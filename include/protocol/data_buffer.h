@@ -1,0 +1,47 @@
+// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+#include <memory>
+#include "common.h"
+#include "expr_value.h"
+
+namespace baikaldb {
+
+const uint32_t MAX_ALLOC_BUF_SIZE = (1024 * 1024 * 1024);
+const uint32_t DFT_ALLOC_BUF_SIZE = (1024 * 1024);
+
+class DataBuffer {
+public:
+    DataBuffer(uint32_t capacity = DFT_ALLOC_BUF_SIZE);
+    ~DataBuffer();
+
+    bool byte_array_append_size(int len, int is_pow);
+    bool byte_array_append_len(const uint8_t *data, int len);
+    bool byte_array_append_value(const ExprValue& value);
+    bool byte_array_append_length_coded_binary(unsigned long long num);
+    bool pack_length_coded_string(const std::string& str, bool is_null);
+    bool network_queue_send_append(const uint8_t* data, int len, 
+                                    uint8_t packet_id, int append_data_later);
+    void byte_array_clear();
+
+public:
+    uint8_t*        _data = 0;
+    size_t          _size = 0;
+    size_t          _capacity = 0;
+}; 
+
+typedef std::shared_ptr<DataBuffer> SmartBuffer;
+
+} // namespace baikal

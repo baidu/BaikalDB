@@ -1,0 +1,138 @@
+// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+#include "expr_node.h"
+//#include "sql_parser.h"
+
+namespace baikaldb {
+class Literal : public ExprNode {
+public:
+    Literal() : _value(pb::NULL_TYPE) {
+        _is_constant = true;
+    }
+    Literal(ExprValue value) : _value(value) {
+        _is_constant = true;
+        _col_type = _value.type;
+        if (_value.is_timestamp()) {
+            _node_type = pb::TIMESTAMP_LITERAL;
+        } else if (_value.is_date()) {
+            _node_type = pb::DATE_LITERAL;
+        } else if (_value.is_datetime()) {
+            _node_type = pb::DATETIME_LITERAL;
+        } else if (_value.is_int()) {
+            _node_type = pb::INT_LITERAL;
+        } else if (_value.is_string()) {
+            _node_type = pb::STRING_LITERAL;
+        } else if (_value.is_bool()) {
+            _node_type = pb::BOOL_LITERAL;
+        } else if (_value.is_double()) {
+            _node_type = pb::DOUBLE_LITERAL;
+        } else {
+            _node_type = pb::NULL_LITERAL;
+        }
+    }
+
+    virtual ~Literal() {
+    }
+    
+    virtual int init(const pb::ExprNode& node) {
+        int ret = 0;
+        ret = ExprNode::init(node);
+        if (ret < 0) {
+            return ret;
+        }
+        switch (node.node_type()) {
+            case pb::NULL_LITERAL:
+                _value.type = pb::NULL_TYPE;
+                break;
+            case pb::INT_LITERAL:
+                _value.type = pb::INT64;
+                _value._u.int64_val = node.derive_node().int_val();
+                break;
+            case pb::DOUBLE_LITERAL:
+                _value.type = pb::DOUBLE;
+                _value._u.double_val = node.derive_node().double_val();
+                break;
+            case pb::STRING_LITERAL:
+                _value.type = pb::STRING;
+                _value.str_val = node.derive_node().string_val();
+                break;
+            case pb::DATETIME_LITERAL:
+                _value.type = pb::DATETIME;
+                _value._u.uint64_val = node.derive_node().int_val();
+                break;
+            case pb::TIMESTAMP_LITERAL:
+                _value.type = pb::TIMESTAMP;
+                _value._u.uint32_val = node.derive_node().int_val();    
+                break;        
+            case pb::DATE_LITERAL:
+                _value.type = pb::DATE;
+                _value._u.uint32_val = node.derive_node().int_val();    
+                break;        
+            default:
+                return -1;
+        }
+        return 0;
+    }
+
+    virtual void transfer_pb(pb::ExprNode* pb_node) {
+        ExprNode::transfer_pb(pb_node);
+        switch (node_type()) {
+            case pb::NULL_LITERAL:
+                break;
+            case pb::INT_LITERAL:
+                pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
+                break;
+            case pb::DOUBLE_LITERAL:
+                pb_node->mutable_derive_node()->set_double_val(_value.get_numberic<double>());
+                break;
+            case pb::STRING_LITERAL:
+                pb_node->mutable_derive_node()->set_string_val(_value.get_string());
+                break;
+            case pb::DATETIME_LITERAL:
+            case pb::TIMESTAMP_LITERAL:
+                pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
+                break;
+            default:
+                break;
+        }
+    }
+
+    // only the following castings are allowed:
+    //  STRING_LITERA => TIMESTAMP_LITERAL
+    //  STRING_LITERA => DATETIME_LITERAL
+    //  STRING_LITERA => DATE_LITERAL
+    void cast_to_type(pb::ExprNodeType literal_type) {
+        if (literal_type == pb::TIMESTAMP_LITERAL) {
+            _value.cast_to(pb::TIMESTAMP);
+        } else if (literal_type == pb::DATE_LITERAL) {
+            _value.cast_to(pb::DATE);
+        } else if (literal_type == pb::DATETIME_LITERAL) {
+            _value.cast_to(pb::DATETIME);
+        }
+        _node_type = literal_type;
+        _col_type = _value.type;
+    }
+
+    virtual ExprValue get_value(MemRow* row) {
+        return _value;
+    }
+
+private:
+    ExprValue _value;
+};
+}
+
+/* vim: set ts=4 sw=4 sts=4 tw=100 */

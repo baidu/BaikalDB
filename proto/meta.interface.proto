@@ -1,0 +1,511 @@
+syntax="proto2";
+import "common.proto";
+import "optype.proto";
+import "raft.proto";
+package baikaldb.pb;
+option cc_generic_services = true;
+//option cc_enable_arenas = true;
+
+//schema信息
+message NameSpaceInfo {
+    required string namespace_name         = 1;
+    optional int64 namespace_id            = 2;
+    optional int64 quota                   = 3;
+    optional int64 version                 = 4;
+    optional bool deleted                  = 5;
+};
+
+message DataBaseInfo {
+    required string database               = 1;
+    optional int64 database_id             = 2;
+    required string namespace_name         = 3;
+    optional int64 namespace_id            = 4;
+    optional int64 quota                   = 5;
+    optional int64 version                 = 6;
+    optional bool   deleted                = 7;
+};
+
+enum SchemaType {
+    DYNAMCI = 1;
+    STATIC = 2;
+};
+
+enum Engine {
+    ROCKS_DB = 1;
+};
+enum Status {
+    NORMAL = 1;
+    FAULTY = 2;
+    DEAD   = 3;
+};
+enum RegionStatus {
+    IDLE = 1;
+    DOING = 2;
+};
+
+enum Charset {
+    UTF8 = 0;
+    GBK = 1;
+};
+// user MUST ensure that field_id in fields are continuous and sorted, 
+// even if a field is deleted
+message SchemaInfo {
+    optional int64 table_id                 = 1;
+    required string table_name              = 2;
+    optional string new_table_name          = 3;
+    optional string upper_table_name        = 4;
+    optional int64 upper_table_id           = 5;
+    optional int64 top_table_id             = 6;
+    repeated int64 lower_table_ids          = 7;
+    required string database                = 8;
+    optional int64 database_id              = 9;
+    required string namespace_name          = 10;
+    optional int64 namespace_id             = 11;
+    optional int64 partition_num            = 12; //若为层次表固定为1
+    optional string partition_exp           = 13; //暂时不用,直接取模做分片
+    repeated PartitionRegion regions        = 14; //维护该信息成本太高，暂时不用。只有层次表的最顶层表存储该信息
+    optional int64 region_size              = 15;
+    optional int64 replica_num              = 16;
+    repeated FieldInfo fields               = 17;
+    repeated IndexInfo indexs               = 18;
+    optional string resource_tag            = 19;
+    optional int32 max_field_id             = 20;
+    optional int64 version                  = 21;
+    optional Status status                  = 22;
+    optional SchemaType schema_type         = 23;
+    optional Engine engine                  = 24;
+    repeated string init_store              = 25;
+    repeated bytes split_keys               = 26;
+    optional bool deleted                   = 27;
+    optional int64  byte_size_per_record    = 28;
+    optional uint64 auto_increment_increment= 29; //自增主键初始值
+    optional uint32 timestamp               = 30; //表创建时间
+    optional Charset charset                = 31;
+};
+
+message PartitionRegion {
+    required int64 partition_id = 1;
+    repeated int64 region_id    = 2;
+}
+
+message FieldInfo {
+    required string field_name        = 1;
+    optional string new_field_name    = 2;
+    optional PrimitiveType mysql_type = 3;
+    optional bool can_null            = 4;
+    optional int32 field_id           = 5;
+    optional bool auto_increment      = 6;
+    optional bool deleted             = 7;
+    optional bytes default_value      = 8;
+    optional bytes comment            = 9;
+};
+
+enum IndexType {
+    I_NONE          = 0;
+    I_PRIMARY       = 1;
+    I_UNIQ          = 2;
+    I_KEY           = 3;
+    I_FULLTEXT      = 4; //query切词，word切词，node无额外信息
+    I_RECOMMEND     = 5; //query不切词，word不切词，node有额外信息
+};
+
+enum SegmentType {
+    S_DEFAULT        = 0;
+    S_NO_SEGMENT     = 1;
+    S_WORDRANK       = 2;
+    S_WORDSEG_BASIC  = 3;
+    S_SIMPLE         = 4;
+};
+
+message IndexInfo {
+    required string index_name      = 1;
+    optional string new_index_name  = 2;
+    optional IndexType index_type   = 3;
+    repeated string field_names     = 4;
+    repeated int32 field_ids        = 5;
+    optional bool is_global         = 6;
+    optional int64 index_id         = 7; //primary_key的主键id是table_id
+    optional SegmentType segment_type = 8; //FULLTEXT use for segment
+};
+
+//address format: ip:port
+message RegionInfo {
+    required int64 region_id               = 1;
+    required string table_name             = 2;//层次表只保存最上层table_id
+    required int64 table_id                = 3;//层次表只保存最上层table_id
+    required int64 partition_id            = 4;
+    required int64 replica_num             = 5;
+    required int64 version                 = 6;
+    required int64 conf_version            = 7;//用于baikal和meta_server之间同步peer和leader信息
+    optional bytes start_key               = 8;
+    optional bytes end_key                 = 9;
+    repeated string peers                  = 10;//包含leader
+    optional string leader                 = 11;
+    optional RegionStatus status           = 12;
+    optional int64 used_size               = 13;
+    optional int64 log_index               = 14;
+    optional bool deleted                  = 15;
+    optional bool can_add_peer             = 16; //刚分裂出来的region如果没有做过truncate_log_index, 不能增加region
+    optional int64 parent                  = 17; //记录被分裂的region id,方便追查统计,0表示初始化region
+    optional uint32 timestamp              = 18; //region创建时间
+};
+
+//权限信息
+enum RW {
+    READ  = 1;
+    WRITE = 2;
+};
+
+message PrivilegeDatabase {
+    required string database   = 1;
+    optional int64 database_id = 2;
+    optional RW database_rw    = 3;
+};
+
+message PrivilegeTable {
+    required string database   = 1;
+    optional int64 database_id = 2;
+    required string table_name = 3;
+    optional int64 table_id    = 4;
+    optional RW table_rw       = 5;
+};
+
+message UserPrivilege {
+    required string username                      = 1;
+    optional string password                      = 2;
+    required string namespace_name                = 3;
+    optional int64 namespace_id                   = 4;
+    repeated PrivilegeDatabase privilege_database = 5; 
+    repeated PrivilegeTable privilege_table       = 6; 
+    repeated string bns                           = 7;
+    repeated string ip                            = 8;
+    optional int64 version                        = 9;
+};
+
+//集群信息
+//逻辑机房
+message LogicalRoom {
+    repeated string logical_rooms = 1;
+};
+
+//物理机房和逻辑机房对应关系
+message PhysicalRoom {
+    required string logical_room     = 1;
+    repeated string physical_rooms   = 2;
+};
+
+message InstanceInfo {
+    required string address         = 1;
+    optional int64 capacity         = 2;
+    //第一次上报心跳的时候需要填该参数
+    //实际该参数并不需要存储
+    optional int64 used_size        = 3;
+    optional string resource_tag    = 4;
+    optional string physical_room   = 5;
+    optional Status status          = 6;
+};
+
+message MovePhysicalRequest {
+    required string physical_room    = 1;
+    required string old_logical_room = 2;
+    required string new_logical_room = 3;
+};
+
+message AlterTableRequest {
+    required string table_name  = 1;
+    required string namespace   = 2;
+    required string database    = 3;
+    optional int64 table_id     = 4;
+    optional int64 namespace_id = 5;
+    optional int64 database_id  = 6;
+    repeated FieldInfo fields   = 7;
+    repeated IndexInfo indexs   = 8;
+};
+
+message RegionSplitRequest {
+    required int64 region_id     = 1; 
+    required bytes split_key     = 2;
+    optional string new_instance = 3; //新分裂region的实例地址
+    optional bool  tail_split    = 4; //是否是尾分裂 尾分裂不是本机分裂 需要分配实例
+    optional int64 table_id      = 5;
+    optional string resource_tag = 6;
+};
+
+message RegionSplitResponse {
+    required int64 old_region_id = 1;
+    required int64 new_region_id = 2;
+    required string new_instance = 3;
+};
+
+/*
+ * operation genId/update
+ * input: op_type = genId
+ *        table_id 表id
+ *        start_id: 先判断当前已经分配出去的最大值是否大于该值
+ *        number: 批量生成的个数
+ * output: [star_id, end_id), 左闭右开区间
+ *
+ *
+ * input: op_type = update
+ *        table_id 表id
+ *        start_id:若用户指定了该字段，代表max_id直接调整为该start_id + 1
+ *        increment_id:若用户指定了该字段，代表max_id在原基础上增加increment_id
+ *        force: true,强制执行update操作, 否则不允许回退id，即start_id不能小于已经分配出去的最大Id
+ */
+message AutoIncrementRequest {
+    required int64              table_id = 1;
+    optional uint64             count = 2;
+    optional uint64             start_id = 3;
+    optional uint64             increment_id = 4;
+    optional bool               force = 5;
+};
+// 恢复误删region接口
+// meta没删，store删了，可以用restore_region_id恢复
+// meta删除了，store也删除了，可以用lower_region_id，upper_region_id前后region恢复
+message RestoreRegionRequest {
+    optional int64 restore_region_id = 1;
+    optional int64 lower_region_id = 2;
+    optional int64 upper_region_id = 3;
+}
+
+message MetaManagerRequest {
+    required OpType              op_type                = 1; //一级操作符
+    optional SchemaInfo          table_info             = 2; //建/删表
+    optional NameSpaceInfo       namespace_info         = 3; //建/改/删 namepace, 对应操作OP_CREATE
+    optional DataBaseInfo        database_info          = 4; //建/改/删 database, 对应操作OP_CREATE
+    optional UserPrivilege       user_privilege         = 5; //创建用户, 权限增删 
+    optional AlterTableRequest   alter_table            = 6; // 加字段/索引 删字段/索引 改字段/索引名称 改类型
+    optional LogicalRoom         logical_rooms          = 7; //新增/删除逻辑机房
+    optional PhysicalRoom        physical_rooms         = 8; //新增/删除物理机房
+    optional InstanceInfo        instance               = 9; //新增/删除实例 
+    optional MovePhysicalRequest move_physical_request  = 10; //逻辑将转移 
+    optional RegionInfo          region_info            = 11; //add and update
+    repeated int64               drop_region_ids        = 12; //支持批量删除 
+    optional RegionSplitRequest  region_split           = 13; //region分裂请求
+    optional AutoIncrementRequest auto_increment        = 14; //自增主键id生成和更新 
+    optional RestoreRegionRequest restore_region        = 15; //恢复误删的region
+};
+
+message MetaManagerResponse {
+    required ErrCode errcode                    = 1;
+    optional string errmsg                      = 2;
+    optional string leader                      = 3;
+    optional RegionSplitResponse split_response = 4;
+    optional OpType op_type                     = 5;
+    optional uint64 start_id                    = 6;
+    optional uint64 end_id                      = 7;
+};
+
+message SchemaHeartBeat {
+    required int64 table_id    = 1;
+    required int64 version     = 2;
+};
+
+message LeaderHeartBeat {
+    required RegionInfo region  = 1;
+    //required int64 used_size  = 2;
+    optional RegionStatus status      = 2;
+};
+
+message PeerHeartBeat {
+    required int64 region_id    = 1;
+    //为了在创建表失败的情况下，该region能够删除
+    required int64 table_id     = 2;
+    required int64 log_index    = 3;
+};
+
+message AddPeer {
+    required int64 region_id    = 1;
+    repeated string old_peers   = 2;
+    repeated string new_peers   = 3;
+};
+message TransLeaderRequest {
+    required int64 region_id    = 1;
+    required string old_leader  = 2;
+    required string new_leader  = 3;
+    optional int64  table_id    = 4;
+};
+message StoreHeartBeatRequest {
+    required InstanceInfo instance_info      = 1;
+    repeated SchemaHeartBeat schema_infos    = 2;
+    repeated LeaderHeartBeat leader_regions  = 3;
+    repeated PeerHeartBeat peer_infos        = 4;
+    optional bool need_leader_balance        = 5;
+    optional bool need_peer_balance          = 6;
+};
+
+message StoreHeartBeatResponse {
+    required ErrCode errcode                = 1;
+    optional string errmsg                  = 2;
+    repeated SchemaInfo schema_change_info  = 3;
+    repeated int64 delete_region_ids        = 4;
+    repeated AddPeer add_peers              = 5;
+    optional string leader                  = 6;
+    repeated TransLeaderRequest trans_leader= 7;
+    repeated int64 trans_leader_table_id    = 8;
+    repeated int64 trans_leader_count       = 9;
+};
+
+message RegionHeartBeat {
+    required int64 region_id            = 1;
+    required int64 version              = 2;
+    required int64 conf_version         = 3;
+};
+
+message BaikalSchemaHeartBeat {
+    required int64 table_id             = 1;
+    required int64 version              = 2;
+    repeated RegionHeartBeat regions    = 3;
+};
+
+message BaikalHeartBeatRequest {
+    repeated BaikalSchemaHeartBeat schema_infos    = 1;
+};
+
+message BaikalHeartBeatResponse {
+    required ErrCode errcode                      = 1;
+    optional string errmsg                        = 2;
+    optional string leader                        = 3;
+    repeated SchemaInfo schema_change_info        = 4;
+    repeated RegionInfo region_change_info        = 5;
+    repeated UserPrivilege privilege_change_info  = 6; //全部同步
+};
+enum QueryOpType {
+    QUERY_LOGICAL                                 = 1;
+    QUERY_PHYSICAL                                = 2;
+    QUERY_INSTANCE                                = 3;
+    QUERY_USERPRIVILEG                            = 4;
+    QUERY_NAMESPACE                               = 5;
+    QUERY_DATABASE                                = 6; 
+    QUERY_SCHEMA                                  = 7;
+    QUERY_REGION                                  = 8;
+    QUERY_INSTANCE_FLATTEN                        = 101;
+    QUERY_PRIVILEGE_FLATTEN                       = 102;
+    QUERY_REGION_FLATTEN                          = 103;
+    QUERY_TABLE_FLATTEN                           = 104;
+    QUERY_SCHEMA_FLATTEN                          = 105;
+    QUERY_TRANSFER_LEADER                         = 201;
+    QUERY_SET_PEER                                = 202;
+};
+message PhysicalInstance {
+    required string physical_room                 = 1;
+    required string logical_room                  = 2;      
+    repeated string instances                     = 3;
+};
+message QueryRequest {
+    required QueryOpType op_type                  = 1;
+    optional string logical_room                  = 2;
+    optional string physical_room                 = 3;
+    optional string instance_address              = 4;
+    optional string user_name                     = 5;
+    optional string namespace_name                = 6;
+    optional string database                      = 7;
+    optional string table_name                    = 8;
+    optional int64  region_id                     = 9;
+    optional string old_leader                    = 10;
+    optional string new_leader                    = 11;
+    optional string old_peers                     = 12;
+    optional string new_peers                     = 13;
+    optional string resource_tag                  = 14;
+    optional string str_region_id                 = 15;
+};
+message QueryResponse {
+    required ErrCode            errcode             = 1;
+    optional string             errmsg              = 2;
+    optional string             leader              = 3;
+    repeated PhysicalRoom       physical_rooms      = 4;
+    repeated PhysicalInstance   physical_instances  = 5;
+    repeated InstanceInfo       instance_infos      = 6;
+    repeated UserPrivilege      user_privilege      = 7;
+    repeated NameSpaceInfo      namespace_infos     = 8;
+    repeated DataBaseInfo       database_infos      = 9;
+    repeated SchemaInfo         schema_infos        = 10;
+    repeated RegionInfo         region_infos        = 11; 
+    repeated QueryInstance      flatten_instances   = 12;
+    repeated QueryUserPrivilege flatten_privileges  = 13;
+    repeated QueryRegion        flatten_regions     = 14;
+    repeated QueryTable         flatten_tables      = 15;
+    repeated QuerySchema        flatten_schema_infos= 16;
+};
+
+message QueryUserPrivilege {
+    required string         username        = 1;
+    required string         namespace_name  = 2;
+    required string         privilege       = 3;
+    required RW             table_rw        = 4;
+};
+
+message QueryInstance {
+    required string        address                      = 1;
+    optional int64         capacity                     = 2;
+    optional int64         used_size                    = 3;
+    optional string        resource_tag                 = 4;
+    optional Status        status                       = 5;
+    optional string        physical_room                = 6;
+    optional string        logical_room                 = 7;
+    optional int64         peer_count                   = 8;
+    optional string        peer_ids                     = 9;
+    optional int64         region_leader_count          = 10;
+    optional string        region_leader_ids            = 11;
+    optional int64         region_count                 = 12;
+    optional string        region_ids                   = 13;
+};
+message QueryRegion {
+    required int64 region_id               = 1;
+    optional string table_name             = 2;//层次表只保存最上层table_id
+    optional int64 partition_id            = 3;
+    optional int64 replica_num             = 4;
+    optional int64 version                 = 5;
+    optional int64 conf_version            = 6;//用于baikal和meta_server之间同步peer和leader信息
+    optional bytes start_key              = 7;
+    optional bytes end_key                = 8;
+    optional string peers                  = 9;//包含leader
+    optional string leader                 = 10;
+    optional RegionStatus status           = 11;
+    optional int64  used_size              = 12;
+    optional int64 log_index               = 13;
+    optional bool deleted                  = 14;
+    optional bool can_add_peer             = 15; //刚分裂出来的region如果没有做过truncate_log_index, 不能增加region
+    optional string primary_key            = 16;
+    optional string resource_tag           = 17;
+    optional int64 parent                  = 18;
+    optional string create_time            = 19;
+};
+message QueryTable {
+    required string             namespace_name      = 1;
+    required string             database            = 2;
+    required string             table_name          = 3;
+    required string             upper_table_name    = 4;
+    required int64              region_size         = 5;
+    required int64              replica_num         = 6;
+    required string             resource_tag        = 7;
+    required int64              max_field_id        = 8;
+    required int64              version             = 10;
+    required Status             status              = 11;
+    optional string             split_keys          = 12;
+    required bool               deleted             = 13;
+    required int64              byte_size_per_record= 14;
+    optional int64              table_id            = 15;
+    optional string             create_time         = 16;
+    optional int64              region_count        = 17; 
+};
+
+message QuerySchema {
+    required string             field_or_index      = 1;
+    required string             column_name         = 2;
+    required int64              column_id           = 3;
+    required string             column_type         = 4;
+    optional bool               can_null            = 5;
+    optional string             extra               = 6;
+    optional bool               deleted             = 7;
+};
+
+service MetaService {
+    //meta_server raft的控制接口
+    rpc raft_control(RaftControlRequest) returns (RaftControlResponse);
+    rpc meta_manager(MetaManagerRequest) returns (MetaManagerResponse);
+    rpc store_heartbeat(StoreHeartBeatRequest) returns (StoreHeartBeatResponse);
+    rpc baikal_heartbeat(BaikalHeartBeatRequest) returns (BaikalHeartBeatResponse);
+    rpc query(QueryRequest) returns (QueryResponse);
+};
+
