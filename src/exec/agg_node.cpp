@@ -1,0 +1,242 @@
+// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "agg_node.h"
+#include "runtime_state.h"
+
+namespace baikaldb {
+int AggNode::init(const pb::PlanNode& node) {
+    int ret = 0;
+    ret = ExecNode::init(node);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::init fail, ret:%d", ret);
+        return ret;
+    }
+    _is_merger = node.node_type() == pb::MERGE_AGG_NODE;
+    for (auto& expr : node.derive_node().agg_node().group_exprs()) {
+        ExprNode* group_expr = nullptr;
+        ret = ExprNode::create_tree(expr, &group_expr);
+        if (ret < 0) {
+            //如何释放资源
+            return ret;
+        }
+        _group_exprs.push_back(group_expr);
+    }
+    std::set<int> agg_slot_set;
+    for (auto& expr : node.derive_node().agg_node().agg_funcs()) {
+        if (expr.nodes_size() < 1 || expr.nodes(0).node_type() != pb::AGG_EXPR) {
+            DB_WARNING("AggNode::init fail, expr.nodes_size:%d", expr.nodes_size());
+            return -1;
+        }
+        int slot_id = expr.nodes(0).derive_node().slot_id();
+        if (agg_slot_set.count(slot_id) == 1) {
+            continue;
+        }
+        agg_slot_set.insert(slot_id);
+        ExprNode* agg_call = nullptr;
+        ret = ExprNode::create_tree(expr, &agg_call);
+        if (ret < 0) {
+            //如何释放资源
+            return ret;
+        }
+        _agg_fn_calls.push_back(static_cast<AggFnCall*>(agg_call));
+    }
+    //_group_tuple_id = node.derive_node().agg_node().group_tuple_id();
+    _agg_tuple_id = node.derive_node().agg_node().agg_tuple_id();
+    _hash_map.init(12301);
+    _iter = _hash_map.end();
+    return 0;
+}
+
+int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+    int ret = 0;
+    ret = ExecNode::expr_optimize(tuple_descs);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
+        return ret;
+    }
+    for (auto expr : _group_exprs) {
+        //类型推导
+        ret = expr->type_inferer();
+        if (ret < 0) {
+            DB_WARNING("expr type_inferer fail:%d", ret);
+            return ret;
+        }
+        //常量表达式计算
+        expr->const_pre_calc();
+    }
+    if (_agg_tuple_id < 0) {
+        return 0;
+    }
+    pb::TupleDescriptor* agg_tuple_desc = &(*tuple_descs)[_agg_tuple_id];
+    //_intermediate_slot_id != _final_slot_id则type为pb::STRING
+    //_final_slot_id type在AggExpr里会设置
+    for (auto& slot : *agg_tuple_desc->mutable_slots()) {
+        slot.set_slot_type(pb::STRING);
+    }
+    for (auto expr : _agg_fn_calls) {
+        //类型推导
+        ret = expr->type_inferer(agg_tuple_desc);
+        if (ret < 0) {
+            DB_WARNING("expr type_inferer fail:%d", ret);
+            return ret;
+        }
+        //常量表达式计算
+        expr->const_pre_calc();
+    }
+    return 0;
+}
+
+int AggNode::open(RuntimeState* state) {
+    int ret = 0;
+    ret = ExecNode::open(state);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::open fail, ret:%d", ret);
+        return ret;
+    }
+    for (auto expr : _group_exprs) {
+        ret = expr->open();
+        if (ret < 0) {
+            DB_WARNING("expr open fail, ret:%d", ret);
+            return ret;
+        }
+    }
+    for (auto agg : _agg_fn_calls) {
+        ret = agg->open();
+        if (ret < 0) {
+            DB_WARNING("agg open fail, ret:%d", ret);
+            return ret;
+        }
+    }
+    _mem_row_desc = state->mem_row_desc();
+
+    TimeCost cost;
+    int64_t agg_time = 0;
+    int64_t scan_time = 0;
+    int row_cnt = 0;
+    for (auto child : _children) {
+        bool eos = false;
+        do {
+            TimeCost cost;
+            RowBatch batch;
+            ret = child->get_next(state, &batch, &eos);
+            if (ret < 0) {
+                DB_WARNING("child->get_next fail, ret:%d", ret);
+                return ret;
+            }
+            scan_time += cost.get_time();
+            cost.reset();
+            process_row_batch(batch);
+            agg_time += cost.get_time();
+            row_cnt += batch.size();
+            // 对于用order by分组的特殊优化
+            //if (_agg_tuple_id == -1 && _limit != -1 && (int64_t)_hash_map.size() >= _limit) {
+            //    break;
+            //}
+        } while (!eos);
+    }
+    DB_WARNING("region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
+        state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
+    // select count(*) from t; 无数据时返回0
+    if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
+        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+        AggFnCall::initialize_all(_agg_fn_calls, row.get());
+        uint8_t null_flag = 0;
+        MutTableKey key;
+        key.append_u8(null_flag);
+        _hash_map.insert(key.data(), row.release());
+    }
+    //等hash_map构建完毕后才取位置
+    _iter = _hash_map.begin();
+    return 0;
+}
+
+void AggNode::encode_agg_key(MemRow* row, MutTableKey& key) {
+    uint8_t null_flag = 0;
+    key.append_u8(null_flag);
+    for (uint32_t i = 0; i < _group_exprs.size(); i++) {
+        ExprValue value = _group_exprs[i]->get_value(row);
+        if (value.is_null()) {
+            null_flag |= (0x01 << (7 - i));
+            continue;
+        }
+        key.append_value(value);
+    }
+    key.replace_u8(null_flag, 0);
+}
+
+void AggNode::process_row_batch(RowBatch& batch) {
+    for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
+        std::unique_ptr<MemRow>& row = batch.get_row();
+        MutTableKey key;
+        MemRow* cur_row = row.get();
+        encode_agg_key(cur_row, key);
+        MemRow** agg_row = _hash_map.seek(key.data());
+        if (agg_row == nullptr) { //不存在则新建
+            cur_row = row.release();
+            agg_row = &cur_row;
+            AggFnCall::initialize_all(_agg_fn_calls, *agg_row);
+            // 可能会rehash
+            _hash_map.insert(key.data(), *agg_row);
+        }
+        if (_is_merger) {
+            AggFnCall::merge_all(_agg_fn_calls, cur_row, *agg_row);
+        } else {
+            AggFnCall::update_all(_agg_fn_calls, cur_row, *agg_row);
+        }
+    }
+}
+
+int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    while (1) {
+        if (reached_limit() || _iter == _hash_map.end()) {
+            *eos = true;
+            return 0;
+        }
+        if (batch->is_full()) {
+            return 0;
+        }
+        AggFnCall::finalize_all(_agg_fn_calls, _iter->second);
+        batch->move_row(std::move(std::unique_ptr<MemRow>(_iter->second)));
+        _iter->second = nullptr;
+        _iter++;
+    }
+}
+
+void AggNode::close(RuntimeState* state) {
+    for (auto expr : _group_exprs) {
+        expr->close();
+    }
+    for (auto agg : _agg_fn_calls) {
+        agg->close();
+    }
+    for (; _iter != _hash_map.end(); _iter++) {
+        delete _iter->second;
+    }
+}
+void AggNode::transfer_pb(pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(pb_node);
+    auto agg_node = pb_node->mutable_derive_node()->mutable_agg_node();
+    agg_node->clear_group_exprs();
+    for (auto expr : _group_exprs) {
+        ExprNode::create_pb_expr(agg_node->add_group_exprs(), expr);
+    }
+    agg_node->clear_agg_funcs();
+    for (auto agg : _agg_fn_calls) {
+        ExprNode::create_pb_expr(agg_node->add_agg_funcs(), agg);
+    }
+}
+}
+
+/* vim: set ts=4 sw=4 sts=4 tw=100 */

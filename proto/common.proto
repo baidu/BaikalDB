@@ -1,0 +1,70 @@
+syntax="proto2";
+package baikaldb.pb;
+option cc_generic_services = true;
+//option cc_enable_arenas = true;
+
+enum ErrCode {
+    SUCCESS = 0;
+    NOT_LEADER = 1;
+    PARSE_FROM_PB_FAIL = 2;
+    PARSE_TO_PB_FAIL = 3;
+    UNSUPPORT_REQ_TYPE = 4;
+    INPUT_PARAM_ERROR = 5;
+    GET_VALUE_FAIL = 6;
+    PUT_VALUE_FAIL = 7;
+    DELETE_VALUE_FAIL = 8;
+    INTERNAL_ERROR = 9;
+    VERSION_OLD = 10;
+    REGION_ERROR_STATUS = 11;
+    EXEC_FAIL = 12;
+    DISABLE_WRITE_TIMEOUT = 13;
+    SPLIT_TIMEOUT = 14;
+    REGION_ALREADY_EXIST = 15;
+    REGION_NOT_EXIST = 16;
+    HAVE_NOT_INIT = 17;
+    TXN_FOLLOW_UP = 18;
+    CANNOT_ADD_PEER = 19;
+    PEER_NOT_EQUAL  = 20;
+    CONNECT_FAIL    = 21;
+};
+
+enum PrimitiveType {
+    INVALID_TYPE = 0;
+    NULL_TYPE = 1;
+    BOOL = 2;
+    INT8 = 3;
+    INT16 = 4;
+    INT32 = 5;
+    INT64 = 6;
+    UINT8 = 7;
+    UINT16 = 8;
+    UINT32 = 9;
+    UINT64 = 10;
+    FLOAT = 11;
+    DOUBLE = 12;
+    STRING = 13;
+    DATETIME = 14;
+    TIMESTAMP = 15;
+    DATE = 16;
+    HLL = 17;
+};
+
+//message ColumnType {
+//    required PrimitiveType primitive_type = 1;
+//    optional uint32 len = 2;
+//};
+
+message SlotDescriptor {
+    required int32 slot_id = 1;  //从1开始
+    required PrimitiveType slot_type = 2;
+    required int32 tuple_id = 3;
+    optional int64 table_id = 4; //从表中获取才填
+    optional int32 field_id = 5; //从表中获取才填
+};
+
+//tuple可以与table对应，也可以是中间表达式和聚合结果
+message TupleDescriptor {
+    required int32 tuple_id = 1;
+    optional int64 table_id = 2; //与表映射才填
+    repeated SlotDescriptor slots = 3; 
+};

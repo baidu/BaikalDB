@@ -1,0 +1,184 @@
+// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+
+#include "common.h"
+#include "table_record.h"
+#include "rocksdb/slice.h"
+
+namespace baikaldb {
+class TupleRecord {
+public:
+    TupleRecord(rocksdb::Slice slice) {
+        _data = slice.data();
+        _size = slice.size();
+    }
+
+    ~TupleRecord() {}
+
+    void reset_offset() {
+        _offset = 0;
+    }
+    void skip_varint() {
+        while (_offset < _size && (_data[_offset++] >> 7) != 0);
+    }
+
+    template <typename T>
+    T get_varint() {
+        T raw = 0;
+        int pos = 0;
+        while (_offset < _size) {
+            raw |= (((int64_t)_data[_offset] & 0x7F) << pos);
+            pos += 7;
+            if ((_data[_offset++] >> 7) == 0) {
+                break;
+            }
+        }
+        return raw;
+    }
+
+    template <typename T>
+    void skip_fixed() {
+        _offset += sizeof(T);
+    }
+
+    template <typename T>
+    T get_fixed() {
+        T val = *(T*)(_data + _offset);
+        _offset += sizeof(T);
+        return val;
+    }
+
+    void skip_string() {
+        _offset += get_varint<uint64_t>();
+    }
+
+    std::string get_string() {
+        uint64_t length = get_varint<uint64_t>();
+        std::string val(_data + _offset, length);
+        _offset += length;
+        return val;
+    }
+
+    // decode 'required' (rather than 'all') fields from serialized protobuf bytes
+    // and fill to SmartRecord
+    int decode_fields(const std::vector<int32_t>& fields, SmartRecord record) {
+        uint64_t field_key  = 0;
+        uint64_t field_num  = 0;
+        int32_t  wired_type = 0;
+        size_t   fetch_idx  = 0;
+
+        while (_offset < _size && fetch_idx < fields.size()) {
+            field_key = get_varint<uint64_t>();
+            field_num = field_key >> 3;
+            wired_type = field_key & 0x07;
+
+            if (_offset >= _size) {
+                DB_WARNING("error: %lu, %lu", _offset,_size);
+                return -1;
+            }
+
+            while (fetch_idx < fields.size() && field_num > (uint64_t)fields[fetch_idx]) {
+                fetch_idx++;
+            }
+            if (fetch_idx == fields.size()) {
+                //DB_WARNING("tag1: %d");
+                return 0;
+            }
+            if (field_num < (uint64_t)fields[fetch_idx]) {
+                // skip current field in proto
+                if (wired_type == 0) {
+                    skip_varint();
+                } else if (wired_type == 1) {
+                    skip_fixed<double>();
+                } else if (wired_type == 2) {
+                    skip_string();
+                } else if (wired_type == 5) {
+                    skip_fixed<float>();
+                } else {
+                    DB_WARNING("invalid wired_type: %d", wired_type);
+                    return -1;
+                }
+            } else if (field_num == (uint64_t)fields[fetch_idx]) {
+                auto field = record->get_field_by_tag(fields[fetch_idx]);
+                if (field == nullptr) {
+                    DB_WARNING("invalid field: %d", fields[fetch_idx]);
+                    return -1;
+                }
+                switch (field->cpp_type()) {
+                case FieldDescriptor::CPPTYPE_INT32: {
+                    uint32_t raw_val = get_varint<uint32_t>();
+                    int32_t value = 0;
+                    if (raw_val & 0x1) {
+                        value = (raw_val << 31) | ~(raw_val >> 1);
+                    } else {
+                        value = (raw_val >> 1);
+                    }
+                    //DB_WARNING("value: %d", value);
+                    record->set_int32(field, value);
+                } break;
+                case FieldDescriptor::CPPTYPE_UINT32: {
+                    if (field->type() == FieldDescriptor::TYPE_UINT32) {
+                        record->set_uint32(field, get_varint<uint32_t>());
+                    } else {
+                        record->set_uint32(field, get_fixed<uint32_t>());
+                    }
+                } break;
+                case FieldDescriptor::CPPTYPE_INT64: {
+                    uint64_t raw_val = get_varint<uint64_t>();
+                    int64_t value = 0;
+                    if (raw_val & 0x1) {
+                        value = (raw_val << 63) | ~(raw_val >> 1);
+                    } else {
+                        value = (raw_val >> 1);
+                    }
+                    //DB_WARNING("value: %ld, %lu", value, raw_val);
+                    record->set_int64(field, value);
+                } break;
+                case FieldDescriptor::CPPTYPE_UINT64: {
+                    if (field->type() == FieldDescriptor::TYPE_UINT64) {
+                        record->set_uint64(field, get_varint<uint64_t>());
+                    } else {
+                        record->set_uint64(field, get_fixed<uint64_t>());
+                    }
+                } break;
+                case FieldDescriptor::CPPTYPE_FLOAT: {
+                    record->set_float(field, get_fixed<float>());
+                } break;
+                case FieldDescriptor::CPPTYPE_DOUBLE: {
+                    record->set_double(field, get_fixed<double>());
+                } break;
+                case FieldDescriptor::CPPTYPE_BOOL: {
+                    record->set_boolean(field, get_varint<uint32_t>());
+                } break;
+                case FieldDescriptor::CPPTYPE_STRING: {
+                    record->set_string(field, get_string());
+                } break;
+                default: {
+                    return -1;
+                } break;
+                }
+                fetch_idx++;
+            }
+        }
+        return 0;
+    }
+private:
+    const char*   _data;
+    size_t  _size;
+    size_t  _offset = 0;
+
+};
+}

@@ -1,0 +1,275 @@
+// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+#include "base.h"
+#include "expr.h"
+
+namespace parser {
+
+const int MYSQL_FLOAT_PRECISION = 24;
+
+enum CharacterSet : unsigned char {
+    CHARSET_ASCII = 0,
+    CHARSET_UTF8,
+    CHARSET_GBK,
+    CHARSET_LATIN1,
+    CHARSET_BINARY,
+    CHARSET_NULL,
+};
+
+enum MysqlType : unsigned char {
+    MYSQL_TYPE_DECIMAL = 0,
+    MYSQL_TYPE_TINY,
+    MYSQL_TYPE_SHORT,
+    MYSQL_TYPE_LONG,
+    MYSQL_TYPE_FLOAT,
+    MYSQL_TYPE_DOUBLE,
+    MYSQL_TYPE_NULL,
+    MYSQL_TYPE_TIMESTAMP,
+    MYSQL_TYPE_LONGLONG,
+    MYSQL_TYPE_INT24,
+    MYSQL_TYPE_DATE,
+    MYSQL_TYPE_TIME,
+    MYSQL_TYPE_DATETIME,
+    MYSQL_TYPE_YEAR,
+    MYSQL_TYPE_NEWDATE,
+    MYSQL_TYPE_VARCHAR,
+    MYSQL_TYPE_BIT,
+    MYSQL_TYPE_TIMESTAMP2, 
+    MYSQL_TYPE_DATETIME2, 
+    MYSQL_TYPE_TIME2,
+    MYSQL_TYPE_JSON         = 245, 
+    MYSQL_TYPE_NEWDECIMAL   = 246, 
+    MYSQL_TYPE_ENUM         = 247, 
+    MYSQL_TYPE_SET          = 248, 
+    MYSQL_TYPE_TINY_BLOB    = 249, 
+    MYSQL_TYPE_MEDIUM_BLOB  = 250, 
+    MYSQL_TYPE_LONG_BLOB    = 251, 
+    MYSQL_TYPE_BLOB         = 252, 
+    MYSQL_TYPE_VAR_STRING   = 253, 
+    MYSQL_TYPE_STRING       = 254, 
+    MYSQL_TYPE_GEOMETRY     = 255
+};
+
+enum MysqlFieldFlag {
+    MYSQL_FIELD_FLAG_NOT_NULL = 0,
+    MYSQL_FIELD_FLAG_PRI_KEY,
+    MYSQL_FIELD_FLAG_UNIQ_KEY,
+    MYSQL_FIELD_FLAG_MULTI_KEY,
+    MYSQL_FIELD_FLAG_BLOB,
+    MYSQL_FIELD_FLAG_UNSIGNED,
+    MYSQL_FIELD_FLAG_ZEROFILL,
+    MYSQL_FIELD_FLAG_BINARY,
+    MYSQL_FIELD_FLAG_AUTO_INC
+};
+
+enum ColumnOptionType : unsigned char {
+    COLUMN_OPT_NONE = 0,
+    COLUMN_OPT_NULL,
+    COLUMN_OPT_NOT_NULL,
+    COLUMN_OPT_AUTO_INC,
+    COLUMN_OPT_DEFAULT_VAL,
+    COLUMN_OPT_PRIMARY_KEY,
+    COLUMN_OPT_UNIQ_KEY,
+    COLUMN_OPT_FULLTEXT,
+    COLUMN_OPT_ON_UPDATE,
+    COLUMN_OPT_COMMENT,
+    COLUMN_OPT_GENERATED,
+    COLUMN_OPT_REFERENCE
+};
+
+enum ConstraintType : unsigned char {
+    CONSTRAINT_NONE = 0,
+    CONSTRAINT_PRIMARY,
+    CONSTRAINT_INDEX,
+    CONSTRAINT_UNIQ,
+    CONSTRAINT_FOREIGN_KEY,
+    CONSTRAINT_FULLTEXT
+};
+
+enum TableOptionType : unsigned char {
+    TABLE_OPT_NONE = 0,
+    TABLE_OPT_ENGINE,
+    TABLE_OPT_CHARSET,
+    TABLE_OPT_COLLATE,
+    TABLE_OPT_AUTO_INC,
+    TABLE_OPT_COMMENT,
+    TABLE_OPT_AVG_ROW_LENGTH,
+    TABLE_OPT_CHECKSUM,
+    TABLE_OPT_COMPRESSION,
+    TABLE_OPT_CONNECTION,
+    TABLE_OPT_PASSWORD,
+    TABLE_OPT_KEY_BLOCK_SIZE,
+    TABLE_OPT_MAX_ROWS,
+    TABLE_OPT_MIN_ROWS,
+    TABLE_OPT_DELAY_KEY_WRITE,
+    TABLE_OPT_ROW_FORMAT,
+    TABLE_OPT_STATS_PERSISTENT,
+    TABLE_OPT_SHARD_ROW_ID,
+    TABLE_OPT_PACK_KEYS
+};
+
+enum DatabaseOptionType : unsigned char {
+    DATABASE_OPT_NONE = 0,
+    DATABASE_OPT_CHARSET,
+    DATABASE_OPT_COLLATE
+};
+
+struct TypeOption : public Node {
+    bool is_unsigned = false;
+    bool is_zerofill = false;
+
+    TypeOption() {
+        node_type = NT_TYPE_OPT;
+    }
+};
+
+struct FloatOption : public Node {
+    int total_len = -1;
+    int float_len = -1;
+
+    FloatOption() {
+        node_type = NT_FLOAT_OPT;
+    }
+};
+
+struct FieldType : public Node {
+    MysqlType   type;
+    uint32_t    flag = 0;
+    int32_t     total_len = -1;
+    int32_t     float_len = -1;
+    String      charset;
+    String      collate;
+    // items is the element list for enum and set type.
+    Vector<String> items;
+
+    FieldType() {
+        node_type = NT_FIELD_TYPE;
+    }
+};
+
+struct ColumnOption : public Node {
+    ColumnOptionType type;
+
+    ExprNode* expr = nullptr; // comment or default value
+
+    // Stored is only for ColumnOptionGenerated, default is false.
+    bool store = false;
+
+    // ReferenceDef* foreign_ref;
+
+    ColumnOption() {
+        node_type = NT_COLUMN_OPT;
+    }
+
+    virtual void print() const override {
+    }
+};
+
+struct ColumnDef : public Node {
+    ColumnName* name = nullptr;
+    FieldType*  type = nullptr;
+    Vector<ColumnOption*> options;
+
+    ColumnDef() {
+        node_type = NT_COLUMN_DEF;
+    }
+};
+
+// struct IndexOption : public Node {
+//     uint64_t block_size;
+//     baikaldb::pb::IndexType index_type;
+//     String comment;
+
+//     IndexOption() {
+//         node_type = NT_INDEX_OPT;
+//     }
+// };
+
+struct TableOption : public Node {
+    TableOptionType type;
+    String          str_value;
+    uint64_t        uint_value;
+
+    TableOption() {
+        node_type = NT_TABLE_OPT;
+    }
+};
+
+struct Constraint : public Node {
+    ConstraintType  type;
+    String          name;
+    Vector<ColumnName*> columns;  // Used for PRIMARY KEY, KEY, UNIQUE, FULLTEXT
+    // ReferenceDef*   refer = nullptr;    // Used for foreign key.
+    // IndexOption*    index_option = nullptr;
+
+    Constraint() {
+        node_type = NT_CONSTRAINT;
+        name = nullptr;
+    }
+};
+
+struct CreateTableStmt : public DdlNode {
+    bool  if_not_exist = false;
+    TableName* table_name = nullptr;
+    TableName* ref_table_name = nullptr;
+
+    Vector<ColumnDef*>  columns;
+    Vector<Constraint*> constraints;
+    Vector<TableOption*>  options;
+
+    CreateTableStmt() {
+        node_type = NT_CREATE_TABLE;
+    }
+};
+
+struct DropTableStmt : public DdlNode {
+    bool if_exist = false;
+    Vector<TableName*> table_names;
+
+    DropTableStmt() {
+        node_type = NT_DROP_TABLE;
+    }
+};
+
+struct DatabaseOption : public Node {
+    DatabaseOptionType  type;
+    String              str_value;
+    DatabaseOption() {
+        node_type = NT_DATABASE_OPT;
+        str_value = nullptr;
+    }
+};
+
+struct CreateDatabaseStmt : public DdlNode {
+    bool        if_not_exist = false;
+    String      db_name;
+    Vector<DatabaseOption*> options;
+    CreateDatabaseStmt() {
+        node_type = NT_CREATE_DATABASE;
+        db_name = nullptr;
+    }
+};
+
+struct DropDatabaseStmt : public DdlNode {
+    bool   if_exist = false;
+    String db_name;
+    DropDatabaseStmt() {
+        node_type = NT_DROP_DATABASE;
+        db_name = nullptr;
+    }
+};
+}
+/* vim: set ts=4 sw=4 sts=4 tw=100 */
