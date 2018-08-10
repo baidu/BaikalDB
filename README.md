@@ -21,7 +21,7 @@ Below is a summary of BaikalDB key features:
 * State-Free Horizontal scalability. For more storage space of a BaikalDB cluster, new nodes can be added to the cluster with ease. Load Balancer will then take the new added nodes into consideration and migrate region replicas from busy nodes to idle nodes automatically.
 * MySQL Compatibility. BaikalDB supports MySQL client-server protocol and a subset of MySQL dialect of query language, including Select, Select...Join, Insert, Delete, Replace, Update, Create Table, Create Database, etc. It also supports dynamic adding or deleting fields for a table without refreshing the table data.
 Users can migrate their data from MySQL to BaikalDB with very low cost, while saving the cost of manually sharding the tables when data grows larger.
-* Ease of Deployment. BaikalDB has a list of sophisticated startup options (using gflags), but most of them can keep default for nomal usage. Deploying a BaikalDB cluaster contains a few very simple steps. We deploy BaikalDB in hundreds of containers inside Baidu private cloud.
+* Ease of Deployment. BaikalDB has a list of sophisticated startup options (using gflags), but most of them can keep default for nomal usage. Deploying a BaikalDB cluster contains a few very simple steps. We deploy BaikalDB in hundreds of containers inside Baidu private cloud.
 * Multi-Tenant Data Isolation. For typical usage, multiple BaikalStore clusters with different resouce tags can be deployed to share a single BaikalMeta and BaikalDB cluster, and users can only access databases and tables with specific resource tags.
 
 ![BaikalDB Architecture](docs/resources/baikaldb_arch.png)
