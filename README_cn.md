@@ -1,7 +1,7 @@
 [English Version](README.md)
 
 # BaikalDB
-BaikalDB是一个分布式可扩展的HTAP存储系统，采用类spanner的架构，支持PB级结构化数据的随机实时读写。
+BaikalDB是一个分布式可扩展的存储系统，支持PB级结构化数据的随机实时读写。
 提供MySQL接口，支持常用的SELECT，UPDATE，INSERT，DELETE语法。
 
 提供各种WHERE过滤、GROUP BY聚合，HAVING过滤，ORDER BY排序等功能，用户可以组合实现各种在线OLAP需求，具备秒级别的亿级数据扫描聚合能力。
