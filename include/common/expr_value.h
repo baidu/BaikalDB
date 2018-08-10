@@ -313,11 +313,13 @@ struct ExprValue {
                     (_u.double_val < other._u.double_val ? -1 : 0);
             case pb::STRING:
                 return str_val.compare(other.str_val);
+            case pb::NULL_TYPE:
+                return -1;
             default:
                 return 0;
         }
     }
-
+    
     bool is_null() const { 
         return type == pb::NULL_TYPE;
     }

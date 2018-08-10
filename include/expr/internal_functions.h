@@ -35,6 +35,9 @@ ExprValue date_format(const std::vector<ExprValue>& input);
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);
 ExprValue hll_estimate(const std::vector<ExprValue>& input);
+// case when functions
+ExprValue case_when(const std::vector<ExprValue>& input);
+ExprValue case_expr_when(const std::vector<ExprValue>& input);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -1,19 +1,4 @@
 %{
-// Copyright 2013 The ql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSES/QL-LICENSE file.
-// Copyright 2015 PingCAP, Inc.
-// Modifications copyright (C) 2018, Baidu.com, Inc.
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 #include <stdio.h>
 #define YY_DECL
@@ -480,6 +465,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ColumnName
     ExprList
     Expr
+    ElseOpt
     SimpleExpr
     FunctionCall
     Operators
@@ -509,6 +495,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IndexHintList 
     TableNameList
     SelectFieldList
+    WhenClauseList
+    WhenClause
 
 %type <item> 
     TableElementList 
@@ -2191,6 +2179,63 @@ SimpleExpr:
         $$ = FuncExpr::new_unary_op_node(FT_BIT_NOT, $2, parser->arena);
     }
     | '(' Expr ')' {
+        $$ = $2;
+    }
+    | CASE Expr WhenClauseList ElseOpt END {
+        FuncExpr* fun = new_node(FuncExpr);  
+        fun->fn_name = "case_expr_when";
+        fun->children.push_back($2, parser->arena);
+        for (int i = 0; i < $3->children.size(); i++) {
+            fun->children.push_back($3->children[i], parser->arena);
+        }
+        if ($4 != nullptr) {      
+            fun->children.push_back($4, parser->arena);
+        }
+        $$ = fun;
+    }
+    | CASE WhenClauseList ElseOpt END {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "case_when";
+        for (int i = 0; i < $2->children.size(); i++) {
+            fun->children.push_back($2->children[i], parser->arena);
+        }   
+        if ($3 != nullptr) {       
+            fun->children.push_back($3, parser->arena);
+        }
+        $$ = fun;
+    }
+    ;
+
+WhenClauseList:
+    WhenClause {
+        Node* list = new_node(Node);
+        list->children.reserve(10, parser->arena);
+        for (int i = 0; i < $1->children.size(); i++) {
+            list->children.push_back($1->children[i], parser->arena);
+        }
+        $$ = list;
+    }
+    | WhenClauseList WhenClause {
+        for (int i = 0; i < $2->children.size(); i++) {
+            $1->children.push_back($2->children[i], parser->arena);
+        }
+        $$ = $1;
+    }
+    ;
+WhenClause:
+    WHEN Expr THEN Expr {
+        Node* list = new_node(Node);
+        list->children.reserve(2, parser->arena);
+        list->children.push_back($2, parser->arena);
+        list->children.push_back($4, parser->arena);
+        $$ = list;
+    }
+    ;
+ElseOpt:
+    {
+        $$ = nullptr;
+    }
+    | ELSE Expr {
         $$ = $2;
     }
     ;

@@ -88,6 +88,8 @@ void FunctionManager::register_operators() {
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);
     register_object_ret("hll_estimate", hll_estimate, pb::INT64);
+    register_object_ret("case_when", case_when, pb::STRING);
+    register_object_ret("case_expr_when", case_expr_when, pb::STRING);
 }
 
 int FunctionManager::init() {

@@ -422,7 +422,7 @@ int StateMachine::_auth_read(SmartSocket sock) {
             return RET_ERROR;
         }
         for (int idx = 0; idx < 20; idx++) {
-            if (*(packet + off + idx) != *(sock->user_info->scramble_password + idx + 1)) {
+            if (*(packet + off + idx) != *(sock->user_info->scramble_password + idx)) {
                 DB_WARNING_CLIENT(sock, "client connect Baikal with wrong password");
                 return RET_AUTH_FAILED;
             }
@@ -434,22 +434,6 @@ int StateMachine::_auth_read(SmartSocket sock) {
         return RET_AUTH_FAILED;
     }
 
-    /*
-    // auth client ip for baikal
-    if (!ConfigParser::get_instance()->is_auth_ok(sock->ip)) {
-        DB_WARNING_CLIENT(sock, "client auth failed");
-        return RET_AUTH_FAILED;
-    }
-    //auth client ip for all family
-    FetcherAuth* fetcher_auth = Scheduler::get_instance()->get_fetcher_auth();
-    for (StrStrMap::iterator iter = sock->user_info->family_map.begin();
-            iter != sock->user_info->family_map.end(); ++iter) {
-        if (!fetcher_auth->is_auth_ok(iter->second, sock->ip)) {
-            DB_WARNING_CLIENT(sock, "auth fail for family %s", iter->second.c_str());
-            return RET_AUTH_FAILED;
-        }
-    }
-    */
     // set current_db
     if ((unsigned int)(sock->packet_len + PACKET_HEADER_LEN) > off) {
         if (0 != _wrapper->protocol_get_string(packet, sock->packet_len + 4,
@@ -632,8 +616,6 @@ int StateMachine::_query_read(SmartSocket sock) {
 }
 
 bool StateMachine::_query_process(SmartSocket client) {
-    //auto ctx = client->query_ctx;
-    //auto stat_info = &(ctx->stat_info);
     TimeCost cost;
     gettimeofday(&(client->query_ctx->stat_info.start_stamp), 0);
 
@@ -701,6 +683,8 @@ bool StateMachine::_query_process(SmartSocket client) {
             ret = _handle_client_query_show_create_table(client);
         } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_COLUMNS)) {
             ret = _handle_client_query_show_full_columns(client);
+        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_TABLE_STATUS)) {
+            ret = _handle_client_query_show_table_status(client);
         } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_COLLATION)) {
             ret = _handle_client_query_show_collation(client);
         } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_WARNINGS)) {
@@ -1085,7 +1069,7 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         oss << field.default_value << " ";
         oss << (field.auto_inc ? "AUTO_INCREMENT" : "") << ",\n";
     }
-    int index_idx = 0;
+    uint32_t index_idx = 0;
     for (auto& index_id : info.indices) {
         IndexInfo index_info = factory->get_index_info(index_id); 
         oss << "  " << index_map[index_info.type] << " ";
@@ -1096,7 +1080,7 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
             oss << "`" << split_vec[split_vec.size() - 1] << "` ";
         }
         oss << "(";
-        int field_idx = 0;
+        uint32_t field_idx = 0;
         for (auto& field : index_info.fields) {
             std::vector<std::string> split_vec;
             boost::split(split_vec, field.name,
@@ -1254,6 +1238,179 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
         row.push_back(" ");
         rows.push_back(row); 
     }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
+    if (!client) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    do {
+        ResultField field;
+        field.name = "Name";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Engine";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Version";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Row_format";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Rows";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Avg_row_length";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Data_length";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Max_data_length";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Index_length";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Data_free";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Auto_increment";
+        field.type = MYSQL_TYPE_LONG;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Create_time";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Update_time";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Check_time";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Collation";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Checksum";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Create_options";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Comment";
+        field.type = MYSQL_TYPE_VAR_STRING;
+        fields.push_back(field);
+    } while (0);
+
+
+
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+    std::string db = client->current_db;
+    std::string table;
+    if (split_vec.size() == 5) {
+        table = remove_quote(split_vec[4].c_str(), '\'');
+    } else {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    std::string full_name = client->user_info->namespace_ + "." + db + "." + table;
+    int64_t table_id = -1;
+    if (factory->get_table_id(full_name, table_id) != 0) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    TableInfo info = factory->get_table_info(table_id);
+    // Make rows.
+    std::vector<std::vector<std::string> > rows;
+    std::vector<std::string> row;
+    row.push_back(table);
+    row.push_back("Innodb");
+    row.push_back(std::to_string(info.version));
+    row.push_back("Compact");
+    row.push_back("0");
+    row.push_back("0");
+    row.push_back("0");
+    row.push_back("0");
+    row.push_back("0");
+    row.push_back("0");
+    row.push_back("0");
+    row.push_back("2018-08-09 15:01:40");
+    row.push_back("");
+    row.push_back("");
+    row.push_back("utf8_general_ci");
+    row.push_back("");
+    row.push_back("");
+    row.push_back("");
+    rows.push_back(row);
 
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {

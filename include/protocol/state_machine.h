@@ -50,6 +50,7 @@ const std::string SQL_SHOW_DATABASES             = "show databases";
 const std::string SQL_SHOW_TABLES                = "show tables";
 const std::string SQL_SHOW_CREATE_TABLE          = "show create table";
 const std::string SQL_SHOW_FULL_COLUMNS          = "show full columns";
+const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
 const std::string SQL_SHOW_WARNINGS              = "show warnings";
@@ -138,6 +139,7 @@ private:
     bool _handle_client_query_show_tables(SmartSocket client);
     bool _handle_client_query_show_create_table(SmartSocket client);
     bool _handle_client_query_show_full_columns(SmartSocket client);
+    bool _handle_client_query_show_table_status(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
     bool _handle_client_query_common_query(SmartSocket client);
     bool _handle_client_query_select_1(SmartSocket client);

@@ -164,7 +164,9 @@ public:
              return;
         }
         for (size_t i = 0; i < table_ids.size(); ++i) {
-            _table_info_map[table_ids[i]].partition_regions[partition_ids[i]].erase(region_ids[i]);
+            if (_table_info_map.find(table_ids[i]) != _table_info_map.end()) {
+                _table_info_map[table_ids[i]].partition_regions[partition_ids[i]].erase(region_ids[i]);
+            }
         }
     }
     int get_table_info(const std::string& table_name, pb::SchemaInfo& table_info) {
@@ -208,7 +210,7 @@ public:
         return count;
     }
     void get_region_count(const std::set<std::int64_t>& table_ids,
-                        std::unordered_map<int64_t, int64_t> table_region_ids) {
+                        std::unordered_map<int64_t, int64_t>& table_region_count) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         for (auto& table_info : _table_info_map) {
             int64_t table_id = table_info.first;
@@ -216,7 +218,7 @@ public:
             for (auto& partition_region : table_info.second.partition_regions) {
                 count += partition_region.second.size(); 
             }
-            table_region_ids[table_id] = count;
+            table_region_count[table_id] = count;
         }    
     }
     int64_t get_replica_num(int64_t table_id) {

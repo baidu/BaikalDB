@@ -163,8 +163,8 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
     for (int i = 0; i < _insert_stmt->lists.size(); ++i) {
         parser::RowExpr* row_expr = _insert_stmt->lists[i];
         SmartRecord row = _factory->new_record(_table_id);
-        int32_t field_cnt = 0;
-        for (; field_cnt < row_expr->children.size(); ++field_cnt) {
+        uint32_t field_cnt = 0;
+        for (; field_cnt < (uint32_t)row_expr->children.size(); ++field_cnt) {
             if (field_cnt >= _fields.size()) {
                 DB_WARNING("more values than fields");
                 break;

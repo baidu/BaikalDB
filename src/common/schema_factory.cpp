@@ -216,9 +216,11 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table) {
             field_info.default_expr_value = ExprValue::Now();
             field_info.default_expr_value.cast_to(field_info.type);
         } else {
-            field_info.default_expr_value.type = pb::STRING;
-            field_info.default_expr_value.str_val = field_info.default_value;
-            field_info.default_expr_value.cast_to(field_info.type);
+            if (field.has_default_value()) {
+                field_info.default_expr_value.type = pb::STRING;
+                field_info.default_expr_value.str_val = field_info.default_value;
+                field_info.default_expr_value.cast_to(field_info.type);
+            }
         }
         if (field_info.type == pb::STRING || field_info.type == pb::HLL) {
             field_info.size = -1;
@@ -572,8 +574,12 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     }
     user_info->username = username;
     user_info->password = password;
-    scramble(user_info->scramble_password + 1,
-        "\x2f\x55\x3e\x74\x50\x72\x6d\x4b\x56\x4c\x57\x54\x7c\x34\x2f\x2e\x37\x6b\x37\x6e",
+    scramble(user_info->scramble_password,
+        ("\x26\x4f\x37\x58"
+        "\x43\x7a\x6c\x53"
+        "\x21\x25\x65\x57"
+        "\x62\x35\x42\x66"
+        "\x6f\x34\x62\x49"),
         password.c_str());
     user_info->namespace_ = user.namespace_name();
     user_info->namespace_id = user.namespace_id();
@@ -864,7 +870,7 @@ int SchemaFactory::get_region_by_key(
         std::unordered_map<int64_t, pb::RegionInfo>& output_regions) {
 
     BAIDU_SCOPED_LOCK(_update_region_mutex);
-    for (size_t idx = 0; idx < input_regions.size(); ++idx) {
+    for (int idx = 0; idx < input_regions.size(); ++idx) {
         int64_t table_id = input_regions[idx].table_id();
 
         const std::string& start = input_regions[idx].start_key();

@@ -94,7 +94,7 @@ public:
 
     int64_t         namespace_id = 0;
     int64_t         version = 0;
-    uint8_t         scramble_password[21];
+    uint8_t         scramble_password[20];
 
     TimeCost        query_cost;
     std::mutex      conn_mutex;

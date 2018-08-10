@@ -251,6 +251,7 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
     for (auto& schema_heart_beat : request->schema_infos()) {
         int64_t table_id = schema_heart_beat.table_id();
         report_table_ids.insert(table_id);
+        report_region_ids[table_id] = std::set<std::int64_t>{};
         for (auto& region_info : schema_heart_beat.regions()) {
             report_region_ids[table_id].insert(region_info.region_id());
         }

@@ -32,6 +32,166 @@ TEST(test_parser, case_option) {
     {
         parser::SqlParser parser;
         //select distict
+        std::string sql_case = "select case adgroup_id when 1378428934 "
+                "then 'true' else 'false' end from ideacontent limit 10";
+        parser.parse(sql_case);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("case_expr_when"));
+        ASSERT_TRUE(func_expr->children.size() == 4);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        ASSERT_TRUE(func_expr->children.size() == 4);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select case adgroup_id when 1378428934 then 'true' end from ideacontent limit 10";
+        parser.parse(sql_case);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("case_expr_when"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl;
+    } 
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select case when 1378428934 then 'true' else 'false' end from ideacontent limit 10";
+        parser.parse(sql_case);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("case_when"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl;
+    } 
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select case when 1378428934 then 'true' end from ideacontent limit 10";
+        parser.parse(sql_case);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("case_when"));
+        ASSERT_TRUE(func_expr->children.size() == 2);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl;
+    } 
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select case when 1378428934 then 'true' when 1397887 "
+            "then 'false' else 'hello' end from ideacontent limit 10";
+        parser.parse(sql_case);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("case_when"));
+        ASSERT_TRUE(func_expr->children.size() == 5);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl;
+    } 
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select case adgroup_id when 1378428934 then 'true'"
+            " when 1397887 then 'false' else 'hello' end from ideacontent limit 10";
+        parser.parse(sql_case);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("case_expr_when"));
+        ASSERT_TRUE(func_expr->children.size() == 6);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl;
+    } 
+    {
+        parser::SqlParser parser;
+        //select distict
         std::string sql_opt0 = "select distinct high_priority straight_join"
                                 " sql_cache sql_calc_found_rows field_a";
         parser.parse(sql_opt0);

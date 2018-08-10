@@ -292,7 +292,7 @@ int Region::init(bool write_db, int32_t snapshot_times) {
 #ifdef BAIDU_INTERNAL
                     segment_type = pb::S_WORDRANK;
 #else
-                    segment_type = pb::SIMPLE;
+                    segment_type = pb::S_SIMPLE;
 #endif
                 }
                 _reverse_index_map[index_id] = new ReverseIndex<CommonSchema>(

@@ -28,6 +28,7 @@
 #include "rapidjson.h"
 #include <raft/raft.h>
 #include "common.h"
+#include "password.h"
 #include "schema_factory.h"
 
 int main(int argc, char* argv[])
@@ -37,8 +38,13 @@ int main(int argc, char* argv[])
 }
 
 namespace baikaldb {
-
 TEST(test_stripslashes, case_all) {
+    std::cout << 
+        ("\x26\x4f\x37\x58"
+        "\x43\x7a\x6c\x53"
+        "\x21\x25\x65\x57"
+        "\x62\x35\x42\x66"
+        "\x6f\x34\x62\x49") << std::endl; 
     uint16_t a1 = -1;
     uint16_t a2 = 2;
     int64_t xx =  a2 - a1;

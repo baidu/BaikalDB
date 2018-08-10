@@ -203,6 +203,38 @@ ExprValue hll_estimate(const std::vector<ExprValue>& input) {
     tmp._u.int64_val = hll::hll_estimate(input[0]);
     return tmp;
 }
+
+ExprValue case_when(const std::vector<ExprValue>& input) {
+    for (size_t i = 0; i <= input.size() / 2; ++i) {
+        auto if_index = i * 2;
+        auto then_index = i * 2 + 1;
+        if (input[if_index].get_numberic<bool>()) {
+            return input[then_index];
+        }
+    }
+    //没有else分支, 返回null
+    if (input.size() % 2 == 0) {
+        return ExprValue();
+     } else {
+        return input[input.size() - 1];
+    }
+}
+
+ExprValue case_expr_when(const std::vector<ExprValue>& input) {
+    for (size_t i = 0; i <= (input.size() - 1) / 2; ++i) {
+        auto if_index = i * 2 + 1;
+        auto then_index = i * 2 + 2;
+        if (input[0].compare(input[if_index]) == 0) {
+            return input[then_index];
+        }
+    }
+    //没有else分支, 返回null
+    if ((input.size() - 1) % 2 == 0) {
+        return ExprValue();
+     } else {
+        return input[input.size() - 1];
+    }
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

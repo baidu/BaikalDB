@@ -43,19 +43,21 @@ int MysqlWrapper::handshake_send(SmartSocket sock) {
 
     // Send handshake package.
     const uint8_t packet_handshake_2[] =
-        "\x2f\x55\x3e\x74"
-        "\x50\x72\x6d\x4b"  // scramble_buf
+        "\x26\x4f\x37\x58"
+        "\x43\x7a\x6c\x53"  // auth-plugin-data-part-1
         "\x00"              // filter
-        "\x0c\xa2"          // server capabilities
+        "\x0c\xa2"          // capability flags (lower 2 bytes)
         "\x1c"              // server language encoding :cp 1257 change to gbk
         "\x02\x00"          // server status
+        "\x00\x00"          // capability flags (upper 2 bytes)
+        "\x00"              // length of auth-plugin-data
         "\x00\x00\x00\x00"
         "\x00\x00\x00\x00"
-        "\x00\x00\x00\x00"
-        "\x00\x56\x4c\x57"
-        "\x54\x7c\x34\x2f"
-        "\x2e\x37\x6b\x37"
-        "\x6e\x00";
+        "\x00\x00"          // 10bytes reserved
+        "\x21\x25\x65\x57"
+        "\x62\x35\x42\x66"
+        "\x6f\x34\x62\x49"
+        "\x00";             // auth-plugin-data-part-2 len=13
 
     size_t len1 = sizeof(packet_handshake_1) - 1;
     size_t len2 = sizeof(packet_handshake_2) - 1;
@@ -475,59 +477,6 @@ bool MysqlWrapper::make_field_packet(DataBuffer* array, const ResultField* field
 
     return true;
 }
-/*
-bool MysqlWrapper::make_row_packet(DataBuffer* send_buf,
-                            SmartResultSet& result_set,
-                            int* send_packet_id) {
-    if (send_buf == NULL || send_packet_id == NULL){
-        DB_FATAL("invalid parameter, send_buf==null or send_packet_id==null");
-        return false;
-    }
-    // packet header
-    int start_pos = send_buf->_size;
-    uint8_t bytes[4];
-    bytes[0] = '\x01';
-    bytes[1] = '\x00';
-    bytes[2] = '\x00';
-    bytes[3] = (*send_packet_id) & 0xff;
-    (*send_packet_id)++;
-    if (!send_buf->byte_array_append_len(bytes, 4)) {
-        DB_FATAL("Failed to append len. value:[%s], len:[1]", bytes);
-        return false;
-    }
-
-    // package body.
-    int size = result_set->get_field_count();
-    for (int32_t cnt = 0; cnt < size; ++cnt) {
-        uint8_t null_byte = 0xfb;
-        const char* value = result_set->get_value(cnt);
-        if (value == NULL) {
-            if (!send_buf->byte_array_append_len((const uint8_t*)&null_byte, 1)) {
-                DB_FATAL("Failed to append len.value:[%s],len:[1]", null_byte);
-                return false;
-            }
-        } else {
-            uint64_t length = strlen(value);
-            if (!send_buf->byte_array_append_length_coded_binary((unsigned long long)length)) {
-                DB_FATAL("Failed to append length coded binary.length:[%u]", length);
-                return false;
-            }
-            if (!send_buf->byte_array_append_len((const uint8_t*)(value), length)) {
-                DB_FATAL("Failed to append len. value:[%s],len:[%u]",
-                                value, length);
-                return false;
-            }
-        }
-    }
-
-    int packet_body_len = send_buf->_size - start_pos - 4;
-    send_buf->_data[start_pos] = packet_body_len & 0xff;
-    send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
-    send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
-
-    return true;
-}
-*/
 bool MysqlWrapper::make_row_packet(DataBuffer* send_buf,
                                     const std::vector<std::string>& row,
                                     int* send_packet_id) {
@@ -578,43 +527,7 @@ bool MysqlWrapper::make_row_packet(DataBuffer* send_buf,
 
     return true;
 }
-/*
-bool MysqlWrapper::make_row_packet(DataBuffer* send_buf,
-                                   SmartTable& table,
-                                   int32_t row_idx,
-                                   int* send_packet_id) {
-    if (send_buf == NULL || send_packet_id == NULL){
-        DB_FATAL("invalid parameter, send_buf==null or send_packet_id==null");
-        return false;
-    }
-    // packet header
-    int start_pos = send_buf->_size;
-    uint8_t bytes[4];
-    bytes[0] = '\x01';
-    bytes[1] = '\x00';
-    bytes[2] = '\x00';
-    bytes[3] = (*send_packet_id) & 0xff;
-    (*send_packet_id)++;
-    if (!send_buf->byte_array_append_len(bytes, 4)) {
-        DB_FATAL("Failed to append len. value:[%s], len:[1]", bytes);
-        return false;
-    }
 
-    // package body.
-    for (int32_t col_idx = 0; col_idx < table->col_size(); ++col_idx) {
-        if (!send_buf->byte_array_append_table_cell(table, row_idx, col_idx)) {
-            DB_FATAL("Failed to append table cell. row_idx:%d, col_idx:%d", row_idx, col_idx);
-            return false;
-        }
-    }
-    int packet_body_len = send_buf->_size - start_pos - 4;
-    send_buf->_data[start_pos] = packet_body_len & 0xff;
-    send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
-    send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
-
-    return true;
-}
-*/
 int MysqlWrapper::real_read(SmartSocket sock, int want_len, int* real_read_len) {
     if (!sock || NULL == sock->self_buf || NULL == real_read_len) {
         DB_FATAL("s == NULL || send_buf == NULL || NULL == real_read_len");

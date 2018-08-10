@@ -519,6 +519,7 @@ void TableManager::check_add_table(std::set<int64_t>& report_table_ids,
         *schema_info = table_info_pair.second.schema_pb;
         for (auto& partition_region : table_info_pair.second.partition_regions) {
             for (auto& region_id : partition_region.second) {
+                DB_WARNING("new add region id: %ld", region_id);
                 new_add_region_ids.push_back(region_id);
             }
         }

@@ -64,13 +64,6 @@ enum SerializeStatus {
     STMPS_NEED_RESIZE
 };
 
-typedef unsigned char           uint8;
-typedef signed char             int8;
-typedef short                   int16;
-typedef unsigned char           uchar;
-typedef unsigned long long int  ulonglong;
-typedef unsigned int            uint32;
-
 class TimeCost {
 public:
     TimeCost() {

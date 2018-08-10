@@ -67,6 +67,7 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request, braft::
     region_state.status = pb::NORMAL;
     set_region_state(region_id, region_state);
     if (new_add) {
+        DB_WARNING("region id: %ld is new", region_id);
         TableManager::get_instance()->add_region_id(table_id, partition_id, region_id);
     }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
@@ -215,7 +216,13 @@ void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_
         }
     }
     concurrency_cond.wait(-FLAGS_concurrency_num);
-    erase_region_info(drop_region_ids);
+    pb::MetaManagerRequest request;
+    request.set_op_type(pb::OP_DROP_REGION);
+    for (auto& drop_region_id : drop_region_ids) {
+        request.add_drop_region_ids(drop_region_id);
+    }
+    SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
+    //erase_region_info(drop_region_ids);
 }
 void RegionManager::delete_all_region_for_dead_store(const std::string& instance) {
     DB_WARNING("delete all region for dead store start, dead_store:%s", instance.c_str());
@@ -517,6 +524,7 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         auto master_region_info = get_region_info(region_id);
         //新增region, 在meta_server中不存在
         if (master_region_info == nullptr) {
+            DB_WARNING("region_info: %s is new ", leader_region_info.ShortDebugString().c_str());
             pb::MetaManagerRequest request;
             request.set_op_type(pb::OP_UPDATE_REGION);
             *(request.mutable_region_info()) = leader_region.region();

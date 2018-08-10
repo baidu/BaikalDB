@@ -253,24 +253,6 @@ std::string to_string(uint64_t number)
     return "";
 }
 
-
-std::string print_stacktrace()
-{
-    std::string res = "\n";
-    int size = 16;
-    void * array[16];
-    int stack_num = backtrace(array, size);
-    char ** stacktrace = backtrace_symbols(array, stack_num);
-    for (int i = 0; i < stack_num; ++i)
-    {
-        res += std::string(stacktrace[i]);
-        res += "\n";
-        //printf("%s\n", stacktrace[i]);
-    }
-    free(stacktrace);
-    return res;
-}
-
 std::string remove_quote(const char* str, char quote) {
     uint32_t len = strlen(str);
     if (len > 2 && str[0] == quote && str[len-1] == quote) {
