@@ -1,7 +1,7 @@
 [中文版](README_cn.md)
 
 # Introduction BaikalDB
-BaikalDB is a distributed [HTAP](https://en.wikipedia.org/wiki/Hybrid_transactional/analytical_processing_HTAP) database system inspired by the architecture of Google Spanner.
+BaikalDB is a distributed enhanced structured database system.
 It supports sequential and randomised realtime read/write of structural data in petabytes-scale.
 BaikalDB is compatible with MySQL protocol and it supports MySQL style SQL dialect, by which users can migrate their data storage from MySQL to BaikalDB seamlessly.
 
