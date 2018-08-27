@@ -56,7 +56,7 @@ void* MachineDriver::bthread_callback(void* void_arg) {
     }
 
     task->socket->thread_idx = thread_idx;
-    if (thread_idx >= _driver->_thread_num) {
+    if ((uint32_t)thread_idx >= _driver->_thread_num) {
         DB_FATAL("tid: %d, thread_idx: %d, _thread_num: %d", tid, thread_idx, _driver->_thread_num);
         exit(-1);
     }

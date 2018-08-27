@@ -535,7 +535,7 @@ void TableManager::check_add_region(const std::set<std::int64_t>& report_table_i
     std::vector<int64_t> table_for_add_region; //需要add_region的table_id
     for (auto& region_ids_pair : report_region_ids) {
         int64_t table_id = region_ids_pair.first;
-        if (table_region_count[table_id] <= region_ids_pair.second.size()) {
+        if (table_region_count[table_id] <= (int64_t)region_ids_pair.second.size()) {
             continue;
         }
         table_for_add_region.push_back(table_id);

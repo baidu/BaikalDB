@@ -28,6 +28,7 @@
 #include <boost/algorithm/string.hpp>
 #include <google/protobuf/descriptor.pb.h>
 #include "rocksdb/slice.h"
+#include "expr_value.h"
 
 using google::protobuf::FieldDescriptorProto;
 
@@ -328,6 +329,7 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::DATETIME,     FieldDescriptorProto::TYPE_FIXED64},
         { pb::TIMESTAMP,    FieldDescriptorProto::TYPE_FIXED32},
         { pb::DATE,         FieldDescriptorProto::TYPE_FIXED32},
+        { pb::TIME,         FieldDescriptorProto::TYPE_SFIXED32},
         { pb::HLL,          FieldDescriptorProto::TYPE_BYTES},
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL   }
     };
@@ -380,7 +382,7 @@ std::string datetime_to_str(uint64_t datetime) {
     int macrosec = (datetime & 0xFFFFFF);
 
     char buf[30] = {0};
-    sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06d",
         year, month, day, hour, minute, second, macrosec);
     return std::string(buf);
 }
@@ -392,10 +394,17 @@ uint64_t str_to_datetime(const char* str_time) {
     char buf[max_time_size + 1] = {0};
     memcpy(buf, str_time, len);
     uint32_t idx = 0;
+    bool has_date = false;
     for (; idx < len; ++idx) {
+        if (buf[idx] == '-') {
+            has_date = true;
+        }
         if (buf[idx] == '.') {
             break;
         }
+    }
+    if (!has_date) {
+        return time_to_datetime(str_to_time(str_time));
     }
     if (idx < len) {
         for (uint32_t i = idx + 1; i <= idx + 6 && i < max_time_size; ++i) {
@@ -463,5 +472,91 @@ uint64_t timestamp_to_datetime(time_t timestamp) {
     datetime |= (min << 30);
     datetime |= (sec << 24);
     return datetime;
+}
+
+int32_t datetime_to_time(uint64_t datetime) {
+    int tm_hour = ((datetime >> 36) & 0x1F);
+    int tm_min = ((datetime >> 30) & 0x3F);
+    int tm_sec = ((datetime >> 24) & 0x3F);
+    int32_t time = 0;
+    time |= tm_sec;
+    time |= (tm_min << 6);
+    time |= (tm_hour << 12);
+    return time;
+}
+uint64_t time_to_datetime(int32_t time) {
+    ExprValue tmp(pb::TIMESTAMP);
+    time_t now = ::time(NULL);
+    now = ((now + 28800) / 86400) * 86400; // 去除时分秒 考虑时区
+
+    bool minus = false;
+    if (time < 0) {
+        minus = true;
+        time = -time;
+    }
+    uint32_t hour = (time >> 12) & 0x3FF;
+    uint32_t min = (time >> 6) & 0x3F;
+    uint32_t sec = time & 0x3F;
+    int32_t delta_sec = hour * 3600 + min * 60 + sec;
+    if (minus) {
+        delta_sec = -delta_sec;
+    }
+    now -= 28800;
+    now += delta_sec;
+
+    return timestamp_to_datetime(now);
+}
+std::string time_to_str(int32_t time) {
+    bool minus = false;
+    if (time < 0) {
+        minus = true;
+        time = -time;
+    }
+    int hour = (time >> 12) & 0x3FF;
+    int min = (time >> 6) & 0x3F;
+    int sec = time & 0x3F;
+    static const char* OP_STR[] = {"", "-"};
+    char buf[20] = {0};
+    snprintf(buf, sizeof(buf), "%s%02d:%02d:%02d", OP_STR[minus], hour, min, sec);
+    return std::string(buf);
+}
+int32_t str_to_time(const char* str_time) {
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int32_t time = 0;
+    bool minus = false;
+
+    sscanf(str_time, "%d:%2u:%2u",
+         &hour, &minute, &second);
+    if (hour < 0) {
+        hour = -hour;
+        minus = true;
+    }
+    time |= second;
+    time |= (minute << 6);
+    time |= (hour << 12);
+    if (minus) {
+        time = -time;
+    }
+    return time;
+}
+int32_t seconds_to_time(int32_t seconds) {
+    bool minus = false;
+    if (seconds < 0) {
+        minus = true;
+        seconds = - seconds;
+    }
+    int sec = seconds % 60;
+    int min = (seconds / 60) % 60;
+    int hour = seconds / 3600;
+    int32_t time = 0;
+    time |= sec;
+    time |= (min << 6);
+    time |= (hour << 12);
+    if (minus) {
+        time = -time;
+    }
+    return time;
 }
 }  // baikaldb

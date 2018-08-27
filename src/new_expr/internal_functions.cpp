@@ -171,6 +171,52 @@ ExprValue date_format(const std::vector<ExprValue>& input) {
     format_result.str_val = s;
     return format_result;
 }
+ExprValue timediff(const std::vector<ExprValue>& input) {
+    if (input.size() < 2) {
+        return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    ExprValue arg1 = input[0];
+    ExprValue arg2 = input[1];
+    int32_t seconds = arg1.cast_to(pb::TIMESTAMP)._u.uint32_val - 
+        arg2.cast_to(pb::TIMESTAMP)._u.uint32_val;
+    ExprValue ret(pb::TIME);
+    ret._u.int32_val = seconds_to_time(seconds);
+    return ret;
+}
+ExprValue timestampdiff(const std::vector<ExprValue>& input) {
+    if (input.size() < 3) {
+        return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+
+    ExprValue arg2 = input[1];
+    ExprValue arg3 = input[2];
+    int32_t seconds = arg3.cast_to(pb::TIMESTAMP)._u.uint32_val - 
+        arg2.cast_to(pb::TIMESTAMP)._u.uint32_val;
+    ExprValue ret(pb::INT64);
+    if (input[0].str_val == "second") {
+        ret._u.int64_val = seconds;
+    } else if (input[0].str_val == "minute") {
+        ret._u.int64_val = seconds / 60;
+    } else if (input[0].str_val == "hour") {
+        ret._u.int64_val = seconds / 3600;
+    } else if (input[0].str_val == "day") {
+        ret._u.int64_val = seconds / (24 * 3600);
+    } else {
+        // un-support
+        return ExprValue::Null();
+    }
+    return ret;
+}
 
 ExprValue hll_add(const std::vector<ExprValue>& input) {
     if (input.size() < 2) {
@@ -205,7 +251,7 @@ ExprValue hll_estimate(const std::vector<ExprValue>& input) {
 }
 
 ExprValue case_when(const std::vector<ExprValue>& input) {
-    for (size_t i = 0; i <= input.size() / 2; ++i) {
+    for (size_t i = 0; i < input.size() / 2; ++i) {
         auto if_index = i * 2;
         auto then_index = i * 2 + 1;
         if (input[if_index].get_numberic<bool>()) {
@@ -221,7 +267,7 @@ ExprValue case_when(const std::vector<ExprValue>& input) {
 }
 
 ExprValue case_expr_when(const std::vector<ExprValue>& input) {
-    for (size_t i = 0; i <= (input.size() - 1) / 2; ++i) {
+    for (size_t i = 0; i < (input.size() - 1) / 2; ++i) {
         auto if_index = i * 2 + 1;
         auto then_index = i * 2 + 2;
         if (input[0].compare(input[if_index]) == 0) {

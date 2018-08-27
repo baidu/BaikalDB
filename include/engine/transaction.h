@@ -111,19 +111,6 @@ public:
             MutTableKey&      pk_val,
             bool              check_region);
 
-    // Return a iterator used for scanning the primary index (table)
-    TableIterator* scan_primary(
-            const IndexRange&       range, 
-            std::vector<int32_t>&   fields, 
-            bool                    check_region, 
-            bool                    forward);
-
-    // Return a iterator used for scanning the secondary index
-    IndexIterator* scan_secondary(
-            const IndexRange&       range, 
-            bool                    check_region, 
-            bool                    forward);
-
     int remove(int64_t region, IndexInfo& index, const SmartRecord key);
     int remove(int64_t region, IndexInfo& index, const TableKey&   key);
 
@@ -147,6 +134,10 @@ public:
         return _is_prepared;
     }
 
+    bool is_rolledback() {
+        return _is_rolledback;
+    }
+
     bool prepare_apply() {
         return _prepare_apply;
     }
@@ -161,6 +152,10 @@ public:
 
     CachePlanMap& cache_plan_map() {
         return _cache_plan_map;
+    }
+
+    void reset_active_time() {
+        last_active_time = butil::gettimeofday_us();
     }
 
     bool has_write() {
@@ -196,6 +191,7 @@ public:
 public:
     int64_t     num_increase_rows = 0;
     int64_t     last_active_time = 0;
+    int         dml_num_affected_rows = 0; //for autocommit dml return
 
 private:
     int get_update_primary(
@@ -213,9 +209,9 @@ private:
     uint64_t                        _txn_id = 0;
     bool                            _is_prepared = false;
     bool                            _is_finished = false;
+    bool                            _is_rolledback = false;
     bool                            _prepare_apply = false;
     int64_t                         _prepare_time_us = 0;
-
     std::stack<int>                 _save_point_seq;
     std::stack<int64_t>             _save_point_increase_rows;
 
@@ -234,4 +230,6 @@ private:
 
     bthread_mutex_t                 _txn_mutex;
 };
+
+typedef std::shared_ptr<Transaction> SmartTransaction;
 }

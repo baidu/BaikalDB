@@ -34,7 +34,7 @@ void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb:
     
     int64_t region_id = 0; 
     if (request->str_region_id().size() > 0) {
-        region_id = std::stol(request->str_region_id());
+        region_id = strtoll(request->str_region_id().c_str(), NULL, 10);
     }
     if (region_id != 0) {
         query_region_ids.push_back(region_id);

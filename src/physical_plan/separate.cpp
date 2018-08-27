@@ -129,7 +129,7 @@ int Separate::analyze(QueryContext* ctx) {
     AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
     SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
     if (join_nodes.size() != 0) {
-        seperate_for_join(join_nodes); 
+        seperate_for_join(scan_nodes); 
     } else if (agg_node != nullptr) {
         ExecNode* parent = agg_node->get_parent();
         AggNode* merge_agg_node = nullptr;
@@ -238,18 +238,36 @@ int Separate::separate_autocommit_dml_1pc(QueryContext* ctx, PacketNode* packet_
 int Separate::separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_node,
         std::map<int64_t, pb::RegionInfo>& region_infos) {
     // create baikaldb commit node
-    std::unique_ptr<TransactionNode> commit_node(
-        create_txn_node(pb::TXN_COMMIT));
+    std::unique_ptr<TransactionNode> commit_node(create_txn_node(pb::TXN_COMMIT));
     if (commit_node.get() == nullptr) {
         DB_WARNING("create commit_node failed");
         return -1;
     }
     ExecNode* dml_root = packet_node->children(0);
-    ExecNode* dml_leaf = dml_root;
-    while (dml_leaf->children_size() == 1) {
-        dml_leaf = dml_leaf->children(0);
-    }
     packet_node->clear_children();
+
+    // create begin fetcher node
+    std::unique_ptr<FetcherNode> begin_fetch_node(create_fetcher_node(pb::OP_BEGIN));
+    if (begin_fetch_node.get() == nullptr) {
+        DB_WARNING("create begin_fetch_node failed");
+        return -1;
+    }
+    // create store begin node
+    std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE));
+    if (store_begin_node.get() == nullptr) {
+        DB_WARNING("create store_begin_node failed");
+        return -1;
+    }
+    begin_fetch_node->add_child(store_begin_node.release());
+
+    // create dml fetcher node
+    std::unique_ptr<FetcherNode> dml_fetch_node(create_fetcher_node(packet_node->op_type()));
+    if (dml_fetch_node.get() == nullptr) {
+        DB_WARNING("create dml_fetch_node failed");
+        return -1;
+    }
+    dml_fetch_node->set_region_infos(region_infos, ctx->insert_region_ids);
+    dml_fetch_node->add_child(dml_root);
 
     // create prepare fetcher node
     std::unique_ptr<FetcherNode> prepare_fetch_node(create_fetcher_node(pb::OP_PREPARE));
@@ -257,8 +275,13 @@ int Separate::separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_
         DB_WARNING("create prepare_fetch_node failed");
         return -1;
     }
-    // DB_WARNING("region size: %ld, %ld", ctx->region_infos.size(), ctx->insert_region_ids.size());
-    prepare_fetch_node->set_region_infos(region_infos, ctx->insert_region_ids);
+    // create store prepare node
+    std::unique_ptr<TransactionNode> store_prepare_node(create_txn_node(pb::TXN_PREPARE));
+    if (store_prepare_node.get() == nullptr) {
+        DB_WARNING("create store_prepare_node failed");
+        return -1;
+    }
+    prepare_fetch_node->add_child(store_prepare_node.release());
 
     // create commit fetcher node
     std::unique_ptr<FetcherNode> commit_fetch_node(create_fetcher_node(pb::OP_COMMIT));
@@ -266,8 +289,14 @@ int Separate::separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_
         DB_WARNING("create commit_fetch_node failed");
         return -1;
     }
-    //DB_WARNING("region size: %ld, %ld", ctx->region_infos.size(), ctx->insert_region_ids.size());
-    commit_fetch_node->set_region_infos(region_infos, ctx->insert_region_ids);
+    
+    // create store commit node
+    std::unique_ptr<TransactionNode> store_commit_node(create_txn_node(pb::TXN_COMMIT_STORE));
+    if (store_commit_node.get() == nullptr) {
+        DB_WARNING("create store_commit_node failed");
+        return -1;
+    }
+    commit_fetch_node->add_child(store_commit_node.release());
 
     // create rollback fetcher node (in case of prepare failure)
     std::unique_ptr<FetcherNode> rollback_fetch_node(create_fetcher_node(pb::OP_ROLLBACK));
@@ -275,46 +304,17 @@ int Separate::separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_
         DB_WARNING("create rollback_fetch_node failed");
         return -1;
     }
-    //DB_WARNING("region size: %ld, %ld", ctx->region_infos.size(), ctx->insert_region_ids.size());
-    rollback_fetch_node->set_region_infos(region_infos, ctx->insert_region_ids);
-
-    // create store begin node
-    std::unique_ptr<TransactionNode> store_begin_node(
-        create_txn_node(pb::TXN_BEGIN_STORE));
-    if (store_begin_node.get() == nullptr) {
-        DB_WARNING("create store_begin_node failed");
-        return -1;
-    }
-
-    // create store prepare node
-    std::unique_ptr<TransactionNode> store_prepare_node(
-        create_txn_node(pb::TXN_PREPARE));
-    if (store_prepare_node.get() == nullptr) {
-        DB_WARNING("create store_prepare_node failed");
-        return -1;
-    }
-    store_prepare_node->add_child(dml_root);
-    dml_leaf->add_child(store_begin_node.release());
-    prepare_fetch_node->add_child(store_prepare_node.release());
-
-    // create store commit node
-    std::unique_ptr<TransactionNode> store_commit_node(
-        create_txn_node(pb::TXN_COMMIT_STORE));
-    if (store_commit_node.get() == nullptr) {
-        DB_WARNING("create store_commit_node failed");
-        return -1;
-    }
-    commit_fetch_node->add_child(store_commit_node.release());
 
     // create store rollback node
-    std::unique_ptr<TransactionNode> store_rollback_node(
-        create_txn_node(pb::TXN_ROLLBACK_STORE));
+    std::unique_ptr<TransactionNode> store_rollback_node(create_txn_node(pb::TXN_ROLLBACK_STORE));
     if (store_rollback_node.get() == nullptr) {
         DB_WARNING("create store_rollback_node failed");
         return -1;
     }
     rollback_fetch_node->add_child(store_rollback_node.release());
 
+    commit_node->add_child(begin_fetch_node.release());
+    commit_node->add_child(dml_fetch_node.release());
     commit_node->add_child(prepare_fetch_node.release());
     commit_node->add_child(commit_fetch_node.release());
     commit_node->add_child(rollback_fetch_node.release());
@@ -460,43 +460,36 @@ int Separate::separate_begin(QueryContext* ctx, TransactionNode* txn_node) {
     return 0;
 }
 
-int Separate::seperate_for_join(const std::vector<ExecNode*>& join_nodes) {
-    for (auto& exec_node_ptr : join_nodes) {
-        JoinNode* join_node_ptr = static_cast<JoinNode*>(exec_node_ptr);
-        for (size_t i = 0; i < join_node_ptr->children_size(); ++i) {
-            ExecNode* child = join_node_ptr->children(i);
-            if (child->get_node_type() == pb::JOIN_NODE) {
-                continue;
-            }
-            if (child->get_node_type() != pb::TABLE_FILTER_NODE &&
-                    child->get_node_type() != pb::SCAN_NODE) {
-                //不会走到该分支
-                DB_FATAL("illegal plan, child node type:%s", 
-                          pb::PlanNodeType_Name(child->get_node_type()).c_str());
+int Separate::seperate_for_join(const std::vector<ExecNode*>& scan_nodes) {
+    for (auto& scan_node_ptr : scan_nodes) {
+        ExecNode* fether_node_parent = scan_node_ptr->get_parent();
+        ExecNode* fether_node_child = scan_node_ptr;
+        if (fether_node_parent == nullptr) {
+            DB_WARNING("fether node children is null");
+            return -1;
+        }
+        while (fether_node_parent->node_type() == pb::TABLE_FILTER_NODE
+                    || fether_node_parent->node_type() == pb::WHERE_FILTER_NODE) {
+            fether_node_parent = fether_node_parent->get_parent();
+            fether_node_child = fether_node_child->get_parent();
+            if (fether_node_parent == nullptr) {
+                DB_WARNING("fether node children is null");
                 return -1;
             }
-            FilterNode* filter_node = NULL;
-            ScanNode* scan_node = NULL;
-            if (child->get_node_type() == pb::TABLE_FILTER_NODE) {
-                filter_node = static_cast<FilterNode*>(child);
-                scan_node = static_cast<ScanNode*>(filter_node->children(0));
-            } else {
-                scan_node = static_cast<ScanNode*>(child);
-            }
-            pb::PlanNode pb_fetch_node; 
-            pb_fetch_node.set_node_type(pb::FETCHER_NODE);
-            pb_fetch_node.set_limit(-1);
-            pb::FetcherNode* pb_fetch_node_derive = 
-                pb_fetch_node.mutable_derive_node()->mutable_fetcher_node();
-            pb_fetch_node_derive->set_op_type(pb::OP_SELECT);
-            FetcherNode* fetch_node = new FetcherNode;
-            scan_node->set_related_fetcher_node(fetch_node);
-            fetch_node->init(pb_fetch_node);
-            std::map<int64_t, pb::RegionInfo> region_infos = scan_node->region_infos();
-            fetch_node->set_region_infos(region_infos);
-            join_node_ptr->replace_child(child, fetch_node);
-            fetch_node->add_child(child);
         }
+        pb::PlanNode pb_fetch_node; 
+        pb_fetch_node.set_node_type(pb::FETCHER_NODE);
+        pb_fetch_node.set_limit(-1);
+        pb::FetcherNode* pb_fetch_node_derive = 
+            pb_fetch_node.mutable_derive_node()->mutable_fetcher_node();
+        pb_fetch_node_derive->set_op_type(pb::OP_SELECT);
+        FetcherNode* fetch_node = new FetcherNode;
+        static_cast<ScanNode*>(scan_node_ptr)->set_related_fetcher_node(fetch_node);
+        fetch_node->init(pb_fetch_node);
+        std::map<int64_t, pb::RegionInfo> region_infos = static_cast<ScanNode*>(scan_node_ptr)->region_infos();
+        fetch_node->set_region_infos(region_infos);
+        fether_node_parent->replace_child(fether_node_child, fetch_node);
+        fetch_node->add_child(fether_node_child);
     }
     return 0;
 }

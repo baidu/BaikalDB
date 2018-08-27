@@ -23,6 +23,7 @@ namespace baikaldb {
 int DDLPlanner::plan() {
     pb::MetaManagerRequest request;
     // only CREATE TABLE is supported
+    MysqlErrCode error_code = ER_ERROR_COMMON;
     if (_ctx->stmt_type == parser::NT_CREATE_TABLE) {
         request.set_op_type(pb::OP_CREATE_TABLE);
         pb::SchemaInfo *table = request.mutable_table_info();
@@ -30,6 +31,7 @@ int DDLPlanner::plan() {
             DB_WARNING("parser create table command failed");
             return -1;
         }
+        error_code = ER_CANT_CREATE_TABLE;
     } else if (_ctx->stmt_type == parser::NT_DROP_TABLE) {
         request.set_op_type(pb::OP_DROP_TABLE);
         pb::SchemaInfo *table = request.mutable_table_info();
@@ -44,6 +46,7 @@ int DDLPlanner::plan() {
             DB_WARNING("parser create database command failed");
             return -1;
         }
+        error_code = ER_CANT_CREATE_DB;
     } else if (_ctx->stmt_type == parser::NT_DROP_DATABASE) {
         request.set_op_type(pb::OP_DROP_DATABASE);
         pb::DataBaseInfo *database = request.mutable_database_info();
@@ -51,18 +54,80 @@ int DDLPlanner::plan() {
             DB_WARNING("parser drop database command failed");
             return -1;
         }
+    } else if (_ctx->stmt_type == parser::NT_ALTER_TABLE) {
+        if (0 != parse_alter_table(request)) {
+            DB_WARNING("parser alter table command failed");
+            return -1;
+        }
+        error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
     } else {
         DB_WARNING("unsupported DDL command: %d", _ctx->stmt_type);
         return -1;
     }
     pb::MetaManagerResponse response;
     if (MetaServerInteract::get_instance()->send_request("meta_manager", request, response) != 0) {
+        if (response.errcode() != pb::SUCCESS && _ctx->stat_info.error_code == ER_ERROR_FIRST) {
+            _ctx->stat_info.error_code = error_code;
+            _ctx->stat_info.error_msg << response.errmsg();
+        }
         DB_WARNING("send_request fail");
         return -1;
     }
-    if (response.errcode() != pb::SUCCESS) {
-        DB_WARNING("err:%s", response.errmsg().c_str());
+
+    return 0;
+}
+
+int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column) {
+    pb::FieldInfo* field = table.add_fields();
+    if (column->name == nullptr || column->name->name.empty()) {
+        DB_WARNING("column_name is empty");
         return -1;
+    }
+    field->set_field_name(column->name->name.value);
+    if (column->type == nullptr) {
+        DB_WARNING("data_type is empty for column: %s", column->name->name.value);
+        return -1;
+    }
+    pb::PrimitiveType data_type = to_baikal_type(column->type);
+    if (data_type == pb::INVALID_TYPE) {
+        DB_WARNING("data_type is unsupported: %s", column->name->name.value);
+        return -1;
+    }
+    field->set_mysql_type(data_type);
+    int option_len = column->options.size();
+    for (int opt_idx = 0; opt_idx < option_len; ++opt_idx) {
+        parser::ColumnOption* col_option = column->options[opt_idx];
+        if (col_option->type == parser::COLUMN_OPT_NOT_NULL) {
+            field->set_can_null(false);
+        } else if (col_option->type == parser::COLUMN_OPT_NULL) {
+            field->set_can_null(true);
+        } else if (col_option->type == parser::COLUMN_OPT_AUTO_INC) {
+            field->set_auto_increment(true);
+        } else if (col_option->type == parser::COLUMN_OPT_PRIMARY_KEY) {
+            pb::IndexInfo* index = table.add_indexs();
+            index->set_index_name("primary_key");
+            index->set_index_type(pb::I_PRIMARY);
+            index->add_field_names(column->name->name.value);
+        } else if (col_option->type == parser::COLUMN_OPT_UNIQ_KEY) {
+            pb::IndexInfo* index = table.add_indexs();
+            std::string col_name(column->name->name.value);
+            index->set_index_name(col_name + "_key");
+            index->set_index_type(pb::I_UNIQ);
+            index->add_field_names(col_name);
+        } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL) {
+            std::string default_value = col_option->expr->to_string();
+            field->set_default_value(default_value);
+        } else if (col_option->type == parser::COLUMN_OPT_COMMENT) {
+            std::string comment = col_option->expr->to_string();
+            field->set_comment(comment);
+        } else {
+            DB_WARNING("unsupported column option type: %d", col_option->type);
+            return -1;
+        }
+    }
+    // can_null default is false
+    if (!field->has_can_null()) {
+        field->set_can_null(false);
     }
     return 0;
 }
@@ -75,7 +140,8 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
     }
     if (stmt->table_name->db.empty()) {
         if (_ctx->cur_db.empty()) {
-            DB_WARNING("No database selected for table: %s", stmt->table_name->table.value);
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "No database selected";
             return -1;
         }
         table.set_database(_ctx->cur_db);
@@ -92,54 +158,9 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             DB_WARNING("column is nullptr");
             return -1;
         }
-        pb::FieldInfo* field = table.add_fields();
-        if (column->name != nullptr && !column->name->name.empty()) {
-            field->set_field_name(column->name->name.value);
-        }
-        if (column->type == nullptr) {
-            DB_WARNING("data_type is empty for column: %s", column->name->name.value);
+        if (0 != add_column_def(table, column)) {
+            DB_WARNING("add column to table failed.");
             return -1;
-        }
-        pb::PrimitiveType data_type = to_baikal_type(column->type);
-        if (data_type == pb::INVALID_TYPE) {
-            DB_WARNING("data_type is unsupported: %s", column->name->name.value);
-            return -1;
-        }
-        field->set_mysql_type(data_type);
-        int option_len = column->options.size();
-        for (int opt_idx = 0; opt_idx < option_len; ++opt_idx) {
-            parser::ColumnOption* col_option = column->options[opt_idx];
-            if (col_option->type == parser::COLUMN_OPT_NOT_NULL) {
-                field->set_can_null(false);
-            } else if (col_option->type == parser::COLUMN_OPT_NULL) {
-                field->set_can_null(true);
-            } else if (col_option->type == parser::COLUMN_OPT_AUTO_INC) {
-                field->set_auto_increment(true);
-            } else if (col_option->type == parser::COLUMN_OPT_PRIMARY_KEY) {
-                pb::IndexInfo* index = table.add_indexs();
-                index->set_index_name("primary_key");
-                index->set_index_type(pb::I_PRIMARY);
-                index->add_field_names(column->name->name.value);
-            } else if (col_option->type == parser::COLUMN_OPT_UNIQ_KEY) {
-                pb::IndexInfo* index = table.add_indexs();
-                std::string col_name(column->name->name.value);
-                index->set_index_name(col_name + "_key");
-                index->set_index_type(pb::I_UNIQ);
-                index->add_field_names(col_name);
-            } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL) {
-                std::string default_value = col_option->expr->to_string();
-                field->set_default_value(default_value);
-            } else if (col_option->type == parser::COLUMN_OPT_COMMENT) {
-                std::string comment = col_option->expr->to_string();
-                field->set_comment(comment);
-            } else {
-                DB_WARNING("unsupported column option type: %d", col_option->type);
-                return -1;
-            }
-        }
-        // can_null default is false
-        if (!field->has_can_null()) {
-            field->set_can_null(false);
         }
     }
 
@@ -255,7 +276,8 @@ int DDLPlanner::parse_drop_table(pb::SchemaInfo& table) {
     }
     if (table_name->db.empty()) {
         if (_ctx->cur_db.empty()) {
-            DB_WARNING("No database selected for table: %s", table_name->table.value);
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "No database selected";
             return -1;
         }
         table.set_database(_ctx->cur_db);
@@ -272,7 +294,8 @@ int DDLPlanner::parse_drop_table(pb::SchemaInfo& table) {
 int DDLPlanner::parse_create_database(pb::DataBaseInfo& database) {
     parser::CreateDatabaseStmt* stmt = (parser::CreateDatabaseStmt*)(_ctx->stmt);
     if (stmt->db_name.empty()) {
-        DB_WARNING("error: no db_name specified");
+        _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+        _ctx->stat_info.error_msg << "No database selected";
         return -1;
     }
     database.set_database(stmt->db_name.value);
@@ -283,7 +306,8 @@ int DDLPlanner::parse_create_database(pb::DataBaseInfo& database) {
 int DDLPlanner::parse_drop_database(pb::DataBaseInfo& database) {
     parser::DropDatabaseStmt* stmt = (parser::DropDatabaseStmt*)(_ctx->stmt);
     if (stmt->db_name.empty()) {
-        DB_WARNING("error: no db_name specified");
+        _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+        _ctx->stat_info.error_msg << "No database selected";
         return -1;
     }
     database.set_database(stmt->db_name.value);
@@ -291,6 +315,107 @@ int DDLPlanner::parse_drop_database(pb::DataBaseInfo& database) {
     return 0;
 }
 
+int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
+    parser::AlterTableStmt* stmt = (parser::AlterTableStmt*)(_ctx->stmt);
+    if (stmt->table_name == nullptr) {
+        DB_WARNING("error: no table name specified");
+        return -1;
+    }
+    pb::SchemaInfo* table = alter_request.mutable_table_info();
+    if (stmt->table_name->db.empty()) {
+        if (_ctx->cur_db.empty()) {
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "No database selected";
+            return -1;
+        }
+        table->set_database(_ctx->cur_db);
+    } else {
+        table->set_database(stmt->table_name->db.value);
+    }
+    table->set_table_name(stmt->table_name->table.value);
+    table->set_namespace_name(_ctx->user_info->namespace_);
+    if (stmt->alter_specs.size() > 1 || stmt->alter_specs.size() == 0) {
+        _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+        _ctx->stat_info.error_msg << "Alter with multiple alter_specifications is not supported in this version";
+        return -1;
+    }
+    parser::AlterTableSpec* spec = stmt->alter_specs[0];
+    if (spec == nullptr) {
+        _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+        _ctx->stat_info.error_msg << "empty alter_specification";
+        return -1;
+    }
+    if (spec->spec_type == parser::ALTER_SPEC_TABLE_OPTION) {
+        alter_request.set_op_type(pb::OP_UPDATE_BYTE_SIZE);
+        if (spec->table_options.size() > 1) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "Alter with multiple table_options is not supported in this version";
+            return -1;
+        }
+        parser::TableOption* table_option = spec->table_options[0];
+        if (table_option->type == parser::TABLE_OPT_AVG_ROW_LENGTH) {
+            table->set_byte_size_per_record(table_option->uint_value);
+        } else {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "Alter table option type unsupported: " << table_option->type;
+            return -1;
+        }
+    } else if (spec->spec_type == parser::ALTER_SPEC_ADD_COLUMN) {
+        alter_request.set_op_type(pb::OP_ADD_FIELD);
+        int column_len = spec->new_columns.size();
+        for (int idx = 0; idx < column_len; ++idx) {
+            parser::ColumnDef* column = spec->new_columns[idx];
+            if (column == nullptr) {
+                DB_WARNING("column is nullptr");
+                return -1;
+            }
+            if (0 != add_column_def(*table, column)) {
+                DB_WARNING("add column to table failed.");
+                return -1;
+            }
+        }
+        if (table->indexs_size() != 0) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "add table column with index is not supported in this version";
+            return -1;
+        }
+    } else if (spec->spec_type == parser::ALTER_SPEC_DROP_COLUMN) {
+        alter_request.set_op_type(pb::OP_DROP_FIELD);
+        pb::FieldInfo* field = table->add_fields();
+        if (spec->column_name.empty()) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "field_name is empty";
+            return -1;
+        } 
+        field->set_field_name(spec->column_name.value);
+    } else if (spec->spec_type == parser::ALTER_SPEC_RENAME_COLUMN) {
+        alter_request.set_op_type(pb::OP_RENAME_FIELD);
+        pb::FieldInfo* field = table->add_fields();
+        if (spec->column_name.empty()) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "old field_name is empty";
+            return -1;
+        }
+        field->set_field_name(spec->column_name.value);
+        parser::ColumnDef* column = spec->new_columns[0];
+        field->set_new_field_name(column->name->name.value);
+    } else if (spec->spec_type == parser::ALTER_SPEC_RENAME_TABLE) {
+        alter_request.set_op_type(pb::OP_RENAME_TABLE);
+        if ((spec->new_table_name->db == stmt->table_name->db) == false
+            && strcmp(spec->new_table_name->db.c_str(), _ctx->cur_db.c_str()) != 0) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "cannot rename table to another database";
+            return -1;
+        }
+        table->set_new_table_name(spec->new_table_name->table.value);
+    } else {
+        _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+        _ctx->stat_info.error_msg << "alter_specification type (" 
+                                << spec->spec_type << ") not supported in this version";
+        return -1;
+    }
+    return 0;
+}
 
 pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     switch (field_type->type) {
@@ -327,6 +452,7 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
         return pb::FLOAT;
     } break;
     case parser::MYSQL_TYPE_DECIMAL:
+    case parser::MYSQL_TYPE_NEWDECIMAL:
     case parser::MYSQL_TYPE_DOUBLE: {
         return pb::DOUBLE;
     } break;
@@ -343,6 +469,9 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     } break;
     case parser::MYSQL_TYPE_DATETIME: {
         return pb::DATETIME;
+    } break;
+    case parser::MYSQL_TYPE_TIME: {
+        return pb::TIME;
     } break;
     case parser::MYSQL_TYPE_TIMESTAMP: {
         return pb::TIMESTAMP;

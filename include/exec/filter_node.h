@@ -30,6 +30,8 @@ public:
 
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
 
+    virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
+
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return &_conjuncts;
     }
@@ -40,12 +42,6 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(pb::PlanNode* pb_node);
-    //virtual void print_exec_node() {
-    //    ExecNode::print_exec_node();
-    //    pb::PlanNode pb_node;
-    //    transfer_pb(&pb_node);
-    //    DB_WARNING("filter node:%s", pb_node.DebugString().c_str());
-    //}
 private:
     bool need_copy(MemRow* row);
 

@@ -31,6 +31,8 @@ public:
             _node_type = pb::DATE_LITERAL;
         } else if (_value.is_datetime()) {
             _node_type = pb::DATETIME_LITERAL;
+        } else if (_value.is_time()) {
+            _node_type = pb::TIME_LITERAL;
         } else if (_value.is_int()) {
             _node_type = pb::INT_LITERAL;
         } else if (_value.is_string()) {
@@ -73,6 +75,10 @@ public:
                 _value.type = pb::DATETIME;
                 _value._u.uint64_val = node.derive_node().int_val();
                 break;
+            case pb::TIME_LITERAL:
+                _value.type = pb::TIME;
+                _value._u.int32_val = node.derive_node().int_val();
+                break;
             case pb::TIMESTAMP_LITERAL:
                 _value.type = pb::TIMESTAMP;
                 _value._u.uint32_val = node.derive_node().int_val();    
@@ -102,6 +108,8 @@ public:
                 pb_node->mutable_derive_node()->set_string_val(_value.get_string());
                 break;
             case pb::DATETIME_LITERAL:
+            case pb::DATE_LITERAL:
+            case pb::TIME_LITERAL:
             case pb::TIMESTAMP_LITERAL:
                 pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
                 break;
@@ -121,6 +129,8 @@ public:
             _value.cast_to(pb::DATE);
         } else if (literal_type == pb::DATETIME_LITERAL) {
             _value.cast_to(pb::DATETIME);
+        } else if (literal_type == pb::TIME_LITERAL) {
+            _value.cast_to(pb::TIME);
         }
         _node_type = literal_type;
         _col_type = _value.type;

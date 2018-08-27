@@ -294,6 +294,7 @@ int TableRecord::encode_field(const Reflection* _reflection,
             int32_t val = _reflection->GetInt32(*_message, field);
             key.append_i16((int16_t)val);
         } break;
+        case pb::TIME:
         case pb::INT32: {
             int32_t val = _reflection->GetInt32(*_message, field);
             key.append_i32(val);
@@ -373,6 +374,7 @@ int TableRecord::decode_field(const Reflection* _reflection,
             _reflection->SetInt32(_message, field, key.extract_i16(pos));
             pos += sizeof(int16_t);
         } break;
+        case pb::TIME:
         case pb::INT32: {
             if (pos + sizeof(int32_t) > key.size()) {
                 DB_WARNING("int32_t pos out of bound: %d %d %zu", field->number(), pos, key.size());

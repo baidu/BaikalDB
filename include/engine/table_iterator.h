@@ -22,6 +22,9 @@
 
 namespace baikaldb {
 class Transaction;
+class TableIterator;
+class IndexIterator;
+typedef std::shared_ptr<Transaction> SmartTransaction;
 
 //前缀的=传 [key, key],双闭区间
 struct IndexRange {
@@ -99,11 +102,24 @@ public:
         _iter = nullptr;
     }
 
-    virtual int open(const IndexRange& range, std::vector<int32_t>& fields, Transaction* txn = nullptr);
+    virtual int open(const IndexRange& range, std::vector<int32_t>& fields, SmartTransaction txn = nullptr);
 
     virtual bool valid() const {
         return _valid;
     }
+
+    static TableIterator* scan_primary(
+        SmartTransaction        txn,
+        const IndexRange&       range, 
+        std::vector<int32_t>&   fields, 
+        bool                    check_region, 
+        bool                    forward);
+
+    static IndexIterator* scan_secondary(
+        SmartTransaction    txn,
+        const IndexRange&   range, 
+        bool                check_region, 
+        bool                forward);
 
 protected:
     MutTableKey             _start;

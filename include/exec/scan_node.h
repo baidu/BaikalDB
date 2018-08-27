@@ -36,13 +36,12 @@ public:
         delete _table_iter;
     }
     virtual int init(const pb::PlanNode& node);
-    virtual int predicate_pushdown();
+    virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
     bool need_pushdown(ExprNode* expr);
     virtual int index_condition_pushdown();
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual int add_or_pushdown(baikaldb::ExprNode*, ExecNode** exec_node);
     int64_t table_id() {
         return _table_id;
     }

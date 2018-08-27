@@ -30,7 +30,7 @@ message TransactionInfo {
     repeated int32  need_rollback_seq = 5; //因为在某些region上执行失败，需要全局回滚seq_id 
     repeated CachePlan cache_plans   = 6;  //缓存的query的执行计划
     optional int64   num_rows        = 7;  //事务增加的行数，用于事务恢复使用(split)
-    //optional bool  replay
+    optional bool    autocommit      = 8;
 };
 
 message StoreReq {
@@ -40,7 +40,7 @@ message StoreReq {
     required int64 region_version   = 4;
     optional Plan plan              = 5;
     repeated TransactionInfo txn_infos = 6; //只有OP_VALIDATE_AND_ADD_VERSION时会用到多个TransactionInfo，用于更新old_region上prepared事务的行数
-    optional int64 query_id         = 7;
+    optional fixed64 log_id         = 7; // for print log
     //optional bytes split_key      = 8; //split操作时填写
     optional bytes start_key        = 9;
     optional bytes end_key          = 10;
