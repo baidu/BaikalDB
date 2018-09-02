@@ -53,7 +53,7 @@ new_http_archive(
 # from https://github.com/nelhage/rules_boost
 git_repository(
     name = "com_github_nelhage_rules_boost",
-    commit = "239ce40e42ab0e3fe7ce84c2e9303ff8a277c41a",
+    commit = "96ba810e48f4a28b85ee9c922f0b375274a97f98",
     remote = "https://github.com/nelhage/rules_boost",
 )
 

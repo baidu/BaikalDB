@@ -253,6 +253,7 @@ cc_library(
         ":session",
         ":protocol",
         ":runtime", 
+        ":engine", 
         ":physical_plan",
     ],
     visibility = ["//visibility:public"],
