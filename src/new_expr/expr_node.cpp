@@ -203,6 +203,7 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
         case pb::STRING_LITERAL:
         case pb::DATE_LITERAL:
         case pb::DATETIME_LITERAL:
+        case pb::TIME_LITERAL:
         case pb::TIMESTAMP_LITERAL:
             *expr_node = new Literal;
             (*expr_node)->init(node);

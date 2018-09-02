@@ -360,7 +360,7 @@ void ClusterManager::drop_instance(const pb::MetaManagerRequest& request, braft:
     //实例不存在
     if (_instance_info.find(address) == _instance_info.end()) {
         DB_WARNING("instance:%s not exist", address.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "physical room not exist");
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "instance not exist");
         return;
     }
     std::string physical_room = _instance_info[address].physical_room;

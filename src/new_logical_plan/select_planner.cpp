@@ -202,6 +202,9 @@ int SelectPlanner::create_agg_node() {
 void SelectPlanner::add_single_table_columns(TableInfo* table_info) {
     for (uint32_t idx = 0; idx < table_info->fields.size(); ++idx) {
         auto field = table_info->fields[idx];
+        if (field.deleted) {
+            continue;
+        }
         std::string& field_name = field.name;
         std::vector<std::string> items;
         boost::split(items, field_name, boost::is_any_of("."));

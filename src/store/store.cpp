@@ -42,7 +42,7 @@ DEFINE_string(resource_tag, "", "resource tag");
 DEFINE_int32(update_used_size_interval_us, 10 * 1000 * 1000, "update used size interval (10 s)");
 DEFINE_int64(capacity, 100 * 1024 * 1024 * 1024LL, "store memory size, defalut:100G");
 DEFINE_int32(split_threshold , 150, "split_thread, defalut: 150 * region_size / 100");
-DEFINE_int32(byte_size_per_record, 500, "byte size per record, 100");
+DEFINE_int32(byte_size_per_record, 500, "byte size per record, 500");
 DEFINE_int64(flush_region_interval_us, 10 * 60 * 1000 * 1000LL, 
             "flush region interval, defalut(10 min)");
 DEFINE_int64(transaction_clear_interval_ms, 1000LL,

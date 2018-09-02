@@ -64,6 +64,7 @@ int RuntimeState::init(const pb::StoreReq& req,
         DB_WARNING("error: txn pool is null: %ld", _region_id);
         return -1;
     }
+    _log_id = req.log_id();
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
     return 0;
@@ -83,6 +84,7 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
         return -1;
     }
     txn_id = _client_conn->txn_id;
+    _log_id = ctx->stat_info.log_id;
     return 0;
 }
 

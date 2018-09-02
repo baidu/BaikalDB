@@ -46,19 +46,19 @@ int InsertNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
     for (auto expr : _update_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     ret = init_schema_info(state);
     if (ret == -1) {
-        DB_WARNING("init schema failed fail:%d", ret);
+        DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
     int cnt = 0;
@@ -68,7 +68,7 @@ int InsertNode::open(RuntimeState* state) {
         _records.push_back(record);
         cnt++;
     }
-    //DB_WARNING("insert_size:%d", cnt);
+    //DB_WARNING_STATE(state, "insert_size:%d", cnt);
     if (_on_dup_key_update) {
         _dup_update_row = state->mem_row_desc()->fetch_mem_row();
         if (_tuple_id >= 0) {
@@ -89,7 +89,7 @@ int InsertNode::open(RuntimeState* state) {
     for (auto& record : _records) {
         ret = insert_row(state, record);
         if (ret < 0) {
-            DB_WARNING("insert_row fail");
+            DB_WARNING_STATE(state, "insert_row fail");
             return -1;
         }
         num_affected_rows += ret;

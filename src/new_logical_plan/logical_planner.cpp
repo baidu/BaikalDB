@@ -179,6 +179,7 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     case parser::NT_CREATE_DATABASE:
     case parser::NT_DROP_TABLE:
     case parser::NT_DROP_DATABASE:
+    case parser::NT_ALTER_TABLE:
         planner.reset(new DDLPlanner(ctx));
         ctx->succ_after_logical_plan = true;
         break;
@@ -600,7 +601,8 @@ int LogicalPlanner::parse_db_name_from_table_name(
     } else if (!_ctx->cur_db.empty()) {
         db = _ctx->cur_db;
     } else {
-        DB_WARNING("no database name, specify database by USE cmd");
+        _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+        _ctx->stat_info.error_msg << "No database selected";
         return -1;
     }
     return 0;
@@ -637,6 +639,7 @@ int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb:
                 parser::ExprNode* child = (parser::ExprNode*)func->children[i];
                 if (flatten_filter(child, filters) != 0) {
                     DB_WARNING("parse AND child error");
+                    return -1;
                 }
             }
             return 0;
@@ -863,21 +866,18 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr) {
             return -1;
         }
     } else if (expr_item->expr_type == parser::ET_COLUMN) {
-        if (0 != create_term_slot_ref_node((parser::ColumnName*)expr_item, expr)) {
-            if (_ctx->stat_info.error_code != ER_ERROR_FIRST) {
-                return -1;
+        int ret = create_alias_node((parser::ColumnName*)expr_item, expr);
+        if (ret == -2) {
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_NON_UNIQ_ERROR;
+                _ctx->stat_info.error_msg << "Column \'" << expr_item->to_string() << "\' is ambiguous";
             }
-            int ret = create_alias_node((parser::ColumnName*)expr_item, expr);
-            if (ret == -1) {
+            return -1;
+        } else if (ret == -1) {
+            if (0 != create_term_slot_ref_node((parser::ColumnName*)expr_item, expr)) {
                 if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                     _ctx->stat_info.error_code = ER_BAD_FIELD_ERROR;
                     _ctx->stat_info.error_msg << "Unknown column \'" << expr_item->to_string() << "\'";
-                }
-                return -1;
-            } else if (ret == -2) {
-                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
-                    _ctx->stat_info.error_code = ER_NON_UNIQ_ERROR;
-                    _ctx->stat_info.error_msg << "Column \'" << expr_item->to_string() << "\' is ambiguous";
                 }
                 return -1;
             }

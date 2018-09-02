@@ -21,6 +21,12 @@
 #include "mem_row_descriptor.h"
 
 namespace baikaldb { 
+#define DB_WARNING_STATE(state, _fmt_, args...) \
+    do {\
+        DB_WARNING("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
+                state->log_id(), state->region_id(), state->table_id(), ##args); \
+    } while (0);
+
 class RuntimeState;
 class ExecNode {
 public:
@@ -38,27 +44,14 @@ public:
      *     -2 - EMPTY_RESULT
      */
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
-    virtual int predicate_pushdown() {
+
+    //input: 需要下推的条件
+    //input_exprs 既是输入参数，也是输出参数
+    //output:能推的条件尽量下推，不能推的条件做一个filter node, 连接到节点的上边
+    virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
         //DB_WARNING("node:%ld is predicating pushdown", this);
-        for (auto& e : _children) {
-            if (0 != e->predicate_pushdown()) {
-                DB_WARNING("child condition optimize fail");
-                return -1;
-            }
-        }
-        return 0;
-    }
-    //增加一个表达式，将该表达式一直下推到最底层节点，返回节点
-    virtual int add_or_pushdown(ExprNode* expr, 
-                                 ExecNode** exec_node) {
-        for (auto& e : _children) {
-            if (0 != e->add_or_pushdown(expr, exec_node)) {
-                DB_WARNING("child add and predicate fail");
-                return -1;
-            }
-        }
-        return 0;
-    }
+    void add_filter_node(const std::vector<ExprNode*>& input_exprs);
+    
     pb::PlanNodeType get_node_type() const {
         return _node_type;
     }
@@ -146,7 +139,6 @@ public:
     static void destory_tree(ExecNode* root) {
         delete root;
     }
-    
 protected:
     int64_t _limit;
     int64_t _num_rows_returned;

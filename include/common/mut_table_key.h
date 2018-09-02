@@ -121,6 +121,7 @@ public:
             case pb::INT16:
                 return append_i16(value._u.int16_val);
             case pb::INT32:
+            case pb::TIME:
                 return append_i32(value._u.int32_val);
             case pb::INT64:
                 return append_i64(value._u.int64_val);

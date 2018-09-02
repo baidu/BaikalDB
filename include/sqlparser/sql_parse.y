@@ -440,6 +440,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SUBDATE
     SUBSTR
     SUBSTRING
+    TIMESTAMPADD
+    TIMESTAMPDIFF
     SUM
     SYSDATE
     SYSTEM_USER
@@ -539,6 +541,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DatabaseOptionListOpt
     DatabaseOptionList
     VarAssignItem
+    AlterSpecList
+    AlterSpec
+    ColumnDefList
 
 %type <item> OnDuplicateKeyUpdate 
 %type <item> 
@@ -575,6 +580,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RollbackTransactionStmt
     SetStmt
     VarAssignList
+    AlterTableStmt
 
 %type <assign> Assignment
 %type <integer> 
@@ -619,7 +625,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %type <limit> LimitClause;
 
 %nonassoc empty
-
 %nonassoc lowerThanSetKeyword
 %nonassoc lowerThanKey
 %nonassoc KEY
@@ -669,6 +674,8 @@ Statement:
     | CommitTransactionStmt
     | RollbackTransactionStmt
     | SetStmt
+    | ShowStmt
+    | AlterTableStmt
     ;
 
 InsertStmt:
@@ -1245,6 +1252,12 @@ LimitClause:
         limit->count = ((LiteralExpr*)$4)->_u.int64_val;
         $$ = limit;
     }
+    | LIMIT INTEGER_LIT OFFSET INTEGER_LIT {
+        LimitClause* limit = new_node(LimitClause);
+        limit->offset = ((LiteralExpr*)$4)->_u.int64_val;
+        limit->count = ((LiteralExpr*)$2)->_u.int64_val;
+        $$ = limit;
+    }
     ;
 WhereClause:
     WHERE Expr {
@@ -1556,94 +1569,94 @@ FunctionNameSubstring:
 
 TimestampUnit:
     MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | WEEK {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | MONTH {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | QUARTER {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | YEAR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     ;
 
 TimeUnit:
     MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | HOUR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | WEEK {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MONTH {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | QUARTER {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | YEAR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | SECOND_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MINUTE_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MINUTE_SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR_SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR_MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_HOUR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | YEAR_MONTH {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     ;
 
@@ -1786,6 +1799,14 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         fun->children.push_back($5, parser->arena);
         fun->children.push_back($7, parser->arena);
+        $$ = fun;
+    }
+    | TIMESTAMPADD '(' TimestampUnit ',' Expr ',' Expr ')' {
+        $$ = nullptr;
+    }
+    | TIMESTAMPDIFF '(' TimestampUnit ',' Expr ',' Expr ')' {
+        FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_COMMON, $3, $5, $7, parser->arena);
+        fun->fn_name = "timestampdiff";
         $$ = fun;
     }
     | TRIM '(' Expr ')' {
@@ -2153,6 +2174,8 @@ AllIdent:
     | SUBDATE
     | SUBSTR
     | SUBSTRING
+    | TIMESTAMPADD
+    | TIMESTAMPDIFF 
     | SUM
     | SYSDATE
     | SYSTEM_USER
@@ -2492,6 +2515,24 @@ ColumnDef:
             column->options.push_back((ColumnOption*)($3->children[idx]), parser->arena);
         }
         $$ = column;
+    }
+    ;
+
+ColumnDefList:
+    ColumnDef
+    {
+        Node* list = new_node(Node);
+        if ($1 != nullptr) {
+            list->children.push_back($1, parser->arena);
+        }
+        $$ = list;
+    }
+    | ColumnDefList ',' ColumnDef
+    {
+        if ($3 != nullptr) {
+            $1->children.push_back($3, parser->arena);
+        }
+        $$ = $1;
     }
     ;
 
@@ -2835,7 +2876,7 @@ FixedPointType:
     {
         $$ = MYSQL_TYPE_NEWDECIMAL;
     }
-    |    NUMERIC
+    | NUMERIC
     {
         $$ = MYSQL_TYPE_NEWDECIMAL;
     }
@@ -3613,21 +3654,21 @@ ShowLikeOrWhereOpt: {
     ;
 GlobalScope:
     {
-        $$ = false
+        $$ = false;
     }
     | GLOBAL {
-        $$ = true
+        $$ = true;
     }
     | SESSION {
-        $$ = false
+        $$ = false;
     }
     ;
 OptFull:
     {
-        $$ = false
+        $$ = false;
     }
     | FULL {
-        $$ = true
+        $$ = true;
     }
     ;
 ShowDatabaseNameOpt:
@@ -3640,7 +3681,99 @@ ShowDatabaseNameOpt:
     ;
 ShowTableAliasOpt:
     FromOrIn TableName {
-        $$ = nullptr
+        $$ = nullptr;
+    }
+    ;
+
+AlterTableStmt:
+    ALTER IgnoreOptional TABLE TableName AlterSpecList
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->ignore = $2;
+        stmt->table_name = (TableName*)$4;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            stmt->alter_specs.push_back((AlterTableSpec*)($5->children[idx]), parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+
+AlterSpecList:
+    AlterSpec
+    {
+        Node* list = new_node(Node);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | AlterSpecList ',' AlterSpec
+    {
+        $1->children.push_back($3, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+ColumnKwdOpt:
+    {}
+    | COLUMN
+    ;
+
+AsOrToOpt:
+    {}
+    | AS
+    {}
+    | TO
+    {}
+
+AlterSpec:
+    TableOptionList
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_TABLE_OPTION;
+        for (int idx = 0; idx < $1->children.size(); ++idx) {
+            spec->table_options.push_back((TableOption*)($1->children[idx]), parser->arena);
+        }
+        $$ = spec;
+    }
+    | ADD ColumnKwdOpt ColumnDef
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_COLUMN;
+        spec->new_columns.push_back((ColumnDef*)$3, parser->arena);
+        $$ = spec;
+    }
+    | ADD ColumnKwdOpt '(' ColumnDefList ')'
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_COLUMN;
+        for (int idx = 0; idx < $4->children.size(); ++idx) {
+            spec->new_columns.push_back((ColumnDef*)($4->children[idx]), parser->arena);
+        }
+        $$ = spec;
+    }
+    | DROP ColumnKwdOpt AllIdent
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_COLUMN;
+        spec->column_name = $3;
+        $$ = spec;
+    }
+    | RENAME COLUMN AllIdent TO ColumnName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_RENAME_COLUMN;
+        spec->column_name = $3;
+
+        ColumnDef* new_column = new_node(ColumnDef);
+        new_column->name = (ColumnName*)$5;
+        spec->new_columns.push_back(new_column, parser->arena);
+        $$ = spec;
+    }
+    | RENAME AsOrToOpt TableName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_RENAME_TABLE;
+        spec->new_table_name = (TableName*)$3;
+        $$ = spec;
     }
     ;
 

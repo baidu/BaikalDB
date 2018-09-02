@@ -106,7 +106,6 @@ public:
         ctx->stat_info.num_affected_rows = state.num_affected_rows();
         ctx->stat_info.error_code = state.error_code;
         
-        ctx->stat_info.log_id = state.log_id();
         return 0;
     }
 

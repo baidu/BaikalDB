@@ -114,25 +114,25 @@ int SortNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
     for (auto expr : _order_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     for (auto expr : _slot_order_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     if (state->sort_use_index()) {
-        DB_WARNING("sort use index, limit:%ld", _limit);
+        DB_WARNING_STATE(state, "sort use index, limit:%ld", _limit);
         return 0;
     }
     _mem_row_desc = state->mem_row_desc();
@@ -146,7 +146,7 @@ int SortNode::open(RuntimeState* state) {
         std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
         ret = _children[0]->get_next(state, batch.get(), &eos);
         if (ret < 0) {
-            DB_WARNING("child->get_next fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
             return ret;
         }
         //照理不会出现拿到0行数据
@@ -157,7 +157,7 @@ int SortNode::open(RuntimeState* state) {
         fill_tuple(batch.get());
         _sorter->add_batch(batch);
     } while (!eos);
-    DB_WARNING("sort_size:%d", count);
+    DB_WARNING_STATE(state, "sort_size:%d", count);
     _sorter->sort();
     return 0;
 }
@@ -175,7 +175,7 @@ int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         ret = _sorter->get_next(batch, eos);
     }
     if (ret < 0) {
-        DB_WARNING("_sorter->get_next fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "_sorter->get_next fail, ret:%d", ret);
         return ret;
     }
     _num_rows_returned += batch->size();

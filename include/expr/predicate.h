@@ -111,6 +111,7 @@ class InPredicate : public ScalarFnCall {
         M_DOUBLE,
         M_STRING,
         M_DATETIME,
+        M_TIME,
         M_DATE,
         M_TIMESTAMP,
         M_NULL

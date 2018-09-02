@@ -43,6 +43,9 @@ int InPredicate::type_inferer() {
         case pb::DATETIME:
             _map_type = M_DATETIME;
             break;
+        case pb::TIME:
+            _map_type = M_TIME;
+            break;
         case pb::DATE:
             _map_type = M_DATE;
             break;
@@ -107,6 +110,15 @@ int InPredicate::type_inferer() {
                         delete _children[i];
                     }
                     break;
+                case M_TIME:
+                    value.cast_to(pb::TIME);
+                    if (_int_set.count(value.get_numberic<int64_t>()) == 0) {
+                        _int_set.insert(value.get_numberic<int64_t>());
+                        tmp_children.push_back(_children[i]);
+                    } else {
+                        delete _children[i];
+                    }
+                    break;
                 case M_DOUBLE:
                     if (_double_set.count(value.get_numberic<double>()) == 0) {
                         _double_set.insert(value.get_numberic<double>());
@@ -161,6 +173,9 @@ int InPredicate::open() {
         case pb::DATETIME:
             _map_type = M_DATETIME;
             break;
+        case pb::TIME:
+            _map_type = M_TIME;
+            break;
         case pb::DATE:
             _map_type = M_DATE;
             break;
@@ -193,6 +208,9 @@ int InPredicate::open() {
                     break;
                 case M_DATETIME:
                     _int_set.insert(value.cast_to(pb::DATETIME).get_numberic<int64_t>());
+                    break;
+                case M_TIME:
+                    _int_set.insert(value.cast_to(pb::TIME).get_numberic<int64_t>());
                     break;
                 case M_DATE:
                     _int_set.insert(value.cast_to(pb::DATE).get_numberic<int64_t>());
@@ -229,6 +247,11 @@ ExprValue InPredicate::get_value(MemRow* row) {
             break;
         case M_DATETIME:
             if (_int_set.count(value.cast_to(pb::DATETIME).get_numberic<int64_t>()) == 1) {
+                return ExprValue::True();
+            }
+            break;
+        case M_TIME:
+            if (_int_set.count(value.cast_to(pb::TIME).get_numberic<int64_t>()) == 1) {
                 return ExprValue::True();
             }
             break;

@@ -39,17 +39,17 @@ int DeleteNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
     ret = init_schema_info(state);
     if (ret == -1) {
-        DB_WARNING("init schema failed fail:%d", ret);
+        DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
-    Transaction* txn = state->txn();
+    auto txn = state->txn();
     if (txn == nullptr) {
-        DB_WARNING("txn is nullptr: region:%ld", _region_id);
+        DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
         return -1;
     }
     if (FLAGS_disable_writebatch_index) {
@@ -69,7 +69,7 @@ int DeleteNode::open(RuntimeState* state) {
         RowBatch batch;
         ret = _children[0]->get_next(state, &batch, &eos);
         if (ret < 0) {
-            DB_WARNING("children:get_next fail:%d", ret);
+            DB_WARNING_STATE(state, "children:get_next fail:%d", ret);
             return ret;
         }
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
@@ -83,7 +83,7 @@ int DeleteNode::open(RuntimeState* state) {
             }
             ret = delete_row(state, record);
             if (ret < 0) {
-                DB_WARNING("delete_row fail");
+                DB_WARNING_STATE(state, "delete_row fail");
                 return -1;
             }
             num_affected_rows += ret;

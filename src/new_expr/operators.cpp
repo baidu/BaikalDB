@@ -90,6 +90,7 @@ BINARY_OP_FN(bit_xor, uint, pb::UINT64, uint64_val, ^);
     BINARY_OP_PREDICATE_FN(NAME, double, _u.double_val, OP); \
     BINARY_OP_PREDICATE_FN(NAME, string, str_val, OP); \
     BINARY_OP_PREDICATE_FN(NAME, datetime, _u.uint64_val, OP); \
+    BINARY_OP_PREDICATE_FN(NAME, time, _u.int32_val, OP); \
     BINARY_OP_PREDICATE_FN(NAME, date, _u.uint32_val, OP); \
     BINARY_OP_PREDICATE_FN(NAME, timestamp, _u.uint32_val, OP);
 

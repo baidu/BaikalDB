@@ -349,38 +349,6 @@ extern int end_key_compare(const std::string& key1, const std::string& key2);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 //extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 
-extern std::string timestamp_to_str(time_t timestamp);
-
-extern time_t str_to_timestamp(const char* str_time);
-
-// encode DATETIME to string format
-// ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
-extern std::string datetime_to_str(uint64_t datetime);
-
-extern uint64_t str_to_datetime(const char* str_time);
-
-extern time_t datetime_to_timestamp(uint64_t datetime);
-extern uint64_t timestamp_to_datetime(time_t timestamp);
-
-// inline functions
-// DATE: 17 bits year*13+month  (year 0-9999, month 1-12)
-//        5 bits day            (1-31)
-inline uint32_t datetime_to_date(uint64_t datetime) {
-    return ((datetime >> 41) & 0x3FFFFF);
-}
-inline uint64_t date_to_datetime(uint32_t date) {
-    return (uint64_t)date << 41;
-}
-inline std::string date_to_str(uint32_t date) {
-    int year_month = ((date >> 5) & 0x1FFFF);
-    int year = year_month / 13;
-    int month = year_month % 13;
-    int day = (date & 0x1F);
-    char buf[30] = {0};
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
-    return std::string(buf);
-}
-
 inline int end_key_compare(const std::string& key1, const std::string& key2) {
     if (key1 == key2) {
         return 0;

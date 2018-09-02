@@ -396,7 +396,7 @@ public:
 
     int execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& response, 
             uint64_t txn_id, 
-            Transaction*& txn, 
+            SmartTransaction& txn, 
             int64_t applied_index, 
             int64_t term, 
             uint64_t log_id = 0);

@@ -23,6 +23,7 @@ enum ExprNodeType {
     DATETIME_LITERAL = 17;
     DATE_LITERAL = 18;
     IS_TRUE_PREDICATE = 19;
+    TIME_LITERAL = 20;
 };
 
 message Function {

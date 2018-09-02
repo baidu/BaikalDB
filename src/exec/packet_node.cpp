@@ -14,6 +14,7 @@
 
 #include "packet_node.h"
 #include "runtime_state.h"
+#include "network_socket.h"
 
 namespace baikaldb {
 int PacketNode::init(const pb::PlanNode& node) {
@@ -79,7 +80,12 @@ int PacketNode::open(RuntimeState* state) {
     _wrapper = MysqlWrapper::get_instance();
     state->set_num_affected_rows(ret);
     if (op_type() != pb::OP_SELECT) {
-        pack_ok(state->num_affected_rows());
+        if (op_type() == pb::OP_INSERT) {
+            auto client = state->client_conn();
+            pack_ok(state->num_affected_rows(), client->last_insert_id);
+        } else {
+            pack_ok(state->num_affected_rows());
+        }
         return 0;
     }
     for (auto expr : _projections) {

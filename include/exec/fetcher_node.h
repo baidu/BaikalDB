@@ -31,7 +31,7 @@ public:
 
     // send (cached) cmds with seq_id >= start_seq_id
     int send_request( RuntimeState* state, pb::RegionInfo& info, 
-        std::vector<SmartRecord> records, int64_t region_id, 
+        std::vector<SmartRecord>* records, int64_t region_id, 
         uint64_t log_id, int retry_times, int start_seq_id);
 
     virtual int init(const pb::PlanNode& node); 

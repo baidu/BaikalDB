@@ -31,7 +31,6 @@ public:
         std::unique_lock<std::mutex> lock(_map_mutex);
         auto iter = _txn_map.begin();
         while (iter != _txn_map.end()) {
-            delete iter->second;
             iter->second = nullptr;
             iter = _txn_map.erase(iter);
         }
@@ -42,11 +41,11 @@ public:
     int init(int64_t region_id, pb::RegionInfo* _region_info);
 
     // -1 means insert error (already exists)
-    int begin_txn(uint64_t txn_id, Transaction*& txn);
+    int begin_txn(uint64_t txn_id, SmartTransaction& txn);
 
     void remove_txn(uint64_t txn_id);
 
-    Transaction* get_txn(uint64_t txn_id) {
+    SmartTransaction get_txn(uint64_t txn_id) {
         std::unique_lock<std::mutex> lock(_map_mutex);
         if (_txn_map.count(txn_id) == 0) {
             return nullptr;
@@ -97,7 +96,7 @@ private:
     pb::RegionInfo* _region_info = nullptr;
 
     // txn_id => txn handler mapping
-    std::unordered_map<uint64_t, Transaction*>  _txn_map;
+    std::unordered_map<uint64_t, SmartTransaction>  _txn_map;
     std::mutex _map_mutex;
 
     BthreadCond  _num_prepared_txn;  // total number of prepared transactions

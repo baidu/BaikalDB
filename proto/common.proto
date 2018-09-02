@@ -47,6 +47,7 @@ enum PrimitiveType {
     TIMESTAMP = 15;
     DATE = 16;
     HLL = 17;
+    TIME = 18;
 };
 
 //message ColumnType {

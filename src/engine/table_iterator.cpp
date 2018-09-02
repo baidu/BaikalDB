@@ -18,7 +18,45 @@
 
 namespace baikaldb {
 
-int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, Transaction* txn) {
+TableIterator* Iterator::scan_primary(
+        SmartTransaction        txn,
+        const IndexRange&       range, 
+        std::vector<int32_t>&   fields, 
+        bool                    check_region, 
+        bool                    forward) {
+    txn->reset_active_time();
+    TableIterator* iter = new (std::nothrow)TableIterator(check_region, forward);
+    if (nullptr == iter) {
+        return nullptr;
+    }
+    if (0 != iter->open(range, fields, txn)) {
+        DB_WARNING("open table iterator failed");
+        delete iter;
+        return nullptr;
+    }
+    return iter;
+}
+
+IndexIterator* Iterator::scan_secondary(
+        SmartTransaction    txn,
+        const IndexRange&   range, 
+        bool                check_region, 
+        bool                forward) {
+    txn->reset_active_time();
+    IndexIterator* iter = new (std::nothrow)IndexIterator(check_region, forward);
+    if (nullptr == iter) {
+        return nullptr;
+    }
+    std::vector<int32_t> dummy;
+    if (0 != iter->open(range, dummy, txn)) {
+        DB_WARNING("open index iterator failed");
+        delete iter;
+        return nullptr;
+    }
+    return iter;
+}
+
+int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartTransaction txn) {
     _left_open   = range.left_open;
     _right_open  = range.right_open;
     //_index       = range.index_info->id;

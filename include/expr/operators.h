@@ -38,6 +38,7 @@ ExprValue minus_double(const std::vector<ExprValue>& input);
     BINARY_OP_DEFINE(NAME, double); \
     BINARY_OP_DEFINE(NAME, string); \
     BINARY_OP_DEFINE(NAME, datetime); \
+    BINARY_OP_DEFINE(NAME, time); \
     BINARY_OP_DEFINE(NAME, date); \
     BINARY_OP_DEFINE(NAME, timestamp); 
 // + - * /

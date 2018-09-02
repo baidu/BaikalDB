@@ -181,11 +181,13 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
         _meta_state_machine->set_close_load_balance(true); 
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
+        return;
     }
     if (request->op_type() == pb::OP_OPEN_LOAD_BALANCE) {
         _meta_state_machine->set_close_load_balance(false);
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
+        return;
     }
     DB_FATAL("request has wrong op_type:%d , log_id:%lu", 
                     request->op_type(), log_id);

@@ -24,13 +24,11 @@
 
 using google::protobuf::FileDescriptor;
 namespace baikaldb {
-//DEFINE_int32(schema_factory_bucket_size, 1033, "schema_factory_bucket_size");
 
 int SchemaFactory::init() {
     if (_is_init) {
         return 0;
     }
-    //int32_t bucket_size = FLAGS_schema_factory_bucket_size;
     _is_init = true;
     return 0;
 }
@@ -178,6 +176,9 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table) {
     int field_cnt = table.fields_size();
     for (int idx = 0; idx < field_cnt; ++idx) {
         const pb::FieldInfo& field = table.fields(idx);
+        if (field.deleted()) {
+            continue;
+        }
         if (!field.has_field_id() 
                 || !field.has_mysql_type() 
                 || !field.has_field_name()) {
@@ -807,7 +808,7 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         bool right_open = range.right_open();
         MutTableKey  _start;
         MutTableKey  _end;
-        if (left) {
+        if (left != nullptr) {
             if (0 != _start.append_index(index, left.get(), range.left_field_cnt(), false)) {
                 DB_FATAL("Fail to encode_key, table:%ld", index.id);
                 return -1;
@@ -816,7 +817,7 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
             left_open = false;
         }
 
-        if (right) {
+        if (right != nullptr) {
             if (0 != _end.append_index(index, right.get(), range.right_field_cnt(), false)) {
                 DB_FATAL("Fail to encode_key, table:%ld", index.id);
                 return -1;
@@ -867,7 +868,7 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
 // The in 
 int SchemaFactory::get_region_by_key(
         const RepeatedPtrField<pb::RegionInfo>& input_regions,
-        std::unordered_map<int64_t, pb::RegionInfo>& output_regions) {
+        std::map<int64_t, pb::RegionInfo>& output_regions) {
 
     BAIDU_SCOPED_LOCK(_update_region_mutex);
     for (int idx = 0; idx < input_regions.size(); ++idx) {

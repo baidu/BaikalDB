@@ -34,8 +34,7 @@ public:
     }
     virtual int init(const pb::PlanNode& node); 
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
-    virtual int predicate_pushdown();
-    virtual int add_or_pushdown(ExprNode* expr, ExecNode** exec_nodes);
+    virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
     virtual void transfer_pb(pb::PlanNode* pb_node);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -43,20 +42,21 @@ public:
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return &_conditions; 
     }
+    void convert_to_inner_join(std::vector<ExprNode*>& input_exprs);
     int get_next_for_other_join(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_for_inner_join(RuntimeState* state, RowBatch* batch, bool* eos);
+    bool outer_contains_expr(ExprNode* expr) {
+        return expr_in_tuple_ids(_outer_tuple_ids, expr);
+    }
+    bool inner_contains_expr(ExprNode* expr) {
+        return expr_in_tuple_ids(_inner_tuple_ids, expr);
+    }
     bool contains_expr(ExprNode* expr) {
-        std::unordered_set<int32_t> tuple_ids = _left_tuple_ids;
-        for (auto tuple_id : _right_tuple_ids) {
+        std::unordered_set<int32_t> tuple_ids = _outer_tuple_ids;
+        for (auto tuple_id : _inner_tuple_ids) {
             tuple_ids.insert(tuple_id);
         }
         return expr_in_tuple_ids(tuple_ids, expr);
-    }
-    bool left_contains_expr(ExprNode* expr) {
-        return expr_in_tuple_ids(_left_tuple_ids, expr);
-    }
-    bool right_contains_expr(ExprNode* expr) {
-        return expr_in_tuple_ids(_right_tuple_ids, expr);
     }
     bool expr_in_tuple_ids(std::unordered_set<int32_t>& tuple_ids, ExprNode* expr) {
         std::unordered_set<int32_t> related_tuple_ids;
@@ -90,10 +90,12 @@ public:
     //    }   
     //}  
 private:
+    bool _satisfy_filter(MemRow* row);
     int _fill_equal_slot();
+    bool _is_equal_condition(ExprNode* expr);
     int _construct_in_condition(std::vector<ExprNode*>& slot_refs,
                                   std::vector<std::vector<ExprValue>>& in_values,
-                                  ExprNode** conjunct);
+                                  std::vector<ExprNode*>& in_exprs);
     int _fetcher_join_table(RuntimeState* state, ExecNode* child_node,
                             std::vector<MemRow*>& tuple_data);
     void _construct_hash_map(const std::vector<MemRow*>& tuple_data,
@@ -106,7 +108,9 @@ private:
 
     int _construct_result_batch(RowBatch* batch, 
                                MemRow* outer_mem_row, 
-                               MemRow* inner_mem_row);
+                               MemRow* inner_mem_row,
+                               bool inner_join);
+    int _construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_row);
 private:
     pb::JoinType _join_type;
     std::vector<ExprNode*> _conditions;
