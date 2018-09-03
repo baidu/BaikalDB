@@ -121,8 +121,8 @@ bind(
 
 git_repository(
     name = "com_github_brpc_braft",
-    remote= "https://github.com/brpc/braft.git",
-    tag = "a4fd1239631b37a6b08449137f1e1a8fdcd5820d",
+    remote = "https://github.com/brpc/braft.git",
+    commit = "a4fd1239631b37a6b08449137f1e1a8fdcd5820d",
 )
 
 bind(
