@@ -1,6 +1,6 @@
 [中文版](README_cn.md)
 
-[![Build Status](https://travis-ci.org/baoxuezhao/BaikalDB.svg?branch=master)](https://travis-ci.org/baoxuezhao/BaikalDB)
+[![Build Status](https://travis-ci.org/baidu/BaikalDB.svg?branch=master)](https://travis-ci.org/baidu/BaikalDB)
 
 # Introduction BaikalDB
 BaikalDB is a distributed enhanced structured database system.
