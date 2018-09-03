@@ -12,4 +12,7 @@ install:
     - sudo apt-get install g++
 
 script:
-    - bazel build //:all
+    - bazel build //:baikaldb
+    - bazel build //:baikalStore
+    - bazel build //:baikalMeta
+    
