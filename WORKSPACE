@@ -100,7 +100,7 @@ new_git_repository(
     name = "com_github_madler_zlib",
     remote = "https://github.com/madler/zlib.git",
     tag = "v1.2.11",
-    sha256 = "629380c90a77b964d896ed37163f5c3a34f6e6d897311f1df2a7016355c45eff",
+    #sha256 = "629380c90a77b964d896ed37163f5c3a34f6e6d897311f1df2a7016355c45eff",
     build_file = "third-party/zlib.BUILD",
 )
 
