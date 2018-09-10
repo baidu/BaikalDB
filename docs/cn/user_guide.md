@@ -1,6 +1,6 @@
 # 常见问题
 
-1. count(\*) vs count(1)：count(*)是经过优化的，性能是最好的
+1. count(\*) vs count(1)：count(*)是经过优化的，性能是最好的。不过BaikalDB会自动把count(1)优化成count（\*）
 2. a,b字段建联合索引，where b=3 能否用到索引？：不能用到，联合索引必须完全匹配前缀才能用到索引，例如where a=3 ；where a=3 and b=4;均可用到索引
 3. 只查询几行数据，但是耗时很久？：第一先确认是否建立二级索引加速查询，如果有二级索引还很慢，可以尝试`use index(index_name)`来指定索引
 
@@ -8,13 +8,13 @@
 
 # 索引类型
 
-| 类型           | 中文   | 描述                              |
-| ------------ | ---- | ------------------------------- |
-| I\_PRIMARY   | 主键索引 | 主键聚簇，可联合，不允许NULL                |
-| I\_UNIQ      | 唯一索引 | 可多列，不可重复，不允许NULL                |
-| I\_KEY       | 索引   | 可多列，可重复，不允许NULL                 |
-| I\_FULLTEXT  | 全文索引 | 只能单列，采用wordrank切词，只支持gbk，允许NULL |
-| I\_RECOMMEND | 推荐索引 | 图片推荐专用索引，外部用户可忽略                |
+| 类型         | 中文     | 描述                                                         |
+| ------------ | -------- | ------------------------------------------------------------ |
+| I\_PRIMARY   | 主键索引 | 主键聚簇，可联合，不允许NULL                                 |
+| I\_UNIQ      | 唯一索引 | 可多列，不可重复，不允许NULL                                 |
+| I\_KEY       | 索引     | 可多列，可重复，不允许NULL                                   |
+| I\_FULLTEXT  | 全文索引 | 只能单列，可选wordrank/wordseg/单字切词，只支持gbk，允许NULL |
+| I\_RECOMMEND | 推荐索引 | 图片推荐专用索引，外部用户可忽略                             |
 
 **与MySQL不同，BaikalDB天然顺序写，无需指定无意义的顺序id作为主键。一般情况使用联合主键会获得更好的性能。**
 
@@ -79,11 +79,12 @@ HLL固定占用1k存储，直接使用impala的实现（HyperLogLog in Practice 
 
 - 日期时间
 
-| 类型        | 长度(字节) | 描述                                       |
-| --------- | ------ | ---------------------------------------- |
-| DATETIME  | 8      | [1000-01-01 00:00:00.000000, 9999-12-31 00:00:00.000000] 精确到us |
-| TIMESTAMP | 4      | [1970-01-01 00:00:01, 2038-01-19 03:14:07] 精确到s |
-| DATE      | 4      | [1000-01-01, 9999-12-31]精确到天             |
+| 类型      | 长度(字节) | 描述                                                         |
+| --------- | ---------- | ------------------------------------------------------------ |
+| DATETIME  | 8          | [1000-01-01 00:00:00.000000, 9999-12-31 00:00:00.000000] 精确到us |
+| TIMESTAMP | 4          | [1970-01-01 00:00:01, 2038-01-19 03:14:07] 精确到s           |
+| DATE      | 4          | [1000-01-01, 9999-12-31]精确到天                             |
+| TIME      | 4          | [-838:59:59,838:59:59]精确到s                                |
 
 # 字面常量
 
@@ -131,26 +132,30 @@ BaikalDB会自动将STRING类型字面常量转成时间类型字面常量。Bai
 
 目前支持的操作符如下表,计算规则同MySQL 
 
-| 操作符   | 符号                       | 描述                                       |
-| ----- | ------------------------ | ---------------------------------------- |
-| 算术运算  | `+-*/`                   | 特殊的除以0返回NULL，+-可以单目                      |
-| 位运算   | `<<>>~|^&`               | 同C语言                                     |
-| 逻辑运算  | `and or not && || !`     | 可多列，可重复，允许NULL                           |
+| 操作符     | 符号                     | 描述                                                    |
+| ---------- | ------------------------ | ------------------------------------------------------- |
+| 算术运算   | `+-*/`                   | 特殊的除以0返回NULL，+-可以单目                         |
+| 位运算     | `<<>>~|^&`               | 同C语言                                                 |
+| 逻辑运算   | `and or not && || !`     | 可多列，可重复，允许NULL                                |
 | 关系运算符 | `  < = != >= <= between` | between等价于&gt;= &amp;&amp; &lt;=，!=可以写作&lt;&gt; |
-| 其他运算符 | `like，is null，in`        | 特殊的，对全文索引列做like，会进行全文检索                  |
+| 其他运算符 | `like，is null，in`      | 特殊的，对全文索引列做like，会进行全文检索              |
+| 条件运算符 | `case when else`         | 同MySQL，条件选择时候用                                 |
 
 # SQL语句
 
 BaikalDB支持与MySQL类似的语法，具体用法参考MySQL
 
-- show databases
-- show tables
+- show databases/show tables/show create table/show full columns
+- alter table add/drop/rename column/alter table rename table [as|to] 
+- rename table old to new
 - create table
+  - create table支持default value
 - use db
 - select
   - 支持where、group by、order by、having、limit，语法同MySQL
   - join：left join，inner join，right join，只支持等值join
   - 支持use index (index_name)来指定索引
+  - 子查询功能正在开发中
 
 即将支持union/union all，子查询
 
@@ -194,12 +199,14 @@ BaikalDB支持与MySQL类似的语法，具体用法参考MySQL
 
 * 日期时间函数
 
-| 函数             | 返回类型      | 描述                                       |
-| -------------- | --------- | ---------------------------------------- |
-| now            | DATETIME  | 返回当前时间，精确到us                             |
-| unix_timestamp | UINT32    | 若无参数则返回当前的时间戳，也可接收一个时间类型，返回对应的时间戳        |
+| 函数           | 返回类型  | 描述                                                         |
+| -------------- | --------- | ------------------------------------------------------------ |
+| now            | DATETIME  | 返回当前时间，精确到us                                       |
+| unix_timestamp | UINT32    | 若无参数则返回当前的时间戳，也可接收一个时间类型，返回对应的时间戳 |
 | from_unixtime  | TIMESTAMP | 给定一个int32的时间戳，返回内部TIMESTAMP类型`2018-01-01 23:11:11` |
 | date_format    | STRING    | 目前同strftime http://www.runoob.com/cprogramming/c-function-strftime.html |
+| timestampdiff  | INT64     | 返回两个时间差，详见MySQL，不过单位只支持SECOND，MINUT，HOUR，DAY |
+| timediff       | TIME      | 返回两个时间的差，详见MySQL                                  |
 
 - HyperLogLog函数
 

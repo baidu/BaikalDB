@@ -28,6 +28,7 @@
 namespace baikaldb {
 
 DEFINE_int32(retry_interval_us, 500 * 1000, "retry interval ");
+DEFINE_int32(single_store_concurrency, 20, "max request for one store");
 
 int FetcherNode::init(const pb::PlanNode& node) {
     int ret = 0;
@@ -57,8 +58,12 @@ int FetcherNode::init(const pb::PlanNode& node) {
 }
 
 int FetcherNode::send_request(
-        RuntimeState* state, pb::RegionInfo& info, std::vector<SmartRecord> records,
+        RuntimeState* state, pb::RegionInfo& info, std::vector<SmartRecord>* records,
         int64_t region_id, uint64_t log_id, int retry_times, int start_seq_id) {
+    if (_error) {
+        DB_WARNING("recieve error, need not requeset to region_id: %ld", region_id);
+        return -1;
+    }
     //DB_WARNING("region_info; txn: %ld, %s, %lu", _txn_id, info.ShortDebugString().c_str(), records.size());
     if (retry_times >= 5) {
         DB_WARNING("region_id: %ld, txn_id: %lu, log_id:%lu rpc error; retry:%d", 
@@ -97,6 +102,7 @@ int FetcherNode::send_request(
     req.set_op_type(_op_type);
     req.set_region_id(region_id);
     req.set_region_version(info.version());
+    req.set_log_id(log_id);
     for (auto& desc : state->tuple_descs()) {
         req.add_tuples()->CopyFrom(desc);
     }
@@ -104,10 +110,16 @@ int FetcherNode::send_request(
     pb::TransactionInfo* txn_info = req.add_txn_infos();
     txn_info->set_txn_id(state->txn_id);
     txn_info->set_seq_id(state->seq_id);
+    txn_info->set_autocommit(state->autocommit());
     for (int id : client_conn->need_rollback_seq) {
         txn_info->add_need_rollback_seq(id);
     }
+    // for exec next_statement_after_begin, begin must be added
     if (client_conn->cache_plans.size() == 1 && state->autocommit() == false) {
+        start_seq_id = 1;
+    }
+    // for autocommit prepare, begin and dml must be added
+    if (state->autocommit() && _op_type == pb::OP_PREPARE) {
         start_seq_id = 1;
     }
     txn_info->set_start_seq_id(start_seq_id);
@@ -160,9 +172,9 @@ int FetcherNode::send_request(
                 DB_WARNING("no insert/replace node");
                 return -1;
             }
-            if (pb_node != nullptr) {   // only for replace and insert node
+            if (pb_node != nullptr && records != nullptr) {   // only for replace and insert node
                 pb_node->clear_records();
-                for (auto& record : records) {
+                for (auto& record : *records) {
                     std::string* str = pb_node->add_records();
                     record->encode(*str);
                 }
@@ -210,10 +222,10 @@ int FetcherNode::send_request(
                 region_id, retry_times, res.leader().c_str(), log_id);
 
         if (res.leader() != "0.0.0.0:0") {
+            info.set_leader(res.leader());
             schema_factory->update_leader(info);
             std::lock_guard<std::mutex> lck(client_conn->region_lock);
             client_conn->region_infos[region_id].set_leader(res.leader());
-            info.set_leader(res.leader());
         } else {
             other_peer_to_leader_func(info);
         }
@@ -416,67 +428,82 @@ int FetcherNode::open(RuntimeState* state) {
             return ret;
         }
     }
-    _mem_row_compare = std::make_shared<MemRowCompare>(
-            _slot_order_exprs, _is_asc, _is_null_first);
+    _mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
     _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
 
-    // 构造并发送请求
-    std::unordered_set<int64_t> send_region_ids;
-    for (auto& pair : _region_infos) {
-        send_region_ids.insert(pair.first);
-    }
     // for txn control cmd, send to all relevant regions instead of only the current dml regions.
     if (_op_type == pb::OP_ROLLBACK || _op_type == pb::OP_PREPARE || _op_type == pb::OP_COMMIT) {
-        for (auto pair : client_conn->region_infos) {
-            send_region_ids.insert(pair.first);
-        }
+        _region_infos = client_conn->region_infos;
+    }
+    // 构造并发送请求
+    std::map<std::string, std::set<int64_t>> send_region_ids_map; // leader ip => region_ids
+    for (auto& pair : _region_infos) {
+        send_region_ids_map[pair.second.leader()].insert(pair.first);
     }
     //DB_WARNING("send_region_ids: %lu, cached:%ld", send_region_ids.size(), client_conn->region_infos.size());
-    if (send_region_ids.size() == 0) {
+    if (send_region_ids_map.size() == 0) {
         push_cmd_to_cache(state);
         if (_op_type == pb::OP_PREPARE) {
             state->set_optimize_1pc(true);
         }
         return 0;
     }
-    uint64_t log_id = butil::fast_rand();
-    state->set_log_id(log_id);
+    if ((_op_type == pb::OP_INSERT || _op_type == pb::OP_UPDATE || _op_type == pb::OP_DELETE)
+            && state->autocommit() && state->txn_id != 0) {
+        push_cmd_to_cache(state);
+        client_conn->region_infos.insert(_region_infos.begin(), _region_infos.end());
+        return 0;
+    }
+    uint64_t log_id = state->log_id();
     TimeCost cost;
-    BthreadCond cond;
-    _affected_rows = 0;
-
-    // when prepare txn, 2pc degenerates to 1pc when where is only 1 region or txn has no write
+    // when prepare txn, 2pc degenerates to 1pc when there is only 1 region or txn has no write
     if (_op_type == pb::OP_PREPARE) {
-        if (send_region_ids.size() <= 1 || !client_conn->transaction_has_write()) {
+        if ((send_region_ids_map.size() == 1 && send_region_ids_map.begin()->second.size() == 1)
+                || !client_conn->transaction_has_write()) {
             state->set_optimize_1pc(true);
             DB_WARNING("enable optimize_1pc: txn_id: %lu, seq_id: %d", state->txn_id, state->seq_id);
         }
     }
 
-    for (int64_t region_id : send_region_ids) {
-        // 这两个资源后续不会分配新的，因此不需要加锁
-        pb::RegionInfo* info = nullptr;
-        if (_region_infos.count(region_id) != 0) {
-            info = &_region_infos[region_id];
-        } else {
-            std::lock_guard<std::mutex> lck(client_conn->region_lock);
-            info = &(client_conn->region_infos[region_id]);
-        }
-        //pb::RegionInfo& region_info = *info;
-        std::vector<SmartRecord>& records = _insert_region_ids[region_id];
-        auto req_thread = [this, state, info, &records, region_id, log_id, &cond]() {
-            int ret = send_request(state, *info, records, region_id, log_id, 0, state->seq_id);
-            if (ret < 0) {
-                DB_WARNING("rpc error, region_id:%ld, log_id:%lu", region_id, log_id);
-                _error = true;
+    BthreadCond store_cond; // 不同store发请全并发
+    _affected_rows = 0;
+    for (auto& pair : send_region_ids_map) {
+        store_cond.increase();
+        auto store_thread = [this, state, pair, log_id, &store_cond]() {
+            ON_SCOPE_EXIT([&store_cond]{store_cond.decrease_signal();});
+            BthreadCond cond(-FLAGS_single_store_concurrency); // 单store内并发数
+            for (auto region_id : pair.second) {
+                // 这两个资源后续不会分配新的，因此不需要加锁
+                pb::RegionInfo* info = nullptr;
+                if (_region_infos.count(region_id) != 0) {
+                    info = &_region_infos[region_id];
+                } else {
+                    std::lock_guard<std::mutex> lck(state->client_conn()->region_lock);
+                    info = &(state->client_conn()->region_infos[region_id]);
+                }
+                cond.increase();
+                cond.wait();
+                std::vector<SmartRecord>* records = nullptr;
+                if (_insert_region_ids.count(region_id) == 1) {
+                    records = &_insert_region_ids[region_id];
+                }
+                auto req_thread = [this, state, info, records, region_id, log_id, &cond]() {
+                    ON_SCOPE_EXIT([&cond]{cond.decrease_signal();});
+                    int ret = send_request(state, *info, records, region_id, log_id, 0, state->seq_id);
+                    if (ret < 0) {
+                        DB_WARNING("rpc error, region_id:%ld, log_id:%lu", region_id, log_id);
+                        _error = true;
+                    }
+                };
+                Bthread bth(&BTHREAD_ATTR_SMALL);
+                bth.run(req_thread);
             }
-            cond.decrease_signal();
+            cond.wait(-FLAGS_single_store_concurrency);
         };
-        cond.increase();
         Bthread bth(&BTHREAD_ATTR_SMALL);
-        bth.run(req_thread);
+        bth.run(store_thread);
     }
-    cond.wait();
+    store_cond.wait();
     if (_error) {
         DB_FATAL("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d", 
             log_id, state->txn_id, state->seq_id);
@@ -498,7 +525,6 @@ int FetcherNode::open(RuntimeState* state) {
         // 无sort节点时不会排序，按顺序输出
         _sorter->merge_sort();
     }
-
     // cache dml cmd in baikaldb before sending to store_affected_rows
     push_cmd_to_cache(state);
     return _affected_rows.load();

@@ -28,7 +28,7 @@ int TransactionPool::init(int64_t region_id, pb::RegionInfo* region_info) {
 }
 
 // -1 means insert error (already exists)
-int TransactionPool::begin_txn(uint64_t txn_id, Transaction*& txn) {
+int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn) {
     //int64_t region_id = _region->get_region_id();
     std::string txn_name = std::to_string(_region_id) + "_" + std::to_string(txn_id);
     std::unique_lock<std::mutex> lock(_map_mutex);
@@ -36,7 +36,7 @@ int TransactionPool::begin_txn(uint64_t txn_id, Transaction*& txn) {
         DB_FATAL("txn already exists, txn_id: %lu", txn_id);
         return -1;
     }
-    txn = new (std::nothrow)Transaction(txn_id, _region_info, this);
+    txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, _region_info, this));
     if (txn == nullptr) {
         DB_FATAL("new txn failed, txn_id: %lu", txn_id);
         return -1;
@@ -44,21 +44,14 @@ int TransactionPool::begin_txn(uint64_t txn_id, Transaction*& txn) {
     auto ret = txn->begin();
     if (ret != 0) {
         DB_FATAL("begin txn failed, txn_id: %lu", txn_id);
-        delete txn;
-        txn = nullptr;
+        txn.reset();
         return -1;
     }
     auto res = txn->get_txn()->SetName(txn_name);
     if (!res.ok()) {
         DB_WARNING("unknown error: %d, %s", res.code(), res.ToString().c_str());
     }
-    // DB_WARNING("txn name: %ld, %s, %d, %lu, %lu", 
-    //     _region->get_region_id(),
-    //     txn->get_txn()->GetName().c_str(), 
-    //     txn->get_txn()->GetState(),
-    //     txn->get_txn()->GetID(), 
-    //     txn->get_txn()->GetId());
-    DB_WARNING("txn_begin: %p, %lu", txn->get_txn(), txn_id);
+    DB_WARNING("txn_begin: %p, %s", txn->get_txn(), txn_name.c_str());
     _txn_map.insert(std::make_pair(txn_id, txn));
     _txn_count++;
     return 0;
@@ -69,8 +62,8 @@ void TransactionPool::remove_txn(uint64_t txn_id) {
     if (_txn_map.count(txn_id) == 0) {
         return;
     }
-    DB_WARNING("txn_removed: %p, %lu", _txn_map[txn_id]->get_txn(), txn_id);
-    delete _txn_map[txn_id];
+    auto txn = _txn_map[txn_id]->get_txn();
+    DB_WARNING("txn_removed: %p, %lu", txn, txn->GetName().c_str());
     _txn_map.erase(txn_id);
     _txn_count--;
 }
@@ -94,7 +87,6 @@ void TransactionPool::clear_transactions(int32_t clear_delay_ms) {
             txn->rollback();
             iter = _txn_map.erase(iter);
             _txn_count--;
-            delete txn;
             clear = true;
         }
         if (clear == false) {
@@ -114,7 +106,6 @@ void TransactionPool::on_leader_stop_rollback() {
             DB_WARNING("TransactionNote: txn %s is rollback due to leader stop", 
                 txn->get_txn()->GetName().c_str());
             txn->rollback();
-            delete txn;
             iter = _txn_map.erase(iter);
             _txn_count--;
         } else {
@@ -133,7 +124,6 @@ void TransactionPool::on_leader_stop_rollback(uint64_t txn_id) {
         DB_WARNING("TransactionNote: txn %s is rollback due to leader stop", 
             _txn_map[txn_id]->get_txn()->GetName().c_str());
         _txn_map[txn_id]->rollback();
-        delete _txn_map[txn_id];
         _txn_map.erase(txn_id);
         _txn_count--;
     }
@@ -180,7 +170,7 @@ int TransactionPool::on_shutdown_recovery(
         for (auto& plan : txn_info.cache_plans()) {
             txn->cache_plan_map().insert({plan.seq_id(), plan});
         }
-        _txn_map.insert(std::make_pair(txn_id, txn));
+        _txn_map.insert(std::make_pair(txn_id, SmartTransaction(txn)));
         _txn_count++;
         iter = recovered_txns.erase(iter);
         DB_WARNING("region_id: %ld, txn_id: %lu, txn_name: %s, num_rows: %ld, seq_id: %d, txn recovered", 
@@ -204,7 +194,7 @@ void TransactionPool::get_prepared_txn_info(
         bool graceful_shutdown) {
     std::unique_lock<std::mutex> lock(_map_mutex);
     for (auto& pair : _txn_map) {
-        Transaction* txn = pair.second;
+        auto txn = pair.second;
         if (!txn->is_prepared() || !txn->has_write()) {
             continue;
         }

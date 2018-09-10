@@ -30,7 +30,8 @@ public:
             //DB_WARNING("has no join, not predicate")
             return 0;
         }
-        if (0 != plan->predicate_pushdown()) {
+        std::vector<ExprNode*> empty_exprs;
+        if (0 != plan->predicate_pushdown(empty_exprs)) {
             DB_WARNING("predicate push down fail");
             return -1;
         }

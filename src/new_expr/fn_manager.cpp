@@ -30,6 +30,7 @@ namespace baikaldb {
     REGISTER_BINARY_OP(NAME, double) \
     REGISTER_BINARY_OP(NAME, string) \
     REGISTER_BINARY_OP(NAME, datetime) \
+    REGISTER_BINARY_OP(NAME, time) \
     REGISTER_BINARY_OP(NAME, date) \
     REGISTER_BINARY_OP(NAME, timestamp)
 
@@ -84,6 +85,8 @@ void FunctionManager::register_operators() {
     register_object_ret("from_unixtime", from_unixtime, pb::TIMESTAMP);
     register_object_ret("now", now, pb::DATETIME);
     register_object_ret("date_format", date_format, pb::STRING);
+    register_object_ret("timediff", timediff, pb::TIME);
+    register_object_ret("timestampdiff", timestampdiff, pb::INT64);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);
@@ -112,6 +115,8 @@ int FunctionManager::complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType
                 complete_fn(fn, 2, pb::DATETIME, pb::BOOL);
             } else if (has_date(types)) {
                 complete_fn(fn, 2, pb::DATE, pb::BOOL);
+            } else if (has_time(types)) {
+                complete_fn(fn, 2, pb::TIME, pb::BOOL);
             } else if (has_double(types)) {
                 complete_fn(fn, 2, pb::DOUBLE, pb::BOOL);
             } else if (has_uint(types)) {
@@ -244,6 +249,9 @@ void FunctionManager::complete_fn(pb::Function& fn, int num_args,
             break;
         case pb::DATETIME:
             arg_str = "_datetime";
+            break;
+        case pb::TIME:
+            arg_str = "_time";
             break;
         case pb::DATE:
             arg_str = "_date";

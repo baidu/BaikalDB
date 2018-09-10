@@ -87,6 +87,15 @@ inline bool has_datetime(std::vector<pb::PrimitiveType> types) {
     return false;
 }
 
+inline bool has_time(std::vector<pb::PrimitiveType> types) {
+    for (auto type : types) {
+        if (type == pb::TIME) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool has_date(std::vector<pb::PrimitiveType> types) {
     for (auto type : types) {
         if (type == pb::DATE) {
@@ -174,6 +183,7 @@ inline int32_t get_num_size(pb::PrimitiveType type) {
         case pb::UINT32:
         case pb::DATE:
         case pb::TIMESTAMP:
+        case pb::TIME:
             return 4;
         case pb::INT64:
         case pb::UINT64:
@@ -215,6 +225,8 @@ inline int32_t to_mysql_type(pb::PrimitiveType type) {
             return MYSQL_TYPE_DATETIME;
         case pb::DATE:
             return MYSQL_TYPE_DATE;
+        case pb::TIME:
+            return MYSQL_TYPE_TIME;
         case pb::TIMESTAMP:
             return MYSQL_TYPE_TIMESTAMP;
         case pb::HLL:

@@ -101,7 +101,8 @@ bool DataBuffer::byte_array_append_value(const ExprValue& value) {
         // string长度太长，单独处理
         if (value.is_string()) {
             return pack_length_coded_string(value.str_val, false);
-        } else if (value.is_datetime() || value.is_timestamp() || value.is_date()) {
+        } else if (value.is_datetime() || value.is_timestamp() || 
+                value.is_date() || value.is_time()) {
             return pack_length_coded_string(value.get_string(), false);
         }
         

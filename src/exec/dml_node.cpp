@@ -57,12 +57,12 @@ int DMLNode::init_schema_info(RuntimeState* state) {
 }
 
 int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update) {
-    //DB_WARNING("insert record: %s", record->debug_string().c_str());
+    //DB_WARNING_STATE(state, "insert record: %s", record->debug_string().c_str());
     int ret = 0;
     int affected_rows = 0;
-    Transaction* txn = state->txn();
+    auto txn = state->txn();
     if (txn == nullptr) {
-        DB_WARNING("txn is null, region:%ld", _region_id);
+        DB_WARNING_STATE(state, "txn is null, region:%ld", _region_id);
         return -1;
     }
     auto& reverse_index_map = state->reverse_index_map();
@@ -73,7 +73,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 auto field = record->get_field_by_tag(slot.field_id());
                 _dup_update_row->set_value(slot.tuple_id(), slot.slot_id(),
                         record->get_value(field));
-                //DB_WARNING("_on_dup_key_update: tuple:%d slot:%d %d", slot.tuple_id(), slot.slot_id(), record->get_value(field).get_numberic<int32_t>());
+                //DB_WARNING_STATE(state, "_on_dup_key_update: tuple:%d slot:%d %d", slot.tuple_id(), slot.slot_id(), record->get_value(field).get_numberic<int32_t>());
             }
         }
     }
@@ -86,7 +86,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         }
         ret = txn->get_update_primary(_region_id, *_pri_info, old_record, field_ids, GET_LOCK, true);
         if (ret == -3) {
-            //DB_WARNING("key not in this region:%ld, %s", _region_id, record->to_string().c_str());
+            //DB_WARNING_STATE(state, "key not in this region:%ld, %s", _region_id, record->to_string().c_str());
             return 0;
         }
         if (ret != -2) {
@@ -107,25 +107,25 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                     old_record->encode(old_s);
                     record->encode(new_s);
                     if (old_s == new_s) {
-                        DB_WARNING("table_id:%ld, region_id: %ld, old new is same, need not replace", 
+                        DB_WARNING_STATE(state, "table_id:%ld, region_id: %ld, old new is same, need not replace", 
                                 _table_id, state->region_id());
                         return 0;
                     }*/
                     ret = delete_row(state, old_record);
                     if (ret < 0) {
-                        DB_WARNING("remove fail, table_id:%ld ,ret:%d", _table_id, ret);
+                        DB_WARNING_STATE(state, "remove fail, table_id:%ld ,ret:%d", _table_id, ret);
                         return -1;
                     }
                     ++affected_rows;
                 } else {
-                    DB_WARNING("insert row must not exist, index:%ld, ret:%d", _table_id, ret);
+                    DB_WARNING_STATE(state, "insert row must not exist, index:%ld, ret:%d", _table_id, ret);
                     state->error_code = ER_DUP_KEY;
                     state->error_msg << "Cannot write duplicate key: " 
                                      << old_record->debug_string();
                     return -1;
                 }
             } else {
-                DB_WARNING("insert row rocksdb error, index:%ld, ret:%d", _table_id, ret);
+                DB_WARNING_STATE(state, "insert row rocksdb error, index:%ld, ret:%d", _table_id, ret);
                 return -1;
             }
         }
@@ -133,7 +133,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     MutTableKey pk_key;
     ret = record->encode_key(*_pri_info, pk_key, -1, false);
     if (ret < 0) {
-        DB_WARNING("encode key failed, ret:%d", ret);
+        DB_WARNING_STATE(state, "encode key failed, ret:%d", ret);
         return ret;
     }
     std::string pk_str = pk_key.data();
@@ -159,7 +159,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             } if (_node_type == pb::REPLACE_NODE) {
                 ret = delete_row(state, old_record);
                 if (ret < 0) {
-                    DB_WARNING("remove fail, index:%ld ,ret:%d", info.id, ret);
+                    DB_WARNING_STATE(state, "remove fail, index:%ld ,ret:%d", info.id, ret);
                     return -1;
                 }
                 ++affected_rows;
@@ -172,7 +172,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             if (_need_ignore) {
                 return 0;
             }
-            DB_WARNING("insert index row must not exist, index:%ld, ret:%d", info.id, ret);
+            DB_WARNING_STATE(state, "insert index row must not exist, index:%ld, ret:%d", info.id, ret);
             return -1;
         }
     }
@@ -194,7 +194,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             std::string word;
             ret = record->get_reverse_word(info, word);
             if (ret < 0) {
-                DB_WARNING("index_info to word fail for index_id: %ld", info.id);
+                DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", info.id);
                 return ret;
             }
             //DB_NOTICE("word:%s", str_to_hex(word).c_str());
@@ -206,16 +206,16 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         }
         ret = txn->put_secondary(_region_id, info, record);
         if (ret < 0) {
-            DB_WARNING("put index:%ld fail:%d, table_id:%ld", info.id, ret, _table_id);
+            DB_WARNING_STATE(state, "put index:%ld fail:%d, table_id:%ld", info.id, ret, _table_id);
             return ret;
         }
     }
     ret = txn->put_primary(_region_id, *_pri_info, record);
     if (ret < 0) {
-        DB_WARNING("put table:%ld fail:%d", _table_id, ret);
+        DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;
     }
-    //DB_WARNING("insert succes:%ld, %s", _region_id, record->to_string().c_str());
+    //DB_WARNING_STATE(state, "insert succes:%ld, %s", _region_id, record->to_string().c_str());
     ++_num_increase_rows;
     return ++affected_rows;
 }
@@ -225,7 +225,7 @@ int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* 
     MutTableKey pk_key;
     ret = record->encode_key(*_pri_info, pk_key, -1, false);
     if (ret < 0) {
-        DB_WARNING("encode key failed, ret:%d", ret);
+        DB_WARNING_STATE(state, "encode key failed, ret:%d", ret);
         return ret;
     }
     *pk_str = pk_key.data();
@@ -235,18 +235,18 @@ int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* 
         record->clear();
         record->decode_key(*_pri_info, *pk_str);
     }
-    Transaction* txn = state->txn();
+    auto txn = state->txn();
     //delete requires all fields (index and non-index fields)
     return txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true);
 }
 
 int DMLNode::remove_row(RuntimeState* state, SmartRecord record, const std::string& pk_str) {
     int ret = 0;
-    Transaction* txn = state->txn();
+    auto txn = state->txn();
     if (_affect_primary) {
         ret = txn->remove(_region_id, *_pri_info, record);
         if (ret != 0) {
-            DB_WARNING("remove fail, index:%ld ,ret:%d", _table_id, ret);
+            DB_WARNING_STATE(state, "remove fail, index:%ld ,ret:%d", _table_id, ret);
             return -1;
         }
     }
@@ -259,7 +259,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record, const std::stri
         if (reverse_index_map.count(info.id) == 1) {
             // inverted index only support single field
             if (info.id == -1 || info.fields.size() != 1) {
-                DB_WARNING("indexinfo get fail, index_id:%ld", info.id);
+                DB_WARNING_STATE(state, "indexinfo get fail, index_id:%ld", info.id);
                 return -1;
             }
             auto field = record->get_field_by_tag(info.fields[0].id);
@@ -269,7 +269,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record, const std::stri
             std::string word;
             ret = record->get_reverse_word(info, word);
             if (ret < 0) {
-                DB_WARNING("index_info to word fail for index_id: %ld", info.id);
+                DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", info.id);
                 return ret;
             }
             ret = reverse_index_map[info.id]->delete_reverse(txn->get_txn(), word, pk_str, record);
@@ -280,12 +280,12 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record, const std::stri
         }
         ret = txn->get_update_secondary(_region_id, *_pri_info, info, record, LOCK_ONLY, false);
         if (ret != 0 && ret != -2) {
-            DB_WARNING("lock fail, index:%ld, ret:%d", info.id, ret);
+            DB_WARNING_STATE(state, "lock fail, index:%ld, ret:%d", info.id, ret);
             return -1;
         }
         ret = txn->remove(_region_id, info, record);
         if (ret != 0) {
-            DB_WARNING("remove index:%ld failed", info.id);
+            DB_WARNING_STATE(state, "remove index:%ld failed", info.id);
             return -1;
         }
     }
@@ -298,13 +298,13 @@ int DMLNode::delete_row(RuntimeState* state, SmartRecord record) {
     std::string pk_str;
     ret = get_lock_row(state, record, &pk_str);
     if (ret == -3) {
-        //DB_WARNING("key not in this region:%ld", _region_id);
+        //DB_WARNING_STATE(state, "key not in this region:%ld", _region_id);
         return 0;
     }else if (ret == -2) {
         // deleted
         return 0;
     } else if (ret != 0) {
-        DB_WARNING("lock table:%ld failed", _table_id);
+        DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
         return -1;
     }
     return remove_row(state, record, pk_str);
@@ -315,18 +315,18 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     std::string pk_str;
     ret = get_lock_row(state, record, &pk_str);
     if (ret == -3) {
-        //DB_WARNING("key not in this region:%ld", _region_id);
+        //DB_WARNING_STATE(state, "key not in this region:%ld", _region_id);
         return 0;
     }else if (ret == -2) {
         // row deleted
         return 0;
     } else if (ret != 0) {
-        DB_WARNING("lock table:%ld failed", _table_id);
+        DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
         return -1;
     }
     ret = remove_row(state, record, pk_str);
     if (ret < 0) {
-        DB_WARNING("remove_row fail");
+        DB_WARNING_STATE(state, "remove_row fail");
         return -1;
     } else if (ret == 0) {
         // update null row
@@ -340,7 +340,7 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
                 auto field = record->get_field_by_tag(slot.field_id());
                 row->set_value(slot.tuple_id(), slot.slot_id(),
                         record->get_value(field));
-                //DB_WARNING("_on_dup_key_update: tuple:%d slot:%d %d", slot.tuple_id(), slot.slot_id(), record->get_value(field).get_numberic<int32_t>());
+                //DB_WARNING_STATE(state, "_on_dup_key_update: tuple:%d slot:%d %d", slot.tuple_id(), slot.slot_id(), record->get_value(field).get_numberic<int32_t>());
             }
         }
     }
@@ -356,13 +356,13 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     old_record->encode(old_s);
     record->encode(new_s);
     if (old_s == new_s) {
-        DB_WARNING("table_id:%ld, region_id: %ld, old new is same, need not update", 
+        DB_WARNING_STATE(state, "table_id:%ld, region_id: %ld, old new is same, need not update", 
                 _table_id, state->region_id());
         return 0;
     }*/
     ret = insert_row(state, record, true);
     if (ret < 0) {
-        DB_WARNING("insert_row fail");
+        DB_WARNING_STATE(state, "insert_row fail");
         return -1;
     }
     return 1;

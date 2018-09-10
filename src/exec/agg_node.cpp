@@ -102,20 +102,20 @@ int AggNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
     for (auto expr : _group_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     for (auto agg : _agg_fn_calls) {
         ret = agg->open();
         if (ret < 0) {
-            DB_WARNING("agg open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "agg open fail, ret:%d", ret);
             return ret;
         }
     }
@@ -132,7 +132,7 @@ int AggNode::open(RuntimeState* state) {
             RowBatch batch;
             ret = child->get_next(state, &batch, &eos);
             if (ret < 0) {
-                DB_WARNING("child->get_next fail, ret:%d", ret);
+                DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
                 return ret;
             }
             scan_time += cost.get_time();
@@ -146,7 +146,7 @@ int AggNode::open(RuntimeState* state) {
             //}
         } while (!eos);
     }
-    DB_WARNING("region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
+    DB_WARNING_STATE(state, "region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
         state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
     // select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {

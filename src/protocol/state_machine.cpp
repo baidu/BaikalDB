@@ -1000,6 +1000,7 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         {pb::DOUBLE, "double"},
         {pb::STRING, "varchar(1024)"},
         {pb::DATETIME, "DATETIME"},
+        {pb::TIME, "TIME"},
         {pb::TIMESTAMP, "TIMESTAMP"},
         {pb::DATE, "DATE"},
     };
@@ -1425,7 +1426,7 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
 
 bool StateMachine::_handle_client_query_show_region(SmartSocket client) {
     int region_id_pos = client->query_ctx->sql.find("_");
-    int64_t region_id = std::stoll(client->query_ctx->sql.substr(region_id_pos + 1));
+    int64_t region_id = strtoll(client->query_ctx->sql.substr(region_id_pos + 1).c_str(), NULL, 10);
     DB_WARNING("region_id: %ld", region_id);
 
     // Make fields.
@@ -2091,7 +2092,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     int ret = 0;
     ret = LogicalPlanner::analyze(client->query_ctx.get());
     if (ret < 0) {
-        DB_FATAL_CLIENT(client, "Failed to LogicalPlanner::analyze: %s",
+        DB_WARNING_CLIENT(client, "Failed to LogicalPlanner::analyze: %s",
             client->query_ctx->sql.c_str());
         if (client->query_ctx->stat_info.error_code == ER_ERROR_FIRST) {
             client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
@@ -2155,13 +2156,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         _wrapper->make_simple_ok_packet(client);
         return true;
     }
-     //pb::Plan plan_dump;
-     //ExecNode::create_pb_plan(&plan_dump, client->query_ctx->root);
-     //int len = plan_dump.nodes_size();
-     //for (int idx = 0; idx < len; ++idx) {
-     //    DB_WARNING("pb::plan is: %s", plan_dump.nodes(idx).DebugString().c_str());
-     //}
-
+   
     // 不会有fether那一层，重构
     ret = PhysicalPlanner::execute(client->query_ctx.get(), client->send_buf);
     if (ret < 0) {

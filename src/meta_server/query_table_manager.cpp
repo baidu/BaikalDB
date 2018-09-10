@@ -261,6 +261,7 @@ void QueryTableManager::decode_key(int64_t table_id, const TableKey& start_key, 
                     start_key_string += ",";
                     pos += sizeof(int16_t);
                 } break;
+                case pb::TIME:
                 case pb::INT32: {
                     if (pos + sizeof(int32_t) > start_key.size()) {
                         DB_WARNING("int32_t pos out of bound: %d %zu", pos, start_key.size());

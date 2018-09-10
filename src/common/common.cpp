@@ -28,6 +28,7 @@
 #include <boost/algorithm/string.hpp>
 #include <google/protobuf/descriptor.pb.h>
 #include "rocksdb/slice.h"
+#include "expr_value.h"
 
 using google::protobuf::FieldDescriptorProto;
 
@@ -328,6 +329,7 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::DATETIME,     FieldDescriptorProto::TYPE_FIXED64},
         { pb::TIMESTAMP,    FieldDescriptorProto::TYPE_FIXED32},
         { pb::DATE,         FieldDescriptorProto::TYPE_FIXED32},
+        { pb::TIME,         FieldDescriptorProto::TYPE_SFIXED32},
         { pb::HLL,          FieldDescriptorProto::TYPE_BYTES},
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL   }
     };
@@ -336,132 +338,5 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         return -1;
     }
     return _mysql_pb_type_mapping[type];
-}
-
-std::string timestamp_to_str(time_t timestamp) {
-    char str_time[21] = {0};
-    struct tm tm;
-    localtime_r(&timestamp, &tm);  
-    // 夏令时影响
-    if (tm.tm_isdst == 1) {
-        timestamp = timestamp - 3600;
-        localtime_r(&timestamp, &tm);
-    }
-    strftime(str_time, sizeof(str_time), "%Y-%m-%d %H:%M:%S", &tm);
-    return std::string(str_time);
-}
-
-time_t str_to_timestamp(const char* str_time) {
-    if (str_time == nullptr) {
-        return 0;
-    }
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-    sscanf(str_time, "%4d-%2d-%2d %2d:%2d:%2d",
-           &tm.tm_year, &tm.tm_mon, &tm.tm_mday,  
-           &tm.tm_hour, &tm.tm_min, &tm.tm_sec);
-
-    tm.tm_year -= 1900;
-    tm.tm_mon--;
-    time_t ret = mktime(&tm);
-    return ret;
-}
-
-// encode DATETIME to string format
-// ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
-std::string datetime_to_str(uint64_t datetime) {
-    int year_month = ((datetime >> 46) & 0x1FFFF);
-    int year = year_month / 13;
-    int month = year_month % 13;
-    int day = ((datetime >> 41) & 0x1F);
-    int hour = ((datetime >> 36) & 0x1F);
-    int minute = ((datetime >> 30) & 0x3F);
-    int second = ((datetime >> 24) & 0x3F);
-    int macrosec = (datetime & 0xFFFFFF);
-
-    char buf[30] = {0};
-    sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-        year, month, day, hour, minute, second, macrosec);
-    return std::string(buf);
-}
-
-uint64_t str_to_datetime(const char* str_time) {
-    //YYYY-MM-DD HH:MM:SS.xxxxxx
-    const static size_t max_time_size = 26;
-    size_t len = std::min(strlen(str_time), (size_t)max_time_size);
-    char buf[max_time_size + 1] = {0};
-    memcpy(buf, str_time, len);
-    uint32_t idx = 0;
-    for (; idx < len; ++idx) {
-        if (buf[idx] == '.') {
-            break;
-        }
-    }
-    if (idx < len) {
-        for (uint32_t i = idx + 1; i <= idx + 6 && i < max_time_size; ++i) {
-            if (buf[i] < '0' || buf[i] > '9') {
-                buf[i] = '0';
-            }
-        }
-    }
-
-    uint64_t year = 0;
-    uint64_t month = 0;
-    uint64_t day = 0;
-    uint64_t hour = 0;
-    uint64_t minute = 0;
-    uint64_t second = 0;
-    uint64_t macrosec = 0;
-
-    sscanf(buf, "%4lu-%2lu-%2lu %2lu:%2lu:%2lu.%6lu",
-        &year, &month, &day, &hour, &minute, &second, &macrosec);
-
-    //datetime中间计算时会转化成int64, 最高位必须为0
-    uint64_t datetime = 0;
-    uint64_t year_month = year * 13 + month;
-    datetime |= (year_month << 46);
-    datetime |= (day << 41);
-    datetime |= (hour << 36);
-    datetime |= (minute << 30);
-    datetime |= (second << 24);
-    datetime |= macrosec;
-    return datetime;
-}
-
-time_t datetime_to_timestamp(uint64_t datetime) {
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-
-    int year_month = ((datetime >> 46) & 0x1FFFF);
-    tm.tm_year = year_month / 13;
-    tm.tm_mon = year_month % 13;
-    tm.tm_mday = ((datetime >> 41) & 0x1F);
-    tm.tm_hour = ((datetime >> 36) & 0x1F);
-    tm.tm_min = ((datetime >> 30) & 0x3F);
-    tm.tm_sec = ((datetime >> 24) & 0x3F);
-    //int macrosec = (datetime & 0xFFFFFF);
-
-    tm.tm_year -= 1900;
-    tm.tm_mon--;
-    return mktime(&tm);
-}
-
-uint64_t timestamp_to_datetime(time_t timestamp) {
-    uint64_t datetime = 0;
-
-    struct tm tm = *localtime(&timestamp);
-    tm.tm_year += 1900;
-    tm.tm_mon++;
-    uint64_t year_month = tm.tm_year * 13 + tm.tm_mon;
-    uint64_t day = tm.tm_mday;
-    uint64_t hour = tm.tm_hour;
-    uint64_t min = tm.tm_min;
-    uint64_t sec = tm.tm_sec;
-    datetime |= (year_month << 46);
-    datetime |= (day << 41);
-    datetime |= (hour << 36);
-    datetime |= (min << 30);
-    datetime |= (sec << 24);
-    return datetime;
 }
 }  // baikaldb

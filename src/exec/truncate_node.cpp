@@ -31,17 +31,17 @@ int TruncateNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
     RocksWrapper* _db = RocksWrapper::get_instance();
     if (_db == nullptr) {
-        DB_WARNING("get rocksdb instance failed");
+        DB_WARNING_STATE(state, "get rocksdb instance failed");
         return -1;
     }
     rocksdb::ColumnFamilyHandle* _data_cf = _db->get_data_handle();
     if (_data_cf == nullptr) {
-        DB_WARNING("get rocksdb data column family failed");
+        DB_WARNING_STATE(state, "get rocksdb data column family failed");
         return -1;
     }
     _region_id = state->region_id();
@@ -58,14 +58,14 @@ int TruncateNode::open(RuntimeState* state) {
     rocksdb::Slice end(region_end.data());
     auto res = _db->remove_range(write_options, _data_cf, begin, end);
     if (!res.ok()) {
-        DB_WARNING("truncate table failed: table:%ld, region:%ld, code=%d, msg=%s", 
+        DB_WARNING_STATE(state, "truncate table failed: table:%ld, region:%ld, code=%d, msg=%s", 
             _table_id, _region_id, res.code(), res.ToString().c_str());
         return -1;
     }
     /*
     res = _db->compact_range(rocksdb::CompactRangeOptions(), _data_cf, &begin, &end);
     if (!res.ok()) {
-        DB_WARNING("compact after truncated failed: table:%ld, region:%ld, code=%d, msg=%s", 
+        DB_WARNING_STATE(state, "compact after truncated failed: table:%ld, region:%ld, code=%d, msg=%s", 
             _table_id, _region_id, res.code(), res.ToString().c_str());
         return -1;
     }

@@ -17,6 +17,7 @@
 #include "query_context.h"
 #include "schema_factory.h"
 #include "insert_node.h"
+#include "network_socket.h"
 #include "meta_server_interact.hpp"
 
 namespace baikaldb {
@@ -74,6 +75,8 @@ int AutoInc::analyze(QueryContext* ctx) {
         return 0;
     }
     int64_t start_id = response.start_id();
+    auto client = ctx->runtime_state.client_conn();
+    client->last_insert_id = start_id;
     for (auto& record : ctx->insert_records) {
         auto field = record->get_field_by_tag(table_info.auto_inc_field_id);
         ExprValue value = record->get_value(field);

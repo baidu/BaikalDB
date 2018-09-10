@@ -535,43 +535,6 @@ int Transaction::remove(int64_t region, IndexInfo& index, const TableKey& key) {
     return 0;
 }
 
-TableIterator* Transaction::scan_primary(
-        const IndexRange&       range, 
-        std::vector<int32_t>&   fields, 
-        bool                    check_region, 
-        bool                    forward) {
-
-    last_active_time = butil::gettimeofday_us();
-    TableIterator* iter = new (std::nothrow)TableIterator(check_region, forward);
-    if (nullptr == iter) {
-        return nullptr;
-    }
-    if (0 != iter->open(range, fields, this)) {
-        DB_WARNING("open table iterator failed");
-        delete iter;
-        return nullptr;
-    }
-    return iter;
-}
-
-IndexIterator* Transaction::scan_secondary(
-        const IndexRange& range, 
-        bool check_region, 
-        bool forward) {
-    last_active_time = butil::gettimeofday_us();
-    IndexIterator* iter = new (std::nothrow)IndexIterator(check_region, forward);
-    if (nullptr == iter) {
-        return nullptr;
-    }
-    std::vector<int32_t> dummy;
-    if (0 != iter->open(range, dummy, this)) {
-        DB_WARNING("open index iterator failed");
-        delete iter;
-        return nullptr;
-    }
-    return iter;
-}
-
 rocksdb::Status Transaction::prepare() {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     if (_is_prepared) {
@@ -624,6 +587,7 @@ rocksdb::Status Transaction::rollback() {
             _pool->decrease_prepared();
         }
         _is_finished = true;
+        _is_rolledback = true;
     }
     return res;
 }

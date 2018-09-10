@@ -51,6 +51,29 @@ int ExecNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     return 0;
 }
 
+int ExecNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
+    if (_children.size() > 0) {
+        _children[0]->predicate_pushdown(input_exprs); 
+    }
+    if (input_exprs.size() > 0) {
+        add_filter_node(input_exprs);      
+    }
+    input_exprs.clear();
+    return 0;
+}
+void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
+    pb::PlanNode pb_plan_node;
+    pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
+    pb_plan_node.set_num_children(1);
+    pb_plan_node.set_limit(-1);
+    auto filter_node = new FilterNode();
+    filter_node->init(pb_plan_node);
+    _parent->replace_child(this, filter_node);
+    filter_node->add_child(this);
+    for (auto& expr : input_exprs) {
+        filter_node->add_conjunct(expr);
+    }
+}
 void ExecNode::get_node(pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes) {
     if (_node_type == node_type) {
         exec_nodes.push_back(this);

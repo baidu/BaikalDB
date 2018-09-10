@@ -86,105 +86,114 @@ int JoinNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     return 0; 
 }
 
-int JoinNode::predicate_pushdown() {
-    //DB_WARNING("node:%ld is pushdown", this);
-    if (_parent == NULL) {
-        DB_WARNING("parent is null");
-        return 0;
-    }
-    if (_parent->get_node_type() != pb::JOIN_NODE 
-            && _parent->get_node_type() != pb::WHERE_FILTER_NODE) {
-        //DB_WARNING("parent is not join or filter node, node_type:%s",
-        //           pb::PlanNodeType_Name(_parent->get_node_type()).c_str());
-        return 0;
-    }
-    std::vector<ExprNode*>* parent_conditions = _parent->mutable_conjuncts();
-    auto iter = parent_conditions->begin();
-    //DB_WARNING("join node begin predicate pushdown");
-    while (iter != parent_conditions->end()) {
-        if (!contains_expr(*iter)) {
-            //DB_WARNING("expr not pushdown");
+int JoinNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
+    DB_WARNING("node:%ld is pushdown", this);
+    convert_to_inner_join(input_exprs);
+    
+    std::vector<ExprNode*> outer_push_exprs;
+    std::vector<ExprNode*> inner_push_exprs;
+    if (_join_type == pb::INNER_JOIN) {
+        auto iter = _conditions.begin(); 
+        while (iter != _conditions.end()) {
+            if (outer_contains_expr(*iter)) {
+                outer_push_exprs.push_back(*iter);
+                iter = _conditions.erase(iter);
+                continue;
+            }
+            if (inner_contains_expr(*iter)) {
+                inner_push_exprs.push_back(*iter);
+                iter = _conditions.erase(iter);
+                continue;
+            }
             ++iter;
-            continue;
         }
-        if (_join_type == pb::INNER_JOIN) {
-            _conditions.push_back(*iter);
-            iter = parent_conditions->erase(iter);
-            //DB_WARNING("expr is pushdown to join node");
-            continue;
+        for (auto& expr : input_exprs) {
+            if (outer_contains_expr(expr)) {
+                outer_push_exprs.push_back(expr);
+                continue;
+            } 
+            if (inner_contains_expr(expr)) {
+                inner_push_exprs.push_back(expr);
+                continue;
+            }
+            _conditions.push_back(expr);
         }
-
-        if (_join_type == pb::LEFT_JOIN) {
-            if (left_contains_expr(*iter)) {
-                _conditions.push_back(*iter);
-                iter = parent_conditions->erase(iter);
-                //DB_WARNING("expr is pushdown to join node");
-                continue;
-            }
-            if (right_contains_expr(*iter) 
-                    && !((*iter)->contains_special_operator(pb::IS_NULL_PREDICATE))) {
-                _conditions.push_back(*iter);
-                iter = parent_conditions->erase(iter);
-                set_join_type(pb::INNER_JOIN);
-                //DB_WARNING("expr is pushdown to join node");
-                continue;
-            }
-            if (!((*iter)->contains_special_operator(pb::IS_NULL_PREDICATE)) 
-                    && !((*iter)->contains_special_operator(pb::OR_PREDICATE))) {
-                _conditions.push_back(*iter);
-                iter = parent_conditions->erase(iter);
-                set_join_type(pb::INNER_JOIN);
-                //DB_WARNING("expr is pushdown to join node");
-                continue;
-            }
-            //DB_WARNING("expr is not pushdown");
-        }
-        if (_join_type == pb::RIGHT_JOIN) {
-            if (right_contains_expr(*iter)) {
-                _conditions.push_back(*iter);
-                iter = parent_conditions->erase(iter);
-                //DB_WARNING("expr is pushdown to join node");
-                continue;
-            }
-            if (left_contains_expr(*iter) 
-                    && !((*iter)->contains_special_operator(pb::IS_NULL_PREDICATE))) {
-                _conditions.push_back(*iter);
-                iter = parent_conditions->erase(iter);
-                set_join_type(pb::INNER_JOIN);
-                //DB_WARNING("expr is pushdown to join node");
-                continue;
-            }
-            if (!((*iter)->contains_special_operator(pb::IS_NULL_PREDICATE))
-                    && !((*iter)->contains_special_operator(pb::OR_PREDICATE))) {
-                _conditions.push_back(*iter);
-                iter = parent_conditions->erase(iter);
-                set_join_type(pb::INNER_JOIN);
-                //DB_WARNING("expr is pushdown to join node");
-                continue;
-            }
-            //DB_WARNING("expr is not pushdown");    
-        }
-        //DB_WARNING("expr is not pushdown");
-        ++iter;
+        input_exprs.clear();
     }
-    return ExecNode::predicate_pushdown();
-}
-
-int JoinNode::add_or_pushdown(ExprNode* expr, ExecNode** exec_node) {
-    //目前只有join构造出来的in条件会调用这个方法，先简单下推，不考虑null这种情况
-    if (left_contains_expr(expr)) {
-        if (_join_type == pb::INNER_JOIN || _join_type == pb::LEFT_JOIN) {
-            return _children[0]->add_or_pushdown(expr, exec_node);
-        } 
-    } else if (right_contains_expr(expr)) {
-        if (_join_type == pb::INNER_JOIN || _join_type == pb::RIGHT_JOIN) {
-           return  _children[1]->add_or_pushdown(expr, exec_node);
-        } 
+    if (_join_type == pb::LEFT_JOIN || _join_type == pb::RIGHT_JOIN) {
+        auto iter = input_exprs.begin();
+        while (iter != input_exprs.end()) {
+            if (outer_contains_expr(*iter)) {
+                outer_push_exprs.push_back(*iter);
+                iter = input_exprs.erase(iter);
+                continue;
+            }
+            ++iter;
+        }
+        iter = _conditions.begin();
+        while (iter != _conditions.end()) {
+            if (inner_contains_expr(*iter)) {
+                inner_push_exprs.push_back(*iter);
+                iter = _conditions.erase(iter);
+                continue;
+            }
+            ++iter;
+        }
+    }    
+    _outer_node->predicate_pushdown(outer_push_exprs);
+    if (outer_push_exprs.size() > 0) {
+        _outer_node->add_filter_node(outer_push_exprs);
     }
-    //不能继续下推
-    *exec_node = this;
-    _conditions.push_back(expr);
+    _inner_node->predicate_pushdown(inner_push_exprs);
+    if (inner_push_exprs.size() > 0) {
+        _inner_node->add_filter_node(inner_push_exprs);
+    }
     return 0;
+}
+void JoinNode::convert_to_inner_join(std::vector<ExprNode*>& input_exprs) {
+    //inner_join默认情况下都是左边是驱动表, left_join只能左边做驱动表
+    //outer_node 和 inner_node在做完seperate之后会变化，所以在join node open的时候要重新赋值一次
+    _outer_node = _children[0];
+    _inner_node = _children[1];
+    _outer_tuple_ids = _left_tuple_ids;
+    _inner_tuple_ids = _right_tuple_ids;
+    
+    if (_join_type == pb::RIGHT_JOIN) {
+        _outer_node = _children[1];
+        _inner_node = _children[0];
+        _outer_tuple_ids = _right_tuple_ids;
+        _inner_tuple_ids = _left_tuple_ids;
+    }
+    
+    std::vector<ExprNode*> full_exprs = input_exprs;
+    for (auto& expr : _conditions) {
+        full_exprs.push_back(expr);
+    }
+    if (_inner_node->get_node_type() == pb::JOIN_NODE) {
+        ((JoinNode*)_inner_node)->convert_to_inner_join(full_exprs);
+    }
+    if (_outer_node->get_node_type() == pb::JOIN_NODE) {
+        ((JoinNode*)_outer_node)->convert_to_inner_join(full_exprs);
+    }
+    if (_join_type == pb::INNER_JOIN) {
+        return;
+    }
+
+    for (auto& expr : input_exprs) {
+        if (outer_contains_expr(expr)) {
+            continue;
+        }
+        if (inner_contains_expr(expr)
+                && !expr->contains_special_operator(pb::IS_NULL_PREDICATE)) {
+            set_join_type(pb::INNER_JOIN);
+            return;
+        }
+        if (contains_expr(expr) && !expr->contains_special_operator(pb::IS_NULL_PREDICATE)
+                && !expr->contains_special_operator(pb::OR_PREDICATE)) {
+            set_join_type(pb::INNER_JOIN);
+            return;
+        }
+    }
 }
 
 void JoinNode::transfer_pb(pb::PlanNode* pb_node) {
@@ -198,11 +207,6 @@ void JoinNode::transfer_pb(pb::PlanNode* pb_node) {
 
 int JoinNode::open(RuntimeState* state) {
     TimeCost join_time_cost;
-    if (_conditions.size() < 1) {
-        DB_WARNING("ExecNode:: not support join no condition");
-        return -1;
-    }
-    //inner_join默认情况下都是左边是驱动表, left_join只能左边做驱动表
     _outer_node = _children[0];
     _inner_node = _children[1];
     _outer_tuple_ids = _left_tuple_ids;
@@ -213,32 +217,32 @@ int JoinNode::open(RuntimeState* state) {
         _outer_tuple_ids = _right_tuple_ids;
         _inner_tuple_ids = _left_tuple_ids;
     }
-    if (_conditions.size() > 2) {
-        DB_WARNING("not support multi condition join");
-        return -1;
-    }
     auto ret = _fill_equal_slot();
     if (ret < 0) {
         DB_WARNING("fill equal slot fail");
         return -1;
     }
-    //DB_WARNING("_outer_node:%ld _inner_node:%ld", _outer_node, _inner_node);
-    //for (auto& tuple_id : _outer_tuple_ids) {
-    //    DB_WARNING("_outer tuple_id:%d", tuple_id);
-    //}
-    //for (auto& tuple_id : _inner_tuple_ids) {
-    //    DB_WARNING("_inner tuple_id:%d", tuple_id);
-    //}
-    //for (auto& expr_node : _outer_equal_slot) {
-    //    DB_WARNING("outer join condition, slot_id:%d, tuple_id:%d", 
-    //                    static_cast<SlotRef*>(expr_node)->slot_id(),
-    //                    static_cast<SlotRef*>(expr_node)->tuple_id());
-    //}
-    //for (auto& expr_node : _inner_equal_slot) {
-    //    DB_WARNING("inner join condition, slot_id:%d, tuple_id:%d",
-    //                static_cast<SlotRef*>(expr_node)->slot_id(),
-    //                static_cast<SlotRef*>(expr_node)->tuple_id());
-    //}
+    if (_outer_equal_slot.size() == 0) {
+        DB_WARNING("has no equal condition in join");
+        return -1;
+    }
+    DB_WARNING("_outer_node:%ld _inner_node:%ld", _outer_node, _inner_node);
+    for (auto& tuple_id : _outer_tuple_ids) {
+        DB_WARNING("_outer tuple_id:%d", tuple_id);
+    }
+    for (auto& tuple_id : _inner_tuple_ids) {
+        DB_WARNING("_inner tuple_id:%d", tuple_id);
+    }
+    for (auto& expr_node : _outer_equal_slot) {
+        DB_WARNING("outer join condition, slot_id:%d, tuple_id:%d", 
+                        static_cast<SlotRef*>(expr_node)->slot_id(),
+                        static_cast<SlotRef*>(expr_node)->tuple_id());
+    }
+    for (auto& expr_node : _inner_equal_slot) {
+        DB_WARNING("inner join condition, slot_id:%d, tuple_id:%d",
+                    static_cast<SlotRef*>(expr_node)->slot_id(),
+                    static_cast<SlotRef*>(expr_node)->tuple_id());
+    }
     _mem_row_desc = state->mem_row_desc();
     DB_WARNING("when join, init join open, time_cost:%ld", join_time_cost.get_time());
     join_time_cost.reset();
@@ -266,9 +270,9 @@ int JoinNode::open(RuntimeState* state) {
     DB_WARNING("when join, save join value, time_cost:%ld",
                 join_time_cost.get_time());
     join_time_cost.reset();
-    ExprNode* expr = NULL;
+    std::vector<ExprNode*> in_exprs;
     //驱动表表返回的join条件下推 todo
-    ret = _construct_in_condition(_inner_equal_slot, _outer_join_values, &expr);
+    ret = _construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
     if (ret < 0) {
         DB_WARNING("ExecNode::create in condition for right table fail");
         return ret;
@@ -277,38 +281,41 @@ int JoinNode::open(RuntimeState* state) {
                 join_time_cost.get_time());
     join_time_cost.reset();
     //表达式下推，下推的那个节点重新做索引选择，路由选择
-    ExecNode* node_for_add_expr = NULL;
-    ret = _inner_node->add_or_pushdown(expr, &node_for_add_expr);
-    DB_WARNING("when join,  add_or_pushdown, time_cost:%ld",
+    _inner_node->predicate_pushdown(in_exprs);
+    if (in_exprs.size() > 0) {
+        DB_WARNING("inner node add filter node");
+        _inner_node->add_filter_node(in_exprs);
+    }
+    DB_WARNING("when join,  re predicate pushdown, time_cost:%ld",
                 join_time_cost.get_time());
     join_time_cost.reset();
 
-    //如果只能推到join节点则不需要重新做索引选择和路由选择
-    if (node_for_add_expr->node_type() == pb::TABLE_FILTER_NODE
-            || node_for_add_expr->node_type() == pb::WHERE_FILTER_NODE) {
-        ExecNode* child_node = node_for_add_expr->children(0);
-        if (child_node->node_type() != pb::SCAN_NODE) {
-            DB_WARNING("filter node child is not scan node");
-            return -1;
+    std::vector<ExecNode*> scan_nodes;
+    _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
+    //重新做路由选择
+    for (auto& exec_node : scan_nodes) {
+        ScanNode* scan_node = static_cast<ScanNode*>(exec_node);
+        ExecNode* parent_node_ptr = scan_node->get_parent();
+        if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
+                || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
+            auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
+                    int32_t {return state->get_slot_id(tuple_id, field_id);};
+            scan_node->clear_possible_indexes();
+            //索引选择
+            IndexSelector().index_selector(get_slot_id,
+                                            NULL,
+                                            scan_node, 
+                                            static_cast<FilterNode*>(parent_node_ptr),
+                                            NULL,
+                                            NULL);
+            //路由选择
+            PlanRouter().scan_plan_router(scan_node);
+            FetcherNode* related_fetcher_node = scan_node->
+                                                get_related_fetcher_node();
+            auto region_infos = scan_node->region_infos();
+            //更改scan_node对应的fethcer_node的region信息
+            related_fetcher_node->set_region_infos(region_infos);
         }
-        ScanNode* scan_node = static_cast<ScanNode*>(child_node);
-        auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
-                int32_t {return state->get_slot_id(tuple_id, field_id);};
-        scan_node->clear_possible_indexes();
-        //索引选择
-        IndexSelector().index_selector(get_slot_id,
-                                        NULL,
-                                        scan_node, 
-                                        static_cast<FilterNode*>(node_for_add_expr),
-                                        NULL,
-                                        NULL);
-        //路由选择
-        PlanRouter().scan_plan_router(scan_node);
-        FetcherNode* related_fetcher_node = static_cast<ScanNode*>(child_node)->
-                                            get_related_fetcher_node();
-        auto region_infos = scan_node->region_infos();
-        //更改scan_node对应的fethcer_node的region信息
-        related_fetcher_node->set_region_infos(region_infos);
     }
     DB_WARNING("when join, index_selector and scan plan, time_cost:%ld",
                 join_time_cost.get_time());
@@ -345,96 +352,103 @@ int JoinNode::open(RuntimeState* state) {
 }
 
 int JoinNode::_fill_equal_slot() {
-    for (auto expr : _conditions) {
-        //目前仅支持等值join
-#ifdef NEW_PARSER
-        if (expr->node_type() != pb::FUNCTION_CALL 
-            || static_cast<ScalarFnCall*>(expr)->fn().fn_op() != parser::FT_EQ) {
-            DB_WARNING("ExecNode::only support equal join");
-            return -1;
-        }
-#else 
-        if (expr->node_type() != pb::FUNCTION_CALL 
-            || static_cast<ScalarFnCall*>(expr)->fn().fn_op() != OP_EQ) {
-            DB_WARNING("ExecNode::only support equal join");
-            return -1;
-        }
-#endif
-        if (expr->children_size() != 2) {
-            DB_WARNING("ExecNode:: equal expr not legal");
-            return -1;
-        }
-        ExprNode* left_child = expr->children(0);
-        ExprNode* right_child = expr->children(1);
-        if (left_child->node_type() != pb::SLOT_REF
-                || right_child->node_type() != pb::SLOT_REF) {
-            DB_WARNING("ExecNode::only support equal join");
-            return -1;
-        }
-        int32_t left_tuple_id = static_cast<SlotRef*>(left_child)->tuple_id();
-        int32_t right_tuple_id = static_cast<SlotRef*>(right_child)->tuple_id();
-        if (_outer_tuple_ids.count(left_tuple_id) == 1 
-                && _inner_tuple_ids.count(right_tuple_id) == 1) {
-                _outer_equal_slot.push_back(left_child);
-                _inner_equal_slot.push_back(right_child);
-        } else if (_outer_tuple_ids.count(right_tuple_id) == 1
-                && _inner_tuple_ids.count(left_tuple_id) == 1) {
-                _outer_equal_slot.push_back(right_child);
-                _inner_equal_slot.push_back(left_child);
+    auto iter = _conditions.begin();
+    //因为目前不支持filed_a, filed_b in ((1, "str"), (2,
+    //"str"))这种in操作，所以剪枝只能剪掉一个等值操作符
+    bool remove_condition = false; //限制只能剪掉一次
+    while (iter != _conditions.end()) {
+        auto expr = *iter;
+        if (_is_equal_condition(expr) && !remove_condition) {
+            iter = _conditions.erase(iter);
+            remove_condition = true;
         } else {
-            DB_WARNING("ExecNode:: join condition not support");
-            return -1;
-        }
-        auto ret = expr->open();
-        if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
-            return ret;
-        }
+            auto ret = expr->open();
+            if (ret < 0) {
+                DB_WARNING("expr open fail, ret:%d", ret);
+                return ret;
+            }
+            ++iter;
+        } 
     }
     return 0;
+}
+bool JoinNode::_is_equal_condition(ExprNode* expr) {
+#ifdef NEW_PARSER
+    if (expr->node_type() != pb::FUNCTION_CALL 
+        || static_cast<ScalarFnCall*>(expr)->fn().fn_op() != parser::FT_EQ) {
+        return false;
+    }
+#else 
+    if (expr->node_type() != pb::FUNCTION_CALL 
+        || static_cast<ScalarFnCall*>(expr)->fn().fn_op() != OP_EQ) {
+        return false;
+    }
+#endif
+    if (expr->children_size() != 2) {
+        return false;
+    }
+    ExprNode* left_child = expr->children(0);
+    ExprNode* right_child = expr->children(1);
+    if (left_child->node_type() != pb::SLOT_REF
+            || right_child->node_type() != pb::SLOT_REF) {
+        return false;
+    }
+    int32_t left_tuple_id = static_cast<SlotRef*>(left_child)->tuple_id();
+    int32_t right_tuple_id = static_cast<SlotRef*>(right_child)->tuple_id();
+    if (_outer_tuple_ids.count(left_tuple_id) == 1 
+            && _inner_tuple_ids.count(right_tuple_id) == 1) {
+        _outer_equal_slot.push_back(left_child);
+        _inner_equal_slot.push_back(right_child);
+        return true;
+    } else if (_outer_tuple_ids.count(right_tuple_id) == 1
+            && _inner_tuple_ids.count(left_tuple_id) == 1) {
+        _outer_equal_slot.push_back(right_child);
+        _inner_equal_slot.push_back(left_child);
+        return true;
+    }
+    return false;
 }
 
 int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs, 
                              std::vector<std::vector<ExprValue>>& in_values, 
-                             ExprNode** conjunct) {
+                             std::vector<ExprNode*>& in_exprs) {
     //手工构造pb格式的表达式，再转为内存结构的表达式
-    if (slot_refs.size() > 1) {
-        DB_WARNING("ExecNode:: only support one condition join");
-        return -1;
-    }
-    pb::Expr expr;
-
-    //增加一个in
-    pb::ExprNode* in_node = expr.add_nodes();
-    in_node->set_node_type(pb::IN_PREDICATE);
-    pb::Function* func = in_node->mutable_fn();
-    func->set_name("in");
+    for (size_t i = 0; i < slot_refs.size(); ++i) {
+        ExprNode* conjunct = nullptr;
+        pb::Expr expr;
+        //增加一个in
+        pb::ExprNode* in_node = expr.add_nodes();
+        in_node->set_node_type(pb::IN_PREDICATE);
+        pb::Function* func = in_node->mutable_fn();
+        func->set_name("in");
 #ifdef NEW_PARSER
-    func->set_fn_op(parser::FT_IN);
+        func->set_fn_op(parser::FT_IN);
 #else
-    func->set_fn_op(OP_IN);
+        func->set_fn_op(OP_IN);
 #endif
-    in_node->set_num_children(1);
+        in_node->set_num_children(1);
 
-    //增加一个slot_ref
-    pb::ExprNode* slot_node = expr.add_nodes();
-    slot_node->set_node_type(pb::SLOT_REF);
-    slot_node->set_col_type(slot_refs[0]->col_type());
-    slot_node->set_num_children(0);
-    slot_node->mutable_derive_node()->set_tuple_id(static_cast<SlotRef*>(slot_refs[0])->tuple_id());
-    slot_node->mutable_derive_node()->set_slot_id(static_cast<SlotRef*>(slot_refs[0])->slot_id());
-    
-    auto ret = ExprNode::create_tree(expr, conjunct);
-    if (ret < 0) {
-        //如何释放资源
-        DB_WARNING("create in condition fail");
-        return ret;
+        //增加一个slot_ref
+        pb::ExprNode* slot_node = expr.add_nodes();
+        slot_node->set_node_type(pb::SLOT_REF);
+        slot_node->set_col_type(slot_refs[i]->col_type());
+        slot_node->set_num_children(0);
+        slot_node->mutable_derive_node()->set_tuple_id(static_cast<SlotRef*>(slot_refs[i])->tuple_id());
+        slot_node->mutable_derive_node()->set_slot_id(static_cast<SlotRef*>(slot_refs[i])->slot_id());
+        
+        auto ret = ExprNode::create_tree(expr, &conjunct);
+        if (ret < 0) {
+            //如何释放资源
+            DB_WARNING("create in condition fail");
+            return ret;
+        }
+        for (auto& in_value : in_values) {
+            ExprNode* literal_node = new Literal(in_value[i]);
+            conjunct->add_child(literal_node); 
+        }
+        conjunct->type_inferer();
+        in_exprs.push_back(conjunct);
     }
-    for (auto& in_value : in_values) {
-        ExprNode* literal_node = new Literal(in_value[0]);
-        (*conjunct)->add_child(literal_node); 
-    }
-    (*conjunct)->type_inferer();
     return 0;
 }
 
@@ -525,7 +539,8 @@ int JoinNode::get_next_for_other_join(RuntimeState* state, RowBatch* batch, bool
                 //DB_WARNING("construct result batch");
                 auto ret = _construct_result_batch(batch,
                                                    *_outer_iter,
-                                                   (*inner_mem_rows)[_hash_mapped_index]);
+                                                   (*inner_mem_rows)[_hash_mapped_index],
+                                                   false);
                 if (ret < 0) {
                     DB_WARNING("construct result batch fail");
                     return ret;
@@ -544,7 +559,7 @@ int JoinNode::get_next_for_other_join(RuntimeState* state, RowBatch* batch, bool
                 DB_WARNING("when join, batch is full, time_cost:%ld", get_next_time.get_time());
                 return 0;
             }
-            auto ret = _construct_result_batch(batch, *_outer_iter, NULL);
+            auto ret = _construct_result_batch(batch, *_outer_iter, NULL, false);
             if (ret < 0) {
                 DB_WARNING("construct result batch fail");
                 return ret;
@@ -597,7 +612,7 @@ int JoinNode::get_next_for_inner_join(RuntimeState* state, RowBatch* batch, bool
                 //DB_WARNING("construct reslut batch");
                 //(*outer_mem_rows)[_hash_mapped_index]->print_content();
                 //inner_mem_row.get()->print_content();
-                auto ret = _construct_result_batch(batch, (*outer_mem_rows)[_hash_mapped_index], inner_mem_row.get());
+                auto ret = _construct_result_batch(batch, (*outer_mem_rows)[_hash_mapped_index], inner_mem_row.get(), true);
                 if (ret < 0) {
                     DB_WARNING("construct result batch fail");
                     return ret;
@@ -611,9 +626,19 @@ int JoinNode::get_next_for_inner_join(RuntimeState* state, RowBatch* batch, bool
     }
     return 0;
 }
+inline bool JoinNode::_satisfy_filter(MemRow* row) {
+    for (auto& condition : _conditions) {
+        ExprValue value = condition->get_value(row);
+        if (value.is_null() || value.get_numberic<bool>() == false) {
+            return false;
+        }
+    }
+    return true;
+}
 int JoinNode::_construct_result_batch(RowBatch* batch, 
                                       MemRow* outer_mem_row, 
-                                      MemRow* inner_mem_row) {
+                                      MemRow* inner_mem_row,
+                                      bool  inner_join) {
     //if (outer_mem_row != NULL) {
     //    outer_mem_row->print_content();
     //}
@@ -636,7 +661,24 @@ int JoinNode::_construct_result_batch(RowBatch* batch,
             return -1;
         }
     }
-    //row->print_content();
+    if (_satisfy_filter(row.get())) {
+        batch->move_row(std::move(row));
+        //row->print_content();
+    } else if (!inner_join) {
+        return _construct_null_result_batch(batch, outer_mem_row);
+    } 
+    return 0;
+}
+int JoinNode:: _construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_row) {
+    std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+    int ret = 0;
+    if (outer_mem_row != NULL) {
+        ret = row->copy_from(_outer_tuple_ids, outer_mem_row);
+        if (ret < 0) {
+            DB_WARNING("copy from left row fail");
+            return -1;
+        }
+    }
     batch->move_row(std::move(row));
     return 0;
 }

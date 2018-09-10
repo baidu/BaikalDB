@@ -142,6 +142,7 @@ public:
             delete kv.second.pool;
             kv.second.pool = nullptr;
         }
+        
         //bthread_mutex_destroy(&_update_table_mutex);
         //bthread_mutex_destroy(&_update_region_mutex);
         //bthread_mutex_destroy(&_update_user_mutex);
@@ -218,7 +219,7 @@ public:
 
     int get_region_by_key(
             const RepeatedPtrField<pb::RegionInfo>& input_regions,
-            std::unordered_map<int64_t, pb::RegionInfo>& output_regions);
+            std::map<int64_t, pb::RegionInfo>& output_regions);
 
     int get_region_by_key(IndexInfo& index,
             std::vector<SmartRecord> records,

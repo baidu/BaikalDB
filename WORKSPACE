@@ -53,7 +53,7 @@ new_http_archive(
 # from https://github.com/nelhage/rules_boost
 git_repository(
     name = "com_github_nelhage_rules_boost",
-    commit = "239ce40e42ab0e3fe7ce84c2e9303ff8a277c41a",
+    commit = "96ba810e48f4a28b85ee9c922f0b375274a97f98",
     remote = "https://github.com/nelhage/rules_boost",
 )
 
@@ -76,7 +76,7 @@ bind(
 new_git_repository(
     name = "com_github_facebook_rocksdb",
     remote = "https://github.com/facebook/rocksdb.git",
-    sha256 = "6e8d0844adc37da331844ac4b21ae33ba1f5265d8914c745760d9209a57e9cc9",
+    #sha256 = "6e8d0844adc37da331844ac4b21ae33ba1f5265d8914c745760d9209a57e9cc9",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
     tag = "v5.12.4"
 )
@@ -100,7 +100,7 @@ new_git_repository(
     name = "com_github_madler_zlib",
     remote = "https://github.com/madler/zlib.git",
     tag = "v1.2.11",
-    sha256 = "629380c90a77b964d896ed37163f5c3a34f6e6d897311f1df2a7016355c45eff",
+    #sha256 = "629380c90a77b964d896ed37163f5c3a34f6e6d897311f1df2a7016355c45eff",
     build_file = "third-party/zlib.BUILD",
 )
 
@@ -121,8 +121,8 @@ bind(
 
 git_repository(
     name = "com_github_brpc_braft",
-    remote= "https://github.com/brpc/braft.git",
-    tag = "master",
+    remote = "https://github.com/brpc/braft.git",
+    commit = "a4fd1239631b37a6b08449137f1e1a8fdcd5820d",
 )
 
 bind(

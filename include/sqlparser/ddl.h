@@ -127,6 +127,21 @@ enum DatabaseOptionType : unsigned char {
     DATABASE_OPT_COLLATE
 };
 
+// https://dev.mysql.com/doc/refman/8.0/en/alter-table.html
+enum AlterSpecType : unsigned char {
+    ALTER_SPEC_ADD_COLUMN = 0,   // only support add column at the tail
+    ALTER_SPEC_ADD_INDEX,        // not supported yet
+    ALTER_SPEC_ADD_CONSTRAINT,
+    ALTER_SPEC_ADD_FULLTEXT,
+
+    ALTER_SPEC_DROP_COLUMN, 
+    ALTER_SPEC_DROP_INDEX,
+
+    ALTER_SPEC_RENAME_COLUMN,
+    ALTER_SPEC_RENAME_TABLE,
+    ALTER_SPEC_TABLE_OPTION
+};
+
 struct TypeOption : public Node {
     bool is_unsigned = false;
     bool is_zerofill = false;
@@ -266,9 +281,39 @@ struct CreateDatabaseStmt : public DdlNode {
 struct DropDatabaseStmt : public DdlNode {
     bool   if_exist = false;
     String db_name;
+
     DropDatabaseStmt() {
         node_type = NT_DROP_DATABASE;
         db_name = nullptr;
+    }
+};
+
+// current supported alter type:
+// ALTER_SPEC_ADD_COLUMN
+// ALTER_SPEC_DROP_COLUMN
+// ALTER_SPEC_RENAME_COLUMN
+// ALTER_SPEC_RENAME_TABLE
+// ALTER_SPEC_TABLE_OPTION (only AVG_ROW_LENGTH)
+struct AlterTableSpec : public Node {
+    AlterSpecType           spec_type;
+    String                  column_name;
+    Vector<TableOption*>    table_options;
+    TableName*              new_table_name = nullptr;
+    Vector<ColumnDef*>      new_columns;
+
+    AlterTableSpec() {
+        node_type = NT_ALTER_SEPC;
+        column_name = nullptr;
+    }
+};
+
+struct AlterTableStmt : public DdlNode {
+    bool       ignore = false;
+    TableName* table_name = nullptr;
+    Vector<AlterTableSpec*> alter_specs;
+
+    AlterTableStmt() {
+        node_type = NT_ALTER_TABLE;
     }
 };
 }

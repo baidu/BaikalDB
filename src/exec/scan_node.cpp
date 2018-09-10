@@ -59,6 +59,7 @@ int ScanNode::select_index(RuntimeState* state,
             index_priority = 0;
         }
         uint32_t prefix_ratio_index_score = (prefix_ratio_round << 16) | index_priority;
+        DB_WARNING("scan node insert prefix_ratio_index_score:%u, i: %d", prefix_ratio_index_score, i);
         prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, i));
 
         // 优先选倒排，没有就取第一个
@@ -81,7 +82,9 @@ int ScanNode::select_index(RuntimeState* state,
         return sort_index;
     }
     // ratio * 10(=0...9)相同的possible index中，按照PRIMARY, UNIQUE, KEY的优先级选择
+    DB_WARNING("prefix_ratio_id_mapping.size: %d", prefix_ratio_id_mapping.size());
     for (auto iter = prefix_ratio_id_mapping.crbegin(); iter != prefix_ratio_id_mapping.crend(); ++iter) {
+        DB_WARNING("prefix_ratio_index_score:%u, i: %d", iter->first, iter->second);
         return iter->second;
     }
     return 0;
@@ -105,7 +108,7 @@ int ScanNode::choose_index(RuntimeState* state) {
     _index_id = pos_index.index_id();
     _index_info = &state->resource()->get_index_info(_index_id);
     if (_index_info->id == -1) {
-        DB_WARNING("no index_info found for index id: %ld", _index_id);
+        DB_WARNING_STATE(state, "no index_info found for index id: %ld", _index_id);
         return -1;
     }
     int ret = 0;
@@ -116,7 +119,7 @@ int ScanNode::choose_index(RuntimeState* state) {
             auto index_id = pos_index.index_id();
             IndexInfo& index_info = state->resource()->get_index_info(index_id);
             if (index_info.id == -1) {
-                DB_WARNING("no index_info found for index id: %ld", index_id);
+                DB_WARNING_STATE(state, "no index_info found for index id: %ld", index_id);
                 return -1;
             }
             for (auto& range : pos_index.ranges()) {
@@ -125,14 +128,14 @@ int ScanNode::choose_index(RuntimeState* state) {
                 std::string word;
                 ret = record->get_reverse_word(index_info, word);
                 if (ret < 0) {
-                    DB_WARNING("index_info to word fail for index_id: %ld", index_id);
+                    DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", index_id);
                     return ret;
                 }
                 _reverse_infos.push_back(index_info);
                 _query_words.push_back(word);
             }
             _index_ids.push_back(index_id);
-            DB_WARNING("use multi %d", _reverse_infos.size());
+            DB_WARNING_STATE(state, "use multi %d", _reverse_infos.size());
         }
         return 0;
     }
@@ -140,7 +143,7 @@ int ScanNode::choose_index(RuntimeState* state) {
     if (pos_index.ranges_size() == 0) {
         return -1;
     }
-    DB_WARNING("use_index: %ld table_id: %ld left:%d, right:%d", 
+    DB_WARNING_STATE(state, "use_index: %ld table_id: %ld left:%d, right:%d", 
             _index_id, _table_id, pos_index.ranges(0).left_field_cnt(), pos_index.ranges(0).right_field_cnt());
 
     bool is_eq = true;
@@ -160,7 +163,7 @@ int ScanNode::choose_index(RuntimeState* state) {
         if (left_field_cnt != right_field_cnt) {
             is_eq = false;
         }
-        //DB_WARNING("left_open:%d right_open:%d", left_open, right_open);
+        //DB_WARNING_STATE(state, "left_open:%d right_open:%d", left_open, right_open);
         if (left_open || right_open) {
             is_eq = false;
         }
@@ -173,7 +176,7 @@ int ScanNode::choose_index(RuntimeState* state) {
     }
     if (_index_info->type == pb::I_PRIMARY || _index_info->type == pb::I_UNIQ) {
         if (_left_field_cnts[_idx] == (int)_index_info->fields.size() && is_eq) {
-            //DB_WARNING("index use get ,index:%ld", _index_info.id);
+            //DB_WARNING_STATE(state, "index use get ,index:%ld", _index_info.id);
             _use_get = true;
         }
     }
@@ -181,7 +184,7 @@ int ScanNode::choose_index(RuntimeState* state) {
         ExprNode* index_conjunct = nullptr;
         ret = ExprNode::create_tree(expr, &index_conjunct);
         if (ret < 0) {
-            DB_WARNING("ExprNode::create_tree fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "ExprNode::create_tree fail, ret:%d", ret);
             return ret;
         }
         _index_conjuncts.push_back(index_conjunct);
@@ -190,7 +193,7 @@ int ScanNode::choose_index(RuntimeState* state) {
         _sort_use_index = true;
         _scan_forward = pos_index.sort_index().is_asc();
     }
-    //DB_WARNING("start search");
+    //DB_WARNING_STATE(state, "start search");
     return 0;
 }
 
@@ -207,45 +210,18 @@ int ScanNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
-int ScanNode::predicate_pushdown() {
+int ScanNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     //DB_WARNING("node:%ld is pushdown", this);
-    if (_parent == NULL) {
-        DB_WARNING("parent is null");
+    if (_parent->get_node_type() == pb::WHERE_FILTER_NODE
+            || _parent->get_node_type() == pb::TABLE_FILTER_NODE) {
+        DB_WARNING("parent is filter node,%d", _parent->get_node_type());
         return 0;
     }
-    if (_parent->get_node_type() != pb::JOIN_NODE) {
-        DB_WARNING("parent is not join node,%d", _parent->get_node_type());
-        return 0;
+    if (input_exprs.size() > 0) {
+        add_filter_node(input_exprs);
     }
-
-    std::vector<ExprNode*>* parent_conditions = _parent->mutable_conjuncts();
-    FilterNode* filter_node = NULL;
-    auto iter = parent_conditions->begin();
-    while (iter != parent_conditions->end()) {
-        if (!contain_condition(*iter)) {
-            ++iter;
-            //DB_WARNING("expr is not pushdown");
-            continue;
-        }
-        //生成filter节点
-        if (filter_node == NULL) {
-            pb::PlanNode pb_plan_node;
-            pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
-            pb_plan_node.set_num_children(1);
-            pb_plan_node.set_limit(-1);
-            filter_node = new FilterNode();
-            filter_node->init(pb_plan_node);
-            //修改plan树结构，在scan 和 join之间增加filter
-            _parent->replace_child(this, filter_node);
-            filter_node->add_child(this);
-        }
-        //下推
-        filter_node->add_conjunct(*iter);
-        //剪枝
-        iter = parent_conditions->erase(iter);
-        DB_WARNING("expr is push_down")
-    }
-    return ExecNode::predicate_pushdown();
+    input_exprs.clear();
+    return 0;
 }
 
 bool ScanNode::need_pushdown(ExprNode* expr) {
@@ -329,42 +305,16 @@ int ScanNode::index_condition_pushdown() {
     return 0;
 }
 
-int ScanNode::add_or_pushdown(ExprNode* expr, 
-                              ExecNode** exec_node) {
-    if (!contain_condition(expr)) {
-        DB_WARNING("add or pushdwon fail");
-        return -1;
-    }
-    
-    if (_parent->node_type() == pb::TABLE_FILTER_NODE
-            || _parent->node_type() == pb::WHERE_FILTER_NODE) {
-        static_cast<FilterNode*>(_parent)->add_conjunct(expr);
-        *exec_node = _parent;
-    } else {
-        pb::PlanNode pb_plan_node;
-        pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
-        pb_plan_node.set_num_children(1);
-        pb_plan_node.set_limit(-1);
-        FilterNode* filter_node = new FilterNode();
-        filter_node->init(pb_plan_node);
-        _parent->replace_child(this, filter_node);
-        filter_node->add_child(this);
-        filter_node->add_conjunct(expr);
-        *exec_node = filter_node;
-    }
-    return 0;
-}
-
 int ScanNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
     ret = choose_index(state);
     if (ret < 0) {
-        DB_WARNING("calc index fail:%d", ret);
+        DB_WARNING_STATE(state, "calc index fail:%d", ret);
         return ret;
     }
     if (_index_info->type == pb::I_RECOMMEND) {
@@ -381,9 +331,9 @@ int ScanNode::open(RuntimeState* state) {
 
     _mem_row_desc = state->mem_row_desc();
     _region_id = state->region_id();
-    DB_WARNING("use_index: %ld table_id: %ld region_id: %ld", _index_id, _table_id, _region_id);
+    DB_WARNING_STATE(state, "use_index: %ld table_id: %ld region_id: %ld", _index_id, _table_id, _region_id);
     _region_info = &(state->resource()->region_info);
-    Transaction* txn = state->txn();
+    auto txn = state->txn();
     auto reverse_index_map = state->reverse_index_map();
     for (auto& f : _pri_info->fields) {
         auto slot_id = state->get_slot_id(_tuple_id, f.id);
@@ -421,22 +371,22 @@ int ScanNode::open(RuntimeState* state) {
     for (auto expr : _index_conjuncts) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("Expr::open fail:%d", ret);
+            DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
             return ret;
         }
     }
-    //DB_WARNING("_is_covering_index:%d", _is_covering_index);
+    //DB_WARNING_STATE(state, "_is_covering_index:%d", _is_covering_index);
     if (_reverse_infos.size() > 0) {
         for (auto& info : _reverse_infos) {
             if (reverse_index_map.count(info.id) == 1) {
                 _reverse_indexes.push_back(reverse_index_map[info.id]);
             } else {
-                DB_WARNING("index:%ld is not FULLTEXT", info.id);
+                DB_WARNING_STATE(state, "index:%ld is not FULLTEXT", info.id);
                 return -1;
             }
         }
         bool or_bool = true;
-        //DB_WARNING("_m_index search");
+        //DB_WARNING_STATE(state, "_m_index search");
         // reverse has in, need not or boolean
         if (_reverse_indexes.size() > _index_ids.size()) {
             or_bool = false;
@@ -448,14 +398,14 @@ int ScanNode::open(RuntimeState* state) {
     } else if (reverse_index_map.count(_index_id) == 1) {
         //倒排索引不允许是多字段
         if (_index_info->fields.size() != 1) {
-            DB_WARNING("indexinfo get fail, index_id:%ld", _index_id);
+            DB_WARNING_STATE(state, "indexinfo get fail, index_id:%ld", _index_id);
             return -1;
         }
         _reverse_index = reverse_index_map[_index_id];
         std::string word;
         ret = _left_records[_idx]->get_reverse_word(*_index_info, word);
         if (ret < 0) {
-            DB_WARNING("index_info to word fail for index_id: %ld", _index_id);
+            DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", _index_id);
             return ret;
         }
         //DB_NOTICE("word:%s", str_to_hex(word).c_str());
@@ -497,9 +447,9 @@ void ScanNode::close(RuntimeState* state) {
 }
 
 int ScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos) {
-    Transaction* txn = state->txn();
+    auto txn = state->txn();
     if (txn == nullptr) {
-        DB_WARNING("txn is nullptr");
+        DB_WARNING_STATE(state, "txn is nullptr");
         return -1;
     }
     SmartRecord record;
@@ -519,7 +469,7 @@ int ScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* 
         }
         int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, true);
         if (ret < 0) {
-            DB_WARNING("get primary:%ld fail, not exist, ret:%d, record: %s", 
+            DB_WARNING_STATE(state, "get primary:%ld fail, not exist, ret:%d, record: %s", 
                     _table_id, ret, record->to_string().c_str());
             continue;
         }
@@ -550,10 +500,10 @@ int ScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* 
         } else {
             record = _left_records[_idx++];
         }
-        Transaction* txn = state->txn();
+        auto txn = state->txn();
         int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, record, GET_ONLY, true);
         if (ret < 0) {
-            DB_WARNING("get index:%ld fail, not exist, ret:%d, record: %s", 
+            DB_WARNING_STATE(state, "get index:%ld fail, not exist, ret:%d, record: %s", 
                     _table_id, ret, record->to_string().c_str());
             continue;
         }
@@ -603,9 +553,9 @@ int ScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool*
                         _left_opens[_idx], 
                         _right_opens[_idx]);
                 delete _table_iter;
-                _table_iter = state->txn()->scan_primary(range, _field_ids, true, _scan_forward);
+                _table_iter = Iterator::scan_primary(state->txn(), range, _field_ids, true, _scan_forward);
                 if (_table_iter == nullptr) {
-                    DB_WARNING("open TableIterator fail, table_id:%ld", _index_id);
+                    DB_WARNING_STATE(state, "open TableIterator fail, table_id:%ld", _index_id);
                     return -1;
                 }
                 if (_is_covering_index) {
@@ -621,7 +571,7 @@ int ScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool*
             continue;
         }
         TimeCost cost;
-        //DB_WARNING("get_next:%lu", cost.get_time());
+        //DB_WARNING_STATE(state, "get_next:%lu", cost.get_time());
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
         for (auto slot : _tuple_desc->slots()) {
             auto field = record->get_field_by_tag(slot.field_id());
@@ -681,9 +631,9 @@ int ScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool*
                             _left_opens[_idx], 
                             _right_opens[_idx]);
                     delete _index_iter;
-                    _index_iter = state->txn()->scan_secondary(range, true, _scan_forward);
+                    _index_iter = Iterator::scan_secondary(state->txn(), range, true, _scan_forward);
                     if (_index_iter == nullptr) {
-                        DB_WARNING("open IndexIterator fail, index_id:%ld", _index_id);
+                        DB_WARNING_STATE(state, "open IndexIterator fail, index_id:%ld", _index_id);
                         return -1;
                     }
                     _idx++;
@@ -697,19 +647,19 @@ int ScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool*
         if (_reverse_indexes.size() > 0) {
             ret = _m_index.get_next(record);
             if (ret < 0) {
-                DB_WARNING("get index fail, maybe reach end");
+                DB_WARNING_STATE(state, "get index fail, maybe reach end");
                 continue;
             }
         } else if (_reverse_index != nullptr) {
             ret = _reverse_index->get_next(record);
             if (ret < 0) {
-                DB_WARNING("get index fail, maybe reach end");
+                DB_WARNING_STATE(state, "get index fail, maybe reach end");
                 continue;
             }
         } else {
             ret = _index_iter->get_next(record);
             if (ret < 0) {
-                //DB_WARNING("get index fail, maybe reach end");
+                //DB_WARNING_STATE(state, "get index fail, maybe reach end");
                 continue;
             }
         }
@@ -726,7 +676,7 @@ int ScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool*
         //DB_NOTICE("get index: %ld", cost.get_time());
         //cost.reset();
         if (!_is_covering_index) {
-            Transaction* txn = state->txn();
+            auto txn = state->txn();
             ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
             if (ret < 0) {
                 DB_FATAL("get primary:%ld fail, ret:%d, index primary may be not consistency: %s", 

@@ -20,6 +20,7 @@
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
 #include "common.h"
+#include "datetime.h"
 #include "type_utils.h"
 
 namespace baikaldb {
@@ -79,6 +80,9 @@ struct ExprValue {
             case pb::DATETIME: {
                 return _u.uint64_val;
             }
+            case pb::TIME: {
+                return _u.int32_val;
+            }
             case pb::TIMESTAMP: {
                 // internally timestamp is stored in uint32
                 return _u.uint32_val;
@@ -130,6 +134,8 @@ struct ExprValue {
                     _u.uint64_val = timestamp_to_datetime(_u.uint32_val);
                 } else if (type == pb::DATE) {
                     _u.uint64_val = date_to_datetime(_u.uint32_val);
+                } else if (type == pb::TIME) {
+                    _u.uint64_val = time_to_datetime(_u.int32_val);
                 } else {
                     _u.uint64_val = get_numberic<uint64_t>();
                 }
@@ -147,6 +153,16 @@ struct ExprValue {
                     _u.uint32_val = datetime_to_date(cast_to(pb::DATETIME)._u.uint64_val);
                 } else {
                     _u.uint32_val = get_numberic<uint32_t>();
+                }
+                break;
+            }
+            case pb::TIME: {
+                if (is_numberic()) {
+                    _u.int32_val = get_numberic<int32_t>();
+                } else if (is_string()) {
+                    _u.int32_val = str_to_time(str_val.c_str());
+                } else {
+                    _u.int32_val = datetime_to_time(cast_to(pb::DATETIME)._u.uint64_val);
                 }
                 break;
             }
@@ -183,6 +199,7 @@ struct ExprValue {
             case pb::FLOAT:
             case pb::TIMESTAMP:
             case pb::DATE:
+            case pb::TIME:
                 butil::MurmurHash3_x64_128(&_u, 4, seed, out);
                 return out[0];
             case pb::INT64:
@@ -229,6 +246,8 @@ struct ExprValue {
                 return str_val;
             case pb::DATETIME:
                 return datetime_to_str(_u.uint64_val);
+            case pb::TIME:
+                return time_to_str(_u.int32_val);
             case pb::TIMESTAMP:
                 return timestamp_to_str(_u.uint32_val);
             case pb::DATE:
@@ -289,6 +308,7 @@ struct ExprValue {
             case pb::INT16:
                 return _u.int16_val - other._u.int16_val;
             case pb::INT32:
+            case pb::TIME:
                 return (int64_t)_u.int32_val - (int64_t)other._u.int32_val;
             case pb::INT64:
                 return _u.int64_val > other._u.int64_val ? 1 :
@@ -346,6 +366,10 @@ struct ExprValue {
 
     bool is_datetime() const {
         return type == pb::DATETIME;
+    }
+
+    bool is_time() const {
+        return type == pb::TIME;
     }
 
     bool is_timestamp() const {

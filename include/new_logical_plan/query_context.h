@@ -93,7 +93,7 @@ struct QueryStat {
         error_msg.str("");
         num_affected_rows   = 0;
         num_returned_rows   = 0;
-        log_id              = 0;
+        log_id              = butil::fast_rand();
     }
 };
 

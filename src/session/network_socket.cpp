@@ -44,6 +44,7 @@ NetworkSocket::NetworkSocket() {
     packet_len = 0;
     packet_read_len = 0;
     is_handshake_send_partly = 0;
+    last_insert_id = 0;
     has_error_packet = false;
     is_auth_result_send_partly = 0;
     query_ctx.reset(new QueryContext);
@@ -97,6 +98,7 @@ bool NetworkSocket::reset() {
     packet_read_len = 0;
     is_handshake_send_partly = 0;
     is_auth_result_send_partly = 0;
+    last_insert_id = 0;
     current_db.clear();
     username.clear();
 

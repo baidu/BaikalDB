@@ -98,6 +98,7 @@ struct NetworkSocket {
     int             is_handshake_send_partly;       // Handshake is sended partly, go on sending.
     int             is_auth_result_send_partly;     // Auth result is sended partly,
                                                     // need to go on sending.
+    int64_t         last_insert_id;
     // Socket status.
     std::string     current_db;                     // Current use database.
     int             charset_num;                    // Client charset number.
@@ -119,7 +120,7 @@ struct NetworkSocket {
     std::set<int>   need_rollback_seq;       // The sequence id for the commands need rollback within the transaction
     std::mutex      region_lock;
     std::map<int, pb::CachePlan> cache_plans; // plan of queries in a transaction
-    std::unordered_map<int64_t, pb::RegionInfo> region_infos;
+    std::map<int64_t, pb::RegionInfo> region_infos;
 };
 
 class SocketPool {

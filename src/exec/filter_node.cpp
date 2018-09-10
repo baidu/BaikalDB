@@ -80,12 +80,33 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     }
     return 0;
 }
+int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
+    //having条件暂时不下推
+    if (_node_type == pb::HAVING_FILTER_NODE) {
+        ExecNode::predicate_pushdown(input_exprs);
+        return 0;
+    }
+    for (auto& expr : _conjuncts) {
+        input_exprs.push_back(expr);     
+    }
+    if (_children.size() != 1) {
+        DB_WARNING("filter node pushdown fail");
+        return -1;
+    }
+    _children[0]->predicate_pushdown(input_exprs);
+    _conjuncts.clear();
+    for (auto& expr: input_exprs) {
+        _conjuncts.push_back(expr);
+    }
+    input_exprs.clear();
+    return 0;
+}
 
 int FilterNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
 
@@ -97,12 +118,12 @@ int FilterNode::open(RuntimeState* state) {
         }
         ret = conjunct->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
         _pruned_conjuncts.push_back(conjunct);
     }
-    //DB_WARNING("_conjuncts_size:%ld, pruned_conjuncts_size:%ld", _conjuncts.size(), _pruned_conjuncts.size());
+    //DB_WARNING_STATE(state, "_conjuncts_size:%ld, pruned_conjuncts_size:%ld", _conjuncts.size(), _pruned_conjuncts.size());
     return 0;
 }
 
@@ -140,16 +161,16 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
                 _child_row_batch.set_capacity(state->multiple_row_batch_capacity());
                 auto ret = _children[0]->get_next(state, &_child_row_batch, &_child_eos);
                 if (ret < 0) {
-                    DB_WARNING("_children get_next fail");
+                    DB_WARNING_STATE(state, "_children get_next fail");
                     return ret;
                 }
-                //DB_WARNING("_child_row_batch:%u %u", _child_row_batch.capacity(), _child_row_batch.size());
+                //DB_WARNING_STATE(state, "_child_row_batch:%u %u", _child_row_batch.capacity(), _child_row_batch.size());
                 //DB_NOTICE("scan cost:%ld", cost.get_time());
                 continue;
             }
         }
         if (reached_limit()) {
-            DB_WARNING("reach limit size:%u", batch->size());
+            DB_WARNING_STATE(state, "reach limit size:%u", batch->size());
             *eos = true;
             return 0;
         }

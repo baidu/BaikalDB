@@ -31,6 +31,8 @@ ExprValue unix_timestamp(const std::vector<ExprValue>& input);
 ExprValue from_unixtime(const std::vector<ExprValue>& input);
 ExprValue now(const std::vector<ExprValue>& input);
 ExprValue date_format(const std::vector<ExprValue>& input);
+ExprValue timediff(const std::vector<ExprValue>& input);
+ExprValue timestampdiff(const std::vector<ExprValue>& input);
 // hll functions
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);

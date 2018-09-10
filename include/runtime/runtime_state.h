@@ -98,20 +98,26 @@ public:
     int64_t region_id() {
         return _region_id;
     }
+    int64_t table_id() {
+        if (_resource != nullptr) {
+            return _resource->table_id;
+        }
+        return 0;
+    }
     DataBuffer* send_buf() {
         return _send_buf;
     }
-    Transaction* txn() {
+    SmartTransaction txn() {
         return _txn;
     }
 
-    void set_txn(Transaction* txn) {
+    void set_txn(SmartTransaction txn) {
         _txn = txn;
     }
 
-    Transaction* create_txn_if_null(pb::RegionInfo* _region_info) {
+    SmartTransaction create_txn_if_null(pb::RegionInfo* _region_info) {
         if (_txn == nullptr) {
-            _txn = new Transaction(0, _region_info, _txn_pool);
+            _txn = SmartTransaction(new Transaction(0, _region_info, _txn_pool));
             _txn->begin();
         }
         return _txn;
@@ -237,14 +243,14 @@ private:
     int _num_increase_rows = 0; //存储净新增行数
     int _num_affected_rows = 0; //存储baikaldb写影响的行数
     int _num_returned_rows = 0; //存储baikaldb读返回的行数
-    int64_t _log_id;
+    int64_t _log_id = 0;
 
     bool              _autocommit = true;     // used for baikaldb and store
     bool              _optimize_1pc = false;  // 2pc de-generates to 1pc when autocommit=true and
                                               // there is only 1 region.
     NetworkSocket*    _client_conn = nullptr; // used for baikaldb
     TransactionPool*  _txn_pool = nullptr;    // used for store
-    Transaction*      _txn = nullptr;         // used for store
+    SmartTransaction  _txn = nullptr;         // used for store
     std::shared_ptr<RegionResource> _resource;// used for store
 
     // 如果用了排序列做索引，就不需要排序了

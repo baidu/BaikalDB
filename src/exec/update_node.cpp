@@ -45,19 +45,19 @@ int UpdateNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
     for (auto expr : _update_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     ret = init_schema_info(state);
     if (ret == -1) {
-        DB_WARNING("init schema failed fail:%d", ret);
+        DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
     std::set<int32_t> affect_field_ids;
@@ -107,7 +107,7 @@ int UpdateNode::open(RuntimeState* state) {
         RowBatch batch;
         ret = _children[0]->get_next(state, &batch, &eos);
         if (ret < 0) {
-            DB_WARNING("children:get_next fail:%d", ret);
+            DB_WARNING_STATE(state, "children:get_next fail:%d", ret);
             return ret;
         }
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
@@ -120,7 +120,7 @@ int UpdateNode::open(RuntimeState* state) {
             }
             ret = update_row(state, record, row);
             if (ret < 0) {
-                DB_WARNING("insert_row fail");
+                DB_WARNING_STATE(state, "insert_row fail");
                 return -1;
             }
             num_affected_rows += ret;

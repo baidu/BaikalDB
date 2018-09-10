@@ -394,6 +394,8 @@ STDDEV_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return STDDEV_SAMP
 SUBDATE { un_reserved_keyword(yylval, yyscanner, parser); return SUBDATE; }
 SUBSTR { un_reserved_keyword(yylval, yyscanner, parser); return SUBSTR; }
 SUBSTRING { un_reserved_keyword(yylval, yyscanner, parser); return SUBSTRING; }
+TIMESTAMPADD { un_reserved_keyword(yylval, yyscanner, parser); return TIMESTAMPADD; }
+TIMESTAMPDIFF { un_reserved_keyword(yylval, yyscanner, parser); return TIMESTAMPDIFF; }
 SUM { un_reserved_keyword(yylval, yyscanner, parser); return SUM; }
 SYSDATE { un_reserved_keyword(yylval, yyscanner, parser); return SYSDATE; }
 SYSTEM_USER { un_reserved_keyword(yylval, yyscanner, parser); return SYSTEM_USER; }

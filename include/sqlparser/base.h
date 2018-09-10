@@ -69,6 +69,8 @@ enum NodeType {
     NT_DATABASE_OPT,
     NT_CREATE_DATABASE,
     NT_DROP_DATABASE,
+    NT_ALTER_TABLE,
+    NT_ALTER_SEPC,
 
     NT_START_TRANSACTION,
     NT_COMMIT_TRANSACTION,
@@ -106,10 +108,21 @@ struct String {
     bool empty() const {
         return (value == nullptr || value[0] == '\0');
     }
+    String& to_lower_inplace() {
+        if (value != nullptr) {
+            int len = strlen(value);
+            std::transform(value, value + len, value, ::tolower);
+        }
+        return *this;
+    }
     std::string to_lower() const {
-        std::string tmp = value;
-        std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::tolower);
-        return tmp;
+        if (value != nullptr) {
+            std::string tmp = value;
+            std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::tolower);
+            return tmp;
+        } else {
+            return std::string();
+        }
     }
     // shallow copy
     String& operator=(std::nullptr_t n) {
@@ -124,6 +137,17 @@ struct String {
         value = (char*)str;
         return *this;
     }
+
+    bool operator==(const String& rhs) {
+        if (empty() && rhs.empty()) {
+            return true;
+        }
+        if (empty() || rhs.empty()) {
+            return false;
+        }
+        return strcmp(value, rhs.value) == 0;
+    }
+    
 };
 inline std::ostream& operator<<(std::ostream& os, const String& str) {
     if (str.value == nullptr) {
