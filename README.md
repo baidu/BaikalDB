@@ -60,7 +60,7 @@ You may brew and enjoy a cup of coffee waiting for the tedious building process
   * baikal**/bin  // bin directory is where the binary program resides
   * baikal**/conf // conf directory is where the configuration file gflags.conf resides
 * It is compulsory to first deploy baikalMeta, then baikalStore and finally baikalDB
-* If multiple replica for table data is required, at least baikalStore instances should be deployed.
+* If multiple replica for table data is required, at least three baikalStore instances should be deployed.
 
 ### baikalMeta Deployment
 * copy the baikalMeta binary to ./bin 
