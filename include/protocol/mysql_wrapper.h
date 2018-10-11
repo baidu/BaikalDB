@@ -67,7 +67,7 @@ typedef struct result_field_t {
     result_field_t() {}
     ~result_field_t() {}
 
-    std::string     catalog = "baikaldb";
+    std::string     catalog = "def";
     std::string     db;
     std::string     table;
     std::string     org_table;

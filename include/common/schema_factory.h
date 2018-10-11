@@ -22,6 +22,7 @@
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/descriptor.pb.h>
+#include <bthread/execution_queue.h>
 #include "common.h"
 #include "expr_value.h"
 #include "proto/meta.interface.pb.h"
@@ -43,6 +44,47 @@ struct UserInfo;
 class TableRecord;
 typedef std::shared_ptr<TableRecord> SmartRecord;
 typedef std::map<std::string, int64_t> StrInt64Map;
+
+struct RegionInfo {
+    mutable std::mutex leader_mutex;
+    pb::RegionInfo region_info;
+    RegionInfo() {}
+    // update leader for all thread
+    explicit RegionInfo(const RegionInfo& other) {
+        BAIDU_SCOPED_LOCK(other.leader_mutex);
+        region_info = other.region_info;
+    }
+};
+struct TableRegionInfo {
+    // region_id => RegionInfo
+    std::unordered_map<int64_t, RegionInfo> region_info_mapping;
+    // partion vector of (start_key => regionid)
+    std::vector<StrInt64Map> key_region_mapping;
+    void update_leader(int64_t region_id, const std::string& leader) {
+        if (region_info_mapping.count(region_id) == 1) {
+            BAIDU_SCOPED_LOCK(region_info_mapping[region_id].leader_mutex);
+            region_info_mapping[region_id].region_info.set_leader(leader);
+        }
+    }
+    int get_region_info(int64_t region_id, pb::RegionInfo& info) {
+        if (region_info_mapping.count(region_id) == 1) {
+            BAIDU_SCOPED_LOCK(region_info_mapping[region_id].leader_mutex);
+            info = region_info_mapping[region_id].region_info;
+            return 0;
+        } else {
+            return -1;
+        }
+    }
+    void insert_region_info(const pb::RegionInfo& info) {
+        if (region_info_mapping.count(info.region_id()) == 1) {
+            BAIDU_SCOPED_LOCK(region_info_mapping[info.region_id()].leader_mutex);
+            region_info_mapping[info.region_id()].region_info = info;
+        } else {
+            region_info_mapping[info.region_id()].region_info = info;
+        }
+    }
+};
+typedef std::shared_ptr<DoubleBuffer<TableRegionInfo>> TableRegionPtr;
 
 struct FieldInfo {
     int32_t             id;
@@ -79,6 +121,7 @@ struct TableInfo {
     int64_t                 byte_size_per_record = 1; //默认情况下不分裂，兼容以前的表
     int64_t                 auto_inc_field_id = -1; //自增字段id
     pb::Charset             charset;
+    pb::Engine              engine;
     std::string             name;    // db.table
     std::string             namespace_;
     std::string             resource_tag;
@@ -131,21 +174,27 @@ struct DatabaseInfo {
     std::string             namespace_;
 };
 
+struct SchemaMapping {
+    // namespace.database (db) => database_id
+    std::unordered_map<std::string, int64_t> db_name_id_mapping;
+    // database_id => IndexInfo
+    std::unordered_map<int64_t, DatabaseInfo> db_info_mapping;
+    // namespace.database.table_name (db.table) => table_id
+    std::unordered_map<std::string, int64_t> table_name_id_mapping;
+    // table_id => TableInfo
+    std::unordered_map<int64_t, TableInfo> table_info_mapping;
+    // index_name (namespace.db.table.index) => index_id
+    std::unordered_map<std::string, int64_t> index_name_id_mapping;
+    // index_id => IndexInfo
+    std::unordered_map<int64_t, IndexInfo> index_info_mapping;
+};
+
 class SchemaFactory {
+    typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec; 
 public:
     virtual ~SchemaFactory() {
-        for (auto& kv : _table_info_mapping) {
-            delete kv.second.file_proto;
-            kv.second.file_proto = nullptr;
-            delete kv.second.factory;
-            kv.second.factory = nullptr;
-            delete kv.second.pool;
-            kv.second.pool = nullptr;
-        }
-        
-        //bthread_mutex_destroy(&_update_table_mutex);
-        //bthread_mutex_destroy(&_update_region_mutex);
-        //bthread_mutex_destroy(&_update_user_mutex);
+        bthread_mutex_destroy(&_update_table_region_mutex);
+        bthread_mutex_destroy(&_update_user_mutex);
     }
 
     static SchemaFactory* get_instance() {
@@ -158,22 +207,30 @@ public:
 
     // not thread-safe, should be called in single thread
     // 删除判断deleted, name允许改
-    int update_table(const pb::SchemaInfo& table);
+    void update_table(const pb::SchemaInfo& table);
+    static int update_tables_double_buffer(
+            void* meta, bthread::TaskIterator<pb::SchemaInfo>& iter);
+    void update_tables_double_buffer(bthread::TaskIterator<pb::SchemaInfo>& iter);
 
+    static int update_regions_double_buffer(
+            void* meta, bthread::TaskIterator<RegionVec>& iter);
+    void update_regions_double_buffer(
+            bthread::TaskIterator<RegionVec>& iter);
+    void update_regions_table(int64_t table_id, std::map<int,
+            std::map<std::string, const pb::RegionInfo*>>& key_region_map);
     // 删除判断deleted
-    void update_regions(
-            const ::google::protobuf::RepeatedPtrField<pb::RegionInfo>& regions);
-    void force_update_region(const pb::RegionInfo& region);
+    void update_regions(const RegionVec& regions);
+    //void force_update_region(const pb::RegionInfo& region);
     void update_region(const pb::RegionInfo& region);
     void update_leader(const pb::RegionInfo& region);
-    void _update_region(const pb::RegionInfo& region, bool force);
-    void delete_region_without_lock(const pb::RegionInfo& region);
+    TableRegionPtr get_table_region(int64_t table_id);
 
     //TODO 不考虑删除
     void update_user(const pb::UserPrivilege& user);
 
     std::unordered_map<int64_t, TableInfo>& table_info_mapping() {
-        return _table_info_mapping;
+        SchemaMapping* frontground = _double_buffer_table.read();
+        return frontground->table_info_mapping;
     }
 
     ////functions for table info access
@@ -185,6 +242,7 @@ public:
 
     DatabaseInfo get_database_info(int64_t databaseid);
 
+    pb::Engine get_table_engine(int64_t tableid);
     TableInfo get_table_info(int64_t tableid);
 
     IndexInfo get_index_info(int64_t indexid);
@@ -210,6 +268,7 @@ public:
 
     // functions for region info access
     int get_region_info(int64_t region_id, pb::RegionInfo& info);
+    int get_region_info(int64_t table_id, int64_t region_id, pb::RegionInfo& info);
 
     int get_region_capacity(int64_t table_id, int64_t& region_capacity);
     // only used for pk (not null)
@@ -233,52 +292,28 @@ public:
 private:
     SchemaFactory() {
         _is_init = false;
-        //bthread_mutex_init(&_update_table_mutex, NULL);
-        //bthread_mutex_init(&_update_region_mutex, NULL);
-        //bthread_mutex_init(&_update_user_mutex, NULL);
+        bthread_mutex_init(&_update_table_region_mutex, NULL);
+        bthread_mutex_init(&_update_user_mutex, NULL);
     }
+    int update_table(const pb::SchemaInfo& table, SchemaMapping* background);
     // 全量更新
-    void update_index(TableInfo& info, 
-        const pb::IndexInfo& index, const pb::IndexInfo* pk_index);
+    void update_index(TableInfo& info, const pb::IndexInfo& index,
+            const pb::IndexInfo* pk_indexi, SchemaMapping* background);
     //delete table和index
-    void delete_table(const pb::SchemaInfo& table);
+    void delete_table(const pb::SchemaInfo& table, SchemaMapping* background);
 
 
-    //DescriptorPool          _pool;
     bool                    _is_init;
-    //bthread_mutex_t         _update_table_mutex;
-    std::mutex              _update_table_mutex;
-    std::mutex              _update_region_mutex;
-    //bthread_mutex_t         _update_region_mutex;
-    //bthread_mutex_t         _update_user_mutex;
-    std::mutex              _update_user_mutex;
-
-    // database_id => IndexInfo
-    std::unordered_map<int64_t, DatabaseInfo> _db_info_mapping;
-
-    // table_id => TableInfo
-    std::unordered_map<int64_t, TableInfo> _table_info_mapping;
-
-    // index_id => IndexInfo
-    std::unordered_map<int64_t, IndexInfo> _index_info_mapping;
-
-    // region_id => RegionInfo
-    std::unordered_map<int64_t, pb::RegionInfo> _region_info_mapping;
+    bthread_mutex_t         _update_table_region_mutex;
+    bthread_mutex_t         _update_user_mutex;
 
     // username => UserPrivilege
     std::unordered_map<std::string, std::shared_ptr<UserInfo>> _user_info_mapping;
 
-    // namespace.database (db) => database_id
-    std::unordered_map<std::string, int64_t> _db_name_id_mapping;
+    DoubleBuffer<SchemaMapping> _double_buffer_table;
+    bthread::ExecutionQueueId<pb::SchemaInfo> _table_queue_id = {0};
 
-    // namespace.database.table_name (db.table) => table_id
-    std::unordered_map<std::string, int64_t> _table_name_id_mapping;
-
-    // index_name (namespace.db.table.index) => index_id
-    std::unordered_map<std::string, int64_t> _index_name_id_mapping;
-
-    // table_id => (partion vector of (start_key => regionid))
-    std::unordered_map<int64_t, std::vector<StrInt64Map>> _key_region_mapping;
-
+    std::unordered_map<int64_t, TableRegionPtr> _table_region_mapping;
+    bthread::ExecutionQueueId<RegionVec> _region_queue_id = {0};
 };
 }

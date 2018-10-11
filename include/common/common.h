@@ -31,6 +31,7 @@
 #include <butil/endpoint.h>
 #include <butil/base64.h>
 #endif
+#include <bthread/execution_queue.h>
 #include "log.h"
 #include "proto/common.pb.h"
 
@@ -84,6 +85,34 @@ private:
     int64_t _start;
 };
 
+// wrapper bthread::execution_queue functions for c++ style
+class ExecutionQueue {
+public:
+    ExecutionQueue() {
+        bthread::execution_queue_start(&_queue_id, nullptr, run_function, nullptr);
+    }
+    void run(const std::function<void()>& call) {
+        bthread::execution_queue_execute(_queue_id, call);
+    }
+    void stop() {
+        execution_queue_stop(_queue_id);
+    }
+    void join() {
+        execution_queue_join(_queue_id);
+    }
+private:
+    static int run_function(void* meta, bthread::TaskIterator<std::function<void()>>& iter) {
+        if (iter.is_queue_stopped()) {
+            return 0;
+        }
+        for (; iter; ++iter) {
+            (*iter)();
+        }
+        return 0;
+    }
+    bthread::ExecutionQueueId<std::function<void()>> _queue_id = {0};
+};
+// wrapper bthread functions for c++ style
 class Bthread {
 public:
     Bthread() {
@@ -149,14 +178,14 @@ public:
 
     void decrease_signal() {
         bthread_mutex_lock(&_mutex);
-        _count--;
+        --_count;
         bthread_cond_signal(&_cond);
         bthread_mutex_unlock(&_mutex);
     }
 
     void decrease_broadcast() {
         bthread_mutex_lock(&_mutex);
-        _count--;
+        --_count;
         bthread_cond_broadcast(&_cond);
         bthread_mutex_unlock(&_mutex);
     }
@@ -177,6 +206,7 @@ public:
     int increase_wait(int cond = 0) {
         int ret = 0;
         bthread_mutex_lock(&_mutex);
+        ++_count;
         while (_count > cond) {
             ret = bthread_cond_wait(&_cond, &_mutex);
             if (ret != 0) {
@@ -184,7 +214,6 @@ public:
                 break;
             }
         }
-        ++_count;
         bthread_mutex_unlock(&_mutex);
         return ret;
     }
@@ -207,6 +236,7 @@ public:
         int ret = 0;
         timespec tm = butil::microseconds_from_now(timeout_us);
         bthread_mutex_lock(&_mutex);
+        ++_count;
         while (_count > cond) {
             ret = bthread_cond_timedwait(&_cond, &_mutex, &tm);
             if (ret != 0) {
@@ -214,7 +244,6 @@ public:
                 break; 
             }
         }
-        ++_count;
         bthread_mutex_unlock(&_mutex);
         return ret;
     }
@@ -326,6 +355,23 @@ private:
     std::unordered_map<KEY, VALUE> _map[MAP_COUNT];
     bthread_mutex_t _mutex[MAP_COUNT];
     DISALLOW_COPY_AND_ASSIGN(ThreadSafeMap);
+};
+
+template <typename T>
+class DoubleBuffer {
+public:
+    T* read() {
+        return _data + _index;
+    }
+    T* read_background() {
+        return _data + !_index;
+    }
+    void swap() {
+        _index = ! _index;
+    }
+private:
+    T _data[2];
+    int _index = 0;
 };
 
 extern int64_t timestamp_diff(timeval _start, timeval _end);

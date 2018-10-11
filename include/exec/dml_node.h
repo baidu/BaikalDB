@@ -28,7 +28,8 @@ public:
     int insert_row(RuntimeState* state, SmartRecord record, bool is_update = false);
     int delete_row(RuntimeState* state, SmartRecord record);
     int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str);
-    int remove_row(RuntimeState* state, SmartRecord record, const std::string& pk_str);
+    int remove_row(RuntimeState* state, SmartRecord record, 
+            const std::string& pk_str, bool delete_primary = true);
     int update_row(RuntimeState* state, SmartRecord record, MemRow* row);
     int64_t table_id() {
         return _table_id;
@@ -45,6 +46,7 @@ protected:
     pb::TupleDescriptor* _values_tuple_desc = nullptr;
     std::unique_ptr<MemRow> _dup_update_row; // calc for on_dup_key_update
     int _num_increase_rows = 0; // update num_table_lines 
+    bool _is_replace = false;
     bool _need_ignore = false;
     bool _on_dup_key_update = false;
     //std::vector<int64_t> _index_ids;

@@ -434,11 +434,17 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
     return DECIMAL_LIT;
 }
 
-\"([^\\\"]|\\.|[\x81-\xFE][\x40-\xFE])*\" |
-\'([^\\\']|\\.|[\x81-\xFE][\x40-\xFE])*\' |
+\"([^\\\"]|\\.)*\" |
+\'([^\\\']|\\.)*\' |
 	"?" {
     //×Ö·û´®..
-	yylval->expr = LiteralExpr::make_string(yytext, parser->arena);
+	LiteralExpr* lit;
+	lit = LiteralExpr::make_string(yytext, parser->arena);
+	lit->_u.str_val.stripslashes(); // ´Ólogical_planÒÆµ½Õâ±ß
+	if (parser->is_gbk && parser->has_5c) {
+		lit->_u.str_val.restore_5c();
+	}
+	yylval->expr = lit;
     return STRING_LIT;
 }
 

@@ -21,6 +21,8 @@
 #include "base.h"
 
 namespace baikaldb {
+DECLARE_bool(default_2pc);
+
 class ExecNode;
 
 // notice日志信息统计结构
@@ -100,10 +102,13 @@ struct QueryStat {
 class QueryContext {
 public:
     QueryContext() {
+        enable_2pc = FLAGS_default_2pc;
     }
     QueryContext(std::shared_ptr<UserInfo> user, std::string db) : 
-        cur_db(db),
-        user_info(user) {}
+            cur_db(db),
+            user_info(user) {
+        enable_2pc = FLAGS_default_2pc;
+    }
 
     ~QueryContext();
 
@@ -148,17 +153,16 @@ public:
         }
         return -1;
     }
-
     pb::PlanNode* add_plan_node() {
         return plan.add_nodes();
     }
-
     int create_plan_tree();
     
 public:
     std::string         sql;
     std::vector<std::string> comments;
     std::string         cur_db;
+    std::string         charset;
 
     // new sql parser data structs
     parser::StmtNode*   stmt;

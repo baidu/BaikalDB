@@ -339,4 +339,5 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
     }
     return _mysql_pb_type_mapping[type];
 }
+
 }  // baikaldb

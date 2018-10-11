@@ -80,6 +80,11 @@ public:
                                   pb::BaikalHeartBeatResponse* response,
                                   google::protobuf::Closure* done); 
 
+    virtual void migrate(google::protobuf::RpcController* controller,
+            const pb::MigrateRequest* /*request*/,
+            pb::MigrateResponse* response,
+            google::protobuf::Closure* done);
+
     void shutdown_raft();
     
 private:

@@ -55,7 +55,7 @@ enum OpType {
     OP_UPDATE_FOR_AUTO_INCREMENT            = 147; //更新自增主键最大值
     OP_RESTORE_REGION                       = 148; //恢复store误删的region
     OP_UNSAFE_DECISION                      = 149; //开启删表和log_index=0时自动删除region逻辑10分钟
-    OP_SET_INSTANCE_DEAD                    = 150; //手工置实例状态为dead
+    OP_SET_INSTANCE_MIGRATE                 = 150; //手工置实例状态为MIGRATE，迁移用
     OP_PREPARE                              = 151; 
     OP_ADD_ID_FOR_AUTO_INCREMENT            = 152; //添加自增主键
     OP_DROP_ID_FOR_AUTO_INCREMENT           = 153; //删除自增主键

@@ -32,9 +32,8 @@ typedef std::map<int, pb::CachePlan> CachePlanMap;
 class TransactionPool;
 class Transaction {
 public:
-    Transaction(uint64_t txn_id, pb::RegionInfo* region_info, TransactionPool* pool) : 
+    Transaction(uint64_t txn_id, TransactionPool* pool) : 
             _txn_id(txn_id),
-            _region_info(region_info),
             _pool(pool) {
         _write_opt.disableWAL = FLAGS_disable_wal;
         bthread_mutex_init(&_txn_mutex, nullptr);
@@ -166,6 +165,9 @@ public:
             }
         }
         return false;
+    }
+    void set_region_info(pb::RegionInfo* region_info) {
+        _region_info = region_info;
     }
 
     // 

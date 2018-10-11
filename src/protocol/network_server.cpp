@@ -155,6 +155,9 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
         auto req_info = request.add_schema_infos();
         req_info->set_table_id(info_pair.second.id);
         req_info->set_version(info_pair.second.version);
+        if (info_pair.second.engine != pb::ROCKSDB) {
+            continue;
+        }
         std::map<int64_t, pb::RegionInfo> region_infos;
         IndexInfo index = factory->get_index_info(info_pair.second.id);
         factory->get_region_by_key(index, NULL, region_infos);
@@ -259,28 +262,7 @@ void NetworkServer::connection_timeout_check() {
 // Gracefully shutdown.
 void NetworkServer::graceful_shutdown() {
     _shutdown = true;
-    _ios.stop();
-    pthread_join(_timer_tid, nullptr);
-    _heartbeat_bth.join();
 
-    if (_epoll_info == nullptr) {
-        DB_WARNING("_epoll_info not initialized yet.");
-        return;
-    }
-    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
-        SmartSocket sock = _epoll_info->get_fd_mapping(idx);
-        if (!sock) {
-            continue;
-        }
-        if (sock == nullptr || sock->in_pool == true || sock->fd == 0) {
-            continue;
-        }
-
-        // 待现有工作处理完成，需要获取锁
-        sock->mutex.lock();
-        sock->shutdown = true;
-        MachineDriver::get_instance()->dispatch(sock, _epoll_info, true, false);
-    }
 }
 
 NetworkServer::NetworkServer():
@@ -344,6 +326,7 @@ bool NetworkServer::init() {
         DB_FATAL("send heart beat request to meta server fail");
         return false;
     }
+    bthread_usleep(300 * 1000);
     if (FLAGS_fetch_instance_id) {
         if (fetch_instance_info() != 0) {
             return false;
@@ -367,6 +350,29 @@ bool NetworkServer::init() {
 }
 
 void NetworkServer::stop() {
+    _ios.stop();
+    pthread_join(_timer_tid, nullptr);
+    _heartbeat_bth.join();
+
+    if (_epoll_info == nullptr) {
+        DB_WARNING("_epoll_info not initialized yet.");
+        return;
+    }
+    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+        SmartSocket sock = _epoll_info->get_fd_mapping(idx);
+        if (!sock) {
+            continue;
+        }
+        if (sock == nullptr || sock->in_pool == true || sock->fd == 0) {
+            continue;
+        }
+
+        // 待现有工作处理完成，需要获取锁
+        if (sock->mutex.try_lock()) {
+            sock->shutdown = true;
+            MachineDriver::get_instance()->dispatch(sock, _epoll_info, true, false);
+        }
+    }
     return;
 }
 

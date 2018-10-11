@@ -77,11 +77,18 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             }
         }
     }
+    MutTableKey pk_key;
+    ret = record->encode_key(*_pri_info, pk_key, -1, false);
+    if (ret < 0) {
+        DB_WARNING_STATE(state, "encode key failed, ret:%d", ret);
+        return ret;
+    }
+    std::string pk_str = pk_key.data();
     if (_affect_primary) {
         //no field need to decode here, only check key exist and get lock
         std::vector<int32_t> field_ids;
         SmartRecord old_record = record;
-        if (_node_type == pb::REPLACE_NODE) {
+        if (_is_replace) {
             old_record = record->clone(true);
         }
         ret = txn->get_update_primary(_region_id, *_pri_info, old_record, field_ids, GET_LOCK, true);
@@ -100,7 +107,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                         ++ret;
                     }
                     return ret;
-                } else if (_node_type == pb::REPLACE_NODE) {
+                } else if (_is_replace) {
                     /*
                     std::string old_s;
                     std::string new_s;
@@ -111,7 +118,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                                 _table_id, state->region_id());
                         return 0;
                     }*/
-                    ret = delete_row(state, old_record);
+                    ret = remove_row(state, old_record, pk_str, false);
                     if (ret < 0) {
                         DB_WARNING_STATE(state, "remove fail, table_id:%ld ,ret:%d", _table_id, ret);
                         return -1;
@@ -130,13 +137,6 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             }
         }
     }
-    MutTableKey pk_key;
-    ret = record->encode_key(*_pri_info, pk_key, -1, false);
-    if (ret < 0) {
-        DB_WARNING_STATE(state, "encode key failed, ret:%d", ret);
-        return ret;
-    }
-    std::string pk_str = pk_key.data();
 
     // lock secondary keys
     for (auto& index_id: _affected_index_ids) {
@@ -145,7 +145,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             continue;
         }
         SmartRecord old_record = record;
-        if (_node_type == pb::REPLACE_NODE) {
+        if (_is_replace ) {
             old_record = record->clone(true);
         }
         ret = txn->get_update_secondary(_region_id, *_pri_info, info, old_record, GET_LOCK, true);
@@ -156,7 +156,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                     ++ret;
                 }
                 return ret;
-            } if (_node_type == pb::REPLACE_NODE) {
+            } if (_is_replace) {
                 ret = delete_row(state, old_record);
                 if (ret < 0) {
                     DB_WARNING_STATE(state, "remove fail, index:%ld ,ret:%d", info.id, ret);
@@ -240,10 +240,11 @@ int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* 
     return txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true);
 }
 
-int DMLNode::remove_row(RuntimeState* state, SmartRecord record, const std::string& pk_str) {
+int DMLNode::remove_row(RuntimeState* state, SmartRecord record, 
+        const std::string& pk_str, bool delete_primary) {
     int ret = 0;
     auto txn = state->txn();
-    if (_affect_primary) {
+    if (_affect_primary && delete_primary) {
         ret = txn->remove(_region_id, *_pri_info, record);
         if (ret != 0) {
             DB_WARNING_STATE(state, "remove fail, index:%ld ,ret:%d", _table_id, ret);

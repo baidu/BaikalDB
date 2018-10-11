@@ -81,7 +81,7 @@ public:
 
     void move_physical(const pb::MetaManagerRequest& request, braft::Closure* done); 
     
-    void set_instance_dead(const pb::MetaManagerRequest* request,
+    void set_instance_migrate(const pb::MetaManagerRequest* request,
                              pb::MetaManagerResponse* response,
                              uint64_t log_id); 
     
@@ -152,6 +152,14 @@ public:
                     std::unordered_map<int64_t, int64_t>{};
         }
     }
+
+    Instance get_instance(std::string instance) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_instance_info.find(instance) == _instance_info.end()) {
+            return Instance();
+        }
+        return _instance_info[instance];
+    }
   
     void set_instance_regions(const std::string& instance, 
                     const std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
@@ -170,19 +178,19 @@ public:
         _instance_info[instance].capacity = instance_info.capacity();
         _instance_info[instance].used_size = instance_info.used_size();
         _instance_info[instance].resource_tag = instance_info.resource_tag();
-        _instance_info[instance].instance_status.state = pb::NORMAL;
+        if (_instance_info[instance].instance_status.state != pb::MIGRATE) {
+            _instance_info[instance].instance_status.state = pb::NORMAL;
+        }
         _instance_info[instance].instance_status.timestamp = butil::gettimeofday_us();
         return 0;
     }
     
-    int set_dead_for_instance(const std::string& dead_instance) {
+    int set_migrate_for_instance(const std::string& instance) {
         BAIDU_SCOPED_LOCK(_instance_mutex);
-        if (_instance_info.find(dead_instance) == _instance_info.end()) {
+        if (_instance_info.find(instance) == _instance_info.end()) {
             return -1;
         }
-        //修改该实例上报心跳的时间，是健康检查线程可以直接判定该实例为dead
-        _instance_info[dead_instance].instance_status.timestamp = 0;
-        _instance_info[dead_instance].instance_status.state = pb::DEAD;
+        _instance_info[instance].instance_status.state = pb::MIGRATE;
         return 0;
     }
     
@@ -223,15 +231,13 @@ private:
                                 const std::string& key, 
                                 const std::string& value);
 private:
-    //std::mutex                                                  _physical_mutex;
-    bthread_mutex_t                                                  _physical_mutex;
+    bthread_mutex_t                                             _physical_mutex;
     //物理机房与逻辑机房对应关系 , key:物理机房， value:逻辑机房
     std::unordered_map<std::string, std::string>                _physical_info;
     //物理机房与逻辑机房对应关系 , key:逻辑机房， value:物理机房组合
     std::unordered_map<std::string, std::set<std::string>>      _logical_physical_map;
     
-    //std::mutex                                                  _instance_mutex;
-    bthread_mutex_t                                                  _instance_mutex;
+    bthread_mutex_t                                             _instance_mutex;
     //物理机房与实例对应关系, key:实例， value:物理机房
     //std::unordered_map<std::string, std::string>                _instance_physical_map;
     //物理机房与实例对应关系, key:物理机房， value:实例

@@ -113,7 +113,7 @@ void common_raft_control(google::protobuf::RpcController* controller,
             new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
         node->snapshot(snapshot_done);
         return;
-    }   
+    }
     case pb::ShutDown : { 
         RaftControlDone* shutdown_done = 
                 new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
@@ -261,11 +261,7 @@ void _set_peer(google::protobuf::RpcController* controller,
         if (0 == _diff_peers(old_peers, new_peers, &peer)) {
             RaftControlDone* set_peer_done =
                 new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
-#ifdef BAIDU_INTERNAL
-            node->add_peer(old_peers, peer, set_peer_done);
-#else
             node->add_peer(peer, set_peer_done);
-#endif
         } else {
             response->set_errcode(pb::INPUT_PARAM_ERROR);
             response->set_errmsg("diff peer fail when add peer");
@@ -280,11 +276,7 @@ void _set_peer(google::protobuf::RpcController* controller,
         if (0 == _diff_peers(old_peers, new_peers, &peer)) {
             RaftControlDone* set_peer_done =
                 new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
-#ifdef BAIDU_INTERNAL
-            node->remove_peer(old_peers, peer, set_peer_done);
-#else
             node->remove_peer(peer, set_peer_done);
-#endif
         } else {
             response->set_errcode(pb::INPUT_PARAM_ERROR);
             response->set_errmsg("diff peer fail when remove peer");

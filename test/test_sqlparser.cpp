@@ -15,9 +15,11 @@
 #include <gtest/gtest.h>
 #include <climits>
 #include <iostream>
+#include <fstream>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include "common.h"
 #include "parser.h"
 
 int main(int argc, char* argv[])
@@ -29,15 +31,29 @@ int main(int argc, char* argv[])
 namespace parser {
 
 TEST(test_parser, case_all) {
-    uint32_t xx2 = (uint32_t)-1 % 23;
-    std::cout << xx2 << ":aaa\n";
     parser::SqlParser parser;
-    std::string sql = "insert into t1 (a,b) values (1,2),(3,4+2);select 1;";
-    std::string sql2 = "insert \n \n in to t1 (a,b) values (1,1),(now(), (1+((2+3))));";
+    std::string sql = "insert into t1() values (1,'aaa'),('3',4+2)";
+    //std::string sql2 = "insert \n \n in to t1 (a,b) values (1,1),(now(), (1+((2+3))));";
+    std::ifstream done_ifs("test_sql");
+    std::string sql2(
+        (std::istreambuf_iterator<char>(done_ifs)),
+        std::istreambuf_iterator<char>());
+    /*
+    baikal::client::Manager _manager;
+    baikal::client::Service* _baikaldb; 
+    _manager.init("conf", "baikal_client.conf");
+    baikal::client::ResultSet result_set;
+    _baikaldb = _manager.get_service("baikaldb");
+    _baikaldb->query(0, sql2, &result_set);
+    for (int i = 0; i < sql2.size(); i++) {
+        printf("%02x", sql2[i]);
+    }
+    */
+    std::cout << "\n" << sql2.size() << std::endl;
     parser.parse(sql);
-    std::cout << "sql:" << sql2 << std::endl;
+    std::cout << "sql:" << sql << " " << parser.is_gbk << " " << parser.has_5c << std::endl;
     if (parser.error != parser::SUCC) {
-        std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
+        std::cout <<  parser.result.size() << " error:" << parser.syntax_err_str << std::endl;
         return;
     }
     InsertStmt* stmt = (InsertStmt*)parser.result[0];

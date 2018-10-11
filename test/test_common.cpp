@@ -66,7 +66,7 @@ TEST(test_stripslashes, case_all) {
 TEST(test_pb2json, pb2json) {
     std::cout << sizeof(pb::RegionInfo) << " " << sizeof(rapidjson::StringBuffer) 
     << " " << sizeof(Pb2JsonOptions) << " " << sizeof(TableInfo) << " " << sizeof(pb::SchemaInfo) << "\n";
-    std::cout << sizeof(raft::NodeOptions) << " " << sizeof(std::string) 
+    std::cout << sizeof(raft::NodeOptions) << " " << sizeof(std::string) << " " << sizeof(size_t) << " "
     << sizeof(raft::PeerId) << sizeof(base::EndPoint) << "\n"; 
 }
 

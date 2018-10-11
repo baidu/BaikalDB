@@ -48,6 +48,7 @@ const std::string SQL_SESSION_TX_ISOLATION       = "select @@session.tx_isolatio
 const std::string SQL_SELECT_DATABASE            = "select database()";
 const std::string SQL_SHOW_DATABASES             = "show databases";
 const std::string SQL_SHOW_TABLES                = "show tables";
+const std::string SQL_SHOW_FULL_TABLES           = "show full tables";
 const std::string SQL_SHOW_CREATE_TABLE          = "show create table";
 const std::string SQL_SHOW_FULL_COLUMNS          = "show full columns";
 const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
@@ -136,6 +137,7 @@ private:
     bool _handle_client_query_session_tx_isolation(SmartSocket client);
     bool _handle_client_query_select_database(SmartSocket client);
     bool _handle_client_query_show_databases(SmartSocket client);
+    bool _handle_client_query_show_full_tables(SmartSocket client);
     bool _handle_client_query_show_tables(SmartSocket client);
     bool _handle_client_query_show_create_table(SmartSocket client);
     bool _handle_client_query_show_full_columns(SmartSocket client);

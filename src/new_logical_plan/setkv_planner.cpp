@@ -72,12 +72,13 @@ int SetKVPlanner::set_autocommit_0() {
 int SetKVPlanner::set_autocommit_1() {
     auto client = _ctx->runtime_state.client_conn();
     client->autocommit = true;
-    plan_commit_txn();
     if (client->txn_id == 0) {
-        _ctx->runtime_state.set_autocommit(true);
-    } else {
-        _ctx->runtime_state.set_autocommit(false);
+        _ctx->succ_after_logical_plan = true;
+        //DB_WARNING("set_autocommit_1 outside a txn, ignore");
+        return 0;
     }
+    plan_commit_txn();
+    _ctx->runtime_state.set_autocommit(false); // autocommit status before set autocommit=1
     return 0;
 }
 } // end of namespace baikaldb

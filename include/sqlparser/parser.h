@@ -34,7 +34,10 @@ struct SqlParser {
     ParseError error = SUCC;
     std::string syntax_err_str;
     butil::Arena arena;
+    bool is_gbk = false;
+    bool has_5c = false;
     void parse(const std::string& sql);
+    void change_5c_to_7f();
 };
 
 inline void print_stmt(Node* node, int ii = 0) {

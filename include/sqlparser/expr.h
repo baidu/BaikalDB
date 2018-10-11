@@ -198,6 +198,7 @@ struct LiteralExpr : public ExprNode {
         lit->_u.str_val = value;
         return lit;
     }
+
     static LiteralExpr* make_true(butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_BOOL;

@@ -25,18 +25,11 @@ message DataBaseInfo {
     optional bool   deleted                = 7;
 };
 
-enum SchemaType {
-    DYNAMCI = 1;
-    STATIC = 2;
-};
-
-enum Engine {
-    ROCKS_DB = 1;
-};
 enum Status {
     NORMAL = 1;
     FAULTY = 2;
     DEAD   = 3;
+    MIGRATE= 4; // 迁移状态，该状态不能被改变，后续只能删除该实例
 };
 enum RegionStatus {
     IDLE = 1;
@@ -500,6 +493,29 @@ message QuerySchema {
     optional bool               deleted             = 7;
 };
 
+message MigrateInstance {
+    optional string name = 1;
+    optional string event = 2;
+    optional string pre_host = 3;
+    optional string pre_port = 4;
+    optional string post_host = 5;
+    optional string post_port = 6;
+    optional string status = 7;
+};
+
+message TargetsList {
+    repeated MigrateInstance instances = 1;
+};
+
+message MigrateRequest {
+    optional string opera_action = 1;
+    optional TargetsList targets_list = 2;
+};
+
+message MigrateResponse {
+    optional TargetsList targets_list = 1;
+};
+
 service MetaService {
     //meta_server raft的控制接口
     rpc raft_control(RaftControlRequest) returns (RaftControlResponse);
@@ -507,5 +523,6 @@ service MetaService {
     rpc store_heartbeat(StoreHeartBeatRequest) returns (StoreHeartBeatResponse);
     rpc baikal_heartbeat(BaikalHeartBeatRequest) returns (BaikalHeartBeatResponse);
     rpc query(QueryRequest) returns (QueryResponse);
+    rpc migrate(MigrateRequest) returns (MigrateResponse);
 };
 

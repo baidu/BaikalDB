@@ -361,7 +361,7 @@ IndexSelector::RangeType IndexSelector::or_like_index_type(
     *value = parent->children(1)->get_value(nullptr);
     return OR_LIKE;
 }
-#ifdef NEW_PARSER
+
 IndexSelector::RangeType IndexSelector::index_expr_type(ExprNode* expr, int32_t tuple_id, int32_t slot_id,
         pb::IndexType index_type, std::vector<ExprValue>* values) {
     if (index_type == pb::I_FULLTEXT) {
@@ -457,103 +457,6 @@ IndexSelector::RangeType IndexSelector::index_expr_type(ExprNode* expr, int32_t 
             return NONE;
     }
 }
-#else
-IndexSelector::RangeType IndexSelector::index_expr_type(ExprNode* expr, int32_t tuple_id, int32_t slot_id,
-        pb::IndexType index_type, std::vector<ExprValue>* values) {
-    if (index_type == pb::I_FULLTEXT) {
-        ExprValue value(pb::NULL_TYPE);
-        auto type = or_like_index_type(expr, tuple_id, slot_id, &value);
-        if (type == OR_LIKE) {
-            values->push_back(value);
-            return OR_LIKE;
-        }
-    }
-    if (expr->children_size() < 2) {
-        return NONE;
-    }
-    if (expr->children(0)->node_type() != pb::SLOT_REF) {
-        return NONE;
-    }
-    SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
-    if (slot_ref->tuple_id() != tuple_id || slot_ref->slot_id() != slot_id) {
-        return NONE;
-    }
-    pb::PrimitiveType col_type = expr->children(0)->col_type();
-    for (uint32_t i = 1; i < expr->children_size(); i++) {
-        if (!expr->children(i)->is_constant()) {
-            return NONE;
-        }
-        expr->children(i)->open();
-        ExprValue val = expr->children(i)->get_value(nullptr);
-        // 目前索引不允许为null
-        if (!val.is_null()) {
-            values->push_back(val.cast_to(col_type));
-        }
-    }
-    if (values->size() == 0) {
-        return INDEX_HAS_NULL;
-    }
-    if (index_type == pb::I_RECOMMEND) {
-        if (expr->node_type() == pb::LIKE_PREDICATE) {
-            return LIKE;
-        } else {
-            return NONE;
-        }
-    }
-    // fulltext support normal type
-    if (index_type == pb::I_FULLTEXT) {
-        switch (expr->node_type()) {
-            case pb::LIKE_PREDICATE:
-                return LIKE;
-            case pb::FUNCTION_CALL: {
-                int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
-                if (fn_op == OP_EQ) {
-                    return EQ;
-                } else {
-                    return NONE;
-                }
-            }
-            case pb::IN_PREDICATE:
-                if (values->size() == 1) { 
-                    return EQ;
-                } else {
-                    return IN;
-                }
-            default:
-                return NONE;
-        }
-    }
-    switch (expr->node_type()) {
-        case pb::FUNCTION_CALL: {
-            int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
-            switch (fn_op) {
-                case OP_EQ:
-                    return EQ;
-                case OP_GE:
-                    return LEFT_CLOSE;
-                case OP_GT:
-                    return LEFT_OPEN;
-                case OP_LE:
-                    return RIGHT_CLOSE;
-                case OP_LT:
-                    return RIGHT_OPEN;
-                default:
-                    return NONE;
-            }
-        }
-        case pb::IS_NULL_PREDICATE:
-            return EQ;
-        case pb::IN_PREDICATE:
-            if (values->size() == 1) { 
-                return EQ;
-            } else {
-                return IN;
-            }
-        default:
-            return NONE;
-    }
-}
-#endif
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

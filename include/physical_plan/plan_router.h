@@ -15,7 +15,7 @@
 #pragma once
 
 #include "exec_node.h"
-#include "scan_node.h"
+#include "rocksdb_scan_node.h"
 #include "insert_node.h"
 #include "fetcher_node.h"
 #include "truncate_node.h"
@@ -29,12 +29,12 @@ public:
     /* 通过主键索引获取所在的regions
      */
     int analyze(QueryContext* ctx);
-    int scan_plan_router(ScanNode* scan_node);
+    int scan_plan_router(RocksdbScanNode* scan_node);
 private:
     template<typename T>
     int insert_node_analyze(T* node, QueryContext* ctx); 
 
-    int scan_node_analyze(ScanNode* scan_node, QueryContext* ctx);
+    int scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx);
     int truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ctx);
     int transaction_node_analyze(TransactionNode* txn_node, QueryContext* ctx);
 };

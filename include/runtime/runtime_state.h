@@ -33,6 +33,7 @@ class QueryContext;
 class NetworkSocket;
 
 // 不同region资源隔离，不需要每次从SchemaFactory加锁获取
+// todo:SchemaFactory目前无锁获取，后续相关信息可以直接从SchemaFactory获取
 struct RegionResource {
     IndexInfo& get_index_info(int64_t index_id) {
         return index_infos[index_id];
@@ -51,13 +52,13 @@ class RuntimeState {
 public:
     ~RuntimeState();
 
+    // baikalStore init
     int init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool);
 
-    int init(const pb::StoreReq& req, TransactionPool* pool);
-
+    // baikaldb init
     int init(QueryContext* ctx, DataBuffer* send_buf);
 
     // for prepared txn recovery in BaikalDB
@@ -115,11 +116,13 @@ public:
         _txn = txn;
     }
 
-    SmartTransaction create_txn_if_null(pb::RegionInfo* _region_info) {
-        if (_txn == nullptr) {
-            _txn = SmartTransaction(new Transaction(0, _region_info, _txn_pool));
-            _txn->begin();
+    SmartTransaction create_txn_if_null() {
+        if (_txn != nullptr) {
+            return _txn;
         }
+        _txn = SmartTransaction(new Transaction(0, _txn_pool));
+        _txn->set_region_info(&(_resource->region_info));
+        _txn->begin();
         return _txn;
     }
     void set_num_increase_rows(int num) {

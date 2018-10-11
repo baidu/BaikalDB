@@ -38,7 +38,7 @@ public:
 
     TransactionPool() : _num_prepared_txn(0), _txn_count(0) {}
 
-    int init(int64_t region_id, pb::RegionInfo* _region_info);
+    int init(int64_t region_id);
 
     // -1 means insert error (already exists)
     int begin_txn(uint64_t txn_id, SmartTransaction& txn);
@@ -93,7 +93,6 @@ public:
 
 private:
     int64_t _region_id = 0;
-    pb::RegionInfo* _region_info = nullptr;
 
     // txn_id => txn handler mapping
     std::unordered_map<uint64_t, SmartTransaction>  _txn_map;
