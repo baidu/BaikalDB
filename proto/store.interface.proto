@@ -87,6 +87,10 @@ message RemoveRegion {
     required int64  region_id       = 1;
     optional bool   force           = 2;
 };
+
+message CompactRegion {
+    repeated int64  region_ids      = 1; // if size = 0, it will compact the entire db
+};
 service StoreService {
     //1、创建table时master调用，region及raft同步创建成功后才返回给metaServer,
     //   创建表时raft node地址初始化为一个节点
@@ -112,4 +116,6 @@ service StoreService {
 
     //get region的applied_index, 用来分裂完成后优化选择transfer leader的对象
     rpc get_applied_index(GetAppliedIndex) returns (StoreRes);
+
+    rpc compact_region(CompactRegion) returns (StoreRes);
 };

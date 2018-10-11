@@ -90,6 +90,10 @@ public:
                                 const pb::GetAppliedIndex* request,
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done);
+    virtual void compact_region(google::protobuf::RpcController* controller,
+                                const pb::CompactRegion* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
     //上报心跳
     void report_heart_beat();
 
@@ -113,7 +117,6 @@ public:
    
     SmartRegion get_region(int64_t region_id) {
         if (_region_mapping.count(region_id) == 0) {
-            DB_WARNING("count error");
             return SmartRegion();
         } else {
             return _region_mapping.get(region_id);
@@ -150,9 +153,12 @@ public:
     }
     //store优雅退出，保存每个region的applied_index, 下次重启时不再加载snapshot, log_index自动做过滤
     void close() {
+        _add_peer_queue.stop();
         _is_running = false;
         _heart_beat_bth.join();
         DB_WARNING("heart beat bth join");
+        _add_peer_queue.join();
+        DB_WARNING("_add_peer_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
         _merge_bth.join();
@@ -225,7 +231,9 @@ private:
     void _remove_snapshot_path(int64_t drop_region_id);
     
     int _remove_log_entry(int64_t drop_region_id);
-    Store(): snapshot_load_currency(-FLAGS_snapshot_load_num), _split_num(0) {}
+    Store(): snapshot_load_currency(-FLAGS_snapshot_load_num), 
+             init_region_currency(-FLAGS_snapshot_load_num), 
+             _split_num(0) {}
    
     void monitor_memory();
     void print_properties(const std::string& name);
@@ -233,6 +241,7 @@ private:
 public:
     //全局做snapshot_load的并发控制
     BthreadCond snapshot_load_currency;
+    BthreadCond init_region_currency;
 private:
     std::string                             _address;
     std::string                             _physical_room;
@@ -274,6 +283,7 @@ private:
     bool _shutdown = false;
 
     std::vector<rocksdb::Transaction*> _recovered_txns;
+    ExecutionQueue _add_peer_queue;
 // private:
 //     int _init_test_region(std::string start, std::string end, int64_t id);
 //     int _init_test_region(uint64_t start, uint64_t end, int count);

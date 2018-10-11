@@ -60,8 +60,13 @@ std::string datetime_to_str(uint64_t datetime) {
     int macrosec = (datetime & 0xFFFFFF);
 
     char buf[30] = {0};
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-        year, month, day, hour, minute, second, macrosec);
+    if (macrosec > 0) {
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+                year, month, day, hour, minute, second, macrosec);
+    } else {
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                year, month, day, hour, minute, second);
+    }
     return std::string(buf);
 }
 

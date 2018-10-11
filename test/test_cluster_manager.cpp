@@ -185,7 +185,7 @@ TEST_F(ClusterManagerTest, test_add_and_drop) {
     count = _cluster_manager->get_peer_count("127.0.0.1:8010", 2);
     ASSERT_EQ(5, count);
 
-    ret = _cluster_manager->set_dead_for_instance("127.0.0.1:8010");
+    ret = _cluster_manager->set_migrate_for_instance("127.0.0.1:8010");
     ASSERT_EQ(0, ret);
     
     exclude_stores.clear();

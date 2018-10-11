@@ -31,7 +31,7 @@ public:
     virtual ~ReverseIndexBase() {
     }
     //倒排表的1、2、3级倒排链表merge函数
-    virtual int reverse_merge_func() = 0;
+    virtual int reverse_merge_func(pb::RegionInfo info) = 0;
     //新加正排 创建倒排索引
     virtual int insert_reverse(
                        rocksdb::Transaction* txn,
@@ -53,6 +53,7 @@ public:
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast = false) = 0;
     virtual bool valid() = 0;
+    virtual void clear() = 0;
     virtual int get_next(SmartRecord record) = 0;
     virtual void sync(AtomicManager<std::atomic<long>>& am) = 0;
 
@@ -199,7 +200,7 @@ public:
     }
     ~ReverseIndex(){}
 
-    virtual int reverse_merge_func();
+    virtual int reverse_merge_func(pb::RegionInfo info);
     //0:success    -1:fail
     virtual int insert_reverse(
                         rocksdb::Transaction* txn,
@@ -221,6 +222,11 @@ public:
                        bool is_fast = false); 
     virtual bool valid() {
         return _schema->valid();
+    }
+    // release immediately
+    virtual void clear() {
+        delete _schema;
+        _schema = nullptr;
     }
     virtual int get_next(SmartRecord record) {
         return _schema->next(record);
@@ -329,6 +335,9 @@ public:
     typedef typename Schema::ReverseList ReverseList;
     ~MutilReverseIndex() {
         delete _exe;
+        for (auto& index : _reverse_indexes) {
+            index->clear();
+        }
     }
     int search(
             rocksdb::Transaction* txn,
@@ -392,6 +401,7 @@ private:
     IndexInfo _index_info;
     TableInfo _table_info;
     std::vector<BooleanExecutorBase*> _son_exe_vec;
+    std::vector<ReverseIndexBase*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;
     int32_t _weight_field_id = 0;
 };

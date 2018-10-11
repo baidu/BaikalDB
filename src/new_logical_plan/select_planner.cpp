@@ -102,6 +102,9 @@ int SelectPlanner::plan() {
 }
 
 int SelectPlanner::create_limit_node() {
+    if (_limit_count == -1 && _limit_offset == 0) {
+        return 0;
+    }
     pb::PlanNode* limit_node = _ctx->add_plan_node();
     limit_node->set_node_type(pb::LIMIT_NODE);
     limit_node->set_limit(_limit_count);
@@ -140,12 +143,6 @@ int SelectPlanner::create_agg_node() {
     if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
         return 0;
     }
-    /*
-    if (!_distinct_agg_funcs.empty() && !_group_exprs.empty()) {
-        DB_WARNING("distinct agg query doesnot support group by");
-        return -1;
-    }
-    */
     pb::PlanNode* agg_node = _ctx->add_plan_node();
     agg_node->set_node_type(pb::AGG_NODE);
     if (!_distinct_agg_funcs.empty()) {
@@ -183,12 +180,10 @@ int SelectPlanner::create_agg_node() {
             expr->CopyFrom(_group_exprs[idx]);
         }
         for (uint32_t idx = 0; idx < _distinct_agg_funcs.size(); ++idx) {
-            pb::Expr* expr = agg2->add_group_exprs();
-            if (_distinct_agg_funcs[idx].nodes_size() != 2) {
-                DB_WARNING("invalid distinct expr");
-                return -1;
+            for (int expr_idx = 1; expr_idx < _distinct_agg_funcs[idx].nodes_size(); expr_idx++) {
+                pb::Expr* expr = agg2->add_group_exprs();
+                expr->add_nodes()->CopyFrom(_distinct_agg_funcs[idx].nodes(expr_idx));
             }
-            expr->add_nodes()->CopyFrom(_distinct_agg_funcs[idx].nodes(1));
         }
         for (uint32_t idx = 0; idx < _agg_funcs.size(); ++idx) {
             pb::Expr* expr = agg2->add_agg_funcs();

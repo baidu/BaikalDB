@@ -33,6 +33,7 @@ int AggNode::init(const pb::PlanNode& node) {
         }
         _group_exprs.push_back(group_expr);
     }
+    //DB_NOTICE("_group_exprs: %d %s", node.derive_node().agg_node().group_exprs_size(), node.DebugString().c_str());
     std::set<int> agg_slot_set;
     for (auto& expr : node.derive_node().agg_node().agg_funcs()) {
         if (expr.nodes_size() < 1 || expr.nodes(0).node_type() != pb::AGG_EXPR) {

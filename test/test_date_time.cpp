@@ -62,19 +62,19 @@ TEST(test_str_stamp, case_all) {
 }
 
 TEST(test_datetime_str, case_all) {
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44")), "2017-12-03 19:28:44.000000");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.")), "2017-12-03 19:28:44.000000");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:")), "2017-12-03 19:00:00.000000");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19")), "2017-12-03 19:00:00.000000");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000")), "2017-12-03 19:28:44.000000");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44")), "2017-12-03 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.")), "2017-12-03 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:")), "2017-12-03 19:00:00");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19")), "2017-12-03 19:00:00");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000")), "2017-12-03 19:28:44");
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.1234567")), "2017-12-03 19:28:44.123456");
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.123")), "2017-12-03 19:28:44.123000");
 
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000123")), "2017-12-03 19:28:44.000123");
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000123456")), "2017-12-03 19:28:44.000123");
 
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 192:28:44")), "2017-12-03 19:00:00.000000");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:284:44")), "2017-12-03 19:28:00.000000");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 192:28:44")), "2017-12-03 19:00:00");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:284:44")), "2017-12-03 19:28:00");
 }
 int32_t str_to_time2(const char* str_time) {
     int hour = 0;
@@ -149,8 +149,8 @@ TEST(test_datetime_time, case_all) {
     EXPECT_EQ(time_to_str(str_to_time("-119:28:44")), "-119:28:44");
     EXPECT_EQ(time_to_str(str_to_time("-119:28:44.124")), "-119:28:44");
     EXPECT_EQ(time_to_str(str_to_time("199:28:44")), "199:28:44");
-    EXPECT_EQ(datetime_to_str(time_to_datetime(str_to_time("19:28:44"))), ExprValue::Now().cast_to(pb::DATE).get_string() + " 19:28:44.000000");
-    EXPECT_EQ(datetime_to_str(time_to_datetime(str_to_time("01:28:44"))), ExprValue::Now().cast_to(pb::DATE).get_string() + " 01:28:44.000000");
+    EXPECT_EQ(datetime_to_str(time_to_datetime(str_to_time("19:28:44"))), ExprValue::Now().cast_to(pb::DATE).get_string() + " 19:28:44");
+    EXPECT_EQ(datetime_to_str(time_to_datetime(str_to_time("01:28:44"))), ExprValue::Now().cast_to(pb::DATE).get_string() + " 01:28:44");
     //EXPECT_EQ(datetime_to_str(time_to_datetime2(str_to_time("-19:28:44"))), ExprValue::Now().cast_to(pb::DATE).get_string() + " 19:28:44.000000");
     EXPECT_EQ(time_to_str(seconds_to_time(3601)), "01:00:01");
     EXPECT_EQ(time_to_str(seconds_to_time(-3601)), "-01:00:01");
@@ -159,7 +159,7 @@ TEST(test_datetime_time, case_all) {
 
 TEST(test_datetime_timestamp, case_all) {
     EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("2017-12-03 19:28:44.123456"))), "2017-12-03 19:28:44");
-    EXPECT_EQ(datetime_to_str(timestamp_to_datetime(str_to_timestamp("2017-12-03 19:28:44"))), "2017-12-03 19:28:44.000000");
+    EXPECT_EQ(datetime_to_str(timestamp_to_datetime(str_to_timestamp("2017-12-03 19:28:44"))), "2017-12-03 19:28:44");
 }
 
 }  // namespace baikal

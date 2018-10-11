@@ -21,24 +21,22 @@ int PlanRouter::analyze(QueryContext* ctx) {
     if (!plan->need_seperate()) {
         return 0;
     }
+    DB_NOTICE("need_seperate:%d", plan->need_seperate());
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
-    InsertNode* replace_node = static_cast<InsertNode*>(plan->get_node(pb::REPLACE_NODE));
     TruncateNode* truncate_node = static_cast<TruncateNode*>(plan->get_node(pb::TRUNCATE_NODE));
     TransactionNode* txn_node = static_cast<TransactionNode*>(plan->get_node(pb::TRANSACTION_NODE));
 
     if (scan_nodes.size() != 0) {
         for (auto scan_node : scan_nodes) {
-            auto ret = scan_node_analyze(static_cast<ScanNode*>(scan_node), ctx);
+            auto ret = scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node), ctx);
             if (ret != 0) {
                 return ret;
             }
         }
     } else if (insert_node != nullptr) {
         return insert_node_analyze(insert_node, ctx);
-    } else if (replace_node != nullptr) {
-        return insert_node_analyze(replace_node, ctx);
     } else if (truncate_node != nullptr) {
         return truncate_node_analyze(truncate_node, ctx);
     } else if (txn_node != nullptr) {
@@ -70,11 +68,12 @@ int PlanRouter::insert_node_analyze(T* node, QueryContext* ctx) {
     return 0;
 }
 
-int PlanRouter::scan_node_analyze(ScanNode* scan_node, QueryContext* ctx) {
+int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx) {
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     if (ctx->debug_region_id != -1) {
         pb::RegionInfo info;
-        int ret = schema_factory->get_region_info(ctx->debug_region_id, info);
+        int64_t table_id = scan_node->table_id();
+        int ret = schema_factory->get_region_info(table_id, ctx->debug_region_id, info);
         if (ret != 0) {
             ctx->region_infos.clear();
             DB_WARNING("get region_info in debug mode failed, %ld", ctx->debug_region_id);
@@ -86,7 +85,7 @@ int PlanRouter::scan_node_analyze(ScanNode* scan_node, QueryContext* ctx) {
     return scan_plan_router(scan_node);
 }
 
-int PlanRouter::scan_plan_router(ScanNode* scan_node) {
+int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node) {
     const pb::ScanNode& pb_scan_node = scan_node->pb_node().derive_node().scan_node();
     int64_t table_id = scan_node->table_id();
     const pb::PossibleIndex* primary = nullptr;

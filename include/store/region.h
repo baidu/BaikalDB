@@ -38,6 +38,7 @@
 #include "table_key.h"
 #include "mut_table_key.h"
 #include "rocks_wrapper.h"
+#include "split_compaction_filter.h"
 #include "proto/common.pb.h"
 #include "proto/meta.interface.pb.h"
 #include "proto/store.interface.pb.h"
@@ -129,7 +130,7 @@ public:
             int64_t applied_index, 
             int64_t term);
 
-    void dml(const pb::StoreReq& request, 
+    void dml_2pc(const pb::StoreReq& request, 
             pb::OpType op_type, 
             const pb::Plan& plan,
             const RepeatedPtrField<pb::TupleDescriptor>& tuples, 
@@ -153,7 +154,7 @@ public:
             pb::StoreRes& response);
 
     //leader收到从metaServer心跳包中的解析出来的add_peer请求
-    void add_peer(const pb::AddPeer& add_peer);
+    void add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue);
     void add_peer(const pb::AddPeer* request,  
             pb::StoreRes* response, 
             google::protobuf::Closure* done);
@@ -178,7 +179,10 @@ public:
 
     virtual void on_configuration_committed(const ::braft::Configuration& conf);
 
+    virtual void on_configuration_committed(const ::raft::Configuration& conf, int64_t index);
+
     int clear_data();
+    void compact();
 
     // other thread
     void reverse_merge();
@@ -314,7 +318,7 @@ public:
     int64_t get_version() {
         return _region_info.version();
     }
-    bool check_split_complete ();
+    bool check_split_complete();
     bool compare_and_set_fail_for_split() {
         std::unique_lock<std::mutex> lock(_split_mutex);
         if (_region_info.version() <= 0) {
@@ -436,7 +440,6 @@ public:
         BAIDU_SCOPED_LOCK(_ptr_mutex);
         _resource = new_resource;
     }
-
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -514,6 +517,23 @@ private:
     void set_region(const pb::RegionInfo& region_info) {
         std::lock_guard<std::mutex> lock(_region_lock);
         _region_info.CopyFrom(region_info);
+    }
+    void set_region_with_update_range(const pb::RegionInfo& region_info) {
+        std::lock_guard<std::mutex> lock(_region_lock);
+        _region_info.CopyFrom(region_info);
+        // region_info更新range，替换resource
+        std::shared_ptr<RegionResource> new_resource(new RegionResource);
+        *new_resource = *_resource;
+        new_resource->region_info = region_info;
+        {
+            BAIDU_SCOPED_LOCK(_ptr_mutex);
+            _resource = new_resource;
+        }
+        //compaction时候删掉多余的数据
+        SplitCompactionFilter::get_instance()->set_range_key(
+                _region_id,
+                region_info.start_key(),
+                region_info.end_key());
     }
 
 private:

@@ -27,6 +27,10 @@ int InsertNode::init(const pb::PlanNode& node) {
     _table_id = node.derive_node().insert_node().table_id();
     _tuple_id = node.derive_node().insert_node().tuple_id();
     _values_tuple_id = node.derive_node().insert_node().values_tuple_id();
+    _is_replace = node.derive_node().insert_node().is_replace();
+    if (_node_type == pb::REPLACE_NODE) {
+        _is_replace = true;
+    }
     _need_ignore = node.derive_node().insert_node().need_ignore();
     for (auto& slot : node.derive_node().insert_node().update_slots()) {
         _update_slots.push_back(slot);

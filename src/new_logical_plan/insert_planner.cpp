@@ -22,20 +22,15 @@ int InsertPlanner::plan() {
     pb::PlanNode* insert_node = _ctx->add_plan_node();
 
     _insert_stmt = (parser::InsertStmt*)(_ctx->stmt);
-    if (_insert_stmt->is_replace) {
-        insert_node->set_node_type(pb::REPLACE_NODE);
-    } else {
-        insert_node->set_node_type(pb::INSERT_NODE);
-    }
-    bool need_ignore = false;
-    need_ignore = _insert_stmt->is_ignore;
+    insert_node->set_node_type(pb::INSERT_NODE);
     
     insert_node->set_limit(-1);
     insert_node->set_num_children(0); //TODO
 
     pb::DerivePlanNode* derive = insert_node->mutable_derive_node();
     pb::InsertNode* insert = derive->mutable_insert_node();
-    insert->set_need_ignore(need_ignore);
+    insert->set_need_ignore(_insert_stmt->is_ignore);
+    insert->set_is_replace(_insert_stmt->is_replace);
     
     // parse db.table in insert SQL
     if (0 != parse_db_table(insert)) {
@@ -179,6 +174,10 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
             return -1;
         }
         for (auto& field : _default_fields) {
+            if (field.default_value == "(current_timestamp())") {
+                field.default_expr_value = ExprValue::Now();
+                field.default_expr_value.cast_to(field.type);
+            }
             if (0 != row->set_value(
                         row->get_field_by_tag(field.id), field.default_expr_value)) {
                 DB_WARNING("fill insert value failed");

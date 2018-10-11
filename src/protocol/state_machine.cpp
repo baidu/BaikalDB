@@ -586,6 +586,7 @@ int StateMachine::_query_read(SmartSocket sock) {
                 DB_FATAL_CLIENT(sock, "protocol_get_sql_string ret=%d", ret);
                 return ret;
             }
+            //std::cerr << "sql:" << sock->query_ctx->sql.size() << ":" << sock->query_ctx->sql << "\n";
         } else {
             DB_FATAL_CLIENT(sock, "server is read_only, so it can not "
                     "execute stmt_close statement, command:[%d]", command);
@@ -650,6 +651,12 @@ bool StateMachine::_query_process(SmartSocket client) {
                     || type == SQL_SET_CHARACTER_SET_CLIENT_NUM
                     || type == SQL_SET_CHARACTER_SET_CONNECTION_NUM
                     || type == SQL_SET_CHARACTER_SET_RESULTS_NUM) {
+            boost::regex reg(".*gbk.*", boost::regex::icase);
+            if (boost::regex_match(client->query_ctx->sql, reg)) {
+                client->charset_name = "gbk";
+            } else {
+                client->charset_name = "utf8";
+            }
             _wrapper->make_simple_ok_packet(client);
             client->state = STATE_READ_QUERY_RESULT;
         } /*else if (type == SQL_START_TRANSACTION_NUM
@@ -679,6 +686,8 @@ bool StateMachine::_query_process(SmartSocket client) {
             ret = _handle_client_query_show_databases(client);
         } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_TABLES)) {
             ret = _handle_client_query_show_tables(client);
+        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_TABLES)) {
+            ret = _handle_client_query_show_full_tables(client);
         } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_CREATE_TABLE)) {
             ret = _handle_client_query_show_create_table(client);
         } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_COLUMNS)) {
@@ -802,31 +811,43 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
 }
 
 bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
+    std::string sql = client->query_ctx->sql;
     if (!client) {
-        DB_FATAL("param invalid");
+        DB_FATAL("use db fail, %s", sql.c_str());
         //client->state = STATE_ERROR;
         return false;
     }
     // Find databases.
-    std::vector<std::string> dbs;
-    /*
-    if (ConfigParser::get_instance()->get_db_list(dbs) != 0) {
-        DB_FATAL("Failed to get db list.");
-        client->state = STATE_ERROR;
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    std::vector<std::string> dbs =  factory->get_db_list(client->user_info->namespace_);
+    int type = client->query_ctx->type;
+    std::string db;
+    if (type == SQL_USE_NUM) {
+        boost::algorithm::trim_left_if(sql, boost::is_any_of(" "));
+        db = sql;
+    } else if (type == SQL_USE_IN_QUERY_NUM) {
+        std::vector<std::string> split_vec;
+        boost::split(split_vec, client->query_ctx->sql,
+                boost::is_any_of(" \t\n\r."), boost::token_compress_on);
+        if (split_vec.size() < 2) {
+            DB_FATAL("use db fail, %s", sql.c_str());
+            return false;
+        }
+        db = split_vec[1];
+    } else {
+        DB_FATAL("use db fail, %s", sql.c_str());
         return false;
     }
-    */
-    std::string sql = client->query_ctx->sql;
-    //std::string db = boost::algorithm::trim_left_copy_if(sql, boost::is_any_of("USEuse"));
-    boost::algorithm::trim_left_if(sql, boost::is_any_of(" "));
-    //if (std::find(dbs.begin(), dbs.end(), sql) == dbs.end()) {
-    //    DB_FATAL("Can't find database:[%s].", sql.c_str());
-    //    client->state = STATE_ERROR;
-    //    return false;
-    //}
+    if (std::find(dbs.begin(), dbs.end(), db) == dbs.end()) {
+        _wrapper->make_err_packet(client, ER_DBACCESS_DENIED_ERROR, 
+                "Access denied for user '%s' to database '%s'", 
+                client->user_info->username.c_str(), db.c_str());
+        client->state = STATE_READ_QUERY_RESULT;
+        return false;
+    }
     // Set current database.
-    client->current_db = sql;
-    client->query_ctx->cur_db = sql;
+    client->query_ctx->cur_db = db;
+    client->current_db = db;
     // Set ok package.
     _wrapper->make_simple_ok_packet(client);
     client->state = STATE_READ_QUERY_RESULT;
@@ -847,6 +868,7 @@ bool StateMachine::_handle_client_query_template(SmartSocket client,
         ResultField field;
         field.name = field_name.c_str();
         field.type = data_type;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -869,22 +891,22 @@ bool StateMachine::_handle_client_query_template(SmartSocket client,
 
 bool StateMachine::_handle_client_query_version_commit(SmartSocket client) {
     return _handle_client_query_template(client,
-        "@@version_comment", MYSQL_TYPE_VAR_STRING, "Source distribution");
+        "@@version_comment", MYSQL_TYPE_VARCHAR, "Source distribution");
 }
 
 bool StateMachine::_handle_client_query_session_auto_increment(SmartSocket client) {
     return _handle_client_query_template(client,
-        "@@session.auto_increment_increment", MYSQL_TYPE_VAR_STRING, "1");
+        "@@session.auto_increment_increment", MYSQL_TYPE_VARCHAR, "1");
 }
 
 bool StateMachine::_handle_client_query_session_auto_autocommit(SmartSocket client) {
     return _handle_client_query_template(client,
-        "@@session.autocommit", MYSQL_TYPE_VAR_STRING, "1");
+        "@@session.autocommit", MYSQL_TYPE_VARCHAR, "1");
 }
 
 bool StateMachine::_handle_client_query_session_tx_isolation(SmartSocket client) {
     return _handle_client_query_template(client,
-        "@@session.tx_isolation", MYSQL_TYPE_VAR_STRING, "REPEATABLE-READ");
+        "@@session.tx_isolation", MYSQL_TYPE_VARCHAR, "REPEATABLE-READ");
 }
 
 bool StateMachine::_handle_client_query_select_1(SmartSocket client) {
@@ -894,7 +916,7 @@ bool StateMachine::_handle_client_query_select_1(SmartSocket client) {
 
 bool StateMachine::_handle_client_query_select_database(SmartSocket client) {
     return _handle_client_query_template(client,
-        "database()", MYSQL_TYPE_VAR_STRING, client->current_db);
+        "database()", MYSQL_TYPE_VARCHAR, client->current_db);
 }
 
 bool StateMachine::_handle_client_query_show_databases(SmartSocket client) {
@@ -909,7 +931,8 @@ bool StateMachine::_handle_client_query_show_databases(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Database";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -927,6 +950,63 @@ bool StateMachine::_handle_client_query_show_databases(SmartSocket client) {
     if (_make_common_resultset_packet(client, fields, rows) != 0) {
         DB_FATAL_CLIENT(client, "Failed to make result packet.");
         _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool StateMachine::_handle_client_query_show_full_tables(SmartSocket client) {
+    if (!client) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::string namespace_ = client->user_info->namespace_;
+    std::string current_db = client->current_db;
+    if (current_db == "") {
+        DB_WARNING("no database selected");
+        _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
+        client->state = STATE_READ_QUERY_RESULT;
+        return false;
+    }
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    do {
+        ResultField field;
+        field.name = "Tables_in_" + current_db;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Table_type";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    std::vector<std::string> tables =  factory->get_table_list(namespace_, current_db);
+    //DB_NOTICE("db:%s table.size:%d", current_db.c_str(), tables.size());
+    for (uint32_t cnt = 0; cnt < tables.size(); ++cnt) {
+        //DB_NOTICE("table:%s", tables[cnt].c_str());
+        std::vector<std::string> row;
+        row.push_back(tables[cnt]);
+        row.push_back("BASE TABLE");
+        rows.push_back(row);
+    }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "%s", client->query_ctx->sql.c_str());
         client->state = STATE_ERROR;
         return false;
     }
@@ -955,7 +1035,9 @@ bool StateMachine::_handle_client_query_show_tables(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Tables_in_" + current_db;
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.db = current_db;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -963,7 +1045,9 @@ bool StateMachine::_handle_client_query_show_tables(SmartSocket client) {
     std::vector< std::vector<std::string> > rows;
     SchemaFactory* factory = SchemaFactory::get_instance();
     std::vector<std::string> tables =  factory->get_table_list(namespace_, current_db);
+    //DB_NOTICE("db:%s table.size:%d", current_db.c_str(), tables.size());
     for (uint32_t cnt = 0; cnt < tables.size(); ++cnt) {
+        //DB_NOTICE("table:%s", tables[cnt].c_str());
         std::vector<std::string> row;
         row.push_back(tables[cnt]);
         rows.push_back(row);
@@ -1019,13 +1103,15 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Table";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Create Table";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 10240;
         fields.push_back(field);
     } while (0);
 
@@ -1067,7 +1153,14 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         oss << "  " << "`" << split_vec[split_vec.size() - 1] << "` ";
         oss << type_map[field.type] << " ";
         oss << (field.can_null ? "NULL " : "NOT NULL ");
-        oss << field.default_value << " ";
+        if (field.default_value != "") {
+            oss << "DEFAULT ";
+            if (field.default_value == "(current_timestamp())") {
+                oss << "CURRENT_TIMESTAMP ";
+            } else {
+                oss << "'" << field.default_value << "' ";
+            }
+        }
         oss << (field.auto_inc ? "AUTO_INCREMENT" : "") << ",\n";
     }
     uint32_t index_idx = 0;
@@ -1098,7 +1191,12 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
             oss << ")\n";
         }
     }
-    oss << ") ENGINE=Rocksdb " << "DEFAULT CHARSET=" << charset_map[info.charset];
+    static std::map<pb::Engine, std::string> engine_map = {
+        {pb::ROCKSDB, "Rocksdb"},
+        {pb::REDIS, "Redis"}
+    };
+    oss << ") ENGINE=" << engine_map[info.engine];
+    oss << " DEFAULT CHARSET=" << charset_map[info.charset];
     oss <<" AVG_ROW_LENGTH=" << info.byte_size_per_record;
     oss << " COMMENT='{\"resource_tag\":\"" << info.resource_tag;
     oss << "\", \"namespace\":\"" << info.namespace_ << "\"}'";
@@ -1127,55 +1225,64 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Field";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Type";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Collation";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Null";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Key";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "default";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Extra";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Privileges";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Comment";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -1201,12 +1308,12 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
         return false;
     }
     TableInfo info = factory->get_table_info(table_id);
-    std::map<int32_t, pb::IndexType> field_index;
+    std::map<int32_t, IndexInfo> field_index;
     for (auto& index_id : info.indices) {
         IndexInfo index_info = factory->get_index_info(index_id); 
         for (auto& field : index_info.fields) {
             if (field_index.count(field.id) == 0) {
-                field_index[field.id] = index_info.type;
+                field_index[field.id] = index_info;
             }
         }
     }
@@ -1227,9 +1334,13 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
         if (field_index.count(field.id) == 0) {
             row.push_back(" ");
         } else {
-            row.push_back(IndexType_Name(field_index[field.id]));
+            std::string index = IndexType_Name(field_index[field.id].type);
+            if (field_index[field.id].type == pb::I_FULLTEXT) {
+                index += "(" + pb::SegmentType_Name(field_index[field.id].segment_type) + ")";
+            }
+            row.push_back(index);
         }
-        row.push_back("NULL");
+        row.push_back(field.default_value);
         if (info.auto_inc_field_id == field.id) {
             row.push_back("auto_increment");
         } else {
@@ -1263,13 +1374,15 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Name";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Engine";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
@@ -1281,7 +1394,8 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Row_format";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
@@ -1329,89 +1443,108 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Create_time";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Update_time";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Check_time";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Collation";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Checksum";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Create_options";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Comment";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
+    std::string namespace_ = client->user_info->namespace_;
+    std::string db = client->current_db;
+    if (db == "") {
+        DB_WARNING("no database selected");
+        _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
+        client->state = STATE_READ_QUERY_RESULT;
+        return false;
+    }
 
-
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    SchemaFactory* factory = SchemaFactory::get_instance();
     std::vector<std::string> split_vec;
     boost::split(split_vec, client->query_ctx->sql,
             boost::is_any_of(" \t\n\r"), boost::token_compress_on);
-    std::string db = client->current_db;
-    std::string table;
+    std::vector<std::string> tables;
     if (split_vec.size() == 5) {
-        table = remove_quote(split_vec[4].c_str(), '\'');
+        std::string table = remove_quote(split_vec[4].c_str(), '\'');
+        tables.push_back(table);
+    } else if (split_vec.size() == 3) {
+        tables =  factory->get_table_list(namespace_, db);
     } else {
         client->state = STATE_ERROR;
         return false;
     }
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    std::string full_name = client->user_info->namespace_ + "." + db + "." + table;
-    int64_t table_id = -1;
-    if (factory->get_table_id(full_name, table_id) != 0) {
-        client->state = STATE_ERROR;
-        return false;
+    for (auto table : tables) {
+        std::string full_name = client->user_info->namespace_ + "." + db + "." + table;
+        int64_t table_id = -1;
+        if (factory->get_table_id(full_name, table_id) != 0) {
+            client->state = STATE_ERROR;
+            return false;
+        }
+        TableInfo info = factory->get_table_info(table_id);
+        // Make rows.
+        std::vector<std::string> row;
+        row.push_back(table);
+        row.push_back("Innodb");
+        row.push_back(std::to_string(info.version));
+        row.push_back("Compact");
+        row.push_back("0");
+        row.push_back("0");
+        row.push_back("0");
+        row.push_back("0");
+        row.push_back("0");
+        row.push_back("0");
+        row.push_back("0");
+        row.push_back("2018-08-09 15:01:40");
+        row.push_back("");
+        row.push_back("");
+        row.push_back("utf8_general_ci");
+        row.push_back("");
+        row.push_back("");
+        row.push_back("");
+        rows.push_back(row);
     }
-    TableInfo info = factory->get_table_info(table_id);
-    // Make rows.
-    std::vector<std::vector<std::string> > rows;
-    std::vector<std::string> row;
-    row.push_back(table);
-    row.push_back("Innodb");
-    row.push_back(std::to_string(info.version));
-    row.push_back("Compact");
-    row.push_back("0");
-    row.push_back("0");
-    row.push_back("0");
-    row.push_back("0");
-    row.push_back("0");
-    row.push_back("0");
-    row.push_back("0");
-    row.push_back("2018-08-09 15:01:40");
-    row.push_back("");
-    row.push_back("");
-    row.push_back("utf8_general_ci");
-    row.push_back("");
-    row.push_back("");
-    row.push_back("");
-    rows.push_back(row);
 
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {
@@ -1434,14 +1567,16 @@ bool StateMachine::_handle_client_query_show_region(SmartSocket client) {
     do {
         ResultField field;
         field.name = "region_id";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
     do {
         ResultField field;
         field.name = "region_info";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -1483,13 +1618,15 @@ bool StateMachine::_handle_client_query_show_collation(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Collation";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Charset";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
@@ -1501,19 +1638,22 @@ bool StateMachine::_handle_client_query_show_collation(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Default";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Compiled";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Sortlen";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -1559,7 +1699,8 @@ bool StateMachine::_handle_client_query_show_warnings(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Level";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
@@ -1571,7 +1712,8 @@ bool StateMachine::_handle_client_query_show_warnings(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Message";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     // Make rows.
@@ -1600,13 +1742,15 @@ bool StateMachine::_handle_client_query_show_variables(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Variable_name";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Value";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -1744,37 +1888,43 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
     do {
         ResultField field;
         field.name = "Field";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Type";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Null";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Key";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "default";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
     do {
         ResultField field;
         field.name = "Extra";
-        field.type = MYSQL_TYPE_VAR_STRING;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
         fields.push_back(field);
     } while (0);
 
@@ -1800,12 +1950,12 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
         return false;
     }
     TableInfo info = factory->get_table_info(table_id);
-    std::map<int32_t, pb::IndexType> field_index;
+    std::map<int32_t, IndexInfo> field_index;
     for (auto& index_id : info.indices) {
         IndexInfo index_info = factory->get_index_info(index_id); 
         for (auto& field : index_info.fields) {
             if (field_index.count(field.id) == 0) {
-                field_index[field.id] = index_info.type;
+                field_index[field.id] = index_info;
             }
         }
     }
@@ -1825,9 +1975,13 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
         if (field_index.count(field.id) == 0) {
             row.push_back(" ");
         } else {
-            row.push_back(IndexType_Name(field_index[field.id]));
+            std::string index = IndexType_Name(field_index[field.id].type);
+            if (field_index[field.id].type == pb::I_FULLTEXT) {
+                index += "(" + pb::SegmentType_Name(field_index[field.id].segment_type) + ")";
+            }
+            row.push_back(index);
         }
-        row.push_back("NULL");
+        row.push_back(field.default_value);
         if (info.auto_inc_field_id == field.id) {
             row.push_back("auto_increment");
         } else {
@@ -2084,6 +2238,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     client->query_ctx->thread_idx = client->thread_idx;
     client->query_ctx->stat_info.sql_length = client->query_ctx->sql.size();
     client->query_ctx->runtime_state.set_client_conn(client.get());
+    client->query_ctx->charset = client->charset_name;
     
     // sql planner.
     TimeCost cost;
@@ -2118,7 +2273,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             client->query_ctx->sql.c_str());
         return false;
     }
-    DB_WARNING("logical success cost:%ld, txn_id: %lu ", cost1.get_time(), client->txn_id);
+    int64_t logical_cost = cost1.get_time();
     cost1.reset();
 
     // set txn_id and txn seq_id
@@ -2150,7 +2305,12 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     }
     client->query_ctx->stat_info.query_plan_time = cost.get_time();
     cost.reset();
-    DB_WARNING("phiscal success cost:%ld ", cost1.get_time());
+    DB_WARNING("logical success cost:%ld, txn_id: %lu, phiscal success cost:%ld", 
+            logical_cost, client->txn_id, cost1.get_time());
+    //pb::Plan plan;
+    //ExecNode::create_pb_plan(&plan, client->query_ctx->root);
+    //DB_NOTICE("%s", client->query_ctx->plan.DebugString().c_str());
+    //DB_NOTICE("%s", plan.DebugString().c_str());
 
     if (client->query_ctx->succ_after_physical_plan) {
         _wrapper->make_simple_ok_packet(client);

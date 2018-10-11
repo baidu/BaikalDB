@@ -224,22 +224,37 @@ void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_
     SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
     //erase_region_info(drop_region_ids);
 }
-void RegionManager::delete_all_region_for_dead_store(const std::string& instance) {
+void RegionManager::delete_all_region_for_store(const std::string& instance, pb::Status status) {
     DB_WARNING("delete all region for dead store start, dead_store:%s", instance.c_str());
+    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
     //实例上已经没有reigon了，直接删除该实例即可
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
     if (region_ids.size() == 0) {
-        pb::MetaManagerRequest request;
-        request.set_op_type(pb::OP_DROP_INSTANCE);
-        pb::InstanceInfo* instance_info = request.mutable_instance();
-        instance_info->set_address(instance);
-        ClusterManager::get_instance()->process_cluster_info(NULL, &request, NULL, NULL);
-        DB_WARNING("dead instance has no region, drop instance:%s", instance.c_str());
+        {
+            BAIDU_SCOPED_LOCK(_resource_tag_mutex);
+            _resource_tag_delete_region_map[resource_tag] = false;
+        }
+        if (status == pb::DEAD) {
+            pb::MetaManagerRequest request;
+            request.set_op_type(pb::OP_DROP_INSTANCE);
+            pb::InstanceInfo* instance_info = request.mutable_instance();
+            instance_info->set_address(instance);
+            ClusterManager::get_instance()->process_cluster_info(NULL, &request, NULL, NULL);
+            DB_WARNING("dead instance has no region, drop instance:%s", instance.c_str());
+        }
         return;
     }
+    {
+        BAIDU_SCOPED_LOCK(_resource_tag_mutex);
+        if (_resource_tag_delete_region_map[resource_tag] == true) {
+            DB_WARNING("resoruce_tag:%s, instance:%s has doing by other instance",
+                    resource_tag.c_str(), instance.c_str());
+            return;
+        }
+    }
     std::vector<pb::RaftControlRequest> requests;
-    pre_process_remove_peer_for_dead_store(instance, requests);
+    pre_process_remove_peer_for_store(instance, requests);
     BthreadCond concurrency_cond(-FLAGS_concurrency_num);
     for (auto request : requests) {
         auto remove_peer_fun = [this, request, &concurrency_cond] () {
@@ -260,24 +275,57 @@ void RegionManager::delete_all_region_for_dead_store(const std::string& instance
     DB_WARNING("delete all region for dead store end, dead_store:%s", instance.c_str());
 }
 
-void RegionManager::pre_process_remove_peer_for_dead_store(const std::string& instance,
+void RegionManager::pre_process_remove_peer_for_store(const std::string& instance,
                 std::vector<pb::RaftControlRequest>& requests) {
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
+    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
     for (auto& region_id : region_ids) {
         auto ptr_region = get_region_info(region_id);
         if (ptr_region == nullptr) {
             continue;
         }
+        // TODO liguoqiang 尝试add_peer
         if (ptr_region->peers_size() <= 1) {
             DB_FATAL("region_id:%ld has only one peer, can not been remove, instance%s",
                         region_id, instance.c_str());
+            std::string new_instance;
+            std::set<std::string> peers;
+            peers.insert(ptr_region->peers(0));
+            // 故障需要尽快恢复，轮询最均匀
+            auto ret = ClusterManager::get_instance()->select_instance_rolling(
+                    resource_tag,
+                    peers,
+                    new_instance);
+            if (ret < 0) {
+                DB_FATAL("select store from cluster fail, region_id:%ld", region_id);
+                return;
+            }
+            pb::AddPeer add_peer;
+            add_peer.set_region_id(region_id);
+            for (auto& peer : ptr_region->peers()) {
+                add_peer.add_old_peers(peer);
+                add_peer.add_new_peers(peer);
+            }
+            add_peer.add_new_peers(new_instance);
+            Bthread bth(&BTHREAD_ATTR_SMALL);
+            auto add_peer_fun = 
+                [add_peer]() {
+                    StoreInteract store_interact(add_peer.old_peers(0).c_str());
+                    pb::StoreRes response; 
+                    auto ret = store_interact.send_request("add_peer", add_peer, response);
+                    DB_WARNING("send add peer leader: %s, request:%s, response:%s, ret: %d",
+                            add_peer.old_peers(0).c_str(),
+                            add_peer.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str(), ret);
+                };
+            bth.run(add_peer_fun);
             continue;
         }
         pb::Status status;
         auto ret = get_region_status(region_id, status);
         if (ret < 0 || status != pb::NORMAL) {
-            DB_WARNING("region_id:%ld status is not normal, can not been remove, instance:%s",
+            DB_FATAL("region_id:%ld status is not normal, can not been remove, instance:%s",
                     region_id, instance.c_str());
             continue;
         }
@@ -291,6 +339,7 @@ void RegionManager::pre_process_remove_peer_for_dead_store(const std::string& in
                 request.add_new_peers(peer);
             }
         }
+        // TODO 尝试切主
         if (leader == instance) {
             leader = request.new_peers(0);
         }
@@ -654,10 +703,10 @@ void RegionManager::check_peer_count(int64_t region_id,
     // add_peer
     if (leader_region_info.peers_size() < replica_num) {
         std::string new_instance;
-        auto ret = ClusterManager::get_instance()->select_instance_min(
+        // 故障需要尽快恢复，轮询最均匀
+        auto ret = ClusterManager::get_instance()->select_instance_rolling(
                 resource_tag,
                 peers_in_heart,
-                table_id,
                 new_instance);
         if (ret < 0) {
             DB_FATAL("select store from cluster fail, region_id:%ld", region_id);
@@ -777,8 +826,12 @@ void RegionManager::region_healthy_check_function() {
     for (auto& region_state : _region_state_map) {
         if (butil::gettimeofday_us() - region_state.second.timestamp > 
                 FLAGS_store_heart_beat_interval_us * FLAGS_region_faulty_interval_times) {
+            auto region_info = get_region_info(region_state.first);
+            if (region_info == nullptr) {
+                continue; 
+            }
             DB_FATAL("region_id:%ld not recevie heartbeat for a long time, leader:%s", 
-                     region_state.first, _region_info_map[region_state.first]->leader().c_str());
+                     region_state.first, region_info->leader().c_str());
             region_state.second.status = pb::FAULTY;
         } else {
             region_state.second.status = pb::NORMAL;

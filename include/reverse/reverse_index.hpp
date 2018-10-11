@@ -14,10 +14,10 @@
 
 namespace baikaldb {
 template <typename Schema>
-int ReverseIndex<Schema>::reverse_merge_func() {
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    pb::RegionInfo info;
-    factory->get_region_info(_region_id, info);
+int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info) {
+    //SchemaFactory* factory = SchemaFactory::get_instance();
+    //pb::RegionInfo info;
+    //factory->get_region_info(_region_id, info);
     _key_range = KeyRange(info.start_key(), info.end_key());
     int8_t status;
     TimeCost timer;
@@ -138,7 +138,6 @@ int ReverseIndex<Schema>::handle_reverse(
     }
     return 0;
 }
-
 
 template <typename Schema>
 int ReverseIndex<Schema>::insert_reverse(
@@ -274,13 +273,13 @@ int ReverseIndex<Schema>::create_executor(
                             BooleanExecutorBase*& exe,
                             bool is_fast) {
     TimeCost timer;
-    delete _schema;
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    pb::RegionInfo info;
+    //delete _schema;
+    //SchemaFactory* factory = SchemaFactory::get_instance();
+    //pb::RegionInfo info;
     //DB_WARNING("before get_info");
-    factory->get_region_info(_region_id, info);
+    //factory->get_region_info(_region_id, info);
     //DB_WARNING("after get_info");
-    _key_range = KeyRange(info.start_key(), info.end_key());
+    //_key_range = KeyRange(info.start_key(), info.end_key());
     _schema = new Schema();
     _schema->init(this, txn, _key_range, conjuncts, is_fast);
     _schema->statistic().delete_time += timer.get_time();
@@ -538,6 +537,7 @@ int MutilReverseIndex<Schema>::search(
         _exe = nullptr;
         return 0;
     }
+    _reverse_indexes = reverse_indexes;
     _index_info = index_info;
     _table_info = table_info;
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");

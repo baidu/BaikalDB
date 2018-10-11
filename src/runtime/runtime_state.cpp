@@ -20,10 +20,6 @@ namespace baikaldb {
 
 RuntimeState::~RuntimeState() {}
 
-int RuntimeState::init(const pb::StoreReq& req, TransactionPool* pool) {
-    return init(req, req.plan(), req.tuples(), pool);
-}
-
 int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
@@ -67,6 +63,9 @@ int RuntimeState::init(const pb::StoreReq& req,
     _log_id = req.log_id();
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
+    if (_txn != nullptr) {
+        _txn->set_region_info(&(_resource->region_info));
+    }
     return 0;
 }
 

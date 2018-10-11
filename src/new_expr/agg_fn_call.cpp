@@ -213,11 +213,15 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
         }
         case COUNT_DISTINCT:
         case COUNT: {
-            if (!_children[0]->get_value(src).is_null()) {
-                ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
-                result._u.int64_val++;
-                dst->set_value(_tuple_id, _intermediate_slot_id, result);
+            for (auto child : _children) {
+                if (child->get_value(src).is_null()) {
+                    return 0;
+                }
             }
+
+            ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
+            result._u.int64_val++;
+            dst->set_value(_tuple_id, _intermediate_slot_id, result);
             return 0;
         }
         case SUM: {
