@@ -27,12 +27,9 @@ int AutoInc::analyze(QueryContext* ctx) {
         return 0;
     }
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
-    InsertNode* replace_node = static_cast<InsertNode*>(plan->get_node(pb::REPLACE_NODE));
     int64_t table_id = -1;
     if (insert_node != NULL) {
         table_id = insert_node->table_id();
-    } else if (replace_node != NULL) {
-        table_id = replace_node->table_id();
     }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     TableInfo table_info = schema_factory->get_table_info(table_id);

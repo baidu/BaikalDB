@@ -138,6 +138,7 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     }
     TimeCost cost;
     parser::SqlParser parser;
+    parser.charset = ctx->charset;
     parser.parse(ctx->sql);
     if (parser.error != parser::SUCC) {
         ctx->stat_info.error_code = ER_SYNTAX_ERROR;
@@ -1080,12 +1081,12 @@ int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr
         DB_WARNING("column name: %s is ambiguous", column->name.c_str());
         return -2;
     } else if (match_count == 0) {
-        DB_WARNING("invalid column name: %s", column->name.c_str());
+        //DB_WARNING("invalid column name: %s", column->name.c_str());
         return -1;
     } else {
         auto iter = _select_alias_mapping.find(lower_name);
         if (iter != _select_alias_mapping.end() && iter->second >= _select_exprs.size()) {
-            DB_WARNING("invalid column name: %s", column->name.c_str());
+            //DB_WARNING("invalid column name: %s", column->name.c_str());
             return -1;
         }
         expr.MergeFrom(_select_exprs[iter->second]);
@@ -1144,10 +1145,7 @@ int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal,
         case parser::LT_STRING: {
             node->set_node_type(pb::STRING_LITERAL);
             node->set_col_type(pb::STRING);
-            std::string str = literal->_u.str_val.c_str();
-            // 考虑放到sqlparser里做
-            stripslashes(str);
-            node->mutable_derive_node()->set_string_val(str);
+            node->mutable_derive_node()->set_string_val(literal->_u.str_val.c_str());
             break;
         }
         case parser::LT_BOOL:
@@ -1352,6 +1350,7 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root) {
         pb::ScanNode* scan = derive->mutable_scan_node();
         scan->set_tuple_id(join_root->join_node.left_tuple_ids(0));
         scan->set_table_id(join_root->join_node.left_table_ids(0));
+        scan->set_engine(_factory->get_table_engine(scan->table_id()));
         for (auto index_id : join_root->use_indexes) {
             scan->add_use_indexes(index_id);
         }
@@ -1389,6 +1388,7 @@ int LogicalPlanner::create_scan_nodes() {
         pb::ScanNode* scan = derive->mutable_scan_node();
         scan->set_tuple_id(tuple_desc.tuple_id());
         scan->set_table_id(tuple_desc.table_id());
+        scan->set_engine(_factory->get_table_engine(scan->table_id()));
     }
     return 0;
 }

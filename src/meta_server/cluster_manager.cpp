@@ -23,7 +23,7 @@
 namespace baikaldb {
 DEFINE_int32(migrate_percent, 60, "migrate percent. default:60%");
 DEFINE_int32(error_judge_percent, 10, "error judge percen. default:10");
-DEFINE_int32(error_judge_number, 5, "error judge number. default:5");
+DEFINE_int32(error_judge_number, 3, "error judge number. default:3");
 DEFINE_int32(mem_used_percent, 50, "mem userd percent. default:50%");
 
 DECLARE_int32(store_heart_beat_interval_us);
@@ -502,12 +502,12 @@ void ClusterManager::move_physical(const pb::MetaManagerRequest& request, braft:
     DB_NOTICE("move physical success, request:%s", request.ShortDebugString().c_str());
 }
 
-void ClusterManager::set_instance_dead(const pb::MetaManagerRequest* request,
+void ClusterManager::set_instance_migrate(const pb::MetaManagerRequest* request,
                                         pb::MetaManagerResponse* response,
                                         uint64_t log_id) {
     response->set_op_type(request->op_type());
     response->set_errcode(pb::SUCCESS);
-    response->set_errmsg("success");
+    response->set_errmsg("PROCESSING");
     if (_meta_state_machine != NULL && !_meta_state_machine->is_leader()) {
         ERROR_SET_RESPONSE(response, pb::NOT_LEADER, "not leader", request->op_type(), log_id)
         return;
@@ -516,13 +516,19 @@ void ClusterManager::set_instance_dead(const pb::MetaManagerRequest* request,
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, "no instance", request->op_type(), log_id)
         return;
     }
-    std::string dead_instance = request->instance().address(); 
-    auto ret = set_dead_for_instance(dead_instance);
+    std::string instance = request->instance().address(); 
+    auto ret = set_migrate_for_instance(instance);
     if (ret < 0) {
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, "instance not exist", request->op_type(), log_id);
+        response->set_errmsg("ALLOWED");
         return;
     }
-    RegionManager::get_instance()->delete_all_region_for_dead_store(dead_instance); 
+    std::vector<int64_t> region_ids;
+    RegionManager::get_instance()->get_region_ids(instance, region_ids);
+    if (region_ids.size() == 0) {
+        response->set_errmsg("ALLOWED");
+        return;
+    }
+    RegionManager::get_instance()->delete_all_region_for_store(instance, pb::MIGRATE); 
 }
 
 void ClusterManager::process_instance_heartbeat_for_store(const pb::InstanceInfo& instance_heart_beat) {
@@ -544,26 +550,24 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
     std::string resource_tag = request->instance_info().resource_tag();
     std::unordered_map<int64_t, std::vector<int64_t>> table_regions;
     std::unordered_map<int64_t, int64_t> table_region_counts;
-    if (request->need_peer_balance()) {
-        for (auto& peer_info : request->peer_infos()) {
-            table_regions[peer_info.table_id()].push_back(peer_info.region_id());
-        }
-        for (auto& table_region : table_regions) {
-            table_region_counts[table_region.first] = table_region.second.size();
-        }
-        set_instance_regions(instance, table_regions, table_region_counts);
-        DB_WARNING("instance_info: %s, resource_tag: %s", instance.c_str(), resource_tag.c_str());
-        for (auto& table_region: table_regions) {
-            std::string str_region_id;
-            for (auto& region_id : table_region.second) {
-                str_region_id += std::to_string(region_id) + ",";
-            }
-            DB_WARNING("table_id: %ld, region_count: %ld, region_id: %s", 
-                        table_region.first, table_region_counts[table_region.first], str_region_id.c_str());
-        }
-    }
     if (!request->has_need_peer_balance() || !request->need_peer_balance()) {
         return;
+    }
+    for (auto& peer_info : request->peer_infos()) {
+        table_regions[peer_info.table_id()].push_back(peer_info.region_id());
+    }
+    for (auto& table_region : table_regions) {
+        table_region_counts[table_region.first] = table_region.second.size();
+    }
+    set_instance_regions(instance, table_regions, table_region_counts);
+    DB_WARNING("instance_info: %s, resource_tag: %s", instance.c_str(), resource_tag.c_str());
+    for (auto& table_region: table_regions) {
+        std::string str_region_id;
+        for (auto& region_id : table_region.second) {
+            str_region_id += std::to_string(region_id) + ",";
+        }
+        DB_WARNING("table_id: %ld, region_count: %ld, region_id: %s", 
+                table_region.first, table_region_counts[table_region.first], str_region_id.c_str());
     }
     if (!_meta_state_machine->whether_can_decide()) {
         DB_WARNING("meta state machine can not make decision");
@@ -603,6 +607,7 @@ void ClusterManager::store_healthy_check_function() {
     int64_t dead_store_num = 0;
     std::vector<std::string> dead_stores;
     std::vector<std::string> full_stores;
+    std::vector<std::string> migrate_stores;
     {
         BAIDU_SCOPED_LOCK(_instance_mutex);
         total_store_num = _instance_info.size();
@@ -610,10 +615,16 @@ void ClusterManager::store_healthy_check_function() {
             return;
         }
         for (auto& instance_pair : _instance_info) {
-            int64_t last_timestamp = instance_pair.second.instance_status.timestamp;
+            auto& instance = instance_pair.second;
+            auto& status = instance.instance_status;
+            if (status.state == pb::MIGRATE) {
+                migrate_stores.push_back(instance_pair.first);
+                continue;
+            }
+            int64_t last_timestamp = status.timestamp;
             if ((butil::gettimeofday_us() - last_timestamp) > 
                     FLAGS_store_heart_beat_interval_us * FLAGS_store_dead_interval_times) {
-                instance_pair.second.instance_status.state = pb::DEAD; 
+                status.state = pb::DEAD; 
                 dead_stores.push_back(instance_pair.first);
                 DB_WARNING("instance:%s is dead", instance_pair.first.c_str());
                 ++dead_store_num;
@@ -621,18 +632,18 @@ void ClusterManager::store_healthy_check_function() {
             } 
             if ((butil::gettimeofday_us() - last_timestamp) > 
                     FLAGS_store_heart_beat_interval_us * FLAGS_store_faulty_interval_times) {
-                instance_pair.second.instance_status.state = pb::FAULTY;
+                status.state = pb::FAULTY;
                 DB_WARNING("instance:%s is faulty", instance_pair.first.c_str());
                 ++faulty_store_num;
                 continue;
             }
             //如果实例状态都正常的话，再判断是否因为容量问题需要做迁移
-            if (instance_pair.second.capacity == 0) {
-                DB_FATAL("instance:%s capactiy is 0", instance_pair.second.address.c_str());
+            if (instance.capacity == 0) {
+                DB_FATAL("instance:%s capactiy is 0", instance.address.c_str());
                 continue;
             }
             //暂时不考虑容量问题，该检查先关闭(liuhuicong)
-            //if (instance_pair.second.used_size * 100 / instance_pair.second.capacity >= 
+            //if (instance.used_size * 100 / instance.capacity >= 
             //        FLAGS_migrate_percent) {
             //    DB_WARNING("instance:%s is full", instance_pair.first.c_str()); 
             //    full_stores.push_back(instance_pair.first);   
@@ -643,12 +654,18 @@ void ClusterManager::store_healthy_check_function() {
                 && (dead_store_num + faulty_store_num) >= FLAGS_error_judge_number) {
             DB_FATAL("has too much dead and faulty instance, may be error judge");
             dead_stores.clear();
+            migrate_stores.clear();
+            return;
         }
     }
     //如果store实例死掉，则删除region
-    for (auto& dead_store : dead_stores) {
-        DB_FATAL("store:%s is dead", dead_store.c_str());
-        RegionManager::get_instance()->delete_all_region_for_dead_store(dead_store);
+    for (auto& store : dead_stores) {
+        DB_FATAL("store:%s is dead", store.c_str());
+        RegionManager::get_instance()->delete_all_region_for_store(store, pb::DEAD);
+    }
+    for (auto& store : migrate_stores) {
+        DB_FATAL("store:%s is dead", store.c_str());
+        RegionManager::get_instance()->delete_all_region_for_store(store, pb::MIGRATE);
     }
     //若实例满，则做实例迁移
     //for (auto& full_store : full_stores) {

@@ -71,6 +71,7 @@ message ScanNode {
     required int64 table_id = 2;
     repeated PossibleIndex indexes = 3; //baikal列举可能的index，region自己决定用哪个
     repeated int64 use_indexes = 4;
+    optional Engine engine = 5;
 };
 
 message LimitNode {
@@ -131,6 +132,7 @@ message InsertNode {
     repeated Expr update_exprs = 5;
     optional int32 tuple_id = 6; // update原始数据tuple_id
     optional int32 values_tuple_id = 7; // values 后数据tuple_id
+    optional bool is_replace = 8;
 };
 
 message DeleteNode {

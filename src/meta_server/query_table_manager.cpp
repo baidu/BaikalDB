@@ -111,6 +111,10 @@ void QueryTableManager::get_flatten_schema(const pb::QueryRequest* request,
         //index_schema.set_field_or_index("Field");
         index_schema.set_column_name(index_info.index_name());
         index_schema.set_column_id(index_info.index_id());
+        std::string type = pb::IndexType_Name(index_info.index_type());
+        if (index_info.index_type() == pb::I_FULLTEXT) {
+            type += "(" + pb::SegmentType_Name(index_info.segment_type()) + ")";
+        }
         index_schema.set_column_type(pb::IndexType_Name(index_info.index_type()));
         index_schema.set_can_null(false);
         std::string extra = "[";

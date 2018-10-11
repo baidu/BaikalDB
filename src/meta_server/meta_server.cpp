@@ -14,6 +14,7 @@
 
 #include "meta_server.h"
 #include <boost/lexical_cast.hpp>
+#include "meta_server_interact.hpp"
 #include "auto_incr_state_machine.h"
 #include "meta_state_machine.h"
 #include "cluster_manager.h"
@@ -89,6 +90,7 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     SchemaManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     PrivilegeManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     ClusterManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+    MetaServerInteract::get_instance()->init();
     
     _init_success = true;
     return 0;
@@ -171,8 +173,8 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
         response->set_op_type(request->op_type());
         return;
     }
-    if (request->op_type() == pb::OP_SET_INSTANCE_DEAD) {
-        ClusterManager::get_instance()->set_instance_dead(request, response, log_id);
+    if (request->op_type() == pb::OP_SET_INSTANCE_MIGRATE) {
+        ClusterManager::get_instance()->set_instance_migrate(request, response, log_id);
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
         return;
@@ -332,6 +334,75 @@ void MetaServer::baikal_heartbeat(google::protobuf::RpcController* controller,
     RETURN_IF_NOT_INIT(_init_success, response, log_id);
     if (_meta_state_machine != nullptr) {
         _meta_state_machine->baikal_heartbeat(controller, request, response, done_guard.release());
+    }
+}
+
+void MetaServer::migrate(google::protobuf::RpcController* controller,
+                                 const pb::MigrateRequest* /*request*/,
+                                 pb::MigrateResponse* response,
+                                 google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+    const std::string* data = cntl->http_request().uri().GetQuery("data");
+    pb::MigrateRequest request;
+    if (data != NULL) {
+        json2pb(*data, &request);
+    }
+    static std::map<std::string, std::string> bns_pre_ip_port;
+    static std::mutex bns_mutex;
+    for (auto& instance : request.targets_list().instances()) {
+        std::string bns = instance.name();
+        std::string event = instance.event();
+        auto res_instance = response->mutable_targets_list()->add_instances();
+        res_instance->set_name(bns);
+        res_instance->set_status("PROCESSING");
+        std::vector<std::string> bns_instances;
+        int ret = 0;
+        std::string ip_port;
+        if (instance.has_pre_host() && instance.has_pre_port()) {
+            ip_port = instance.pre_host() + ":" + instance.pre_port();
+        } else {
+        }
+        if (event == "EXPECTED_MIGRATE") {
+            pb::MetaManagerRequest internal_req;
+            pb::MetaManagerResponse internal_res;
+            internal_req.set_op_type(pb::OP_SET_INSTANCE_MIGRATE);
+            internal_req.mutable_instance()->set_address(ip_port);
+            ret = MetaServerInteract::get_instance()->send_request(
+                    "meta_manager", internal_req, internal_res);
+            if (ret != 0) {
+                DB_WARNING("internal request fail, %s, %s", 
+                        internal_req.ShortDebugString().c_str(), 
+                        internal_res.ShortDebugString().c_str());
+                res_instance->set_status("PROCESSING");
+                return;
+            }
+            res_instance->set_status(internal_res.errmsg());
+            BAIDU_SCOPED_LOCK(bns_mutex);
+            bns_pre_ip_port[bns] = ip_port;
+        } else if (event == "MIGRATED") {
+            {
+                BAIDU_SCOPED_LOCK(bns_mutex);
+                if (bns != "" && bns_pre_ip_port.count(bns) == 1) {
+                    ip_port = bns_pre_ip_port[bns];
+                }
+            }
+            pb::MetaManagerRequest internal_req;
+            pb::MetaManagerResponse internal_res;
+            internal_req.set_op_type(pb::OP_DROP_INSTANCE);
+            internal_req.mutable_instance()->set_address(ip_port);
+            ret = MetaServerInteract::get_instance()->send_request(
+                    "meta_manager", internal_req, internal_res);
+            if (ret != 0) {
+                DB_WARNING("internal request fail, %s, %s", 
+                        internal_req.ShortDebugString().c_str(), 
+                        internal_res.ShortDebugString().c_str());
+                res_instance->set_status("PROCESSING");
+                return;
+            }
+            res_instance->set_status("SUCCESS");
+        }
     }
 }
 

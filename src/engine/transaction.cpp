@@ -307,6 +307,10 @@ int Transaction::get_update_primary(
         bool            parse_key,
         bool            check_region) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
+    if (_region_info == nullptr) {
+        DB_WARNING("no region_info");
+        return -1;
+    }
     last_active_time = butil::gettimeofday_us();
     int ret = -1;
     //IndexInfo index_info = _factory->get_index_info(table);
@@ -432,6 +436,10 @@ int Transaction::get_update_secondary(
         MutTableKey&        pk,
         bool                check_region) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
+    if (_region_info == nullptr) {
+        DB_WARNING("no region_info");
+        return -1;
+    }
     last_active_time = butil::gettimeofday_us();
     std::string& pk_val = pk.data();
     if (index.type != pb::I_UNIQ) {

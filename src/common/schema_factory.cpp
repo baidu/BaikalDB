@@ -29,16 +29,52 @@ int SchemaFactory::init() {
     if (_is_init) {
         return 0;
     }
+    int ret = bthread::execution_queue_start(&_table_queue_id, nullptr, 
+            update_tables_double_buffer, (void*)this);
+    if (ret != 0) {
+        DB_FATAL("execution_queue_start error, %d", ret);
+        return -1;
+    }
+    ret = bthread::execution_queue_start(&_region_queue_id, nullptr, 
+            update_regions_double_buffer, (void*)this);
+    if (ret != 0) {
+        DB_FATAL("execution_queue_start error, %d", ret);
+        return -1;
+    }
     _is_init = true;
     return 0;
 }
 
+void SchemaFactory::update_table(const pb::SchemaInfo& table) {
+    bthread::execution_queue_execute(_table_queue_id, table);
+}
+int SchemaFactory::update_tables_double_buffer(
+        void* meta, bthread::TaskIterator<pb::SchemaInfo>& iter) {
+    SchemaFactory* factory = (SchemaFactory*)meta;
+    factory->update_tables_double_buffer(iter);
+    bthread_usleep(100 * 1000); // 更新间隔100ms，双buf不需要引用计数了
+    return 0;
+}
+void SchemaFactory::update_tables_double_buffer(bthread::TaskIterator<pb::SchemaInfo>& iter) {
+    SchemaMapping* background = _double_buffer_table.read_background();
+    SchemaMapping* frontground = _double_buffer_table.read();
+    *background = *frontground;
+    for (; iter; ++iter) {
+        update_table(*iter, background);
+    }
+    _double_buffer_table.swap();
+}
+
 //TODO
-void SchemaFactory::delete_table(const pb::SchemaInfo& table) {
+void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping* background) {
     if (!table.has_table_id()) {
         DB_FATAL("missing fields in SchemaInfo");
         return;
     }
+    auto& _table_info_mapping = background->table_info_mapping;
+    auto& _table_name_id_mapping = background->table_name_id_mapping;
+    auto& _index_info_mapping = background->index_info_mapping;
+    auto& _index_name_id_mapping = background->index_name_id_mapping;
     int64_t table_id = table.table_id();
     if (_table_info_mapping.count(table_id) == 0) {
         DB_FATAL("no table found with tableid: %ld", table_id);
@@ -74,23 +110,26 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table) {
             });
 
     {
-        BAIDU_SCOPED_LOCK(_update_region_mutex);
-        _key_region_mapping.erase(table_id);
+        BAIDU_SCOPED_LOCK(_update_table_region_mutex);
+        _table_region_mapping.erase(table_id);
     }
     _table_info_mapping.erase(table_id);
     return;
 }
 
 // not thread-safe
-int SchemaFactory::update_table(const pb::SchemaInfo &table) {
+int SchemaFactory::update_table(const pb::SchemaInfo &table, SchemaMapping* background) {
+    auto& _table_info_mapping = background->table_info_mapping;
+    auto& _table_name_id_mapping = background->table_name_id_mapping;
+    auto& _db_info_mapping = background->db_info_mapping;
+    auto& _db_name_id_mapping = background->db_name_id_mapping;
     DB_WARNING("table:%s", table.ShortDebugString().c_str());
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
     if (!_is_init) {
         DB_FATAL("SchemaFactory not initialized");
         return -1;
     }
     if (table.has_deleted() && table.deleted()) {
-        delete_table(table);
+        delete_table(table, background);
         return 0;
     }
     //TODO: change name to id
@@ -154,6 +193,10 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table) {
     tbl_info.namespace_ = _namespace;
     tbl_info.resource_tag = table.resource_tag();
     tbl_info.charset = table.charset();
+    tbl_info.engine = pb::ROCKSDB;
+    if (table.has_engine()) {
+        tbl_info.engine = table.engine();
+    }
     if (!table.has_byte_size_per_record() || table.byte_size_per_record() < 1) {
         tbl_info.byte_size_per_record = 1;
     } else {
@@ -213,16 +256,18 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table) {
         field_info.auto_inc = field.auto_increment();
         field_info.deleted = field.deleted();
         field_info.default_value = field.default_value();
-        if (field_info.default_value == "current_timestamp") {
+        if (field.has_default_value()) {
+            field_info.default_expr_value.type = pb::STRING;
+            field_info.default_expr_value.str_val = field_info.default_value;
+            field_info.default_expr_value.cast_to(field_info.type);
+        }
+        /*
+        if (field_info.default_value == "(current_timestamp())") {
             field_info.default_expr_value = ExprValue::Now();
             field_info.default_expr_value.cast_to(field_info.type);
         } else {
-            if (field.has_default_value()) {
-                field_info.default_expr_value.type = pb::STRING;
-                field_info.default_expr_value.str_val = field_info.default_value;
-                field_info.default_expr_value.cast_to(field_info.type);
-            }
         }
+        */
         if (field_info.type == pb::STRING || field_info.type == pb::HLL) {
             field_info.size = -1;
         } else {
@@ -279,7 +324,7 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table) {
         const pb::IndexInfo& cur = table.indexs(idx);
         int64_t index_id = cur.index_id();
         //DB_WARNING("update_index: %ld", index_id);
-        update_index(tbl_info, cur, pk_index);
+        update_index(tbl_info, cur, pk_index, background);
         tbl_info.indices.push_back(index_id);
     }
 
@@ -303,8 +348,10 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table) {
 }
 
 //TODO, string index type
-void SchemaFactory::update_index(TableInfo& table_info, 
-        const pb::IndexInfo& index, const pb::IndexInfo* pk_index) {
+void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& index, 
+        const pb::IndexInfo* pk_index, SchemaMapping* background) {
+    auto& _index_info_mapping = background->index_info_mapping;
+    auto& _index_name_id_mapping = background->index_name_id_mapping;
     IndexInfo idx_info;
     std::string old_idx_name;
     //如果表存在，需要清空里面的内容
@@ -412,153 +459,167 @@ void SchemaFactory::update_index(TableInfo& table_info,
     _index_name_id_mapping[fullname] = idx_info.id;
 }
 
+void SchemaFactory::update_regions(
+        const RegionVec& regions) {
+    bthread::execution_queue_execute(_region_queue_id, regions);
+}
+int SchemaFactory::update_regions_double_buffer(
+        void* meta, bthread::TaskIterator<RegionVec>& iter) {
+    SchemaFactory* factory = (SchemaFactory*)meta;
+    factory->update_regions_double_buffer(iter);
+    bthread_usleep(100 * 1000); // 更新间隔100ms，双buf不需要引用计数了
+    return 0;
+}
 // 心跳更新时，如果region有分裂，需要保证分裂出来的region与源region同时更新
 // todo liuhuicong 更新时判断所有的start/end是否合法（重叠，空洞）
-void SchemaFactory::update_regions(
-        const ::google::protobuf::RepeatedPtrField<pb::RegionInfo>& regions) {
+void SchemaFactory::update_regions_double_buffer(bthread::TaskIterator<RegionVec>& iter) {
     // tableid => (partion => (start_key => region))
-    std::map<int64_t, std::map<int, 
+    std::map<int64_t, std::map<int,
         std::map<std::string, const pb::RegionInfo*>>> table_key_region_map;
-    for (auto& region : regions) {
-        int64_t table_id = region.table_id();
-        int p_id = region.partition_id();
-        const std::string& start_key = region.start_key();
-        table_key_region_map[table_id][p_id][start_key] = &region;
+    for (; iter; ++iter) {
+        for (auto& region : *iter) {
+            int64_t table_id = region.table_id();
+            int p_id = region.partition_id();
+            const std::string& start_key = region.start_key();
+            table_key_region_map[table_id][p_id][start_key] = &region;
+        }
     }
     for (auto& table_region : table_key_region_map) {
-        for (auto& start_key_region : table_region.second) {
-            auto& start_key_region_map = start_key_region.second;
-            std::vector<const pb::RegionInfo*> last_regions;
-            //std::string start_key;
-            std::string end_key;
-            for (auto iter = start_key_region_map.begin(); iter != start_key_region_map.end(); ++iter) {
-                const pb::RegionInfo& region = *iter->second;
-                DB_WARNING("region_info:%s", region.ShortDebugString().c_str());
-                pb::RegionInfo orgin_region;
-                int ret = get_region_info(region.region_id(), orgin_region);
-                if (ret < 0) {
-                    DB_WARNING("region:%s", region.ShortDebugString().c_str());
-                    if (last_regions.size() != 0) {
-                        //DB_WARNING("last_region:%s, region:%s",
-                        //        last_region->ShortDebugString().c_str(), region.ShortDebugString().c_str());
-                        auto last_region = last_regions.back();
-                        if (last_region->end_key() != region.start_key()) {
-                            last_regions.clear();
-                            DB_FATAL("last_region->end_key():%s != region.start_key():%s", 
-                                    last_region->end_key().c_str(), region.start_key().c_str());
-                            continue;
-                        }
-                        last_regions.push_back(&region);
-                        if (region.end_key() == end_key) {
-                            BAIDU_SCOPED_LOCK(_update_region_mutex);
-                            for (auto r : last_regions) {
-                                _update_region(*r, false);
-                                DB_WARNING("update regions %s", r->ShortDebugString().c_str());
-                            }
-                            last_regions.clear();
-                        } else if (end_key_compare(region.end_key(), end_key) > 0) {
-                            DB_FATAL("region.end_key:%s > end_key:%s", 
-                                    str_to_hex(region.end_key()).c_str(), 
-                                    str_to_hex(end_key).c_str());
-                            last_regions.clear();
-                        }
-                    } else {
-                         DB_WARNING("region:%s", region.ShortDebugString().c_str());
-                        // 先判断加入的region是否与现有的region有范围重叠
-                        int64_t table_id = region.table_id();
-                        std::vector<StrInt64Map>& vec = _key_region_mapping[table_id];
-                        if (vec.size() < 1) {
-                            vec.resize(1);
-                        }
-                        StrInt64Map& key_reg_map = vec[0];
-                        auto region_iter = key_reg_map.lower_bound(region.start_key());
-                        if (region_iter != key_reg_map.begin()) {
-                            int64_t pre_region_id = (--region_iter)->second;
-                            BAIDU_SCOPED_LOCK(_update_region_mutex);
-                            const pb::RegionInfo& info = _region_info_mapping[pre_region_id];
-                            if (info.end_key() == region.end_key()) {
-                                DB_WARNING("region:%ld %ld is overlapping", 
-                                        pre_region_id, region.region_id());
-                                continue;
-                            }
-                        }
-                        DB_WARNING("region:%s", region.ShortDebugString().c_str());
-                        update_region(region);
-                    }
-                } else if (region.version() > orgin_region.version()) {
-                    DB_WARNING("region:%s, orgin_region:%s", 
-                            region.ShortDebugString().c_str(), orgin_region.ShortDebugString().c_str());
-                    last_regions.clear();
-                    //version变化了说明splt了，需要整体更新
-                    last_regions.push_back(&region);
-                    //start_key = region.start_key();
-                    end_key = orgin_region.end_key();
-                    continue;
-                } else {
-                    DB_WARNING("region:%s", region.ShortDebugString().c_str());
-                    update_region(region);
-                }
-                //DB_WARNING("region:%s, orgin_region:%s",
-                //        region.ShortDebugString().c_str(), orgin_region.ShortDebugString().c_str());
-                //last_region = nullptr;
-            }
-        }
+        int64_t table_id = table_region.first;
+        update_regions_table(table_id, table_region.second);
     }
 }
 
-void SchemaFactory::update_region(const pb::RegionInfo& region) {
-    BAIDU_SCOPED_LOCK(_update_region_mutex);
-    _update_region(region, false);
-}
-void SchemaFactory::force_update_region(const pb::RegionInfo& region) {
-    BAIDU_SCOPED_LOCK(_update_region_mutex);
-    _update_region(region, true);
-}
-void SchemaFactory::_update_region(const pb::RegionInfo& region, bool force) {
-    if (region.has_deleted() && region.deleted()) {
-        DB_WARNING("region:%s deleted", region.ShortDebugString().c_str());
-        delete_region_without_lock(region);
-        return;
-    }
-    if (!force) {
-        const pb::RegionInfo& orgin_region = _region_info_mapping[region.region_id()];
-        //不允许version 回退
-        if (orgin_region.version() > region.version()) {
-            DB_WARNING("no roll back");
+void SchemaFactory::update_regions_table(int64_t table_id, std::map<int,
+        std::map<std::string, const pb::RegionInfo*>>& key_region_map) {
+    TableRegionPtr double_buffer_ptr = get_table_region(table_id);
+    TableRegionInfo* background = double_buffer_ptr->read_background();
+    TableRegionInfo* frontground = double_buffer_ptr->read();
+    background->region_info_mapping = frontground->region_info_mapping;
+    background->key_region_mapping = frontground->key_region_mapping;
+    auto _update_region = [background](const pb::RegionInfo& region) {
+        if (region.has_deleted() && region.deleted()) {
+            DB_WARNING("region:%s deleted", region.ShortDebugString().c_str());
+            std::vector<StrInt64Map>& vec = background->key_region_mapping;
+            if (vec.size() < 1) {
+                return;
+            }
+            StrInt64Map& key_reg_map = vec[0];
+            key_reg_map.erase(region.start_key());
+            background->region_info_mapping.erase(region.region_id());
             return;
         }
-    }
-    int64_t table_id = region.table_id();
-    std::vector<StrInt64Map>& vec = _key_region_mapping[table_id];
-    if (vec.size() < 1) {
-        vec.resize(1);
-    }
-    StrInt64Map& key_reg_map = vec[0];
-    key_reg_map.insert(std::make_pair(region.start_key(), region.region_id()));
+        pb::RegionInfo orgin_region;
+        background->get_region_info(region.region_id(), orgin_region);
+        //不允许version 回退
+        if (orgin_region.version() > region.version()) {
+            DB_WARNING("no roll back, region_id: %ld, old_ver:%d, ver:%d", 
+                    region.region_id(), orgin_region.version(), region.version());
+            return;
+        }
+        std::vector<StrInt64Map>& vec = background->key_region_mapping;
+        if (vec.size() < 1) {
+            vec.resize(1);
+        }
+        StrInt64Map& key_reg_map = vec[0];
+        key_reg_map.insert(std::make_pair(region.start_key(), region.region_id()));
 
-    _region_info_mapping[region.region_id()] = region;
+        background->insert_region_info(region);
+        DB_WARNING("region_id: %ld ver:%d update success", region.region_id(), region.version());
+    };
+
+    for (auto& start_key_region : key_region_map) {
+        auto& start_key_region_map = start_key_region.second;
+        std::vector<const pb::RegionInfo*> last_regions;
+        //std::string start_key;
+        std::string end_key;
+        for (auto iter = start_key_region_map.begin(); iter != start_key_region_map.end(); ++iter) {
+            const pb::RegionInfo& region = *iter->second;
+            DB_WARNING("region_info:%s", region.ShortDebugString().c_str());
+            pb::RegionInfo orgin_region;
+            int ret = background->get_region_info(region.region_id(), orgin_region);
+            if (ret < 0) {
+                DB_WARNING("region:%s", region.ShortDebugString().c_str());
+                if (last_regions.size() != 0) {
+                    //DB_WARNING("last_region:%s, region:%s",
+                    //        last_region->ShortDebugString().c_str(), region.ShortDebugString().c_str());
+                    auto last_region = last_regions.back();
+                    if (last_region->end_key() != region.start_key()) {
+                        last_regions.clear();
+                        DB_FATAL("last_region->end_key():%s != region.start_key():%s", 
+                                last_region->end_key().c_str(), region.start_key().c_str());
+                        continue;
+                    }
+                    last_regions.push_back(&region);
+                    if (region.end_key() == end_key) {
+                        for (auto r : last_regions) {
+                            _update_region(*r);
+                            DB_WARNING("update regions %s", r->ShortDebugString().c_str());
+                        }
+                        last_regions.clear();
+                    } else if (end_key_compare(region.end_key(), end_key) > 0) {
+                        DB_FATAL("region.end_key:%s > end_key:%s", 
+                                str_to_hex(region.end_key()).c_str(), 
+                                str_to_hex(end_key).c_str());
+                        last_regions.clear();
+                    }
+                } else {
+                    DB_WARNING("region:%s", region.ShortDebugString().c_str());
+                    // 先判断加入的region是否与现有的region有范围重叠
+                    std::vector<StrInt64Map>& vec = background->key_region_mapping;
+                    if (vec.size() < 1) {
+                        vec.resize(1);
+                    }
+                    StrInt64Map& key_reg_map = vec[0];
+                    auto region_iter = key_reg_map.lower_bound(region.start_key());
+                    if (region_iter != key_reg_map.begin()) {
+                        int64_t pre_region_id = (--region_iter)->second;
+                        pb::RegionInfo pre_info;
+                        background->get_region_info(pre_region_id, pre_info);
+                        if (end_key_compare(pre_info.end_key(), region.end_key()) >= 0) {
+                            DB_WARNING("region:%ld %ld is overlapping", 
+                                    pre_region_id, region.region_id());
+                            continue;
+                        }
+                    }
+                    DB_WARNING("region:%s", region.ShortDebugString().c_str());
+                    _update_region(region);
+                }
+            } else if (region.version() > orgin_region.version()) {
+                DB_WARNING("region:%s, orgin_region:%s",
+                        region.ShortDebugString().c_str(), orgin_region.ShortDebugString().c_str());
+                last_regions.clear();
+                //version变化了说明split了，需要整体更新
+                last_regions.push_back(&region);
+                //start_key = region.start_key();
+                end_key = orgin_region.end_key();
+                continue;
+            } else {
+                DB_WARNING("region:%s, orgin_region:%s",
+                        region.ShortDebugString().c_str(), orgin_region.ShortDebugString().c_str());
+                _update_region(region);
+            }
+            //DB_WARNING("region:%s, orgin_region:%s",
+            //        region.ShortDebugString().c_str(), orgin_region.ShortDebugString().c_str());
+            //last_region = nullptr;
+        }
+    }
+    double_buffer_ptr->swap();
+}
+
+TableRegionPtr SchemaFactory::get_table_region(int64_t table_id) {
+    {
+        BAIDU_SCOPED_LOCK(_update_table_region_mutex);
+        if (_table_region_mapping.count(table_id) == 0) {
+            _table_region_mapping[table_id] = std::make_shared<DoubleBuffer<TableRegionInfo>>();
+        }
+        return _table_region_mapping[table_id];
+    }
 }
 
 void SchemaFactory::update_leader(const pb::RegionInfo& region) {
-    BAIDU_SCOPED_LOCK(_update_region_mutex);
-    if (_region_info_mapping.count(region.region_id()) == 1) {
-        _region_info_mapping[region.region_id()].set_leader(region.leader());
-    }
-}
-
-void SchemaFactory::delete_region_without_lock(const pb::RegionInfo& region) {
     int64_t table_id = region.table_id();
-    auto iter = _key_region_mapping.find(table_id);
-    if (iter != _key_region_mapping.end()) {
-        std::vector<StrInt64Map>& vec = iter->second;
-        if (vec.size() < 1) {
-            return;
-        }
-        StrInt64Map& key_reg_map = vec[0];
-        key_reg_map.erase(region.start_key());
-    }
-    _region_info_mapping.erase(region.region_id());
-    return;
+    get_table_region(table_id)->read()->update_leader(region.region_id(), region.leader());
 }
 
 void SchemaFactory::update_user(const pb::UserPrivilege& user) {
@@ -614,7 +675,8 @@ SmartRecord SchemaFactory::new_record(TableInfo& info) {
 
 // create a new table record (aka. a table row)
 SmartRecord SchemaFactory::new_record(int64_t tableid) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _table_info_mapping = frontground->table_info_mapping;
     if (_table_info_mapping.count(tableid) == 0) {
         DB_WARNING("no table found: %ld", tableid);
         return nullptr;
@@ -623,15 +685,26 @@ SmartRecord SchemaFactory::new_record(int64_t tableid) {
 }
 
 DatabaseInfo SchemaFactory::get_database_info(int64_t databaseid) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _db_info_mapping = frontground->db_info_mapping;
     if (_db_info_mapping.count(databaseid) == 0) {
         return DatabaseInfo();
     }
     return _db_info_mapping[databaseid];
 }
 
+pb::Engine SchemaFactory::get_table_engine(int64_t tableid) {
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _table_info_mapping = frontground->table_info_mapping;
+    if (_table_info_mapping.count(tableid) == 0) {
+        return pb::ROCKSDB;
+    }
+    return _table_info_mapping[tableid].engine;
+}
+
 TableInfo SchemaFactory::get_table_info(int64_t tableid) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _table_info_mapping = frontground->table_info_mapping;
     if (_table_info_mapping.count(tableid) == 0) {
         return TableInfo();
     }
@@ -639,7 +712,8 @@ TableInfo SchemaFactory::get_table_info(int64_t tableid) {
 }
 
 IndexInfo SchemaFactory::get_index_info(int64_t indexid) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _index_info_mapping = frontground->index_info_mapping;
     if (_index_info_mapping.count(indexid) == 0) {
         return IndexInfo();
     }
@@ -656,8 +730,8 @@ std::shared_ptr<UserInfo> SchemaFactory::get_user_info(const std::string& user) 
 
 std::vector<std::string> SchemaFactory::get_db_list(std::string namespace_) {
     std::vector<std::string> vec;
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
-    for (auto& db_pair : _db_info_mapping) {
+    SchemaMapping* frontground = _double_buffer_table.read();
+    for (auto& db_pair : frontground->db_info_mapping) {
         auto& db_info = db_pair.second;
         if (db_info.namespace_ == namespace_) {
             vec.push_back(db_info.name);
@@ -667,9 +741,10 @@ std::vector<std::string> SchemaFactory::get_db_list(std::string namespace_) {
 }
 
 std::vector<std::string> SchemaFactory::get_table_list(std::string namespace_, std::string db_name) {
+    db_name += ".";
     std::vector<std::string> vec; 
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
-    for (auto& table_pair : _table_info_mapping) {
+    SchemaMapping* frontground = _double_buffer_table.read();
+    for (auto& table_pair : frontground->table_info_mapping) {
         auto& table_info = table_pair.second;
         if (table_info.namespace_ == namespace_) {
             if (table_info.name.size() <= db_name.size()) {
@@ -678,30 +753,31 @@ std::vector<std::string> SchemaFactory::get_table_list(std::string namespace_, s
                 continue;
             }
             if (table_info.name.compare(0, db_name.size(), db_name) == 0) {
-                vec.push_back(table_info.name.substr(db_name.size() + 1));
+                vec.push_back(table_info.name.substr(db_name.size()));
             }
         }
     }
     return vec;
 }
 void SchemaFactory::get_all_table_version(std::unordered_map<int64_t, int64_t>& table_id_version_map) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
-    for (auto& table_pair : _table_info_mapping) {
+    SchemaMapping* frontground = _double_buffer_table.read();
+    for (auto& table_pair : frontground->table_info_mapping) {
         table_id_version_map[table_pair.first] = table_pair.second.version;
     }
 }
 
+int SchemaFactory::get_region_info(int64_t table_id, int64_t region_id, pb::RegionInfo& info) {
+    return get_table_region(table_id)->read()->get_region_info(region_id, info);
+}
+
 int SchemaFactory::get_region_info(int64_t region_id, pb::RegionInfo& info) {
-    BAIDU_SCOPED_LOCK(_update_region_mutex);
-    if (_region_info_mapping.count(region_id) == 0) {
-        return -1;
-    }
-    info = _region_info_mapping[region_id];
+    // todo
     return 0;
 }
 
 int SchemaFactory::get_table_id(const std::string& table_name, int64_t& table_id) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _table_name_id_mapping = frontground->table_name_id_mapping;
     if (_table_name_id_mapping.count(table_name) == 0) {
         return -1;
     }
@@ -710,7 +786,8 @@ int SchemaFactory::get_table_id(const std::string& table_name, int64_t& table_id
 }
 int SchemaFactory::get_byte_size_per_record(int64_t table_id, 
         int64_t& byte_size_per_record) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _table_info_mapping = frontground->table_info_mapping;
     if (_table_info_mapping.count(table_id) == 0) {
         return -1;
     }
@@ -718,7 +795,8 @@ int SchemaFactory::get_byte_size_per_record(int64_t table_id,
     return 0;
 }
 int SchemaFactory::get_region_capacity(int64_t table_id, int64_t& region_capacity) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _table_info_mapping = frontground->table_info_mapping;
     if (_table_info_mapping.count(table_id) == 0) {
         return -1;
     }
@@ -726,7 +804,8 @@ int SchemaFactory::get_region_capacity(int64_t table_id, int64_t& region_capacit
     return 0;
 }
 int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _db_name_id_mapping = frontground->db_name_id_mapping;
     if (_db_name_id_mapping.count(db_name) == 0) {
         return -1;
     }
@@ -734,8 +813,8 @@ int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
     return 0;
 }
 int SchemaFactory::whether_exist_tableid(int64_t table_id) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
-    if (_table_info_mapping.count(table_id) == 0) {
+    SchemaMapping* frontground = _double_buffer_table.read();
+    if (frontground->table_info_mapping.count(table_id) == 0) {
         return -1;
     }
     return 0;
@@ -750,7 +829,9 @@ int SchemaFactory::whether_exist_tableid(int64_t table_id) {
 int SchemaFactory::get_index_id(int64_t table_id,
                                 const std::string& index_name, 
                                 int64_t& index_id) {
-    BAIDU_SCOPED_LOCK(_update_table_mutex);
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _table_info_mapping = frontground->table_info_mapping;
+    auto& _index_name_id_mapping = frontground->index_name_id_mapping;
     if (_table_info_mapping.count(table_id) == 0) {
         return -1;
     }
@@ -769,25 +850,23 @@ int SchemaFactory::get_index_id(int64_t table_id,
     index_id = _index_name_id_mapping[full_index_name];
     return 0;
 }
+
 int SchemaFactory::get_region_by_key(IndexInfo& index, 
         const pb::PossibleIndex* primary,
         std::map<int64_t, pb::RegionInfo>& region_infos) {
     region_infos.clear();
-    BAIDU_SCOPED_LOCK(_update_region_mutex);
+    TableRegionPtr double_buffer_ptr = get_table_region(index.id);
+    TableRegionInfo* frontground = double_buffer_ptr->read();
+    auto& key_region_mapping = frontground->key_region_mapping;
     if (primary == nullptr) {
-        auto iter = _key_region_mapping.find(index.id);
-        if (iter == _key_region_mapping.end()) {
-            DB_WARNING("no region found for table:%ld", index.id);
+        if (key_region_mapping.size() != 1) {
+            DB_WARNING("partion_num not supported:%ld, %lu", index.id, key_region_mapping.size());
             return -1;
         }
-        if (iter->second.size() != 1) {
-            DB_WARNING("partion_num not supported:%ld, %lu", index.id, iter->second.size());
-            return -1;
-        }
-        StrInt64Map& map = iter->second[0];
+        StrInt64Map& map = key_region_mapping[0];
         for (auto& pair : map) {
             int64_t region_id = pair.second;
-            region_infos[region_id] = _region_info_mapping[region_id];
+            frontground->get_region_info(region_id, region_infos[region_id]);
         }
         return 0;
     }
@@ -831,16 +910,11 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
             _start_sentinel.append_u16(0xFFFF);
         }
 
-        auto iter = _key_region_mapping.find(index.id);
-        if (iter == _key_region_mapping.end()) {
-            DB_WARNING("no region found for table:%ld", index.id);
+        if (key_region_mapping.size() != 1) {
+            DB_WARNING("partion_num not supported:%ld, %lu", index.id, key_region_mapping.size());
             return -1;
         }
-        if (iter->second.size() != 1) {
-            DB_WARNING("partion_num not supported:%ld, %lu", index.id, iter->second.size());
-            return -1;
-        }
-        StrInt64Map& map = iter->second[0];
+        StrInt64Map& map = key_region_mapping[0];
         auto region_iter = map.upper_bound(_start_sentinel.data());
         
         while (left_open && region_iter != map.end() && 
@@ -854,7 +928,7 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
             if (_end.data().empty() || region_iter->first <= _end.data() ||
                     (!right_open && boost::starts_with(region_iter->first, _end.data()))) {
                 int64_t region_id = region_iter->second;
-                region_infos[region_id] = _region_info_mapping[region_id];
+                frontground->get_region_info(region_id, region_infos[region_id]);
             } else {
                 break;
             }
@@ -869,24 +943,20 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
 int SchemaFactory::get_region_by_key(
         const RepeatedPtrField<pb::RegionInfo>& input_regions,
         std::map<int64_t, pb::RegionInfo>& output_regions) {
-
-    BAIDU_SCOPED_LOCK(_update_region_mutex);
     for (int idx = 0; idx < input_regions.size(); ++idx) {
         int64_t table_id = input_regions[idx].table_id();
+        TableRegionPtr double_buffer_ptr = get_table_region(table_id);
+        TableRegionInfo* frontground = double_buffer_ptr->read();
+        auto& key_region_mapping = frontground->key_region_mapping;
 
         const std::string& start = input_regions[idx].start_key();
         const std::string& end = input_regions[idx].end_key();
 
-        auto iter = _key_region_mapping.find(table_id);
-        if (iter == _key_region_mapping.end()) {
-            DB_WARNING("no region found for table:%ld", table_id);
-            return 0;
-        }
-        if (iter->second.size() != 1) {
-            DB_WARNING("partion_num not supported:%ld, %lu", table_id, iter->second.size());
+        if (key_region_mapping.size() != 1) {
+            DB_WARNING("partion_num not supported:%ld, %lu", table_id, key_region_mapping.size());
             return -1;
         }
-        StrInt64Map& map = iter->second[0];
+        StrInt64Map& map = key_region_mapping[0];
         auto region_iter = map.upper_bound(start);
 
         if (region_iter != map.begin()) {
@@ -895,7 +965,7 @@ int SchemaFactory::get_region_by_key(
         while (region_iter != map.end()) {
             if (end.empty() || region_iter->first < end) {
                 int64_t region_id = region_iter->second;
-                output_regions.insert({region_id, _region_info_mapping[region_id]});
+                frontground->get_region_info(region_id, output_regions[region_id]);
             } else {
                 break;
             }
@@ -911,28 +981,25 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         std::map<int64_t, pb::RegionInfo>& region_infos) {
     region_ids.clear();
     region_infos.clear();
-    BAIDU_SCOPED_LOCK(_update_region_mutex);
+    TableRegionPtr double_buffer_ptr = get_table_region(index.id);
+    TableRegionInfo* frontground = double_buffer_ptr->read();
+    auto& key_region_mapping = frontground->key_region_mapping;
     for (auto& record : records) {
         MutTableKey  key;
         if (0 != key.append_index(index, record.get(), -1, false)) {
             DB_FATAL("Fail to encode_key, table:%ld", index.id);
             return -1;
         }
-        auto iter = _key_region_mapping.find(index.id);
-        if (iter == _key_region_mapping.end()) {
-            DB_WARNING("no region found for table:%ld", index.id);
+        if (key_region_mapping.size() != 1) {
+            DB_WARNING("partion_num not supported:%ld, %lu", index.id, key_region_mapping.size());
             return -1;
         }
-        if (iter->second.size() != 1) {
-            DB_WARNING("partion_num not supported:%ld, %lu", index.id, iter->second.size());
-            return -1;
-        }
-        StrInt64Map& map = iter->second[0];
+        StrInt64Map& map = key_region_mapping[0];
         auto region_iter = map.upper_bound(key.data());
         --region_iter;
         int64_t region_id = region_iter->second;
         region_ids[region_id].push_back(record);
-        region_infos[region_id] = _region_info_mapping[region_id];
+        frontground->get_region_info(region_id, region_infos[region_id]);
     }
     //DB_WARNING("region_id:%ld", region_iter->second);
     return 0;

@@ -15,7 +15,7 @@
 #include "join_node.h"
 #include "filter_node.h"
 #include "expr_node.h"
-#include "scan_node.h"
+#include "rocksdb_scan_node.h"
 #include "scalar_fn_call.h"
 #include "index_selector.h"
 #include "plan_router.h"
@@ -294,7 +294,7 @@ int JoinNode::open(RuntimeState* state) {
     _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
     //重新做路由选择
     for (auto& exec_node : scan_nodes) {
-        ScanNode* scan_node = static_cast<ScanNode*>(exec_node);
+        RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
         ExecNode* parent_node_ptr = scan_node->get_parent();
         if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
                 || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
@@ -373,17 +373,10 @@ int JoinNode::_fill_equal_slot() {
     return 0;
 }
 bool JoinNode::_is_equal_condition(ExprNode* expr) {
-#ifdef NEW_PARSER
     if (expr->node_type() != pb::FUNCTION_CALL 
         || static_cast<ScalarFnCall*>(expr)->fn().fn_op() != parser::FT_EQ) {
         return false;
     }
-#else 
-    if (expr->node_type() != pb::FUNCTION_CALL 
-        || static_cast<ScalarFnCall*>(expr)->fn().fn_op() != OP_EQ) {
-        return false;
-    }
-#endif
     if (expr->children_size() != 2) {
         return false;
     }
@@ -421,11 +414,7 @@ int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs,
         in_node->set_node_type(pb::IN_PREDICATE);
         pb::Function* func = in_node->mutable_fn();
         func->set_name("in");
-#ifdef NEW_PARSER
         func->set_fn_op(parser::FT_IN);
-#else
-        func->set_fn_op(OP_IN);
-#endif
         in_node->set_num_children(1);
 
         //增加一个slot_ref

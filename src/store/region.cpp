@@ -25,7 +25,6 @@
 #include "table_record.h"
 #include "my_raft_log_storage.h"
 #include "raft_log_compaction_filter.h"
-#include "split_compaction_filter.h"
 #include "store.h"
 #include "store_interact.hpp"
 
@@ -252,7 +251,6 @@ int Region::init(bool write_db, int32_t snapshot_times) {
     } else {
         _report_peer_info = true;
     }
-    _resource->region_info = _region_info;
     // 初始化倒排索引
     TableInfo& table_info = _resource->table_info;
     _resource->region_id = _region_id;
@@ -263,7 +261,6 @@ int Region::init(bool write_db, int32_t snapshot_times) {
                     _region_info.table_id(), _region_id);
         return -1;
     }
-    _factory->update_region(_region_info);
     for (int64_t index_id : table_info.indices) {
         IndexInfo info = _factory->get_index_info(index_id);
         if (info.id == -1) {
@@ -346,11 +343,10 @@ int Region::init(bool write_db, int32_t snapshot_times) {
     options.snapshot_uri = FLAGS_snapshot_uri + "/region_" + 
                                 boost::lexical_cast<std::string>(_region_id);
 
-    _txn_pool.init(_region_id, &_region_info);
+    _txn_pool.init(_region_id);
     if (_node.init(options) != 0) {
         DB_FATAL("raft node init fail, region_id: %ld, region_info:%s", 
                  _region_id, pb2json(_region_info).c_str());
-        _factory->delete_region_without_lock(_region_info); 
         return -1;
     }
     
@@ -368,11 +364,15 @@ int Region::init(bool write_db, int32_t snapshot_times) {
         sync_do_snapshot();
         --snapshot_times;
     }
-    pb::RegionInfo& tmp_region = _resource->region_info;
-    copy_region(&tmp_region);
+    copy_region(&_resource->region_info);
+    //compaction时候删掉多余的数据
+    SplitCompactionFilter::get_instance()->set_range_key(
+            _region_id,
+            _resource->region_info.start_key(),
+            _resource->region_info.end_key());
     _init_success = true;
     DB_WARNING("region_id: %ld init success, region_info:%s, time_cost:%ld", 
-                _region_id, tmp_region.ShortDebugString().c_str(), 
+                _region_id, _resource->region_info.ShortDebugString().c_str(), 
                 time_cost.get_time());
     return 0;
 }
@@ -425,6 +425,14 @@ void Region::raft_control(google::protobuf::RpcController* controller,
         static_cast<brpc::Controller*>(controller);
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
+    }
+    if (!is_leader()) {
+        DB_WARNING("node is not leader when add_peer, region_id: %ld", _region_id);
+        if (response != NULL) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("not leader");
+        }
+        return;
     }
     //每个region同时只能进行一个动作
     pb::RegionStatus expected_status = pb::IDLE;
@@ -530,9 +538,9 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
         }
         
         // normally, cache plan should be execute successfully, because it has been executed 
-        // on other peers.
+        // on other peers, except for single-stmt transactions
         pb::StoreRes res;
-        dml(request, op_type, plan, tuples, res, applied_index, term, seq_id);
+        dml_2pc(request, op_type, plan, tuples, res, applied_index, term, seq_id);
         if (res.has_errcode() && res.errcode() != pb::SUCCESS) {
             response.set_errcode(res.errcode());
             response.set_errmsg(res.errmsg());
@@ -588,6 +596,18 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
             response->set_errcode(pb::SUCCESS);
             return;
         }
+        int64_t disable_write_wait = get_split_wait_time();
+        int ret = _disable_write_cond.timed_wait(disable_write_wait);
+        _real_writing_cond.increase();
+        ScopeGuard auto_decrease([this]() {
+                _real_writing_cond.decrease_signal();
+                });
+        if (ret != 0) {
+            response->set_errcode(pb::DISABLE_WRITE_TIMEOUT);
+            response->set_errmsg("_diable_write_cond wait timeout");
+            DB_FATAL("_diable_write_cond wait timeout, ret:%d, region_id: %ld", ret, _region_id);
+            return;
+        }
         butil::IOBuf data;
         butil::IOBufAsZeroCopyOutputStream wrapper(&data);
         if (!request->SerializeToZeroCopyStream(&wrapper)) {
@@ -605,7 +625,7 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
         braft::Task task;
         task.data = &data;
         task.done = c;
-        _real_writing_cond.increase();
+        auto_decrease.release();
         _node.apply(task);
         return;
     }
@@ -626,7 +646,7 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
         pb::RegionInfo region_info_mem;
         copy_region(&region_info_mem);
         region_info_mem.set_start_key(request->start_key());
-        set_region(region_info_mem);
+        set_region_with_update_range(region_info_mem);
     }
     int ret = 0;
     if (/*op_type != pb::OP_PREPARE && */last_seq < seq_id - 1) {
@@ -855,13 +875,6 @@ void Region::query(google::protobuf::RpcController* controller,
         log_id = cntl->log_id();
     }
     const char* remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
-    /*
-    if (_shutdown) {
-        response->set_errcode(pb::INTERNAL_ERROR);
-        response->set_errmsg("node has been closed");
-        DB_FATAL("region_id: %ld has been closed", _region_id);
-        return;
-    }*/
     if (!_is_leader.load() && 
         //为了性能，支持非一致性读
             (!request->select_without_leader() || _shutdown || !_init_success)) {
@@ -873,6 +886,7 @@ void Region::query(google::protobuf::RpcController* controller,
                         _region_id, log_id, remote_side);
         return;
     }
+    response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str()); // 每次都返回leader
     if (validate_version(request, response) == false) {
         //add_version的第二次或者打三次重试，需要把num_table_line返回回去
         if (request->op_type() == pb::OP_ADD_VERSION_FOR_SPLIT_REGION) {
@@ -891,6 +905,7 @@ void Region::query(google::protobuf::RpcController* controller,
                     request->region_version(), _region_info.version());
         return;
     }
+    // 启动时，或者follow落后太多，需要读leader
     if (request->op_type() == pb::OP_SELECT && request->region_version() > _region_info.version()) {
         response->set_errcode(pb::NOT_LEADER);
         response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str());
@@ -898,6 +913,7 @@ void Region::query(google::protobuf::RpcController* controller,
         DB_WARNING("not leader, leader:%s, region_id: %ld, version:%ld, log_id:%lu, remote_side:%s",
                         butil::endpoint2str(_node.leader_id().addr).c_str(), 
                         _region_id, _region_info.version(), log_id, remote_side);
+        return;
     }
     // int ret = 0;
     // TimeCost cost;
@@ -965,13 +981,13 @@ void Region::dml(const pb::StoreReq& request, pb::StoreRes& response,
         dml_1pc(request, request.op_type(), request.plan(), request.tuples(), 
             response, applied_index, term);
     } else {
-        dml(request, request.op_type(), request.plan(), request.tuples(), 
+        dml_2pc(request, request.op_type(), request.plan(), request.tuples(), 
             response, applied_index, term, seq_id);
     }
     return;
 }
 
-void Region::dml(const pb::StoreReq& request, 
+void Region::dml_2pc(const pb::StoreReq& request, 
         pb::OpType op_type,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples, 
@@ -1037,6 +1053,10 @@ void Region::dml(const pb::StoreReq& request,
     int ret = 0;
     TimeCost cost;
     RuntimeState state;
+    {
+        BAIDU_SCOPED_LOCK(_ptr_mutex);
+        state.set_resource(_resource);
+    }
     ret = state.init(request, plan, tuples, &_txn_pool);
     if (ret < 0) {
         response.set_errcode(pb::EXEC_FAIL);
@@ -1047,10 +1067,6 @@ void Region::dml(const pb::StoreReq& request,
     if (seq_id > 0) {
         // when executing cache query, use the seq_id of corresponding cache query (passed by user)
         state.seq_id = seq_id;
-    }
-    {
-        BAIDU_SCOPED_LOCK(_ptr_mutex);
-        state.set_resource(_resource);
     }
     state.set_reverse_index_map(_reverse_index_map);
     ExecNode* root = nullptr;
@@ -1133,6 +1149,10 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
     int ret = 0;
     TimeCost cost;
     RuntimeState state;
+    {
+        BAIDU_SCOPED_LOCK(_ptr_mutex);
+        state.set_resource(_resource);
+    }
     ret = state.init(request, plan, tuples, &_txn_pool);
     if (ret < 0) {
         response.set_errcode(pb::EXEC_FAIL);
@@ -1141,15 +1161,11 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
                     _region_id, applied_index);
         return;
     }
-    {
-        BAIDU_SCOPED_LOCK(_ptr_mutex);
-        state.set_resource(_resource);
-    }
     // for out-txn dml query, create new txn.
     // for single-region 2pc query, simply fetch the txn created before.
     bool is_new_txn = !(request.op_type() == pb::OP_PREPARE && request.txn_infos(0).optimize_1pc());
     if (is_new_txn) {
-        state.create_txn_if_null(&_region_info);
+        state.create_txn_if_null();
     }
     bool commit_succ = false;
     ScopeGuard auto_rollback([&]() {
@@ -1255,16 +1271,16 @@ void Region::select(const pb::StoreReq& request,
     //DB_WARNING("req:%s", request.DebugString().c_str());
     int ret = 0;
     RuntimeState state;
+    {
+        BAIDU_SCOPED_LOCK(_ptr_mutex);
+        state.set_resource(_resource);
+    }
     ret = state.init(request, plan, tuples, &_txn_pool);
     if (ret < 0) {
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("RuntimeState init fail");
         DB_FATAL("RuntimeState init fail, region_id: %ld", _region_id);
         return;
-    }
-    {
-        BAIDU_SCOPED_LOCK(_ptr_mutex);
-        state.set_resource(_resource);
     }
     // double check, ensure resource match the req version
     if (validate_version(&request, &response) == false) {
@@ -1300,7 +1316,7 @@ void Region::select(const pb::StoreReq& request,
     } else {
         // DB_WARNING("create tmp txn for select cmd: %ld", _region_id)
         is_new_txn = true;
-        txn = state.create_txn_if_null(&_region_info);
+        txn = state.create_txn_if_null();
     }
     ScopeGuard auto_rollback([&]() {
         if (is_new_txn) {
@@ -1376,11 +1392,8 @@ void Region::select(const pb::StoreReq& request,
 }
 
 //leader收到metaServer传来的新增一个peer的请求
-void Region::add_peer(const pb::AddPeer& add_peer) {
-    if (_whether_legal_for_add_peer(add_peer, NULL) != 0) {
-        return;
-    }
-    //这是按照在metaServer里add_peer的构造规则解析出来的newew——instance,
+void Region::add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue) {
+    //这是按照在metaServer里add_peer的构造规则解析出来的new_instance,
     //是解析new_instance的偷懒版本
     std::string new_instance = add_peer.new_peers(add_peer.new_peers_size() - 1);
     //在leader_send_init_region将状态置为doing, 在add_peer结束时将region状态置回来
@@ -1388,24 +1401,34 @@ void Region::add_peer(const pb::AddPeer& add_peer) {
     if (!_status.compare_exchange_strong(expected_status, pb::DOING)) {
         DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
         return;
-    } else {
-        DB_WARNING("region status to doning becase of add peer of heartbeat response, region_id: %ld",
-                    _region_id);
     }
-    if (_leader_send_init_region(new_instance, NULL) != 0) {
+    DB_WARNING("region status to doning becase of add peer of heartbeat response, region_id: %ld",
+            _region_id);
+    if (_whether_legal_for_add_peer(add_peer, NULL) != 0) {
         reset_region_status(); 
         return;
     }
-    _leader_add_peer(add_peer, new_instance, NULL, NULL);
+    auto init_and_add_peer = [add_peer, new_instance, this]() {
+        if (_shutdown) {
+            return;
+        }
+        if (_leader_send_init_region(new_instance, NULL) != 0) {
+            reset_region_status(); 
+            return;
+        }
+        if (_whether_legal_for_add_peer(add_peer, NULL) != 0) {
+            reset_region_status(); 
+            return;
+        }
+        _leader_add_peer(add_peer, new_instance, NULL, NULL);
+    };
+    queue.run(init_and_add_peer);
 }
 
 void Region::add_peer(const pb::AddPeer* request,
                       pb::StoreRes* response,
                       google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
-    if (_whether_legal_for_add_peer(*request, response) != 0) {
-        return;
-    }
     std::set<std::string> old_peers;
     for (auto& old_peer : request->old_peers()) {
         old_peers.insert(old_peer);
@@ -1428,11 +1451,18 @@ void Region::add_peer(const pb::AddPeer* request,
         response->set_errcode(pb::INTERNAL_ERROR);
         response->set_errmsg("new region fail");
         return;
-    } else {
-        DB_WARNING("region status to doning becase of add peer of heartbeat response, region_id: %ld",
-                    _region_id);
+    }
+    DB_WARNING("region status to doing becase of add peer of heartbeat response, region_id: %ld",
+            _region_id);
+    if (_whether_legal_for_add_peer(*request, response) != 0) {
+        reset_region_status(); 
+        return;
     }
     if (_leader_send_init_region(new_instance, response) != 0) {
+        reset_region_status(); 
+        return;
+    }
+    if (_whether_legal_for_add_peer(*request, response) != 0) {
         reset_region_status(); 
         return;
     }
@@ -1442,7 +1472,6 @@ void Region::_leader_add_peer(const pb::AddPeer& add_peer,
                               const std::string& new_instance,
                               pb::StoreRes* response,
                               google::protobuf::Closure* done) {
-    //send add_peer to self
     braft::PeerId peer;
     AddPeerClosure* add_peer_done = new AddPeerClosure;
     add_peer_done->region = this;
@@ -1458,11 +1487,7 @@ void Region::_leader_add_peer(const pb::AddPeer& add_peer,
     }
     braft::PeerId add_peer_instance;
     add_peer_instance.parse(new_instance);
-#ifdef BAIDU_INTERNAL
-    _node.add_peer(old_peers_vec, add_peer_instance, add_peer_done);
-#else
     _node.add_peer(add_peer_instance, add_peer_done);
-#endif
 }
 
 //add_peer第一步
@@ -1671,7 +1696,7 @@ void Region::on_apply(braft::Iterator& iter) {
                         pb::RegionInfo region_info_mem;
                         copy_region(&region_info_mem);
                         region_info_mem.set_start_key(request.start_key());
-                        set_region(region_info_mem);
+                        set_region_with_update_range(region_info_mem);
                     }
                     ret = execute_cached_cmd(request, res, txn_id, txn, iter.index(), iter.term());
                 }
@@ -1867,26 +1892,11 @@ void Region::on_apply(braft::Iterator& iter) {
                                 "applied_index:%ld, term:%ld",
                                 _region_id, _num_table_lines.load(), request.reduce_num_lines(),
                                 _applied_index, term);
-                    set_region(region_info_mem);
-                    // region_info更新range，替换resource
-                    // todo:shared_ptr本身不是原子的，需要加锁
-                    std::shared_ptr<RegionResource> new_resource(new RegionResource);
-                    *new_resource = *_resource;
-                    new_resource->region_info = region_info_mem;
-                    {
-                        BAIDU_SCOPED_LOCK(_ptr_mutex);
-                        _resource = new_resource;
-                    }
-                    _factory->update_region(region_info_mem);
+                    set_region_with_update_range(region_info_mem);
                     _num_table_lines -= request.reduce_num_lines();
                     for (auto& txn_info : request.txn_infos()) {
                         _txn_pool.update_txn_num_rows_after_split(txn_info);
                     }
-                    //compaction时候删掉多余的数据
-                    SplitCompactionFilter::get_instance()->set_range_key(
-                            _region_id,
-                            _region_info.start_key(),
-                            _region_info.end_key());
                 } 
                 DB_NOTICE("op_type: %s, region_id: %ld, applied_index:%ld, term:%d", 
                     pb::OpType_Name(request.op_type()).c_str(), _region_id, _applied_index, term);
@@ -1920,19 +1930,8 @@ void Region::on_apply(braft::Iterator& iter) {
                                 "applied_index:%ld, term:%ld", 
                                 _region_id, _applied_index, term);
                     reset_region_status();
-                    set_region(region_info_mem);
-                    // region_info更新range，替换resource
-                    std::shared_ptr<RegionResource> new_resource(new RegionResource);
-                    *new_resource = *_resource;
-                    new_resource->region_info = region_info_mem;
-                    {
-                        BAIDU_SCOPED_LOCK(_ptr_mutex);
-                        _resource = new_resource;
-                    }
-                    _factory->update_region(region_info_mem);
-                    //_num_table_lines += request.reduce_num_lines();
-                    //SplitCompactionFilter::get_instance()->set_end_key(
-                    //    _region_id, _region_info.start_key(), _region_info.end_key());
+                    set_region_with_update_range(region_info_mem);
+
                     get_prepared_txn_info();
                     if (done) {
                         ((DMLClosure*)done)->response->set_errcode(pb::SUCCESS);
@@ -2023,6 +2022,12 @@ void Region::on_configuration_committed(const::braft::Configuration& conf) {
                 butil::endpoint2str(_node.leader_id().addr).c_str());
 }
 
+void Region::on_configuration_committed(const::braft::Configuration& conf, int64_t index) {
+    on_configuration_committed(conf);
+    if (_applied_index < index) {
+        _applied_index = index;
+    }
+}
 void Region::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
     DB_WARNING("start on shnapshot save, region_id: %ld", _region_id);
     //创建snapshot
@@ -2142,7 +2147,7 @@ int Region::load_applied_index() {
 int Region::on_snapshot_load(braft::SnapshotReader* reader) {
     //DB_WARNING("start on snapshot load, region_id: %ld", _region_id);
     TimeCost time_cost;
-    int ret = Store::get_instance()->snapshot_load_currency.increase_timed_wait(FLAGS_snapshot_timed_wait);
+    int ret = Store::get_instance()->snapshot_load_currency.increase_wait();
     std::shared_ptr<BthreadCond> auto_decrease(&(Store::get_instance()->snapshot_load_currency), 
                                             [](BthreadCond* cond) { cond->decrease_broadcast();});
     DB_WARNING("snapshot load, region_id: %ld, wait_time:%ld, ret:%d", 
@@ -2268,8 +2273,7 @@ int Region::on_snapshot_load(braft::SnapshotReader* reader) {
                     str_to_hex(region_info.start_key()).c_str(), 
                     str_to_hex(region_info.end_key()).c_str(),
                     pb2json(region_info).c_str());
-        set_region(region_info);
-        _factory->force_update_region(region_info);
+        set_region_with_update_range(region_info);
     } else {
         DB_FATAL("snapshot has no data region info sst, region_id: %ld", _region_id);
     }
@@ -2329,6 +2333,31 @@ int Region::clear_data() {
     return 0;
 }
 
+void Region::compact() {
+    MutTableKey start_key;
+    MutTableKey end_key;
+    start_key.append_i64(_region_id);
+
+    end_key.append_i64(_region_id);
+    end_key.append_u64(0xFFFFFFFFFFFFFFFF);
+
+    auto data_cf = _rocksdb->get_data_handle();
+    if (data_cf == nullptr) {
+        DB_WARNING("get rocksdb data column family failed, region_id: %ld", _region_id);
+        return;
+    }
+    TimeCost cost;
+    rocksdb::Slice start(start_key.data());
+    rocksdb::Slice end(end_key.data());
+    rocksdb::CompactRangeOptions compact_options;
+    auto res = _rocksdb->compact_range(compact_options, data_cf, &start, &end);
+    if (!res.ok()) {
+        DB_WARNING("compact_range error: code=%d, msg=%s", 
+                res.code(), res.ToString().c_str());
+    }
+    DB_WARNING("compact_range cost:%ld", cost.get_time());
+}
+
 void Region::reverse_merge() {
     if (_shutdown) {
         return;
@@ -2339,7 +2368,7 @@ void Region::reverse_merge() {
     });
     TimeCost cost;
     for (auto& pair : _reverse_index_map) {
-        pair.second->reverse_merge_func();
+        pair.second->reverse_merge_func(_resource->region_info);
     }
     //DB_WARNING("region_id: %ld reverse merge:%lu", _region_id, cost.get_time());
     SELF_TRACE("region_id: %ld reverse merge:%lu", _region_id, cost.get_time());
@@ -2646,6 +2675,7 @@ void Region::write_local_rocksdb_for_split() {
                 key_slice.remove_prefix(2 * sizeof(int64_t));
                 if (index_info.type == pb::I_PRIMARY) {
                     // check end_key
+                    // tail split need not send rocksdb
                     if (key_slice.compare(_region_info.end_key()) >= 0) {
                         break;
                     }
@@ -2927,6 +2957,7 @@ void Region::send_log_entry_to_new_region_for_split() {
     TimeCost write_wait_cost;
     _disable_write_cond.increase();
     int64_t disable_write_wait = get_split_wait_time();
+    usleep(100);
     ret = _real_writing_cond.timed_wait(disable_write_wait);
     if (ret != 0) {
         DB_FATAL("_real_writing_cond wait timeout, region_id: %ld", _region_id);
@@ -3273,6 +3304,7 @@ int Region::get_log_entry_for_split(const int64_t split_start_index,
                 && store_req.op_type() != pb::OP_DELETE
                 && store_req.op_type() != pb::OP_UPDATE
                 && store_req.op_type() != pb::OP_PREPARE
+                && store_req.op_type() != pb::OP_ROLLBACK
                 && store_req.op_type() != pb::OP_COMMIT) {
             DB_WARNING("unexpected store_req:%s, region_id: %ld", 
                      pb2json(store_req).c_str(), _region_id);

@@ -55,6 +55,16 @@ enum PrimitiveType {
 //    optional uint32 len = 2;
 //};
 
+enum SchemaType {
+    DYNAMIC = 1;
+    STATIC = 2;
+};
+
+enum Engine {
+    ROCKSDB = 1;
+    REDIS = 2;
+};
+
 message SlotDescriptor {
     required int32 slot_id = 1;  //从1开始
     required PrimitiveType slot_type = 2;

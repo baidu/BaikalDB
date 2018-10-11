@@ -21,6 +21,7 @@
 #include "delete_node.h"
 #include "join_node.h"
 #include "scan_node.h"
+#include "rocksdb_scan_node.h"
 #include "sort_node.h"
 #include "packet_node.h"
 #include "limit_node.h"
@@ -99,7 +100,6 @@ ExecNode* ExecNode::get_node(pb::PlanNodeType node_type) {
 
 bool ExecNode::need_seperate() {
     switch (_node_type) {
-        case pb::SCAN_NODE:
         case pb::INSERT_NODE:
         case pb::UPDATE_NODE:
         case pb::DELETE_NODE:
@@ -107,6 +107,12 @@ bool ExecNode::need_seperate() {
         case pb::TRUNCATE_NODE:
         case pb::TRANSACTION_NODE:
             return true;
+        case pb::SCAN_NODE:
+            //DB_NOTICE("engine:%d", static_cast<ScanNode*>(this)->engine());
+            if (static_cast<ScanNode*>(this)->engine() == pb::ROCKSDB) {
+                return true;
+            }
+            break;
         default:
             break;
     }
@@ -196,7 +202,10 @@ int ExecNode::create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, Exec
 int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
     switch (node.node_type()) {
         case pb::SCAN_NODE:
-            *exec_node = new ScanNode;
+            *exec_node = ScanNode::create_scan_node(node);
+            if (*exec_node == nullptr) {
+                return -1;
+            }
             return (*exec_node)->init(node);
         case pb::SORT_NODE:
             *exec_node = new SortNode;

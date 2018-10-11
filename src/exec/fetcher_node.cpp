@@ -159,14 +159,9 @@ int FetcherNode::send_request(
                 || _op_type == pb::OP_INSERT) {
             InsertNode* insert_node = static_cast<InsertNode*>(
                     _children[0]->get_node(pb::INSERT_NODE));
-            InsertNode* replace_node = static_cast<InsertNode*>(
-                    _children[0]->get_node(pb::REPLACE_NODE));
             pb::InsertNode* pb_node = nullptr;
             if (insert_node != nullptr) {
                 pb_node = insert_node->mutable_pb_node()->
-                    mutable_derive_node()->mutable_insert_node();
-            } else if (replace_node != nullptr) {
-                pb_node = replace_node->mutable_pb_node()->
                     mutable_derive_node()->mutable_insert_node();
             } else if (!state->autocommit()) {
                 DB_WARNING("no insert/replace node");
@@ -338,10 +333,12 @@ int FetcherNode::send_request(
         _affected_rows += res.affected_rows();
         return 0;
     }
-    // if (_op_type == pb::OP_COMMIT || _op_type == pb::OP_ROLLBACK) {
-    //     std::lock_guard<std::mutex> lck(client_conn->region_lock);
-    //     client_conn->region_infos.erase(region_id);
-    // }
+    if (res.leader() != "0.0.0.0:0" && res.leader() != "" && res.leader() != info.leader()) {
+        info.set_leader(res.leader());
+        schema_factory->update_leader(info);
+        std::lock_guard<std::mutex> lck(client_conn->region_lock);
+        client_conn->region_infos[region_id].set_leader(res.leader());
+    }
     cost.reset();
     std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
     for (auto& pb_row : *res.mutable_row_values()) {
@@ -377,13 +374,9 @@ int FetcherNode::push_cmd_to_cache(RuntimeState* state) {
     // TODO: 缓存的plan中，insert record全部插入，暂时不做拆分
     if (_op_type == pb::OP_INSERT) {
         InsertNode* insert_node = static_cast<InsertNode*>(_children[0]->get_node(pb::INSERT_NODE));
-        InsertNode* replace_node = static_cast<InsertNode*>(_children[0]->get_node(pb::REPLACE_NODE));
         pb::InsertNode* pb_node = nullptr;
         if (insert_node != nullptr) {
             pb_node = insert_node->mutable_pb_node()->
-                mutable_derive_node()->mutable_insert_node();
-        } else if (replace_node != nullptr) {
-            pb_node = replace_node->mutable_pb_node()->
                 mutable_derive_node()->mutable_insert_node();
         } else if (!state->autocommit()) {
             DB_WARNING("no insert/replace node");

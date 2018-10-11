@@ -200,9 +200,9 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         parser::TableOption* option = stmt->options[idx];
         if (option->type == parser::TABLE_OPT_ENGINE) {
             std::string str_val(option->str_value.value);
-            if (!boost::algorithm::iequals(str_val, "rocksdb")) {
-                DB_WARNING("unsupported storage engine:%s, use rocksdb", str_val.c_str());
-                return -1;
+            table.set_engine(pb::ROCKSDB);
+            if (boost::algorithm::iequals(str_val, "redis")) {
+                table.set_engine(pb::REDIS);
             }
         } else if (option->type == parser::TABLE_OPT_CHARSET) {
             std::string str_val(option->str_value.value);
@@ -401,8 +401,18 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         field->set_new_field_name(column->name->name.value);
     } else if (spec->spec_type == parser::ALTER_SPEC_RENAME_TABLE) {
         alter_request.set_op_type(pb::OP_RENAME_TABLE);
-        if ((spec->new_table_name->db == stmt->table_name->db) == false
-            && strcmp(spec->new_table_name->db.c_str(), _ctx->cur_db.c_str()) != 0) {
+        std::string new_db_name;
+        if (spec->new_table_name->db.empty()) {
+            if (_ctx->cur_db.empty()) {
+                _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+                _ctx->stat_info.error_msg << "No database selected";
+                return -1;
+            }
+            new_db_name = _ctx->cur_db;
+        } else {
+            new_db_name = spec->new_table_name->db.c_str();
+        }
+        if (new_db_name != table->database()) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
             _ctx->stat_info.error_msg << "cannot rename table to another database";
             return -1;

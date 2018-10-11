@@ -17,6 +17,7 @@
 #include "limit_node.h"
 #include "agg_node.h"
 #include "scan_node.h"
+#include "rocksdb_scan_node.h"
 #include "join_node.h"
 #include "sort_node.h"
 #include "filter_node.h"
@@ -64,7 +65,7 @@ int Separate::analyze(QueryContext* ctx) {
         //inset、replace、truncate请求没有scan_node
         fetch_node->set_region_infos(ctx->region_infos, ctx->insert_region_ids);
         if (scan_nodes.size() > 0) {
-            auto region_infos = static_cast<ScanNode*>(scan_nodes[0])->region_infos();
+            auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
             fetch_node->set_region_infos(region_infos);
         }
         bool autocommit = ctx->runtime_state.autocommit();
@@ -106,7 +107,7 @@ int Separate::analyze(QueryContext* ctx) {
         return -1;
     }
 
-    std::map<int64_t, pb::RegionInfo> region_infos = static_cast<ScanNode*>(scan_nodes[0])->region_infos();
+    std::map<int64_t, pb::RegionInfo> region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
     int region_size = region_infos.size();
     fetch_node->set_region_infos(region_infos);
     std::vector<ExecNode*> join_nodes;
@@ -116,13 +117,16 @@ int Separate::analyze(QueryContext* ctx) {
             DB_WARNING("illegal plan");
             return -1;
         }
+        /*
         // 没有join节点，并且单region全部可以下推
+        // 分裂后会有问题
         if (region_size == 1) {
             fetch_node->add_child(packet_node->children(0));
             packet_node->clear_children();
             packet_node->add_child(fetch_node.release());
             return 0;
         }
+        */
     }
 
     LimitNode* limit_node = static_cast<LimitNode*>(plan->get_node(pb::LIMIT_NODE));
@@ -484,9 +488,9 @@ int Separate::seperate_for_join(const std::vector<ExecNode*>& scan_nodes) {
             pb_fetch_node.mutable_derive_node()->mutable_fetcher_node();
         pb_fetch_node_derive->set_op_type(pb::OP_SELECT);
         FetcherNode* fetch_node = new FetcherNode;
-        static_cast<ScanNode*>(scan_node_ptr)->set_related_fetcher_node(fetch_node);
+        static_cast<RocksdbScanNode*>(scan_node_ptr)->set_related_fetcher_node(fetch_node);
         fetch_node->init(pb_fetch_node);
-        std::map<int64_t, pb::RegionInfo> region_infos = static_cast<ScanNode*>(scan_node_ptr)->region_infos();
+        std::map<int64_t, pb::RegionInfo> region_infos = static_cast<RocksdbScanNode*>(scan_node_ptr)->region_infos();
         fetch_node->set_region_infos(region_infos);
         fether_node_parent->replace_child(fether_node_child, fetch_node);
         fetch_node->add_child(fether_node_child);

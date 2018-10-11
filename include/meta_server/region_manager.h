@@ -35,6 +35,7 @@ public:
         bthread_mutex_destroy(&_region_mutex);
         bthread_mutex_destroy(&_count_mutex);
         bthread_mutex_destroy(&_region_state_mutex);
+        bthread_mutex_destroy(&_resource_tag_mutex);
     }
     static RegionManager* get_instance() {
         static RegionManager instance;
@@ -47,8 +48,8 @@ public:
     void split_region(const pb::MetaManagerRequest& request, braft::Closure* done);
     void send_remove_region_request(const std::vector<int64_t>& drop_region_ids);
 
-    void delete_all_region_for_dead_store(const std::string& instance);
-    void pre_process_remove_peer_for_dead_store(const std::string& instance,
+    void delete_all_region_for_store(const std::string& instance, pb::Status status);
+    void pre_process_remove_peer_for_store(const std::string& instance,
                                     std::vector<pb::RaftControlRequest>& requests); 
 
     void check_update_region(const pb::BaikalHeartBeatRequest* request,
@@ -256,22 +257,25 @@ private:
         bthread_mutex_init(&_region_mutex, NULL);
         bthread_mutex_init(&_count_mutex, NULL);
         bthread_mutex_init(&_region_state_mutex, NULL);
+        bthread_mutex_init(&_resource_tag_mutex, NULL);
     }
 private:
-    //std::mutex                                          _region_mutex;
-    bthread_mutex_t                                          _region_mutex;
+    bthread_mutex_t                                     _region_mutex;
     int64_t                                             _max_region_id;
     
     //region_id 与table_id的映射关系, key:region_id, value:table_id
-    std::unordered_map<int64_t, SmartRegionInfo>         _region_info_map;
+    std::unordered_map<int64_t, SmartRegionInfo>        _region_info_map;
     //实例和region_id的映射关系，在需要主动发送迁移实例请求时需要
     std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_region_map;
 
     bthread_mutex_t                                     _region_state_mutex;
     std::unordered_map<int64_t, RegionStateInfo>        _region_state_map;
     //该信息只在meta_server的leader中内存保存, 该map可以单用一个锁
-    bthread_mutex_t                                          _count_mutex;
+    bthread_mutex_t                                     _count_mutex;
     std::unordered_map<std::string, std::unordered_map<int64_t, int64_t>> _instance_leader_count;
+    //临时方案，为了安全，每个resource_tag只控制单实例迁移
+    bthread_mutex_t                                     _resource_tag_mutex;
+    std::map<std::string, bool>                         _resource_tag_delete_region_map; 
 }; //class
 
 }//namespace

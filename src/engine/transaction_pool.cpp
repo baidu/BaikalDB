@@ -21,9 +21,8 @@ namespace baikaldb {
 DEFINE_int32(transaction_clear_delay_ms, 3600 * 1000, \
         "delay duration to clear prepared and expired transactions");
 
-int TransactionPool::init(int64_t region_id, pb::RegionInfo* region_info) {
+int TransactionPool::init(int64_t region_id) {
     _region_id = region_id;
-    _region_info = region_info;
     return 0;
 }
 
@@ -36,7 +35,7 @@ int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn) {
         DB_FATAL("txn already exists, txn_id: %lu", txn_id);
         return -1;
     }
-    txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, _region_info, this));
+    txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, this));
     if (txn == nullptr) {
         DB_FATAL("new txn failed, txn_id: %lu", txn_id);
         return -1;
@@ -147,7 +146,7 @@ int TransactionPool::on_shutdown_recovery(
             continue;
         }
         uint64_t txn_id = strtoll(txn_name.substr(txn_name.find('_') + 1).c_str(), nullptr, 0);
-        auto txn = new (std::nothrow)Transaction(txn_id, _region_info, this);
+        auto txn = new (std::nothrow)Transaction(txn_id, this);
         if (txn == nullptr) {
             DB_FATAL("TransactionError: new txn failed, txn_id: %lu", txn_id);
             return -1;

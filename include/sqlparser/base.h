@@ -18,6 +18,7 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <unordered_map>
 
 #ifdef BAIDU_INTERNAL
 #include <base/arena.h>
@@ -107,6 +108,57 @@ struct String {
     }
     bool empty() const {
         return (value == nullptr || value[0] == '\0');
+    }
+    void restore_5c() {
+        size_t i = 0;
+        size_t len = strlen(value);
+        while (i < len) {
+            if ((value[i] & 0x80) != 0) {
+                if (++i >= len) {
+                    return;
+                }
+                if (value[i] == 0x7F) {
+                    value[i] = 0x5C;
+                }
+            }
+            ++i;
+        }
+    }
+    void stripslashes() {
+        size_t slow = 0;
+        size_t fast = 0;
+        bool has_slash = false;
+        static std::unordered_map<char, char> trans_map = {
+            {'\\', '\\'},
+            {'\"', '\"'},
+            {'\'', '\''},
+            {'r', '\r'},
+            {'t', '\t'},
+            {'n', '\n'},
+            {'b', '\b'},
+            {'Z', '\x1A'},
+        };
+        size_t len = strlen(value);
+        while (fast < len) {
+            if (has_slash) {
+                if (trans_map.count(value[fast]) == 1) {
+                    value[slow++] = trans_map[value[fast++]];
+                } else if (value[fast] == '%' || value[fast] == '_') {
+                    // like中的特殊符号，需要补全'\'
+                    value[slow++] = '\\';
+                    value[slow++] = value[fast++];
+                }
+                has_slash = false;
+            } else {
+                if (value[fast] == '\\') {
+                    has_slash = true;
+                    fast++;
+                } else {
+                    value[slow++] = value[fast++];
+                }
+            }
+        }
+        value[slow] = '\0';
     }
     String& to_lower_inplace() {
         if (value != nullptr) {

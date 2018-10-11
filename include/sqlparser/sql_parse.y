@@ -741,8 +741,10 @@ IntoOpt:
 InsertValues:
     '(' ColumnNameListOpt ')' values_sym ValueList {
         InsertStmt* insert = (InsertStmt*)$5;
-        for (int i = 0; i < $2->children.size(); i++) {
-            insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
         }
         $$ = insert;
     }
@@ -1905,12 +1907,12 @@ SumExpr:
         fun->children.push_back($4, parser->arena);
         $$ = fun;
     }
-    | COUNT '(' DistinctKwd Expr ')' {
+    | COUNT '(' DistinctKwd ExprList ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->func_type = FT_AGG;
         fun->fn_name = $1;
         fun->distinct = true;
-        fun->children.push_back($4, parser->arena);
+        fun->children = $4->children;
         $$ = fun;
     }
     | COUNT '(' ALL Expr ')' {

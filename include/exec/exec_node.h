@@ -63,6 +63,7 @@ public:
     bool need_seperate();
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+        *eos = true;
         return 0;
     }
     virtual void close(RuntimeState* state) {
