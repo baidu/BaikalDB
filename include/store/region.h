@@ -179,7 +179,7 @@ public:
 
     virtual void on_configuration_committed(const ::braft::Configuration& conf);
 
-    virtual void on_configuration_committed(const ::raft::Configuration& conf, int64_t index);
+    virtual void on_configuration_committed(const ::braft::Configuration& conf, int64_t index);
 
     int clear_data();
     void compact();
