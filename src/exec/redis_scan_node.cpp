@@ -31,7 +31,7 @@ int RedisScanNode::init(const pb::PlanNode& node) {
         return ret;
     }
     brpc::ChannelOptions option;
-    option.protocol = baidu::rpc::PROTOCOL_REDIS;
+    option.protocol = brpc::PROTOCOL_REDIS;
     option.max_retry = 1;
     option.connect_timeout_ms = 3000; 
     option.timeout_ms = -1;
