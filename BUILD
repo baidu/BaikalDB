@@ -59,18 +59,6 @@ COPTS  = [
     "-Wno-strict-aliasing",
 ]
 
-LINKOPTS = [
-    "-lpthread",
-    "-lbz2",
-    "-lrt",
-    "-ldl",
-    "-lcrypt",
-    "-lcrypto",
-    "-rdynamic",
-    "-lz", 
-    "-lssl",
-]
-
 cc_library(
     name = "common",
     srcs = glob(["src/common/*.cpp"]),

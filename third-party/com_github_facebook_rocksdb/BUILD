@@ -5,23 +5,6 @@ licenses(["notice"])
 exports_files(["rocksdb.patch"])
 
 genrule(
-    name = "pessimistic_transaction_patch",
-    srcs = [
-        "@//third-party/com_github_facebook_rocksdb:rocksdb.patch",
-        "utilities/transactions/pessimistic_transaction.cc",
-    ],
-    outs = [
-        "utilities/transactions/pessimistic_transaction_patch.cc",
-    ],
-    cmd = "\n".join([
-           "cat external/com_github_facebook_rocksdb/utilities/transactions/pessimistic_transaction.cc >> $(@)",
-           "OUT_FILE=`ls $(@)`",
-           "OUT_PATH=`dirname -- $$OUT_FILE`",
-           "patch -d$$OUT_PATH -p0 < $(location @//third-party/com_github_facebook_rocksdb:rocksdb.patch)",
-          ])
-)
-
-genrule(
     name = "build_version",
     srcs = glob([".git/**/*"]) + [
         "util/build_version.cc.in",
@@ -38,7 +21,6 @@ cc_library(
         "**/*.h",
     ]) + [
         ":build_version",
-        ":pessimistic_transaction_patch",
         "cache/clock_cache.cc",
         "cache/lru_cache.cc",
         "cache/sharded_cache.cc",
