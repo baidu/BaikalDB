@@ -18,6 +18,7 @@
 #include "expr_node.h"
 #include "row_batch.h"
 #include "proto/plan.pb.h"
+#include "proto/meta.interface.pb.h"
 #include "mem_row_descriptor.h"
 
 namespace baikaldb { 
@@ -73,6 +74,11 @@ public:
     }
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return NULL;
+    }
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        for (size_t idx = 0; idx < _children.size(); ++idx) {
+            _children[idx]->find_place_holder(placeholders);
+        }
     }
     void set_parent(ExecNode* parent_node) {
         _parent = parent_node;
@@ -132,12 +138,15 @@ public:
     pb::PlanNodeType node_type() {
         return _node_type;
     }
+    std::map<int64_t, pb::RegionInfo>& region_infos() {
+        return _region_infos;
+    }
 
     //除了表达式外大部分直接沿用保存的pb
-    virtual void transfer_pb(pb::PlanNode* pb_node);
-    static void create_pb_plan(pb::Plan* plan, ExecNode* root);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
+    static void create_pb_plan(int64_t region_id, pb::Plan* plan, ExecNode* root);
     static int create_tree(const pb::Plan& plan, ExecNode** root);
-    static void destory_tree(ExecNode* root) {
+    static void destroy_tree(ExecNode* root) {
         delete root;
     }
 protected:
@@ -147,6 +156,7 @@ protected:
     std::vector<ExecNode*> _children;
     ExecNode* _parent = nullptr;
     pb::PlanNode _pb_node;
+    std::map<int64_t, pb::RegionInfo> _region_infos;
 
 private:
     static int create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, ExecNode** root);

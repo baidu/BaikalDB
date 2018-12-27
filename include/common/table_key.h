@@ -111,6 +111,10 @@ public:
         return;
     }
 
+    void extract_char(int pos, size_t len, std::string& out) {
+        out.assign(_data.data_ + pos, len);
+    }
+
     int extract_index(IndexInfo& index, TableRecord* record, int& pos);
 
     void set_full(bool full) {

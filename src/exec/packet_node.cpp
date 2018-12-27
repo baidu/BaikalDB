@@ -40,6 +40,7 @@ int PacketNode::init(const pb::PlanNode& node) {
         field.org_name = name;
         _fields.push_back(field);
     }
+
     return 0;
 }
 int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
@@ -70,6 +71,8 @@ int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     return 0;
 }
 int PacketNode::open(RuntimeState* state) {
+    auto client = state->client_conn();
+
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -80,12 +83,12 @@ int PacketNode::open(RuntimeState* state) {
     _wrapper = MysqlWrapper::get_instance();
     state->set_num_affected_rows(ret);
     if (op_type() != pb::OP_SELECT) {
-        if (op_type() == pb::OP_INSERT) {
-            auto client = state->client_conn();
-            pack_ok(state->num_affected_rows(), client->last_insert_id);
-        } else {
-            pack_ok(state->num_affected_rows());
-        }
+        // if (op_type() == pb::OP_INSERT) {
+        //     pack_ok(state->num_affected_rows(), client.get());
+        // } else {
+        //     pack_ok(state->num_affected_rows());
+        // }
+        pack_ok(state->num_affected_rows(), client);
         return 0;
     }
     for (auto expr : _projections) {
@@ -99,7 +102,11 @@ int PacketNode::open(RuntimeState* state) {
     pack_fields();
     if (_children.size() == 0) {
         if (!reached_limit()) {
-            pack_row(nullptr);
+            if (_binary_protocol) {
+                pack_binary_row(nullptr);
+            } else {
+                pack_text_row(nullptr);
+            }
         }
     } else {
         bool eos = false;
@@ -113,7 +120,11 @@ int PacketNode::open(RuntimeState* state) {
             }
             for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
                 TimeCost cost;
-                ret = pack_row(batch.get_row().get());
+                if (_binary_protocol) {
+                    ret = pack_binary_row(batch.get_row().get());
+                } else {
+                    ret = pack_text_row(batch.get_row().get());
+                }
                 pack_time += cost.get_time();
                 cost.reset();
                 state->inc_num_returned_rows(1);
@@ -136,18 +147,28 @@ void PacketNode::close(RuntimeState* state) {
     }
 }
 
-int PacketNode::pack_ok(int num_affected_rows, int64_t last_insert_id) {
+int PacketNode::pack_ok(int num_affected_rows, NetworkSocket* client) {
     if (_send_buf->_size > 0) {
         _send_buf->byte_array_clear();
     }
+    int64_t last_insert_id = (op_type() == pb::OP_INSERT)? client->last_insert_id : 0;
 
     DataBuffer tmp_buf;
     tmp_buf.byte_array_append_length_coded_binary(0);
     tmp_buf.byte_array_append_length_coded_binary(num_affected_rows);
     tmp_buf.byte_array_append_length_coded_binary(last_insert_id);
+    
+    // https://dev.mysql.com/doc/internals/en/status-flags.html
+    uint16_t status_flag = 0;
+    if (client->txn_id != 0) {
+        status_flag |= 0x0001;
+    }
+    if (client->autocommit) {
+        status_flag |= 0x0002;
+    }
     uint8_t bytes[2];
-    bytes[0] = (0 & 0xff);
-    bytes[1] = (0 >> 8) & 0xff;
+    bytes[0] = (status_flag & 0xff);
+    bytes[1] = (status_flag >> 8) & 0xff;
     tmp_buf.byte_array_append_len(bytes, 2);
 
     bytes[0] = 0 & 0xff;
@@ -160,6 +181,7 @@ int PacketNode::pack_err() {
     return 0;
 }
 
+// https://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::Resultset
 int PacketNode::pack_head() {
     //Result Set Header Packet
     int start_pos = _send_buf->_size;
@@ -191,7 +213,18 @@ int PacketNode::pack_fields() {
     return 0;
 }
 
-int PacketNode::pack_row(MemRow* row) {
+// use for make_stmt_prepare_ok_packet
+int PacketNode::pack_fields(DataBuffer* buffer, int packet_id) {
+    for (auto& field : _fields) {
+        ++packet_id;
+        _wrapper->make_field_packet(buffer, &field, packet_id);
+    }
+    ++packet_id;
+    _wrapper->make_eof_packet(buffer, packet_id);
+    return 0;
+}
+
+int PacketNode::pack_text_row(MemRow* row) {
     ++_packet_id;
     int start_pos = _send_buf->_size;
     uint8_t bytes[4];
@@ -206,10 +239,64 @@ int PacketNode::pack_row(MemRow* row) {
 
     // package body.
     for (auto expr : _projections) {
-        if (!_send_buf->byte_array_append_value(expr->get_value(row).cast_to(expr->col_type()))) {
+        if (!_send_buf->append_text_value(expr->get_value(row).cast_to(expr->col_type()))) {
             DB_FATAL("Failed to append table cell.");
             return -1;
         }
+    }
+    int packet_body_len = _send_buf->_size - start_pos - 4;
+    _send_buf->_data[start_pos] = packet_body_len & 0xff;
+    _send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
+    _send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
+    return 0;
+}
+
+int PacketNode::pack_binary_row(MemRow* row) {
+    ++_packet_id;
+    int start_pos = _send_buf->_size;
+    uint8_t bytes[4];
+    bytes[0] = '\x01';
+    bytes[1] = '\x00';
+    bytes[2] = '\x00';
+    bytes[3] = _packet_id & 0xff;
+    if (!_send_buf->byte_array_append_len(bytes, 4)) {
+        DB_FATAL("Failed to append len. value:[%s], len:[4]", bytes);
+        return -1;
+    }
+
+    // row header
+    bytes[0] = '\x00';
+    if (!_send_buf->byte_array_append_len(bytes, 1)) {
+        DB_FATAL("Failed to append row_header");
+        return -1;
+    }
+
+    int column_count = _fields.size();
+    int null_bitmap_len = (column_count + 7 + 2) / 8;
+    std::unique_ptr<uint8_t[]> null_map(new uint8_t[null_bitmap_len]);
+    memset(null_map.get(), 0, null_bitmap_len);
+    int null_map_pos = _send_buf->_size;
+    if (!_send_buf->byte_array_append_len(null_map.get(), null_bitmap_len)) {
+        DB_FATAL("Failed to append null_map");
+        return -1;
+    }
+
+    int field_idx = 0;
+    // package body.
+    for (auto expr : _projections) {
+        if (!_send_buf->append_binary_value(expr->get_value(row).cast_to(expr->col_type()),
+                _fields[field_idx].type, null_map.get(), field_idx, 2)) {
+            DB_FATAL("Failed to append table cell.");
+            return -1;
+        }
+        field_idx++;
+    }
+    // std::string null_map_str((char*)null_map.get(), null_bitmap_len);
+    // DB_WARNING("NULL-Bitmap: %s", str_to_hex(null_map_str).c_str());
+
+    // fill the real values of NULL-Bitmap
+    for (int idx = 0; idx < null_bitmap_len; ++idx) {
+        _send_buf->_data[null_map_pos + idx] = null_map[idx];
     }
     int packet_body_len = _send_buf->_size - start_pos - 4;
     _send_buf->_data[start_pos] = packet_body_len & 0xff;
@@ -222,6 +309,13 @@ int PacketNode::pack_eof() {
     ++_packet_id;
     _wrapper->make_eof_packet(_send_buf, _packet_id);
     return 0;
+}
+
+void PacketNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _projections) {
+        expr->find_place_holder(placeholders);
+    }
 }
 }
 

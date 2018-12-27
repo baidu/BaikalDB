@@ -7,9 +7,7 @@ echo -e "restore region through lower and upper region_id"
 curl -d '{
     "op_type":"OP_RESTORE_REGION",
     "restore_region": {
-        "restore_region_id": 186044,
-        "lower_region_id": 90690,
-        "upper_region_id": 78048
+        "restore_region_id":'$2'
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

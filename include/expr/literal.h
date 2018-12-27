@@ -22,6 +22,7 @@ public:
     Literal() : _value(pb::NULL_TYPE) {
         _is_constant = true;
     }
+
     Literal(ExprValue value) : _value(value) {
         _is_constant = true;
         _col_type = _value.type;
@@ -81,16 +82,26 @@ public:
                 break;
             case pb::TIMESTAMP_LITERAL:
                 _value.type = pb::TIMESTAMP;
-                _value._u.uint32_val = node.derive_node().int_val();    
+                _value._u.uint32_val = node.derive_node().int_val();
                 break;        
             case pb::DATE_LITERAL:
                 _value.type = pb::DATE;
-                _value._u.uint32_val = node.derive_node().int_val();    
-                break;        
+                _value._u.uint32_val = node.derive_node().int_val();
+                break;
+            case pb::PLACE_HOLDER_LITERAL:
+                _value.type = pb::PLACE_HOLDER;
+                _value._u.int64_val = node.derive_node().int_val(); // place_holder id
             default:
                 return -1;
         }
         return 0;
+    }
+
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ExprNode::find_place_holder(placeholders);
+        if (pb::PLACE_HOLDER_LITERAL == _node_type) {
+            placeholders.insert({_value._u.int64_val, this});
+        }
     }
 
     virtual void transfer_pb(pb::ExprNode* pb_node) {
@@ -99,6 +110,7 @@ public:
             case pb::NULL_LITERAL:
                 break;
             case pb::INT_LITERAL:
+            case pb::PLACE_HOLDER_LITERAL:
                 pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
                 break;
             case pb::DOUBLE_LITERAL:

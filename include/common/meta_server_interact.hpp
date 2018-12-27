@@ -31,7 +31,7 @@
 namespace baikaldb {
 class MetaServerInteract {
 public:
-    static const int RETRY_TIMES = 3;
+    static const int RETRY_TIMES = 5;
     
     static MetaServerInteract* get_instance() {
         static MetaServerInteract _instance;
@@ -39,6 +39,7 @@ public:
     }
     MetaServerInteract() {}
     int init();
+    int init_internal(const std::string& meta_bns);
     template<typename Request, typename Response>
     int send_request(const std::string& service_name,
                                      const Request& request,
@@ -85,7 +86,9 @@ public:
             if (cntl.Failed()) {
                 DB_WARNING("connect with server fail. send request fail, error:%s, log_id:%lu",
                             cntl.ErrorText().c_str(), cntl.log_id());
-                return -1;
+                _set_leader_address(butil::EndPoint());
+                ++retry_time;
+                continue;
             }
             if (response.errcode() == pb::NOT_LEADER) {
                 DB_WARNING("connect with meat server:%s fail. not leader, redirect to :%s, log_id:%lu",
@@ -98,10 +101,7 @@ public:
                 continue;
             }
             if (response.errcode() != pb::SUCCESS) {
-                DB_FATAL("send meta server fail, log_id:%lu, request:%s",
-                          cntl.log_id(), 
-                          request.ShortDebugString().c_str());
-                DB_FATAL("send meta server fail, log_id:%lu, response:%s", 
+                DB_WARNING("send meta server fail, log_id:%lu, response:%s", 
                         cntl.log_id(),
                         response.ShortDebugString().c_str());
                 return -1;

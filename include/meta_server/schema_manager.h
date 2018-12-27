@@ -52,23 +52,11 @@ public:
     int check_and_get_for_privilege(pb::UserPrivilege& user_privilege);
 
     int load_snapshot();
-    void set_unsafe_decision() {
-        _unsafe_decision = true;
-        Bthread bth;
-        bth.run([this]() {
-            bthread_usleep(FLAGS_balance_periodicity * FLAGS_store_heart_beat_interval_us);
-            _unsafe_decision = false;
-            DB_WARNING("unsafte decision reset to false");
-        });
-    }
-    bool get_set_unsafe_decision() {
-        return _unsafe_decision;
-    }
     void set_meta_state_machine(MetaStateMachine* meta_state_machine) {
         _meta_state_machine = meta_state_machine;
     }
     bool get_unsafe_decision() {
-        return _unsafe_decision;
+        return _meta_state_machine->get_unsafe_decision();
     }
 private:
     SchemaManager() {}
@@ -81,9 +69,11 @@ private:
     int load_max_id_snapshot(const std::string& max_id_prefix, 
                               const std::string& key, 
                               const std::string& value);
+    int whether_dists_legal(pb::MetaManagerRequest* request, 
+                            pb::MetaManagerResponse* response,
+                            uint64_t log_id);
     
     MetaStateMachine*                                   _meta_state_machine;
-    bool                                                _unsafe_decision = false;
 }; //class
 
 }//namespace

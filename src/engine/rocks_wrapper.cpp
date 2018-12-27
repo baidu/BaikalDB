@@ -101,7 +101,6 @@ int32_t RocksWrapper::init(const std::string& path) {
             rocksdb::NewFixedPrefixTransform(1));
     _meta_info_option.OptimizeLevelStyleCompaction();
     _meta_info_option.compaction_pri = rocksdb::kOldestSmallestSeqFirst;
-
     _db_path = path;
     // List Column Family
     std::vector<std::string> column_family_names;

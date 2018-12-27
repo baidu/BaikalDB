@@ -22,10 +22,9 @@
 #include <mutex>
 #include <list>
 #include <unordered_map>
-//#include "data_buffer.h"
 #include "user_info.h"
+#include "type_utils.h"
 #include "common.h"
-#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
 
@@ -37,6 +36,7 @@ const uint32_t SELF_BUF_DEFAULT_SIZE        = 4096;
 class NetworkSocket;
 class QueryContext;
 class DataBuffer;
+class ExecNode;
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
 
 enum SocketType {
@@ -53,6 +53,13 @@ enum SocketStatus{
     STATE_READ_QUERY_RESULT     = 6,    // STATE_READ_QUERY_RESULT
     STATE_ERROR_REUSE           = 100,
     STATE_ERROR                 = 101   // STATE_ERROR
+};
+
+struct CachePlan {
+    pb::OpType  op_type;
+    int32_t     sql_id;
+    ExecNode*   root = nullptr;
+    std::vector<pb::TupleDescriptor> tuple_descs;
 };
 
 struct NetworkSocket {
@@ -118,9 +125,18 @@ struct NetworkSocket {
     uint64_t        server_instance_id = 0;  // The global unique instance id of the current BaikalDB process, 
                                              // fetched from BaikalMeta when a BaikalDB instance starts,
     std::set<int>   need_rollback_seq;       // The sequence id for the commands need rollback within the transaction
-    std::mutex      region_lock;
-    std::map<int, pb::CachePlan> cache_plans; // plan of queries in a transaction
+    bthread_mutex_t region_lock;
+
+    std::map<int, CachePlan> cache_plans; // plan of queries in a transaction
     std::map<int64_t, pb::RegionInfo> region_infos;
+
+    // prepare releated members
+    uint64_t         stmt_id = 0;  // The statement ID auto_inc in Mysql Client-Server Protocol
+    std::unordered_map<std::string, QueryContext*> prepared_plans;
+    std::unordered_map<std::string, std::vector<SignedType>> param_type;
+
+    std::unordered_map<std::string, pb::ExprNode> session_vars;
+    std::unordered_map<std::string, pb::ExprNode> user_vars;
 };
 
 class SocketPool {

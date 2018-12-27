@@ -18,9 +18,14 @@
 #include "expr_value.h"
 
 namespace baikaldb {
+//number functions
+ExprValue round(const std::vector<ExprValue>& input);
+ExprValue floor(const std::vector<ExprValue>& input);
+ExprValue ceil(const std::vector<ExprValue>& input);
 //string functions
 ExprValue length(const std::vector<ExprValue>& input);
 ExprValue lower(const std::vector<ExprValue>& input);
+ExprValue lower_gbk(const std::vector<ExprValue>& input);
 ExprValue upper(const std::vector<ExprValue>& input);
 ExprValue concat(const std::vector<ExprValue>& input);
 ExprValue substr(const std::vector<ExprValue>& input);
@@ -40,6 +45,8 @@ ExprValue hll_estimate(const std::vector<ExprValue>& input);
 // case when functions
 ExprValue case_when(const std::vector<ExprValue>& input);
 ExprValue case_expr_when(const std::vector<ExprValue>& input);
+// MurmurHash sign
+ExprValue murmur_hash(const std::vector<ExprValue>& input);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

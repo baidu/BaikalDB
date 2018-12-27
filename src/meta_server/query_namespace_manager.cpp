@@ -31,6 +31,7 @@ void QueryNamespaceManager::get_namespace_info(const pb::QueryRequest* request,
         } else {
             response->set_errcode(pb::INPUT_PARAM_ERROR);
             response->set_errmsg("namespace not exist");
+            DB_FATAL("namespace: %s  not exist", namespace_name.c_str());
         }    
     }    
 }

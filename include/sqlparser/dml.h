@@ -188,10 +188,12 @@ struct OrderByClause : public Node {
 };
 
 struct LimitClause : public Node {
-    int offset = 0;
-    int count = 0;
+    ExprNode* offset;
+    ExprNode* count;
     LimitClause() {
-       node_type = NT_LIMIT; 
+       node_type = NT_LIMIT;
+       offset = nullptr;
+       count = nullptr;
     }
     virtual void to_stream(std::ostream& os) const override {
         os << " " << offset << ", " << count;

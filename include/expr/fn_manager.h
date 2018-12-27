@@ -25,6 +25,7 @@ class FunctionManager : public ObjectManager<
                         FunctionManager> {
 public:
     int init();
+    std::string get_swap_op(const std::string& name);
     static int complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType> types);
 
 private:

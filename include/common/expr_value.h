@@ -387,8 +387,12 @@ struct ExprValue {
     bool is_numberic() const {
         return is_int() || is_bool() || is_double();
     }
+    
+    bool is_place_holder() const {
+        return type == pb::PLACE_HOLDER;
+    }
 
-    SerializeStatus serialize_to_mysql_packet(char* buf, size_t size, size_t& len) const;
+    SerializeStatus serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const;
 
     static ExprValue Null() {
         ExprValue ret(pb::NULL_TYPE);

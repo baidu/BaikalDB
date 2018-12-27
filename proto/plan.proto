@@ -76,6 +76,8 @@ message ScanNode {
 
 message LimitNode {
     optional int64 offset = 1;
+    optional Expr  offset_expr = 2;
+    optional Expr  count_expr = 3;
 };
 
 message SortNode {
@@ -133,6 +135,8 @@ message InsertNode {
     optional int32 tuple_id = 6; // update原始数据tuple_id
     optional int32 values_tuple_id = 7; // values 后数据tuple_id
     optional bool is_replace = 8;
+    repeated int32 field_ids = 9;   // store field ids for prepared stmt
+    repeated Expr  insert_values = 10;   // store values for prepared stmt
 };
 
 message DeleteNode {

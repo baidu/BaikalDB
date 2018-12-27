@@ -289,7 +289,7 @@ int RocksdbScanNode::index_condition_pushdown() {
         if (need_pushdown(*iter)) {
             _index_conjuncts.push_back(*iter);
             iter = parent_conditions->erase(iter);
-            DB_WARNING("expr is push_down")
+            //DB_WARNING("expr is push_down")
         } else {
             iter++;
         }
@@ -460,8 +460,8 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
         }
         int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, true);
         if (ret < 0) {
-            DB_WARNING_STATE(state, "get primary:%ld fail, not exist, ret:%d, record: %s", 
-                    _table_id, ret, record->to_string().c_str());
+            //DB_WARNING_STATE(state, "get primary:%ld fail, not exist, ret:%d, record: %s", 
+            //        _table_id, ret, record->to_string().c_str());
             continue;
         }
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
@@ -677,6 +677,21 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         ++_num_rows_returned;
         //DB_NOTICE("MemRow set: %ld", cost.get_time());
     }
+}
+void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
+    if (region_id == 0 || _region_primary.count(region_id) == 0) {
+        return;
+    }
+    auto scan_pb = pb_node->mutable_derive_node()->mutable_scan_node();
+    pb::PossibleIndex* primary = nullptr;
+    for (auto& pos_index : *scan_pb->mutable_indexes()) {
+        if (pos_index.index_id() == _table_id) {
+            primary = &pos_index;
+            break;
+        }
+    }
+    primary->CopyFrom(_region_primary[region_id]);
 }
 }
 

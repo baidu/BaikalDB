@@ -30,7 +30,7 @@ public:
     }
     virtual ~RocksdbScanNode() {
         for (auto expr : _index_conjuncts) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
         delete _index_iter;
         delete _table_iter;
@@ -53,17 +53,21 @@ public:
         } 
         return false;
     }
-    std::map<int64_t, pb::RegionInfo>* mutable_region_infos() {
-        return &_region_infos;
-    }
-    std::map<int64_t, pb::RegionInfo> region_infos() const {
-        return _region_infos;
+    std::map<int64_t, pb::PossibleIndex>* mutable_region_primary() {
+        return &_region_primary;
     }
     void set_related_fetcher_node(FetcherNode* fetcher_node) {
         _related_fetcher_node = fetcher_node;
     }
     FetcherNode* get_related_fetcher_node() const {
         return _related_fetcher_node;
+    }
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ScanNode::find_place_holder(placeholders);
+        for (auto& expr : _index_conjuncts) {
+            expr->find_place_holder(placeholders);
+        }
     }
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -112,7 +116,8 @@ private:
     std::vector<std::string> _query_words;
     std::vector<ReverseIndexBase*> _reverse_indexes;
     MutilReverseIndex<CommonSchema> _m_index;
-    std::map<int64_t, pb::RegionInfo> _region_infos;
+
+    std::map<int64_t, pb::PossibleIndex> _region_primary;
     std::map<int32_t, int32_t> _index_slot_field_map;
 };
 }

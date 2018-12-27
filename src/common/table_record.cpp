@@ -27,6 +27,19 @@ SmartRecord TableRecord::new_record(int64_t tableid) {
     return factory->new_record(tableid);
 }
 
+std::string TableRecord::get_index_value(IndexInfo& index) {
+    std::string tmp;
+    for (auto& field : index.fields) {
+        auto tag_field = get_field_by_tag(field.id);
+        tmp += get_value(tag_field).get_string();
+        tmp += "-";
+    }
+    if (!tmp.empty()) {
+        tmp.pop_back();
+    }
+    return tmp;
+}
+
 bool TableRecord::is_null(const FieldDescriptor* field) {
     const Reflection* _reflection = _message->GetReflection();
     if (!_reflection->HasField(*_message, field)) {
@@ -215,6 +228,10 @@ ExprValue TableRecord::get_value(const FieldDescriptor* field) {
 
 // by_tag default true
 int TableRecord::set_value(const FieldDescriptor* field, const ExprValue& value) {
+    if (field == nullptr) {
+        DB_WARNING("Invalid Field Descriptor");
+        return -1;
+    }
     const Reflection* _reflection = _message->GetReflection();
     if (value.is_null()) {
         _reflection->ClearField(_message, field);
@@ -254,7 +271,7 @@ int TableRecord::set_value(const FieldDescriptor* field, const ExprValue& value)
 }
 
 int TableRecord::get_reverse_word(IndexInfo& index_info, std::string& word) {
-    int ret = 0;
+    //int ret = 0;
     auto field = get_field_by_tag(index_info.fields[0].id);
     //DB_WARNING("index_info:%d id:%d", index_info.fields[0].type, index_info.fields[0].id);
     if (index_info.fields[0].type == pb::STRING) {

@@ -21,6 +21,8 @@
 #include "proto/store.interface.pb.h"
 #include "meta_server.h"
 #include "schema_manager.h"
+#include "cluster_manager.h"
+#include "table_manager.h"
 
 namespace baikaldb {
 typedef std::shared_ptr<pb::RegionInfo> SmartRegionInfo;
@@ -43,7 +45,7 @@ public:
     }
     friend class QueryRegionManager;
     void update_region(const pb::MetaManagerRequest& request, braft::Closure* done);
-    void restore_region(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void restore_region(const pb::MetaManagerRequest& request, pb::MetaManagerResponse* response);
     void drop_region(const pb::MetaManagerRequest& request, braft::Closure* done);
     void split_region(const pb::MetaManagerRequest& request, braft::Closure* done);
     void send_remove_region_request(const std::vector<int64_t>& drop_region_ids);
@@ -81,14 +83,16 @@ public:
                 pb::StoreHeartBeatResponse* response);
 
     void leader_load_balance(bool whether_can_decide,
-                    bool close_load_balance,
+                    bool load_balance,
                     const pb::StoreHeartBeatRequest* request,
                     pb::StoreHeartBeatResponse* response);
     
     void peer_load_balance(const std::unordered_map<int64_t, int64_t>& add_peer_counts,
                 std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
                 const std::string& instance,
-                const std::string& resouce_tag);
+                const std::string& resouce_tag,
+                std::unordered_map<int64_t, std::string>& logical_rooms,
+                std::unordered_map<int64_t, int64_t>& table_average_counts);
    
     int load_region_snapshot(const std::string& value);
     void migirate_region_for_store(const std::string& instance);
@@ -128,6 +132,18 @@ public:
             }
         }
     }
+    void print_region_ids(const std::string& instance) {
+        BAIDU_SCOPED_LOCK(_region_mutex);
+        if (_instance_region_map.find(instance) ==  _instance_region_map.end()) {
+            return;
+        }
+        for (auto& table_id : _instance_region_map[instance]) {
+            for (auto& region_id : table_id.second) {
+                DB_WARNING("table_id: %ld, region_id: %ld in store: %s", 
+                        table_id.first, region_id, instance.c_str());
+            }
+        }
+    }
     int get_region_status(int64_t region_id, pb::Status& status) {
         BAIDU_SCOPED_LOCK(_region_state_mutex);
         if (_region_state_map.find(region_id) == _region_state_map.end()) {
@@ -136,17 +152,54 @@ public:
         status = _region_state_map[region_id].status;
         return 0;
     }
+
+    void whether_add_instance(const std::map<std::string, int64_t>& uniq_instance) {
+        std::map<std::string, int64_t> add_instances;
+        for (auto& peer_pair : uniq_instance) {
+            bool exist = ClusterManager::get_instance()->instance_exist(peer_pair.first);
+            if (!exist) {
+                DB_WARNING("peer: %s not exist in meta server", peer_pair.first.c_str());
+                add_instances[peer_pair.first] = peer_pair.second;
+            }
+        }
+        if (add_instances.size() > 0) {
+            auto add_instance_fun = [add_instances] {
+                for (auto peer_pair :add_instances) {
+                    std::string resource_tag;
+                    TableManager::get_instance()->get_resource_tag(peer_pair.second, resource_tag);
+                    pb::MetaManagerRequest request;
+                    request.set_op_type(pb::OP_ADD_INSTANCE);
+                    pb::InstanceInfo* instance_info = request.mutable_instance();
+                    instance_info->set_address(peer_pair.first);
+                    instance_info->set_resource_tag(resource_tag);
+                    instance_info->set_status(pb::FAULTY);
+                    ClusterManager::get_instance()->process_cluster_info(NULL, &request, NULL, NULL);
+                }
+            };
+            Bthread bth;
+            bth.run(add_instance_fun);
+        }
+    }
+
     void set_region_info(const pb::RegionInfo& region_info) {
         int64_t table_id = region_info.table_id();
         int64_t region_id = region_info.region_id();
         BAIDU_SCOPED_LOCK(_region_mutex);
         if (_region_info_map.find(region_id) != _region_info_map.end()) {
-            for (auto peer : _region_info_map[region_id]->peers()) {
+            for (auto& peer : _region_info_map[region_id]->peers()) {
                 _instance_region_map[peer][table_id].erase(region_id);                
             }
         }
-        for (auto peer : region_info.peers()) {
+        for (auto& peer : region_info.peers()) {
             _instance_region_map[peer][table_id].insert(region_id);
+        }
+        //如果原peer下已不存在region，则erase这个table_id
+        if (_region_info_map.find(region_id) != _region_info_map.end()) {
+            for (auto& peer : _region_info_map[region_id]->peers()) {
+                if (_instance_region_map[peer][table_id].size() <= 0) {
+                    _instance_region_map[peer].erase(table_id);
+                } 
+            }
         }
         auto ptr_region = std::make_shared<pb::RegionInfo>(region_info);
         _region_info_map[region_id] = ptr_region;
@@ -165,11 +218,13 @@ public:
     }
     void set_region_mem_info(int64_t region_id, 
                              int64_t new_log_index,
-                             int64_t used_size) {
+                             int64_t used_size,
+                             int64_t num_table_lines) {
         BAIDU_SCOPED_LOCK(_region_mutex);
         if (_region_info_map.find(region_id) != _region_info_map.end()) {
             _region_info_map[region_id]->set_log_index(new_log_index);
             _region_info_map[region_id]->set_used_size(used_size);
+            _region_info_map[region_id]->set_num_table_lines(num_table_lines);
         }
     }
     void set_region_leader(int64_t region_id,
@@ -275,7 +330,7 @@ private:
     std::unordered_map<std::string, std::unordered_map<int64_t, int64_t>> _instance_leader_count;
     //临时方案，为了安全，每个resource_tag只控制单实例迁移
     bthread_mutex_t                                     _resource_tag_mutex;
-    std::map<std::string, bool>                         _resource_tag_delete_region_map; 
+    std::map<std::string, std::string>                         _resource_tag_delete_region_map; 
 }; //class
 
 }//namespace

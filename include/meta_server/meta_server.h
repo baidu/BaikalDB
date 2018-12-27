@@ -21,6 +21,7 @@
 #endif
 #include "proto/meta.interface.pb.h"
 #include "common.h"
+#include "meta_server_interact.hpp"
 
 namespace baikaldb {
 class MetaStateMachine;
@@ -88,10 +89,17 @@ public:
     void shutdown_raft();
     
 private:
+    MetaServerInteract* meta_proxy(const std::string& plat) {
+        if (_meta_interact_map.count(plat) == 1) {
+            return _meta_interact_map[plat];
+        }
+        return MetaServerInteract::get_instance();
+    }
     MetaServer() {}
     
     MetaStateMachine* _meta_state_machine = NULL;
     AutoIncrStateMachine* _auto_incr_state_machine = NULL;
+    std::map<std::string, MetaServerInteract*> _meta_interact_map;
 
     bool _init_success = false;
 }; //class

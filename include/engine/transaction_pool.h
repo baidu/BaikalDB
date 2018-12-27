@@ -90,7 +90,9 @@ public:
             bool graceful_shutdown);
 
     void update_txn_num_rows_after_split(const pb::TransactionInfo& txn_info);
-
+    
+    //清空所有的状态
+    void clear();
 private:
     int64_t _region_id = 0;
 

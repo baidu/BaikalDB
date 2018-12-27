@@ -1,17 +1,16 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
+/***************************************************************************
+ * 
+ * Copyright (c) 2017 Baidu.com, Inc. All Rights Reserved
+ * 
+ **************************************************************************/
+ 
+/**
+ * @file test_clster_manager.cpp
+ * @author liuhuicong(com@baidu.com)
+ * @date 2017/11/16 11:53:56
+ * @brief 
+ *  
+ **/
 #include "gtest/gtest.h"
 #include "schema_manager.h"
 #include "table_manager.h"
@@ -454,9 +453,9 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     _region_manager->update_region(request_update_region_feed, NULL);
     ASSERT_EQ(1, _region_manager->_region_info_map.size());
     ASSERT_EQ(6, _region_manager->_instance_region_map.size());
-    ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8010"].size());
-    ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8011"].size());
-    ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8012"].size());
+    ASSERT_EQ(0, _region_manager->_instance_region_map["127.0.0.1:8010"].size());
+    ASSERT_EQ(0, _region_manager->_instance_region_map["127.0.0.1:8011"].size());
+    ASSERT_EQ(0, _region_manager->_instance_region_map["127.0.0.1:8012"].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8020"].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8021"].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8022"].size());

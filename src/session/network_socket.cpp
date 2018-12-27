@@ -15,6 +15,7 @@
 #include <boost/make_shared.hpp>
 #include "network_socket.h"
 #include "query_context.h"
+#include "exec_node.h"
 
 namespace baikaldb {
 static UserInfo dummy;
@@ -49,7 +50,28 @@ NetworkSocket::NetworkSocket() {
     is_auth_result_send_partly = 0;
     query_ctx.reset(new QueryContext);
     user_info.reset(new UserInfo);
-    //user_info = &dummy;
+    pb::ExprNode str_node;
+    str_node.set_node_type(pb::STRING_LITERAL);
+    str_node.set_col_type(pb::STRING);
+    str_node.set_num_children(0);
+    str_node.mutable_derive_node()->set_string_val("utf8");
+    session_vars["character_set_database"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("utf8_general_ci");
+    session_vars["collation_database"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("REPEATABLE-READ");
+    session_vars["tx_isolation"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("Source distribution");
+    session_vars["version_comment"] = str_node;
+
+    pb::ExprNode int_node;
+    int_node.set_node_type(pb::INT_LITERAL);
+    int_node.set_col_type(pb::INT64);
+    int_node.set_num_children(0);
+    int_node.mutable_derive_node()->set_int_val(1);
+    session_vars["auto_increment_increment"] = int_node;
+    session_vars["autocommit"] = int_node;
+
+    bthread_mutex_init(&region_lock, nullptr);
 }
 
 NetworkSocket::~NetworkSocket() {
@@ -61,6 +83,14 @@ NetworkSocket::~NetworkSocket() {
     delete send_buf;
     self_buf = nullptr;
     send_buf = nullptr;
+
+    for (auto& pair : cache_plans) {
+        delete pair.second.root;
+    }
+    for (auto& pair : prepared_plans) {
+        delete pair.second;
+    }
+    bthread_mutex_destroy(&region_lock);
 }
 
 void NetworkSocket::reset_send_buf() {
@@ -109,9 +139,18 @@ bool NetworkSocket::reset() {
     txn_id = 0;
     new_txn_id = 0;
     seq_id = 0;
+    stmt_id = 0;
+
+    for (auto& pair : cache_plans) {
+        delete pair.second.root;
+    }
+    cache_plans.clear();
+    for (auto& pair : prepared_plans) {
+        delete pair.second;
+    }
+    prepared_plans.clear();
     need_rollback_seq.clear();
     region_infos.clear();
-    cache_plans.clear();
     return true;
 }
 
@@ -121,7 +160,7 @@ bool NetworkSocket::transaction_has_write() {
         return true;
     }
     for (auto& pair : cache_plans) {
-        pb::OpType type = pair.second.op_type();
+        pb::OpType type = pair.second.op_type;
         if (type == pb::OP_INSERT || type == pb::OP_DELETE || type == pb::OP_UPDATE) {
             return true;
         }
@@ -139,8 +178,11 @@ void NetworkSocket::on_commit_rollback() {
     seq_id = 0;
     need_rollback_seq.clear();
     //multi_state_txn = !autocommit;
-    region_infos.clear();
+    for (auto& pair : cache_plans) {
+        delete pair.second.root;
+    }
     cache_plans.clear();
+    region_infos.clear();
 }
 
 bool NetworkSocket::reset_when_err() {

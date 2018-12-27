@@ -112,13 +112,6 @@ public:
 
     ~QueryContext();
 
-    void cancel() {
-        _is_cancelled = true;
-    }
-    bool is_cancelled() {
-        return _is_cancelled;
-    }
-
     void add_tuple(const pb::TupleDescriptor& tuple_desc) {
         if (tuple_desc.tuple_id() >= (int)_tuple_descs.size()) {
             _tuple_descs.resize(tuple_desc.tuple_id() + 1);
@@ -176,15 +169,20 @@ public:
 
     pb::Plan            plan;
     ExecNode*           root = nullptr;
+    std::map<int, ExprNode*> placeholders;
+    std::string         prepare_stmt_name;
+    std::vector<pb::ExprNode> param_values;
+
     RuntimeState        runtime_state;  // baikaldb side runtime state
-    std::vector<SmartRecord> insert_records;
-    std::map<int64_t, pb::RegionInfo> region_infos;
-    std::map<int64_t, std::vector<SmartRecord>> insert_region_ids;
+    // the insertion records, not grouped by region yet
+    std::vector<SmartRecord>            insert_records;
     bool                has_recommend = false;
 
     bool                succ_after_logical_plan = false;
     bool                succ_after_physical_plan = false;
     bool                return_empty = false;
+    bool                new_prepared = false;  // flag for stmt_prepare
+    bool                exec_prepared = false; // flag for stmt_execute
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 
@@ -193,10 +191,9 @@ public:
     // in autocommit mode, two phase commit is disabled by default (for better formance)
     // user can enable 2pc by comments /*{"enable_2pc":1}*/ preceding a DML statement
     bool                enable_2pc = false;
+    bool                is_cancelled = false;
 
 private:
-    bool                _is_cancelled = false;
-
     std::vector<pb::TupleDescriptor> _tuple_descs;
 };
 } //namespace baikal

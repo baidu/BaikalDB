@@ -41,6 +41,9 @@ public:
 
     virtual ~Transaction() {
         bthread_mutex_destroy(&_txn_mutex);
+        if (!_is_finished) {
+            rollback();
+        }
         delete _txn;
         _txn = nullptr;
     }
@@ -71,7 +74,9 @@ public:
     // UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields, primary_key>
     // NON-UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields + primary_key, NULL>
     int put_secondary(int64_t region, IndexInfo& index, SmartRecord record);
-
+    int put_meta_info(const std::string& key, const std::string& value);
+    
+    int remove_meta_info(const std::string& key);
     // TODO: update return status
     // Return -2 if key not found
     // If get succ, value is encoded into "key"
@@ -226,6 +231,7 @@ private:
     
     rocksdb::Transaction*           _txn = nullptr;
     rocksdb::ColumnFamilyHandle*    _data_cf = nullptr;
+    rocksdb::ColumnFamilyHandle*    _meta_cf = nullptr;
     pb::RegionInfo*                 _region_info = nullptr;
     RocksWrapper*                   _db = nullptr;
     TransactionPool*                _pool = nullptr;

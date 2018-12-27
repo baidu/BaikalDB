@@ -23,7 +23,7 @@ public:
     }
     virtual  ~FilterNode() {
         for (auto conjunct : _conjuncts) {
-            ExprNode::destory_tree(conjunct);
+            ExprNode::destroy_tree(conjunct);
         }
     }
     virtual int init(const pb::PlanNode& node);
@@ -41,7 +41,15 @@ public:
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual void transfer_pb(pb::PlanNode* pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
+
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ExecNode::find_place_holder(placeholders);
+        for (auto& expr : _conjuncts) {
+            expr->find_place_holder(placeholders);
+        }
+    }
+    void remove_primary_conjunct(int64_t index_id);
 private:
     bool need_copy(MemRow* row);
 

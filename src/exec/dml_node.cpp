@@ -45,14 +45,29 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         _pri_field_ids.insert(field_info.id);
     }
     _affected_index_ids = _table_info->indices;
-
-    //保存所有字段，主键不在pb里，不需要传入
-    for (auto& field_info : _table_info->fields) {
-        if (_pri_field_ids.count(field_info.id) == 0) {
-            _field_ids.push_back(field_info.id);
+    // update and on_dup_key_update need all fields
+    // delete and insert/replace need get index fields
+    if (_node_type == pb::UPDATE_NODE || _on_dup_key_update) {
+        //保存所有字段，主键不在pb里，不需要传入
+        for (auto& field_info : _table_info->fields) {
+            if (_pri_field_ids.count(field_info.id) == 0) {
+                _field_ids.push_back(field_info.id);
+            }
+        }
+        std::sort(_field_ids.begin(), _field_ids.end());
+    } else {
+        std::set<int32_t> index_field_ids;
+        for (auto& pair : state->resource()->index_infos) {
+            for (auto& field_info : pair.second.fields) {
+                if (_pri_field_ids.count(field_info.id) == 0) {
+                    index_field_ids.insert(field_info.id);
+                }
+            }
+        }
+        for (auto id : index_field_ids) {
+            _field_ids.push_back(id);
         }
     }
-    std::sort(_field_ids.begin(), _field_ids.end());
     return 0;
 }
 
@@ -86,12 +101,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     std::string pk_str = pk_key.data();
     if (_affect_primary) {
         //no field need to decode here, only check key exist and get lock
-        std::vector<int32_t> field_ids;
+        //std::vector<int32_t> field_ids;
         SmartRecord old_record = record;
         if (_is_replace) {
             old_record = record->clone(true);
         }
-        ret = txn->get_update_primary(_region_id, *_pri_info, old_record, field_ids, GET_LOCK, true);
+        ret = txn->get_update_primary(_region_id, *_pri_info, old_record, _field_ids, GET_LOCK, true);
         if (ret == -3) {
             //DB_WARNING_STATE(state, "key not in this region:%ld, %s", _region_id, record->to_string().c_str());
             return 0;
@@ -100,8 +115,15 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             if (_need_ignore) {
                 return 0;
             }
-            if (ret == 0 && !is_update) { 
-                if (_on_dup_key_update) {
+            if (ret == 0) { 
+                if (is_update) {
+                    DB_WARNING_STATE(state, "update new primary row must not exist, "
+                            "index:%ld, ret:%d", _table_id, ret);
+                    state->error_code = ER_DUP_KEY;
+                    state->error_msg << "Duplicate entry: '" << 
+                        old_record->get_index_value(*_pri_info) << "' for key 'PRIMARY'";
+                    return -1;
+                } else if (_on_dup_key_update) {
                     ret = update_row(state, record, _dup_update_row.get());
                     if (ret == 1) {
                         ++ret;
@@ -127,8 +149,8 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 } else {
                     DB_WARNING_STATE(state, "insert row must not exist, index:%ld, ret:%d", _table_id, ret);
                     state->error_code = ER_DUP_KEY;
-                    state->error_msg << "Cannot write duplicate key: " 
-                                     << old_record->debug_string();
+                    state->error_msg << "Duplicate entry: '" << 
+                        old_record->get_index_value(*_pri_info) << "' for key 'PRIMARY'";
                     return -1;
                 }
             } else {
@@ -145,18 +167,27 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             continue;
         }
         SmartRecord old_record = record;
-        if (_is_replace ) {
+        if (_is_replace) {
             old_record = record->clone(true);
         }
         ret = txn->get_update_secondary(_region_id, *_pri_info, info, old_record, GET_LOCK, true);
-        if (ret == 0 && !is_update) {
-            if (_on_dup_key_update) {
+        if (ret == 0) {
+            if (is_update) {
+                DB_WARNING_STATE(state, "update uniq key must not exist, "
+                        "index:%ld, ret:%d", info.id, ret);
+                state->error_code = ER_DUP_KEY;
+                state->error_msg << "Duplicate entry: '" << 
+                    old_record->get_index_value(info) << "' for key '" << info.short_name << "'";
+                return -1;
+            } else if (_need_ignore) {
+                return 0;
+            } else if (_on_dup_key_update) {
                 ret = update_row(state, old_record, _dup_update_row.get());
                 if (ret == 1) {
                     ++ret;
                 }
                 return ret;
-            } if (_is_replace) {
+            } else if (_is_replace) {
                 ret = delete_row(state, old_record);
                 if (ret < 0) {
                     DB_WARNING_STATE(state, "remove fail, index:%ld ,ret:%d", info.id, ret);
@@ -164,6 +195,13 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 }
                 ++affected_rows;
                 continue;
+            } else {
+                DB_WARNING_STATE(state, "insert uniq key must not exist, "
+                        "index:%ld, ret:%d", info.id, ret);
+                state->error_code = ER_DUP_KEY;
+                state->error_msg << "Duplicate entry: '" << 
+                    old_record->get_index_value(info) << "' for key '" << info.short_name << "'";
+                return -1;
             }
         }
         // ret == -3 means the primary_key returned by get_update_secondary is out of the region
@@ -172,7 +210,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             if (_need_ignore) {
                 return 0;
             }
-            DB_WARNING_STATE(state, "insert index row must not exist, index:%ld, ret:%d", info.id, ret);
+            DB_WARNING_STATE(state, "insert rocksdb failed, index:%ld, ret:%d", info.id, ret);
             return -1;
         }
     }
@@ -334,7 +372,6 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         return 0;
     }
     // if the updating field has no change, the update can be skipped.
-    //SmartRecord old_record = record->clone(true);
     if (_on_dup_key_update) {
         if (_tuple_desc != nullptr) {
             for (auto slot : _tuple_desc->slots()) {
@@ -367,6 +404,13 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         return -1;
     }
     return 1;
+}
+
+void DMLNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _update_exprs) {
+        expr->find_place_holder(placeholders);
+    }
 }
 }
 

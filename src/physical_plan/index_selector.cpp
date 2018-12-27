@@ -16,6 +16,7 @@
 #include "slot_ref.h"
 #include "scalar_fn_call.h"
 #include "join_node.h"
+#include "agg_node.h"
 #include "parser.h"
 
 namespace baikaldb {
@@ -26,6 +27,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
     if (scan_nodes.size() == 0) {
         return 0;
     }
+    AggNode* agg_node = static_cast<AggNode*>(root->get_node(pb::AGG_NODE));
     SortNode* sort_node = static_cast<SortNode*>(root->get_node(pb::SORT_NODE));
     JoinNode* join_node = static_cast<JoinNode*>(root->get_node(pb::JOIN_NODE));
     for (auto& scan_node_ptr : scan_nodes) {
@@ -33,26 +35,29 @@ int IndexSelector::analyze(QueryContext* ctx) {
         if (parent_node_ptr == NULL) {
             continue;
         }
+
+        FilterNode* filter_node = nullptr;
         if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
                 || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
-            auto get_slot_id = [ctx](int32_t tuple_id, int32_t field_id)-> 
-                    int32_t {return ctx->get_slot_id(tuple_id, field_id);};
-            //有join节点暂时不考虑sort索引优化
-            if (join_node != NULL) {
-                index_selector(get_slot_id, 
-                                ctx,
-                                static_cast<ScanNode*>(scan_node_ptr), 
-                                static_cast<FilterNode*>(parent_node_ptr), 
-                                NULL,
-                                &ctx->has_recommend);
-            } else {
-                index_selector(get_slot_id,
-                               ctx,
-                               static_cast<ScanNode*>(scan_node_ptr), 
-                               static_cast<FilterNode*>(parent_node_ptr), 
-                               sort_node,
-                               &ctx->has_recommend);
-            }
+            filter_node = static_cast<FilterNode*>(parent_node_ptr);
+        }
+        auto get_slot_id = [ctx](int32_t tuple_id, int32_t field_id)-> 
+                int32_t {return ctx->get_slot_id(tuple_id, field_id);};
+        //有join节点暂时不考虑sort索引优化
+        if (join_node != NULL || agg_node != NULL) {
+            index_selector(get_slot_id, 
+                            ctx,
+                            static_cast<ScanNode*>(scan_node_ptr), 
+                            filter_node, 
+                            NULL,
+                            &ctx->has_recommend);
+        } else {
+            index_selector(get_slot_id,
+                           ctx,
+                           static_cast<ScanNode*>(scan_node_ptr), 
+                           filter_node, 
+                           sort_node,
+                           &ctx->has_recommend);
         }
         pb::ScanNode* pb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->mutable_pb_node()->
             mutable_derive_node()->mutable_scan_node();
@@ -77,7 +82,13 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
     pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->
         mutable_derive_node()->mutable_scan_node();
 
-    std::vector<ExprNode*>* conjuncts = filter_node->mutable_conjuncts();
+    std::vector<ExprNode*>* conjuncts = filter_node?filter_node->mutable_conjuncts():nullptr;
+    if (conjuncts != nullptr) {
+        // join时fetch完左表后会复用FilterNode, 需要重新获取possible index id
+        for (auto expr : *conjuncts) {
+            expr->clear_filter_index();
+        }
+    }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     std::vector<int64_t> index_ids = schema_factory->get_table_info(table_id).indices;
     if (pb_scan_node->use_indexes_size() != 0) {
@@ -97,9 +108,10 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         SmartRecord left_record = record_template->clone(false);
         SmartRecord right_record = record_template->clone(false);
         //SmartRecord eq_record = schema_factory->new_record(table_id);
+        std::vector<SmartRecord> in_records;
         int field_cnt = 0;
 
-        bool range_pred = true; //是否是范围(= > < >= <=)条件
+        bool range_pred = false; //是否是范围(= > < >= <=)条件
         bool in_pred = false;   //是否是in条件
 
         for (auto field : index_info.fields) {
@@ -113,7 +125,12 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
             for (auto expr : *conjuncts) {
                 std::vector<ExprValue> values;
                 bool expr_break = true;
-                switch (index_expr_type(expr, tuple_id, slot_id, index_type, &values)) {
+                RangeType rg_type = index_expr_type(expr, tuple_id, slot_id, index_type, &values);
+                // a,b联合索引，a in (1,2) and b=3也能使用索引
+                if (in_pred && rg_type != EQ) {
+                    rg_type = NONE;
+                }
+                switch (rg_type) {
                     case NONE:
                         expr_break = false;
                         field_break = true;
@@ -123,11 +140,18 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                         right_field_cnt = field_cnt;
                         left_open = false;
                         right_open = false;
-                        left_record->set_value(left_record->get_field_by_tag(field.id), values[0]);
-                        right_record->set_value(right_record->get_field_by_tag(field.id), values[0]);
+                        if (in_pred) {
+                            for (auto record : in_records) {
+                                record->set_value(record->get_field_by_tag(field.id), values[0]);
+                            }
+                            range_pred = false;
+                        } else {
+                            left_record->set_value(left_record->get_field_by_tag(field.id), values[0]);
+                            right_record->set_value(right_record->get_field_by_tag(field.id), values[0]);
+                            range_pred = true;
+                        }
                         expr_break = true;
                         field_break = false;
-                        range_pred = true;
                         expr->add_filter_index(index_id);
                         break;
                     case LEFT_OPEN:
@@ -192,26 +216,17 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                         break;
                     case IN: {
                         // 特殊逻辑
-                        // left_field_cnt = 0;
-                        // right_field_cnt = 0;
+                        left_field_cnt = field_cnt;
+                        right_field_cnt = field_cnt;
                         range_pred = false;
                         in_pred = true;
-                        auto pos_index = pb_scan_node->add_indexes();
-                        pos_index->set_index_id(index_id);
                         for (auto value : values) {
-                            left_record->set_value(left_record->get_field_by_tag(field.id), value);
-                            auto range = pos_index->add_ranges();
-                            std::string str;
-                            left_record->encode(str);
-                            range->set_left_pb_record(str);
-                            range->set_right_pb_record(str);
-                            range->set_left_field_cnt(field_cnt);
-                            range->set_right_field_cnt(field_cnt);
-                            range->set_left_open(false);
-                            range->set_right_open(false);
+                            auto record = left_record->clone(true);
+                            record->set_value(record->get_field_by_tag(field.id), value);
+                            in_records.push_back(record);
                         }
                         expr_break = true;
-                        field_break = true;
+                        field_break = false;
                         expr->add_filter_index(index_id);
                         break;
                     }
@@ -235,11 +250,23 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         if (left_field_cnt == 0 && right_field_cnt == 0 && !range_pred) {
             continue;
         }
-        //如果是IN条件，PossibleIndex已经生成，且不考虑sort index.
+        //如果是IN条件，不考虑sort index.
         if (in_pred) {
-             continue;
+            auto pos_index = pb_scan_node->add_indexes();
+            pos_index->set_index_id(index_id);
+            for (auto record : in_records) {
+                auto range = pos_index->add_ranges();
+                std::string str;
+                record->encode(str);
+                range->set_left_pb_record(str);
+                range->set_right_pb_record(str);
+                range->set_left_field_cnt(left_field_cnt);
+                range->set_right_field_cnt(right_field_cnt);
+                range->set_left_open(false);
+                range->set_right_open(false);
+            }
+            continue;
         }
-
         bool between = false;
         std::string str1;
         std::string str2;
@@ -273,8 +300,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
             } else if (left_field_cnt < right_field_cnt) { // (EQ)*(LE/LT)
                 use_by_sort = check_sort_use_index(get_slot_id, index_info, order_exprs, tuple_id, left_field_cnt);
             }
-
-            //DB_WARNING("index: %ld, field_count:%d, %d, sort_index:%d", index_id, left_field_cnt, right_field_cnt, use_by_sort);
+            // DB_WARNING("index: %ld, field_count:%d, %d, sort_index:%d", index_id, left_field_cnt, right_field_cnt, use_by_sort);
         }
         if (left_field_cnt == 0 && right_field_cnt == 0 && !use_by_sort) {
             continue;
@@ -301,6 +327,12 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         pb::PossibleIndex* pos_index = pb_scan_node->add_indexes();
         pos_index->set_index_id(table_id);
         pos_index->add_ranges();
+    }
+    // 纯kv类优化，只主键索引时候过滤掉in条件
+    if (pb_scan_node->indexes_size() == 1 && pb_scan_node->indexes(0).index_id() == table_id) {
+        if (filter_node != nullptr) {
+            filter_node->remove_primary_conjunct(table_id);
+        }
     }
     //DB_WARNING("pb_scan_node: %s", pb_scan_node->DebugString().c_str());
 }

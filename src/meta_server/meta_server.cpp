@@ -14,7 +14,7 @@
 
 #include "meta_server.h"
 #include <boost/lexical_cast.hpp>
-#include "meta_server_interact.hpp"
+#include <boost/algorithm/string.hpp>
 #include "auto_incr_state_machine.h"
 #include "meta_state_machine.h"
 #include "cluster_manager.h"
@@ -33,6 +33,10 @@ namespace baikaldb {
 DEFINE_int32(meta_port, 8010, "Meta port");
 DEFINE_int32(meta_replica_number, 3, "Meta replica num");
 DEFINE_int32(concurrency_num, 40, "concurrency num, default: 40");
+// for migrate
+DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
+DEFINE_string(e0_meta_bns, "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all", "");
+DEFINE_string(qa_meta_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "");
 
 const std::string MetaServer::CLUSTER_IDENTIFY(1, 0x01);
 const std::string MetaServer::LOGICAL_CLUSTER_IDENTIFY(1, 0x01);
@@ -91,6 +95,12 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     PrivilegeManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     ClusterManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     MetaServerInteract::get_instance()->init();
+    _meta_interact_map["e0"] = new MetaServerInteract;
+    _meta_interact_map["e0"]->init_internal(FLAGS_e0_meta_bns);
+    _meta_interact_map["qa"] = new MetaServerInteract;
+    _meta_interact_map["qa"]->init_internal(FLAGS_e0_meta_bns);
+    _meta_interact_map["ps"] = new MetaServerInteract;
+    _meta_interact_map["ps"]->init_internal(FLAGS_e0_meta_bns);
     
     _init_success = true;
     return 0;
@@ -147,10 +157,11 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_RENAME_FIELD
             || request->op_type() == pb::OP_MODIFY_FIELD
             || request->op_type() == pb::OP_UPDATE_REGION
-            || request->op_type() == pb::OP_RESTORE_REGION
             || request->op_type() == pb::OP_DROP_REGION
             || request->op_type() == pb::OP_SPLIT_REGION
-            || request->op_type() == pb::OP_UPDATE_BYTE_SIZE) {
+            || request->op_type() == pb::OP_UPDATE_BYTE_SIZE
+            || request->op_type() == pb::OP_UPDATE_SPLIT_LINES
+            || request->op_type() == pb::OP_UPDATE_DISTS) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,
@@ -167,28 +178,84 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
                                           done_guard.release());
         return;
     }
-    if (request->op_type() == pb::OP_UNSAFE_DECISION) {
-        SchemaManager::get_instance()->set_unsafe_decision();
-        response->set_errcode(pb::SUCCESS);
-        response->set_op_type(request->op_type());
-        return;
-    }
     if (request->op_type() == pb::OP_SET_INSTANCE_MIGRATE) {
         ClusterManager::get_instance()->set_instance_migrate(request, response, log_id);
-        response->set_errcode(pb::SUCCESS);
-        response->set_op_type(request->op_type());
-        return;
-    }
-    if (request->op_type() == pb::OP_CLOSE_LOAD_BALANCE) {
-        _meta_state_machine->set_close_load_balance(true); 
-        response->set_errcode(pb::SUCCESS);
-        response->set_op_type(request->op_type());
         return;
     }
     if (request->op_type() == pb::OP_OPEN_LOAD_BALANCE) {
-        _meta_state_machine->set_close_load_balance(false);
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
+        if (request->resource_tags_size() == 0) {
+            _meta_state_machine->set_global_load_balance(true);
+            DB_WARNING("open global load balance");
+            return;
+        }
+        for (auto& resource_tag : request->resource_tags()) {
+            _meta_state_machine->set_load_balance(resource_tag, true);
+            DB_WARNING("open load balance for resource_tag: %s", resource_tag.c_str());
+        }
+        return;
+    }
+    if (request->op_type() == pb::OP_CLOSE_LOAD_BALANCE) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        if (request->resource_tags_size() == 0) {
+            _meta_state_machine->set_global_load_balance(false);
+            DB_WARNING("close global load balance");
+            return;
+        }
+        for (auto& resource_tag : request->resource_tags()) {
+            _meta_state_machine->set_load_balance(resource_tag, false);
+            DB_WARNING("close load balance for resource_tag: %s", resource_tag.c_str());
+        } 
+        return;
+    }
+    if (request->op_type() == pb::OP_OPEN_MIGRATE) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        if (request->resource_tags_size() == 0) {
+            _meta_state_machine->set_global_migrate(true);
+            DB_WARNING("open global migrate");
+            return;
+        }
+        for (auto& resource_tag : request->resource_tags()) {
+            _meta_state_machine->set_migrate(resource_tag, true);
+            DB_WARNING("open migrate for resource_tag: %s", resource_tag.c_str());
+        }
+        return;
+    }
+    if (request->op_type() == pb::OP_CLOSE_MIGRATE) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        if (request->resource_tags_size() == 0) {
+            _meta_state_machine->set_global_migrate(false);
+            DB_WARNING("close migrate");
+            return;
+        }
+        for (auto& resource_tag : request->resource_tags()) {
+            _meta_state_machine->set_migrate(resource_tag, false);
+            DB_WARNING("close migrate for resource_tag: %s", resource_tag.c_str());
+        } 
+        return;
+    }
+    if (request->op_type() == pb::OP_OPEN_UNSAFE_DECISION) {
+        _meta_state_machine->set_unsafe_decision(true);
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        DB_WARNING("open unsafe decison");
+        return;
+    }
+    if (request->op_type() == pb::OP_CLOSE_UNSAFE_DECISION) {
+        _meta_state_machine->set_unsafe_decision(false);
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        DB_WARNING("close unsafe decision");
+        return;
+    }
+    if (request->op_type() == pb::OP_RESTORE_REGION) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        RegionManager::get_instance()->restore_region(*request, response);
         return;
     }
     DB_FATAL("request has wrong op_type:%d , log_id:%lu", 
@@ -274,6 +341,14 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         QueryRegionManager::get_instance()->send_set_peer(request, response);
         break;
     }
+    case pb::QUERY_DIFF_REGION_IDS: {
+        QueryClusterManager::get_instance()->get_diff_region_ids(request, response);
+        break;        
+    }
+    case pb::QUERY_REGION_IDS: {
+        QueryClusterManager::get_instance()->get_region_ids(request, response);
+        break;                           
+    }
     default: {
         DB_WARNING("invalid op_type, request:%s logid:%lu", 
                     request->ShortDebugString().c_str(), log_id);
@@ -337,6 +412,70 @@ void MetaServer::baikal_heartbeat(google::protobuf::RpcController* controller,
     }
 }
 
+static std::string plat_mapping(const std::string& plat) {
+    static std::map<std::string, std::string> mapping = {
+        {"e0", "e0"},
+        {"qa", "qa"},
+    };
+    if (mapping.count(plat) == 1) {
+        return mapping[plat];
+    }
+    return "ps";
+}
+
+static unsigned char to_hex(unsigned char x)   {   
+    return  x > 9 ? x + 55 : x + 48;   
+}
+
+static unsigned char from_hex(unsigned char x) {   
+    unsigned char y = '\0';  
+    if (x >= 'A' && x <= 'Z') { 
+        y = x - 'A' + 10;  
+    } else if (x >= 'a' && x <= 'z') { 
+        y = x - 'a' + 10;  
+    } else if (x >= '0' && x <= '9') {
+        y = x - '0';  
+    }
+    return y;  
+}  
+
+static std::string url_decode(const std::string& str) {
+    std::string strTemp = "";  
+    size_t length = str.length();  
+    for (size_t i = 0; i < length; i++)  {  
+        if (str[i] == '+') {
+            strTemp += ' ';
+        }  else if (str[i] == '%')  {  
+            unsigned char high = from_hex((unsigned char)str[++i]);  
+            unsigned char low = from_hex((unsigned char)str[++i]);  
+            strTemp += high * 16 + low;  
+        }  
+        else strTemp += str[i];  
+    }  
+    return strTemp;  
+}
+
+static std::string url_encode(const std::string& str) {
+    std::string strTemp = "";  
+    size_t length = str.length();  
+    for (size_t i = 0; i < length; i++) {  
+        if (isalnum((unsigned char)str[i]) ||   
+                (str[i] == '-') ||  
+                (str[i] == '_') ||   
+                (str[i] == '.') ||   
+                (str[i] == '~')) {
+            strTemp += str[i];  
+        } else if (str[i] == ' ') {
+            strTemp += "+";  
+        } else  {  
+            strTemp += '%';  
+            strTemp += to_hex((unsigned char)str[i] >> 4);  
+            strTemp += to_hex((unsigned char)str[i] % 16);  
+        }  
+    }  
+    return strTemp; 
+}
+
 void MetaServer::migrate(google::protobuf::RpcController* controller,
                                  const pb::MigrateRequest* /*request*/,
                                  pb::MigrateResponse* response,
@@ -345,16 +484,27 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
     brpc::Controller* cntl =
         static_cast<brpc::Controller*>(controller);
     const std::string* data = cntl->http_request().uri().GetQuery("data");
+    cntl->http_response().set_content_type("text/plain");
     pb::MigrateRequest request;
+    DB_WARNING("start any_migrate");
     if (data != NULL) {
-        json2pb(*data, &request);
+        std::string decode_data = url_decode(*data);
+        DB_WARNING("start any_migrate %s %s", data->c_str(), decode_data.c_str());
+        json2pb(decode_data, &request);
     }
     static std::map<std::string, std::string> bns_pre_ip_port;
     static std::mutex bns_mutex;
     for (auto& instance : request.targets_list().instances()) {
         std::string bns = instance.name();
+        std::vector<std::string> vec;
+        std::string plat = "e0";
+        boost::split(vec, bns, boost::is_any_of("-"));
+        if (vec.size() > 2) {
+            plat = plat_mapping(vec[1]);
+        }
+        DB_WARNING("plat:%s", plat.c_str());
         std::string event = instance.event();
-        auto res_instance = response->mutable_targets_list()->add_instances();
+        auto res_instance = response->mutable_data()->mutable_targets_list()->add_instances();
         res_instance->set_name(bns);
         res_instance->set_status("PROCESSING");
         std::vector<std::string> bns_instances;
@@ -363,13 +513,20 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
         if (instance.has_pre_host() && instance.has_pre_port()) {
             ip_port = instance.pre_host() + ":" + instance.pre_port();
         } else {
+            get_instance_from_bns(&ret, bns, bns_instances, false);
+            if (bns_instances.size() != 1) {
+                DB_WARNING("bns:%s must have 1 instance", bns.c_str());
+                res_instance->set_status("PROCESSING");
+                return;
+            }
+            ip_port = bns_instances[0];
         }
         if (event == "EXPECTED_MIGRATE") {
             pb::MetaManagerRequest internal_req;
             pb::MetaManagerResponse internal_res;
             internal_req.set_op_type(pb::OP_SET_INSTANCE_MIGRATE);
             internal_req.mutable_instance()->set_address(ip_port);
-            ret = MetaServerInteract::get_instance()->send_request(
+            ret = meta_proxy(plat)->send_request(
                     "meta_manager", internal_req, internal_res);
             if (ret != 0) {
                 DB_WARNING("internal request fail, %s, %s", 
@@ -392,7 +549,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
             pb::MetaManagerResponse internal_res;
             internal_req.set_op_type(pb::OP_DROP_INSTANCE);
             internal_req.mutable_instance()->set_address(ip_port);
-            ret = MetaServerInteract::get_instance()->send_request(
+            ret = meta_proxy(plat)->send_request(
                     "meta_manager", internal_req, internal_res);
             if (ret != 0) {
                 DB_WARNING("internal request fail, %s, %s", 

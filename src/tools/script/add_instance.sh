@@ -7,17 +7,13 @@ echo -e "增加实例\n"
 curl -d '{
     "op_type": "OP_ADD_INSTANCE",
     "instance": {
-        "address" : "127.0.0.1:8011",
+        "address" : "127.0.0.1:8210",
         "capacity" : 107374182400,
         "used_size" : 0,
         "resource_tag" :"",
-        "physical_room" :"idc",
-        "status": 1
+        "physical_room" :"bjyz",
+        "status": "FAULTY"
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"
 
-curl -d '{
-    "op_type": "QUERY_INSTANCE",
-    "instance_address": "127.0.0.1:8011"
-}' http://$1/MetaService/query

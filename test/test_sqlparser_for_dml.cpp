@@ -36,10 +36,6 @@ TEST(test_parser, case_insert) {
             " (2, 'test_2'), (3, 'test_3') on duplicate key update"
             " db.table_a.field_a = 1, table_b.field_b = 2 ";
         parser.parse(sql_insert0);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -78,10 +74,6 @@ TEST(test_parser, case_insert) {
             "value (1, 'test'), (2, 'test_2'), (3, 'test_3')"
             " on duplicate key update db.table_a.field_a := 1, table_b.field_b := 2 ";
         parser.parse(sql_insert1);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -128,10 +120,6 @@ TEST(test_parser, case_insert) {
             " values (1, 'test') on duplicate key update"
             " db.table_a.field_a := 1, table_b.field_b := 2 ";
         parser.parse(sql_insert2);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -171,10 +159,6 @@ TEST(test_parser, case_insert) {
             " on duplicate key update"
             " db.table_a.field_a := 1, table_b.field_b := values(field_a) + 10 ";
         parser.parse(sql_insert3);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -213,10 +197,6 @@ TEST(test_parser, case_insert) {
             " on duplicate key update db.table_a.field_a := 1,"
             " table_b.field_b := values(field_a) + 10 ";
         parser.parse(sql_insert4);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -253,10 +233,6 @@ TEST(test_parser, case_insert) {
         parser::SqlParser parser;
         std::string sql_insert5 = "insert high_priority  table_a values (1), (2)";
         parser.parse(sql_insert5);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -283,10 +259,6 @@ TEST(test_parser, case_insert) {
         parser::SqlParser parser;
         std::string sql_insert6 = "insert high_priority  table_a values (1)";
         parser.parse(sql_insert6);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -313,10 +285,6 @@ TEST(test_parser, case_insert) {
             " field_b = 100 on duplicate key update db.table_a.field_a = 1,"
             " table_b.field_b = values(field_a) + values(field_b) ";
         parser.parse(sql_insert7);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -349,10 +317,6 @@ TEST(test_parser, case_insert) {
         std::string sql_insert8 = "insert LOW_PRIORITY ignore into db.table_a set field_a = 10 "
             "on duplicate key update db.table_a.field_a = 1";
         parser.parse(sql_insert8);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -384,10 +348,6 @@ TEST(test_parser, case_replace) {
         std::string sql_replace0 = "replace LOW_PRIORITY into db.table_a(field_a, field_b) values (1, 'test'),"
             " (2, 'test_2'), (3, 'test_3')";
         parser.parse(sql_replace0);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -428,10 +388,6 @@ TEST(test_parser, case_update) {
         std::string sql_replace0 = "replace LOW_PRIORITY into db.table_a(field_a, field_b) values (1, 'test'),"
             " (2, 'test_2'), (3, 'test_3')";
         parser.parse(sql_replace0);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -473,10 +429,6 @@ TEST(test_parser, case_delete) {
             " where filed_a + 3 > 100 or filed_b + 1 < 10 and filed_c *3 > 45"
             " order by filed_a, filed_b limit 10, 100";
         parser.parse(sql_delete0);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -498,10 +450,6 @@ TEST(test_parser, case_delete) {
         std::string sql_delete1 = "delete from db.table_a"
             " where filed_a + 3 > 100 or filed_b + 1 < 10 and filed_c *3 > 45";
         parser.parse(sql_delete1);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -523,10 +471,6 @@ TEST(test_parser, case_delete) {
         std::string sql_delete2 = "delete db.table_a, db.table_b from db.table_a inner join db.table_b"
             " where filed_a + 3 > 100 or filed_b + 1 < 10 and filed_c *3 > 45";
         parser.parse(sql_delete2);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -553,10 +497,6 @@ TEST(test_parser, case_delete) {
         std::string sql_delete2 = "delete db.table_a, db.table_b from db.table_a"
             " where filed_a + 3 > 100 or filed_b + 1 < 10 and filed_c *3 > 45";
         parser.parse(sql_delete2);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -575,10 +515,6 @@ TEST(test_parser, case_delete) {
         std::string sql_update0 = "update low_priority ignore db.table_a set filed_a = 10"
             " where filed_a + 3 > 100 or filed_b + 1 < 10 and filed_c *3 > 45 order by field_a, field_b desc limit 10";
         parser.parse(sql_update0);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -595,10 +531,6 @@ TEST(test_parser, case_delete) {
         //select distict
         std::string sql_truncate = "truncate db_table.a";
         parser.parse(sql_truncate);
-        if (parser.error != parser::SUCC) {
-            std::cout <<  parser.result.size() << "error:" << parser.syntax_err_str << std::endl;
-            return;
-        }
 
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());

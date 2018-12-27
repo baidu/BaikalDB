@@ -137,7 +137,7 @@ int ExecNode::open(RuntimeState* state) {
     return num_affected_rows;
 }
 
-void ExecNode::transfer_pb(pb::PlanNode* pb_node) {
+void ExecNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     _pb_node.set_node_type(_node_type);
     _pb_node.set_limit(_limit);
     _pb_node.set_num_children(_children.size());
@@ -145,11 +145,11 @@ void ExecNode::transfer_pb(pb::PlanNode* pb_node) {
     return;
 }
 
-void ExecNode::create_pb_plan(pb::Plan* plan, ExecNode* root) {
+void ExecNode::create_pb_plan(int64_t region_id, pb::Plan* plan, ExecNode* root) {
     pb::PlanNode* pb_node = plan->add_nodes();
-    root->transfer_pb(pb_node);
+    root->transfer_pb(region_id, pb_node);
     for (size_t i = 0; i < root->children_size(); i++) {
-        create_pb_plan(plan, root->children(i));
+        create_pb_plan(region_id, plan, root->children(i));
     }
 }
 

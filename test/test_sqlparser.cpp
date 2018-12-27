@@ -1,17 +1,3 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include <gtest/gtest.h>
 #include <climits>
 #include <iostream>
@@ -19,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include "baikal_client.h"
 #include "common.h"
 #include "parser.h"
 
@@ -248,41 +235,126 @@ TEST(test_parser, autocommit0) {
 }
 
 TEST(test_parser, set_kv) {
-    parser::SqlParser parser;
-    std::string sql = "set key1=val1, key2=val2;";
-    parser.parse(sql);
-    if (parser.error != parser::SUCC) {
-        std::cout <<  parser.result.size() << " error:" << parser.syntax_err_str << std::endl;
-        return;
-    }
-    StmtNode* stmt = (StmtNode*)parser.result[0];
-    EXPECT_EQ(stmt->node_type, parser::NT_SET_CMD);
-    if (stmt->node_type != parser::NT_SET_CMD) {
-        return;
-    }
-    SetStmt* set = (SetStmt*)stmt;
-    EXPECT_EQ(set->var_list.size(), 2);
-    if (set->var_list.size() != 2) {
-        return;
-    }
-    VarAssign* assign0 = set->var_list[0];
-    EXPECT_EQ(strcmp(assign0->key.value, "key1"), 0);
-    EXPECT_EQ(assign0->value->expr_type, ET_COLUMN);
+    {
+        parser::SqlParser parser;
+        std::string sql = "set key1=val1, key2=val2;";
+        parser.parse(sql);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << " error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        StmtNode* stmt = (StmtNode*)parser.result[0];
+        EXPECT_EQ(stmt->node_type, parser::NT_SET_CMD);
+        if (stmt->node_type != parser::NT_SET_CMD) {
+            return;
+        }
+        SetStmt* set = (SetStmt*)stmt;
+        EXPECT_EQ(set->var_list.size(), 2);
+        if (set->var_list.size() != 2) {
+            return;
+        }
+        VarAssign* assign0 = set->var_list[0];
+        EXPECT_EQ(strcmp(assign0->key.value, "key1"), 0);
+        EXPECT_EQ(assign0->value->expr_type, ET_COLUMN);
 
-    if (assign0->value->expr_type != ET_COLUMN) {
-        return;
-    }
-    ColumnName* name = (ColumnName*)(assign0->value);
-    EXPECT_EQ(strcmp(name->name.value, "val1"), 0);
+        if (assign0->value->expr_type != ET_COLUMN) {
+            return;
+        }
+        ColumnName* name = (ColumnName*)(assign0->value);
+        EXPECT_EQ(strcmp(name->name.value, "val1"), 0);
 
-    VarAssign* assign1 = set->var_list[1];
-    EXPECT_EQ(strcmp(assign1->key.value, "key2"), 0);
-    EXPECT_EQ(assign1->value->expr_type, ET_COLUMN);
+        VarAssign* assign1 = set->var_list[1];
+        EXPECT_EQ(strcmp(assign1->key.value, "key2"), 0);
+        EXPECT_EQ(assign1->value->expr_type, ET_COLUMN);
 
-    if (assign1->value->expr_type != ET_COLUMN) {
-        return;
+        if (assign1->value->expr_type != ET_COLUMN) {
+            return;
+        }
+        name = (ColumnName*)(assign1->value);
+        EXPECT_EQ(strcmp(name->name.value, "val2"), 0);
     }
-    name = (ColumnName*)(assign1->value);
-    EXPECT_EQ(strcmp(name->name.value, "val2"), 0);
+    // test system variable with identifier prefix
+    {
+        parser::SqlParser parser;
+        std::string sql = "SET SESSION autocommit=ON, LOCAL autocommit=ON, @@autocommit=OFF, GLOBAL autocommit=OFF";
+        parser.parse(sql);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << " error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        StmtNode* stmt = (StmtNode*)parser.result[0];
+        EXPECT_EQ(stmt->node_type, parser::NT_SET_CMD);
+        if (stmt->node_type != parser::NT_SET_CMD) {
+            return;
+        }
+        SetStmt* set = (SetStmt*)stmt;
+        EXPECT_EQ(set->var_list.size(), 4);
+        if (set->var_list.size() != 4) {
+            return;
+        }
+        VarAssign* assign0 = set->var_list[0];
+        EXPECT_EQ(strcmp(assign0->key.value, "@@session.autocommit"), 0);
+        EXPECT_EQ(assign0->value->expr_type, ET_LITETAL);
+        if (assign0->value->expr_type != ET_LITETAL) {
+            return;
+        }
+        LiteralExpr* lit = (LiteralExpr*)(assign0->value);
+        EXPECT_EQ(lit->_u.int64_val, 1);
+
+        VarAssign* assign1 = set->var_list[1];
+        EXPECT_EQ(strcmp(assign1->key.value, "@@local.autocommit"), 0);
+        EXPECT_EQ(assign1->value->expr_type, ET_LITETAL);
+        if (assign1->value->expr_type != ET_LITETAL) {
+            return;
+        }
+        lit = (LiteralExpr*)(assign1->value);
+        EXPECT_EQ(lit->_u.int64_val, 1);
+
+        VarAssign* assign2 = set->var_list[2];
+        EXPECT_EQ(strcmp(assign2->key.value, "@@autocommit"), 0);
+        EXPECT_EQ(assign2->value->expr_type, ET_LITETAL);
+        if (assign2->value->expr_type != ET_LITETAL) {
+            return;
+        }
+        lit = (LiteralExpr*)(assign2->value);
+        EXPECT_EQ(lit->_u.int64_val, 0);
+
+        VarAssign* assign3 = set->var_list[3];
+        EXPECT_EQ(strcmp(assign3->key.value, "@@global.autocommit"), 0);
+        EXPECT_EQ(assign3->value->expr_type, ET_LITETAL);
+        if (assign3->value->expr_type != ET_LITETAL) {
+            return;
+        }
+        lit = (LiteralExpr*)(assign3->value);
+        EXPECT_EQ(lit->_u.int64_val, 0);
+    }
+    // test user variable
+    {
+        parser::SqlParser parser;
+        std::string sql = "SET @user_key=userval";
+        parser.parse(sql);
+        if (parser.error != parser::SUCC) {
+            std::cout <<  parser.result.size() << " error:" << parser.syntax_err_str << std::endl;
+            return;
+        }
+        StmtNode* stmt = (StmtNode*)parser.result[0];
+        EXPECT_EQ(stmt->node_type, parser::NT_SET_CMD);
+        if (stmt->node_type != parser::NT_SET_CMD) {
+            return;
+        }
+        SetStmt* set = (SetStmt*)stmt;
+        EXPECT_EQ(set->var_list.size(), 1);
+        if (set->var_list.size() != 1) {
+            return;
+        }
+        VarAssign* assign0 = set->var_list[0];
+        EXPECT_EQ(strcmp(assign0->key.value, "@user_key"), 0);
+        EXPECT_EQ(assign0->value->expr_type, ET_COLUMN);
+        if (assign0->value->expr_type != ET_COLUMN) {
+            return;
+        }
+        ColumnName* name = (ColumnName*)(assign0->value);
+        EXPECT_EQ(strcmp(name->name.value, "userval"), 0);
+    }
 }
 }  // namespace baikal

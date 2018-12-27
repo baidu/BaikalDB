@@ -41,7 +41,7 @@ int TransactionNode::add_commit_log_entry(
     pb::CachePlan commit_plan;
     commit_plan.set_op_type(pb::OP_COMMIT);
     commit_plan.set_seq_id(seq_id);
-    ExecNode::create_pb_plan(commit_plan.mutable_plan(), commit_fetch);
+    ExecNode::create_pb_plan(0, commit_plan.mutable_plan(), commit_fetch);
 
     for (auto& pair : region_infos) {
         commit_plan.add_regions()->CopyFrom(pair.second);
@@ -229,7 +229,14 @@ int TransactionNode::open(RuntimeState* state) {
                 client->on_commit_rollback();
             }
         } else {
-            DB_WARNING_STATE(state, "TransactionNote: optimize_1pc, no commit/rollback: txn_id: %lu", state->txn_id);
+            if (ret >= 0) {
+                DB_WARNING_STATE(state, "TransactionNote: optimize_1pc, no commit: txn_id: %lu", state->txn_id);
+            } else if (state->autocommit()) {
+                // auto rollback in autocommit mode
+                DB_WARNING("rollback for single-sql trnsaction with optimize_1pc");
+                state->seq_id++;
+                rollback_node->open(state);
+            }
         }
         if (ret >= 0 || state->autocommit()) {
             client->on_commit_rollback();
@@ -360,8 +367,8 @@ int TransactionNode::open(RuntimeState* state) {
 }
 
 // serialize a TransactionNode into protobuf PlanNode
-void TransactionNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void TransactionNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto txn_node = pb_node->mutable_derive_node()->mutable_transaction_node();
     txn_node->set_txn_cmd(_txn_cmd);
 }

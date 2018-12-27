@@ -52,7 +52,7 @@ int TruncateNode::open(RuntimeState* state) {
     region_end.append_i64(_region_id).append_u64(0xFFFFFFFFFFFFFFFF);
 
     rocksdb::WriteOptions write_options;
-    write_options.disableWAL = true;
+    //write_options.disableWAL = true;
 
     rocksdb::Slice begin(region_start.data());
     rocksdb::Slice end(region_end.data());
@@ -73,8 +73,8 @@ int TruncateNode::open(RuntimeState* state) {
     return 0;
 }
 
-void TruncateNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void TruncateNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto truncate_node = pb_node->mutable_derive_node()->mutable_truncate_node();
     truncate_node->set_table_id(_table_id);
 }

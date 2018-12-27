@@ -61,6 +61,10 @@ int main(int argc, char **argv) {
         DB_FATAL("meta server interact init failed");
         return -1;
     }
+    if (baikaldb::AutoInc::init_meta_inter() != 0) {
+        DB_FATAL("auto incr meta server interact init failed");
+        return -1;
+    }
     // Initail server.
     baikaldb::NetworkServer* server = baikaldb::NetworkServer::get_instance();
     if (!server->init()) {

@@ -98,7 +98,9 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_DROP_FIELD:
     case pb::OP_MODIFY_FIELD:
     case pb::OP_RENAME_FIELD:
-    case pb::OP_UPDATE_BYTE_SIZE: {
+    case pb::OP_UPDATE_BYTE_SIZE: 
+    case pb::OP_UPDATE_SPLIT_LINES: 
+    case pb::OP_UPDATE_DISTS: {
         if (!request->has_table_info()) { 
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
                     "no schema_info", request->op_type(), log_id);
@@ -106,6 +108,12 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
         }
         if (request->op_type() == pb::OP_UPDATE_BYTE_SIZE
                 && !request->table_info().has_byte_size_per_record()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no bye_size_per_record", request->op_type(), log_id);
+            return;
+        }
+        if (request->op_type() == pb::OP_UPDATE_SPLIT_LINES
+                && !request->table_info().has_region_split_lines()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no bye_size_per_record", request->op_type(), log_id);
             return;
@@ -122,6 +130,13 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
             if (ret < 0) {
                 return;
             }
+        }
+        if (request->op_type() == pb::OP_UPDATE_DISTS) {
+            auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+            auto ret = whether_dists_legal(mutable_request, response, log_id);
+            if (ret < 0) {
+                return;
+            } 
         }
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
@@ -141,10 +156,6 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                     "no split region info", request->op_type(), log_id);
             return;
         }
-        _meta_state_machine->process(controller, request, response, done_guard.release());
-        return;
-    }
-    case pb::OP_RESTORE_REGION: {
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
@@ -228,8 +239,9 @@ void SchemaManager::process_leader_heartbeat_for_store(const pb::StoreHeartBeatR
     int64_t leader_region_time = step_time_cost.get_time();
     step_time_cost.reset();
 
+    std::string resource_tag = request->instance_info().resource_tag();
     RegionManager::get_instance()->leader_load_balance(_meta_state_machine->whether_can_decide(), 
-            _meta_state_machine->get_close_load_balance(), request, response);
+            _meta_state_machine->get_load_balance(resource_tag), request, response);
     int64_t leader_balance_time = step_time_cost.get_time();
     SELF_TRACE("process leader heartbeat, update_status_time: %ld, leader_region_time: %ld,"
                 " leader_balance_time: %ld, log_id: %lu",
@@ -396,6 +408,14 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
             }
         }
     }
+    auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+    std::string main_logical_room;
+    //用户指定了跨机房部署
+    auto ret = whether_dists_legal(mutable_request, response, log_id);
+    if (ret != 0) {
+        return ret;
+    }
+    main_logical_room = request->table_info().main_logical_room();
     std::vector<std::string> new_instances;
     int count = partition_num * (request->table_info().split_keys_size() + 1);
     std::string resource_tag = request->table_info().resource_tag();
@@ -405,6 +425,7 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         int ret = ClusterManager::get_instance()->select_instance_rolling(
                     resource_tag,
                     {},
+                    main_logical_room,    
                     instance);
         if (ret < 0) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
@@ -413,7 +434,6 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         }
         new_instances.push_back(instance);
     }
-    auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
     for (auto& new_instance : new_instances) {
         mutable_request->mutable_table_info()->add_init_store(new_instance);
     }
@@ -430,13 +450,13 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
                             "table id not exist", request->op_type(), log_id);
         return -1;
     }
-    if (ptr_region->peers_size() != ptr_region->replica_num()) {
+    if (ptr_region->peers_size() < 2) {
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                             "region not stable, cannot split", 
                             request->op_type(), 
                             log_id);
-        DB_WARNING("region cannot split, region not stable, request: %s", 
-                    request->ShortDebugString().c_str());
+        DB_WARNING("region cannot split, region not stable, request: %s, region_id: %ld", 
+                    request->ShortDebugString().c_str(), region_id);
         return -1;
     }
     int64_t table_id = 0;
@@ -457,23 +477,27 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
         }
     }
     std::string source_instance = request->region_split().new_instance();
-    response->mutable_split_response()->set_new_instance(source_instance);
     if (!request->region_split().has_tail_split()
             || !request->region_split().tail_split()) {
+        response->mutable_split_response()->set_new_instance(source_instance);
         return 0;
     }
     //从cluster中选择一台实例, 只有尾分裂需要，其他分裂只做本地分裂
     std::string instance;
     auto ret = 0;
+    std::string main_logical_room;
+    TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
     if (_meta_state_machine->whether_can_decide()) {
         ret = ClusterManager::get_instance()->select_instance_min(resource_tag, 
                                                   std::set<std::string>{source_instance},
                                                   table_id,
+                                                  main_logical_room,
                                                   instance);
     } else {
         DB_WARNING("meta state machine can not make decision");
         ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag, 
                                                     std::set<std::string>{source_instance},
+                                                    main_logical_room,
                                                     instance);
     }
     if (ret < 0) {
@@ -511,7 +535,36 @@ int SchemaManager::load_max_id_snapshot(const std::string& max_id_prefix,
     } 
     return 0;
 }
-
+int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
+                        pb::MetaManagerResponse* response,
+                        uint64_t log_id) {
+    if (request->table_info().dists_size() == 0) {
+        return 0;
+    }
+    int64_t total_count = 0;
+    //检验逻辑机房是否存在
+    for (auto& dist : request->table_info().dists()) {
+        std::string logical_room = dist.logical_room();
+        if (ClusterManager::get_instance()->logical_room_exist(logical_room)) {
+            total_count += dist.count();
+            continue;
+        }
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                "logical room not exist, select instance fail",
+                request->op_type(), log_id);
+        return -1;
+    }
+    if (request->table_info().main_logical_room().size() == 0) {
+        request->mutable_table_info()->set_main_logical_room(
+                request->table_info().dists(0).logical_room()); 
+    }
+    if (total_count != request->table_info().replica_num()) {
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                "replica num not match", request->op_type(), log_id);
+        return -1;
+    }
+    return 0;
+}
 }//namespace 
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

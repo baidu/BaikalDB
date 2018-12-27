@@ -60,27 +60,27 @@ public:
             return false;
         }
         int64_t index_id = table_key.extract_i64(sizeof(int64_t));
-        IndexInfo index_info = _factory->get_index_info(index_id);
-        IndexInfo pk_info = _factory->get_index_info(index_info.pk);
+        // double buffer has 100ms interval
+        IndexInfo* index_info = _factory->get_index_info_ptr(index_id);
+        if (index_info == nullptr) {
+            return false;
+        }
+        IndexInfo* pk_info = _factory->get_index_info_ptr(index_info->pk);
+        if (pk_info == nullptr) {
+            return false;
+        }
 
         //int ret1 = 0;
         int ret2 = 0;
-        if (index_info.type == pb::I_PRIMARY) {
-            // ret1 = start_key.compare(0, std::string::npos, 
-            //         key.data() + prefix_len, key.size() - prefix_len);
+        if (index_info->type == pb::I_PRIMARY) {
             ret2 = end_key.empty()? 1 : end_key.compare(0, std::string::npos, 
                     key.data() + prefix_len, key.size() - prefix_len);
-            //if (ret1 <= 0 && ret2 > 0) {
             return (ret2 <= 0);
-        } else if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_KEY) {
-            // ret1 = start_key.compare(0, std::string::npos,
-            //         value.data(), value.size());
-            // ret2 = end_key.empty()? 1 : end_key.compare(0, std::string::npos,
-            //         value.data(), value.size());
+        } else if (index_info->type == pb::I_UNIQ || index_info->type == pb::I_KEY) {
             rocksdb::Slice key_slice(key);
             key_slice.remove_prefix(sizeof(int64_t) * 2);
             return !Transaction::fits_region_range(key_slice, value, 
-                nullptr, &end_key, pk_info, index_info);
+                nullptr, &end_key, *pk_info, *index_info);
         }
         return false;
     }

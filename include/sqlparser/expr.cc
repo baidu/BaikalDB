@@ -20,9 +20,9 @@ static std::unordered_map<int, std::string> FUNC_STR_MAP = {
     {FT_COMMON, ""},
     {FT_AGG, ""},
     // ~ ! -
-    {FT_BIT_NOT, " ~ "},
-    {FT_LOGIC_NOT, " ! "},
-    {FT_UMINUS, " - "},
+    {FT_BIT_NOT, "~"},
+    {FT_LOGIC_NOT, "!"},
+    {FT_UMINUS, "-"},
     // + - * /
     {FT_ADD, " + "},
     {FT_MINUS, " - "},
@@ -132,6 +132,16 @@ FuncExpr* FuncExpr::new_ternary_op_node(
 void FuncExpr::to_stream(std::ostream& os) const {
     static const char* not_str[] = {"", " NOT"};
     static const char* true_str[] = {"TRUE", "FALSE"};
+    // unary特殊处理，不加括号
+    switch (func_type) {
+        case FT_BIT_NOT:
+        case FT_LOGIC_NOT:
+        case FT_UMINUS:
+            os << FUNC_STR_MAP[func_type] << children[0];
+            return;
+        default:
+            break;
+    }
     os << "(";
     switch (func_type) {
         case FT_COMMON: {
@@ -152,11 +162,6 @@ void FuncExpr::to_stream(std::ostream& os) const {
             os << ")";
             break;
         }
-        case FT_BIT_NOT:
-        case FT_LOGIC_NOT:
-        case FT_UMINUS:
-            os << FUNC_STR_MAP[func_type] << children[0];
-            break;
         case FT_ADD:
         case FT_MINUS:
         case FT_MULTIPLIES:
@@ -231,6 +236,9 @@ void LiteralExpr::to_stream(std::ostream& os) const {
             break;
         case LT_NULL:
             os << "NULL";
+            break;
+        case LT_PLACE_HOLDER:
+            os << "?";
             break;
         default:
             break;

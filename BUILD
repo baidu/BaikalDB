@@ -59,6 +59,18 @@ COPTS  = [
     "-Wno-strict-aliasing",
 ]
 
+LINKOPTS = [
+    "-lpthread",
+    "-lbz2",
+    "-lrt",
+    "-ldl",
+    "-lcrypt",
+    "-lcrypto",
+    "-rdynamic",
+    "-lz", 
+    "-lssl",
+]
+
 cc_library(
     name = "common",
     srcs = glob(["src/common/*.cpp"]),
@@ -469,6 +481,8 @@ cc_library(
     ],
     deps = [
         "//external:butil",
+        "//external:brpc",
+        ":cc_baikaldb_internal_proto",
     ],
     visibility = ["//visibility:public"],
 )
@@ -509,13 +523,17 @@ cc_binary(
     includes = [
         "include/meta_server",
         "include/engine",
+        "include/common",
     ],
     deps = [
         ":meta_server",
+        ":cc_baikaldb_internal_proto",
         ":common",
+        ":engine",
         ":raft",
         ":raft_meta",
     ],
+    linkstatic = True,
 )
 
 cc_binary(
@@ -646,6 +664,7 @@ cc_binary(
         ":new_logical_plan",
         ":mem_row",
     ],
+    linkstatic = True,
 )
 
 cc_library(

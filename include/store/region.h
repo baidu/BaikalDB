@@ -47,6 +47,10 @@
 //#include "region_resource.h"
 #include "runtime_state.h"
 #include "rapidjson/document.h"
+#include "raft_snapshot_adaptor.h"
+#include "region_control.h"
+#include "meta_writer.h"
+#include "rpc_sender.h"
 
 using google::protobuf::Message;
 using google::protobuf::RepeatedPtrField;
@@ -60,9 +64,21 @@ struct StatisticsInfo {
     int64_t time_cost_sum;
     int64_t end_time_us;
 };
+class region;
+class ScopeProcStatus {
+public:
+    ScopeProcStatus(Region* region) : _region(region) {}
+    ~ScopeProcStatus();
+    void reset() {
+        _region = NULL;
+    }
+private:
+    Region* _region;
+};
 
 class TransactionPool;
 class Region : public braft::StateMachine {
+friend class RegionControl;
 public:
     static const uint8_t PRIMARY_INDEX_FLAG;
     static const uint8_t SECOND_INDEX_FLAG;
@@ -104,21 +120,28 @@ public:
                 _region_id(region_id),
                 _statistics_queue(_statistics_items,
                     RECV_QUEUE_SIZE * sizeof(StatisticsInfo), butil::NOT_OWN_STORAGE),
-               _node(groupId, peerId),
-               _is_leader(false),
-               _shutdown(false),
-               _init_success(false),
-               _num_table_lines(0) {
+                _qps(1),
+                _average_cost(50000),
+                _node(groupId, peerId),
+                _is_leader(false),
+                _shutdown(false),
+                _init_success(false),
+                _num_table_lines(0),
+                _num_delete_lines(0),
+                _region_control(this, region_id),
+                _snapshot_adaptor(new RaftSnapshotAdaptor(region_id)) {
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
-        _status.store(_region_info.status());
+        _region_control.store_status(_region_info.status());
     }
 
-    int init(bool write_db, int32_t snapshot_times);
+    int init(bool new_region, int32_t snapshot_times);
 
     void raft_control(google::protobuf::RpcController* controller,
             const pb::RaftControlRequest* request,
             pb::RaftControlResponse* response,
-            google::protobuf::Closure* done);
+            google::protobuf::Closure* done) {
+        _region_control.raft_control(controller, request, response, done);
+    };
 
     void query(google::protobuf::RpcController* controller,
             const pb::StoreReq* request,
@@ -153,18 +176,8 @@ public:
             const RepeatedPtrField<pb::TupleDescriptor>& tuples,
             pb::StoreRes& response);
 
-    //leader收到从metaServer心跳包中的解析出来的add_peer请求
-    void add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue);
-    void add_peer(const pb::AddPeer* request,  
-            pb::StoreRes* response, 
-            google::protobuf::Closure* done);
-    int transfer_leader(const pb::TransLeaderRequest& trans_leader_request); 
-    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance); 
-    // state machine method
-    void set_can_add_peer();
-    void sync_do_snapshot();
     virtual void on_apply(braft::Iterator& iter);
-    
+   
     virtual void on_shutdown();
     virtual void on_leader_start();
     virtual void on_leader_start(int64_t term);
@@ -178,19 +191,59 @@ public:
     virtual void on_error(const ::braft::Error& e);
 
     virtual void on_configuration_committed(const ::braft::Configuration& conf);
-
+    
     virtual void on_configuration_committed(const ::braft::Configuration& conf, int64_t index);
 
-    int clear_data();
-    void compact();
+    void snapshot(braft::Closure* done);
+    void on_snapshot_load_for_restart(braft::SnapshotReader* reader,
+            std::map<int64_t, std::string>& prepared_log_entrys);
 
+    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance); 
+    
+    void set_can_add_peer();
+    
+    //leader收到从metaServer心跳包中的解析出来的add_peer请求
+    void add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue) { 
+        _region_control.add_peer(add_peer, queue); 
+    }
+    
+    void add_peer(const pb::AddPeer* request,  
+            pb::StoreRes* response, 
+            google::protobuf::Closure* done) {
+        _region_control.add_peer(request, response, done);
+    }
+
+    void do_snapshot() {
+        _region_control.sync_do_snapshot();
+    }
+    int transfer_leader(const pb::TransLeaderRequest& trans_leader_request) {
+        return _region_control.transfer_leader(trans_leader_request);
+    }
+    void reset_region_status () {
+        _region_control.reset_region_status();
+    }
+    
+    pb::RegionStatus get_status() const {
+        return _region_control.get_status();
+    }
+
+    int clear_data();
+    void compact_data_in_queue();
+    int ingest_sst(const std::string& data_sst_file, const std::string& meta_sst_file); 
     // other thread
     void reverse_merge();
 
     // dump the the tuples in this region in format {{k1:v1},{k2:v2},{k3,v3}...}
     // used for debug
     std::string dump_hex();
-    
+   
+    //on_apply里调用的方法 
+    void start_split(braft::Closure* done, int64_t applied_index, int64_t term);
+    void start_split_for_tail(braft::Closure* done, int64_t applied_index, int64_t term);
+    void validate_and_add_version(const pb::StoreReq& request, braft::Closure* done, int64_t applied_index, int64_t term);
+    void add_version_for_split_region(const pb::StoreReq& request, braft::Closure* done, int64_t applied_index, int64_t term);
+    void apply_txn_request(const pb::StoreReq& request, braft::Closure* done, int64_t index, int64_t term);
+
     //开始做split操作
     //第一步通过raft状态机,创建迭代器，取出当前的index,自此之后的log不能再删除
     void start_process_split(const pb::RegionSplitResponse& split_response,
@@ -225,29 +278,12 @@ public:
             int64_t& split_end_index);
     
     int get_split_key(std::string& split_key);
-    int send_no_op_request(const std::string& instance,
-            int64_t recevie_region_id, 
-            int64_t request_version);
- 
+    
     int64_t get_region_id() {
         return _region_id;
     }
 
     void update_average_cost(int64_t request_time_cost);
-
-    // other thread
-    void reset_region_status() {
-        pb::RegionStatus expected_status = pb::DOING;
-        if (!_status.compare_exchange_strong(expected_status, pb::IDLE)) {
-            DB_WARNING("region status is not doing, region_id: %ld", _region_id);
-        } else {
-            DB_WARNING("region status is reset to IDLE, region_id: %ld", _region_id);
-        }
-    }
-    
-    pb::RegionStatus get_status() const {
-        return _status.load();
-    }
 
     void reset_split_status() {
         _split_param.split_start_index = INT_FAST64_MAX;
@@ -318,24 +354,32 @@ public:
     int64_t get_version() {
         return _region_info.version();
     }
-    bool check_split_complete();
-    bool compare_and_set_fail_for_split() {
-        std::unique_lock<std::mutex> lock(_split_mutex);
-        if (_region_info.version() <= 0) {
-            _split_success = false;
-            return true;
-        }
-        return false;
-    }
-    bool compare_and_set_success_for_split() {
-        std::unique_lock<std::mutex> lock(_split_mutex);
-        if (_split_success) {
-            _region_info.set_version(1);
-            return true;
-        }
-        return false;
-    }
+    bool check_region_legal_complete();
 
+    bool compare_and_set_illegal() {
+        std::unique_lock<std::mutex> lock(_legal_mutex);
+        if (_region_info.version() <= 0) {
+            _legal_region = false;
+            return true;
+        }
+        return false;
+    }
+    bool compare_and_set_legal_for_split() {
+        std::unique_lock<std::mutex> lock(_legal_mutex);
+        if (_legal_region) {
+            _region_info.set_version(1);
+            DB_WARNING("compare and set split verison to 1, region_id: %ld", _region_id);
+            return true;
+        }
+        return false;
+    }
+    bool compare_and_set_legal() {
+        std::unique_lock<std::mutex> lock(_legal_mutex);
+        if (_legal_region) {
+            return true;
+        }
+        return false;
+    }
     int64_t get_num_table_lines() {
         return _num_table_lines.load();
     }
@@ -343,18 +387,6 @@ public:
     bool is_tail() {
         return  (!_region_info.has_end_key() || _region_info.end_key() == "");
     }
-    void snapshot(braft::Closure* done);
-
-    int save_prepared_txn(
-            std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn_info,
-            rapidjson::Document& root);
-    
-    int load_prepared_txn(
-            std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn_info,
-            rapidjson::Document& root);
-
-    void save_applied_index();
-    int  load_applied_index();
 
     int64_t get_qps() {
         return _qps.load();
@@ -363,19 +395,14 @@ public:
         return _average_cost.load(); 
     }
     void set_num_table_lines(int64_t table_line) {
+        MetaWriter::get_instance()->update_num_table_lines(_region_id, table_line);
         _num_table_lines.store(table_line);
         DB_WARNING("region_id: %ld, table_line:%ld", _region_id, _num_table_lines.load());
     }
-    void start_thread_to_remove_region(int64_t drop_region_id, std::string instance_address);
-    void send_remove_region_to_store(int64_t drop_region_id, std::string instance_address);
     void set_removed(bool removed) {
         _removed = removed;
     }
-    void set_need_clear_data(bool need_clear_data) {
-        _need_clear_data = need_clear_data;
-    }
 
-    int64_t get_peer_applied_index(const std::string& peer, int64_t region_id);
     int64_t get_split_wait_time() {
         int64_t wait_time = FLAGS_disable_write_wait_timeout_us;
         if (FLAGS_disable_write_wait_timeout_us < _split_param.split_slow_down_cost * 10) {
@@ -413,12 +440,6 @@ public:
         return _txn_pool;
     }
 
-    // save prepared txn info when shutdown
-    void get_prepared_txn_info() {
-        _prepared_txn_info.clear();
-        _txn_pool.get_prepared_txn_info(_prepared_txn_info, true);
-    }
-
     void update_resource_table() {
         std::shared_ptr<RegionResource> new_resource(new RegionResource);
         new_resource->region_info = _region_info;
@@ -439,6 +460,29 @@ public:
         }
         BAIDU_SCOPED_LOCK(_ptr_mutex);
         _resource = new_resource;
+    }
+    
+    void start_thread_to_remove_region(int64_t drop_region_id, std::string instance_address) {
+        Bthread bth(&BTHREAD_ATTR_SMALL);
+        std::function<void()> remove_region_function =
+            [this, drop_region_id, instance_address]() {
+                _multi_thread_cond.increase();
+                RpcSender::send_remove_region_method(drop_region_id, instance_address);
+                _multi_thread_cond.decrease_signal();
+            };
+        bth.run(remove_region_function);
+    }
+    void set_restart(bool restart) {
+        _restart = restart;
+    }
+    //现在支持replica_num的修改，从region_info里去replica_num已经不准确
+    //bool peers_stable() {
+    //    std::vector<braft::PeerId> peers;
+    //    return _node.list_peers(&peers).ok() && peers.size() >= (size_t)_region_info.replica_num();
+    //}
+    void copy_region(pb::RegionInfo* region_info) {
+        std::lock_guard<std::mutex> lock(_region_lock);
+        region_info->CopyFrom(_region_info);
     }
 private:
     struct SplitParam {
@@ -475,45 +519,9 @@ private:
         bool tail_split = false;
         std::unordered_map<uint64_t, pb::TransactionInfo> prepared_txn;
     };
-    
-    void save_snapshot(braft::Closure* done, 
-                        rocksdb::Iterator* iter,
-                        braft::SnapshotWriter*writer, 
-                        MutTableKey region_prefix,
-                        std::string extra,
-                        pb::RegionInfo snapshot_region_info);
-
-    int send_request_to_region(const pb::StoreReq& request,
-                                const std::string& instance,
-                                int64_t region_id);
-
-    int send_init_region_to_store(const std::string instance_address, 
-                                   const pb::InitRegion& init_region_request,
-                                   pb::StoreRes* response);
-
-    int _write_region_to_rocksdb(const pb::RegionInfo& region_info);
-    int _whether_legal_for_add_peer(const pb::AddPeer& add_peer, pb::StoreRes* response);
-    int _leader_send_init_region(const std::string& new_instance, pb::StoreRes* response);
-    void _leader_add_peer(const pb::AddPeer& add_peer,
-                          const std::string& new_instance, 
-                          pb::StoreRes* response, 
-                          google::protobuf::Closure* done);
 
     bool validate_version(const pb::StoreReq* request, pb::StoreRes* response);
-
-    int _write_sst_for_region_info(braft::Closure* done,
-                                   const std::string& sst_file,
-                                   pb::RegionInfo& snapshot_region_info);
-    int _write_sst_for_data(braft::Closure* done,
-                            const std::string& sst_file,
-                            rocksdb::Iterator* iter,
-                            MutTableKey& region_prefix,
-                            int64_t& row_count);
-
-    void copy_region(pb::RegionInfo* region_info) {
-        std::lock_guard<std::mutex> lock(_region_lock);
-        region_info->CopyFrom(_region_info);
-    }
+    
     void set_region(const pb::RegionInfo& region_info) {
         std::lock_guard<std::mutex> lock(_region_lock);
         _region_info.CopyFrom(region_info);
@@ -541,7 +549,7 @@ private:
     RocksWrapper*       _rocksdb;
     SchemaFactory*      _factory;
     rocksdb::ColumnFamilyHandle* _data_cf;    
-    rocksdb::ColumnFamilyHandle* _region_cf;    
+    rocksdb::ColumnFamilyHandle* _meta_cf;    
     std::string         _address; //ip:port
     
     //region metainfo
@@ -555,15 +563,14 @@ private:
     // todo liguoqiang  如何初始化这个
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     
-    //region status,用在分裂和add_peer remove_peer时
-    //只有leader有状态
-    std::atomic<pb::RegionStatus> _status;
     // todo 是否可以改成无锁的
     BthreadCond _disable_write_cond;
     BthreadCond _real_writing_cond;
     SplitParam _split_param;
-    std::mutex _split_mutex;
-    bool       _split_success = true;
+
+
+    std::mutex _legal_mutex;
+    bool       _legal_region = true;
 
     TimeCost                        _time_cost; //上次收到请求的时间，每次收到请求都重置一次
     std::mutex                      _queue_lock;    
@@ -571,7 +578,7 @@ private:
     StatisticsInfo _statistics_items[RECV_QUEUE_SIZE];
     std::atomic<int64_t> _qps;
     std::atomic<int64_t> _average_cost;
-
+    bool                                _restart = false;
     //raft node
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;
@@ -584,35 +591,22 @@ private:
     BthreadCond                         _multi_thread_cond;
     // region stat variables
     std::atomic<int64_t>                _num_table_lines;  //total number of pk record in this region
-    int64_t                             _snapshot_num_table_lines = 0;  //last snapshot number 
+    std::atomic<int64_t>                _num_delete_lines;  //total number of delete rows after last compact
+    int64_t                             _snapshot_num_table_lines = 0;  //last snapshot number
     TimeCost                            _snapshot_time_cost;
     int64_t                             _snapshot_index = 0; //last snapshot log index
     bool                                _removed = false;
-    bool                                _need_clear_data = true;
     TransactionPool                     _txn_pool;
 
-    // used to save and load prepared txn info when shutdown and recovery
-    std::unordered_map<uint64_t, pb::TransactionInfo> _prepared_txn_info;
     // shared_ptr is not thread safe when assign
     std::mutex  _ptr_mutex;
     std::shared_ptr<RegionResource>     _resource;
+
+    RegionControl                           _region_control;
+    MetaWriter*                             _writer = nullptr;
+    scoped_refptr<braft::FileSystemAdaptor>  _snapshot_adaptor = nullptr;
 };
 
 typedef std::shared_ptr<Region> SmartRegion;
 
-struct SnapshotClosure : public braft::Closure {
-    virtual void Run() {
-        if (!status().ok()) {
-            DB_WARNING("region_id: %ld  status:%s, snapshot failed.",
-                        region->get_region_id(), status().error_cstr());
-        }
-        cond.decrease_signal();
-        delete this;
-    }
-    SnapshotClosure(BthreadCond& cond, Region* reg) : cond(cond), region(reg) {}
-    BthreadCond& cond;
-    Region* region = nullptr;
-    int ret = 0;
-    //int retry = 0;
-};
 } // end of namespace

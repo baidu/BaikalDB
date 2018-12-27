@@ -50,6 +50,7 @@ public:
         channel_opt.connect_timeout_ms = _connect_timeout;
         if (_store_channel.Init(_store_address.c_str(), &channel_opt) != 0) {
             DB_FATAL("store channle init fail. store_address:%s", _store_address.c_str());
+            response.set_errcode(pb::CONNECT_FAIL);
             return -1;
         }
         const ::google::protobuf::ServiceDescriptor* service_desc = pb::StoreService::descriptor();
@@ -65,10 +66,11 @@ public:
         if (cntl.Failed()) {
             DB_FATAL("connect with store fail. send request fail, error:%s, log_id:%lu",
                         cntl.ErrorText().c_str(), cntl.log_id());
+            response.set_errcode(pb::EXEC_FAIL);
             return -1;
         }
         if (response.errcode() != pb::SUCCESS) {
-            DB_FATAL("send store address fail, log_id:%lu, instance: %s, response:%s, request: %s", 
+            DB_WARNING("send store address fail, log_id:%lu, instance: %s, response:%s, request: %s", 
                     cntl.log_id(),
                     _store_address.c_str(),
                     response.ShortDebugString().c_str(),
@@ -109,6 +111,13 @@ public:
             ++retry_time;
         } while (retry_time < RETRY_TIMES);
         return -1;
+    }
+    template<typename Request, typename Response>
+    int send_request_for_leader(const std::string& service_name,
+                                const Request& request,
+                                Response& response) {
+        uint64_t log_id = butil::fast_rand();
+        return send_request_for_leader(log_id, service_name, request, response);
     }
 private:
     std::string _store_address;

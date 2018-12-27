@@ -33,7 +33,7 @@
 using google::protobuf::FieldDescriptorProto;
 
 namespace baikaldb {
-
+DECLARE_string(default_physical_room);
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
         + (_end.tv_usec-_start.tv_usec); //macro second
@@ -339,5 +339,39 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
     }
     return _mysql_pb_type_mapping[type];
 }
+int get_physical_room(const std::string& ip_and_port_str, std::string& physical_room) {
+#ifdef BAIDU_INTERNAL
+    butil::EndPoint point;
+    int ret = butil::str2endpoint(ip_and_port_str.c_str(), &point);
+    if (ret != 0) {
+        DB_WARNING("instance:%s to endpoint fail, ret:%d", ip_and_port_str.c_str(), ret);
+        return ret;
+    }
+    std::string host;
+    ret = butil::endpoint2hostname(point, &host);
+    if (ret != 0) {
+        DB_WARNING("endpoint to hostname fail, ret:%d", ret);
+        return ret;
+    }
+    DB_DEBUG("host:%s", host.c_str());
+    auto begin = host.find(".");
+    auto end = host.find(":");
+    if (begin == std::string::npos) {
+        DB_WARNING("host:%s to physical room fail", host.c_str()); 
+        return -1;
+    }
+    if (end == std::string::npos) {
+        end = host.size();
+    }
+    physical_room = std::string(host, begin + 1, end - begin -1);
+    return 0;
+#else
+    physical_room = FLAGS_default_physical_room;  
+    return 0;
+#endif
+}
 
+DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
+DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
+DEFINE_int32(snapshot_load_num, 8, "snapshot load concurrency, default 8");
 }  // baikaldb

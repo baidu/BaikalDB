@@ -18,7 +18,7 @@
 
 namespace baikaldb {
 DEFINE_int32(store_request_timeout, 60000, 
-            "store as server request timeout, default:30000ms");
+            "store as server request timeout, default:60000ms");
 DEFINE_int32(store_connect_timeout, 5000, 
             "store as server connect timeout, default:5000ms");
 }

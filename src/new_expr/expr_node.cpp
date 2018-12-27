@@ -20,6 +20,7 @@
 #include "slot_ref.h"
 
 namespace baikaldb {
+// only pre_calc children nodes
 void ExprNode::const_pre_calc() {
     if (_children.size() == 0 || _node_type == pb::AGG_EXPR) {
         return;
@@ -31,9 +32,6 @@ void ExprNode::const_pre_calc() {
         if (!c->_is_constant) {
             _is_constant = false;
         }
-    }
-    if (_node_type == pb::AGG_EXPR) {
-        _is_constant = false;
     }
     //const表达式等着父节点来替换
     //root是const表达式则外部替换
@@ -59,6 +57,8 @@ void ExprNode::const_pre_calc() {
         delete c;
         c = new Literal(value);
     }
+    // 111 > aaa => aaa < 111
+    children_swap();
     //把agg expr替换成slot ref
     for (auto& c : _children) {
         if (c->node_type() == pb::AGG_EXPR) {
@@ -205,6 +205,7 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
         case pb::DATETIME_LITERAL:
         case pb::TIME_LITERAL:
         case pb::TIMESTAMP_LITERAL:
+        case pb::PLACE_HOLDER_LITERAL:
             *expr_node = new Literal;
             (*expr_node)->init(node);
             return 0;

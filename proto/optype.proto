@@ -18,7 +18,7 @@ enum OpType {
     OP_VALIDATE_AND_ADD_VERSION             = 11; //分裂时version + 1
     OP_ADD_VERSION_FOR_SPLIT_REGION         = 12; //该接口是通过网络请求发送的， 上边三个都不是
     OP_TRUNCATE_TABLE                       = 13;
-    //OP_ROLLBACK_VERSION                   = 13; //分裂回滚
+    OP_PREPARE_V2                           = 14; 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
     OP_ADD_PHYSICAL                         = 115; //建物理机房
     OP_ADD_INSTANCE                         = 116; //建实例, 实例通过上报心跳创建，此借口暂时无用
@@ -50,15 +50,20 @@ enum OpType {
     OP_UPDATE_REGION                        = 142; //更新schema上的regionInfo
     OP_DROP_REGION                          = 143; //在一个实例上删除region
     OP_SPLIT_REGION                         = 144; //Region请求分裂, Store请求一个新的region_id和instance
-    OP_UPDATE_BYTE_SIZE                     = 145; //修改表的byte_size_per_record, 调整分裂参数
+    OP_UPDATE_BYTE_SIZE                     = 145; //修改表的byte_size_per_record
     OP_GEN_ID_FOR_AUTO_INCREMENT            = 146; //自增主键生成id
     OP_UPDATE_FOR_AUTO_INCREMENT            = 147; //更新自增主键最大值
     OP_RESTORE_REGION                       = 148; //恢复store误删的region
-    OP_UNSAFE_DECISION                      = 149; //开启删表和log_index=0时自动删除region逻辑10分钟
+    OP_OPEN_UNSAFE_DECISION                 = 149; //开启删表和log_index=0时自动删除region逻辑10分钟
     OP_SET_INSTANCE_MIGRATE                 = 150; //手工置实例状态为MIGRATE，迁移用
     OP_PREPARE                              = 151; 
     OP_ADD_ID_FOR_AUTO_INCREMENT            = 152; //添加自增主键
     OP_DROP_ID_FOR_AUTO_INCREMENT           = 153; //删除自增主键
     OP_CLOSE_LOAD_BALANCE                   = 154;
     OP_OPEN_LOAD_BALANCE                    = 155;
+    OP_CLOSE_UNSAFE_DECISION                = 156;
+    OP_UPDATE_DISTS                         = 157; //修改表的机房分布
+    OP_CLOSE_MIGRATE                        = 158; //迁移跟其他开关不同的是，默认情况下是开启的
+    OP_OPEN_MIGRATE                         = 159;
+    OP_UPDATE_SPLIT_LINES                   = 160; //修改表的region_split_lines, 调整分裂阈值
 };

@@ -16,6 +16,7 @@
 // limitations under the License.
 
 #include <stdio.h>
+#include <iostream>
 #define YY_DECL
 #include "parser.h"
 using parser::SqlParser;
@@ -59,18 +60,18 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 {
     int integer;
     Node* item;  // item can be used as list/array
-    ExprNode* expr;
-    StmtNode* stmt;
-    Assignment* assign;
-    String string;
+    ExprNode*       expr;
+    StmtNode*       stmt;
+    Assignment*     assign;
+    String          string;
     Vector<String>* string_list;
-    IndexHint* index_hint;
+    IndexHint*      index_hint;
     SelectStmtOpts* select_opts;
-    SelectField* select_field;
-    GroupByClause* group_by;
-    OrderByClause* order_by;
-    ByItem* by_item;
-    LimitClause* limit;
+    SelectField*    select_field;
+    GroupByClause*  group_by;
+    OrderByClause*  order_by;
+    ByItem*         by_item;
+    LimitClause*    limit;
 }
 
 %token 
@@ -452,7 +453,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 
 %token EQ_OP ASSIGN_OP  MOD_OP  GE_OP  GT_OP LE_OP LT_OP NE_OP AND_OP OR_OP NOT_OP LS_OP RS_OP CHINESE_DOT
 %token <string> IDENT 
-%token <expr> STRING_LIT INTEGER_LIT DECIMAL_LIT
+%token <expr> STRING_LIT INTEGER_LIT DECIMAL_LIT PLACE_HOLDER_LIT
 
 %type <string> 
     AllIdent 
@@ -483,6 +484,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ExprList
     Expr
     ElseOpt
+    NumLiteral
+    SignedLiteral
+    Literal
     SimpleExpr
     FunctionCall
     Operators
@@ -544,6 +548,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     AlterSpecList
     AlterSpec
     ColumnDefList
+    IndexOptionList
+    IndexOption
+    IndexType
 
 %type <item> OnDuplicateKeyUpdate 
 %type <item> 
@@ -581,6 +588,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SetStmt
     VarAssignList
     AlterTableStmt
+    NewPrepareStmt
+    ExecPrepareStmt
+    DeallocPrepareStmt
 
 %type <assign> Assignment
 %type <integer> 
@@ -615,7 +625,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     GlobalScope
     OptFull
 
-%type <string_list> IndexNameList 
+%type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
 %type <select_opts> SelectStmtOpts
 %type <select_field> SelectField
@@ -676,6 +686,9 @@ Statement:
     | SetStmt
     | ShowStmt
     | AlterTableStmt
+    | NewPrepareStmt
+    | ExecPrepareStmt
+    | DeallocPrepareStmt
     ;
 
 InsertStmt:
@@ -1243,24 +1256,73 @@ LimitClause:
     {
         $$ = nullptr;
     }
-    | LIMIT INTEGER_LIT {
+    | LIMIT SimpleExpr {
+        if ($2->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* count = (LiteralExpr*)$2;
+        if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
         LimitClause* limit = new_node(LimitClause);
-        limit->count = ((LiteralExpr*)$2)->_u.int64_val;
+        limit->count = count;
+        limit->offset = LiteralExpr::make_int("0", parser->arena);
         $$ = limit;
     }
-    | LIMIT INTEGER_LIT ',' INTEGER_LIT {
+    | LIMIT SimpleExpr ',' SimpleExpr {
+        if ($2->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* offset = (LiteralExpr*)$2;
+        if (offset->literal_type != parser::LT_INT && offset->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+
+        if ($4->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* count = (LiteralExpr*)$4;
+        if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
         LimitClause* limit = new_node(LimitClause);
-        limit->offset = ((LiteralExpr*)$2)->_u.int64_val;
-        limit->count = ((LiteralExpr*)$4)->_u.int64_val;
+        limit->offset = offset;
+        limit->count = count;
         $$ = limit;
     }
-    | LIMIT INTEGER_LIT OFFSET INTEGER_LIT {
+    | LIMIT SimpleExpr OFFSET SimpleExpr {
+        if ($2->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* count = (LiteralExpr*)$2;
+        if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+
+        if ($4->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* offset = (LiteralExpr*)$4;
+        if (offset->literal_type != parser::LT_INT && offset->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
         LimitClause* limit = new_node(LimitClause);
-        limit->offset = ((LiteralExpr*)$4)->_u.int64_val;
-        limit->count = ((LiteralExpr*)$2)->_u.int64_val;
+        limit->offset = offset;
+        limit->count = count;
         $$ = limit;
     }
     ;
+
 WhereClause:
     WHERE Expr {
         $$ = $2;
@@ -1849,6 +1911,22 @@ FunctionCallKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun; 
     }
+    | LEFT '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "left";
+        fun->func_type = FT_COMMON;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun; 
+    }
+    | RIGHT '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "right";
+        fun->func_type = FT_COMMON;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun; 
+    }
     ;
 SumExpr:
     AVG '(' BuggyDefaultFalseDistinctOpt Expr')' {
@@ -2187,7 +2265,14 @@ AllIdent:
     | VAR_SAMP
     ;
 
-SimpleExpr:
+NumLiteral:
+    INTEGER_LIT {
+    }
+    | DECIMAL_LIT {
+    }
+    ;
+
+Literal:
     NULLX {
         $$ = LiteralExpr::make_null(parser->arena);
     }
@@ -2197,12 +2282,23 @@ SimpleExpr:
     | FALSE {
         $$ = LiteralExpr::make_false(parser->arena);
     }
-    | INTEGER_LIT {}
-    | DECIMAL_LIT {}
-    | STRING_LIT {}
-    | ColumnName {}
-    | RowExpr {}
-    | FunctionCall {}
+    | NumLiteral {
+    }
+    | STRING_LIT {
+    }
+    ;
+
+SimpleExpr:
+    Literal {
+    }
+    | PLACE_HOLDER_LIT {
+    }
+    | ColumnName {
+    }
+    | RowExpr {
+    }
+    | FunctionCall {
+    }
     | '-' SimpleExpr %prec NEG {
         $$ = FuncExpr::new_unary_op_node(FT_UMINUS, $2, parser->arena);
     }
@@ -2593,12 +2689,37 @@ ColumnOption:
         option->expr = $2;
         $$ = option;
     }
+    | ON UPDATE CURRENT_TIMESTAMP
+    {
+        FuncExpr* current_timestamp = new_node(FuncExpr);
+        current_timestamp->func_type = FT_COMMON;
+        current_timestamp->fn_name = "current_timestamp";
+        ColumnOption* option = new_node(ColumnOption);
+        option->type = COLUMN_OPT_ON_UPDATE;
+        option->expr = current_timestamp;
+        $$ = option;
+    }
     | COMMENT STRING_LIT
     {
         ColumnOption* option = new_node(ColumnOption);
         option->type = COLUMN_OPT_COMMENT;
         option->expr = $2;
         $$ = option;
+    }
+    ;
+
+SignedLiteral:
+    Literal {}
+    | '+' NumLiteral {}
+    | '-' NumLiteral
+    {
+        LiteralExpr* literal = (LiteralExpr*)$2;
+        if (literal->literal_type == parser::LT_INT) {
+        	literal->_u.int64_val = 0 - literal->_u.int64_val;
+        } else {
+        	literal->_u.double_val = 0 - literal->_u.double_val;
+        }
+        $$ = literal;
     }
     ;
 
@@ -2610,7 +2731,7 @@ DefaultValue:
         current_timestamp->fn_name = "current_timestamp";
         $$ = (ExprNode*)current_timestamp;
     }
-    | Expr
+    | SignedLiteral
     {
         $$ = $1;
     }
@@ -2650,16 +2771,17 @@ ConstraintKeywordOpt:
     ;
 
 ConstraintElem:
-    PRIMARY KEY '(' ColumnNameList ')'
+    PRIMARY KEY '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_PRIMARY;
         for (int idx = 0; idx < $4->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$6;
         $$ = item;
     }
-    | FULLTEXT KeyOrIndexOpt IndexName '(' ColumnNameList ')'
+    | FULLTEXT KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_FULLTEXT;
@@ -2667,9 +2789,10 @@ ConstraintElem:
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | KeyOrIndex IndexName '(' ColumnNameList ')'
+    | KeyOrIndex IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
@@ -2677,9 +2800,10 @@ ConstraintElem:
         for (int idx = 0; idx < $4->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$6;
         $$ = item;
     }
-    | UNIQUE KeyOrIndexOpt IndexName '(' ColumnNameList ')'
+    | UNIQUE KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_UNIQ;
@@ -2687,6 +2811,7 @@ ConstraintElem:
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$7;
         $$ = item;
     }
     ;
@@ -2701,17 +2826,53 @@ IndexName:
     }
     ;
 
+IndexOptionList:
+    {
+        $$ = nullptr;
+    }
+    | IndexOptionList IndexOption {
+        if ($2 != nullptr) {
+            $$ = $2;
+        } else {
+            $$ = $1;
+        }
+    }
+    ;
+
+IndexOption:
+    KEY_BLOCK_SIZE EqOpt INTEGER_LIT {
+        $$ = nullptr;
+    }
+    | IndexType {
+        $$ = nullptr;
+    }
+    | COMMENT STRING_LIT {
+        IndexOption* op = new_node(IndexOption);
+        op->comment = ((LiteralExpr*)$2)->_u.str_val;
+        $$ = op;
+    }
+    ;
+
+IndexType:
+    USING BTREE {
+        $$ = nullptr;
+    }
+    | USING HASH {
+        $$ = nullptr;
+    }
+    ;
+
 /*************************************Type Begin***************************************/
 Type:
     NumericType
     {
         $$ = $1;
     }
-    |    StringType
+    | StringType
     {
         $$ = $1;
     }
-    |    DateAndTimeType
+    | DateAndTimeType
     {
         $$ = $1;
     }
@@ -2820,43 +2981,43 @@ IntegerType:
     {
         $$ = MYSQL_TYPE_TINY;
     }
-    |    SMALLINT
+    | SMALLINT
     {
         $$ = MYSQL_TYPE_SHORT;
     }
-    |    MEDIUMINT
+    | MEDIUMINT
     {
         $$ = MYSQL_TYPE_INT24;
     }
-    |    INT
+    | INT
     {
         $$ = MYSQL_TYPE_LONG;
     }
-    |    INT1
+    | INT1
     {
         $$ = MYSQL_TYPE_TINY;
     }
-    |     INT2
+    | INT2
     {
         $$ = MYSQL_TYPE_SHORT;
     }
-    |     INT3
+    | INT3
     {
         $$ = MYSQL_TYPE_INT24;
     }
-    |    INT4
+    | INT4
     {
         $$ = MYSQL_TYPE_LONG;
     }
-    |    INT8
+    | INT8
     {
         $$ = MYSQL_TYPE_LONGLONG;
     }
-    |    INTEGER
+    | INTEGER
     {
         $$ = MYSQL_TYPE_LONG;
     }
-    |    BIGINT
+    | BIGINT
     {
         $$ = MYSQL_TYPE_LONGLONG;
     }
@@ -3162,7 +3323,7 @@ FieldOpts:
     {
         $$ = new_node(Node);
     }
-    |    FieldOpts FieldOpt
+    | FieldOpts FieldOpt
     {
         $1->children.push_back($2, parser->arena);
         $$ = $1;
@@ -3495,14 +3656,43 @@ VarAssignItem:
     {
         VarAssign* assign = new_node(VarAssign);
         assign->key = $1;
-        assign->value = $3;
+        if ($3 != nullptr && $3->expr_type == ET_COLUMN) {
+            ColumnName* col_name = (ColumnName*)$3;
+            if (col_name->name.to_lower() == "off") {
+                // SET XXX = OFF
+                // OFF to 0
+                assign->value = LiteralExpr::make_int("0", parser->arena);
+            } else {
+                assign->value = $3;
+            }
+        } else {
+            assign->value = $3;
+        }
+        $$ = assign;
+    }
+    | VarName EQ_OP ON
+    {
+        VarAssign* assign = new_node(VarAssign);
+        assign->key = $1;
+        assign->value = LiteralExpr::make_int("1", parser->arena);
         $$ = assign;
     }
     | VarName ASSIGN_OP Expr
     {
         VarAssign* assign = new_node(VarAssign);
         assign->key = $1;
-        assign->value = $3;
+        if ($3 != nullptr && $3->expr_type == ET_COLUMN) {
+            ColumnName* col_name = (ColumnName*)$3;
+            if (col_name->name.to_lower() == "off") {
+                // SET XXX = OFF
+                // OFF to 0
+                assign->value = LiteralExpr::make_int("0", parser->arena);
+            } else {
+                assign->value = $3;
+            }
+        } else {
+            assign->value = $3;
+        }
         $$ = assign;
     }
     | CharsetKw AllIdent
@@ -3536,6 +3726,15 @@ VarName:
         String str;
         if ($2.empty() == false) {
             str.strdup("@@session.", parser->arena);
+            str.append($2.c_str(), parser->arena);
+        }
+        $$ = str;
+    }
+    | LOCAL AllIdent
+    {
+        String str;
+        if ($2.empty() == false) {
+            str.strdup("@@local.", parser->arena);
             str.append($2.c_str(), parser->arena);
         }
         $$ = str;
@@ -3779,10 +3978,91 @@ AlterSpec:
     }
     ;
 
+// Prepare Statement
+NewPrepareStmt:
+    PREPARE AllIdent FROM STRING_LIT
+    {
+        NewPrepareStmt* stmt = new_node(NewPrepareStmt);
+        stmt->name = $2;
+        stmt->sql = ((LiteralExpr*)$4)->_u.str_val;
+        $$ = stmt;
+    }
+    | PREPARE AllIdent FROM VarName
+    {
+        if ($4.starts_with("@@") ) {
+            sql_error(&@2, yyscanner, parser, "user variable cannot start with @@");
+            return -1;
+        }
+        if ($4.starts_with("@") == false) {
+            sql_error(&@2, yyscanner, parser, "only user variable is permitted in USING clause");
+            return -1;
+        }
+        NewPrepareStmt* stmt = new_node(NewPrepareStmt);
+        stmt->name = $2;
+        stmt->sql = $4;
+        $$ = stmt;
+    }
+    ;
+
+ExecPrepareStmt:
+    EXECUTE AllIdent
+    {
+        ExecPrepareStmt* stmt = new_node(ExecPrepareStmt);
+        stmt->name = $2;
+        $$ = stmt;
+    }
+    | EXECUTE AllIdent USING VarList
+    {
+        ExecPrepareStmt* stmt = new_node(ExecPrepareStmt);
+        stmt->name = $2;
+        for (int idx = 0; idx < $4->size(); ++idx) {
+            if ((*$4)[idx].starts_with("@@")) {
+                sql_error(&@2, yyscanner, parser, "user variable cannot start with @@");
+                return -1;
+            }
+            if ((*$4)[idx].starts_with("@") == false) {
+                sql_error(&@2, yyscanner, parser, "only user variable is permitted in USING clause");
+                return -1;
+            }
+            stmt->param_list.push_back((*$4)[idx], parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+    
+VarList:
+    VarName
+    {
+        Vector<String>* string_list = new_node(Vector<String>);
+        string_list->reserve(5, parser->arena);
+        string_list->push_back($1, parser->arena);
+        $$ = string_list;        
+    }
+    | VarList ',' VarName
+    {
+        $1->push_back($3, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+DeallocPrepareStmt:
+    DEALLOCATE PREPARE AllIdent
+    {
+        DeallocPrepareStmt* stmt = new_node(DeallocPrepareStmt);
+        stmt->name = $3;
+        $$ = stmt;
+    }
+    | DROP PREPARE AllIdent
+    {
+        DeallocPrepareStmt* stmt = new_node(DeallocPrepareStmt);
+        stmt->name = $3;
+        $$ = stmt;
+    }
+    ;
+
 %%
 int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser *parser, const char *s) {    
     parser->error = parser::SYNTAX_ERROR;
-    //std::cout << sql_get_lineno(yyscanner) << ":" << sql_get_column(yyscanner) << std::endl;
     std::ostringstream os;
     os << s << ", in [" << yylloc->last_line;
     os << ":" << yylloc->first_column;

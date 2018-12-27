@@ -19,7 +19,7 @@
 #include <gflags/gflags.h>
 
 namespace baikaldb {
-DEFINE_bool(disable_wal, true, "disable rocksdb interanal WAL log, only use raft log");
+DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raft log");
 // DEFINE_int32(rocks_transaction_expiration_ms, 600 * 1000, 
 //         "rocksdb transaction_expiration timeout(us)");
 
@@ -29,6 +29,10 @@ int Transaction::begin() {
         return -1;
     }
     if (nullptr == (_data_cf = _db->get_data_handle())) {
+        DB_WARNING("get rocksdb data column family failed");
+        return -1;
+    }
+    if (nullptr == (_meta_cf = _db->get_meta_info_handle())) {
         DB_WARNING("get rocksdb data column family failed");
         return -1;
     }
@@ -262,6 +266,22 @@ int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord rec
     return 0;
 }
 
+int Transaction::put_meta_info(const std::string& key, const std::string& value) {
+    auto res = _txn->Put(_meta_cf, rocksdb::Slice(key), rocksdb::Slice(value));
+    if (!res.ok()) {
+        DB_FATAL("put meta info fail, error: %s", res.ToString().c_str());
+        return -1;
+    }
+    return 0;
+}
+int Transaction::remove_meta_info(const std::string& key) {
+    auto res = _txn->Delete(_meta_cf, rocksdb::Slice(key));
+    if (!res.ok()) {
+        DB_FATAL("remove meta info fail, error: %s", res.ToString().c_str());
+        return -1;
+    }
+    return 0;
+}
 //val should be nullptr (create inside the func if the key is found)
 //TODO: update return status
 int Transaction::get_update_primary(
