@@ -47,7 +47,7 @@
 //#include "region_resource.h"
 #include "runtime_state.h"
 #include "rapidjson/document.h"
-#include "raft_snapshot_adaptor.h"
+#include "rocksdb_file_system_adaptor.h"
 #include "region_control.h"
 #include "meta_writer.h"
 #include "rpc_sender.h"
@@ -129,7 +129,7 @@ public:
                 _num_table_lines(0),
                 _num_delete_lines(0),
                 _region_control(this, region_id),
-                _snapshot_adaptor(new RaftSnapshotAdaptor(region_id)) {
+                _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)) {
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
         _region_control.store_status(_region_info.status());
     }
