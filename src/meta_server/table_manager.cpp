@@ -26,6 +26,33 @@ DECLARE_int32(concurrency_num);
 DEFINE_int32(region_replica_num, 3, "region replica num, default:3"); 
 DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M");
 
+int64_t TableManager::get_row_count(int64_t table_id) {
+    std::vector<int64_t> region_ids;
+    int64_t byte_size_per_record = 0;
+    {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return 0;
+        }
+        byte_size_per_record = _table_info_map[table_id].schema_pb.byte_size_per_record();
+        for (auto& partition_regions : _table_info_map[table_id].partition_regions) {
+            for (auto& region_id :  partition_regions.second) {
+                region_ids.push_back(region_id);    
+            }
+        }
+    }
+    if (byte_size_per_record == 0) {
+        byte_size_per_record = 1;
+    }
+    std::vector<SmartRegionInfo> region_infos;
+    RegionManager::get_instance()->get_region_info(region_ids, region_infos);
+    int64_t total_byte_size = 0;
+    for (auto& region : region_infos) {
+        total_byte_size += region->used_size();
+    }
+    return total_byte_size / byte_size_per_record;
+}
+
 void TableManager::create_table(const pb::MetaManagerRequest& request, braft::Closure* done) {
     auto& table_info = const_cast<pb::SchemaInfo&>(request.table_info());
     table_info.set_timestamp(time(NULL));
@@ -891,7 +918,7 @@ void TableManager::check_table_exist_for_peer(const pb::StoreHeartBeatRequest* r
         if (_table_info_map.find(peer_info.table_id()) != _table_info_map.end()) {
             continue;
         }
-        DB_FATAL("table id:%ld according to region_id:%ld not exit, drop region_id, store_address:%s",
+        DB_WARNING("table id:%ld according to region_id:%ld not exit, drop region_id, store_address:%s",
                 peer_info.table_id(), peer_info.region_id(),
                 request->instance_info().address().c_str());
         //为了安全暂时关掉这个删除region的功能，后续稳定再打开，目前先报fatal(todo)

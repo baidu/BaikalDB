@@ -19,7 +19,7 @@
 
 namespace baikaldb {
 
-int parse_my_raft_log_uri(const std::string& uri, std::string& id){
+static int parse_my_raft_log_uri(const std::string& uri, std::string& id){
     size_t pos = uri.find("id=");
     if (pos == 0 || pos == std::string::npos) {
         return -1;
@@ -465,8 +465,8 @@ int MyRaftLogStorage::_build_key_value(
         value->parts = _construct_slice_array(head_buf, entry->peers, 
                 entry->old_peers, arena);
         value->num_parts = 2;
-        DB_WARNING("region_id: %ld, term:%ld, index:%ld",
-                    _region_id, entry->id.term, entry->id.index);
+        //DB_WARNING("region_id: %ld, term:%ld, index:%ld",
+        //            _region_id, entry->id.term, entry->id.index);
         break;
     case braft::ENTRY_TYPE_NO_OP:
         value->parts = _construct_slice_array(head_buf, nullptr, nullptr, arena);
@@ -522,7 +522,7 @@ rocksdb::Slice* MyRaftLogStorage::_construct_slice_array(
                 meta.add_old_peers((*old_peers)[i].to_string());
             }
         }
-        DB_WARNING("region_id: %ld, configuration:%s", _region_id, meta.ShortDebugString().c_str());
+        //DB_WARNING("region_id: %ld, configuration:%s", _region_id, meta.ShortDebugString().c_str());
         const size_t byte_size = meta.ByteSize();
         void *meta_buf = arena.allocate(byte_size);
         if (meta_buf == NULL) {

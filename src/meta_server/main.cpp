@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
     DB_WARNING("log file load success");
 
     // 注册自定义的raft log的存储方式
-    baikaldb::register_myraftlog_extension();
+    baikaldb::register_myraft_extension();
 
     //add service
     brpc::Server server;
@@ -57,8 +57,34 @@ int main(int argc, char **argv) {
     }
     DB_WARNING("add raft to baidu-rpc server success");
    
+    int ret = 0;
     //this step must be before server.Start
     std::vector<braft::PeerId> peers;
+    std::vector<std::string> instances;
+    bool completely_deploy = false;
+#ifdef BAIDU_INTERNAL
+    //指定的是ip:port的形式
+    if (baikaldb::FLAGS_meta_server_bns.find(":") != std::string::npos) {
+        std::vector<std::string> list_raft_peers;
+        boost::split(list_raft_peers, baikaldb::FLAGS_meta_server_bns, boost::is_any_of(","));
+        for (auto & raft_peer : list_raft_peers) {
+            DB_WARNING("raft_peer:%s", raft_peer.c_str());
+            braft::PeerId peer(raft_peer);
+            peers.push_back(peer);
+        }
+    } else {
+        do {
+            baikaldb::get_instance_from_bns(&ret, baikaldb::FLAGS_meta_server_bns, instances);
+        } while (ret != webfoot::WEBFOOT_RET_SUCCESS &&
+                 ret != webfoot::WEBFOOT_SERVICE_NOTEXIST &&
+                 ret != webfoot::WEBFOOT_SERVICE_BEYOND_THRSHOLD);
+        if (ret == webfoot::WEBFOOT_SERVICE_NOTEXIST || instances.size() == 0) {
+            completely_deploy = true;
+        }
+    }
+    DB_WARNING("completely deploy:%d, host:%s", 
+                completely_deploy, butil::endpoint2str(addr).c_str());
+#else
     //指定的是ip:port的形式
     std::vector<std::string> list_raft_peers;
     boost::split(list_raft_peers, baikaldb::FLAGS_meta_server_bns, boost::is_any_of(","));
@@ -67,7 +93,8 @@ int main(int argc, char **argv) {
         braft::PeerId peer(raft_peer);
         peers.push_back(peer);
     }
-     
+#endif
+ 
     baikaldb::MetaServer* meta_server = baikaldb::MetaServer::get_instance();
     //注册处理meta逻辑的service服务
     if (0 != server.AddService(meta_server, brpc::SERVER_DOESNT_OWN_SERVICE)) {
@@ -80,6 +107,22 @@ int main(int argc, char **argv) {
         return -1;
     }
     DB_WARNING("baidu-rpc server start");
+#ifdef BAIDU_INTERNAL
+    if (completely_deploy) {
+        while (1) {
+            baikaldb::get_instance_from_bns(&ret, baikaldb::FLAGS_meta_server_bns, instances);
+            if ((int)instances.size() == baikaldb::FLAGS_meta_replica_number) {
+                for (auto &instance : instances) {
+                    braft::PeerId peer(instance);
+                    peers.push_back(peer);
+                }
+                break;
+            }
+            DB_WARNING("bns not generate, bns_name:%s", baikaldb::FLAGS_meta_server_bns.c_str());
+            sleep(1);
+        }
+    }
+#endif
     if (meta_server->init(peers) != 0) {
         DB_FATAL("meta server init fail");
         return -1;

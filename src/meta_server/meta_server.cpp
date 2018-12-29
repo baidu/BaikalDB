@@ -167,26 +167,32 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
                                           done_guard.release());
         return;
     }
-    if (request->op_type() == pb::OP_UNSAFE_DECISION) {
-        SchemaManager::get_instance()->set_unsafe_decision();
-        response->set_errcode(pb::SUCCESS);
-        response->set_op_type(request->op_type());
-        return;
-    }
     if (request->op_type() == pb::OP_SET_INSTANCE_MIGRATE) {
         ClusterManager::get_instance()->set_instance_migrate(request, response, log_id);
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
         return;
     }
-    if (request->op_type() == pb::OP_CLOSE_LOAD_BALANCE) {
-        _meta_state_machine->set_close_load_balance(true); 
+    if (request->op_type() == pb::OP_OPEN_LOAD_BALANCE) {
+        _meta_state_machine->set_load_balance(true);
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
         return;
     }
-    if (request->op_type() == pb::OP_OPEN_LOAD_BALANCE) {
-        _meta_state_machine->set_close_load_balance(false);
+    if (request->op_type() == pb::OP_CLOSE_LOAD_BALANCE) {
+        _meta_state_machine->set_load_balance(false); 
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        return;
+    }
+    if (request->op_type() == pb::OP_OPEN_UNSAFE_DECISION) {
+        _meta_state_machine->set_unsafe_decision(true);
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        return;
+    }
+    if (request->op_type() == pb::OP_CLOSE_UNSAFE_DECISION) {
+        _meta_state_machine->set_unsafe_decision(false);
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
         return;
@@ -273,6 +279,14 @@ void MetaServer::query(google::protobuf::RpcController* controller,
     case pb::QUERY_SET_PEER: {
         QueryRegionManager::get_instance()->send_set_peer(request, response);
         break;
+    }
+    case pb::QUERY_DIFF_REGION_IDS: {
+        QueryClusterManager::get_instance()->get_diff_region_ids(request, response);
+        break;        
+    }
+    case pb::QUERY_REGION_IDS: {
+        QueryClusterManager::get_instance()->get_region_ids(request, response);
+        break;                           
     }
     default: {
         DB_WARNING("invalid op_type, request:%s logid:%lu", 
@@ -363,6 +377,13 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
         if (instance.has_pre_host() && instance.has_pre_port()) {
             ip_port = instance.pre_host() + ":" + instance.pre_port();
         } else {
+            get_instance_from_bns(&ret, bns, bns_instances);
+            if (bns_instances.size() != 1) {
+                DB_WARNING("bns:%s must have 1 instance", bns.c_str());
+                res_instance->set_status("PROCESSING");
+                return;
+            }
+            ip_port = bns_instances[0];
         }
         if (event == "EXPECTED_MIGRATE") {
             pb::MetaManagerRequest internal_req;

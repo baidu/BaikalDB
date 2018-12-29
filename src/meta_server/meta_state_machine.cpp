@@ -107,6 +107,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     }
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
+    ClusterManager::get_instance()->process_baikal_heartbeat(request, response);
     PrivilegeManager::get_instance()->process_baikal_heartbeat(request, response);
     SchemaManager::get_instance()->process_baikal_heartbeat(request, response, log_id);
     SELF_TRACE("baikaldb:%s heart beat, time_cost: %ld, response: %s, log_id: %lu", 
@@ -440,7 +441,8 @@ void MetaStateMachine::healthy_check_function() {
 
 void MetaStateMachine::on_leader_stop() {
     _is_leader.store(false);
-    _close_load_balance = true;
+    _load_balance = false;
+    _unsafe_decision = false;
     if (_healthy_check_start) {
         _bth.join();
         _healthy_check_start = false;

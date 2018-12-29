@@ -41,6 +41,13 @@ int SchemaFactory::init() {
         DB_FATAL("execution_queue_start error, %d", ret);
         return -1;
     }
+
+    ret = bthread::execution_queue_start(&_idc_queue_id, nullptr, 
+                update_idc_double_buffer, (void*)this);
+    if (ret != 0) {
+        DB_FATAL("execution_queue_start error, %d", ret);
+        return -1;
+    }
     _is_init = true;
     return 0;
 }
@@ -63,6 +70,44 @@ void SchemaFactory::update_tables_double_buffer(bthread::TaskIterator<pb::Schema
         update_table(*iter, background);
     }
     _double_buffer_table.swap();
+}
+
+void SchemaFactory::update_idc(const pb::IdcInfo& idc_info) {
+    bthread::execution_queue_execute(_idc_queue_id, idc_info);
+}
+
+int SchemaFactory::update_idc_double_buffer(
+        void* meta, bthread::TaskIterator<pb::IdcInfo>& iter) {
+    SchemaFactory* factory = (SchemaFactory*)meta;
+    factory->update_idc_double_buffer(iter);
+    bthread_usleep(100 * 1000);
+    return 0;
+}
+
+void SchemaFactory::update_idc_double_buffer(bthread::TaskIterator<pb::IdcInfo>& iter) {
+    for (; iter; ++iter) {
+        update_idc(*iter, _double_buffer_idc.read_background()); 
+    }
+    _double_buffer_idc.swap(); 
+}
+
+void SchemaFactory::update_idc(const pb::IdcInfo& idc_info, IdcMapping* background) {
+    background->instance_logical_mapping.clear();
+    background->physical_logical_mapping.clear();
+    for (auto& logical_physical : idc_info.logical_physical_map()) {
+        std::string logical_room = logical_physical.logical_room();
+        for (auto& physical_room : logical_physical.physical_rooms()) {
+            background->physical_logical_mapping[physical_room] = logical_room;
+        }
+    }
+    for (auto& instance : idc_info.instance_infos()) {
+        std::string address = instance.address();
+        std::string physical_room = instance.physical_room();
+        if (background->physical_logical_mapping.find(physical_room) !=
+                    background->physical_logical_mapping.end()) {
+            background->instance_logical_mapping[address] = background->physical_logical_mapping[physical_room];
+        }    
+    }
 }
 
 //TODO
@@ -180,6 +225,7 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table, SchemaMapping* back
         tbl_info.file_proto->Clear();
         tbl_info.fields.clear();
         tbl_info.indices.clear();
+        tbl_info.dists.clear();
     }
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
     tbl_info.file_proto->set_name(std::to_string(database_id) + ".proto");
@@ -197,12 +243,20 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table, SchemaMapping* back
     if (table.has_engine()) {
         tbl_info.engine = table.engine();
     }
+    if (table.has_replica_num()) {
+        tbl_info.replica_num = table.replica_num(); 
+    }
     if (!table.has_byte_size_per_record() || table.byte_size_per_record() < 1) {
         tbl_info.byte_size_per_record = 1;
     } else {
         tbl_info.byte_size_per_record = table.byte_size_per_record();
     }
-
+    for (auto& dist : table.dists()) {
+        DistInfo dist_info;
+        dist_info.logical_room = dist.logical_room();
+        dist_info.count = dist.count();
+        tbl_info.dists.push_back(dist_info);
+    }
     std::unique_ptr<DescriptorPool> tmp_pool(new(std::nothrow)DescriptorPool);
     if (tmp_pool == nullptr) {
         DB_FATAL("create FileDescriptorProto failed");
@@ -255,19 +309,14 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table, SchemaMapping* back
         field_info.can_null = field.can_null();
         field_info.auto_inc = field.auto_increment();
         field_info.deleted = field.deleted();
+        field_info.comment = field.comment();
         field_info.default_value = field.default_value();
+        field_info.on_update_value = field.on_update_value();
         if (field.has_default_value()) {
             field_info.default_expr_value.type = pb::STRING;
             field_info.default_expr_value.str_val = field_info.default_value;
             field_info.default_expr_value.cast_to(field_info.type);
         }
-        /*
-        if (field_info.default_value == "(current_timestamp())") {
-            field_info.default_expr_value = ExprValue::Now();
-            field_info.default_expr_value.cast_to(field_info.type);
-        } else {
-        }
-        */
         if (field_info.type == pb::STRING || field_info.type == pb::HLL) {
             field_info.size = -1;
         } else {

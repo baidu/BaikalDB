@@ -19,7 +19,7 @@
 #include <gflags/gflags.h>
 
 namespace baikaldb {
-DEFINE_bool(disable_wal, true, "disable rocksdb interanal WAL log, only use raft log");
+DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raft log");
 // DEFINE_int32(rocks_transaction_expiration_ms, 600 * 1000, 
 //         "rocksdb transaction_expiration timeout(us)");
 

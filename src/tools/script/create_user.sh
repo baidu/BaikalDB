@@ -8,7 +8,7 @@ curl -d '{
     "user_privilege" : {
         "username" : "root",
         "password" : "root",
-        "namespace_name" : "TEST_NAMESPACE",
+        "namespace_name" : "FENGCHAO",
         "privilege_database" : [{
                                     "database" : "TestDB",
                                     "database_rw" : 2                            

@@ -61,6 +61,10 @@ NetworkSocket::~NetworkSocket() {
     delete send_buf;
     self_buf = nullptr;
     send_buf = nullptr;
+
+    for (auto& pair : prepared_plans) {
+        delete pair.second;
+    }
 }
 
 void NetworkSocket::reset_send_buf() {
@@ -112,6 +116,12 @@ bool NetworkSocket::reset() {
     need_rollback_seq.clear();
     region_infos.clear();
     cache_plans.clear();
+
+    stmt_id = 0;
+    for (auto& pair : prepared_plans) {
+        delete pair.second;
+    }
+    prepared_plans.clear();
     return true;
 }
 

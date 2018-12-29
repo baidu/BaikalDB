@@ -454,9 +454,9 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     _region_manager->update_region(request_update_region_feed, NULL);
     ASSERT_EQ(1, _region_manager->_region_info_map.size());
     ASSERT_EQ(6, _region_manager->_instance_region_map.size());
-    ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8010"].size());
-    ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8011"].size());
-    ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8012"].size());
+    ASSERT_EQ(0, _region_manager->_instance_region_map["127.0.0.1:8010"].size());
+    ASSERT_EQ(0, _region_manager->_instance_region_map["127.0.0.1:8011"].size());
+    ASSERT_EQ(0, _region_manager->_instance_region_map["127.0.0.1:8012"].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8020"].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8021"].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8022"].size());

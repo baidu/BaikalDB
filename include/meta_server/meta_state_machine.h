@@ -54,11 +54,17 @@ public:
     //经过3个周期后才可以做决策
     bool whether_can_decide();
 
-    void set_close_load_balance(bool close) {
-        _close_load_balance = close;
+    void set_load_balance(bool open) {
+        _load_balance = open;
     }
-    bool get_close_load_balance() {
-        return _close_load_balance;
+    bool get_load_balance() {
+        return _load_balance;
+    }
+    void set_unsafe_decision(bool open) {
+        _unsafe_decision = open;
+    }
+    bool get_unsafe_decision() {
+        return _unsafe_decision;
     }
 private:
     void save_snapshot(braft::Closure* done,
@@ -68,7 +74,8 @@ private:
     int64_t _leader_start_timestmap;
     Bthread _bth;    
     bool _healthy_check_start;
-    bool _close_load_balance = true;
+    bool _load_balance = false;
+    bool _unsafe_decision = false;
 };
 
 } //namespace baikaldb

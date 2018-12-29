@@ -65,6 +65,39 @@ enum SerializeStatus {
     STMPS_NEED_RESIZE
 };
 
+enum MysqlCommand : uint8_t {
+    // cmd name             cmd no    Associated client function
+    COM_SLEEP               = 0x00,   // (default, e.g. SHOW PROCESSLIST)
+    COM_QUIT                = 0x01,   // mysql_close
+    COM_INIT_DB             = 0x02,   // mysql_select_db
+    COM_QUERY               = 0x03,   // mysql_real_query
+    COM_FIELD_LIST          = 0x04,   // mysql_list_fields
+    COM_CREATE_DB           = 0x05,   // mysql_create_db
+    COM_DROP_DB             = 0x06,   // mysql_drop_db
+    COM_REFRESH             = 0x07,   // mysql_refresh
+    COM_SHUTDOWN            = 0x08,   // 
+    COM_STATISTICS          = 0x09,   // mysql_stat
+    COM_PROCESS_INFO        = 0x0a,   // mysql_list_processes
+    COM_CONNECT             = 0x0b,   // (during authentication handshake)
+    COM_PROCESS_KILL        = 0x0c,   // mysql_kill
+    COM_DEBUG               = 0x0d,
+    COM_PING                = 0x0e,   // mysql_ping
+    COM_TIME                = 0x0f,   // (special value for slow logs?)
+    COM_DELAYED_INSERT      = 0x10,
+    COM_CHANGE_USER         = 0x11,   // mysql_change_user
+    COM_BINLOG_DUMP         = 0x12,   // 
+    COM_TABLE_DUMP          = 0x13,
+    COM_CONNECT_OUT         = 0x14,
+    COM_REGISTER_SLAVE      = 0x15,
+    COM_STMT_PREPARE        = 0x16,
+    COM_STMT_EXECUTE        = 0x17,
+    COM_STMT_SEND_LONG_DATA = 0x18,
+    COM_STMT_CLOSE          = 0x19,
+    COM_STMT_RESET          = 0x1a,
+    COM_SET_OPTION          = 0x1b,
+    COM_STMT_FETCH          = 0x1c
+};
+
 class TimeCost {
 public:
     TimeCost() {
@@ -206,14 +239,14 @@ public:
     int increase_wait(int cond = 0) {
         int ret = 0;
         bthread_mutex_lock(&_mutex);
-        ++_count;
-        while (_count > cond) {
+        while (_count + 1 > cond) {
             ret = bthread_cond_wait(&_cond, &_mutex);
             if (ret != 0) {
                 DB_WARNING("wait timeout, ret:%d", ret);
                 break;
             }
         }
+        ++_count; // 不能放在while前面
         bthread_mutex_unlock(&_mutex);
         return ret;
     }
@@ -236,14 +269,14 @@ public:
         int ret = 0;
         timespec tm = butil::microseconds_from_now(timeout_us);
         bthread_mutex_lock(&_mutex);
-        ++_count;
-        while (_count > cond) {
+        while (_count + 1 > cond) {
             ret = bthread_cond_timedwait(&_cond, &_mutex, &tm);
             if (ret != 0) {
                 DB_WARNING("wait timeout, ret:%d", ret);
                 break; 
             }
         }
+        ++_count;
         bthread_mutex_unlock(&_mutex);
         return ret;
     }
@@ -393,7 +426,7 @@ void stripslashes(std::string& str);
 extern int end_key_compare(const std::string& key1, const std::string& key2);
 
 extern int primitive_to_proto_type(pb::PrimitiveType type);
-//extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
+extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 
 inline int end_key_compare(const std::string& key1, const std::string& key2) {
     if (key1 == key2) {

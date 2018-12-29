@@ -30,7 +30,7 @@ public:
     }
     virtual ~RocksdbScanNode() {
         for (auto expr : _index_conjuncts) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
         delete _index_iter;
         delete _table_iter;
@@ -64,6 +64,12 @@ public:
     }
     FetcherNode* get_related_fetcher_node() const {
         return _related_fetcher_node;
+    }
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ScanNode::find_place_holder(placeholders);
+        for (auto& expr : _index_conjuncts) {
+            expr->find_place_holder(placeholders);
+        }
     }
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);

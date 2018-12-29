@@ -22,8 +22,8 @@
 #include <mutex>
 #include <list>
 #include <unordered_map>
-//#include "data_buffer.h"
 #include "user_info.h"
+#include "type_utils.h"
 #include "common.h"
 #include "proto/store.interface.pb.h"
 
@@ -108,6 +108,8 @@ struct NetworkSocket {
     std::shared_ptr<UserInfo>       user_info;      // userinfo for current connection
     std::shared_ptr<QueryContext>   query_ctx;      // Current query.
 
+    std::unordered_map<std::string, pb::ExprNode> session_vars;
+
     int64_t         conn_id = -1;            // The client connection ID in Mysql Client-Server Protocol
 
     // Transaction related members
@@ -121,6 +123,13 @@ struct NetworkSocket {
     std::mutex      region_lock;
     std::map<int, pb::CachePlan> cache_plans; // plan of queries in a transaction
     std::map<int64_t, pb::RegionInfo> region_infos;
+
+    // prepare releated members
+    uint64_t         stmt_id = 0;  // The statement ID auto_inc in Mysql Client-Server Protocol
+    std::unordered_map<std::string, QueryContext*> prepared_plans;
+    std::unordered_map<std::string, std::vector<SignedType>> param_type;
+
+    std::unordered_map<std::string, pb::ExprNode>  user_vars;
 };
 
 class SocketPool {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "cluster_manager.h"
+#include "table_manager.h"
 #include <boost/algorithm/string.hpp>  
 #include <gflags/gflags.h>
 #include "meta_server.h"
@@ -29,6 +30,8 @@ DEFINE_int32(mem_used_percent, 50, "mem userd percent. default:50%");
 DECLARE_int32(store_heart_beat_interval_us);
 DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(store_faulty_interval_times);
+DECLARE_string(default_logical_room);
+DECLARE_string(default_physical_room);
 //该方法验证请求的合法性
 void ClusterManager::process_cluster_info(google::protobuf::RpcController* controller, 
                                           const pb::MetaManagerRequest* request, 
@@ -214,12 +217,12 @@ void ClusterManager::add_physical(const pb::MetaManagerRequest& request, braft::
             _physical_info[add_room] = logical_room;
         }
     }
-    //{
-    //    BAIDU_SCOPED_LOCK(_instance_mutex);
-    //    for (auto& add_room : logical_physical_room.physical_rooms()) {
-    //        _physical_instance_map[add_room] = std::set<std::string>();
-    //    }
-    //}
+    {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& add_room : logical_physical_room.physical_rooms()) {
+            _physical_instance_map[add_room] = std::set<std::string>();
+        }
+    }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("add physical room success, request:%s", request.ShortDebugString().c_str());
 }
@@ -248,12 +251,12 @@ void ClusterManager::drop_physical(const pb::MetaManagerRequest& request, braft:
             return;
         }
         //物理机房下不能有实例
-        //if (_physical_instance_map.count(drop_room) > 0 
-        //        && _physical_instance_map[drop_room].size() != 0) {
-        //    DB_WARNING("physical room:%s has instance", drop_room.c_str());
-        //    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "physical has instance");
-        //    return;
-        //}
+        if (_physical_instance_map.count(drop_room) > 0 
+                && _physical_instance_map[drop_room].size() != 0) {
+            DB_WARNING("physical room:%s has instance", drop_room.c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "physical has instance");
+            return;
+        }
         tmp_physical_rooms.erase(drop_room);
     }
     pb::PhysicalRoom pb_physical;
@@ -284,12 +287,12 @@ void ClusterManager::drop_physical(const pb::MetaManagerRequest& request, braft:
             _logical_physical_map[logical_room].erase(drop_room);
         }
     }
-    //{
-    //    BAIDU_SCOPED_LOCK(_instance_mutex);
-    //    for (auto& drop_room : logical_physical_room.physical_rooms()) {
-    //        _physical_instance_map.erase(drop_room);
-    //    }
-    //}
+    {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& drop_room : logical_physical_room.physical_rooms()) {
+            _physical_instance_map.erase(drop_room);
+        }
+    }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop physical room success, request:%s", request.ShortDebugString().c_str());
 }
@@ -298,26 +301,33 @@ void ClusterManager::drop_physical(const pb::MetaManagerRequest& request, braft:
 void ClusterManager::add_instance(const pb::MetaManagerRequest& request, braft::Closure* done) {
     auto& instance_info = const_cast<pb::InstanceInfo&>(request.instance());
     std::string address = instance_info.address();
-    // 目前版本不支持物理机房和逻辑机房的划分, 实例隔离通过resource_tag来实现
-    //std::string physical_room = instance_info.physical_room();
-    //if (!instance_info.has_physical_room()) {
-    //    auto ret = get_physical_room(address, physical_room);
-    //    if (ret < 0) {
-    //         DB_WARNING("get physical room fail when add instance, instance:%s", address.c_str());
-    //         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "instance to hostname fail");
-    //         return;
-    //    }
-    //}
-    //instance_info.set_physical_room(physical_room);
-    ////合法性检查
-    ////物理机房不存在
-    //if (_physical_info.find(physical_room) == _physical_info.end()) {
-    //    DB_WARNING("physical room:%s not exist, instance:%s", 
-    //                physical_room.c_str(),
-    //                address.c_str());
-    //    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "physical room not exist");
-    //    return;
-    //}
+    std::string physical_room = instance_info.physical_room();
+    if (!instance_info.has_physical_room() ||
+        instance_info.physical_room().size() == 0) {
+        auto ret = get_physical_room(address, physical_room);
+        if (ret < 0) {
+             DB_WARNING("get physical room fail when add instance, instance:%s", address.c_str());
+             IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "instance to hostname fail");
+             return;
+        }
+    }
+    instance_info.set_physical_room(physical_room);
+    if (_physical_info.find(physical_room) != _physical_info.end()) {
+        instance_info.set_logical_room(_physical_info[physical_room]);
+    } else {
+        DB_FATAL("get logical room for physical room: %s fail", physical_room.c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "physical to logical fail");
+        return;
+    }
+    //合法性检查
+    //物理机房不存在
+    if (_physical_info.find(physical_room) == _physical_info.end()) {
+        DB_WARNING("physical room:%s not exist, instance:%s", 
+                    physical_room.c_str(),
+                    address.c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "physical room not exist");
+        return;
+    }
     //实例已经存在
     if (_instance_info.find(address) != _instance_info.end()) {
         DB_WARNING("instance:%s has already exist", address.c_str());
@@ -340,8 +350,8 @@ void ClusterManager::add_instance(const pb::MetaManagerRequest& request, braft::
     }
     //更新内存值
     BAIDU_SCOPED_LOCK(_instance_mutex);
-    //_instance_physical_map[address] = physical_room;
-    //_physical_instance_map[physical_room].insert(address);
+    _instance_physical_map[address] = physical_room;
+    _physical_instance_map[physical_room].insert(address);
     Instance instance_mem(instance_info);
     _instance_info[address] = instance_mem;
     if (_instance_regions_map.find(address) == _instance_regions_map.end()) {
@@ -375,13 +385,13 @@ void ClusterManager::drop_instance(const pb::MetaManagerRequest& request, braft:
     }
     //更新内存值
     BAIDU_SCOPED_LOCK(_instance_mutex);
-    //_instance_physical_map.erase(address);
+    _instance_physical_map.erase(address);
     _instance_info.erase(address);
     _instance_regions_map.erase(address);
     _instance_regions_count_map.erase(address);
-    //if (_physical_instance_map.find(physical_room) != _physical_instance_map.end()) {
-    //    _physical_instance_map[physical_room].erase(address);
-    //}
+    if (_physical_instance_map.find(physical_room) != _physical_instance_map.end()) {
+        _physical_instance_map[physical_room].erase(address);
+    }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop instance success, request:%s", request.ShortDebugString().c_str());
 }
@@ -391,7 +401,7 @@ void ClusterManager::update_instance(const pb::MetaManagerRequest& request, braf
     //实例不存在
     if (_instance_info.find(address) == _instance_info.end()) {
         DB_WARNING("instance:%s not exist", address.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "logic room not exist");
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "instance not exist");
         return;
     }
     auto& instance_info = const_cast<pb::InstanceInfo&>(request.instance());
@@ -407,6 +417,7 @@ void ClusterManager::update_instance(const pb::MetaManagerRequest& request, braf
     //这两个信息不允许改
     instance_info.set_status(_instance_info[address].instance_status.state);
     instance_info.set_physical_room(_instance_info[address].physical_room);
+    instance_info.set_logical_room(_physical_info[_instance_info[address].physical_room]);
     std::string value;
     if (!instance_info.SerializeToString(&value)) {
         DB_WARNING("request serializeToArray fail, request:%s",request.ShortDebugString().c_str());
@@ -531,6 +542,28 @@ void ClusterManager::set_instance_migrate(const pb::MetaManagerRequest* request,
     RegionManager::get_instance()->delete_all_region_for_store(instance, pb::MIGRATE); 
 }
 
+void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* /*request*/,
+            pb::BaikalHeartBeatResponse* response) {
+    auto idc_info_ptr = response->mutable_idc_info();
+    {
+        BAIDU_SCOPED_LOCK(_physical_mutex);
+        for (auto& logical_physical_mapping : _logical_physical_map) {
+            auto logical_physical_map = idc_info_ptr->add_logical_physical_map();
+            logical_physical_map->set_logical_room(logical_physical_mapping.first);
+            for (auto& physical_room : logical_physical_mapping.second) {
+                logical_physical_map->add_physical_rooms(physical_room);
+            }
+        }
+    }
+    {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& instance_physical_pair : _instance_physical_map) {
+            auto instance = idc_info_ptr->add_instance_infos();
+            instance->set_address(instance_physical_pair.first);
+            instance->set_physical_room(instance_physical_pair.second);
+        }
+    }  
+}
 void ClusterManager::process_instance_heartbeat_for_store(const pb::InstanceInfo& instance_heart_beat) {
     auto ret = update_instance_info(instance_heart_beat);
     if (ret == 0) {
@@ -547,6 +580,7 @@ void ClusterManager::process_instance_heartbeat_for_store(const pb::InstanceInfo
 void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRequest* request,
         pb::StoreHeartBeatResponse* response) {
     std::string instance = request->instance_info().address();
+    std::string logical_room = get_logical_room(instance);
     std::string resource_tag = request->instance_info().resource_tag();
     std::unordered_map<int64_t, std::vector<int64_t>> table_regions;
     std::unordered_map<int64_t, int64_t> table_region_counts;
@@ -560,6 +594,14 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
         table_region_counts[table_region.first] = table_region.second.size();
     }
     set_instance_regions(instance, table_regions, table_region_counts);
+    if (!_meta_state_machine->whether_can_decide()) {
+        DB_WARNING("meta state machine can not make decision");
+        return;
+    }
+    if (!_meta_state_machine->get_load_balance()) {
+        DB_WARNING("meta state machine close load balacne");
+        return;
+    }
     DB_WARNING("instance_info: %s, resource_tag: %s", instance.c_str(), resource_tag.c_str());
     for (auto& table_region: table_regions) {
         std::string str_region_id;
@@ -569,36 +611,53 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
         DB_WARNING("table_id: %ld, region_count: %ld, region_id: %s", 
                 table_region.first, table_region_counts[table_region.first], str_region_id.c_str());
     }
-    if (!_meta_state_machine->whether_can_decide()) {
-        DB_WARNING("meta state machine can not make decision");
-        return;
-    }
-    if (_meta_state_machine->get_close_load_balance()) {
-        DB_WARNING("meta state machine close load balacne");
-        return;
-    }
+    int64_t instance_count_for_logical = get_instance_count(resource_tag, logical_room);
     int64_t instance_count = get_instance_count(resource_tag);
     //peer均衡是先增加后减少, 代表这个表需要有多少个region先add_peer
     std::unordered_map<int64_t, int64_t> add_peer_counts;
+    std::unordered_map<int64_t, std::string> logical_rooms;
     for (auto& table_region : table_regions) {
         int64_t average_peer_count = INT_FAST64_MAX;
         int64_t table_id = table_region.first;
-        int64_t total_peer_count = get_peer_count(table_id);
-        if (instance_count != 0) {
-            average_peer_count = total_peer_count / instance_count;
+        int64_t total_peer_count;
+        bool replica_dists = TableManager::get_instance()->whether_replica_dists(table_id);
+        if (replica_dists) {
+            total_peer_count = get_peer_count(table_id, logical_room);
+        } else {
+            total_peer_count = get_peer_count(table_id);
         }
-        if (instance_count != 0 && total_peer_count % instance_count != 0) {
+        int64_t total_instance_count = 0;
+        if (replica_dists) {
+            total_instance_count = instance_count_for_logical; 
+        } else {
+            total_instance_count = instance_count;
+        }
+        if (total_instance_count != 0) {
+            average_peer_count = total_peer_count / total_instance_count;
+        }
+        if (total_instance_count != 0 && total_peer_count % total_instance_count != 0) {
              average_peer_count++;
         }
         if (table_region.second.size() > (size_t)(average_peer_count + average_peer_count * 5 / 100)) {
             add_peer_counts[table_id] = table_region.second.size() - average_peer_count;
+            if (replica_dists) {
+                logical_rooms[table_id] = logical_room;
+            } else {
+                logical_rooms[table_id] = "";
+            }
         }
     }
     for (auto& add_peer_count : add_peer_counts) {
-        DB_WARNING("should add peer count, table_id: %ld, add_peer_count: %ld", 
-                    add_peer_count.first, add_peer_count.second);
+        DB_WARNING("instance: %s should add peer count for peer_load_balance, "
+                    "table_id: %ld, add_peer_count: %ld, logical_room: %s",
+                    instance.c_str(), 
+                    add_peer_count.first, add_peer_count.second, logical_rooms[add_peer_count.first].c_str());
     }
-    RegionManager::get_instance()->peer_load_balance(add_peer_counts, table_regions, instance, resource_tag);
+    if (add_peer_counts.size() > 0) {
+        RegionManager::get_instance()->peer_load_balance(add_peer_counts, table_regions, instance, resource_tag, logical_rooms);
+    } else {
+        DB_WARNING("instance: %s has been peer_load_balance, no need migrate", instance.c_str());
+    }
 }
 
 void ClusterManager::store_healthy_check_function() {
@@ -627,7 +686,11 @@ void ClusterManager::store_healthy_check_function() {
                 status.state = pb::DEAD; 
                 dead_stores.push_back(instance_pair.first);
                 DB_WARNING("instance:%s is dead", instance_pair.first.c_str());
-                ++dead_store_num;
+                std::vector<int64_t> region_ids;
+                RegionManager::get_instance()->get_region_ids(instance_pair.first, region_ids);
+                if (region_ids.size() != 0) {
+                    ++dead_store_num;
+                }
                 continue;
             } 
             if ((butil::gettimeofday_us() - last_timestamp) > 
@@ -638,10 +701,10 @@ void ClusterManager::store_healthy_check_function() {
                 continue;
             }
             //如果实例状态都正常的话，再判断是否因为容量问题需要做迁移
-            if (instance.capacity == 0) {
-                DB_FATAL("instance:%s capactiy is 0", instance.address.c_str());
-                continue;
-            }
+            //if (instance.capacity == 0) {
+            //    DB_FATAL("instance:%s capactiy is 0", instance.address.c_str());
+            //    continue;
+            //}
             //暂时不考虑容量问题，该检查先关闭(liuhuicong)
             //if (instance.used_size * 100 / instance.capacity >= 
             //        FLAGS_migrate_percent) {
@@ -655,16 +718,19 @@ void ClusterManager::store_healthy_check_function() {
             DB_FATAL("has too much dead and faulty instance, may be error judge");
             dead_stores.clear();
             migrate_stores.clear();
+            for (auto& dead_store : dead_stores) {
+                RegionManager::get_instance()->print_region_ids(dead_store);
+            }
             return;
         }
     }
     //如果store实例死掉，则删除region
     for (auto& store : dead_stores) {
-        DB_FATAL("store:%s is dead", store.c_str());
+        DB_WARNING("store:%s is dead", store.c_str());
         RegionManager::get_instance()->delete_all_region_for_store(store, pb::DEAD);
     }
     for (auto& store : migrate_stores) {
-        DB_FATAL("store:%s is dead", store.c_str());
+        DB_WARNING("store:%s is dead", store.c_str());
         RegionManager::get_instance()->delete_all_region_for_store(store, pb::MIGRATE);
     }
     //若实例满，则做实例迁移
@@ -677,6 +743,7 @@ void ClusterManager::store_healthy_check_function() {
 int ClusterManager::select_instance_min(const std::string& resource_tag,
                                         const std::set<std::string>& exclude_stores,
                                         int64_t table_id,
+                                        const std::string& logical_room,
                                         std::string& selected_instance) {
     selected_instance.clear();
     BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -687,7 +754,7 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
     int64_t max_region_count = INT_FAST64_MAX; 
     for (auto& instance_count : _instance_regions_count_map) {
         std::string cadicate_instance = instance_count.first;
-        if (false == whether_legal_for_select_instance(cadicate_instance, resource_tag, exclude_stores)) {
+        if (false == whether_legal_for_select_instance(cadicate_instance, resource_tag, exclude_stores, logical_room)) {
             continue;
         }
         if (instance_count.second.find(table_id) == instance_count.second.end()) {
@@ -709,6 +776,7 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
 //todo, 暂时未考虑机房，后期需要考虑尽量不放在同一个机房
 int ClusterManager::select_instance_rolling(const std::string& resource_tag, 
                                     const std::set<std::string>& exclude_stores,
+                                    const std::string& logical_room,
                                     std::string& selected_instance) {
     selected_instance.clear();
     BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -726,9 +794,9 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
     size_t rolling_times = 0;
     for (; rolling_times < instance_count; ++iter, ++rolling_times) {
         if (iter == _instance_info.end()) {
-             iter = _instance_info.begin();
+            iter = _instance_info.begin();
         }
-        if (false == whether_legal_for_select_instance(iter->first, resource_tag, exclude_stores)) {
+        if (false == whether_legal_for_select_instance(iter->first, resource_tag, exclude_stores, logical_room)) {
             continue;
         }
         //选择该实例
@@ -746,12 +814,23 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
 void ClusterManager::load_snapshot() {
     _physical_info.clear();
     _logical_physical_map.clear();
-    //_instance_physical_map.clear();
-    //_physical_instance_map.clear();
+    _instance_physical_map.clear();
+    _physical_instance_map.clear();
     _instance_info.clear();
     _instance_regions_map.clear();
     _instance_regions_count_map.clear();
     DB_WARNING("cluster manager begin load snapshot");
+    {
+        BAIDU_SCOPED_LOCK(_physical_mutex);
+        _physical_info[FLAGS_default_physical_room] = 
+            FLAGS_default_logical_room;
+        _logical_physical_map[FLAGS_default_logical_room] = 
+                std::set<std::string>{FLAGS_default_physical_room};
+    }
+    {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        _physical_instance_map[FLAGS_default_logical_room] = std::set<std::string>();
+    }
     //创建一个snapshot
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
@@ -783,8 +862,13 @@ void ClusterManager::load_snapshot() {
 bool ClusterManager::whether_legal_for_select_instance(
             const std::string& candicate_instance,
             const std::string& resource_tag,
-            const std::set<std::string>& exclude_stores) {
+            const std::set<std::string>& exclude_stores,
+            const std::string& logical_room) {
     if (_instance_info.find(candicate_instance) == _instance_info.end()) {
+        return false;
+    }
+    if (logical_room.size() != 0
+            && _instance_info[candicate_instance].logical_room != logical_room) {
         return false;
     }
     if (_instance_info[candicate_instance].instance_status.state != pb::NORMAL
@@ -817,10 +901,22 @@ void ClusterManager::load_instance_snapshot(const std::string& instance_prefix,
         return;
     }
     DB_WARNING("instance_pb:%s", instance_pb.ShortDebugString().c_str());
+
+    std::string physical_room = instance_pb.physical_room();
+    if (physical_room.size() == 0) {
+        instance_pb.set_physical_room(FLAGS_default_physical_room);
+    }
+    if (!instance_pb.has_logical_room()) {
+        if (_physical_info.find(physical_room) != _physical_info.end()) {
+            instance_pb.set_logical_room(_physical_info[physical_room]);
+        } else {
+            DB_FATAL("get logical room for physical room: %s fail", physical_room.c_str());
+        }
+    }
     BAIDU_SCOPED_LOCK(_instance_mutex);
     _instance_info[address] = Instance(instance_pb);
-    //_instance_physical_map[address] = instance_pb.physical_room();
-    //_physical_instance_map[instance_pb.physical_room()].insert(address);
+    _instance_physical_map[address] = instance_pb.physical_room();
+    _physical_instance_map[instance_pb.physical_room()].insert(address);
     if (_instance_regions_map.find(address) == _instance_regions_map.end()) {
         _instance_regions_map[address] = std::unordered_map<int64_t, std::vector<int64_t>>{};
     }
@@ -844,7 +940,7 @@ void ClusterManager::load_physical_snapshot(const std::string& physical_prefix,
     for (auto& physical_room : physical_logical_pb.physical_rooms()) {
         physical_rooms.insert(physical_room);
         _physical_info[physical_room] = logical_room;
-        //_physical_instance_map[physical_room] = std::set<std::string>{};
+        _physical_instance_map[physical_room] = std::set<std::string>{};
     }
     _logical_physical_map[logical_room] = physical_rooms;
 }

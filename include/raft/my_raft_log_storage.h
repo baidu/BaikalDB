@@ -60,15 +60,15 @@ public:
     /* raft_log_cf data format
      * Key:RegionId(8 bytes) + 0x01 Value: _first_log_index
      *
-     * Key:RegionId(8 bytes) + 0x02 + Index(8 bytes)                                      
-     * Value : LogHead + data                                                              
-     * LogHead: term(8 bytes) + EntryType(int)                                            
-     * data: DATA(IOBuf) / ConfigurationPBMeta(pb)                                        
+     * Key:RegionId(8 bytes) + 0x02 + Index(8 bytes)
+     * Value : LogHead + data
+     * LogHead: term(8 bytes) + EntryType(int)
+     * data: DATA(IOBuf) / ConfigurationPBMeta(pb)
      */ 
     static const size_t LOG_META_KEY_SIZE = sizeof(int64_t) + 1;
     static const size_t LOG_DATA_KEY_SIZE = sizeof(int64_t) + 1 + sizeof(int64_t);
-    static const char LOG_META_IDENTIFY = 0x01;                                      
-    static const char LOG_DATA_IDENTIFY = 0x02;    
+    static const uint8_t LOG_META_IDENTIFY = 0x01;                                      
+    static const uint8_t LOG_DATA_IDENTIFY = 0x02;    
     const static size_t LOG_HEAD_SIZE = sizeof(int64_t) + sizeof(int);
     ~MyRaftLogStorage();
     MyRaftLogStorage():_db(NULL), _handle(NULL) {

@@ -41,7 +41,8 @@ int AutoInc::analyze(QueryContext* ctx) {
     for (auto& record : ctx->insert_records) {
             auto field = record->get_field_by_tag(table_info.auto_inc_field_id);
             ExprValue value = record->get_value(field);
-            if (value.is_null()) {
+            // 兼容mysql，值为0会分配自增id
+            if (value.is_null() || value.get_numberic<int64_t>() == 0) {
                 ++auto_id_count;
             } else {
                 int64_t int_val = value.get_numberic<int64_t>();
@@ -77,7 +78,7 @@ int AutoInc::analyze(QueryContext* ctx) {
     for (auto& record : ctx->insert_records) {
         auto field = record->get_field_by_tag(table_info.auto_inc_field_id);
         ExprValue value = record->get_value(field);
-        if (value.is_null()) {
+        if (value.is_null() || value.get_numberic<int64_t>() == 0) {
             value.type = pb::INT64;
             value._u.int64_val = start_id++;
             record->set_value(field, value);

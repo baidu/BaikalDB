@@ -125,6 +125,7 @@ private:
     int _auth_read(SmartSocket sock);
     int _read_packet(SmartSocket sock);
     int _query_read(SmartSocket sock);
+    int _query_read_stmt_execute(SmartSocket sock);
     int _get_query_type(std::shared_ptr<QueryContext> ctx);
     int _get_json_attributes(std::shared_ptr<QueryContext> ctx);
     bool _query_process(SmartSocket sock);
@@ -144,6 +145,7 @@ private:
     bool _handle_client_query_show_table_status(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
     bool _handle_client_query_common_query(SmartSocket client);
+
     bool _handle_client_query_select_1(SmartSocket client);
     bool _handle_client_query_show_collation(SmartSocket client);
     bool _handle_client_query_show_warnings(SmartSocket client);

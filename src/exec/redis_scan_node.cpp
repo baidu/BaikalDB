@@ -69,8 +69,8 @@ int RedisScanNode::open(RuntimeState* state) {
         right_record->decode(range.right_pb_record());
         int left_field_cnt = range.left_field_cnt();
         int right_field_cnt = range.right_field_cnt();
-        bool left_open = range.left_open();
-        bool right_open = range.right_open();
+        //bool left_open = range.left_open();
+        //bool right_open = range.right_open();
         if (range.left_pb_record() != range.right_pb_record()) {
             DB_WARNING("redis only support equeue");
             return -1;

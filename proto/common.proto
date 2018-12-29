@@ -48,6 +48,7 @@ enum PrimitiveType {
     DATE = 16;
     HLL = 17;
     TIME = 18;
+    PLACE_HOLDER = 19;
 };
 
 //message ColumnType {

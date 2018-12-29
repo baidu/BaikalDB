@@ -26,16 +26,16 @@ public:
     }
     virtual ~SortNode() {
         for (auto expr : _order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
         for (auto expr : _slot_order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node);
      
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
-    
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
@@ -47,6 +47,7 @@ public:
             ExprNode::create_pb_expr(sort_node->add_order_exprs(), expr);
         }
     }
+    
     void transfer_fetcher_pb(pb::FetcherNode* pb_fetcher) {
         for (auto expr : _slot_order_exprs) {
             ExprNode::create_pb_expr(pb_fetcher->add_slot_order_exprs(), expr);

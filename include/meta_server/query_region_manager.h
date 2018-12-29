@@ -32,7 +32,10 @@ public:
                     const std::string& instance,
                     int64_t& region_count,
                     int64_t& region_leader_count);
-    
+    void get_peer_ids_per_instance(
+                const std::string& instance,
+                std::set<int64_t>& peer_ids);
+
     void send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_set_peer(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_remove_region_request(std::string instance_address, int64_t region_id);

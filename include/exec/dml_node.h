@@ -22,9 +22,9 @@ public:
     DMLNode() {
         _factory = SchemaFactory::get_instance();
     }
-    virtual ~DMLNode() {
-    }
+    virtual ~DMLNode() {}
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     int insert_row(RuntimeState* state, SmartRecord record, bool is_update = false);
     int delete_row(RuntimeState* state, SmartRecord record);
     int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str);

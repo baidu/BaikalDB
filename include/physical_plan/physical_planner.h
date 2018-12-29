@@ -33,7 +33,7 @@ public:
             ExecNode* plan = ctx->root;
             PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
             for (size_t i = 0; i < packet_node->children_size(); i++) {
-                ExecNode::destory_tree(packet_node->children(i));
+                ExecNode::destroy_tree(packet_node->children(i));
             }
             packet_node->clear_children();
             packet_node->set_limit(0);
@@ -46,6 +46,12 @@ public:
         if (ctx->return_empty) {
             return_empty_func();
             return 0;
+        }
+        // for INSERT/REPLACE statements
+        // insert user variables to records for prepared stmt
+        ret = insert_values_to_record(ctx);
+        if (ret < 0) {
+            return ret;
         }
         // 生成自增id
         ret = AutoInc().analyze(ctx);
@@ -121,21 +127,33 @@ public:
         ExecNode* root = nullptr;
         ret = ExecNode::create_tree(commit_plan.plan(), &root);
         if (ret < 0) {
-            ExecNode::destory_tree(root);
+            ExecNode::destroy_tree(root);
             DB_FATAL("create plan tree failed, txn_id: %lu", state.txn_id);
             return ret;
         }
         ret = root->open(&state);
         if (ret < 0) {
             root->close(&state);
-            ExecNode::destory_tree(root);
+            ExecNode::destroy_tree(root);
             DB_FATAL("open plan tree failed, txn_id: %lu", state.txn_id);
             return ret;
         }
         root->close(&state);
         return 0;
     }
-
+    // insert user variables to record for prepared stmt
+    static int insert_values_to_record(QueryContext* ctx) {
+        if (ctx->stmt_type != parser::NT_INSERT || ctx->exec_prepared == false) {
+            return 0;
+        }
+        ExecNode* plan = ctx->root;
+        InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
+        if (insert_node == nullptr) {
+            DB_WARNING("insert_node is null");
+            return -1;
+        }
+        return insert_node->insert_values_for_prepared_stmt(ctx->insert_records);
+    }
 private:
 };
 }

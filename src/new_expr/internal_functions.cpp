@@ -14,11 +14,39 @@
 
 #include "internal_functions.h"
 #include "hll_common.h"
-#include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <algorithm>
 
 namespace baikaldb {
 static const int32_t DATE_FORMAT_LENGTH = 128;
+ExprValue round(const std::vector<ExprValue>& input) {
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::INT64);
+    tmp._u.int64_val = ::round(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue floor(const std::vector<ExprValue>& input) {
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::INT64);
+    tmp._u.int64_val = ::floor(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue ceil(const std::vector<ExprValue>& input) {
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::INT64);
+    tmp._u.int64_val = ::ceil(input[0].get_numberic<double>());
+    return tmp;
+}
+
 ExprValue length(const std::vector<ExprValue>& input) {
     if (input[0].is_null()) {
         return ExprValue::Null();

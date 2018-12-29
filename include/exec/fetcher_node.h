@@ -25,12 +25,12 @@ class FetcherNode : public ExecNode {
 public:
     virtual ~FetcherNode() {
         for (auto expr : _slot_order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
 
     // send (cached) cmds with seq_id >= start_seq_id
-    int send_request( RuntimeState* state, pb::RegionInfo& info, 
+    int send_request(RuntimeState* state, pb::RegionInfo& info, 
         std::vector<SmartRecord>* records, int64_t region_id, 
         uint64_t log_id, int retry_times, int start_seq_id);
 
@@ -57,7 +57,7 @@ public:
     }
 
     int push_cmd_to_cache(RuntimeState* state);
-
+    void choose_opt_instance(pb::RegionInfo& info, std::string& addr);
 private:
     //insert数据按region拆分，select中主键不拆分，靠store自己过滤
     std::map<int64_t, std::vector<SmartRecord>> _insert_region_ids;

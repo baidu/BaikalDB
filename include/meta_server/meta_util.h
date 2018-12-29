@@ -52,6 +52,9 @@ namespace baikaldb {
         }\
     } while (0);
 
+extern int get_instance_from_bns(int* ret,
+                          const std::string& bns_name, 
+                          std::vector<std::string>& instances); 
 }//namespace baikaldb
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

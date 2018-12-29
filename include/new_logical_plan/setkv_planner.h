@@ -24,14 +24,14 @@ class SetKVPlanner : public LogicalPlanner {
 public:
 
     SetKVPlanner(QueryContext* ctx) : LogicalPlanner(ctx) {}
-
     virtual ~SetKVPlanner() {}
-
     virtual int plan();
 
 private:
     int set_autocommit_0();
     int set_autocommit_1();
+    int set_autocommit(parser::ExprNode* expr);
+    int set_user_variable(const std::string& key, parser::ExprNode* expr);
 
 private:
     parser::SetStmt*  _set_stmt;

@@ -47,6 +47,7 @@
 //#include "region_resource.h"
 #include "runtime_state.h"
 #include "rapidjson/document.h"
+#include "meta_writer.h"
 
 using google::protobuf::Message;
 using google::protobuf::RepeatedPtrField;
@@ -104,6 +105,8 @@ public:
                 _region_id(region_id),
                 _statistics_queue(_statistics_items,
                     RECV_QUEUE_SIZE * sizeof(StatisticsInfo), butil::NOT_OWN_STORAGE),
+                _qps(1),
+                _average_cost(50000),
                _node(groupId, peerId),
                _is_leader(false),
                _shutdown(false),
@@ -440,6 +443,14 @@ public:
         BAIDU_SCOPED_LOCK(_ptr_mutex);
         _resource = new_resource;
     }
+    bool peers_stable() {
+        std::vector<braft::PeerId> peers;
+        return _node.list_peers(&peers).ok() && peers.size() >= (size_t)_region_info.replica_num();
+    }
+    void copy_region(pb::RegionInfo* region_info) {
+        std::lock_guard<std::mutex> lock(_region_lock);
+        region_info->CopyFrom(_region_info);
+    }
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -475,7 +486,19 @@ private:
         bool tail_split = false;
         std::unordered_map<uint64_t, pb::TransactionInfo> prepared_txn;
     };
-    
+   
+    void write_meta_info() {
+        auto ret = _writer->update_num_table_lines(_region_id, _num_table_lines.load());
+        if (ret < 0) {
+            DB_FATAL("write num_table_line to new key fail, region_id: %ld", _region_id);
+        }
+        ret = _writer->update_apply_index(_region_id, _applied_index);
+        if (ret < 0) {
+            DB_FATAL("write apply_index to new key fail, region_id: %ld", _region_id);
+        }
+        DB_WARNING("write num_table_line: %ld and apply_index: %ld to new key, region_id: %ld", 
+            _num_table_lines.load(), _applied_index, _region_id);
+    } 
     void save_snapshot(braft::Closure* done, 
                         rocksdb::Iterator* iter,
                         braft::SnapshotWriter*writer, 
@@ -510,10 +533,6 @@ private:
                             MutTableKey& region_prefix,
                             int64_t& row_count);
 
-    void copy_region(pb::RegionInfo* region_info) {
-        std::lock_guard<std::mutex> lock(_region_lock);
-        region_info->CopyFrom(_region_info);
-    }
     void set_region(const pb::RegionInfo& region_info) {
         std::lock_guard<std::mutex> lock(_region_lock);
         _region_info.CopyFrom(region_info);
@@ -596,6 +615,7 @@ private:
     // shared_ptr is not thread safe when assign
     std::mutex  _ptr_mutex;
     std::shared_ptr<RegionResource>     _resource;
+    MetaWriter*                             _writer = nullptr;
 };
 
 typedef std::shared_ptr<Region> SmartRegion;

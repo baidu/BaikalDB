@@ -108,7 +108,7 @@ int Separate::analyze(QueryContext* ctx) {
     }
 
     std::map<int64_t, pb::RegionInfo> region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
-    int region_size = region_infos.size();
+    //int region_size = region_infos.size();
     fetch_node->set_region_infos(region_infos);
     std::vector<ExecNode*> join_nodes;
     plan->get_node(pb::JOIN_NODE, join_nodes);

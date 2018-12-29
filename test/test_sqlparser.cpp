@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include "baikal_client.h"
 #include "common.h"
 #include "parser.h"
 

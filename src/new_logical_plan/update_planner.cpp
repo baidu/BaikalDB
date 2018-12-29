@@ -48,7 +48,9 @@ int UpdatePlanner::plan() {
     if (0 != parse_orderby()) {
         return -1;
     }
-    parse_limit();
+    if (0 != parse_limit()) {
+        return -1;
+    }
     create_packet_node(pb::OP_UPDATE);
 
     if (0 != create_update_node()) {
@@ -69,11 +71,13 @@ int UpdatePlanner::plan() {
     return 0;
 }
 
-void UpdatePlanner::parse_limit() {
-    if (_update->limit == nullptr) {
-        return;
+int UpdatePlanner::parse_limit() {
+    if (_update->limit != nullptr) {
+        _ctx->stat_info.error_code = ER_SYNTAX_ERROR;
+        _ctx->stat_info.error_msg << "syntax error! update does not support limit";
+        return -1;
     }
-    _limit_count = _update->limit->count;
+    return 0;
 }
 
 int UpdatePlanner::create_update_node() {
@@ -110,7 +114,10 @@ int UpdatePlanner::create_update_node() {
 }
 
 int UpdatePlanner::parse_kv_list() {
+    int64_t table_id = _table_tuple_mapping.begin()->first;
+    TableInfo table_info = _factory->get_table_info(table_id); 
     parser::Vector<parser::Assignment*> set_list = _update->set_list;
+    std::set<int32_t> update_field_ids;
     for (int idx = 0; idx < set_list.size(); ++idx) {
         if (set_list[idx] == nullptr) {
             DB_WARNING("set item is nullptr");
@@ -128,13 +135,39 @@ int UpdatePlanner::parse_kv_list() {
         }
         auto slot = get_scan_ref_slot(field_info->table_id, field_info->id, field_info->type);
         _update_slots.push_back(slot);
+        update_field_ids.insert(field_info->id);
 
         pb::Expr value_expr;
         if (0 != create_expr_tree(set_list[idx]->expr, value_expr)) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
+        if (field_info->on_update_value == "(current_timestamp())") {
+            if (value_expr.nodes(0).node_type() == pb::NULL_LITERAL) {
+                auto node = value_expr.mutable_nodes(0);
+                node->set_num_children(0);
+                node->set_node_type(pb::STRING_LITERAL);
+                node->set_col_type(pb::STRING);
+                node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
+            }
+        }
         _update_values.push_back(value_expr);
+    }
+    for (auto& field : table_info.fields) {
+        if (update_field_ids.count(field.id) != 0) {
+            continue;
+        }
+        if (field.on_update_value == "(current_timestamp())") {
+            pb::Expr value_expr;
+            auto node = value_expr.add_nodes();
+            node->set_num_children(0);
+            node->set_node_type(pb::STRING_LITERAL);
+            node->set_col_type(pb::STRING);
+            node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
+            auto slot = get_scan_ref_slot(field.table_id, field.id, field.type);
+            _update_slots.push_back(slot);
+            _update_values.push_back(value_expr);
+        }
     }
     return 0;
 }

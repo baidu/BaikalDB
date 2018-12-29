@@ -49,7 +49,9 @@ public:
         }
         return true;
     }
-
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ExecNode::find_place_holder(placeholders);
+    }
 
 protected:
     pb::Engine _engine = pb::ROCKSDB;

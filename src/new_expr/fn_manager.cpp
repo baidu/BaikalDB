@@ -72,8 +72,14 @@ void FunctionManager::register_operators() {
         register_object(name, T);
         return_type_map[name] = ret_type;
     };
+    // num funcs
+    register_object_ret("round", round, pb::INT64);
+    register_object_ret("floor", floor, pb::INT64);
+    register_object_ret("ceil", ceil, pb::INT64);
+    register_object_ret("ceiling", ceil, pb::INT64);
+
     // str funcs
-    register_object_ret("length", length, pb::STRING);
+    register_object_ret("length", length, pb::INT64);
     register_object_ret("upper", upper, pb::STRING);
     register_object_ret("lower", lower, pb::STRING);
     register_object_ret("concat", concat, pb::STRING);

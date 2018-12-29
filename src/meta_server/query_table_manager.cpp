@@ -142,9 +142,13 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
     std::string input_namespace_name = request->namespace_name();
     boost::trim(input_namespace_name);
     TableManager* manager = TableManager::get_instance();
-    BAIDU_SCOPED_LOCK(manager->_table_mutex);
+    std::unordered_map<int64_t, TableMem> table_info_map_tmp;
+    {
+        BAIDU_SCOPED_LOCK(manager->_table_mutex);
+        table_info_map_tmp = manager->_table_info_map;
+    }
     std::map<std::string, pb::QueryTable> table_infos;
-    for (auto& table_info : manager->_table_info_map) {
+    for (auto& table_info : table_info_map_tmp) {
         if (input_table_name.size() != 0 
                 && table_info.second.schema_pb.table_name() != input_table_name) {
             continue;
@@ -161,6 +165,7 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
                                         + table_info.second.schema_pb.database() + "\001"
                                         + table_info.second.schema_pb.table_name();
         pb::QueryTable flatten_table_info;
+        int64_t table_id = table_info.second.schema_pb.table_id();
         flatten_table_info.set_namespace_name(table_info.second.schema_pb.namespace_name());
         flatten_table_info.set_database(table_info.second.schema_pb.database());
         flatten_table_info.set_table_name(table_info.second.schema_pb.table_name());
@@ -171,7 +176,7 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
         flatten_table_info.set_max_field_id(table_info.second.schema_pb.max_field_id());
         flatten_table_info.set_version(table_info.second.schema_pb.version());
         flatten_table_info.set_status(table_info.second.schema_pb.status());
-        flatten_table_info.set_table_id(table_info.second.schema_pb.table_id());
+        flatten_table_info.set_table_id(table_id);
         flatten_table_info.set_byte_size_per_record(
                 table_info.second.schema_pb.byte_size_per_record());
         int64_t region_count = 0;
@@ -179,6 +184,7 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
             region_count += partition_region.second.size();
         }
         flatten_table_info.set_region_count(region_count);
+        flatten_table_info.set_row_count(manager->get_row_count(table_id));
         time_t t = table_info.second.schema_pb.timestamp();
         struct tm t_result;
         localtime_r(&t, &t_result);

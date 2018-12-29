@@ -188,6 +188,7 @@ int FetcherNode::send_request(
         //addr = rand_peer_func(info);
         //还是发给leader，但是不是leader也不失败
         addr = info.leader();
+        //choose_opt_instance(info, addr);
         req.set_select_without_leader(true);
     } else {
         addr = info.leader();
@@ -245,7 +246,7 @@ int FetcherNode::send_request(
     }
     //todo 需要处理分裂情况
     if (res.errcode() == pb::VERSION_OLD) {
-        DB_WARNING("VERSION_OLD, region_id:%ld, retry:%d, now:%s, log_id:%lu", 
+        DB_WARNING("VERSION_OLD, region_id: %ld, retry:%d, now:%s, log_id:%lu", 
                 region_id, retry_times, info.ShortDebugString().c_str(), log_id);
         if (res.regions_size() >= 2) {
             auto regions = res.regions();
@@ -289,7 +290,8 @@ int FetcherNode::send_request(
                     ret = send_request(state, r_copy, records, r_copy.region_id(), log_id, retry_times + 1, 1);
                 } else {
                     if (res.leader() != "0.0.0.0:0") {
-                        DB_WARNING("region: %ld set new_leader: %s when old_version", region_id, r_copy.leader().c_str());
+                        DB_WARNING("region_id: %ld set new_leader: %s when old_version", 
+                                region_id, r_copy.leader().c_str());
                         r_copy.set_leader(res.leader());
                     }
                     if (_op_type != pb::OP_COMMIT) {
@@ -305,7 +307,8 @@ int FetcherNode::send_request(
                     ret = send_request(state, r_copy, records, r_copy.region_id(), log_id, retry_times + 1, start_seq_id);
                 }
                 if (ret < 0) {
-                    DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu", r_copy.region_id(), log_id, state->txn_id);
+                    DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu", 
+                            r_copy.region_id(), log_id, state->txn_id);
                     return ret;
                 }
             }
@@ -376,8 +379,7 @@ int FetcherNode::push_cmd_to_cache(RuntimeState* state) {
         InsertNode* insert_node = static_cast<InsertNode*>(_children[0]->get_node(pb::INSERT_NODE));
         pb::InsertNode* pb_node = nullptr;
         if (insert_node != nullptr) {
-            pb_node = insert_node->mutable_pb_node()->
-                mutable_derive_node()->mutable_insert_node();
+            pb_node = insert_node->mutable_pb_node()->mutable_derive_node()->mutable_insert_node();
         } else if (!state->autocommit()) {
             DB_WARNING("no insert/replace node");
             return -1;
@@ -403,6 +405,24 @@ int FetcherNode::push_cmd_to_cache(RuntimeState* state) {
     //DB_WARNING("add cmd to cache: %s", plan_item.ShortDebugString().c_str());
     client->cache_plans.insert({state->seq_id, plan_item});
     return 0;
+}
+void FetcherNode::choose_opt_instance(pb::RegionInfo& info, std::string& addr) {
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+    std::string baikaldb_logical_room = schema_factory->get_logical_room();
+    if (baikaldb_logical_room.empty()) {
+        return;
+    }
+    std::vector<std::string> candicate_peers;
+    for (auto& peer: info.peers()) {
+        std::string logical_room = schema_factory->logical_room_for_instance(peer);
+        if (!logical_room.empty()  && logical_room == baikaldb_logical_room) {
+            candicate_peers.push_back(peer);
+        }  
+    }
+    if (candicate_peers.size() > 0) {
+        uint32_t i = butil::fast_rand() % candicate_peers.size();
+        addr = candicate_peers[i];
+    }
 }
 
 int FetcherNode::open(RuntimeState* state) {

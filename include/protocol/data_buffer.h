@@ -19,8 +19,8 @@
 
 namespace baikaldb {
 
-const uint32_t MAX_ALLOC_BUF_SIZE = (1024 * 1024 * 1024);
-const uint32_t DFT_ALLOC_BUF_SIZE = (1024 * 1024);
+const size_t MAX_ALLOC_BUF_SIZE = (1024 * 1024 * 1024 * 2ULL);
+const size_t DFT_ALLOC_BUF_SIZE = (1024 * 1024);
 
 class DataBuffer {
 public:
@@ -29,8 +29,9 @@ public:
 
     bool byte_array_append_size(int len, int is_pow);
     bool byte_array_append_len(const uint8_t *data, int len);
-    bool byte_array_append_value(const ExprValue& value);
-    bool byte_array_append_length_coded_binary(unsigned long long num);
+    bool append_text_value(const ExprValue& value);
+    bool append_binary_value(const ExprValue& value, uint8_t type, uint8_t* null_map, int field_idx, int null_offset);
+    bool byte_array_append_length_coded_binary(uint64_t num);
     bool pack_length_coded_string(const std::string& str, bool is_null);
     bool network_queue_send_append(const uint8_t* data, int len, 
                                     uint8_t packet_id, int append_data_later);

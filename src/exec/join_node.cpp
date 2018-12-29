@@ -76,7 +76,7 @@ int JoinNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             if (value.is_null() || value.get_numberic<bool>() == false) {
                 // todo, 三种不同的join优化方式不同
             } else {
-                ExprNode::destory_tree(expr);
+                ExprNode::destroy_tree(expr);
                 iter = _conditions.erase(iter);
                 continue;
             }
@@ -296,26 +296,29 @@ int JoinNode::open(RuntimeState* state) {
     for (auto& exec_node : scan_nodes) {
         RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
         ExecNode* parent_node_ptr = scan_node->get_parent();
+        FilterNode* filter_node = nullptr;
         if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
                 || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
-            auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
-                    int32_t {return state->get_slot_id(tuple_id, field_id);};
-            scan_node->clear_possible_indexes();
-            //索引选择
-            IndexSelector().index_selector(get_slot_id,
-                                            NULL,
-                                            scan_node, 
-                                            static_cast<FilterNode*>(parent_node_ptr),
-                                            NULL,
-                                            NULL);
-            //路由选择
-            PlanRouter().scan_plan_router(scan_node);
-            FetcherNode* related_fetcher_node = scan_node->
-                                                get_related_fetcher_node();
-            auto region_infos = scan_node->region_infos();
-            //更改scan_node对应的fethcer_node的region信息
-            related_fetcher_node->set_region_infos(region_infos);
+            filter_node = static_cast<FilterNode*>(parent_node_ptr);
         }
+
+        auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
+                int32_t {return state->get_slot_id(tuple_id, field_id);};
+        scan_node->clear_possible_indexes();
+        //索引选择
+        IndexSelector().index_selector(get_slot_id,
+                                        NULL,
+                                        scan_node, 
+                                        filter_node,
+                                        NULL,
+                                        NULL);
+        //路由选择
+        PlanRouter().scan_plan_router(scan_node);
+        FetcherNode* related_fetcher_node = scan_node->
+                                            get_related_fetcher_node();
+        auto region_infos = scan_node->region_infos();
+        //更改scan_node对应的fethcer_node的region信息
+        related_fetcher_node->set_region_infos(region_infos);
     }
     DB_WARNING("when join, index_selector and scan plan, time_cost:%ld",
                 join_time_cost.get_time());
@@ -683,7 +686,13 @@ void JoinNode::close(RuntimeState* state) {
         delete mem_row;
     }
 }
- 
+
+void JoinNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _conditions) {
+        expr->find_place_holder(placeholders);
+    }
+}  
 }//namespace
 
 

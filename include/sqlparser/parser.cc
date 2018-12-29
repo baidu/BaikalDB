@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "parser.h"
+#include "common.h"
 #ifdef BAIDU_INTERNAL
 #include "uconv.h"
 #endif
@@ -20,7 +21,7 @@
 
 extern int sql_parse(yyscan_t scanner, parser::SqlParser* parser);
 namespace parser {
-void SqlParser::change_5c_to_7f() {
+void SqlParser::change_5c_to_7f(std::string& sql) {
     size_t i = 0;
     while (i < sql.size()) {
         if ((sql[i] & 0x80) != 0) {
@@ -36,6 +37,7 @@ void SqlParser::change_5c_to_7f() {
     }
 }
 void SqlParser::parse(const std::string& sql_) {
+    std::string sql = sql_;
 #ifdef BAIDU_INTERNAL
     // 内部编码设置不准，需要自动获取
     // todo: 整理后，去除这个逻辑
@@ -52,9 +54,8 @@ void SqlParser::parse(const std::string& sql_) {
         is_gbk = false;
     }
 #endif
-    sql = sql_;
     if (is_gbk) {
-        change_5c_to_7f();
+        change_5c_to_7f(sql);
     }
     yyscan_t scanner;
     sql_lex_init(&scanner);

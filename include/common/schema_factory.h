@@ -93,12 +93,20 @@ struct FieldInfo {
     std::string         name;   // db.table.field
     std::string         default_value;
     ExprValue           default_expr_value;
+    std::string         on_update_value;
+    std::string         comment;
     pb::PrimitiveType   type;
     bool                can_null = false;
     bool                auto_inc = false;
     bool                deleted = false;
     //const FieldDescriptor* field;
 };
+
+struct DistInfo {
+    std::string logical_room;
+    int64_t count;
+};
+
 // short name
 inline int32_t get_field_id_by_name(
         const std::vector<FieldInfo>& fields, const std::string& name) {
@@ -128,6 +136,8 @@ struct TableInfo {
     std::vector<int64_t>    indices; // include pk
     //std::set<int64_t>       regions; //TODO
     std::vector<FieldInfo>  fields;
+    std::vector<DistInfo>   dists;
+    int64_t                 replica_num = 3;
 
     const Descriptor*       tbl_desc;
     DescriptorProto*        tbl_proto = nullptr;
@@ -189,6 +199,13 @@ struct SchemaMapping {
     std::unordered_map<int64_t, IndexInfo> index_info_mapping;
 };
 
+struct IdcMapping {
+    // store => logical_room
+    std::unordered_map<std::string, std::string> instance_logical_mapping;
+    // physical_room => logical_room
+    std::unordered_map<std::string, std::string> physical_logical_mapping;
+};
+
 class SchemaFactory {
     typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec; 
 public:
@@ -211,6 +228,12 @@ public:
     static int update_tables_double_buffer(
             void* meta, bthread::TaskIterator<pb::SchemaInfo>& iter);
     void update_tables_double_buffer(bthread::TaskIterator<pb::SchemaInfo>& iter);
+
+    static int update_idc_double_buffer(
+            void* meta, bthread::TaskIterator<pb::IdcInfo>& iter);
+    void update_idc_double_buffer(bthread::TaskIterator<pb::IdcInfo>& iter);
+    void update_idc(const pb::IdcInfo& idc_info, IdcMapping* background);
+    void update_idc(const pb::IdcInfo& idc_info);
 
     static int update_regions_double_buffer(
             void* meta, bthread::TaskIterator<RegionVec>& iter);
@@ -288,12 +311,40 @@ public:
     int whether_exist_tableid(int64_t table_id);
 
     void get_all_table_version(std::unordered_map<int64_t, int64_t>& table_id_version);
-
+    std::string physical_room() {
+        return _physical_room;
+    }
+    std::string get_logical_room() {
+        if (_logical_room.empty()) {
+            IdcMapping* frontground = _double_buffer_idc.read();
+            auto& physical_logical_mapping = frontground->physical_logical_mapping;
+            if (physical_logical_mapping.find(_physical_room) != physical_logical_mapping.end()) {
+                _logical_room = physical_logical_mapping[_physical_room];
+            }
+        }
+        return _logical_room;
+    }
+    std::string logical_room_for_instance(const std::string& store) {
+        IdcMapping* frontground = _double_buffer_idc.read();
+        auto& instance_logical_mapping = frontground->instance_logical_mapping;
+        if (instance_logical_mapping.find(store) != instance_logical_mapping.end()) {
+            return instance_logical_mapping[store];
+        }
+        return "";
+    }
 private:
     SchemaFactory() {
         _is_init = false;
         bthread_mutex_init(&_update_table_region_mutex, NULL);
         bthread_mutex_init(&_update_user_mutex, NULL);
+        butil::EndPoint addr;
+        addr.ip = butil::my_ip();
+        addr.port = 0;
+        std::string address = endpoint2str(addr).c_str(); 
+        auto ret = get_physical_room(address, _physical_room);
+        if (ret < 0) {
+            DB_FATAL("get physical room fail, ip: %s", address.c_str());
+        }
     }
     int update_table(const pb::SchemaInfo& table, SchemaMapping* background);
     // 全量更新
@@ -313,7 +364,13 @@ private:
     DoubleBuffer<SchemaMapping> _double_buffer_table;
     bthread::ExecutionQueueId<pb::SchemaInfo> _table_queue_id = {0};
 
+    DoubleBuffer<IdcMapping>    _double_buffer_idc;
+    bthread::ExecutionQueueId<pb::IdcInfo>  _idc_queue_id = {0};
+
     std::unordered_map<int64_t, TableRegionPtr> _table_region_mapping;
     bthread::ExecutionQueueId<RegionVec> _region_queue_id = {0};
+
+    std::string _physical_room;
+    std::string _logical_room;
 };
 }
