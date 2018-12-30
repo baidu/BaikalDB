@@ -38,7 +38,7 @@ We use [Bazel](https://www.bazel.build) to resolve dependencies and build Baikal
 The build has been successful on Ubuntu 16.04 and CentOS 7. More platforms will be supported soon.
 
 ### Ubuntu 16.04
-* [Install bazel](https://docs.bazel.build/versions/master/install-ubuntu.html).
+* [Install bazel](https://docs.bazel.build/versions/master/install-ubuntu.html), we recommend version 0.18.1 or earlier. Later versions may be incompatible with the BUILD file.
 * Install flex, bison and openssl library: 
   sudo apt-get install flex bison libssl-dev
 * Install g++ (v4.8.2 or later): 
