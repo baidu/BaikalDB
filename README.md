@@ -115,7 +115,7 @@ CREATE TABLE `TestDB`.`test_table` (
 After CREATE TABLE returns successfully, the synchronization of table schema from baikalMeta to baikaldb/baikalStore requires 10-30 seconds, during which SQL command like `show tables` and `desc table` may fail.
 
 ### How To Upgrade BaikalStore to the space-efficient-snapshot version
-If your cluster is deployed with the binary built from the code submitted before Dec. 25 2018, you are required to follow the below steps to upgrade the BaikalStore binary to the latest version.
+If your cluster is deployed with the binary built from the code submitted before Dec. 25 2018, you are required to follow the below instructions to upgrade the BaikalStore binary to the latest version.
 1. Upgrade all BaikalStore instances to the latest no_snapshot_compatible branch. This is an intermediate branch, on which all add_peer operations will fail.
 2. Create new snapshot manually for all regions.
   *  How to create snapshot? Execute `sh src/tools/script/store_snapshot_region.sh ip:port` for all BaikalStore instances.
