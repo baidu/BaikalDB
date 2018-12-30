@@ -28,7 +28,7 @@ BaikalDB 的主要特性如下：
 ## 编译步骤
 外部编译使用[bazel构建工具](https://www.bazel.build)
 ### Ubuntu 16.04
-* [安装bazel](https://docs.bazel.build/versions/master/install-ubuntu.html)。
+* [安装bazel](https://docs.bazel.build/versions/master/install-ubuntu.html) 推荐0.18.1或者更早的版本，较新的版本可能存在语法兼容性问题，我们正在努力解决。
 * 安装flex, bison, openssl库：
   sudo apt-get install flex bison libssl-dev
 * 安装g++ (版本不低于4.8.2)：
