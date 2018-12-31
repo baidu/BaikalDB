@@ -153,6 +153,7 @@ int main(int argc, char** argv) {
         base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
+            delete entry;
             return -1;
         }
         entry->data = data;
@@ -238,6 +239,7 @@ int main(int argc, char** argv) {
         base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
+            delete entry;
             return -1;
         }
         entry->data = data;
@@ -276,6 +278,7 @@ int main(int argc, char** argv) {
         base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
+            delete entry;
             return -1;
         }
         entry->data = data;
@@ -314,6 +317,7 @@ int main(int argc, char** argv) {
         base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
+            delete entry;
             return -1;
         }
         entry->data = data;
@@ -352,6 +356,7 @@ int main(int argc, char** argv) {
             base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
             if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
                 std::cout << "SerializeToZeroCopyStream fail" << std::endl;
+                delete entry;
                 return -1;
             }
             entry->data = data;

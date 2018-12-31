@@ -92,7 +92,6 @@ public:
     }
 
 private:
-    //先用shared_ptr来维护内存，后续看是否需要优化
     //采用unique_ptr来维护内存，减少内存占用
     //后续考虑直接用MemRow，因为MemRow内部也只有几个指针
     std::vector<std::unique_ptr<MemRow> > _rows;

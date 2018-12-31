@@ -27,7 +27,6 @@ enum ParseError {
 };
 
 struct SqlParser {
-    std::string sql;
     std::string charset;
     std::string collation;
     std::vector<StmtNode*> result;
@@ -36,8 +35,9 @@ struct SqlParser {
     butil::Arena arena;
     bool is_gbk = false;
     bool has_5c = false;
+    int place_holder_id = 0;
     void parse(const std::string& sql);
-    void change_5c_to_7f();
+    void change_5c_to_7f(std::string& sql);
 };
 
 inline void print_stmt(Node* node, int ii = 0) {

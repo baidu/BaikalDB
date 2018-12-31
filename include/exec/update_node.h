@@ -25,13 +25,13 @@ public:
     }
     virtual ~UpdateNode() {
         for (auto expr : _update_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node) override;
     virtual int open(RuntimeState* state) override;
     virtual void close(RuntimeState* state) override;
-    virtual void transfer_pb(pb::PlanNode* pb_node) override;
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node) override;
 
 private:
 };

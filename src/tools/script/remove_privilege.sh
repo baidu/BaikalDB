@@ -7,10 +7,10 @@ curl -d '{
     "user_privilege" : {
         "username" : "root",
         "password" : "root",
-        "namespace_name" : "TEST_NAMESPACE",
+        "namespace_name" : "FENGCHAO",
         "privilege_table" : [{
-                                    "database" : "TestDb",
-                                    "table_name" : "TestTb"                           
+                                    "database" : "FC_Content",
+                                    "table_name" : "wordinfo"                           
                                 }]
     }
 }' http://$1/MetaService/meta_manager

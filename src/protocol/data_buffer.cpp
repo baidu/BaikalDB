@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "data_buffer.h"
+#include "key_encoder.h"
 
 namespace baikaldb {
 DataBuffer::DataBuffer(uint32_t capacity) {
@@ -58,14 +59,14 @@ bool DataBuffer::byte_array_append_size(int len, int is_pow) {
     if (_size + len <= _capacity) {
         return true;
     }
-    int want_alloc = _size + len;
-    if (want_alloc > (int)MAX_ALLOC_BUF_SIZE) {
+    size_t want_alloc = _size + len;
+    if (want_alloc > MAX_ALLOC_BUF_SIZE) {
         DB_FATAL("want_alloc size[%d] bigger than max[%d]",
                         want_alloc, MAX_ALLOC_BUF_SIZE);
         return false;
     }
     if (is_pow == 1) {
-        int acc_alloc = 1;
+        size_t acc_alloc = 1;
         while (acc_alloc < want_alloc) {
             acc_alloc <<= 1;
         }
@@ -96,7 +97,7 @@ bool DataBuffer::byte_array_append_len(const uint8_t *data, int len) {
     return true;
 }
 
-bool DataBuffer::byte_array_append_value(const ExprValue& value) {
+bool DataBuffer::append_text_value(const ExprValue& value) {
     do {
         // string长度太长，单独处理
         if (value.is_string()) {
@@ -113,7 +114,7 @@ bool DataBuffer::byte_array_append_value(const ExprValue& value) {
         }
         size_t size = _capacity - _size;
         size_t len = 0;
-        SerializeStatus ret = value.serialize_to_mysql_packet(buf, size, len);
+        SerializeStatus ret = value.serialize_to_mysql_text_packet(buf, size, len);
         if (ret == STMPS_SUCCESS) {
             _size += len;
             return true;
@@ -130,7 +131,41 @@ bool DataBuffer::byte_array_append_value(const ExprValue& value) {
     } while (true);
 }
 
-bool DataBuffer::byte_array_append_length_coded_binary(unsigned long long num) {
+// https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
+// https://dev.mysql.com/doc/internals/en/null-bitmap.html
+// TODO: support other mysql types
+bool DataBuffer::append_binary_value(const ExprValue& value, uint8_t type, uint8_t* null_map, int field_idx, int null_offset) {
+    // DB_WARNING("result value is: %s", value.get_string().c_str());
+    if (value.is_null()) {
+        int byte = ((field_idx + null_offset) / 8);
+        int bit  = ((field_idx + null_offset) % 8);
+        null_map[byte] |= (1 << bit);
+        return true;
+    }
+    // string长度太长，单独处理
+    if (value.is_string()) {
+        return pack_length_coded_string(value.str_val, false);
+    }
+    if (type == MYSQL_TYPE_LONGLONG) {
+        uint64_t val = value.get_numberic<uint64_t>();
+        return byte_array_append_len((uint8_t*)&val, 8);
+    } else if (type == MYSQL_TYPE_LONG || type == MYSQL_TYPE_INT24) {
+        uint32_t val = value.get_numberic<uint32_t>();
+        return byte_array_append_len((uint8_t*)&val, 4);
+    } else if (type == MYSQL_TYPE_SHORT) {
+        uint16_t val = value.get_numberic<uint16_t>();
+        return byte_array_append_len((uint8_t*)&val, 2);
+    } else if (type == MYSQL_TYPE_TINY) {
+        uint8_t val = value.get_numberic<uint8_t>();
+        return byte_array_append_len((uint8_t*)&val, 1);
+    } else {
+        DB_WARNING("unsupported binary type: %u", type);
+        return false;
+    }
+    return true;
+}
+
+bool DataBuffer::byte_array_append_length_coded_binary(uint64_t num) {
     uint8_t bytes[10];
     if (num < 251LL) {
         bytes[0] = (uint8_t)(num & 0xff);

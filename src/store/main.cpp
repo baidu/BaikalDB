@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
         return -1;
     }
     DB_WARNING("log file load success");
-    baikaldb::register_myraftlog_extension();
+    baikaldb::register_myraft_extension();
     int ret = 0;
 #ifdef BAIDU_INTERNAL
     //init wordrank_client
@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
         return -1;
     }
 #endif
-    /*
+    /* 
     std::ifstream extra_fs("test_file");
     std::string word((std::istreambuf_iterator<char>(extra_fs)),
             std::istreambuf_iterator<char>());
@@ -91,8 +91,8 @@ int main(int argc, char **argv) {
     }
     DB_WARNING("wordseg:%ld", tt1.get_time());
     return 0;
-    */
     
+    */
     // init singleton
     baikaldb::FunctionManager::instance()->init();
     if (baikaldb::SchemaFactory::get_instance()->init() != 0) {
@@ -143,6 +143,13 @@ int main(int argc, char **argv) {
     store->shutdown_raft();
     store->close();
     DB_WARNING("store close success");
+    // exit if server.join is blocked
+    baikaldb::Bthread bth;
+    bth.run([]() {
+            bthread_usleep(2 * 60 * 1000 * 1000);
+            DB_FATAL("store forse exit");
+            exit(-1);
+        });
     // 需要后关端口
     server.Stop(0);
     server.Join();

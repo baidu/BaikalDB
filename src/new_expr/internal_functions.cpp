@@ -14,11 +14,39 @@
 
 #include "internal_functions.h"
 #include "hll_common.h"
-#include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <algorithm>
 
 namespace baikaldb {
 static const int32_t DATE_FORMAT_LENGTH = 128;
+ExprValue round(const std::vector<ExprValue>& input) {
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::INT64);
+    tmp._u.int64_val = ::round(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue floor(const std::vector<ExprValue>& input) {
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::INT64);
+    tmp._u.int64_val = ::floor(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue ceil(const std::vector<ExprValue>& input) {
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::INT64);
+    tmp._u.int64_val = ::ceil(input[0].get_numberic<double>());
+    return tmp;
+}
+
 ExprValue length(const std::vector<ExprValue>& input) {
     if (input[0].is_null()) {
         return ExprValue::Null();
@@ -35,6 +63,25 @@ ExprValue lower(const std::vector<ExprValue>& input) {
     ExprValue tmp(pb::STRING);
     tmp.str_val = input[0].str_val;
     std::transform(tmp.str_val.begin(), tmp.str_val.end(), tmp.str_val.begin(), ::tolower); 
+    return tmp;
+}
+
+ExprValue lower_gbk(const std::vector<ExprValue>& input) {
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = input[0].str_val;
+    std::string& literal = tmp.str_val;
+    size_t idx = 0;
+    while (idx < literal.size()) {
+        if ((literal[idx] & 0x80) != 0) {
+            idx += 2;
+        } else {
+            literal[idx] = tolower(literal[idx]);
+            idx++;
+        }
+    }
     return tmp;
 }
 
@@ -280,6 +327,16 @@ ExprValue case_expr_when(const std::vector<ExprValue>& input) {
      } else {
         return input[input.size() - 1];
     }
+}
+
+ExprValue murmur_hash(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::UINT64);
+    if (input.size() == 0) {
+        tmp._u.uint64_val = 0;
+    } else {
+        tmp._u.uint64_val = make_sign(input[0].str_val);
+    }
+    return tmp;
 }
 }
 

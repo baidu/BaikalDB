@@ -2,24 +2,6 @@
 #               https://github.com/smyte/smyte-db/blob/master/third_party/rocksdb.BUILD
 
 licenses(["notice"])
-exports_files(["rocksdb.patch"])
-
-genrule(
-    name = "pessimistic_transaction_patch",
-    srcs = [
-        "@//third-party/com_github_facebook_rocksdb:rocksdb.patch",
-        "utilities/transactions/pessimistic_transaction.cc",
-    ],
-    outs = [
-        "utilities/transactions/pessimistic_transaction_patch.cc",
-    ],
-    cmd = "\n".join([
-           "cat external/com_github_facebook_rocksdb/utilities/transactions/pessimistic_transaction.cc >> $(@)",
-           "OUT_FILE=`ls $(@)`",
-           "OUT_PATH=`dirname -- $$OUT_FILE`",
-           "patch -d$$OUT_PATH -p0 < $(location @//third-party/com_github_facebook_rocksdb:rocksdb.patch)",
-          ])
-)
 
 genrule(
     name = "build_version",
@@ -38,7 +20,6 @@ cc_library(
         "**/*.h",
     ]) + [
         ":build_version",
-        ":pessimistic_transaction_patch",
         "cache/clock_cache.cc",
         "cache/lru_cache.cc",
         "cache/sharded_cache.cc",
@@ -243,6 +224,7 @@ cc_library(
         "utilities/transactions/transaction_util.cc",
         "utilities/transactions/write_prepared_txn.cc",
         "utilities/transactions/write_prepared_txn_db.cc",
+        "utilities/transactions/pessimistic_transaction.cc",
         "utilities/ttl/db_ttl_impl.cc",
         "utilities/write_batch_with_index/write_batch_with_index.cc",
         "utilities/write_batch_with_index/write_batch_with_index_internal.cc",

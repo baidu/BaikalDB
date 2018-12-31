@@ -26,7 +26,7 @@ public:
     }
     virtual ~PacketNode() {
         for (auto expr : _projections) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node);
@@ -38,16 +38,30 @@ public:
         return _op_type;
     }
 
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+
+    size_t field_count() {
+        return _fields.size();
+    }
+    int pack_fields(DataBuffer* buffer, int packet_id);
+    
+    // COM_STMT_EXECUTE use ProtocolBinary for result set
+    void set_binary_protocol(bool binary) {
+        _binary_protocol = binary;
+    }
+
 private:
-    int pack_ok(int num_affected_rows, int64_t last_insert_id = 0);
+    int pack_ok(int num_affected_rows, NetworkSocket* client);
     // 先不用，err在外部填
     int pack_err();
     int pack_head();
     int pack_fields();
-    int pack_row(MemRow* row);
+    int pack_text_row(MemRow* row);
+    int pack_binary_row(MemRow* row);
     int pack_eof();
 
 private:
+    bool _binary_protocol = false;
     pb::OpType _op_type;
     std::vector<ExprNode*> _projections;
     std::vector<ResultField> _fields;

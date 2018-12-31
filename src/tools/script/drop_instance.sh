@@ -10,7 +10,7 @@ curl -d '{
     "op_type": "OP_DROP_INSTANCE",
     "instance": {
         "address" : "'$2'",
-        "physical_room": "idc1"
+        "physical_room": "bjyz"
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

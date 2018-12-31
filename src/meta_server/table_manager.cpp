@@ -26,6 +26,60 @@ DECLARE_int32(concurrency_num);
 DEFINE_int32(region_replica_num, 3, "region replica num, default:3"); 
 DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M");
 
+int64_t TableManager::get_row_count(int64_t table_id) {
+    std::vector<int64_t> region_ids;
+    int64_t byte_size_per_record = 0;
+    {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return 0;
+        }
+        byte_size_per_record = _table_info_map[table_id].schema_pb.byte_size_per_record();
+        for (auto& partition_regions : _table_info_map[table_id].partition_regions) {
+            for (auto& region_id :  partition_regions.second) {
+                region_ids.push_back(region_id);    
+            }
+        }
+    }
+    if (byte_size_per_record == 0) {
+        byte_size_per_record = 1;
+    }
+    std::vector<SmartRegionInfo> region_infos;
+    RegionManager::get_instance()->get_region_info(region_ids, region_infos);
+    int64_t total_byte_size = 0;
+    for (auto& region : region_infos) {
+        total_byte_size += region->used_size();
+    }
+    int64_t total_row_count = 0;
+    for (auto& region : region_infos) {
+        total_row_count += region->num_table_lines();
+    }
+    if (total_row_count == 0) {
+        total_row_count = total_byte_size / byte_size_per_record;
+    }
+    return total_row_count;
+}
+
+void TableManager::update_table_internal(const pb::MetaManagerRequest& request, braft::Closure* done,
+        std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb)> update_callback) {
+    int64_t table_id;
+    if (check_table_exist(request.table_info(), table_id) != 0) {
+        DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
+        return;
+    }
+    pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
+    update_callback(request, mem_schema_pb);
+    auto ret = update_schema_for_rocksdb(table_id, mem_schema_pb, done);
+    if (ret < 0) {
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    set_table_pb(mem_schema_pb);    
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("update table internal success, request:%s", request.ShortDebugString().c_str());
+}
+
 void TableManager::create_table(const pb::MetaManagerRequest& request, braft::Closure* done) {
     auto& table_info = const_cast<pb::SchemaInfo&>(request.table_info());
     table_info.set_timestamp(time(NULL));
@@ -258,23 +312,38 @@ void TableManager::rename_table(const pb::MetaManagerRequest& request, braft::Cl
 }
 
 void TableManager::update_byte_size(const pb::MetaManagerRequest& request, braft::Closure* done) {
-    int64_t table_id;
-    if (check_table_exist(request.table_info(), table_id) != 0) {
-        DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
-        return;
-    }
-    pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
-    mem_schema_pb.set_byte_size_per_record(request.table_info().byte_size_per_record());
-    mem_schema_pb.set_version(mem_schema_pb.version() + 1);
-    auto ret = update_schema_for_rocksdb(table_id, mem_schema_pb, done);
-    if (ret < 0) {
-        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
-        return;
-    }
-    set_table_pb(mem_schema_pb);    
-    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
-    DB_NOTICE("update byte size per record success, request:%s", request.ShortDebugString().c_str());
+    update_table_internal(request, done, 
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+            mem_schema_pb.set_byte_size_per_record(request.table_info().byte_size_per_record());
+            mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+        });
+}
+
+void TableManager::update_split_lines(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    update_table_internal(request, done, 
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+                mem_schema_pb.set_region_split_lines(request.table_info().region_split_lines());
+                mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+        });
+}
+
+void TableManager::update_dists(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    update_table_internal(request, done, 
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+            mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+            mem_schema_pb.clear_dists();
+            mem_schema_pb.clear_main_logical_room();
+            for (auto& dist : request.table_info().dists()) {
+                auto dist_ptr = mem_schema_pb.add_dists();
+                *dist_ptr = dist;
+            }
+            if (request.table_info().has_main_logical_room()) {
+                mem_schema_pb.set_main_logical_room(request.table_info().main_logical_room());
+            }
+            if (request.table_info().has_replica_num()) {
+                mem_schema_pb.set_replica_num(request.table_info().replica_num());
+            }
+        });
 }
 
 void TableManager::add_field(const pb::MetaManagerRequest& request, braft::Closure* done) {
@@ -456,8 +525,8 @@ void TableManager::process_schema_heartbeat_for_store(
                     < table_info_map.second.schema_pb.version()) {
             pb::SchemaInfo* new_table_info = response->add_schema_change_info();
             *new_table_info = table_info_map.second.schema_pb;
-            DB_WARNING("add or update table_name:%s, table_id:%ld",
-                        new_table_info->table_name().c_str(), new_table_info->table_id());
+            //DB_WARNING("add or update table_name:%s, table_id:%ld",
+            //            new_table_info->table_name().c_str(), new_table_info->table_id());
         }
     }
     for (auto& store_table_id : store_table_id_version) {
@@ -468,8 +537,8 @@ void TableManager::process_schema_heartbeat_for_store(
             new_table_info->set_table_name("deleted");
             new_table_info->set_database("deleted");
             new_table_info->set_namespace_name("deleted");
-            DB_WARNING("delete table_info:%s, table_id: %ld",
-                    new_table_info->table_name().c_str(), new_table_info->table_id());
+            //DB_WARNING("delete table_info:%s, table_id: %ld",
+            //        new_table_info->table_name().c_str(), new_table_info->table_id());
         } 
     }
 }
@@ -519,7 +588,7 @@ void TableManager::check_add_table(std::set<int64_t>& report_table_ids,
         *schema_info = table_info_pair.second.schema_pb;
         for (auto& partition_region : table_info_pair.second.partition_regions) {
             for (auto& region_id : partition_region.second) {
-                DB_WARNING("new add region id: %ld", region_id);
+                //DB_WARNING("new add region id: %ld", region_id);
                 new_add_region_ids.push_back(region_id);
             }
         }
@@ -891,7 +960,7 @@ void TableManager::check_table_exist_for_peer(const pb::StoreHeartBeatRequest* r
         if (_table_info_map.find(peer_info.table_id()) != _table_info_map.end()) {
             continue;
         }
-        DB_FATAL("table id:%ld according to region_id:%ld not exit, drop region_id, store_address:%s",
+        DB_WARNING("table id:%ld according to region_id:%ld not exit, drop region_id, store_address:%s",
                 peer_info.table_id(), peer_info.region_id(),
                 request->instance_info().address().c_str());
         //为了安全暂时关掉这个删除region的功能，后续稳定再打开，目前先报fatal(todo)

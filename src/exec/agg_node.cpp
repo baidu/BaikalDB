@@ -216,6 +216,7 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
 }
 
 void AggNode::close(RuntimeState* state) {
+    ExecNode::close(state);
     for (auto expr : _group_exprs) {
         expr->close();
     }
@@ -226,8 +227,8 @@ void AggNode::close(RuntimeState* state) {
         delete _iter->second;
     }
 }
-void AggNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void AggNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto agg_node = pb_node->mutable_derive_node()->mutable_agg_node();
     agg_node->clear_group_exprs();
     for (auto expr : _group_exprs) {
@@ -236,6 +237,15 @@ void AggNode::transfer_pb(pb::PlanNode* pb_node) {
     agg_node->clear_agg_funcs();
     for (auto agg : _agg_fn_calls) {
         ExprNode::create_pb_expr(agg_node->add_agg_funcs(), agg);
+    }
+}
+void AggNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _group_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+    for (auto& expr : _agg_fn_calls) {
+        expr->find_place_holder(placeholders);
     }
 }
 }

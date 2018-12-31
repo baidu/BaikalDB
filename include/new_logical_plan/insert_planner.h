@@ -38,13 +38,11 @@ private:
 
     int parse_values_list(pb::InsertNode* node);
 
+    int fill_default_value(SmartRecord record, FieldInfo& field);
     int fill_record_field(const parser::ExprNode* item, SmartRecord record, FieldInfo& field);
 
 private:
-    //sql_cmd_insert_t*       _insert_cmd;
-    //sql_cmd_replace_t*      _replace_cmd;
-    parser::InsertStmt*               _insert_stmt;
-
+    parser::InsertStmt*     _insert_stmt;
     int64_t                 _table_id;
     std::vector<FieldInfo>  _fields;
     std::vector<FieldInfo>  _default_fields;

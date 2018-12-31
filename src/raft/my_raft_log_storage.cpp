@@ -16,10 +16,11 @@
 #include <boost/lexical_cast.hpp>
 #include "raft_log_compaction_filter.h"
 #include "can_add_peer_setter.h"
+#include "concurrency.h"
 
 namespace baikaldb {
 
-int parse_my_raft_log_uri(const std::string& uri, std::string& id){
+static int parse_my_raft_log_uri(const std::string& uri, std::string& id){
     size_t pos = uri.find("id=");
     if (pos == 0 || pos == std::string::npos) {
         return -1;
@@ -70,12 +71,12 @@ braft::LogStorage* MyRaftLogStorage::new_instance(const std::string& uri) const 
         DB_FATAL("new log_storage instance fail, region_id: %ld",
                   region_id);
     }
-    DB_WARNING("new my_raft_log_storage success, region_id: %ld", region_id);
     RaftLogCompactionFilter::get_instance()->update_first_index_map(region_id, 0);
     return instance;
 }
 
-int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) { 
+int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
+    TimeCost time_cost; 
     //read metaInfo from rocksdb
     char log_meta_key[LOG_META_KEY_SIZE];
     _encode_log_meta_key(log_meta_key, LOG_META_KEY_SIZE);
@@ -93,7 +94,6 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
                                       &string_first_log_index);
     // region is new
     if (!status.ok() && status.IsNotFound()) {
-        DB_WARNING("raft node is new, region_id: %ld", _region_id);
         rocksdb::WriteOptions write_option;
         //write_option.sync = true;
         //write_option.disableWAL = true;
@@ -105,9 +105,6 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
             DB_WARNING("update first log index to rocksdb fail, region_id: %ld, err_mes:%s",
                             _region_id, put_res.ToString().c_str());
             return -1;
-        } else {
-            DB_WARNING("put first log index to rocksdb success, region_id: %ld, first_log_index:%ld",
-                        _region_id, first_log_index);
         }
     } else if (!status.ok()) { 
         DB_FATAL("read log meta info from rocksdb wrong, region_id: %ld, err_mes:%s",
@@ -115,8 +112,6 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
         return -1;
     } else {
         first_log_index = *(int64_t*)string_first_log_index.c_str();
-        DB_WARNING("first log index from rocksdb is: %ld, region_id: %ld", 
-                    first_log_index, _region_id);
     }
     // read log data
     char log_data_key[LOG_DATA_KEY_SIZE];
@@ -198,14 +193,13 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
     }
 
     if (last_log_index == 0) {
-        DB_WARNING("region_id: %ld log entry is empty", _region_id);
         last_log_index = first_log_index - 1;
     }
     _first_log_index.store(first_log_index);
     _last_log_index.store(last_log_index);
     RaftLogCompactionFilter::get_instance()->update_first_index_map(_region_id, first_log_index);
-    DB_WARNING("region_id: %ld, first_log_index:%ld, last_log_index:%ld",
-                    _region_id, _first_log_index.load(), _last_log_index.load());
+    DB_WARNING("region_id: %ld, first_log_index:%ld, last_log_index:%ld, time_cost: %ld",
+                    _region_id, _first_log_index.load(), _last_log_index.load(), time_cost.get_time());
     return 0;
 }
 
@@ -232,21 +226,17 @@ braft::LogEntry* MyRaftLogStorage::get_entry(const int64_t index) {
     entry->AddRef();
     entry->type = (braft::EntryType)head.type;
     entry->id = braft::LogId(index, head.term);
-    //DB_WARNING("log storage get entry, region_id: %ld, log_index:%ld, type:%d, term:%d",
-    //                _region_id, index, entry->type, head.term);
     switch (entry->type) {
         case braft::ENTRY_TYPE_DATA:
             entry->data.append(value_slice.data(), value_slice.size());
-            //DB_WARNING("log storage enty is data, region_id: %ld, log_index:%ld",
-            //                _region_id, index);
             break;
         case braft::ENTRY_TYPE_CONFIGURATION:
             if (_parse_meta(entry, value_slice) != 0) {
                 entry->Release();
                 entry = NULL;
             }
-            DB_WARNING("log storage enty is configure mata, region_id: %ld, log_index:%ld",
-                    _region_id, index);
+            //DB_WARNING("log storage enty is configure mata, region_id: %ld, log_index:%ld",
+            //        _region_id, index);
             break;
         case braft::ENTRY_TYPE_NO_OP:
             if (value_slice.size() != 0) {
@@ -303,6 +293,10 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
                 _last_log_index.load(), entries.front()->id.index, _region_id);
         return -1;
     }
+    Concurrency::get_instance()->raft_write_concurrency.increase_wait();
+    ON_SCOPE_EXIT([]() {
+        Concurrency::get_instance()->raft_write_concurrency.decrease_broadcast();
+    });
 
     //construct data
     std::vector<std::pair<rocksdb::SliceParts, rocksdb::SliceParts>> kv_vec;
@@ -465,8 +459,8 @@ int MyRaftLogStorage::_build_key_value(
         value->parts = _construct_slice_array(head_buf, entry->peers, 
                 entry->old_peers, arena);
         value->num_parts = 2;
-        DB_WARNING("region_id: %ld, term:%ld, index:%ld",
-                    _region_id, entry->id.term, entry->id.index);
+        //DB_WARNING("region_id: %ld, term:%ld, index:%ld",
+        //            _region_id, entry->id.term, entry->id.index);
         break;
     case braft::ENTRY_TYPE_NO_OP:
         value->parts = _construct_slice_array(head_buf, nullptr, nullptr, arena);
@@ -522,7 +516,7 @@ rocksdb::Slice* MyRaftLogStorage::_construct_slice_array(
                 meta.add_old_peers((*old_peers)[i].to_string());
             }
         }
-        DB_WARNING("region_id: %ld, configuration:%s", _region_id, meta.ShortDebugString().c_str());
+        //DB_WARNING("region_id: %ld, configuration:%s", _region_id, meta.ShortDebugString().c_str());
         const size_t byte_size = meta.ByteSize();
         void *meta_buf = arena.allocate(byte_size);
         if (meta_buf == NULL) {
@@ -545,7 +539,7 @@ int MyRaftLogStorage::_parse_meta(braft::LogEntry* entry,
         DB_FATAL("Fail to parse ConfigurationPBMeta, region_id: %ld", _region_id);
         return -1;
     }
-    DB_WARNING("raft configuration pb meta from entry:%s", meta.ShortDebugString().c_str());
+    //DB_WARNING("raft configuration pb meta from entry:%s", meta.ShortDebugString().c_str());
     entry->peers = new std::vector<braft::PeerId>;
     for (int j = 0; j < meta.peers_size(); ++j) {
         entry->peers->push_back(braft::PeerId(meta.peers(j)));

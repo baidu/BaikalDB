@@ -115,11 +115,11 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             index->set_index_type(pb::I_UNIQ);
             index->add_field_names(col_name);
         } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL) {
-            std::string default_value = col_option->expr->to_string();
-            field->set_default_value(default_value);
+            field->set_default_value(col_option->expr->to_string());
         } else if (col_option->type == parser::COLUMN_OPT_COMMENT) {
-            std::string comment = col_option->expr->to_string();
-            field->set_comment(comment);
+            field->set_comment(col_option->expr->to_string());
+        } else if (col_option->type == parser::COLUMN_OPT_ON_UPDATE) {
+            field->set_on_update_value(col_option->expr->to_string());
         } else {
             DB_WARNING("unsupported column option type: %d", col_option->type);
             return -1;
@@ -189,6 +189,37 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             }
             index->set_index_name(constraint->name.value);
         }
+        if (constraint->index_option != nullptr) {
+            rapidjson::Document root;
+            const char* value = constraint->index_option->comment.c_str();
+            try {
+                root.Parse<0>(value);
+                if (root.HasParseError()) {
+                    rapidjson::ParseErrorCode code = root.GetParseError();
+                    DB_WARNING("parse create table json comments error [code:%d][%s]", 
+                        code, value);
+                    return -1;
+                }
+                auto json_iter = root.FindMember("segment_type");
+                if (json_iter != root.MemberEnd()) {
+                    std::string segment_type = json_iter->value.GetString();
+                    static std::map<std::string, pb::SegmentType> segment_map = {
+                        {"S_NO_SEGMENT", pb::S_NO_SEGMENT},
+                        {"S_WORDRANK", pb::S_WORDRANK},
+                        {"S_WORDSEG_BASIC", pb::S_WORDSEG_BASIC},
+                        {"S_SIMPLE", pb::S_SIMPLE}
+                    };
+                    pb::SegmentType pb_segment_type = pb::S_DEFAULT;
+                    if (segment_map.count(segment_type) == 1) {
+                        pb_segment_type = segment_map[segment_type];
+                    }
+                    index->set_segment_type(pb_segment_type);
+                }
+            } catch (...) {
+                DB_WARNING("parse create table json comments error [%s]", value);
+                return -1;
+            }
+        }
         for (int col_idx = 0; col_idx < constraint->columns.size(); ++col_idx) {
             parser::ColumnName* col_name = constraint->columns[col_idx];
             index->add_field_names(col_name->name.value);
@@ -206,7 +237,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             }
         } else if (option->type == parser::TABLE_OPT_CHARSET) {
             std::string str_val(option->str_value.value);
-            if (!boost::algorithm::iequals(str_val, "gbk")) {
+            if (boost::algorithm::iequals(str_val, "gbk")) {
                 table.set_charset(pb::GBK);
             } else {
                 table.set_charset(pb::UTF8);
@@ -237,6 +268,21 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     table.set_namespace_name(namespace_);
                     DB_WARNING("namespace: %s", namespace_.c_str());
                 }
+                json_iter = root.FindMember("replica_num");
+                if (json_iter != root.MemberEnd()) {
+                    int64_t replica_num = json_iter->value.GetInt64();
+                    table.set_replica_num(replica_num);
+                    DB_WARNING("replica_num: %ld", replica_num);
+                }
+                json_iter = root.FindMember("dists");
+                if (json_iter != root.MemberEnd()) {
+                    for (auto i = 0; i < json_iter->value.Size(); i++) {
+                        const rapidjson::Value& dist_value = json_iter->value[i];
+                        auto* dist = table.add_dists();
+                        dist->set_logical_room(dist_value["logical_room"].GetString());
+                        dist->set_count(dist_value["count"].GetInt());
+                    }
+                }
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", option->str_value.value);
                 return -1;
@@ -245,18 +291,13 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
 
         }
     }
-    // user must privide a namespace
-    if (!table.has_namespace_name()) {
-        DB_WARNING("no namespace set in comments");
-        return -1;
-    }
     //set default values if not specified by user
     if (!table.has_byte_size_per_record()) {
-        DB_WARNING("no avg_row_length set in comments, use default:1");
-        table.set_byte_size_per_record(1);
+        DB_WARNING("no avg_row_length set in comments, use default:50");
+        table.set_byte_size_per_record(50);
     }
     if (!table.has_namespace_name()) {
-        DB_WARNING("no namespace set in comments, use default: %s", 
+        DB_WARNING("no namespace set, use default: %s", 
             _ctx->user_info->namespace_.c_str());
         table.set_namespace_name(_ctx->user_info->namespace_);
     }

@@ -719,7 +719,8 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     int64_t count = _table_manager->get_region_count(1);
     ASSERT_EQ(3, count);
 
-    int64_t replica_num = _table_manager->get_replica_num(1);
+    int64_t replica_num = 0;
+    _table_manager->get_replica_num(1, replica_num);
     ASSERT_EQ(3, replica_num);
     
     std::vector<int64_t> query_region_ids;

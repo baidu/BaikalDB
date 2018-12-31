@@ -18,7 +18,7 @@
 namespace baikaldb {
 DEFINE_bool(default_2pc, false, "default enable/disable 2pc for autocommit queries");
 QueryContext::~QueryContext() {
-    ExecNode::destory_tree(root);
+    ExecNode::destroy_tree(root);
 }
 
 int QueryContext::create_plan_tree() {

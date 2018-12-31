@@ -23,6 +23,7 @@ class ScalarFnCall : public ExprNode {
 public:
     virtual int init(const pb::ExprNode& node);
     virtual int type_inferer();
+    virtual void children_swap();
     virtual int open();
     virtual ExprValue get_value(MemRow* row);
     pb::Function fn() {

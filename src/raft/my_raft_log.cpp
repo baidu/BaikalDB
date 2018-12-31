@@ -14,23 +14,30 @@
 
 #include <my_raft_log.h>
 #include <my_raft_log_storage.h>
+#include <my_raft_meta_storage.h>
 #include <pthread.h> 
 
 namespace baikaldb {
 
 static pthread_once_t g_register_once = PTHREAD_ONCE_INIT;
 
-struct MyRaftLogExtension {
+struct MyRaftExtension {
     MyRaftLogStorage my_raft_log_storage;
+    MyRaftMetaStorage my_raft_meta_storage;
 };
 
 static void register_once_or_die() {
-    static MyRaftLogExtension* s_ext = new MyRaftLogExtension;
+    static MyRaftExtension* s_ext = new MyRaftExtension;
     braft::log_storage_extension()->RegisterOrDie("myraftlog", &s_ext->my_raft_log_storage);
-    DB_WARNING("Registered myraftlog extension");
+#ifdef BAIDU_INTERNAL
+    braft::stable_storage_extension()->RegisterOrDie("myraftmeta", &s_ext->my_raft_meta_storage);
+#else
+    braft::meta_storage_extension()->RegisterOrDie("myraftmeta", &s_ext->my_raft_meta_storage);
+#endif
+    DB_WARNING("Registered myraft extension");
 }
 
-int register_myraftlog_extension() {
+int register_myraft_extension() {
     return pthread_once(&g_register_once, register_once_or_die);
 }
 

@@ -138,8 +138,8 @@ void UpdateNode::close(RuntimeState* state) {
     }
 }
 
-void UpdateNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void UpdateNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto update_node = pb_node->mutable_derive_node()->mutable_update_node();
     update_node->clear_update_exprs();
     for (auto expr : _update_exprs) {

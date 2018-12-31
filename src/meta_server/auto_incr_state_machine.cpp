@@ -109,7 +109,7 @@ void AutoIncrStateMachine::drop_table_id(const pb::MetaManagerRequest& request,
     auto& increment_info = request.auto_increment();
     int64_t table_id = increment_info.table_id();
     if (_auto_increment_map.find(table_id) == _auto_increment_map.end()) {
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table id has exist");
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table id not exist");
         DB_WARNING("table_id: %ld not exist when drop table id for auto increment", table_id);
         return;
     }

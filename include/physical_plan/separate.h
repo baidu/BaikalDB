@@ -41,8 +41,6 @@ private:
     int separate_begin(QueryContext* ctx, TransactionNode* txn_node);
     int separate_commit(QueryContext* ctx, TransactionNode* txn_node);
     int separate_rollback(QueryContext* ctx, TransactionNode* txn_node);
-    int separate_autocommit_dml_1pc(QueryContext* ctx, PacketNode* packet_node, 
-        std::map<int64_t, pb::RegionInfo>&);
     int separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_node, 
         std::map<int64_t, pb::RegionInfo>&);
 

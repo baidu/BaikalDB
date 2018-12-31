@@ -41,6 +41,13 @@ int SchemaFactory::init() {
         DB_FATAL("execution_queue_start error, %d", ret);
         return -1;
     }
+
+    ret = bthread::execution_queue_start(&_idc_queue_id, nullptr, 
+                update_idc_double_buffer, (void*)this);
+    if (ret != 0) {
+        DB_FATAL("execution_queue_start error, %d", ret);
+        return -1;
+    }
     _is_init = true;
     return 0;
 }
@@ -63,6 +70,44 @@ void SchemaFactory::update_tables_double_buffer(bthread::TaskIterator<pb::Schema
         update_table(*iter, background);
     }
     _double_buffer_table.swap();
+}
+
+void SchemaFactory::update_idc(const pb::IdcInfo& idc_info) {
+    bthread::execution_queue_execute(_idc_queue_id, idc_info);
+}
+
+int SchemaFactory::update_idc_double_buffer(
+        void* meta, bthread::TaskIterator<pb::IdcInfo>& iter) {
+    SchemaFactory* factory = (SchemaFactory*)meta;
+    factory->update_idc_double_buffer(iter);
+    bthread_usleep(100 * 1000);
+    return 0;
+}
+
+void SchemaFactory::update_idc_double_buffer(bthread::TaskIterator<pb::IdcInfo>& iter) {
+    for (; iter; ++iter) {
+        update_idc(*iter, _double_buffer_idc.read_background()); 
+    }
+    _double_buffer_idc.swap(); 
+}
+
+void SchemaFactory::update_idc(const pb::IdcInfo& idc_info, IdcMapping* background) {
+    background->instance_logical_mapping.clear();
+    background->physical_logical_mapping.clear();
+    for (auto& logical_physical : idc_info.logical_physical_map()) {
+        std::string logical_room = logical_physical.logical_room();
+        for (auto& physical_room : logical_physical.physical_rooms()) {
+            background->physical_logical_mapping[physical_room] = logical_room;
+        }
+    }
+    for (auto& instance : idc_info.instance_infos()) {
+        std::string address = instance.address();
+        std::string physical_room = instance.physical_room();
+        if (background->physical_logical_mapping.find(physical_room) !=
+                    background->physical_logical_mapping.end()) {
+            background->instance_logical_mapping[address] = background->physical_logical_mapping[physical_room];
+        }    
+    }
 }
 
 //TODO
@@ -180,13 +225,23 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table, SchemaMapping* back
         tbl_info.file_proto->Clear();
         tbl_info.fields.clear();
         tbl_info.indices.clear();
+        tbl_info.dists.clear();
     }
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
     tbl_info.file_proto->set_name(std::to_string(database_id) + ".proto");
     tbl_info.tbl_proto = tbl_info.file_proto->add_message_type();
     tbl_info.id = table_id;
     tbl_info.partition_num = table.partition_num(); //TODO
-    tbl_info.region_size = table.region_size();
+    if (!table.has_byte_size_per_record() || table.byte_size_per_record() < 1) {
+        tbl_info.byte_size_per_record = 1;
+    } else {
+        tbl_info.byte_size_per_record = table.byte_size_per_record();
+    }
+    if (table.has_region_split_lines() && table.region_split_lines() != 0) {
+        tbl_info.region_split_lines = table.region_split_lines();
+    } else {
+        tbl_info.region_split_lines = table.region_size() / tbl_info.byte_size_per_record;
+    }
     tbl_info.version = table.version();
     tbl_info.name = _db_name + "." + _tbl_name;
     tbl_info.tbl_proto->set_name(table_name);
@@ -197,12 +252,15 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table, SchemaMapping* back
     if (table.has_engine()) {
         tbl_info.engine = table.engine();
     }
-    if (!table.has_byte_size_per_record() || table.byte_size_per_record() < 1) {
-        tbl_info.byte_size_per_record = 1;
-    } else {
-        tbl_info.byte_size_per_record = table.byte_size_per_record();
+    if (table.has_replica_num()) {
+        tbl_info.replica_num = table.replica_num(); 
     }
-
+    for (auto& dist : table.dists()) {
+        DistInfo dist_info;
+        dist_info.logical_room = dist.logical_room();
+        dist_info.count = dist.count();
+        tbl_info.dists.push_back(dist_info);
+    }
     std::unique_ptr<DescriptorPool> tmp_pool(new(std::nothrow)DescriptorPool);
     if (tmp_pool == nullptr) {
         DB_FATAL("create FileDescriptorProto failed");
@@ -255,19 +313,14 @@ int SchemaFactory::update_table(const pb::SchemaInfo &table, SchemaMapping* back
         field_info.can_null = field.can_null();
         field_info.auto_inc = field.auto_increment();
         field_info.deleted = field.deleted();
+        field_info.comment = field.comment();
         field_info.default_value = field.default_value();
+        field_info.on_update_value = field.on_update_value();
         if (field.has_default_value()) {
             field_info.default_expr_value.type = pb::STRING;
             field_info.default_expr_value.str_val = field_info.default_value;
             field_info.default_expr_value.cast_to(field_info.type);
         }
-        /*
-        if (field_info.default_value == "(current_timestamp())") {
-            field_info.default_expr_value = ExprValue::Now();
-            field_info.default_expr_value.cast_to(field_info.type);
-        } else {
-        }
-        */
         if (field_info.type == pb::STRING || field_info.type == pb::HLL) {
             field_info.size = -1;
         } else {
@@ -370,6 +423,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     std::transform(lower_index_name.begin(), lower_index_name.end(), 
                     lower_index_name.begin(), ::tolower);
     idx_info.name = table_info.name + "." + lower_index_name;
+    idx_info.short_name = lower_index_name;
     idx_info.type = index.index_type();
     idx_info.segment_type = index.segment_type();
     int field_cnt = index.field_ids_size();
@@ -466,8 +520,10 @@ void SchemaFactory::update_regions(
 int SchemaFactory::update_regions_double_buffer(
         void* meta, bthread::TaskIterator<RegionVec>& iter) {
     SchemaFactory* factory = (SchemaFactory*)meta;
+    TimeCost cost;
     factory->update_regions_double_buffer(iter);
     bthread_usleep(100 * 1000); // 更新间隔100ms，双buf不需要引用计数了
+    DB_NOTICE("update_regions_double_buffer time:%ld", cost.get_time());
     return 0;
 }
 // 心跳更新时，如果region有分裂，需要保证分裂出来的region与源region同时更新
@@ -719,6 +775,14 @@ IndexInfo SchemaFactory::get_index_info(int64_t indexid) {
     }
     return _index_info_mapping[indexid];
 }
+IndexInfo* SchemaFactory::get_index_info_ptr(int64_t indexid) {
+    SchemaMapping* frontground = _double_buffer_table.read();
+    auto& _index_info_mapping = frontground->index_info_mapping;
+    if (_index_info_mapping.count(indexid) == 0) { 
+        return nullptr;
+    }
+    return &_index_info_mapping[indexid];
+}
 
 std::shared_ptr<UserInfo> SchemaFactory::get_user_info(const std::string& user) {
     BAIDU_SCOPED_LOCK(_update_user_mutex);
@@ -784,23 +848,13 @@ int SchemaFactory::get_table_id(const std::string& table_name, int64_t& table_id
     table_id = _table_name_id_mapping[table_name];
     return 0;
 }
-int SchemaFactory::get_byte_size_per_record(int64_t table_id, 
-        int64_t& byte_size_per_record) {
-    SchemaMapping* frontground = _double_buffer_table.read();
-    auto& _table_info_mapping = frontground->table_info_mapping;
-    if (_table_info_mapping.count(table_id) == 0) {
-        return -1;
-    }
-    byte_size_per_record = _table_info_mapping[table_id].byte_size_per_record;
-    return 0;
-}
 int SchemaFactory::get_region_capacity(int64_t table_id, int64_t& region_capacity) {
     SchemaMapping* frontground = _double_buffer_table.read();
     auto& _table_info_mapping = frontground->table_info_mapping;
     if (_table_info_mapping.count(table_id) == 0) {
         return -1;
     }
-    region_capacity = _table_info_mapping[table_id].region_size;
+    region_capacity = _table_info_mapping[table_id].region_split_lines;
     return 0;
 }
 int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
@@ -853,8 +907,12 @@ int SchemaFactory::get_index_id(int64_t table_id,
 
 int SchemaFactory::get_region_by_key(IndexInfo& index, 
         const pb::PossibleIndex* primary,
-        std::map<int64_t, pb::RegionInfo>& region_infos) {
+        std::map<int64_t, pb::RegionInfo>& region_infos,
+        std::map<int64_t, pb::PossibleIndex>* region_primary) {
     region_infos.clear();
+    if (region_primary != nullptr) {
+        region_primary->clear();
+    }
     TableRegionPtr double_buffer_ptr = get_table_region(index.id);
     TableRegionInfo* frontground = double_buffer_ptr->read();
     auto& key_region_mapping = frontground->key_region_mapping;
@@ -870,11 +928,18 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         }
         return 0;
     }
+    pb::PossibleIndex template_primary;
+    template_primary.set_index_id(primary->index_id());
+    if (primary->has_sort_index()) {
+        template_primary.mutable_sort_index()->CopyFrom(primary->sort_index());
+    }
+    template_primary.mutable_index_conjuncts()->CopyFrom(primary->index_conjuncts());
 
     auto record_template = TableRecord::new_record(index.id);
+    int range_size = primary->ranges_size();
     for (const auto& range : primary->ranges()) {
-        SmartRecord left;// = record_template->clone(false);
-        SmartRecord right;// = record_template->clone(false);
+        SmartRecord left;
+        SmartRecord right;
         if (range.left_pb_record() != "") {
             left = record_template->clone(false);
             left->decode(range.left_pb_record());
@@ -929,6 +994,12 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
                     (!right_open && boost::starts_with(region_iter->first, _end.data()))) {
                 int64_t region_id = region_iter->second;
                 frontground->get_region_info(region_id, region_infos[region_id]);
+                if (range_size > 1 && region_primary != nullptr) {
+                    if (region_primary->count(region_id) == 0) {
+                        (*region_primary)[region_id].CopyFrom(template_primary);
+                    }
+                    (*region_primary)[region_id].add_ranges()->CopyFrom(range);
+                }
             } else {
                 break;
             }
@@ -939,7 +1010,7 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
 }
 
 // Get a list of new regions given a list of old regions
-// The in 
+// used for transaction recovery after baikaldb crash
 int SchemaFactory::get_region_by_key(
         const RepeatedPtrField<pb::RegionInfo>& input_regions,
         std::map<int64_t, pb::RegionInfo>& output_regions) {

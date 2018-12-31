@@ -189,6 +189,8 @@ public:
         return "";
     }
 
+    std::string get_index_value(IndexInfo& index);
+
     void clear() {
         if (_message) {
             _message->Clear();

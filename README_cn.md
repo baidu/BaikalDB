@@ -28,7 +28,7 @@ BaikalDB 的主要特性如下：
 ## 编译步骤
 外部编译使用[bazel构建工具](https://www.bazel.build)
 ### Ubuntu 16.04
-* [安装bazel](https://docs.bazel.build/versions/master/install-ubuntu.html)。
+* [安装bazel](https://docs.bazel.build/versions/master/install-ubuntu.html) 推荐0.18.1或者更早的版本，较新的版本可能存在语法兼容性问题，我们正在努力解决。
 * 安装flex, bison, openssl库：
   sudo apt-get install flex bison libssl-dev
 * 安装g++ (版本不低于4.8.2)：
@@ -103,6 +103,14 @@ CREATE TABLE `test_table` (
 ) ENGINE=Rocksdb DEFAULT CHARSET=gbk AVG_ROW_LENGTH=100 COMMENT='{"comment":"", "resource_tag":"", "namespace":"TEST_NAMESPACE"}';
 ```
 建表语句中，列定义中暂不支持注释。建表成功后，表信息从BaikalMeta同步到BaikalDB需要10-30s的间隔。同步完成后才能通过show tables和desc table查到表信息。
+
+### baikalStore升级到新版本注意事项
+如果线上运行版本是2018年12月25号(包括)以前提交的版本，若要升级到最新版，需要按照以下步骤进行滚动升级：
+1. 先将线上所有baikalStore实例升级到no_snapshot_compatible分支的最新版本。该版本是一个中间版本，其中的add_peer操作会失败。
+2. 将所有baikalStore实例中的region主动调用一次snapshot，生成新版snapshot。
+  * 升级方法：为每个store实例执行sh store_snapshot_region.sh ip:port（store_snapshot_region.sh脚本位于src/tools/script/目录下）。
+  * 是否升级到新版可以通过验证每个region的snapshot目录下是否还存在snap_region_***.extra.json文件。预期新版的snapshot目录下没有该文件，只有__raft_snapshot_meta后缀的文件。
+3. 升级baikalStore到主干最新代码对应的程序。
 
 ## 文档
 * [用户手册](docs/cn/user_guide.md)

@@ -94,54 +94,74 @@ void NetworkServer::recovery_transactions() {
     }
 }
 
+static void request_log(pb::BaikalHeartBeatRequest& request) {
+    static int reduce_log = 0;
+    if (reduce_log++ % 10 != 0) {
+        return;
+    }
+    for (auto& schema_info : request.schema_infos()) {
+        SELF_TRACE("heartbeat request(table version): table_id: %ld, table_version:%ld", 
+                schema_info.table_id(), schema_info.version());
+        std::string region_version;
+        int count = 0;
+        for (auto& region_heart : schema_info.regions()) {
+            region_version += region_heart.ShortDebugString() + ", ";
+            ++count;
+            if (count % 50 == 0) {
+                SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
+                region_version.clear();
+            }
+        }
+        if (!region_version.empty()) {
+            SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
+        }
+    }
+}
+
+static void response_log(pb::BaikalHeartBeatResponse& response) {
+    static int reduce_log = 0;
+    if (reduce_log++ % 10 != 0) {
+        return;
+    }
+    int count = 0;
+    std::string str_response;
+    for (auto& schema_change_info : response.schema_change_info()) {
+        str_response += schema_change_info.ShortDebugString() + ", ";
+        ++count;
+        if (count % 5 == 0) {
+            SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
+            str_response.clear();
+        }
+    }
+    if (!str_response.empty()) {
+        SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
+    }
+    for (auto& region_change_info : response.region_change_info()) {
+        SELF_TRACE("heartbeat response(region info):%s", 
+                region_change_info.ShortDebugString().c_str());
+    }
+    for (auto& privilege_change_info : response.privilege_change_info()) {
+        SELF_TRACE("heartbeat response(privilege info):%s", 
+                privilege_change_info.ShortDebugString().c_str());
+    }
+    if (response.has_idc_info()) {
+        SELF_TRACE("heartbeat response(idc_info):%s",
+                response.idc_info().ShortDebugString().c_str());
+    }
+}
+
 void NetworkServer::report_heart_beat() {
     while (!_shutdown) {
         pb::BaikalHeartBeatRequest request;
         pb::BaikalHeartBeatResponse response;
         //1、construct heartbeat request
         construct_heart_beat_request(request);
-        for (auto& schema_info : request.schema_infos()) {
-            SELF_TRACE("heartbeat request(table version): table_id: %ld, table_version:%ld", 
-                        schema_info.table_id(), schema_info.version());
-            std::string region_version;
-            int count = 0;
-            for (auto& region_heart : schema_info.regions()) {
-                region_version += region_heart.ShortDebugString() + ", ";
-                ++count;
-                if (count % 50 == 0) {
-                    SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
-                    region_version.clear();
-                }
-            }
-            if (!region_version.empty()) {
-                SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
-            }
-        }
+        request_log(request);
         //2、send heartbeat request to meta server
         if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
             //处理心跳
             process_heart_beat_response(response);
-            int count = 0;
-            std::string str_response;
-            for (auto& schema_change_info : response.schema_change_info()) {
-                str_response += schema_change_info.ShortDebugString() + ", ";
-                ++count;
-                if (count % 5 == 0) {
-                    SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
-                    str_response.clear();
-                }
-            }
-            if (!str_response.empty()) {
-                SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
-            }
-            for (auto& region_change_info : response.region_change_info()) {
-                SELF_TRACE("heartbeat response(region info):%s", 
-                            region_change_info.ShortDebugString().c_str());
-            }
-            for (auto& privilege_change_info : response.privilege_change_info()) {
-                SELF_TRACE("heartbeat response(privilege info):%s", 
-                            privilege_change_info.ShortDebugString().c_str());
-            }
+            response_log(response);
         } else {
             DB_WARNING("send heart beat request to meta server fail");
         }
@@ -179,6 +199,9 @@ void NetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatRespons
 
     factory->update_regions(response.region_change_info());
 
+    if (response.has_idc_info()) {
+        factory->update_idc(response.idc_info());
+    }
     for (auto& info : response.privilege_change_info()) {
         factory->update_user(info);
     }
@@ -326,7 +349,7 @@ bool NetworkServer::init() {
         DB_FATAL("send heart beat request to meta server fail");
         return false;
     }
-    bthread_usleep(300 * 1000);
+    bthread_usleep(15 * 1000 * 1000); // 等待region同步完成
     if (FLAGS_fetch_instance_id) {
         if (fetch_instance_info() != 0) {
             return false;

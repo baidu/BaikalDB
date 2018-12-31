@@ -27,6 +27,7 @@
 #include <proto/meta.interface.pb.h>
 #include "rapidjson.h"
 #include <raft/raft.h>
+#include <bvar/bvar.h>
 #include "common.h"
 #include "password.h"
 #include "schema_factory.h"
@@ -38,6 +39,16 @@ int main(int argc, char* argv[])
 }
 
 namespace baikaldb {
+TEST(test_exmaple, case_all) {
+    return;
+    bvar::Adder<char>  test;
+    bvar::Window<bvar::Adder<char>> test_minute(&test, 6);
+    for (int i = 0; i < 266; i++) {
+        test << 1;
+        std::cout << (int)test.get_value() << " " << (int)test_minute.get_value() << std::endl;
+        usleep(1000000);
+    }
+}
 TEST(test_stripslashes, case_all) {
     std::cout << 
         ("\x26\x4f\x37\x58"
@@ -85,22 +96,74 @@ TEST(test_cond, wait) {
     cond.wait();
     DB_NOTICE("all bth done");
     sleep(1);
+    {
+        BthreadCond* concurrency_cond = new BthreadCond(-4);
+        for (int i = 0; i < 10; i++) {
+            Bthread bth;
+            bth.run([concurrency_cond] () {
+                    // increase_wait 放在函数中，需要确保concurrency_cond生命周期不结束
+                    concurrency_cond->increase_wait();
+                    DB_NOTICE("concurrency_cond2 entry");
+                    bthread_usleep(1000 * 1000);
+                    DB_NOTICE("concurrency_cond2 out");
+                    concurrency_cond->decrease_broadcast();
+                    });
+        }
+        DB_NOTICE("concurrency_cond2 all bth done");
+    }
 
-    BthreadCond concurrency_cond(-5);
-    for (int i = 0; i < 10; i++) {
-        Bthread bth;
-        // increase一定要在主线程里
-        concurrency_cond.increase();
+    {
+        BthreadCond concurrency_cond(-5);
+        for (int i = 0; i < 10; i++) {
+            Bthread bth;
+            // increase一定要在主线程里
+            concurrency_cond.increase_wait();
+            bth.run([&concurrency_cond] () {
+                    DB_NOTICE("concurrency_cond entry");
+                    bthread_usleep(1000 * 1000);
+                    DB_NOTICE("concurrency_cond out");
+                    concurrency_cond.decrease_signal();
+                    });
+        }
+        concurrency_cond.wait(-5);
+        DB_NOTICE("concurrency_cond all bth done");
+    }
+    sleep(1);
+
+    {
+        BthreadCond concurrency_cond;
+        for (int i = 0; i < 10; i++) {
+            Bthread bth;
+            // increase一定要在主线程里
+            concurrency_cond.increase_wait(5);
+            bth.run([&concurrency_cond] () {
+                    DB_NOTICE("concurrency_cond entry");
+                    bthread_usleep(1000 * 1000);
+                    DB_NOTICE("concurrency_cond out");
+                    concurrency_cond.decrease_signal();
+                    });
+        }
         concurrency_cond.wait();
-        bth.run([&concurrency_cond] () {
-            DB_NOTICE("concurrency_cond entry");
+        DB_NOTICE("concurrency_cond all bth done");
+    }
+
+}
+
+TEST(test_ConcurrencyBthread, wait) {
+    ConcurrencyBthread con_bth(5);
+    for (int i = 0; i < 10; i++) {
+        //auto call = [i] () {
+        //    bthread_usleep(1000 * 1000);
+        //    DB_NOTICE("test_ConcurrencyBthread test %d", i);
+        //};
+        //con_bth.run(call);
+        con_bth.run([i] () {
             bthread_usleep(1000 * 1000);
-            DB_NOTICE("concurrency_cond out");
-            concurrency_cond.decrease_signal();
+            DB_NOTICE("test_ConcurrencyBthread test %d", i);
         });
     }
-    concurrency_cond.wait(-5);
-    DB_NOTICE("concurrency_cond all bth done");
+    con_bth.join();
+    DB_NOTICE("all bth done");
 }
 
 TEST(timestamp_to_str, str_to_timestamp) {

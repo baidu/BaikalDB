@@ -34,18 +34,19 @@ public:
     }
     virtual ~AggNode() {
         for (auto expr : _group_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
         for (auto agg : _agg_fn_calls) {
-            ExprNode::destory_tree(agg);
+            ExprNode::destroy_tree(agg);
         }
     }
     virtual int init(const pb::PlanNode& node);
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual void transfer_pb(pb::PlanNode* pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RowBatch& batch);
 private:

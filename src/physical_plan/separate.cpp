@@ -22,6 +22,7 @@
 #include "sort_node.h"
 #include "filter_node.h"
 #include "fetcher_node.h"
+#include "insert_node.h"
 #include "transaction_node.h"
 
 namespace baikaldb {
@@ -42,6 +43,7 @@ int Separate::analyze(QueryContext* ctx) {
     plan->get_node(pb::SCAN_NODE, scan_nodes);
 
     TransactionNode* txn_node = static_cast<TransactionNode*>(plan->get_node(pb::TRANSACTION_NODE));
+    InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
 
     pb::PlanNode pb_fetch_node;
     pb_fetch_node.set_node_type(pb::FETCHER_NODE);
@@ -62,25 +64,26 @@ int Separate::analyze(QueryContext* ctx) {
             && packet_node->op_type() != pb::OP_BEGIN
             && packet_node->op_type() != pb::OP_COMMIT
             && packet_node->op_type() != pb::OP_ROLLBACK) {
-        //inset、replace、truncate请求没有scan_node
-        fetch_node->set_region_infos(ctx->region_infos, ctx->insert_region_ids);
         if (scan_nodes.size() > 0) {
             auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
             fetch_node->set_region_infos(region_infos);
+        } else if (insert_node != nullptr) {
+            //inset、replace node
+            fetch_node->set_region_infos(insert_node->region_infos());
+        } else {
+            // truncate node
+            fetch_node->set_region_infos(packet_node->children(0)->region_infos());
         }
         bool autocommit = ctx->runtime_state.autocommit();
-        if (autocommit == false || packet_node->op_type() == pb::OP_TRUNCATE_TABLE) {
+        if (autocommit == false || ctx->enable_2pc == false
+                || packet_node->op_type() == pb::OP_TRUNCATE_TABLE) {
             fetch_node->add_child(packet_node->children(0));
             packet_node->clear_children();
             packet_node->add_child(fetch_node.release());
         } else {
-            // update scan_node region_info not stored in QueryContext
+            // create multiple fetcher node and use two phase commit
             auto& region_infos = fetch_node->region_infos();
-            if (ctx->enable_2pc) {
-                return separate_autocommit_dml_2pc(ctx, packet_node, region_infos);
-            } else {
-                return separate_autocommit_dml_1pc(ctx, packet_node, region_infos);
-            }
+            return separate_autocommit_dml_2pc(ctx, packet_node, region_infos);
         }
         return 0;
     }
@@ -108,7 +111,7 @@ int Separate::analyze(QueryContext* ctx) {
     }
 
     std::map<int64_t, pb::RegionInfo> region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
-    int region_size = region_infos.size();
+    //int region_size = region_infos.size();
     fetch_node->set_region_infos(region_infos);
     std::vector<ExecNode*> join_nodes;
     plan->get_node(pb::JOIN_NODE, join_nodes);
@@ -138,7 +141,7 @@ int Separate::analyze(QueryContext* ctx) {
         ExecNode* parent = agg_node->get_parent();
         AggNode* merge_agg_node = nullptr;
         pb::PlanNode pb_node;
-        agg_node->transfer_pb(&pb_node);
+        agg_node->transfer_pb(0, &pb_node);
         pb_node.set_node_type(pb::MERGE_AGG_NODE);
         pb_node.set_limit(-1);
         merge_agg_node = new AggNode;
@@ -221,24 +224,6 @@ TransactionNode* Separate::create_txn_node(pb::TxnCmdType cmd_type) {
     return store_txn_node;
 }
 
-int Separate::separate_autocommit_dml_1pc(QueryContext* ctx, PacketNode* packet_node, 
-        std::map<int64_t, pb::RegionInfo>& region_infos) {
-
-    // create commit fetcher node
-    std::unique_ptr<FetcherNode> fetch_node(create_fetcher_node(packet_node->op_type()));
-    if (fetch_node.get() == nullptr) {
-        DB_WARNING("create fetch_node failed");
-        return -1;
-    }
-    // DB_WARNING("region size: %ld, %ld", region_infos.size(), ctx->insert_region_ids.size());
-    fetch_node->set_region_infos(region_infos, ctx->insert_region_ids);
-
-    fetch_node->add_child(packet_node->children(0));
-    packet_node->clear_children();
-    packet_node->add_child(fetch_node.release());
-    return 0;
-}
-
 int Separate::separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_node,
         std::map<int64_t, pb::RegionInfo>& region_infos) {
     // create baikaldb commit node
@@ -270,7 +255,7 @@ int Separate::separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_
         DB_WARNING("create dml_fetch_node failed");
         return -1;
     }
-    dml_fetch_node->set_region_infos(region_infos, ctx->insert_region_ids);
+    dml_fetch_node->set_region_infos(region_infos);
     dml_fetch_node->add_child(dml_root);
 
     // create prepare fetcher node
@@ -334,7 +319,6 @@ int Separate::separate_commit(QueryContext* ctx, TransactionNode* txn_node) {
         return -1;
     }
     //DB_WARNING("region size: %ld, %ld", ctx->region_infos.size(), ctx->insert_region_ids.size());
-    prepare_fetch_node->set_region_infos(ctx->region_infos, ctx->insert_region_ids);
     // create store prepare node
     std::unique_ptr<TransactionNode> store_prepare_node(
         create_txn_node(pb::TXN_PREPARE));
@@ -351,7 +335,6 @@ int Separate::separate_commit(QueryContext* ctx, TransactionNode* txn_node) {
         DB_WARNING("create commit_fetch_node failed");
         return -1;
     }
-    commit_fetch_node->set_region_infos(ctx->region_infos, ctx->insert_region_ids);
 
     // create store commit node
     std::unique_ptr<TransactionNode> store_commit_node(
@@ -371,7 +354,6 @@ int Separate::separate_commit(QueryContext* ctx, TransactionNode* txn_node) {
             DB_WARNING("create rollback_fetch_node failed");
             return -1;
         }
-        rollback_fetch_node->set_region_infos(ctx->region_infos, ctx->insert_region_ids);
 
         // create store commit node
         std::unique_ptr<TransactionNode> store_rollback_node(
@@ -412,7 +394,6 @@ int Separate::separate_rollback(QueryContext* ctx, TransactionNode* txn_node) {
         return -1;
     }
     //DB_WARNING("region size: %ld, %ld", ctx->region_infos.size(), ctx->insert_region_ids.size());
-    rollback_fetch_node->set_region_infos(ctx->region_infos, ctx->insert_region_ids);
 
     // create store rollback node
     std::unique_ptr<TransactionNode> store_rollback_node(create_txn_node(pb::TXN_ROLLBACK_STORE));
@@ -424,7 +405,6 @@ int Separate::separate_rollback(QueryContext* ctx, TransactionNode* txn_node) {
     txn_node->add_child(rollback_fetch_node.release());
 
     if (txn_node->txn_cmd() == pb::TXN_ROLLBACK_BEGIN) {
-        //auto client = ctx->runtime_state.client_conn();
         // create new txn begin fetcher node
         std::unique_ptr<FetcherNode> begin_fetch_node(create_fetcher_node(pb::OP_BEGIN));
         if (begin_fetch_node.get() == nullptr) {
@@ -451,7 +431,6 @@ int Separate::separate_begin(QueryContext* ctx, TransactionNode* txn_node) {
         return -1;
     }
     //DB_WARNING("region size: %ld, %ld", ctx->region_infos.size(), ctx->insert_region_ids.size());
-    begin_fetch_node->set_region_infos(ctx->region_infos, ctx->insert_region_ids);
 
     // create store begin node
     std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE));

@@ -20,7 +20,7 @@
 
 namespace baikaldb {
 
-enum enum_field_types { 
+enum MysqlType : uint8_t { 
     MYSQL_TYPE_DECIMAL, 
     MYSQL_TYPE_TINY,
     MYSQL_TYPE_SHORT,  
@@ -48,6 +48,11 @@ enum enum_field_types {
     MYSQL_TYPE_VAR_STRING = 253,
     MYSQL_TYPE_STRING = 254,
     MYSQL_TYPE_GEOMETRY = 255
+};
+
+struct SignedType {
+    MysqlType   mysql_type = MYSQL_TYPE_NULL;
+    bool        is_unsigned = false;
 };
 
 inline bool is_double(pb::PrimitiveType type) {
@@ -199,7 +204,7 @@ inline int32_t get_num_size(pb::PrimitiveType type) {
 }
 
 
-inline int32_t to_mysql_type(pb::PrimitiveType type) {
+inline uint8_t to_mysql_type(pb::PrimitiveType type) {
     switch (type) {
         case pb::BOOL:
             return MYSQL_TYPE_TINY;

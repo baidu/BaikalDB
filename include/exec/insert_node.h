@@ -24,7 +24,10 @@ public:
     }
     virtual ~InsertNode() {
         for (auto expr : _update_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
+        }
+        for (auto expr : _insert_values) {
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node);
@@ -35,10 +38,22 @@ public:
             expr->close();
         }
     }
-    virtual void transfer_pb(pb::PlanNode* pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
+    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+    int insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert_records);
+
+    std::map<int64_t, std::vector<SmartRecord>>& records_by_region() {
+        return _records_by_region;
+    }
 
 private:
     std::vector<SmartRecord> _records;
+    std::vector<int32_t>     _field_ids;
+    std::vector<ExprNode*>   _insert_values;
+
+    // the insertion records grouped by region id
+    std::map<int64_t, std::vector<SmartRecord>> _records_by_region;
 };
 }
 

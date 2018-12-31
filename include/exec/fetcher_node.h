@@ -22,17 +22,26 @@
 
 namespace baikaldb {
 class FetcherNode : public ExecNode {
+enum ErrorType {
+    E_OK = 0,
+    E_WARNING,
+    E_FATAL
+};
 public:
+    FetcherNode() {
+        bthread_mutex_init(&_region_lock, NULL);
+    }
     virtual ~FetcherNode() {
+        bthread_mutex_destroy(&_region_lock);
         for (auto expr : _slot_order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
 
     // send (cached) cmds with seq_id >= start_seq_id
-    int send_request( RuntimeState* state, pb::RegionInfo& info, 
-        std::vector<SmartRecord>* records, int64_t region_id, 
-        uint64_t log_id, int retry_times, int start_seq_id);
+    ErrorType send_request(RuntimeState* state, pb::RegionInfo& info, 
+        std::vector<SmartRecord>* records, int64_t old_region_id, 
+        int64_t region_id, uint64_t log_id, int retry_times, int start_seq_id);
 
     virtual int init(const pb::PlanNode& node); 
     virtual int open(RuntimeState* state);
@@ -46,37 +55,29 @@ public:
     void set_region_infos(std::map<int64_t, pb::RegionInfo> region_infos) {
         _region_infos.swap(region_infos);
     }
-    void set_region_infos(std::map<int64_t, pb::RegionInfo> region_infos,
-            std::map<int64_t, std::vector<SmartRecord> > region_ids) {
-        _insert_region_ids.swap(region_ids);
-        _region_infos.swap(region_infos);
-    }
 
     std::map<int64_t, pb::RegionInfo>& region_infos() {
         return _region_infos;
     }
-
-    int push_cmd_to_cache(RuntimeState* state);
+    void choose_opt_instance(pb::RegionInfo& info, std::string& addr);
 
 private:
-    //insert数据按region拆分，select中主键不拆分，靠store自己过滤
-    std::map<int64_t, std::vector<SmartRecord>> _insert_region_ids;
+    int push_cmd_to_cache(RuntimeState* state);
+    
     std::map<int64_t, std::shared_ptr<RowBatch>> _region_batch;
     std::map<int64_t, pb::RegionInfo> _region_infos;
     std::map<std::string, int64_t> _start_key_sort;
     pb::OpType _op_type;
-    //std::vector<pb::StoreReq> _requests;
-    //std::vector<pb::StoreRes> _responses;
     //允许fetcher回来后排序
     std::vector<ExprNode*> _slot_order_exprs;
     std::vector<bool> _is_asc;
     std::vector<bool> _is_null_first;
     std::shared_ptr<MemRowCompare> _mem_row_compare;
     std::shared_ptr<Sorter> _sorter;
-    bool _error = false;
+    ErrorType _error = E_OK;
     std::atomic<int> _affected_rows;
     // 因为split会导致多region出来,加锁保护公共资源
-    std::mutex _region_lock;
+    bthread_mutex_t _region_lock;
 };
 }
 

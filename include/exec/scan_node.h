@@ -37,6 +37,19 @@ public:
     pb::Engine engine() {
         return _engine;
     }
+    bool has_index() {
+        for (auto& pos_index : _pb_node.derive_node().scan_node().indexes()) {
+            for (auto& range : pos_index.ranges()) {
+                if (range.left_field_cnt() > 0) {
+                    return true;
+                }
+                if (range.right_field_cnt() > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     void clear_possible_indexes() {
         _pb_node.mutable_derive_node()->mutable_scan_node()->clear_indexes();
     }
@@ -49,7 +62,9 @@ public:
         }
         return true;
     }
-
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ExecNode::find_place_holder(placeholders);
+    }
 
 protected:
     pb::Engine _engine = pb::ROCKSDB;

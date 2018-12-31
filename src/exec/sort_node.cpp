@@ -189,6 +189,7 @@ int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
 }
 
 void SortNode::close(RuntimeState* state) {
+    ExecNode::close(state);
     for (auto expr : _order_exprs) {
         expr->close();
     }
@@ -213,6 +214,16 @@ int SortNode::fill_tuple(RowBatch* batch) {
     }
     batch->reset();
     return 0;
+}
+
+void SortNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _order_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+    for (auto& expr : _slot_order_exprs) {
+        expr->find_place_holder(placeholders);
+    }
 }
 }
 

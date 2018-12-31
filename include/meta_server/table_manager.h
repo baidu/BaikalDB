@@ -36,10 +36,14 @@ public:
         return &instance;
     }
     friend class QueryTableManager;
+    void update_table_internal(const pb::MetaManagerRequest& request, braft::Closure* done,
+    std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb)> update_callback);
     void create_table(const pb::MetaManagerRequest& request, braft::Closure* done);
     void drop_table(const pb::MetaManagerRequest& request, braft::Closure* done);
     void rename_table(const pb::MetaManagerRequest& request, braft::Closure* done);
     void update_byte_size(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void update_split_lines(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void update_dists(const pb::MetaManagerRequest& request, braft::Closure* done);
 
     void add_field(const pb::MetaManagerRequest& request, braft::Closure* done);
     void drop_field(const pb::MetaManagerRequest& request, braft::Closure* done);
@@ -197,6 +201,36 @@ public:
         resource_tag = _table_info_map[table_id].schema_pb.resource_tag();
         return 0;
     }
+    int get_main_logical_room(int64_t table_id, std::string& main_logical_room) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return -1;
+        }
+        main_logical_room = _table_info_map[table_id].schema_pb.main_logical_room();
+        return 0;
+    }
+    int64_t get_replica_dists(int64_t table_id, std::unordered_map<std::string, int64_t>& replica_dists_map) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return -1;
+        }
+        for (auto& replica_dist : _table_info_map[table_id].schema_pb.dists()) {
+            if (replica_dist.count() != 0) {
+                replica_dists_map[replica_dist.logical_room()] = replica_dist.count();
+            }
+        }
+        return 0;
+    }
+    bool whether_replica_dists(int64_t table_id) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return false;
+        }
+        if (_table_info_map[table_id].schema_pb.dists_size() > 0) {
+            return true;
+        }
+        return false;
+    }
     int64_t get_region_count(int64_t table_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
@@ -221,12 +255,13 @@ public:
             table_region_count[table_id] = count;
         }    
     }
-    int64_t get_replica_num(int64_t table_id) {
+    int get_replica_num(int64_t table_id, int64_t& replica_num) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
-            return 0;
+            return -1;
         }
-        return _table_info_map[table_id].schema_pb.replica_num();
+        replica_num = _table_info_map[table_id].schema_pb.replica_num();
+        return 0;
     }
     void get_region_ids(const std::string& full_table_name, std::vector<int64_t>& query_region_ids) {
         BAIDU_SCOPED_LOCK(_table_mutex);
@@ -254,6 +289,7 @@ public:
             }
         }
     }
+    int64_t get_row_count(int64_t table_id);
     void get_region_ids(const std::vector<int64_t>& table_ids,
                          std::unordered_map<int64_t,std::vector<int64_t>>& region_ids) {
         BAIDU_SCOPED_LOCK(_table_mutex);

@@ -29,13 +29,17 @@ public:
     }
     virtual  ~JoinNode() {
         for (auto& condition : _conditions) {
-            ExprNode::destory_tree(condition);
+            ExprNode::destroy_tree(condition);
+        }
+        for (auto& condition : _have_removed) {
+            ExprNode::destroy_tree(condition);
         }
     }
     virtual int init(const pb::PlanNode& node); 
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
-    virtual void transfer_pb(pb::PlanNode* pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
@@ -68,6 +72,23 @@ public:
         }
         return true;
     }
+
+    void reorder_clear() {
+        _conditions.clear();
+        for (auto& child : _children) {
+            if (child->node_type() == pb::JOIN_NODE) {
+                static_cast<JoinNode*>(child)->reorder_clear();
+            } else {
+                child = nullptr;
+            }
+        }
+    }
+
+    bool need_reorder(
+            std::map<int32_t, ExecNode*>& tuple_join_child_map,
+            std::map<int32_t, std::set<int32_t>>& tuple_equals_map, 
+            std::vector<int32_t>& tuple_order,
+            std::vector<ExprNode*>& conditions);
     
     pb::JoinType join_type() {
         return _join_type;
@@ -75,7 +96,7 @@ public:
     void set_join_type(pb::JoinType join_type) {
         _join_type = join_type;
         _pb_node.mutable_derive_node()->mutable_join_node()->set_join_type(join_type);
-    } 
+    }
     //virtual void print_exec_node() {
     //    ExecNode::print_exec_node();
     //    DB_WARNING("join_node, join_type:%s", pb::JoinType_Name(_join_type).c_str());
@@ -114,6 +135,7 @@ private:
 private:
     pb::JoinType _join_type;
     std::vector<ExprNode*> _conditions;
+    std::vector<ExprNode*> _have_removed;
     std::unordered_set<int32_t> _left_tuple_ids;
     std::unordered_set<int32_t> _right_tuple_ids;
 

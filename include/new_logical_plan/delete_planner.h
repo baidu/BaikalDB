@@ -23,8 +23,7 @@ class DeletePlanner : public LogicalPlanner {
 public:
 
     DeletePlanner(QueryContext* ctx) : 
-        LogicalPlanner(ctx), 
-        _limit_count(-1) {}
+        LogicalPlanner(ctx) {}
 
     virtual ~DeletePlanner() {}
 
@@ -36,28 +35,16 @@ private:
 
     // method to create plan node
     int create_truncate_node();
-
     int parse_where();
-
     int parse_orderby();
-
-    void parse_limit() {
-        if (_delete_stmt->limit != nullptr) {
-            _limit_count = _delete_stmt->limit->count;
-            _offset = _delete_stmt->limit->offset;
-        }
-    }
+    int parse_limit();
 
 private:
-    //sql_cmd_delete_t*           _delete_cmd;
-    //sql_cmd_truncate_table_t*   _truncate_cmd;
-    
-    parser::DeleteStmt*           _delete_stmt;
-    parser::TruncateStmt*         _truncate_stmt;
-    parser::NodeType            stmt_type;
+    parser::DeleteStmt*         _delete_stmt;
+    parser::TruncateStmt*       _truncate_stmt;
     std::vector<pb::Expr>       _where_filters;
-    int32_t                     _limit_count;
-    int32_t                     _offset;
+    pb::Expr                    _limit_offset;
+    pb::Expr                    _limit_count;
 };
 } //namespace baikal
 

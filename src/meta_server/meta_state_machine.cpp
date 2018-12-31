@@ -107,6 +107,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     }
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
+    ClusterManager::get_instance()->process_baikal_heartbeat(request, response);
     PrivilegeManager::get_instance()->process_baikal_heartbeat(request, response);
     SchemaManager::get_instance()->process_baikal_heartbeat(request, response, log_id);
     SELF_TRACE("baikaldb:%s heart beat, time_cost: %ld, response: %s, log_id: %lu", 
@@ -243,8 +244,16 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->modify_field(request, done);
             break;
         }
+        case pb::OP_UPDATE_DISTS: {
+            TableManager::get_instance()->update_dists(request, done);
+            break; 
+        }
         case pb::OP_UPDATE_BYTE_SIZE: {
             TableManager::get_instance()->update_byte_size(request, done);
+            break;
+        }
+        case pb::OP_UPDATE_SPLIT_LINES: {
+            TableManager::get_instance()->update_split_lines(request, done);
             break;
         }
         case pb::OP_DROP_REGION: {
@@ -253,10 +262,6 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         }
         case pb::OP_UPDATE_REGION: {
             RegionManager::get_instance()->update_region(request, done);
-            break;
-        }
-        case pb::OP_RESTORE_REGION: {
-            RegionManager::get_instance()->restore_region(request, done);
             break;
         }
         case pb::OP_SPLIT_REGION: {
@@ -440,7 +445,9 @@ void MetaStateMachine::healthy_check_function() {
 
 void MetaStateMachine::on_leader_stop() {
     _is_leader.store(false);
-    _close_load_balance = true;
+    set_global_load_balance(false);
+    set_global_migrate(true);
+    _unsafe_decision = false;
     if (_healthy_check_start) {
         _bth.join();
         _healthy_check_start = false;
@@ -453,7 +460,7 @@ void MetaStateMachine::on_leader_stop() {
 bool MetaStateMachine::whether_can_decide() {
     return _node.is_leader() &&
             ((butil::gettimeofday_us()- _leader_start_timestmap) >
-                2 * FLAGS_balance_periodicity * FLAGS_store_heart_beat_interval_us );
+                2LL * FLAGS_balance_periodicity * FLAGS_store_heart_beat_interval_us );
 }
 }//namespace
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

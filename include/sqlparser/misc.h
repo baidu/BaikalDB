@@ -50,6 +50,33 @@ struct SetStmt : public StmtNode {
         node_type = NT_SET_CMD;
     }
 };
+
+struct NewPrepareStmt : public StmtNode {
+    String  name;
+    String  sql;
+    NewPrepareStmt() {
+        node_type = NT_NEW_PREPARE;
+        name = nullptr;
+        sql = nullptr;
+    }
+};
+
+struct ExecPrepareStmt : public StmtNode {
+    String  name;
+    Vector<String> param_list;
+    ExecPrepareStmt() {
+        node_type = NT_EXEC_PREPARE;
+        name = nullptr;
+    }
+};
+
+struct DeallocPrepareStmt : public StmtNode {
+    String  name;
+    DeallocPrepareStmt() {
+        node_type = NT_DEALLOC_PREPARE;
+        name = nullptr;
+    }
+};
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "runtime_state.h"
 #include "filter_node.h"
+#include "scalar_fn_call.h"
+#include "literal.h"
+#include "parser.h"
+#include "runtime_state.h"
 #include "rapidjson/rapidjson.h"
 #include "rapidjson/reader.h"
 #include "rapidjson/writer.h"
@@ -41,6 +44,110 @@ int FilterNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
+struct SlotPredicate {
+    std::vector<ExprNode*> eq_preds;
+    std::vector<ExprNode*> lt_le_preds;
+    std::vector<ExprNode*> gt_ge_preds;
+    std::vector<ExprNode*> in_preds;
+    bool need_cut() {
+        return (eq_preds.size() + lt_le_preds.size() + gt_ge_preds.size() + in_preds.size()) > 1;
+    }
+    static bool lt_le_less(ExprNode* left, ExprNode* right) {
+        ExprValue l = left->children(1)->get_value(nullptr);
+        ExprValue r = right->children(1)->get_value(nullptr);
+        if (l.compare(r) < 0) {
+            return true;
+        } else if (l.compare(r) == 0) {
+            if (static_cast<ScalarFnCall*>(left)->fn().fn_op() == parser::FT_LT) {
+                return true;
+            }
+        }
+        return false;
+    }
+    static bool gt_ge_less(ExprNode* left, ExprNode* right) {
+        ExprValue l = left->children(1)->get_value(nullptr);
+        ExprValue r = right->children(1)->get_value(nullptr);
+        if (l.compare(r) > 0) {
+            return true;
+        } else if (l.compare(r) == 0) {
+            if (static_cast<ScalarFnCall*>(left)->fn().fn_op() == parser::FT_GT) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
+    auto replace_slot = [](ExprValue eq, ExprNode* expr) {
+        Literal* lit = new Literal(eq);
+        expr->replace_child(0, lit);
+        expr->const_pre_calc();
+    };
+    // has eq, replace all other exprs can be constant
+    if (preds.eq_preds.size() > 0) {
+        DB_NOTICE("enter eq_preds");
+        ExprValue eq = preds.eq_preds[0]->children(1)->get_value(nullptr);
+        for (size_t i = 1; i < preds.eq_preds.size(); i++) {
+            replace_slot(eq, preds.eq_preds[i]);
+        }
+        for (auto expr : preds.lt_le_preds) {
+            replace_slot(eq, expr);
+        }
+        for (auto expr : preds.gt_ge_preds) {
+            replace_slot(eq, expr);
+        }
+        for (auto expr : preds.in_preds) {
+            replace_slot(eq, expr);
+        }
+        return 0;
+    }
+    ExprNode* lt_le = nullptr;
+    ExprNode* gt_ge = nullptr;
+    if (preds.lt_le_preds.size() > 0) {
+        std::sort(preds.lt_le_preds.begin(), preds.lt_le_preds.end(), SlotPredicate::lt_le_less);
+        lt_le = preds.lt_le_preds[0];
+        for (size_t i = 1; i < preds.lt_le_preds.size(); i++) {
+            cut_preds.insert(preds.lt_le_preds[i]);
+        }
+    }
+    if (preds.gt_ge_preds.size() > 0) {
+        std::sort(preds.gt_ge_preds.begin(), preds.gt_ge_preds.end(), SlotPredicate::gt_ge_less);
+        gt_ge = preds.gt_ge_preds[0];
+        for (size_t i = 1; i < preds.gt_ge_preds.size(); i++) {
+            cut_preds.insert(preds.gt_ge_preds[i]);
+        }
+    }
+    // a < 50 and a > 60 => false
+    // a <=50 and a >= 50 => a = 50
+    if (lt_le != nullptr && gt_ge != nullptr) {
+        ExprValue l = lt_le->children(1)->get_value(nullptr);
+        ExprValue g = gt_ge->children(1)->get_value(nullptr);
+        if (l.compare(g) < 0) {
+            return -1;
+        } else if (l.compare(g) == 0) {
+            if (static_cast<ScalarFnCall*>(lt_le)->fn().fn_op() == parser::FT_LE &&
+                static_cast<ScalarFnCall*>(gt_ge)->fn().fn_op() == parser::FT_GE) {
+                // transfer to eq
+                pb::ExprNode node;
+                node.set_node_type(pb::FUNCTION_CALL);
+                node.set_col_type(pb::INVALID_TYPE);
+                pb::Function* func = node.mutable_fn();
+                func->set_name("eq");
+                func->set_fn_op(parser::FT_EQ);
+                lt_le->init(node);
+                lt_le->type_inferer();
+                lt_le->const_pre_calc();
+                cut_preds.insert(gt_ge);
+                return 0;
+            } else {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     int ret = 0;
     ret = ExecNode::expr_optimize(tuple_descs);
@@ -48,9 +155,8 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
     }
-    auto iter = _conjuncts.begin();
-    while (iter != _conjuncts.end()) {
-        auto expr = *iter;
+    std::map<int64_t, SlotPredicate> pred_map;
+    for (auto& expr : _conjuncts) {
         //类型推导
         ret = expr->type_inferer();
         if (ret < 0) {
@@ -59,6 +165,65 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         }
         //常量表达式计算
         expr->const_pre_calc();
+        if (expr->children_size() < 2) {
+            continue;
+        }
+        if (expr->children(0)->node_type() != pb::SLOT_REF) {
+            continue;
+        }
+        SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
+        int64_t sign = (slot_ref->tuple_id() << 8) + slot_ref->slot_id();
+        bool all_const = true;
+        for (uint32_t i = 1; i < expr->children_size(); i++) { 
+            if (!expr->children(i)->is_constant()) {
+                all_const = false;
+                break;
+            }
+        }
+        if (!all_const) {
+            continue;
+        }
+        if (expr->node_type() == pb::IN_PREDICATE) {
+            pred_map[sign].in_preds.push_back(expr);
+        } else if (expr->node_type() == pb::FUNCTION_CALL) {
+            int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
+            switch (fn_op) {
+                case parser::FT_EQ:
+                    pred_map[sign].eq_preds.push_back(expr);
+                    break;
+                case parser::FT_GE:
+                case parser::FT_GT:
+                    pred_map[sign].gt_ge_preds.push_back(expr);
+                    break;
+                case parser::FT_LE:
+                case parser::FT_LT:
+                    pred_map[sign].lt_le_preds.push_back(expr);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    // a < 100 and a < 200 => a <100
+    std::set<ExprNode*> cut_preds;
+    for (auto& pair : pred_map) {
+        if (pair.second.need_cut()) {
+            ret = predicate_cut(pair.second, cut_preds);
+            if (ret < 0) {
+                DB_WARNING("expr is always false");
+                return -2;
+            }
+        }
+    }
+
+    auto iter = _conjuncts.begin();
+    while (iter != _conjuncts.end()) {
+        auto expr = *iter;
+        if (cut_preds.count(expr) == 1) {
+            ExprNode::destroy_tree(expr);
+            iter = _conjuncts.erase(iter);
+            continue;
+        }
         if (expr->is_constant()) {
             ret = expr->open();
             if (ret < 0) {
@@ -69,9 +234,10 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             expr->close();
             //有一个false则应该返回0行，true则直接删除
             if (value.is_null() || value.get_numberic<bool>() == false) {
+                DB_WARNING("expr is always false");
                 return -2;
             } else {
-                ExprNode::destory_tree(expr);
+                ExprNode::destroy_tree(expr);
                 iter = _conjuncts.erase(iter);
                 continue;
             }
@@ -127,12 +293,30 @@ int FilterNode::open(RuntimeState* state) {
     return 0;
 }
 
-void FilterNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto filter_node = pb_node->mutable_derive_node()->mutable_filter_node();
     filter_node->clear_conjuncts();
     for (auto expr : _conjuncts) {
         ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
+    }
+}
+
+void FilterNode::remove_primary_conjunct(int64_t index_id) {
+    auto filter_node = _pb_node.mutable_derive_node()->mutable_filter_node();
+    filter_node->clear_conjuncts();
+    auto iter = _conjuncts.begin();
+    std::vector<int64_t> remove_index;
+    remove_index.push_back(index_id);
+    while (iter != _conjuncts.end()) {
+        auto expr = *iter;
+        if (expr->contained_by_index(remove_index)) {
+            ExprNode::destroy_tree(expr);
+            iter = _conjuncts.erase(iter);
+            continue;
+        }
+        ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
+        ++iter;
     }
 }
 

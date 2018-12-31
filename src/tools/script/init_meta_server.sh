@@ -6,7 +6,7 @@ echo -e "测试场景：添加逻辑机房bj nj hz\n"
 curl -d '{
     "op_type": "OP_ADD_LOGICAL",
     "logical_rooms": {
-        "logical_rooms" : ["bj", "nj", "hz", "yq"]
+        "logical_rooms" : ["bj", "nj", "hz", "yq", "gz"]
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"
@@ -17,7 +17,7 @@ curl -d '{
     "op_type": "OP_ADD_PHYSICAL",
     "physical_rooms": {
         "logical_room" : "bj",
-        "physical_rooms" : ["tc", "yf01", "m1", "bjyz", "cq01", "cq02", "cp01", "dbl", "st01"]
+        "physical_rooms" : ["tc", "yf01", "m1", "bjyz", "cq01", "cq02", "cp01", "dbl01", "st01"]
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"
@@ -36,6 +36,16 @@ curl -d '{
     "physical_rooms": {
         "logical_room" : "hz",
         "physical_rooms" : ["hz01"]
+    }
+}' http://$1/MetaService/meta_manager
+echo -e "\n"
+
+echo -e "\n"
+curl -d '{
+    "op_type": "OP_ADD_PHYSICAL",
+    "physical_rooms": {
+        "logical_room" : "gz",
+        "physical_rooms" : ["gzbh", "gzhl", "gzns", "gzhxy"]
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

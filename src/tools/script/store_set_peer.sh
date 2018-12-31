@@ -5,7 +5,7 @@
 echo -e "Force set peer\n"
 echo 'param: address region_id new_peer'
 region_id=$2
-new_peer=$3
+new_peer=$1
 curl -d '{
     "op_type" : "SetPeer",
     "region_id" : '$region_id',

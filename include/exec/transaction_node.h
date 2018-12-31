@@ -27,7 +27,7 @@ public:
     }
     virtual int init(const pb::PlanNode& node);
     virtual int open(RuntimeState* state);
-    virtual void transfer_pb(pb::PlanNode* pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
 
     pb::TxnCmdType txn_cmd() {
         return _txn_cmd;

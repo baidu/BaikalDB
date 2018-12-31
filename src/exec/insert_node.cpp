@@ -14,6 +14,7 @@
 
 #include "insert_node.h"
 #include "runtime_state.h"
+#include <unordered_set>
 
 namespace baikaldb {
 DECLARE_bool(disable_writebatch_index);
@@ -24,24 +25,36 @@ int InsertNode::init(const pb::PlanNode& node) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
-    _table_id = node.derive_node().insert_node().table_id();
-    _tuple_id = node.derive_node().insert_node().tuple_id();
-    _values_tuple_id = node.derive_node().insert_node().values_tuple_id();
-    _is_replace = node.derive_node().insert_node().is_replace();
+    const pb::InsertNode& insert_node = node.derive_node().insert_node();
+    _table_id = insert_node.table_id();
+    _tuple_id = insert_node.tuple_id();
+    _values_tuple_id = insert_node.values_tuple_id();
+    _is_replace = insert_node.is_replace();
     if (_node_type == pb::REPLACE_NODE) {
         _is_replace = true;
     }
-    _need_ignore = node.derive_node().insert_node().need_ignore();
-    for (auto& slot : node.derive_node().insert_node().update_slots()) {
+    _need_ignore = insert_node.need_ignore();
+    for (auto& slot : insert_node.update_slots()) {
         _update_slots.push_back(slot);
     }
-    for (auto& expr : node.derive_node().insert_node().update_exprs()) {
+    for (auto& expr : insert_node.update_exprs()) {
         ExprNode* up_expr = nullptr;
         ret = ExprNode::create_tree(expr, &up_expr);
         if (ret < 0) {
             return ret;
         }
         _update_exprs.push_back(up_expr);
+    }
+    for (auto id : insert_node.field_ids()) {
+        _field_ids.push_back(id);
+    }
+    for (auto& expr : insert_node.insert_values()) {
+        ExprNode* value_expr = nullptr;
+        ret = ExprNode::create_tree(expr, &value_expr);
+        if (ret < 0) {
+            return ret;
+        }
+        _insert_values.push_back(value_expr);
     }
     _on_dup_key_update = _update_slots.size() > 0;
     return 0;
@@ -104,12 +117,119 @@ int InsertNode::open(RuntimeState* state) {
     return num_affected_rows;
 }
 
-void InsertNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void InsertNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto insert_node = pb_node->mutable_derive_node()->mutable_insert_node();
     insert_node->clear_update_exprs();
     for (auto expr : _update_exprs) {
         ExprNode::create_pb_expr(insert_node->add_update_exprs(), expr);
+    }
+    if (region_id == 0 || _records_by_region.count(region_id) == 0) {
+        return;
+    }
+    std::vector<SmartRecord>& records = _records_by_region[region_id];
+    insert_node->clear_records();
+    for (auto& record : records) {
+        std::string* str = insert_node->add_records();
+        record->encode(*str);
+    }
+}
+
+int InsertNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+    int ret = 0;
+    ret = DMLNode::expr_optimize(tuple_descs);
+    if (ret < 0) {
+        DB_WARNING("expr type_inferer fail:%d", ret);
+        return ret;
+    }
+    for (auto expr : _insert_values) {
+        ret = expr->type_inferer();
+        if (ret < 0) {
+            DB_WARNING("expr type_inferer fail:%d", ret);
+            return ret;
+        }
+        expr->const_pre_calc();
+        if (!expr->is_constant()) {
+            DB_WARNING("insert expr must be constant");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert_records) {
+    if (_field_ids.size() == 0) {
+        DB_WARNING("not execute a prepared stmt");
+        return 0;
+    }
+    if ((_insert_values.size() % _field_ids.size()) != 0) {
+        DB_WARNING("_field_ids should not be empty()");
+        return -1;
+    }
+    TableInfo tbl = _factory->get_table_info(_table_id);
+    if (tbl.id == -1) {
+        DB_WARNING("no table found with table_id: %ld", _table_id);
+        return -1;
+    }
+    std::unordered_map<int32_t, FieldInfo> table_field_map;
+    std::unordered_set<int32_t> insert_field_ids;
+    std::vector<FieldInfo>  insert_fields;
+    std::vector<FieldInfo>  default_fields;
+
+    for (auto& field : tbl.fields) {
+        table_field_map.insert({field.id, field});
+    }
+    for (auto id : _field_ids) {
+        if (table_field_map.count(id) == 0) {
+            DB_WARNING("No field for field id: %d", id);
+            return -1;
+        }
+        insert_field_ids.insert(id);
+        insert_fields.push_back(table_field_map[id]);
+    }
+    for (auto& field : tbl.fields) {
+        if (insert_field_ids.count(field.id) == 0) {
+            default_fields.push_back(field);
+        }
+    }
+    size_t row_size = _insert_values.size() / _field_ids.size();
+    for (size_t row_idx = 0; row_idx < row_size; ++row_idx) {
+        SmartRecord row = _factory->new_record(_table_id);
+        for (size_t col_idx = 0; col_idx < _field_ids.size(); ++col_idx) {
+            size_t idx = row_idx * _field_ids.size() + col_idx;
+            ExprNode* expr = _insert_values[idx];
+            if (0 != expr->open()) {
+                DB_WARNING("expr open fail");
+                return -1;
+            }
+            if (0 != row->set_value(row->get_field_by_tag(insert_fields[col_idx].id), 
+                    expr->get_value(nullptr).cast_to(insert_fields[col_idx].type))) {
+                DB_WARNING("fill insert value failed");
+                expr->close();
+                return -1;
+            }
+            expr->close();
+        }
+        for (auto& field : default_fields) {
+            if (0 != row->set_value(row->get_field_by_tag(field.id), field.default_expr_value)) {
+                DB_WARNING("fill insert value failed");
+                return -1;
+            }
+        }
+        //DB_WARNING("row: %s", row->to_string().c_str());
+        insert_records.push_back(row);
+    }
+    for (auto expr : _insert_values) {
+        ExprNode::destroy_tree(expr);
+    }
+    _insert_values.clear();
+    return 0;
+}
+
+void InsertNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    DMLNode::find_place_holder(placeholders);
+    for (auto& expr : _insert_values) {
+        expr->find_place_holder(placeholders);
     }
 }
 }

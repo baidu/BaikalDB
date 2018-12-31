@@ -76,7 +76,7 @@ int JoinNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             if (value.is_null() || value.get_numberic<bool>() == false) {
                 // todo, 三种不同的join优化方式不同
             } else {
-                ExprNode::destory_tree(expr);
+                ExprNode::destroy_tree(expr);
                 iter = _conditions.erase(iter);
                 continue;
             }
@@ -87,7 +87,7 @@ int JoinNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 }
 
 int JoinNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
-    DB_WARNING("node:%ld is pushdown", this);
+    //DB_WARNING("node:%ld is pushdown", this);
     convert_to_inner_join(input_exprs);
     
     std::vector<ExprNode*> outer_push_exprs;
@@ -196,9 +196,10 @@ void JoinNode::convert_to_inner_join(std::vector<ExprNode*>& input_exprs) {
     }
 }
 
-void JoinNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void JoinNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto join_node = pb_node->mutable_derive_node()->mutable_join_node();
+    join_node->set_join_type(_join_type);
     join_node->clear_conditions();
     for (auto expr : _conditions) {
        ExprNode::create_pb_expr(join_node->add_conditions(), expr);
@@ -296,26 +297,29 @@ int JoinNode::open(RuntimeState* state) {
     for (auto& exec_node : scan_nodes) {
         RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
         ExecNode* parent_node_ptr = scan_node->get_parent();
+        FilterNode* filter_node = nullptr;
         if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
                 || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
-            auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
-                    int32_t {return state->get_slot_id(tuple_id, field_id);};
-            scan_node->clear_possible_indexes();
-            //索引选择
-            IndexSelector().index_selector(get_slot_id,
-                                            NULL,
-                                            scan_node, 
-                                            static_cast<FilterNode*>(parent_node_ptr),
-                                            NULL,
-                                            NULL);
-            //路由选择
-            PlanRouter().scan_plan_router(scan_node);
-            FetcherNode* related_fetcher_node = scan_node->
-                                                get_related_fetcher_node();
-            auto region_infos = scan_node->region_infos();
-            //更改scan_node对应的fethcer_node的region信息
-            related_fetcher_node->set_region_infos(region_infos);
+            filter_node = static_cast<FilterNode*>(parent_node_ptr);
         }
+
+        auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
+                int32_t {return state->get_slot_id(tuple_id, field_id);};
+        scan_node->clear_possible_indexes();
+        //索引选择
+        IndexSelector().index_selector(get_slot_id,
+                                        NULL,
+                                        scan_node, 
+                                        filter_node,
+                                        NULL,
+                                        NULL);
+        //路由选择
+        PlanRouter().scan_plan_router(scan_node);
+        FetcherNode* related_fetcher_node = scan_node->
+                                            get_related_fetcher_node();
+        auto region_infos = scan_node->region_infos();
+        //更改scan_node对应的fethcer_node的region信息
+        related_fetcher_node->set_region_infos(region_infos);
     }
     DB_WARNING("when join, index_selector and scan plan, time_cost:%ld",
                 join_time_cost.get_time());
@@ -356,11 +360,15 @@ int JoinNode::_fill_equal_slot() {
     //因为目前不支持filed_a, filed_b in ((1, "str"), (2,
     //"str"))这种in操作，所以剪枝只能剪掉一个等值操作符
     bool remove_condition = false; //限制只能剪掉一次
+    _outer_equal_slot.clear();
+    _inner_equal_slot.clear();
+
     while (iter != _conditions.end()) {
         auto expr = *iter;
         if (_is_equal_condition(expr) && !remove_condition) {
             iter = _conditions.erase(iter);
             remove_condition = true;
+            _have_removed.push_back(expr);
         } else {
             auto ret = expr->open();
             if (ret < 0) {
@@ -673,6 +681,7 @@ int JoinNode:: _construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_r
 }
 
 void JoinNode::close(RuntimeState* state) {
+    ExecNode::close(state);
     for (auto expr : _conditions) {
         expr->close();
     }
@@ -683,27 +692,50 @@ void JoinNode::close(RuntimeState* state) {
         delete mem_row;
     }
 }
- 
+
+void JoinNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _conditions) {
+        expr->find_place_holder(placeholders);
+    }
+}  
+
+bool JoinNode::need_reorder(
+        std::map<int32_t, ExecNode*>& tuple_join_child_map,
+        std::map<int32_t, std::set<int32_t>>& tuple_equals_map, 
+        std::vector<int32_t>& tuple_order,
+        std::vector<ExprNode*>& conditions) {
+    if (_join_type != pb::INNER_JOIN) {
+        return false;
+    }
+    for (auto& child : _children) {
+        if (child->node_type() == pb::JOIN_NODE) {
+            if (!static_cast<JoinNode*>(child)->need_reorder(
+                        tuple_join_child_map, tuple_equals_map, tuple_order, conditions)) {
+                return false;
+            }
+        } else {
+            ExecNode* scan_node = child->get_node(pb::SCAN_NODE);
+            if (scan_node == nullptr) {
+                return false;
+            }
+            int32_t tuple_id = static_cast<ScanNode*>(scan_node)->tuple_id();
+            tuple_join_child_map[tuple_id] = child;
+            tuple_order.push_back(tuple_id);
+        }
+    }
+    for (auto& expr : _conditions) {
+        _is_equal_condition(expr);
+        conditions.push_back(expr);
+    }
+    for (size_t i = 0; i < _outer_equal_slot.size(); i++) {
+        int32_t left_tuple_id = static_cast<SlotRef*>(_outer_equal_slot[i])->tuple_id();
+        int32_t right_tuple_id = static_cast<SlotRef*>(_inner_equal_slot[i])->tuple_id();
+        tuple_equals_map[left_tuple_id].insert(right_tuple_id);
+        tuple_equals_map[right_tuple_id].insert(left_tuple_id);
+    }
+    return true;
+}
 }//namespace
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

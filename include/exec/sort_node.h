@@ -26,27 +26,28 @@ public:
     }
     virtual ~SortNode() {
         for (auto expr : _order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
         for (auto expr : _slot_order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node);
      
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
-    
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual void transfer_pb(pb::PlanNode* pb_node) {
-        ExecNode::transfer_pb(pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+        ExecNode::transfer_pb(region_id, pb_node);
         auto sort_node = pb_node->mutable_derive_node()->mutable_sort_node();
         sort_node->clear_order_exprs();
         for (auto expr : _order_exprs) {
             ExprNode::create_pb_expr(sort_node->add_order_exprs(), expr);
         }
     }
+    
     void transfer_fetcher_pb(pb::FetcherNode* pb_fetcher) {
         for (auto expr : _slot_order_exprs) {
             ExprNode::create_pb_expr(pb_fetcher->add_slot_order_exprs(), expr);

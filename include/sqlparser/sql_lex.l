@@ -420,47 +420,52 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 
 [0-9]+ {
     //整数..
-	yylval->expr = LiteralExpr::make_int(yytext, parser->arena);
+    yylval->expr = LiteralExpr::make_int(yytext, parser->arena);
     return INTEGER_LIT;
 }
 [0-9]+E[-+]?[0-9]+ |
 [0-9]+\.[0-9]*E[-+]?[0-9]+ |
 \.[0-9]+E[-+]?[0-9]+ |
-[0-9]+\.[0-9]+	|
-[0-9]+\.		|
+[0-9]+\.[0-9]+    |
+[0-9]+\.        |
 \.[0-9]+ {
     //浮点数..
-	yylval->expr = LiteralExpr::make_double(yytext, parser->arena);
+    yylval->expr = LiteralExpr::make_double(yytext, parser->arena);
     return DECIMAL_LIT;
 }
 
 \"([^\\\"]|\\.)*\" |
-\'([^\\\']|\\.)*\' |
-	"?" {
+\'([^\\\']|\\.)*\' {
     //字符串..
-	LiteralExpr* lit;
-	lit = LiteralExpr::make_string(yytext, parser->arena);
-	lit->_u.str_val.stripslashes(); // 从logical_plan移到这边
-	if (parser->is_gbk && parser->has_5c) {
-		lit->_u.str_val.restore_5c();
-	}
-	yylval->expr = lit;
+    LiteralExpr* lit;
+    lit = LiteralExpr::make_string(yytext, parser->arena);
+    lit->_u.str_val.stripslashes(); // 从logical_plan移到这边
+    if (parser->is_gbk && parser->has_5c) {
+        lit->_u.str_val.restore_5c();
+    }
+    yylval->expr = lit;
     return STRING_LIT;
+}
+
+"?" {
+    yylval->expr = LiteralExpr::make_place_holder(parser->place_holder_id, parser->arena);
+    parser->place_holder_id++;
+    return PLACE_HOLDER_LIT;
 }
 
 (([A-Za-z0-9_]+)|(`[^`]+`))((@([A-Za-z0-9_*]+|(`[^`]`)+))*) {
     //标识符..
-	if (yytext[0] != '`') {
-		yylval->string.strdup(yytext, parser->arena);
-	} else {
-		yylval->string.strdup(yytext + 1, strlen(yytext) - 2 , parser->arena);
-	}
+    if (yytext[0] != '`') {
+        yylval->string.strdup(yytext, parser->arena);
+    } else {
+        yylval->string.strdup(yytext + 1, strlen(yytext) - 2 , parser->arena);
+    }
     return IDENT;
 }
 
 @@?[A-Za-z][A-Za-z0-9_.$]* {
     //变量..
-	yylval->string.strdup(yytext, parser->arena);
+    yylval->string.strdup(yytext, parser->arena);
     return IDENT;
 }
 
@@ -474,9 +479,9 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 
 %%
 void un_reserved_keyword(YYSTYPE* yylval, yyscan_t yyscanner, SqlParser* parser) {
-	char* text = yyget_text(yyscanner);
-	yylval->string.strdup(text, parser->arena);
+    char* text = yyget_text(yyscanner);
+    yylval->string.strdup(text, parser->arena);
 }
-		
+        
 /* vim: set ts=4 sw=4 sts=4 tw=100 noet: */
 

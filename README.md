@@ -38,7 +38,7 @@ We use [Bazel](https://www.bazel.build) to resolve dependencies and build Baikal
 The build has been successful on Ubuntu 16.04 and CentOS 7. More platforms will be supported soon.
 
 ### Ubuntu 16.04
-* [Install bazel](https://docs.bazel.build/versions/master/install-ubuntu.html).
+* [Install bazel](https://docs.bazel.build/versions/master/install-ubuntu.html), we recommend version 0.18.1 or earlier. Later versions may be incompatible with the BUILD file.
 * Install flex, bison and openssl library: 
   sudo apt-get install flex bison libssl-dev
 * Install g++ (v4.8.2 or later): 
@@ -114,6 +114,14 @@ CREATE TABLE `TestDB`.`test_table` (
 
 After CREATE TABLE returns successfully, the synchronization of table schema from baikalMeta to baikaldb/baikalStore requires 10-30 seconds, during which SQL command like `show tables` and `desc table` may fail.
 
+### How To Upgrade BaikalStore to the space-efficient-snapshot version
+If your cluster is deployed with the binary built from the code submitted before Dec. 25 2018, you are required to follow the below instructions to upgrade the BaikalStore binary to the latest version.
+1. Upgrade all BaikalStore instances to the latest no_snapshot_compatible branch. This is an intermediate branch, on which all add_peer operations will fail.
+2. Create new snapshot manually for all regions.
+  *  How to create snapshot? Execute `sh src/tools/script/store_snapshot_region.sh ip:port` for all BaikalStore instances.
+  *  How to verify? Check the snapshot directory of each region. Each directory should only contain the file with _raft_snapshot_meta suffix, and no snap_region_***.extra.json file.
+3. Upgrade all BaikalStore instances to the latest master branch.
+
 ## Documents
 * [User Manual](docs/cn/user_guide.md)
 
@@ -130,3 +138,4 @@ You are welcome to constribute new features and bugfix codes. Before code submis
 * We are especially grateful to the teams of RocksDB, brpc and braft, who built powerful and stable libraries to support important features of BaikalDB.
 * We give special thanks to TiDB team and Impala team. We referred their design schemes when designing and developing BaikalDB.
 * Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
+* Thanks our friend team -- The Baidu TafDB team, who provide the space efficient snapshot scheme based on braft.

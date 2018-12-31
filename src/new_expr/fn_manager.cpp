@@ -24,17 +24,29 @@ namespace baikaldb {
     REGISTER_BINARY_OP(NAME, int) \
     REGISTER_BINARY_OP(NAME, uint) \
     REGISTER_BINARY_OP(NAME, double)
-#define REGISTER_BINARY_OP_PREDICATE_ALL_TYPES(NAME) \
-    REGISTER_BINARY_OP(NAME, int) \
-    REGISTER_BINARY_OP(NAME, uint) \
-    REGISTER_BINARY_OP(NAME, double) \
-    REGISTER_BINARY_OP(NAME, string) \
-    REGISTER_BINARY_OP(NAME, datetime) \
-    REGISTER_BINARY_OP(NAME, time) \
-    REGISTER_BINARY_OP(NAME, date) \
-    REGISTER_BINARY_OP(NAME, timestamp)
+    
+#define REGISTER_SWAP_PREDICATE(NAME1, NAME2, TYPE) \
+    REGISTER_BINARY_OP(NAME1, TYPE) \
+    predicate_swap_map[#NAME1"_"#TYPE"_"#TYPE] = #NAME2"_"#TYPE"_"#TYPE;
+#define REGISTER_SWAP_PREDICATE_ALL_TYPES(NAME1, NAME2) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, int) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, uint) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, double) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, string) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, datetime) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, time) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, date) \
+    REGISTER_SWAP_PREDICATE(NAME1, NAME2, timestamp) 
 
 static std::unordered_map<std::string, pb::PrimitiveType> return_type_map;
+static std::unordered_map<std::string, std::string> predicate_swap_map;
+
+std::string FunctionManager::get_swap_op(const std::string& name) {
+    if (predicate_swap_map.count(name) == 1) {
+        return predicate_swap_map[name];
+    }
+    return "";
+}
 
 void FunctionManager::register_operators() {
     // ~ ! -1 -1.1
@@ -57,12 +69,12 @@ void FunctionManager::register_operators() {
     REGISTER_BINARY_OP(bit_or, uint);
     REGISTER_BINARY_OP(bit_xor, uint);
     // ==  != > >= < <=
-    REGISTER_BINARY_OP_PREDICATE_ALL_TYPES(eq);
-    REGISTER_BINARY_OP_PREDICATE_ALL_TYPES(ne);
-    REGISTER_BINARY_OP_PREDICATE_ALL_TYPES(gt);
-    REGISTER_BINARY_OP_PREDICATE_ALL_TYPES(ge);
-    REGISTER_BINARY_OP_PREDICATE_ALL_TYPES(lt);
-    REGISTER_BINARY_OP_PREDICATE_ALL_TYPES(le);
+    REGISTER_SWAP_PREDICATE_ALL_TYPES(eq, eq);
+    REGISTER_SWAP_PREDICATE_ALL_TYPES(ne, ne);
+    REGISTER_SWAP_PREDICATE_ALL_TYPES(gt, lt);
+    REGISTER_SWAP_PREDICATE_ALL_TYPES(ge, le);
+    REGISTER_SWAP_PREDICATE_ALL_TYPES(lt, gt);
+    REGISTER_SWAP_PREDICATE_ALL_TYPES(le, ge);
     // && ||
     REGISTER_BINARY_OP(logic_and, bool);
     REGISTER_BINARY_OP(logic_or, bool);
@@ -72,10 +84,17 @@ void FunctionManager::register_operators() {
         register_object(name, T);
         return_type_map[name] = ret_type;
     };
+    // num funcs
+    register_object_ret("round", round, pb::INT64);
+    register_object_ret("floor", floor, pb::INT64);
+    register_object_ret("ceil", ceil, pb::INT64);
+    register_object_ret("ceiling", ceil, pb::INT64);
+
     // str funcs
-    register_object_ret("length", length, pb::STRING);
+    register_object_ret("length", length, pb::INT64);
     register_object_ret("upper", upper, pb::STRING);
     register_object_ret("lower", lower, pb::STRING);
+    register_object_ret("lower_gbk", lower_gbk, pb::STRING);
     register_object_ret("concat", concat, pb::STRING);
     register_object_ret("substr", substr, pb::STRING);
     register_object_ret("left", left, pb::STRING);
@@ -93,6 +112,8 @@ void FunctionManager::register_operators() {
     register_object_ret("hll_estimate", hll_estimate, pb::INT64);
     register_object_ret("case_when", case_when, pb::STRING);
     register_object_ret("case_expr_when", case_expr_when, pb::STRING);
+    // MurmurHash sign
+    register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
 }
 
 int FunctionManager::init() {

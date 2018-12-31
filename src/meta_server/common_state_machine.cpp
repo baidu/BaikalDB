@@ -112,6 +112,16 @@ void CommonStateMachine::process(google::protobuf::RpcController* controller,
 }
 
 void CommonStateMachine::on_leader_start() {
+    //bns ，自动探测是否迁移
+    if (FLAGS_meta_server_bns.find(":") == std::string::npos) {
+        if (!_check_start) {
+            auto fun = [this]() {
+                start_check_migrate();
+            };
+            _check_migrate.run(fun);
+            _check_start = true;
+        }
+    }
     _is_leader.store(true);
 }
 
@@ -122,6 +132,11 @@ void CommonStateMachine::on_leader_start(int64_t term) {
 
 void CommonStateMachine::on_leader_stop() {
     _is_leader.store(false);
+    if (_check_start) {
+        _check_migrate.join();
+        _check_start = false;
+        DB_WARNING("check migrate thread join");
+    }
     DB_WARNING("leader stop");
 }
 
@@ -142,6 +157,75 @@ void CommonStateMachine::on_configuration_committed(const ::braft::Configuration
     DB_WARNING("new conf committed, new peer:%s", new_peer.c_str());
 }
 
+void CommonStateMachine::start_check_migrate() {
+    DB_WARNING("start check migrate");
+    static int64_t count = 0;
+    int64_t sleep_time_count = FLAGS_check_migrate_interval_us / (1000 * 1000LL); //以S为单位
+    while (_node.is_leader()) {
+        int time = 0;
+        while (time < sleep_time_count) {
+            if (!_node.is_leader()) {
+                return;
+            }
+             bthread_usleep(1000 * 1000LL);
+             ++time;
+        }
+        SELF_TRACE("start check migrate, count: %ld", count);
+        ++count;
+        check_migrate();
+    }
+}
+void CommonStateMachine::check_migrate() {
+    //判断meta_server是否需要做迁移
+    std::vector<std::string> instances;
+    std::string remove_peer;
+    std::string add_peer;
+    int ret = 0;
+    if (get_instance_from_bns(&ret,FLAGS_meta_server_bns, instances) != 0 || 
+            (int32_t)instances.size() != FLAGS_meta_replica_number) {
+        DB_WARNING("get instance from bns fail, bns:%s, ret:%d, instance.size:%d",
+                    FLAGS_meta_server_bns.c_str(), ret, instances.size());
+        return;
+    }
+    std::set<std::string> instance_set;
+    for (auto& instance: instances) {
+        instance_set.insert(instance);
+    }
+    std::set<std::string> peers_in_server;
+    std::vector<braft::PeerId> peers;
+    if (!_node.list_peers(&peers).ok()) {
+        DB_WARNING("node list peer fail");
+        return;
+    }
+    for (auto& peer : peers) {
+        peers_in_server.insert(butil::endpoint2str(peer.addr).c_str());
+    }
+    if (peers_in_server == instance_set) {
+        return;
+    }
+    for (auto& peer : peers_in_server) {
+        if (instance_set.find(peer) == instance_set.end()) {
+            remove_peer = peer;
+            DB_WARNING("remove peer: %s", remove_peer.c_str());
+            break;
+        }
+    }
+    for (auto& peer : instance_set) {
+        if (peers_in_server.find(peer) == peers_in_server.end()) {
+            add_peer = peer;
+            DB_WARNING("add peer: %s", add_peer.c_str());
+            break;
+        }
+    }
+    ret = 0;
+    if (remove_peer.size() != 0) {
+        //发送remove_peer的请求
+        ret = send_set_peer_request(true, remove_peer);
+    }
+    if (add_peer.size() != 0 && ret == 0) {
+        send_set_peer_request(false, add_peer);
+    }
+} 
 int CommonStateMachine::send_set_peer_request(bool remove_peer, const std::string& change_peer) {
     MetaServerInteract meta_server_interact;
     if (meta_server_interact.init() != 0) {

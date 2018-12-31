@@ -41,10 +41,6 @@ const std::string SQL_ROLLBACK                   = "rollback";
 const std::string SQL_START_TRANSACTION          = "start";
 const std::string SQL_COMMIT                     = "commit";
 const std::string SQL_SHOW_VARIABLES             = "show variables";
-const std::string SQL_VERSION_COMMENT            = "select @@version_comment limit 1";
-const std::string SQL_SESSION_AUTO_INCREMENT     = "select @@session.auto_increment_increment";
-const std::string SQL_SESSION_AUTO_AUTOCOMMIT    = "select @@session.autocommit";
-const std::string SQL_SESSION_TX_ISOLATION       = "select @@session.tx_isolation";
 const std::string SQL_SELECT_DATABASE            = "select database()";
 const std::string SQL_SHOW_DATABASES             = "show databases";
 const std::string SQL_SHOW_TABLES                = "show tables";
@@ -55,7 +51,6 @@ const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
 const std::string SQL_SHOW_WARNINGS              = "show warnings";
-const std::string SQL_SELECT_1                   = "select 1";
 const std::string SQL_SHOW_REGION                = "show region";
 
 enum QUERY_TYPE {
@@ -125,16 +120,13 @@ private:
     int _auth_read(SmartSocket sock);
     int _read_packet(SmartSocket sock);
     int _query_read(SmartSocket sock);
+    int _query_read_stmt_execute(SmartSocket sock);
     int _get_query_type(std::shared_ptr<QueryContext> ctx);
     int _get_json_attributes(std::shared_ptr<QueryContext> ctx);
     bool _query_process(SmartSocket sock);
     void _parse_comment(std::shared_ptr<QueryContext> ctx);
 
     bool _handle_client_query_use_database(SmartSocket client);
-    bool _handle_client_query_version_commit(SmartSocket client);
-    bool _handle_client_query_session_auto_increment(SmartSocket client);
-    bool _handle_client_query_session_auto_autocommit(SmartSocket client);
-    bool _handle_client_query_session_tx_isolation(SmartSocket client);
     bool _handle_client_query_select_database(SmartSocket client);
     bool _handle_client_query_show_databases(SmartSocket client);
     bool _handle_client_query_show_full_tables(SmartSocket client);
@@ -144,6 +136,7 @@ private:
     bool _handle_client_query_show_table_status(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
     bool _handle_client_query_common_query(SmartSocket client);
+
     bool _handle_client_query_select_1(SmartSocket client);
     bool _handle_client_query_show_collation(SmartSocket client);
     bool _handle_client_query_show_warnings(SmartSocket client);

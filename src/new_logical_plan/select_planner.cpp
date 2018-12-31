@@ -29,7 +29,7 @@ int SelectPlanner::plan() {
             return -1;        
         }
         create_packet_node(pb::OP_SELECT, 0);
-        DB_WARNING("no sql from");
+        //DB_WARNING("no sql from");
         return 0;
     }
     // parse from
@@ -102,16 +102,23 @@ int SelectPlanner::plan() {
 }
 
 int SelectPlanner::create_limit_node() {
-    if (_limit_count == -1 && _limit_offset == 0) {
-        return 0;
-    }
     pb::PlanNode* limit_node = _ctx->add_plan_node();
     limit_node->set_node_type(pb::LIMIT_NODE);
-    limit_node->set_limit(_limit_count);
+    limit_node->set_limit(-1);
     limit_node->set_num_children(1); //TODO
+
     pb::DerivePlanNode* derive = limit_node->mutable_derive_node();
     pb::LimitNode* limit = derive->mutable_limit_node();
-    limit->set_offset(_limit_offset);
+    if (_limit_offset.nodes_size() > 0) {
+        limit->mutable_offset_expr()->CopyFrom(_limit_offset);
+        limit->set_offset(0);
+    } else {
+        limit->set_offset(0);
+    }
+
+    if (_limit_count.nodes_size() > 0) {
+        limit->mutable_count_expr()->CopyFrom(_limit_count);
+    }
     return 0;
 }
 
@@ -390,8 +397,14 @@ int SelectPlanner::parse_limit() {
         return 0;
     }
     parser::LimitClause* limit = _select->limit;
-    _limit_offset = limit->offset;
-    _limit_count  = limit->count;
+    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset)) {
+        DB_WARNING("create limit offset expr failed");
+        return -1;
+    }
+    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count)) {
+        DB_WARNING("create limit count expr failed");
+        return -1;
+    }
     return 0;
 }
 

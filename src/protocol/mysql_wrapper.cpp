@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include "network_socket.h"
 #include "query_context.h"
+#include "packet_node.h"
 
 namespace baikaldb {
 
@@ -142,60 +143,60 @@ int MysqlWrapper::auth_result_send(SmartSocket sock) {
 }
 
 int MysqlWrapper::protocol_get_char(
-        SmartSocket sock,
-        uint8_t* data,
-        uint32_t* off,
-        uint8_t* result) {
-    if (nullptr == sock || nullptr == data || nullptr == off || nullptr == result) {
-        DB_FATAL("sock or data is null: %p, %p", sock.get(), data);
+        uint8_t*    data,
+        int         packet_len,
+        uint32_t&   offset,
+        uint8_t*    result) {
+    if (nullptr == data || nullptr == result) {
+        DB_FATAL("packet or result is null: %p, %p", data, result);
         return RET_ERROR;
     }
-    if ((unsigned int)(sock->packet_len + PACKET_HEADER_LEN) < *off + 1) {
-        DB_FATAL("s->packet_len=%d + 4 < off=%d + 1", sock->packet_len, *off);
+    if ((unsigned int)packet_len < offset + 1) {
+        DB_FATAL("s->packet_len=%d + 4 < off=%d + 1", packet_len, offset);
         return RET_ERROR;
     }
-    *result = data[(*off)++];
+    *result = data[offset++];
     return RET_SUCCESS;
 }
 
-int MysqlWrapper::protocol_get_int_len(
-        SmartSocket sock,
-        uint8_t* data,
-        uint32_t* off,
-        size_t len,
-        uint64_t* result) {
-    if (!sock || nullptr == data || nullptr == off || len <= 0 || nullptr == result) {
-        DB_FATAL("sock == NULL || data==NULL || NULL == off || len=%d <= 0", len);
+int MysqlWrapper::protocol_get_length_fixed_int(
+        uint8_t*    data,
+        int32_t     packet_len,
+        uint32_t&   offset,
+        size_t      int_len,
+        uint64_t&   result) {
+    if (nullptr == data) {
+        DB_FATAL("data == NULL");
         return RET_ERROR;
     }
-    if ((unsigned int)(sock->packet_len + PACKET_HEADER_LEN) < *off + len) {
-        DB_FATAL("s->packet_len=%d + 4 < off=%d + len=%d", sock->packet_len, *off, len);
+    if ((uint32_t)packet_len < offset + int_len) {
+        DB_FATAL("packet_len(%lu) < offset(%u) + len(%lu)", packet_len, offset, int_len);
         return RET_ERROR;
     }
     uint64_t ret_int = 0;
-    for (uint32_t i = 0; i < len; i++) {
-        ret_int += (uint8_t) data[*off + i] << (i * 8);
+    for (uint32_t i = 0; i < int_len; i++) {
+        ret_int += (((uint64_t) data[offset + i]) << (i * 8));
     }
-    *off += len;
-    *result = ret_int;
+    offset += int_len;
+    result = ret_int;
     return RET_SUCCESS;
 }
 
 int MysqlWrapper::protocol_get_string(
         uint8_t *data,
-        int size,
-        uint32_t* off,
+        int packet_len,
+        uint32_t& offset,
         std::string &ret_str) {
-    if (NULL == data || NULL == off) {
-        DB_FATAL("data==NULL || NULL == off");
+
+    if (nullptr == data) {
+        DB_FATAL("data is nullptr");
         return RET_ERROR;
     }
-
     int len = 0;
-    while ((*off + len) < (unsigned int)size && *(data + *off + len) != '\0') {
+    while ((offset + len) < (unsigned int)packet_len && *(data + offset + len) != '\0') {
         ++len;
     }
-    if (*off + len >= (unsigned int)size) {
+    if (offset + len >= (unsigned int)packet_len) {
         DB_FATAL("protocol_get_string doesn't have \\0 char");
         return RET_ERROR;
     }
@@ -209,7 +210,7 @@ int MysqlWrapper::protocol_get_string(
             DB_FATAL("create tmp buf failed");
             return RET_ERROR;
         }
-        memcpy(tmp_buf, data + *off, len);
+        memcpy(tmp_buf, data + offset, len);
         tmp_buf[len] = '\0';
         ret_str = tmp_buf;
         delete[]tmp_buf;
@@ -218,17 +219,17 @@ int MysqlWrapper::protocol_get_string(
         DB_FATAL("len <=0,len:[%d].", len);
         return RET_ERROR;
     }
-    *off += len + 1;
+    offset += len + 1;
     return RET_SUCCESS;
 }
 
-int MysqlWrapper::protocol_get_sql_string(uint8_t *packet,
-                                        int32_t packet_len,
-                                        uint32_t* off,
+int MysqlWrapper::protocol_get_sql_string(uint8_t*  packet,
+                                        int32_t     packet_len,
+                                        uint32_t&   offset,
                                         std::string& sql,
                                         int sql_len) {
 
-    if (NULL == packet || NULL == off) {
+    if (NULL == packet) {
         DB_FATAL(" NULL == packet || NULL == off");
         return RET_ERROR;
     }
@@ -237,25 +238,8 @@ int MysqlWrapper::protocol_get_sql_string(uint8_t *packet,
             packet_len, sql_len);
         return RET_ERROR;
     }
-
-    char *sql_buf = new (std::nothrow)char[sql_len + 1];
-    if (sql_buf == NULL) {
-        DB_FATAL("allcate temp buffer for read sql string error");
-        return RET_ERROR;
-    }
-    try {
-        memcpy(sql_buf, packet + *off, sql_len);
-    } catch (...) {
-        DB_FATAL("exception in protocol_get_sql_string: %p, %p, %u",
-            sql_buf, packet, *off);
-        delete []sql_buf;
-        return RET_ERROR;
-    }
-    sql_buf[sql_len] = '\0';
-    sql = sql_buf;
-    *off += sql_len;
-
-    delete []sql_buf;
+    sql.assign((char*)packet + offset, sql_len);
+    offset += sql_len;
     return RET_SUCCESS;
 }
 
@@ -293,6 +277,12 @@ bool MysqlWrapper::is_shutdown_command(uint8_t command) {
     return (command == COM_QUIT         //0x01
         || command == COM_SHUTDOWN      //0x08 
         || command == COM_PROCESS_KILL);//0x0c  
+}
+
+bool MysqlWrapper::is_prepare_command(uint8_t command) {
+    return (command == COM_STMT_PREPARE
+        || command == COM_STMT_EXECUTE
+        || command == COM_STMT_CLOSE);
 }
 
 bool MysqlWrapper::make_err_packet(SmartSocket sock, MysqlErrCode err_code, const char* format, ...) {
@@ -457,7 +447,7 @@ bool MysqlWrapper::make_field_packet(DataBuffer* array, const ResultField* field
 
     // decimals
     bytes[0] = field->decimals & 0xff;
-    if (!array->byte_array_append_len(bytes, 2)) {
+    if (!array->byte_array_append_len(bytes, 1)) {
         DB_FATAL("byte_array_append_len failed.");
         return false;
     }
@@ -637,7 +627,7 @@ bool MysqlWrapper::make_eof_packet(DataBuffer* send_buf, int packet_id) {
 }
 
 bool MysqlWrapper::make_simple_ok_packet(SmartSocket sock) {
-    if (!sock) {
+    if (sock == nullptr) {
         DB_FATAL("sock==NULL");
         return RET_ERROR;
     }
@@ -651,6 +641,101 @@ bool MysqlWrapper::make_simple_ok_packet(SmartSocket sock) {
     return sock->send_buf->network_queue_send_append(packet_ok, (sizeof(packet_ok) - 1), 1, 0);
 }
 
+// TODO: support "Parameter Definition Block" and "Column Definition Block"
+// https://dev.mysql.com/doc/internals/en/com-stmt-prepare-response.html
+// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_prepare.html
+bool MysqlWrapper::make_stmt_prepare_ok_packet(SmartSocket sock) {
+    if (sock == nullptr) {
+        DB_FATAL("sock==NULL");
+        return false;
+    }
+    auto iter = sock->prepared_plans.find(sock->query_ctx->prepare_stmt_name);
+    if (iter == sock->prepared_plans.end()) {
+        DB_WARNING("no prepare_stmt found, stmt_name: %s", sock->query_ctx->prepare_stmt_name.c_str());
+        return false;
+    }
+    auto query_ctx = iter->second;
+    ExecNode* plan = query_ctx->root;
+    if (plan == nullptr) {
+        DB_WARNING("prepare_stmt plan is null");
+        return false;
+    }
+    PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
+    if (packet_node == nullptr) {
+        DB_WARNING("prepare_stmt plan packet node is null");
+        return false;
+    }
+    uint8_t status = '\x00';
+    uint32_t stmt_id = (uint32_t)sock->stmt_id;
+    uint16_t columns = packet_node->field_count();
+    uint16_t parameters = query_ctx->placeholders.size();
+    // DB_WARNING("stmt_id: %u, columns: %u, params: %u", stmt_id, columns, parameters);
+    DataBuffer tmp_buf;
+    if (!tmp_buf.byte_array_append_len(&status, 1)) {
+        DB_FATAL("Failed to append status");
+        return false;
+    }
+    uint8_t stmt_id_bytes[4];
+    stmt_id_bytes[0] = (stmt_id & 0xff);
+    stmt_id_bytes[1] = (stmt_id >> 8) & 0xff;
+    stmt_id_bytes[2] = (stmt_id >> 16) & 0xff;
+    stmt_id_bytes[3] = (stmt_id >> 24) & 0xff;
+    if (!tmp_buf.byte_array_append_len(stmt_id_bytes, 4)) {
+        DB_FATAL("Failed to append status");
+        return false;
+    }
+    uint8_t columns_bytes[2];
+    columns_bytes[0] = (columns & 0xff);
+    columns_bytes[1] = (columns >> 8) & 0xff;
+    if (!tmp_buf.byte_array_append_len(columns_bytes, 2)) {
+        DB_FATAL("Failed to append status");
+        return false;
+    }
+    uint8_t param_bytes[2];
+    param_bytes[0] = (parameters & 0xff);
+    param_bytes[1] = (parameters >> 8) & 0xff;
+    if (!tmp_buf.byte_array_append_len(param_bytes, 2)) {
+        DB_FATAL("Failed to append status");
+        return false;
+    }
+    uint8_t filter = 0;
+    tmp_buf.byte_array_append_len(&filter, 1);
+
+    uint8_t warning_count_bytes[2];
+    warning_count_bytes[0] = 0x00;
+    warning_count_bytes[1] = 0x00;
+    if (!tmp_buf.byte_array_append_len(warning_count_bytes, 2)) {
+        DB_FATAL("Failed to append status");
+        return false;
+    }
+    uint8_t packet_id = 1;
+    if (!sock->send_buf->network_queue_send_append(tmp_buf._data, tmp_buf._size, packet_id, 0)) {
+        DB_FATAL("Failed to append prepared_stmt init packet");
+        return false;
+    }
+    for (int idx = 0; idx < parameters; ++idx) {
+        ResultField field;
+        field.catalog = "def";
+        field.name = "?";
+        field.type = 0xfd;
+        field.charsetnr = 0x3f;
+        field.flags = 0x80;
+        packet_id++;
+        if (!make_field_packet(sock->send_buf, &field, packet_id)) {
+            DB_FATAL("Failed to append prepared_stmt parameter packet");
+            return false;
+        }
+    }
+    if (parameters > 0) {
+        packet_id++;
+        make_eof_packet(sock->send_buf, packet_id);        
+    }
+    if (columns > 0) {
+        packet_node->pack_fields(sock->send_buf, packet_id);
+    }
+    return true;
+}
+
 bool MysqlWrapper::make_string_packet(SmartSocket sock, const char* data, int len) {
     if (!sock || data == NULL || len <= 0) {
         DB_FATAL("s == NULL || data == NULL || len=%d <= 0", len);
@@ -661,7 +746,7 @@ bool MysqlWrapper::make_string_packet(SmartSocket sock, const char* data, int le
     char *tmp = new (std::nothrow) char[tmp_len];
     if (tmp == NULL) {
         DB_FATAL("allocate temp buf error!");
-        return RET_ERROR;
+        return false;
     }
     bzero(tmp, tmp_len);
 
@@ -684,4 +769,161 @@ bool MysqlWrapper::make_string_packet(SmartSocket sock, const char* data, int le
     return true;
 }
 
+// return is null or not
+// https://dev.mysql.com/doc/internals/en/integer.html#length-encoded-integer
+int MysqlWrapper::protocol_get_length_coded_int(
+        uint8_t*    data, 
+        int32_t     packet_len,
+        uint32_t&   offset,
+        uint64_t&   result,
+        bool&       is_null) {
+    if ((uint32_t)packet_len < offset + 1) {
+        DB_FATAL("packet_len(%lu) < offset(%u) + len(%lu)", packet_len, offset, 1);
+        return RET_ERROR;
+    }
+    if (data[offset] > 254) {
+        DB_FATAL("invalid length_coded header value: %u", data[offset]);
+        return RET_ERROR;
+    }
+    is_null = false;
+    result = 0;
+    if (data[offset] == 251) {
+        offset += 1;
+        is_null = true;
+        return RET_SUCCESS;
+    }
+    size_t int_length = 0;
+    if (data[offset] <= 250) {
+        result = data[offset];
+        offset += 1;
+    } else if (data[offset] == 252) {
+        offset += 1;
+        int_length = 2;
+    } else if (data[offset] == 253) {
+        offset += 1;
+        int_length = 3;
+    } else if (data[offset] == 254) {
+        offset += 1;
+        int_length = 8;
+    }
+    if (int_length == 0) {
+        return RET_SUCCESS;
+    }
+    if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, int_length, result)) {
+        DB_WARNING("get 2-bytes integer failed");
+        return RET_ERROR;
+    }
+    return RET_SUCCESS;
+}
+
+// https://dev.mysql.com/doc/refman/8.0/en/c-api-prepared-statement-type-codes.html
+// https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
+// TODO: support MYSQL_TYPE_TIME, MYSQL_TYPE_DATE, MYSQL_TYPE_DATETIME, MYSQL_TYPE_TIMESTAMP
+// MYSQL_TYPE_FLOAT and MYSQL_TYPE_DOUBLE
+int MysqlWrapper::decode_binary_protocol_value(
+        uint8_t*    data, 
+        int32_t     packet_len,
+        uint32_t&   offset,
+        SignedType  type,
+        pb::ExprNode& node) {
+
+    // DB_WARNING("mysql_type: %u, is_unsigned: %d, offset: %u, packet_len: %lu", type.mysql_type, type.is_unsigned, offset, packet_len);
+    switch (type.mysql_type) {
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VAR_STRING: {
+        uint64_t length = 0;
+        bool is_null = false;
+        if (RET_SUCCESS != protocol_get_length_coded_int(data, packet_len, offset, length, is_null)) {
+            DB_FATAL("decode_binary_protocol_value failed");
+            return RET_ERROR;
+        }
+        if (is_null) {
+            DB_FATAL("decode_binary_protocol_value failed");
+            return RET_ERROR;
+        }
+        node.set_node_type(pb::STRING_LITERAL);
+        node.set_col_type(pb::STRING);
+        node.set_num_children(0);
+        pb::DeriveExprNode* str_node = node.mutable_derive_node();
+        str_node->set_string_val((char*)data + offset, length);
+        offset += length;
+        break;
+    }
+    case MYSQL_TYPE_TINY: {
+        uint64_t result;
+        if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, result)) {
+            DB_FATAL("decode uint8 failed");
+            return RET_ERROR;
+        }
+        node.set_node_type(pb::INT_LITERAL);
+        if (type.is_unsigned) {
+            node.set_col_type(pb::UINT8);
+        } else {
+            node.set_col_type(pb::INT8);
+        }
+        node.set_num_children(0);
+        pb::DeriveExprNode* str_node = node.mutable_derive_node();
+        str_node->set_int_val(result);
+        break;  
+    }
+    case MYSQL_TYPE_SHORT: {
+        uint64_t result;
+        if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 2, result)) {
+            DB_FATAL("decode int64 failed");
+            return RET_ERROR;
+        }
+        node.set_node_type(pb::INT_LITERAL);
+        if (type.is_unsigned) {
+            node.set_col_type(pb::UINT16);
+        } else {
+            node.set_col_type(pb::INT16);
+        }
+        node.set_num_children(0);
+        pb::DeriveExprNode* str_node = node.mutable_derive_node();
+        str_node->set_int_val(result);
+        break;
+    }
+    case MYSQL_TYPE_LONG: 
+    case MYSQL_TYPE_INT24: {
+        uint64_t result;
+        if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 4, result)) {
+            DB_FATAL("decode int64 failed");
+            return RET_ERROR;
+        }
+        //DB_WARNING("offset: %u, %lu", offset, result);
+        node.set_node_type(pb::INT_LITERAL);
+        if (type.is_unsigned) {
+            node.set_col_type(pb::UINT32);
+        } else {
+            node.set_col_type(pb::INT32);
+        }
+        node.set_num_children(0);
+        pb::DeriveExprNode* str_node = node.mutable_derive_node();
+        str_node->set_int_val(result);
+        break;
+    }
+    case MYSQL_TYPE_LONGLONG: {
+        uint64_t result;
+        if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 8, result)) {
+            DB_FATAL("decode uint64 failed");
+            return RET_ERROR;
+        }
+        node.set_node_type(pb::INT_LITERAL);
+        if (type.is_unsigned) {
+            node.set_col_type(pb::UINT64);
+        } else {
+            node.set_col_type(pb::INT64);
+        }
+        node.set_num_children(0);
+        pb::DeriveExprNode* str_node = node.mutable_derive_node();
+        str_node->set_int_val(result);
+        break;
+    }
+    default:
+        DB_FATAL("invalid type: %d", type.mysql_type);
+        return RET_ERROR;
+    }
+    return RET_SUCCESS;
+}
 } // namespace baikal

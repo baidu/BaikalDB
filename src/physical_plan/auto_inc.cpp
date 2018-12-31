@@ -21,6 +21,7 @@
 #include "meta_server_interact.hpp"
 
 namespace baikaldb {
+MetaServerInteract AutoInc::auto_incr_meta_inter;
 int AutoInc::analyze(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     if (ctx->insert_records.size() == 0) {
@@ -41,7 +42,8 @@ int AutoInc::analyze(QueryContext* ctx) {
     for (auto& record : ctx->insert_records) {
             auto field = record->get_field_by_tag(table_info.auto_inc_field_id);
             ExprValue value = record->get_value(field);
-            if (value.is_null()) {
+            // 兼容mysql，值为0会分配自增id
+            if (value.is_null() || value.get_numberic<int64_t>() == 0) {
                 ++auto_id_count;
             } else {
                 int64_t int_val = value.get_numberic<int64_t>();
@@ -61,7 +63,7 @@ int AutoInc::analyze(QueryContext* ctx) {
     auto_increment_ptr->set_table_id(table_id);
     auto_increment_ptr->set_count(auto_id_count);
     auto_increment_ptr->set_start_id(max_id);
-    if (MetaServerInteract::get_instance()->send_request("meta_manager", 
+    if (AutoInc::auto_incr_meta_inter.send_request("meta_manager", 
                                                           request, 
                                                           response) != 0) {
         DB_FATAL("gen id from meta_server fail, sql:%s", ctx->sql.c_str());
@@ -77,7 +79,7 @@ int AutoInc::analyze(QueryContext* ctx) {
     for (auto& record : ctx->insert_records) {
         auto field = record->get_field_by_tag(table_info.auto_inc_field_id);
         ExprValue value = record->get_value(field);
-        if (value.is_null()) {
+        if (value.is_null() || value.get_numberic<int64_t>() == 0) {
             value.type = pb::INT64;
             value._u.int64_val = start_id++;
             record->set_value(field, value);

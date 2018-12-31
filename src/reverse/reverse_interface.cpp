@@ -496,7 +496,7 @@ int XbsSchema::create_executor(const std::string& search_data, pb::SegmentType s
             }
         }
     }
-    DB_WARNING("sort ReverseNode time:%ld len:%u", cost.get_time(), _res.size());
+    //DB_WARNING("sort ReverseNode time:%ld len:%u", cost.get_time(), _res.size());
     _it = _res.begin();
     return 0;
 }

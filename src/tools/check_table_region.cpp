@@ -27,7 +27,7 @@
 #include "mut_table_key.h"
 
 namespace baikaldb {
-DEFINE_string(namespace_name, "TEST_NAMESPACE", "namespace name, default: TEST_NAMESPACE");
+DEFINE_string(namespace_name, "FENGCHAO", "FENGCHAO");
 DEFINE_string(database, "", "database");
 DEFINE_string(table_name, "", "table_name");
 DEFINE_string(resource_tag, "", "resouce_tag");

@@ -16,7 +16,7 @@
 
 namespace baikaldb {
 
-extern int register_myraftlog_extension();
+extern int register_myraft_extension();
 
 }
 

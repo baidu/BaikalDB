@@ -13,8 +13,43 @@
 // limitations under the License.
 
 #include "common.h"
+#include "sql_define.h"
 #include "parser.h"
 #include <baidu/rpc/server.h>
+
+void test_old_parser(std::vector<char*>& sqls, int num_thread, int loop) {
+    baikaldb::TimeCost cost;
+    baikaldb::BthreadCond cond;
+    for (int i = 0; i < num_thread; ++i) {
+        auto parse_sqls = [&sqls, &cond, i, loop] () {
+            mem_pool_t* pool = mp_init(1024 * 1024 * 10);
+            sql_parser_t* sql_parser = sql_parser_init(pool);
+            for (int j = 0; j < loop; ++j) {
+                for (int num_sql = 0; num_sql < sqls.size(); ++num_sql) {
+                    sql_parser_clear(sql_parser);
+                    mp_clear(pool);
+                    int ret = parse_sql(sqls[num_sql], sql_parser);
+                    if (ret != 0) {
+                        DB_WARNING("parsing error! errorno:[%d][%s][%s]", ret, sql_err_to_str(ret), sqls[num_sql]);
+                        if (ret == SQL_ERR_SYNTAX_ERROR) {
+                            DB_WARNING("parsing syntax message:[%s]", sql_syntax_err_str(sql_parser));
+                            DB_WARNING("before parsing [%s]", sqls[num_sql] + sql_syntax_err_offset(sql_parser));
+                        }
+                    }
+                }
+                //DB_WARNING("old parse finished: thread: %d, loop: %d", i, j);
+            }
+            sql_parser_free(sql_parser);
+            mp_free(pool);
+            cond.decrease_signal();
+        };
+        cond.increase();
+        baikaldb::Bthread bth;
+        bth.run(parse_sqls);
+    }
+    cond.wait();
+    DB_WARNING("old parser cost: %ld", cost.get_time());
+}
 
 void test_new_parser(std::vector<char*>& sqls, int num_thread, int loop) {
     baikaldb::TimeCost cost;
@@ -90,7 +125,14 @@ int main(int argc, char** argv) {
         sqls.push_back(sql);
     }
 
-    test_new_parser(sqls, thread, loop);
+    if (old_or_new == 0) {
+    	test_old_parser(sqls, thread, loop);
+    } else if (old_or_new == 1) {
+    	test_new_parser(sqls, thread, loop);
+    } else {
+    	test_old_parser(sqls, thread, loop);
+    	test_new_parser(sqls, thread, loop);
+    }
 
     for (auto sql : sqls) {
         delete[] sql;

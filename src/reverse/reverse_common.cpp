@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "reverse_common.h"
+#include <cctype>
 #include "proto/reverse.pb.h"
 namespace baikaldb {
 
@@ -74,14 +75,19 @@ int wordseg_basic(const std::string& word, std::map<std::string, float>& term_ma
 }
 #endif
 int simple_seg_gbk(const std::string& word, std::map<std::string, float>& term_map) {
+    static std::set<std::string> ignore_string = {
+        "\t", "\r", "\n", " ", "%", ",", "."
+    };
     for (uint32_t i = 0; i < word.size(); i++) {
+        std::string term;
         if ((word[i] & 0x80) != 0) {
-            term_map[word.substr(i, 2)] = 0;
-            //DB_WARNING("term simple:%s", word.substr(i, 2).c_str());
+            term = word.substr(i, 2);
             i++;
         } else {
-            term_map[word.substr(i, 1)] = 0;
-            //DB_WARNING("term simple:%s", word.substr(i, 1).c_str());
+            term = ::tolower(word[i]);
+        }
+        if (ignore_string.count(term) == 0) {
+            term_map[term] = 0;
         }
     }
     return 0;

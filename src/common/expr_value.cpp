@@ -16,7 +16,7 @@
 #include "hll_common.h"
 
 namespace baikaldb {
-SerializeStatus ExprValue::serialize_to_mysql_packet(char* buf, size_t size, size_t& len) const {
+SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const {
     if (size < 1) {
         len = 1;
         return STMPS_NEED_RESIZE;

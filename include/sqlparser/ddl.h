@@ -203,15 +203,15 @@ struct ColumnDef : public Node {
     }
 };
 
-// struct IndexOption : public Node {
-//     uint64_t block_size;
-//     baikaldb::pb::IndexType index_type;
-//     String comment;
+struct IndexOption : public Node {
+    //uint64_t block_size;
+    //just use comment
+    String comment;
 
-//     IndexOption() {
-//         node_type = NT_INDEX_OPT;
-//     }
-// };
+    IndexOption() {
+        node_type = NT_INDEX_OPT;
+    }
+};
 
 struct TableOption : public Node {
     TableOptionType type;
@@ -228,7 +228,7 @@ struct Constraint : public Node {
     String          name;
     Vector<ColumnName*> columns;  // Used for PRIMARY KEY, KEY, UNIQUE, FULLTEXT
     // ReferenceDef*   refer = nullptr;    // Used for foreign key.
-    // IndexOption*    index_option = nullptr;
+    IndexOption* index_option = nullptr;
 
     Constraint() {
         node_type = NT_CONSTRAINT;

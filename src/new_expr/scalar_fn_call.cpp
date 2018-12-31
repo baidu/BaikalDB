@@ -52,6 +52,21 @@ int ScalarFnCall::type_inferer() {
     return 0;
 }
 
+// 111 > aaa => aaa < 111
+void ScalarFnCall::children_swap() {
+    if (_children.size() != 2) {
+        return;
+    }
+    if (_children[0]->is_constant() && _children[1]->is_slot_ref()) {
+        FunctionManager* fn_manager = FunctionManager::instance();
+        std::string swap_op = fn_manager->get_swap_op(_fn.name());
+        if (!swap_op.empty()) {
+            _fn.set_name(swap_op);
+            std::swap(_children[0], _children[1]);
+        }
+    }
+}
+
 int ScalarFnCall::open() {
     int ret = 0;
     ret = ExprNode::open();

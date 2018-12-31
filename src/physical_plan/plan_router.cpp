@@ -21,7 +21,7 @@ int PlanRouter::analyze(QueryContext* ctx) {
     if (!plan->need_seperate()) {
         return 0;
     }
-    DB_NOTICE("need_seperate:%d", plan->need_seperate());
+    //DB_NOTICE("need_seperate:%d", plan->need_seperate());
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
@@ -56,12 +56,15 @@ int PlanRouter::insert_node_analyze(T* node, QueryContext* ctx) {
         return ret;
     }
     ret = schema_factory->get_region_by_key(
-            index, ctx->insert_records, ctx->insert_region_ids, ctx->region_infos);
+            index, 
+            ctx->insert_records, 
+            node->records_by_region(), 
+            node->region_infos());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
     }
-    if (ctx->region_infos.size() == 0) {
+    if (node->region_infos().size() == 0) {
         DB_WARNING("region_infos.size = 0");
         return -1;
     }
@@ -75,23 +78,24 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx)
         int64_t table_id = scan_node->table_id();
         int ret = schema_factory->get_region_info(table_id, ctx->debug_region_id, info);
         if (ret != 0) {
-            ctx->region_infos.clear();
+            //ctx->region_infos.clear();
             DB_WARNING("get region_info in debug mode failed, %ld", ctx->debug_region_id);
             return -1;
         }
-        (*(scan_node->mutable_region_infos()))[ctx->debug_region_id] = info;
+        (scan_node->region_infos())[ctx->debug_region_id] = info;
         return 0;
     }
     return scan_plan_router(scan_node);
 }
 
 int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node) {
-    const pb::ScanNode& pb_scan_node = scan_node->pb_node().derive_node().scan_node();
+    pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     int64_t table_id = scan_node->table_id();
-    const pb::PossibleIndex* primary = nullptr;
-    for (const auto& pos_index : pb_scan_node.indexes()) {
+    pb::PossibleIndex* primary = nullptr;
+    for (auto& pos_index : *pb_scan_node->mutable_indexes()) {
         if (pos_index.index_id() == table_id) {
             primary = &pos_index;
+            break;
         }
     }
     SchemaFactory* schema_factory = SchemaFactory::get_instance(); 
@@ -100,18 +104,17 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node) {
         DB_WARNING("invalid index info: %ld", table_id);
         return -1;
     }
-    scan_node->mutable_region_infos()->clear();
-    auto ret = schema_factory->get_region_by_key(index, 
-                                                 primary, 
-                                                 *(scan_node->mutable_region_infos()));
+    auto ret = schema_factory->get_region_by_key(
+            index, primary,
+            scan_node->region_infos(),
+            scan_node->mutable_region_primary());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
     }
-    // if (ctx->region_infos.size() == 0) {
-    //     DB_WARNING("region_infos.size = 0");
-    //     return -1;
-    // }
+    if (primary != nullptr && scan_node->mutable_region_primary()->size() > 0) {
+        primary->mutable_ranges()->Clear();
+    }
     return 0;
 }
 
@@ -126,12 +129,12 @@ int PlanRouter::truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ct
         return ret;
     }
 
-    ret = schema_factory->get_region_by_key(index, nullptr, ctx->region_infos);
+    ret = schema_factory->get_region_by_key(index, nullptr, trunc_node->region_infos());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
     }
-    if (ctx->region_infos.size() == 0) {
+    if (trunc_node->region_infos().size() == 0) {
         DB_WARNING("region_infos.size = 0");
         return -1;
     }
