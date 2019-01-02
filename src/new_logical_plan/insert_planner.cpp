@@ -89,16 +89,17 @@ int InsertPlanner::parse_db_table(pb::InsertNode* node) {
     TableInfo tbl_info = _table_info[database + "." + table];
     _table_id = tbl_info.id;
     node->set_table_id(_table_id);
-    DB_DEBUG("db:%s, tbl:%s, tbl_id:%lu", database.c_str(), table.c_str(), _table_id);
+    // DB_DEBUG("db:%s, tbl:%s, tbl_id:%lu", database.c_str(), table.c_str(), _table_id);
     return 0;
 }
 
 int InsertPlanner::parse_kv_list() {
     for (int i = 0; i < _insert_stmt->on_duplicate.size(); ++i) {
-        std::string full_name;
-        if (_insert_stmt->on_duplicate[i]->name != nullptr) {
-            full_name = get_field_full_name(_insert_stmt->on_duplicate[i]->name);
+        if (_insert_stmt->on_duplicate[i]->name == nullptr) {
+            DB_WARNING("on_duplicate name[%d] is enmty", i);
+            return -1;
         }
+        std::string full_name = get_field_full_name(_insert_stmt->on_duplicate[i]->name);
         if (full_name.empty()) {
             DB_WARNING("get full field name failed: %s", _insert_stmt->on_duplicate[i]->name->name.value);
             return -1;
@@ -129,6 +130,11 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
     }
     if (_insert_stmt->columns.size() == 0) {
         _fields = tbl.fields;
+        if (_ctx->new_prepared) {
+            for (auto& field : _fields) {
+                node->add_field_ids(field.id);
+            }
+        }
         return 0;
     }
     std::set<int32_t> field_ids;
@@ -145,6 +151,9 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
         }
         _fields.push_back(*field_info);
         field_ids.insert(field_info->id);
+        if (_ctx->new_prepared) {
+            node->add_field_ids(field_info->id);
+        }
     }
     for (auto& field : tbl.fields) {
         if (field_ids.count(field.id) == 0) {
@@ -157,34 +166,53 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
 int InsertPlanner::parse_values_list(pb::InsertNode* node) {
     for (int i = 0; i < _insert_stmt->lists.size(); ++i) {
         parser::RowExpr* row_expr = _insert_stmt->lists[i];
-        SmartRecord row = _factory->new_record(_table_id);
-        uint32_t field_cnt = 0;
-        for (; field_cnt < (uint32_t)row_expr->children.size(); ++field_cnt) {
-            if (field_cnt >= _fields.size()) {
-                DB_WARNING("more values than fields");
-                break;
-            }
-            if (0 != fill_record_field((parser::ExprNode*)row_expr->children[field_cnt], row, _fields[field_cnt])) {
-                DB_WARNING("fill_record_field fail, field_id:%d", _fields[field_cnt].id);
-                return -1;
-            }
-        }
-        if (field_cnt != _fields.size()) {
+        if ((size_t)row_expr->children.size() != _fields.size()) {
             DB_WARNING("values do not match with field_list");
             return -1;
         }
-        for (auto& field : _default_fields) {
-            if (field.default_value == "(current_timestamp())") {
-                field.default_expr_value = ExprValue::Now();
-                field.default_expr_value.cast_to(field.type);
+        if (_ctx->new_prepared) {
+            for (size_t idx = 0; idx < (size_t)row_expr->children.size(); ++idx) {
+                pb::Expr* expr = node->add_insert_values();
+                if (0 != create_expr_tree(row_expr->children[idx], *expr)) {
+                    DB_WARNING("create insertion value expr failed");
+                    return -1;
+                }
+                if (expr->nodes_size() <= 0) {
+                    DB_WARNING("expr is empty");
+                    return -1;
+                }
             }
-            if (0 != row->set_value(
-                        row->get_field_by_tag(field.id), field.default_expr_value)) {
-                DB_WARNING("fill insert value failed");
-                return -1;
+        } else {
+            SmartRecord row = _factory->new_record(_table_id);
+            for (size_t idx = 0; idx < (size_t)row_expr->children.size(); ++idx) {
+                if (0 != fill_record_field((parser::ExprNode*)row_expr->children[idx], row, _fields[idx])) {
+                    DB_WARNING("fill_record_field fail, field_id:%d", _fields[idx].id);
+                    return -1;
+                }
             }
+            for (auto& field : _default_fields) {
+                if (0 != fill_default_value(row, field)) {
+                    return -1;
+                }
+            }
+            _ctx->insert_records.push_back(row);
         }
-        _ctx->insert_records.push_back(row);
+    }
+    return 0;
+}
+
+int InsertPlanner::fill_default_value(SmartRecord record, FieldInfo& field) {
+    if (field.default_expr_value.is_null()) {
+        return 0;
+    }
+    ExprValue default_value = field.default_expr_value;
+    if (field.default_value == "(current_timestamp())") {
+        default_value = ExprValue::Now();
+        default_value.cast_to(field.type);
+    }
+    if (0 != record->set_value(record->get_field_by_tag(field.id), default_value)) {
+        DB_WARNING("fill insert value failed");
+        return -1;
     }
     return 0;
 }
@@ -216,14 +244,17 @@ int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartR
         DB_WARNING("expr open fail");
         return -1;
     }
-    if (0 != record->set_value(record->get_field_by_tag(field.id), 
-            expr->get_value(nullptr).cast_to(field.type))) {
-        DB_WARNING("fill insert value failed");
-        delete expr;
-        return -1;
-    }
+    ExprValue value = expr->get_value(nullptr).cast_to(field.type);
     expr->close();
     delete expr;
+    // fill default
+    if (value.is_null()) {
+        return fill_default_value(record, field);
+    }
+    if (0 != record->set_value(record->get_field_by_tag(field.id), value)) {
+        DB_WARNING("fill insert value failed");
+        return -1;
+    }
     return 0;
 }
 } //namespace baikaldb

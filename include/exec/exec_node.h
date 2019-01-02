@@ -74,6 +74,11 @@ public:
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return NULL;
     }
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        for (size_t idx = 0; idx < _children.size(); ++idx) {
+            _children[idx]->find_place_holder(placeholders);
+        }
+    }
     void set_parent(ExecNode* parent_node) {
         _parent = parent_node;
     }
@@ -137,7 +142,7 @@ public:
     virtual void transfer_pb(pb::PlanNode* pb_node);
     static void create_pb_plan(pb::Plan* plan, ExecNode* root);
     static int create_tree(const pb::Plan& plan, ExecNode** root);
-    static void destory_tree(ExecNode* root) {
+    static void destroy_tree(ExecNode* root) {
         delete root;
     }
 protected:

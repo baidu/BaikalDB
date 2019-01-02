@@ -368,6 +368,13 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     }
     return 1;
 }
+
+void DMLNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _update_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

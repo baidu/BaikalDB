@@ -25,7 +25,7 @@ public:
     }
     virtual ~UpdateNode() {
         for (auto expr : _update_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node) override;

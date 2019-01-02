@@ -98,10 +98,7 @@ public:
                 continue;
             }
             if (response.errcode() != pb::SUCCESS) {
-                DB_FATAL("send meta server fail, log_id:%lu, request:%s",
-                          cntl.log_id(), 
-                          request.ShortDebugString().c_str());
-                DB_FATAL("send meta server fail, log_id:%lu, response:%s", 
+                DB_WARNING("send meta server fail, log_id:%lu, response:%s", 
                         cntl.log_id(),
                         response.ShortDebugString().c_str());
                 return -1;

@@ -71,7 +71,7 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             if (value.is_null() || value.get_numberic<bool>() == false) {
                 return -2;
             } else {
-                ExprNode::destory_tree(expr);
+                ExprNode::destroy_tree(expr);
                 iter = _conjuncts.erase(iter);
                 continue;
             }

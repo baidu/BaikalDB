@@ -66,6 +66,7 @@ void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb:
         int64_t table_id = region_info->table_id();
         pb::QueryRegion query_region_info;
         query_region_info.set_region_id(region_info->region_id());
+        query_region_info.set_table_id(table_id);
         query_region_info.set_table_name(region_info->table_name());
         query_region_info.set_partition_id(region_info->partition_id());
         query_region_info.set_replica_num(region_info->replica_num());
@@ -189,6 +190,22 @@ void QueryRegionManager::get_region_count_per_instance(
         }
     }
 }
+void QueryRegionManager::get_peer_ids_per_instance(
+            const std::string& instance,
+            std::set<int64_t>& peer_ids) {
+    RegionManager* manager = RegionManager::get_instance();
+    BAIDU_SCOPED_LOCK(manager->_region_mutex);
+    if (manager->_instance_region_map.find(instance) == manager->_instance_region_map.end()) {
+        return;
+    }
+
+    for (auto& table_region_ids : manager->_instance_region_map[instance]) {
+        for (auto& region_id : table_region_ids.second) {
+            peer_ids.insert(region_id);
+        } 
+    }
+}
+
 void QueryRegionManager::send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response) {
     std::string old_leader = request->old_leader();
     boost::trim(old_leader);

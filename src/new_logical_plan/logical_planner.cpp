@@ -26,6 +26,7 @@
 #include "ddl_planner.h"
 #include "setkv_planner.h"
 #include "transaction_planner.h"
+#include "prepare_planner.h"
 #include "predicate.h"
 #include "network_socket.h"
 #include "parser.h"
@@ -137,6 +138,25 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         return -1;
     }
     TimeCost cost;
+    if (ctx->mysql_cmd == COM_STMT_PREPARE 
+            || ctx->mysql_cmd == COM_STMT_EXECUTE 
+            || ctx->mysql_cmd == COM_STMT_CLOSE) {
+
+        if (ctx->mysql_cmd == COM_STMT_PREPARE) {
+            ctx->stmt_type = parser::NT_NEW_PREPARE;
+        } else if (ctx->mysql_cmd == COM_STMT_EXECUTE) {
+            ctx->stmt_type = parser::NT_EXEC_PREPARE;
+        } else if (ctx->mysql_cmd == COM_STMT_CLOSE) {
+            ctx->stmt_type = parser::NT_DEALLOC_PREPARE;
+        }
+        std::unique_ptr<LogicalPlanner> planner;
+        planner.reset(new PreparePlanner(ctx));
+        if (planner->plan() != 0) {
+            DB_WARNING("gen stmt plan failed, mysql_type:%d, stmt_type:%d", ctx->mysql_cmd, ctx->stmt_type);
+            return -1;
+        }
+        return 0;
+    }
     parser::SqlParser parser;
     parser.charset = ctx->charset;
     parser.parse(ctx->sql);
@@ -191,6 +211,11 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     case parser::NT_COMMIT_TRANSACTION:
     case parser::NT_ROLLBACK_TRANSACTION:
         planner.reset(new TransactionPlanner(ctx));
+        break;
+    case parser::NT_NEW_PREPARE:
+    case parser::NT_EXEC_PREPARE:
+    case parser::NT_DEALLOC_PREPARE:
+        planner.reset(new PreparePlanner(ctx));
         break;
     default:
         DB_WARNING("invalid command type: %d", ctx->stmt_type);
@@ -336,7 +361,7 @@ int LogicalPlanner::parse_db_tables(const parser::Node* table_refs, JoinMemTmp**
             return -1;
         }
     } else if (table_refs->node_type == parser::NT_TABLE_SOURCE) {
-        DB_WARNING("tbls item is table source");
+        // DB_WARNING("tbls item is table source");
         if (0 != create_join_node_from_table_source((parser::TableSource*)table_refs, join_root_ptr)) {
             DB_WARNING("parse_db_table_item failed from linked list");
             return -1;
@@ -681,7 +706,8 @@ void LogicalPlanner::create_order_func_slot() {
     _order_slots.push_back(slot);
 }
 
-std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(const std::string& agg, bool& new_slot) {
+std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
+        const std::string& agg, const std::string& fn_name, bool& new_slot) {
     if (_agg_tuple_id == -1) {
         _agg_tuple_id = _tuple_cnt++;
     }
@@ -692,14 +718,12 @@ std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(const std::st
         slots = &iter->second;
         new_slot = false;
     } else {
-        std::string agg_func = agg.substr(0, agg.find_first_of('('));
-        std::transform(agg_func.begin(), agg_func.end(), agg_func.begin(), ::tolower);
         slots = &_agg_slot_mapping[agg];
         slots->resize(1);
         (*slots)[0].set_slot_id(_agg_slot_cnt++);
         (*slots)[0].set_tuple_id(_agg_tuple_id);
         (*slots)[0].set_slot_type(pb::INVALID_TYPE);
-        if (agg_func == "avg") {
+        if (fn_name == "avg") {
             // create intermediate slot
             slots->push_back((*slots)[0]);
             (*slots)[1].set_slot_id(_agg_slot_cnt++);
@@ -718,7 +742,8 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
         return -1;
     }
     bool new_slot = true;
-    auto& slots = get_agg_func_slot(expr_item->to_string(), new_slot);
+    auto& slots = get_agg_func_slot(
+            expr_item->to_string(), expr_item->fn_name.to_lower(), new_slot);
     if (slots.size() < 1) {
         DB_WARNING("wrong number of agg slots");
         return -1;
@@ -863,6 +888,10 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr) {
     const parser::ExprNode* expr_item = (const parser::ExprNode*)item;
     if (expr_item->expr_type == parser::ET_LITETAL) {
         if (0 != create_term_literal_node((parser::LiteralExpr*)expr_item, expr)) {
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_BAD_FIELD_ERROR;
+                _ctx->stat_info.error_msg << "Invalid literal '" << expr_item->to_string() << "'";
+            }
             DB_WARNING("create_term_literal_node failed");
             return -1;
         }
@@ -975,7 +1004,7 @@ std::string LogicalPlanner::get_field_full_name(const parser::ColumnName* column
         full_field_name += ".";
         full_field_name += column->name.to_lower();
         return full_field_name;
-    } else {
+    } else if (!column->name.empty()) {
         //field_name
         auto tables = get_possible_tables(column->name.c_str());
         if (tables.size() == 0) {
@@ -993,6 +1022,9 @@ std::string LogicalPlanner::get_field_full_name(const parser::ColumnName* column
         full_field_name += ".";
         full_field_name += column->name.to_lower();
         return full_field_name;
+    } else {
+        DB_FATAL("column.name is null");
+        return "";
     }
     return full_field_name;
 }
@@ -1095,7 +1127,36 @@ int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr
 }
 
 //TODO: error_code
-int LogicalPlanner::create_term_slot_ref_node(const parser::ColumnName* col_expr, pb::Expr& expr, bool values) {
+int LogicalPlanner::create_term_slot_ref_node(
+        const parser::ColumnName* col_expr, 
+        pb::Expr& expr,
+        bool values) {
+    std::stringstream ss;
+    col_expr->to_stream(ss);
+    std::string origin_name = ss.str();
+    if (boost::algorithm::istarts_with(origin_name, "@@global.")) {
+        // TODO handle set global variable
+        return -1;
+    } else if (boost::algorithm::istarts_with(origin_name, "@@session.") 
+            || boost::algorithm::istarts_with(origin_name, "@@local.")
+            || boost::algorithm::istarts_with(origin_name, "@@")) {
+        // TODO handle set session/local variable
+        return -1;
+    } else if (boost::algorithm::istarts_with(origin_name, "@")) {
+        // user variable term
+        auto client = _ctx->runtime_state.client_conn();
+        auto iter = client->user_vars.find(origin_name.substr(1));
+        pb::ExprNode* node = expr.add_nodes();
+        if (iter != client->user_vars.end()) {
+            node->CopyFrom(iter->second);
+        } else {
+            node->set_num_children(0);
+            node->set_node_type(pb::NULL_LITERAL);
+            node->set_col_type(pb::NULL_TYPE);
+        }
+        return 0;
+    }
+
     std::string full_name = get_field_full_name(col_expr);
     if (full_name.empty()) {
         DB_WARNING("get full field name failed: %s", col_expr->to_string().c_str());
@@ -1125,7 +1186,6 @@ int LogicalPlanner::create_term_slot_ref_node(const parser::ColumnName* col_expr
     return 0;
 }
 
-
 //TODO: primitive len for STRING, BOOL and NULL
 int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal, pb::Expr& expr) {
     pb::ExprNode* node = expr.add_nodes();
@@ -1142,12 +1202,11 @@ int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal,
             node->set_col_type(pb::DOUBLE);
             node->mutable_derive_node()->set_double_val(literal->_u.double_val);
             break;
-        case parser::LT_STRING: {
+        case parser::LT_STRING: 
             node->set_node_type(pb::STRING_LITERAL);
             node->set_col_type(pb::STRING);
             node->mutable_derive_node()->set_string_val(literal->_u.str_val.c_str());
             break;
-        }
         case parser::LT_BOOL:
             node->set_node_type(pb::BOOL_LITERAL);
             node->set_col_type(pb::BOOL);
@@ -1157,6 +1216,14 @@ int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal,
             node->set_node_type(pb::NULL_LITERAL);
             node->set_col_type(pb::NULL_TYPE);
             break;
+        case parser::LT_PLACE_HOLDER:
+            node->set_node_type(pb::PLACE_HOLDER_LITERAL);
+            node->set_col_type(pb::PLACE_HOLDER);
+            node->mutable_derive_node()->set_int_val(literal->_u.int64_val);
+            break;
+        default:
+            DB_WARNING("create_term_literal_node failed: %d", literal->literal_type);
+            return -1;
     }
     return 0;
 }

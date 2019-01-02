@@ -30,6 +30,7 @@ public:
             e = nullptr;
         }
     }
+
     virtual int init(const pb::ExprNode& node) {
         _node_type = node.node_type();
         _col_type = node.col_type();
@@ -54,6 +55,7 @@ public:
             case pb::INT_LITERAL:
             case pb::DOUBLE_LITERAL:
             case pb::STRING_LITERAL:
+            case pb::PLACE_HOLDER_LITERAL:
                 return true;
             default:
                 return false;
@@ -82,7 +84,13 @@ public:
         for (auto e : _children) {
             e->close();
         }
-    } 
+    }
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        for (size_t idx = 0; idx < _children.size(); ++idx) {
+            _children[idx]->find_place_holder(placeholders);
+        }
+    }
+
     ExprNode* get_slot_ref(int32_t tuple_id, int32_t slot_id);
     ExprNode* get_parent(ExprNode* child);
     void add_child(ExprNode* expr_node) {
@@ -125,6 +133,10 @@ public:
         return _is_constant;
     }
 
+    void clear_filter_index() {
+        _index_ids.clear();
+    }
+
     void add_filter_index(int64_t index_id) {
         _index_ids.insert(index_id);
     }
@@ -141,7 +153,7 @@ public:
     virtual void transfer_pb(pb::ExprNode* pb_node);
     static void create_pb_expr(pb::Expr* expr, ExprNode* root);
     static int create_tree(const pb::Expr& expr, ExprNode** root);
-    static void destory_tree(ExprNode* root) {
+    static void destroy_tree(ExprNode* root) {
         delete root;
     }
     void get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids);

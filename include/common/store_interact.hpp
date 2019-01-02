@@ -68,7 +68,7 @@ public:
             return -1;
         }
         if (response.errcode() != pb::SUCCESS) {
-            DB_FATAL("send store address fail, log_id:%lu, instance: %s, response:%s, request: %s", 
+            DB_WARNING("send store address fail, log_id:%lu, instance: %s, response:%s, request: %s", 
                     cntl.log_id(),
                     _store_address.c_str(),
                     response.ShortDebugString().c_str(),
@@ -109,6 +109,13 @@ public:
             ++retry_time;
         } while (retry_time < RETRY_TIMES);
         return -1;
+    }
+    template<typename Request, typename Response>
+    int send_request_for_leader(const std::string& service_name,
+                                const Request& request,
+                                Response& response) {
+        uint64_t log_id = butil::fast_rand();
+        return  send_request_for_leader(log_id, service_name, request, response);
     }
 private:
     std::string _store_address;

@@ -157,7 +157,8 @@ protected:
     void create_order_func_slot();
 
     // @agg format: agg_func(col_name) / count_star()
-    std::vector<pb::SlotDescriptor>& get_agg_func_slot(const std::string& agg, bool& new_slot);
+    std::vector<pb::SlotDescriptor>& get_agg_func_slot(
+            const std::string& agg, const std::string& fn_name, bool& new_slot);
 
     int create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr);
 

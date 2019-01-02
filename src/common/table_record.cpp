@@ -254,7 +254,7 @@ int TableRecord::set_value(const FieldDescriptor* field, const ExprValue& value)
 }
 
 int TableRecord::get_reverse_word(IndexInfo& index_info, std::string& word) {
-    int ret = 0;
+    //int ret = 0;
     auto field = get_field_by_tag(index_info.fields[0].id);
     //DB_WARNING("index_info:%d id:%d", index_info.fields[0].type, index_info.fields[0].id);
     if (index_info.fields[0].type == pb::STRING) {

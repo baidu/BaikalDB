@@ -229,7 +229,14 @@ int TransactionNode::open(RuntimeState* state) {
                 client->on_commit_rollback();
             }
         } else {
-            DB_WARNING_STATE(state, "TransactionNote: optimize_1pc, no commit/rollback: txn_id: %lu", state->txn_id);
+            if (ret >= 0) {
+                DB_WARNING_STATE(state, "TransactionNote: optimize_1pc, no commit: txn_id: %lu", state->txn_id);
+            } else if (state->autocommit()) {
+                // auto rollback in autocommit mode
+                DB_WARNING("rollback for single-sql trnsaction with optimize_1pc");
+                state->seq_id++;
+                rollback_node->open(state);
+            }
         }
         if (ret >= 0 || state->autocommit()) {
             client->on_commit_rollback();

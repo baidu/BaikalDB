@@ -289,7 +289,7 @@ int RocksdbScanNode::index_condition_pushdown() {
         if (need_pushdown(*iter)) {
             _index_conjuncts.push_back(*iter);
             iter = parent_conditions->erase(iter);
-            DB_WARNING("expr is push_down")
+            //DB_WARNING("expr is push_down")
         } else {
             iter++;
         }
@@ -460,8 +460,8 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
         }
         int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, true);
         if (ret < 0) {
-            DB_WARNING_STATE(state, "get primary:%ld fail, not exist, ret:%d, record: %s", 
-                    _table_id, ret, record->to_string().c_str());
+            //DB_WARNING_STATE(state, "get primary:%ld fail, not exist, ret:%d, record: %s", 
+            //        _table_id, ret, record->to_string().c_str());
             continue;
         }
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();

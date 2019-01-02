@@ -16,6 +16,7 @@
 #include "slot_ref.h"
 #include "scalar_fn_call.h"
 #include "join_node.h"
+#include "agg_node.h"
 #include "parser.h"
 
 namespace baikaldb {
@@ -26,6 +27,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
     if (scan_nodes.size() == 0) {
         return 0;
     }
+    AggNode* agg_node = static_cast<AggNode*>(root->get_node(pb::AGG_NODE));
     SortNode* sort_node = static_cast<SortNode*>(root->get_node(pb::SORT_NODE));
     JoinNode* join_node = static_cast<JoinNode*>(root->get_node(pb::JOIN_NODE));
     for (auto& scan_node_ptr : scan_nodes) {
@@ -33,26 +35,29 @@ int IndexSelector::analyze(QueryContext* ctx) {
         if (parent_node_ptr == NULL) {
             continue;
         }
+
+        FilterNode* filter_node = nullptr;
         if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
                 || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
-            auto get_slot_id = [ctx](int32_t tuple_id, int32_t field_id)-> 
-                    int32_t {return ctx->get_slot_id(tuple_id, field_id);};
-            //有join节点暂时不考虑sort索引优化
-            if (join_node != NULL) {
-                index_selector(get_slot_id, 
-                                ctx,
-                                static_cast<ScanNode*>(scan_node_ptr), 
-                                static_cast<FilterNode*>(parent_node_ptr), 
-                                NULL,
-                                &ctx->has_recommend);
-            } else {
-                index_selector(get_slot_id,
-                               ctx,
-                               static_cast<ScanNode*>(scan_node_ptr), 
-                               static_cast<FilterNode*>(parent_node_ptr), 
-                               sort_node,
-                               &ctx->has_recommend);
-            }
+            filter_node = static_cast<FilterNode*>(parent_node_ptr);
+        }
+        auto get_slot_id = [ctx](int32_t tuple_id, int32_t field_id)-> 
+                int32_t {return ctx->get_slot_id(tuple_id, field_id);};
+        //有join节点暂时不考虑sort索引优化
+        if (join_node != NULL || agg_node != NULL) {
+            index_selector(get_slot_id, 
+                            ctx,
+                            static_cast<ScanNode*>(scan_node_ptr), 
+                            filter_node, 
+                            NULL,
+                            &ctx->has_recommend);
+        } else {
+            index_selector(get_slot_id,
+                           ctx,
+                           static_cast<ScanNode*>(scan_node_ptr), 
+                           filter_node, 
+                           sort_node,
+                           &ctx->has_recommend);
         }
         pb::ScanNode* pb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->mutable_pb_node()->
             mutable_derive_node()->mutable_scan_node();
@@ -77,7 +82,13 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
     pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->
         mutable_derive_node()->mutable_scan_node();
 
-    std::vector<ExprNode*>* conjuncts = filter_node->mutable_conjuncts();
+    std::vector<ExprNode*>* conjuncts = filter_node?filter_node->mutable_conjuncts():nullptr;
+    if (conjuncts != nullptr) {
+        // join时fetch完左表后会复用FilterNode, 需要重新获取possible index id
+        for (auto expr : *conjuncts) {
+            expr->clear_filter_index();
+        }
+    }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     std::vector<int64_t> index_ids = schema_factory->get_table_info(table_id).indices;
     if (pb_scan_node->use_indexes_size() != 0) {
@@ -87,6 +98,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         }
     }
     SmartRecord record_template = schema_factory->new_record(table_id);
+
     for (auto index_id : index_ids) {
         IndexInfo index_info = schema_factory->get_index_info(index_id); 
         pb::IndexType index_type = index_info.type;
@@ -231,7 +243,6 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                 break;
             }
         }
-
         if (left_field_cnt == 0 && right_field_cnt == 0 && !range_pred) {
             continue;
         }
@@ -239,7 +250,6 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         if (in_pred) {
              continue;
         }
-
         bool between = false;
         std::string str1;
         std::string str2;
@@ -273,8 +283,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
             } else if (left_field_cnt < right_field_cnt) { // (EQ)*(LE/LT)
                 use_by_sort = check_sort_use_index(get_slot_id, index_info, order_exprs, tuple_id, left_field_cnt);
             }
-
-            //DB_WARNING("index: %ld, field_count:%d, %d, sort_index:%d", index_id, left_field_cnt, right_field_cnt, use_by_sort);
+            // DB_WARNING("index: %ld, field_count:%d, %d, sort_index:%d", index_id, left_field_cnt, right_field_cnt, use_by_sort);
         }
         if (left_field_cnt == 0 && right_field_cnt == 0 && !use_by_sort) {
             continue;

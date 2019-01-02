@@ -238,6 +238,15 @@ void AggNode::transfer_pb(pb::PlanNode* pb_node) {
         ExprNode::create_pb_expr(agg_node->add_agg_funcs(), agg);
     }
 }
+void AggNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _group_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+    for (auto& expr : _agg_fn_calls) {
+        expr->find_place_holder(placeholders);
+    }
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -20,7 +20,7 @@ DEFINE_int32(meta_request_timeout, 30000,
             "meta as server request timeout, default:30000ms");
 DEFINE_int32(meta_connect_timeout, 5000, 
             "meta as server connect timeout, default:5000ms");
-DEFINE_string(meta_server_bns, "127.0.0.1:8110, 127.0.0.1:8111, 127.0.0.1:8112", "meta server bns");
+DEFINE_string(meta_server_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "meta server bns");
 
 int MetaServerInteract::init() {
     _master_leader_address.ip = butil::IP_ANY;                                             

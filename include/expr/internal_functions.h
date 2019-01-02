@@ -18,6 +18,10 @@
 #include "expr_value.h"
 
 namespace baikaldb {
+//number functions
+ExprValue round(const std::vector<ExprValue>& input);
+ExprValue floor(const std::vector<ExprValue>& input);
+ExprValue ceil(const std::vector<ExprValue>& input);
 //string functions
 ExprValue length(const std::vector<ExprValue>& input);
 ExprValue lower(const std::vector<ExprValue>& input);

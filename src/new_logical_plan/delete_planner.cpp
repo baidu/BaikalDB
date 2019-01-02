@@ -51,7 +51,9 @@ int DeletePlanner::plan() {
     if (0 != parse_orderby()) {
         return -1;
     }
-    parse_limit();
+    if (0 != parse_limit()) {
+        return -1;
+    }
     
     create_packet_node(pb::OP_DELETE);
     if (0 != create_delete_node()) {
@@ -82,7 +84,7 @@ int DeletePlanner::create_delete_node() {
 
     pb::PlanNode* delete_node = _ctx->add_plan_node();
     delete_node->set_node_type(pb::DELETE_NODE);
-    delete_node->set_limit(_limit_count);
+    delete_node->set_limit(-1);
     delete_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = delete_node->mutable_derive_node();
     pb::DeleteNode* _delete = derive->mutable_delete_node();
@@ -131,9 +133,27 @@ int DeletePlanner::parse_where() {
 
 int DeletePlanner::parse_orderby() {
     if (_delete_stmt != nullptr && _delete_stmt->order != nullptr) {
-        DB_WARNING("delete doesnot support orderby");
+        DB_WARNING("delete does not support orderby");
         return -1;
     }
+    return 0;
+}
+
+int DeletePlanner::parse_limit() {
+    if (_delete_stmt->limit != nullptr) {
+        _ctx->stat_info.error_code = ER_SYNTAX_ERROR;
+        _ctx->stat_info.error_msg << "syntax error! delete does not support limit";
+        return -1;
+    }
+    // parser::LimitClause* limit = _delete_stmt->limit;
+    // if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset)) {
+    //     DB_WARNING("create limit offset expr failed");
+    //     return -1;
+    // }
+    // if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count)) {
+    //     DB_WARNING("create limit offset expr failed");
+    //     return -1;
+    // }
     return 0;
 }
 

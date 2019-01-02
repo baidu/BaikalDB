@@ -19,15 +19,25 @@ namespace baikaldb {
 class LimitNode : public ExecNode {
 public:
     LimitNode() : _offset(0), _num_rows_skipped(0) {}
+    virtual ~LimitNode() {
+        ExprNode::destroy_tree(_offset_expr);
+        ExprNode::destroy_tree(_count_expr);
+    }
     virtual int init(const pb::PlanNode& node);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
+    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+    virtual void transfer_pb(pb::PlanNode* pb_node);
+
     int64_t other_limit() {
         return _offset + _limit;
     }
-
 private:
     int64_t _offset;
     int64_t _num_rows_skipped;
+
+    ExprNode*   _offset_expr = nullptr;
+    ExprNode*   _count_expr  = nullptr;
 };
 }
 

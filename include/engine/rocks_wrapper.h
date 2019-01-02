@@ -56,7 +56,16 @@ public:
     rocksdb::Status write(const rocksdb::WriteOptions& options, rocksdb::WriteBatch* updates) {
         return _txn_db->Write(options, updates);  
     }
-
+    rocksdb::Status write(const rocksdb::WriteOptions& options,
+                            rocksdb::ColumnFamilyHandle* column_family,
+                            const std::vector<std::string>& keys,
+                            const std::vector<std::string>& values) {
+        rocksdb::WriteBatch batch;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            batch.Put(column_family, keys[i], values[i]);
+        }
+        return _txn_db->Write(options, &batch);
+    }
     rocksdb::Status get(const rocksdb::ReadOptions& options,
                         rocksdb::ColumnFamilyHandle* column_family, 
                         const rocksdb::Slice& key,

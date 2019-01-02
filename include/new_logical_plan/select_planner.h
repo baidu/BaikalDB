@@ -60,9 +60,6 @@ private:
     // create tuples for table scan
     void create_agg_tuple_desc();
 
-public:
-    //pb::TupleDescriptor                 agg_tuple;
-
 private:
     parser::SelectStmt*                 _select;
 
@@ -72,8 +69,8 @@ private:
     std::vector<pb::Expr>   _having_filters;
     std::vector<pb::Expr>   _group_exprs;
 
-    int32_t                 _limit_offset = 0;
-    int32_t                 _limit_count = -1;
+    pb::Expr                _limit_offset;
+    pb::Expr                _limit_count;
 };
 } //namespace baikal
 

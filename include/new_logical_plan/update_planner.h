@@ -38,7 +38,7 @@ private:
     int parse_kv_list();
     int parse_where();
     int parse_orderby();
-    void parse_limit();
+    int parse_limit();
 
 private:
     parser::UpdateStmt*                 _update;

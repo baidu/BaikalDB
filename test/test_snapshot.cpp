@@ -25,7 +25,7 @@
 
 int main(int argc, char** argv) {
 
-    std::string db_path = "snapshot_example";
+    std::string db_path = "rocksdb_snapshot_example";
 
     // open DB
     rocksdb::Options options;

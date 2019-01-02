@@ -197,6 +197,34 @@ public:
         resource_tag = _table_info_map[table_id].schema_pb.resource_tag();
         return 0;
     }
+    int get_main_logical_room(int64_t table_id, std::string& main_logical_room) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return -1;
+        }
+        main_logical_room = _table_info_map[table_id].schema_pb.main_logical_room();
+        return 0;
+    }
+    int64_t get_replica_dists(int64_t table_id, std::unordered_map<std::string, int64_t>& replica_dists_map) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return -1;
+        }
+        for (auto& replica_dist : _table_info_map[table_id].schema_pb.dists()) {
+            replica_dists_map[replica_dist.logical_room()] = replica_dist.count();
+        }
+        return 0;
+    }
+    bool whether_replica_dists(int64_t table_id) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return false;
+        }
+        if (_table_info_map[table_id].schema_pb.dists_size() > 0) {
+            return true;
+        }
+        return false;
+    }
     int64_t get_region_count(int64_t table_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
@@ -254,6 +282,7 @@ public:
             }
         }
     }
+    int64_t get_row_count(int64_t table_id);
     void get_region_ids(const std::vector<int64_t>& table_ids,
                          std::unordered_map<int64_t,std::vector<int64_t>>& region_ids) {
         BAIDU_SCOPED_LOCK(_table_mutex);

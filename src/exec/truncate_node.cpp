@@ -52,7 +52,7 @@ int TruncateNode::open(RuntimeState* state) {
     region_end.append_i64(_region_id).append_u64(0xFFFFFFFFFFFFFFFF);
 
     rocksdb::WriteOptions write_options;
-    write_options.disableWAL = true;
+    //write_options.disableWAL = true;
 
     rocksdb::Slice begin(region_start.data());
     rocksdb::Slice end(region_end.data());

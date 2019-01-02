@@ -112,6 +112,11 @@ public:
         return *this;
     }
 
+    MutTableKey& append_char(const char* data, size_t size) {
+        _data.append(data, size);
+        return *this;
+    }
+
     MutTableKey& append_value(ExprValue& value) {
         switch (value.type) {
             case pb::BOOL:

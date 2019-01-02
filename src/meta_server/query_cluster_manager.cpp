@@ -66,21 +66,21 @@ void QueryClusterManager::get_physical_info(const pb::QueryRequest* request,
             res->set_logical_room(manager->_physical_info[physical_room]);
         }
     }
-    //{
-    //    BAIDU_SCOPED_LOCK(manager->_instance_mutex);
-    //    {
-    //        for (auto& physical_instance : *(response->mutable_physical_instances())) {
-    //            std::string physical_room = physical_instance.physical_room();
-    //            if (manager->_physical_instance_map.find(physical_room) 
-    //                    == manager->_physical_instance_map.end()) {
-    //                continue;
-    //            }
-    //            for (auto& instance : manager->_physical_instance_map[physical_room]) {
-    //                physical_instance.add_instances(instance);
-    //            }
-    //        } 
-    //    }
-    //}
+    {
+        BAIDU_SCOPED_LOCK(manager->_instance_mutex);
+        {
+            for (auto& physical_instance : *(response->mutable_physical_instances())) {
+                std::string physical_room = physical_instance.physical_room();
+                if (manager->_physical_instance_map.find(physical_room) 
+                        == manager->_physical_instance_map.end()) {
+                    continue;
+                }
+                for (auto& instance : manager->_physical_instance_map[physical_room]) {
+                    physical_instance.add_instances(instance);
+                }
+            } 
+        }
+    }
 }
 void QueryClusterManager::get_instance_info(const pb::QueryRequest* request,
                                         pb::QueryResponse* response) {
@@ -152,7 +152,61 @@ void QueryClusterManager::get_flatten_instance(const pb::QueryRequest* request,
         }
     }
 }
-
+void QueryClusterManager::get_diff_region_ids(const pb::QueryRequest* request, 
+                pb::QueryResponse* response) {
+    if (!request->has_instance_address()) {
+        response->set_errcode(pb::INPUT_PARAM_ERROR);
+        response->set_errmsg("input has no instance_address");
+        return;
+    }
+    std::string instance = request->instance_address();
+    response->set_leader(instance);
+    std::set<int64_t> region_ids;
+    get_region_ids_per_instance(instance, region_ids);
+    std::set<int64_t> peer_ids;
+    QueryRegionManager::get_instance()->get_peer_ids_per_instance(instance, 
+                                 peer_ids);
+    if (region_ids == peer_ids) {
+        std::string str = "peer_ids equal to region_ids, size: "  + to_string(region_ids.size());
+        response->set_errmsg(str);
+        return;
+    }
+    std::string str = "peer_ids not equal to region_ids, peer_id_size: "  
+                        + to_string(peer_ids.size()) 
+                        + ", region_id_size: "
+                        + to_string(region_ids.size());
+    response->set_errmsg(str);
+    for (auto& region_id : region_ids) {
+        if (peer_ids.find(region_id) == peer_ids.end()) {
+            response->add_region_ids(region_id);
+        }
+    }
+    for (auto& peer_id : peer_ids) {
+        if (region_ids.find(peer_id) == region_ids.end()) {
+            response->add_peer_ids(peer_id);
+        }
+    } 
+}
+void QueryClusterManager::get_region_ids(const pb::QueryRequest* request, 
+                pb::QueryResponse* response) {
+    if (!request->has_instance_address()) {
+        response->set_errcode(pb::INPUT_PARAM_ERROR);
+        response->set_errmsg("input has no instance_address");
+        return;
+    }
+    std::string instance = request->instance_address();
+    std::set<int64_t> region_ids;
+    get_region_ids_per_instance(instance, region_ids);
+    std::set<int64_t> peer_ids;
+    QueryRegionManager::get_instance()->get_peer_ids_per_instance(instance, 
+                                 peer_ids);
+    for (auto& region_id : region_ids) {
+        response->add_region_ids(region_id);
+    }
+    for (auto& peer_id : peer_ids) {
+        response->add_peer_ids(peer_id);
+    } 
+}
 void QueryClusterManager::mem_instance_to_pb(const Instance& instance_mem, pb::InstanceInfo* instance_pb) {
     instance_pb->set_address(instance_mem.address);
     instance_pb->set_capacity(instance_mem.capacity);
@@ -164,8 +218,22 @@ void QueryClusterManager::mem_instance_to_pb(const Instance& instance_mem, pb::I
 
 void QueryClusterManager::get_region_ids_per_instance(
                     const std::string& instance,
-                    int64_t& count, 
-                    std::vector<int64_t>& region_ids) {
+                    std::set<int64_t>& region_ids) {
+    ClusterManager* manager = ClusterManager::get_instance();
+    BAIDU_SCOPED_LOCK(manager->_instance_mutex);
+    if (manager->_instance_regions_map.find(instance) == manager->_instance_regions_map.end()) {
+        return;
+    }
+    for (auto& table_regions : manager->_instance_regions_map[instance]) {
+        for (auto& region_id : table_regions.second) {
+            region_ids.insert(region_id);
+        }
+    }
+}
+
+void QueryClusterManager::get_region_count_per_instance(
+            const std::string& instance,
+            int64_t& count) {
     ClusterManager* manager = ClusterManager::get_instance();
     BAIDU_SCOPED_LOCK(manager->_instance_mutex);
     if (manager->_instance_regions_map.find(instance) == manager->_instance_regions_map.end()) {
@@ -173,10 +241,7 @@ void QueryClusterManager::get_region_ids_per_instance(
         return;
     }
     for (auto& table_regions : manager->_instance_regions_map[instance]) {
-        count += table_regions.second.size();
-        for (auto& region_id : table_regions.second) {
-            region_ids.push_back(region_id);
-        }
+        count += table_regions.second.size(); 
     }
 }
 void QueryClusterManager::construct_query_response_for_instance(const Instance& instance_info, 
@@ -201,21 +266,8 @@ void QueryClusterManager::construct_query_response_for_instance(const Instance& 
     query_info.set_peer_count(peer_count);
     query_info.set_region_leader_count(region_leader_count);
     int64_t count = 0;
-    std::vector<int64_t> region_ids;
-    get_region_ids_per_instance(instance_info.address, count, region_ids);
+    get_region_count_per_instance(instance_info.address, count);
     query_info.set_region_count(count);
-    std::string str_region_ids = "[";
-    for (auto& region_id : region_ids) {
-        str_region_ids += std::to_string(region_id) + ", "; 
-    }
-    if (str_region_ids.size() > 1) {
-        str_region_ids.pop_back();
-        str_region_ids.pop_back();
-        str_region_ids.push_back(']');
-    } else {
-        str_region_ids.clear();
-    }
-    query_info.set_region_ids(str_region_ids);
     std::multimap<std::string, pb::QueryInstance> physical_instance_infos;
     if (logical_instance_infos.find(logical_room) != logical_instance_infos.end()) {
         physical_instance_infos = logical_instance_infos[logical_room];

@@ -36,6 +36,8 @@
 #include "rocks_wrapper.h"
 #include "table_record.h"
 #include "meta_server_interact.hpp"
+#include "meta_writer.h"
+
 namespace baikaldb {
 DECLARE_string(quit_gracefully_file);
 DECLARE_int32(snapshot_load_num);
@@ -91,9 +93,21 @@ public:
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done);
     virtual void compact_region(google::protobuf::RpcController* controller,
-                                const pb::CompactRegion* request,
+                                const pb::RegionIds* request,
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done);
+    virtual void snapshot_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
+    virtual void query_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
+    virtual void query_illegal_region(google::protobuf::RpcController* controller,
+                                        const pb::RegionIds* request,
+                                        pb::StoreRes* response,
+                                        google::protobuf::Closure* done);
     //上报心跳
     void report_heart_beat();
 
@@ -142,11 +156,11 @@ public:
                                  int64_t* region_sizes);
     void shutdown_raft() {
         _shutdown = true;
-        traverse_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](SmartRegion& region) {
             region->shutdown();
         });
         DB_WARNING("all region was shutdown");
-        traverse_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](SmartRegion& region) {
             region->join();
         });
         DB_WARNING("all region was join");
@@ -170,14 +184,14 @@ public:
         _txn_clear_bth.join();
         DB_WARNING("txn_clear bth join");
 
-        traverse_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](SmartRegion& region) {
             region->get_prepared_txn_info();
             region->get_txn_pool().close();
         });
         _rocksdb->close();
         DB_WARNING("rockdb close");
 
-        traverse_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](SmartRegion& region) {
             region->save_applied_index();
         });
         DB_WARNING("all region quit gracefully");
@@ -249,7 +263,8 @@ private:
 
     RocksWrapper*                           _rocksdb;
     SchemaFactory*                          _factory;
-    rocksdb::ColumnFamilyHandle*            _region_handle; 
+    rocksdb::ColumnFamilyHandle*            _region_handle;
+    MetaWriter*                             _writer = nullptr; 
     //region status,用在分裂和add_peer remove_peers时 
     //只有leader有状态
     // region_id => Region handler

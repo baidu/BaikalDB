@@ -134,7 +134,8 @@ enum LiteralType {
     LT_DOUBLE,
     LT_STRING,
     LT_BOOL,
-    LT_NULL
+    LT_NULL,
+    LT_PLACE_HOLDER
 };
 
 struct LiteralExpr : public ExprNode {
@@ -166,6 +167,8 @@ struct LiteralExpr : public ExprNode {
             case LT_NULL:
                 std::cout << "NULL";
                 break;
+            case LT_PLACE_HOLDER:
+                std::cout << "?(" << _u.int64_val << ")";
         }
         std::cout << std::endl;
     }
@@ -217,7 +220,15 @@ struct LiteralExpr : public ExprNode {
         lit->literal_type = LT_NULL;
         return lit;
     }
+
+    static LiteralExpr* make_place_holder(int place_holder_id, butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        lit->literal_type = LT_PLACE_HOLDER;
+        lit->_u.int64_val = place_holder_id;
+        return lit;
+    }
 };
+
 struct RowExpr : public ExprNode {
     RowExpr() {
         expr_type = ET_ROW_EXPR;

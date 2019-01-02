@@ -21,6 +21,8 @@
 #include "meta_state_machine.h"
 
 namespace baikaldb {
+DECLARE_string(default_logical_room);
+DECLARE_string(default_physical_room);
 struct InstanceStateInfo {
     int64_t timestamp; //上次收到该实例心跳的时间戳
     pb::Status state; //实例状态
@@ -32,8 +34,8 @@ struct Instance {
     int64_t used_size;
     //std::vector<int64_t> regions;
     std::string resource_tag;
-    //std::string logic_room;
     std::string physical_room;
+    std::string logical_room;
     InstanceStateInfo instance_status;
     Instance() {
        instance_status.state = pb::NORMAL;
@@ -45,12 +47,17 @@ struct Instance {
         //若请求中没有该字段，为了安全起见
         used_size(instance_info.capacity()),
         resource_tag(instance_info.resource_tag()),
-        physical_room(instance_info.physical_room()) {
+        physical_room(instance_info.physical_room()),
+        logical_room(instance_info.logical_room()) {
         if (instance_info.has_used_size()) {
             used_size = instance_info.used_size();
         }
-        instance_status.state = pb::NORMAL;
-        instance_status.timestamp = butil::gettimeofday_us(); 
+        if (instance_info.has_status() && instance_info.status() == pb::FAULTY) {
+            instance_status.state = pb::FAULTY;
+        } else {
+            instance_status.state = pb::NORMAL;
+        }
+        instance_status.timestamp = butil::gettimeofday_us();
     }
 };
 
@@ -84,7 +91,8 @@ public:
     void set_instance_migrate(const pb::MetaManagerRequest* request,
                              pb::MetaManagerResponse* response,
                              uint64_t log_id); 
-    
+    void process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request,
+            pb::BaikalHeartBeatResponse* response); 
     void process_instance_heartbeat_for_store(const pb::InstanceInfo& request);
     void process_peer_heartbeat_for_store(const pb::StoreHeartBeatRequest* request, 
                 pb::StoreHeartBeatResponse* response);
@@ -93,14 +101,36 @@ public:
     //排除状态不为normal, 如果输入有resource_tag会优先选择resource_tag
     //排除exclued
     int select_instance_rolling(const std::string& resource_tag, 
-                        const std::set<std::string>& exclude_stores, 
+                        const std::set<std::string>& exclude_stores,
+                        const std::string& logical_room, 
                         std::string& selected_instance);
     int select_instance_min(const std::string& resource_tag,
                             const std::set<std::string>& exclude_stores,
                             int64_t table_id,
-                            std::string& delected_instance);
+                            const std::string& logical_room,
+                            std::string& selected_instance);
     void load_snapshot();
+    bool logical_room_exist(const std::string& logical_room) {
+        BAIDU_SCOPED_LOCK(_physical_mutex);
+        if (_logical_physical_map.find(logical_room) != _logical_physical_map.end()
+                && _logical_physical_map[logical_room].size() != 0) {
+            return true;
+        }
+        return false;
+    }
 public:
+    int64_t get_instance_count(const std::string& resource_tag, const std::string& logical_room) {
+        int64_t count = 0; 
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& instance_info : _instance_info) {
+            if (instance_info.second.resource_tag == resource_tag
+                    && instance_info.second.logical_room == logical_room) {
+                ++count;
+            }
+        }
+        return count;
+    }
+    
     int64_t get_instance_count(const std::string& resource_tag) {
         int64_t count = 0; 
         BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -111,7 +141,22 @@ public:
         }
         return count;
     }
-    
+    int64_t get_peer_count(int64_t table_id, const std::string& logical_room) {
+        int64_t count = 0;
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& region_count: _instance_regions_count_map) {
+            std::string instance = region_count.first;
+            if (_instance_info.find(instance) != _instance_info.end()
+                    && _instance_info[instance].logical_room != logical_room) {
+                continue;
+            }
+            if (region_count.second.find(table_id) != region_count.second.end()) {
+                count += region_count.second[table_id];
+            }
+        }
+        return count;
+    }
+
     int64_t get_peer_count(int64_t table_id) {
         int64_t count = 0;
         BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -122,7 +167,6 @@ public:
         }
         return count;
     }
-
     int64_t get_peer_count(const std::string& instance, int64_t table_id) {
         BAIDU_SCOPED_LOCK(_instance_mutex);
         if (_instance_regions_count_map.find(instance) == _instance_regions_count_map.end()
@@ -160,7 +204,13 @@ public:
         }
         return _instance_info[instance];
     }
-  
+    bool instance_exist(std::string instance) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_instance_info.find(instance) == _instance_info.end()) {
+            return false;
+        }
+        return true;
+    } 
     void set_instance_regions(const std::string& instance, 
                     const std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
                     const std::unordered_map<int64_t, int64_t>& instance_regions_count) {
@@ -197,15 +247,35 @@ public:
     void set_meta_state_machine(MetaStateMachine* meta_state_machine) {
         _meta_state_machine = meta_state_machine;
     }
+    std::string get_logical_room(const std::string& instance) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_instance_info.find(instance) != _instance_info.end()) {
+            return _instance_info[instance].logical_room;
+        }
+        DB_FATAL("instance: %s not exist", instance.c_str());
+        return "";
+    }
 private:
     ClusterManager() {
         bthread_mutex_init(&_physical_mutex, NULL);
         bthread_mutex_init(&_instance_mutex, NULL);
+        {
+            BAIDU_SCOPED_LOCK(_physical_mutex);
+            _physical_info[FLAGS_default_physical_room] = 
+                FLAGS_default_logical_room;
+            _logical_physical_map[FLAGS_default_logical_room] = 
+                    std::set<std::string>{FLAGS_default_physical_room};
+        }
+        {
+            BAIDU_SCOPED_LOCK(_instance_mutex);
+            _physical_instance_map[FLAGS_default_logical_room] = std::set<std::string>();
+        }
     }
     bool whether_legal_for_select_instance(
                 const std::string& candicate_instance,
                 const std::string& resource_tag,
-                const std::set<std::string>& exclude_stores);
+                const std::set<std::string>& exclude_stores,
+                const std::string& logical_room);
     std::string construct_logical_key() {
         return MetaServer::CLUSTER_IDENTIFY
                 + MetaServer::LOGICAL_CLUSTER_IDENTIFY
@@ -239,9 +309,9 @@ private:
     
     bthread_mutex_t                                             _instance_mutex;
     //物理机房与实例对应关系, key:实例， value:物理机房
-    //std::unordered_map<std::string, std::string>                _instance_physical_map;
+    std::unordered_map<std::string, std::string>                _instance_physical_map;
     //物理机房与实例对应关系, key:物理机房， value:实例
-    //std::unordered_map<std::string, std::set<std::string>>      _physical_instance_map;
+    std::unordered_map<std::string, std::set<std::string>>      _physical_instance_map;
     //实例信息
     std::unordered_map<std::string, Instance>                   _instance_info;
     std::string                                                 _last_rolling_instance;

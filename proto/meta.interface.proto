@@ -40,6 +40,11 @@ enum Charset {
     UTF8 = 0;
     GBK = 1;
 };
+//每个逻辑机房的副本数量。第一个逻辑机房为主机房. 目前leader均衡不考虑机房分布。
+message ReplicaDist {
+    required string logical_room = 1;
+    required int64 count        = 2;
+};
 // user MUST ensure that field_id in fields are continuous and sorted, 
 // even if a field is deleted
 message SchemaInfo {
@@ -74,6 +79,8 @@ message SchemaInfo {
     optional uint64 auto_increment_increment= 29; //自增主键初始值
     optional uint32 timestamp               = 30; //表创建时间
     optional Charset charset                = 31;
+    repeated ReplicaDist dists              = 32;
+    optional string main_logical_room       = 33;
 };
 
 message PartitionRegion {
@@ -91,6 +98,7 @@ message FieldInfo {
     optional bool deleted             = 7;
     optional bytes default_value      = 8;
     optional bytes comment            = 9;
+    optional bytes on_update_value    = 10;
 };
 
 enum IndexType {
@@ -196,6 +204,7 @@ message InstanceInfo {
     optional string resource_tag    = 4;
     optional string physical_room   = 5;
     optional Status status          = 6;
+    optional string logical_room    = 7;
 };
 
 message MovePhysicalRequest {
@@ -352,9 +361,16 @@ message BaikalSchemaHeartBeat {
 };
 
 message BaikalHeartBeatRequest {
+    //物理机房和逻辑机房对应关系
     repeated BaikalSchemaHeartBeat schema_infos    = 1;
 };
 
+message IdcInfo {
+    //物理机房和逻辑机房对应关系
+    repeated PhysicalRoom logical_physical_map  = 1;
+    //实例和物理机房对应关系
+    repeated InstanceInfo   instance_infos      = 2;
+};
 message BaikalHeartBeatResponse {
     required ErrCode errcode                      = 1;
     optional string errmsg                        = 2;
@@ -362,6 +378,7 @@ message BaikalHeartBeatResponse {
     repeated SchemaInfo schema_change_info        = 4;
     repeated RegionInfo region_change_info        = 5;
     repeated UserPrivilege privilege_change_info  = 6; //全部同步
+    optional IdcInfo    idc_info                  = 7;
 };
 enum QueryOpType {
     QUERY_LOGICAL                                 = 1;
@@ -379,6 +396,8 @@ enum QueryOpType {
     QUERY_SCHEMA_FLATTEN                          = 105;
     QUERY_TRANSFER_LEADER                         = 201;
     QUERY_SET_PEER                                = 202;
+    QUERY_DIFF_REGION_IDS                         = 301;
+    QUERY_REGION_IDS                              = 302;
 };
 message PhysicalInstance {
     required string physical_room                 = 1;
@@ -419,6 +438,8 @@ message QueryResponse {
     repeated QueryRegion        flatten_regions     = 14;
     repeated QueryTable         flatten_tables      = 15;
     repeated QuerySchema        flatten_schema_infos= 16;
+    repeated int64              peer_ids       = 17;
+    repeated int64              region_ids     = 18;
 };
 
 message QueryUserPrivilege {
@@ -463,6 +484,7 @@ message QueryRegion {
     optional string resource_tag           = 17;
     optional int64 parent                  = 18;
     optional string create_time            = 19;
+    optional int64  table_id               = 20;
 };
 message QueryTable {
     required string             namespace_name      = 1;
@@ -481,6 +503,7 @@ message QueryTable {
     optional int64              table_id            = 15;
     optional string             create_time         = 16;
     optional int64              region_count        = 17; 
+    optional int64              row_count           = 18;
 };
 
 message QuerySchema {

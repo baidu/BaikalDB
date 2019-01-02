@@ -29,11 +29,12 @@ public:
     }
     virtual  ~JoinNode() {
         for (auto& condition : _conditions) {
-            ExprNode::destory_tree(condition);
+            ExprNode::destroy_tree(condition);
         }
     }
     virtual int init(const pb::PlanNode& node); 
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
     virtual void transfer_pb(pb::PlanNode* pb_node);
     virtual int open(RuntimeState* state);
@@ -75,7 +76,7 @@ public:
     void set_join_type(pb::JoinType join_type) {
         _join_type = join_type;
         _pb_node.mutable_derive_node()->mutable_join_node()->set_join_type(join_type);
-    } 
+    }
     //virtual void print_exec_node() {
     //    ExecNode::print_exec_node();
     //    DB_WARNING("join_node, join_type:%s", pb::JoinType_Name(_join_type).c_str());

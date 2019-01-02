@@ -25,7 +25,7 @@
 #include "mut_table_key.h"
 
 namespace baikaldb {
-DEFINE_string(namespace_name, "TEST_NAMESPACE", "namespace name, default: TEST_NAMESPACE");
+DEFINE_string(namespace_name, "FENGCHAO", "FENGCHAO");
 DEFINE_string(database, "", "database");
 DEFINE_string(table_name, "", "table_name");
 DEFINE_string(resource_tag, "", "resouce_tag");
@@ -105,6 +105,11 @@ int create_table(const std::string& namespace_name, const std::string& database,
         }
         */
     }
+
+    for (auto& dist : schema_info.dists()) {
+        auto add_dist = create_table_request.mutable_table_info()->add_dists();
+        *add_dist = dist;
+    } 
    /* 
     auto add_index = create_table_request.mutable_table_info()->add_indexs();
     add_index->set_index_name("user_level_idx");

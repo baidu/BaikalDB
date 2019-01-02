@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
         return -1;
     }
     DB_WARNING("log file load success");
-    baikaldb::register_myraftlog_extension();
+    baikaldb::register_myraft_extension();
     int ret = 0;
 #ifdef BAIDU_INTERNAL
     //init wordrank_client
@@ -143,6 +143,13 @@ int main(int argc, char **argv) {
     store->shutdown_raft();
     store->close();
     DB_WARNING("store close success");
+    // exit if server.join is blocked
+    baikaldb::Bthread bth;
+    bth.run([]() {
+            bthread_usleep(2 * 60 * 1000 * 1000);
+            DB_FATAL("store forse exit");
+            exit(-1);
+        });
     // 需要后关端口
     server.Stop(0);
     server.Join();

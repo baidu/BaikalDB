@@ -10,7 +10,7 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
-// limitations under the License.
+// limitations under the License. 
 
 #include <gtest/gtest.h>
 #include <climits>
@@ -86,21 +86,57 @@ TEST(test_cond, wait) {
     DB_NOTICE("all bth done");
     sleep(1);
 
-    BthreadCond concurrency_cond(-5);
-    for (int i = 0; i < 10; i++) {
-        Bthread bth;
-        // increase一定要在主线程里
-        concurrency_cond.increase();
-        concurrency_cond.wait();
-        bth.run([&concurrency_cond] () {
-            DB_NOTICE("concurrency_cond entry");
-            bthread_usleep(1000 * 1000);
-            DB_NOTICE("concurrency_cond out");
-            concurrency_cond.decrease_signal();
-        });
+    {
+        BthreadCond concurrency_cond(-5);
+        for (int i = 0; i < 10; i++) {
+            Bthread bth;
+            // increase一定要在主线程里
+            concurrency_cond.increase_wait();
+            bth.run([&concurrency_cond] () {
+                    DB_NOTICE("concurrency_cond entry");
+                    bthread_usleep(1000 * 1000);
+                    DB_NOTICE("concurrency_cond out");
+                    concurrency_cond.decrease_signal();
+                    });
+        }
+        concurrency_cond.wait(-5);
+        DB_NOTICE("concurrency_cond all bth done");
     }
-    concurrency_cond.wait(-5);
-    DB_NOTICE("concurrency_cond all bth done");
+    sleep(1);
+
+    {
+        BthreadCond concurrency_cond;
+        for (int i = 0; i < 10; i++) {
+            Bthread bth;
+            // increase一定要在主线程里
+            concurrency_cond.increase_wait(5);
+            bth.run([&concurrency_cond] () {
+                    DB_NOTICE("concurrency_cond entry");
+                    bthread_usleep(1000 * 1000);
+                    DB_NOTICE("concurrency_cond out");
+                    concurrency_cond.decrease_signal();
+                    });
+        }
+        concurrency_cond.wait();
+        DB_NOTICE("concurrency_cond all bth done");
+    }
+
+    {
+        BthreadCond concurrency_cond(-1);
+        for (int i = 0; i < 10; i++) {
+            Bthread bth;
+            bth.run([&concurrency_cond] () {
+                    concurrency_cond.increase_wait();
+                    DB_NOTICE("concurrency_cond2 entry");
+                    bthread_usleep(1000 * 1000);
+                    DB_NOTICE("concurrency_cond2 out");
+                    concurrency_cond.decrease_broadcast();
+                    });
+        }
+        bthread_usleep(1000 * 1000);
+        concurrency_cond.wait(-1);
+        DB_NOTICE("concurrency_cond2 all bth done");
+    }
 }
 
 TEST(timestamp_to_str, str_to_timestamp) {

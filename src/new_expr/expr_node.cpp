@@ -20,6 +20,7 @@
 #include "slot_ref.h"
 
 namespace baikaldb {
+// only pre_calc children nodes
 void ExprNode::const_pre_calc() {
     if (_children.size() == 0 || _node_type == pb::AGG_EXPR) {
         return;
@@ -205,6 +206,7 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
         case pb::DATETIME_LITERAL:
         case pb::TIME_LITERAL:
         case pb::TIMESTAMP_LITERAL:
+        case pb::PLACE_HOLDER_LITERAL:
             *expr_node = new Literal;
             (*expr_node)->init(node);
             return 0;

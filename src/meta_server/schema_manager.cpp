@@ -229,7 +229,7 @@ void SchemaManager::process_leader_heartbeat_for_store(const pb::StoreHeartBeatR
     step_time_cost.reset();
 
     RegionManager::get_instance()->leader_load_balance(_meta_state_machine->whether_can_decide(), 
-            _meta_state_machine->get_close_load_balance(), request, response);
+            _meta_state_machine->get_load_balance(), request, response);
     int64_t leader_balance_time = step_time_cost.get_time();
     SELF_TRACE("process leader heartbeat, update_status_time: %ld, leader_region_time: %ld,"
                 " leader_balance_time: %ld, log_id: %lu",
@@ -396,6 +396,34 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
             }
         }
     }
+    auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+    std::string main_logical_room;
+    //用户指定了跨机房部署
+    if (request->table_info().dists_size() != 0) {
+        int64_t total_count = 0;
+        //检验逻辑机房是否存在
+        for (auto& dist : request->table_info().dists()) {
+            std::string logical_room = dist.logical_room();
+            if (ClusterManager::get_instance()->logical_room_exist(logical_room)) {
+                total_count += dist.count();
+                continue;
+            }
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "logical room not exist, select instance fail",
+                    request->op_type(), log_id);
+            return -1;
+        }
+        if (request->table_info().main_logical_room().size() == 0) {
+            mutable_request->mutable_table_info()->set_main_logical_room(
+                    request->table_info().dists(0).logical_room()); 
+        }
+        main_logical_room = request->table_info().main_logical_room();
+        if (total_count != request->table_info().replica_num()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "replica num not match", request->op_type(), log_id);
+            return -1;
+        }
+    }
     std::vector<std::string> new_instances;
     int count = partition_num * (request->table_info().split_keys_size() + 1);
     std::string resource_tag = request->table_info().resource_tag();
@@ -405,6 +433,7 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         int ret = ClusterManager::get_instance()->select_instance_rolling(
                     resource_tag,
                     {},
+                    main_logical_room,    
                     instance);
         if (ret < 0) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
@@ -413,7 +442,6 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         }
         new_instances.push_back(instance);
     }
-    auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
     for (auto& new_instance : new_instances) {
         mutable_request->mutable_table_info()->add_init_store(new_instance);
     }
@@ -430,13 +458,13 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
                             "table id not exist", request->op_type(), log_id);
         return -1;
     }
-    if (ptr_region->peers_size() != ptr_region->replica_num()) {
+    if (ptr_region->peers_size() < 2) {
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                             "region not stable, cannot split", 
                             request->op_type(), 
                             log_id);
-        DB_WARNING("region cannot split, region not stable, request: %s", 
-                    request->ShortDebugString().c_str());
+        DB_WARNING("region cannot split, region not stable, request: %s, region_id: %ld", 
+                    request->ShortDebugString().c_str(), region_id);
         return -1;
     }
     int64_t table_id = 0;
@@ -457,23 +485,27 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
         }
     }
     std::string source_instance = request->region_split().new_instance();
-    response->mutable_split_response()->set_new_instance(source_instance);
     if (!request->region_split().has_tail_split()
             || !request->region_split().tail_split()) {
+        response->mutable_split_response()->set_new_instance(source_instance);
         return 0;
     }
     //从cluster中选择一台实例, 只有尾分裂需要，其他分裂只做本地分裂
     std::string instance;
     auto ret = 0;
+    std::string main_logical_room;
+    TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
     if (_meta_state_machine->whether_can_decide()) {
         ret = ClusterManager::get_instance()->select_instance_min(resource_tag, 
                                                   std::set<std::string>{source_instance},
                                                   table_id,
+                                                  main_logical_room,
                                                   instance);
     } else {
         DB_WARNING("meta state machine can not make decision");
         ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag, 
                                                     std::set<std::string>{source_instance},
+                                                    main_logical_room,
                                                     instance);
     }
     if (ret < 0) {

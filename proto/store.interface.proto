@@ -57,6 +57,11 @@ message RowValue {
     repeated bytes tuple_values = 1;
 };
 
+message RegionLeader {
+    required int64  region_id            = 1;
+    required string leader               = 2;        
+};
+
 message StoreRes {
     required ErrCode errcode        = 1;
     optional string errmsg          = 2;
@@ -70,6 +75,8 @@ message StoreRes {
     optional int32 last_seq_id      = 9; //store端当前事务已执行的最后一个cmd的seq_id, 未开始则为0
     repeated TransactionInfo txn_infos = 10; // 用于OP_ADD_VERSION_FOR_SPLIT_REGION时返回Prepared事务行数
     optional int32 mysql_errcode   = 11;
+    optional int64  region_count   = 12;
+    repeated RegionLeader region_leaders = 13;
 };
 
 message InitRegion {
@@ -88,9 +95,10 @@ message RemoveRegion {
     optional bool   force           = 2;
 };
 
-message CompactRegion {
+message RegionIds {
     repeated int64  region_ids      = 1; // if size = 0, it will compact the entire db
 };
+
 service StoreService {
     //1、创建table时master调用，region及raft同步创建成功后才返回给metaServer,
     //   创建表时raft node地址初始化为一个节点
@@ -117,5 +125,11 @@ service StoreService {
     //get region的applied_index, 用来分裂完成后优化选择transfer leader的对象
     rpc get_applied_index(GetAppliedIndex) returns (StoreRes);
 
-    rpc compact_region(CompactRegion) returns (StoreRes);
+    rpc compact_region(RegionIds) returns (StoreRes);
+
+    rpc snapshot_region(RegionIds) returns(StoreRes);
+
+    rpc query_region(RegionIds) returns (StoreRes);
+    
+    rpc query_illegal_region(RegionIds) returns (StoreRes);
 };

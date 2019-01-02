@@ -214,6 +214,16 @@ int SortNode::fill_tuple(RowBatch* batch) {
     batch->reset();
     return 0;
 }
+
+void SortNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _order_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+    for (auto& expr : _slot_order_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */
