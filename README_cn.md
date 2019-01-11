@@ -1,4 +1,4 @@
-[English Version](README.md)
+[English Version](README.md) \|[20181225前BaikalStore升级须知](docs/cn/upgrade_BaikalStore.md)
 
 # BaikalDB
 BaikalDB是一个分布式可扩展的存储系统，支持PB级结构化数据的随机实时读写。
