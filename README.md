@@ -1,4 +1,4 @@
-[中文版](README_cn.md) [20181225前BaikalStore升级注意](docs/cn/upgrade_BaikalStore.md)
+[中文版](README_cn.md)     [20181225前BaikalStore升级注意](docs/cn/upgrade_BaikalStore.md)
 
 [![Build Status](https://travis-ci.org/baidu/BaikalDB.svg?branch=master)](https://travis-ci.org/baidu/BaikalDB)
 
