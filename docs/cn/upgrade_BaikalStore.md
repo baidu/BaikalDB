@@ -24,3 +24,4 @@ If your cluster is deployed with the binary built from the code submitted before
 
 3. 升级baikalStore到主干最新代码对应的程序。
 
+**注意：由于使用了raft协议，BaikalStore与BaikalMeta的正常滚动升级或重启的并发度必须是1，否则过程中可能会影响服务的可用性。**
