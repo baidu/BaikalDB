@@ -191,9 +191,11 @@ FetcherNode::ErrorType FetcherNode::send_request(
     int64_t entry_ms5 = butil::gettimeofday_ms() % 1000;
     pb::StoreService_Stub(&channel).query(&cntl, &req, &res, NULL);
 
-    DB_WARNING("entry_ms:%d, %d, %d, %d, %d, lock:%ld, wait region_id: %ld version:%ld time:%ld log_id:%lu txn_id: %lu, ip:%s", 
-            entry_ms, entry_ms2, entry_ms3, entry_ms4, entry_ms5, client_lock_tm, region_id, info.version(), cost.get_time(), log_id, state->txn_id,
-            butil::endpoint2str(cntl.remote_side()).c_str());
+    if (cost.get_time() > 30 * 1000) {
+        DB_WARNING("entry_ms:%d, %d, %d, %d, %d, lock:%ld, wait region_id: %ld version:%ld time:%ld log_id:%lu txn_id: %lu, ip:%s", 
+                entry_ms, entry_ms2, entry_ms3, entry_ms4, entry_ms5, client_lock_tm, region_id, info.version(), cost.get_time(), log_id, state->txn_id,
+                butil::endpoint2str(cntl.remote_side()).c_str());
+    }
     if (cntl.Failed()) {
         DB_WARNING("call failed region_id: %ld, error:%s, log_id:%lu", 
                 region_id, cntl.ErrorText().c_str(), log_id);
@@ -359,8 +361,10 @@ FetcherNode::ErrorType FetcherNode::send_request(
         _region_batch[region_id] = batch;
         lock_tm= lock.get_time();
     }
-    DB_WARNING("lock_tm:%ld, parse region:%ld time:%ld rows:%u log_id:%lu ", 
-            lock_tm, region_id, cost.get_time(), batch->size(), log_id);
+    if (cost.get_time() > 30 * 1000) {
+        DB_WARNING("lock_tm:%ld, parse region:%ld time:%ld rows:%u log_id:%lu ", 
+                lock_tm, region_id, cost.get_time(), batch->size(), log_id);
+    }
     return E_OK;
 }
 

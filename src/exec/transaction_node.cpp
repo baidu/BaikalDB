@@ -295,7 +295,7 @@ int TransactionNode::open(RuntimeState* state) {
         auto res = txn->prepare();
         int ret = 0;
         if (res.ok()) {
-            DB_WARNING_STATE(state, "prepare success, region_id: %ld, txn_id: %lu:%d", region_id, state->txn_id, state->seq_id);
+            //DB_WARNING_STATE(state, "prepare success, region_id: %ld, txn_id: %lu:%d", region_id, state->txn_id, state->seq_id);
             ret = txn->dml_num_affected_rows; // for autocommit dml, affected row is returned in commit node
         } else if (res.IsExpired()) {
             DB_WARNING_STATE(state, "txn expired, region_id: %ld, txn_id: %lu:%d", region_id, state->txn_id, state->seq_id);
@@ -328,8 +328,8 @@ int TransactionNode::open(RuntimeState* state) {
         auto res = txn->commit();
         int ret = 0;
         if (res.ok()) {
-            DB_WARNING_STATE(state, "txn commit success, region_id: %ld, txn_id: %lu, seq_id:%d", 
-                region_id, state->txn_id, state->seq_id);
+            //DB_WARNING_STATE(state, "txn commit success, region_id: %ld, txn_id: %lu, seq_id:%d", 
+            //    region_id, state->txn_id, state->seq_id);
             ret = txn->dml_num_affected_rows; // for autocommit dml, affected row is returned in commit node
         } else if (res.IsExpired()) {
             DB_WARNING_STATE(state, "txn expired when commit, region_id: %ld, txn_id: %lu, seq_id:%d", 

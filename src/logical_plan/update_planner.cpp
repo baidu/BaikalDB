@@ -90,6 +90,7 @@ int UpdatePlanner::create_update_node() {
     pb::PlanNode* update_node = _ctx->add_plan_node();
     update_node->set_node_type(pb::UPDATE_NODE);
     update_node->set_limit(_limit_count);
+    update_node->set_is_explain(_ctx->is_explain);
     update_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = update_node->mutable_derive_node();
     pb::UpdateNode* update = derive->mutable_update_node();

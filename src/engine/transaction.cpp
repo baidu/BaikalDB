@@ -573,7 +573,7 @@ rocksdb::Status Transaction::prepare() {
     if (res.ok()) {
         if (_pool && !_is_prepared) {
             _pool->increase_prepared();
-            DB_WARNING("increase_prepared: %d", _pool->num_prepared());
+            //DB_WARNING("increase_prepared: %d", _pool->num_prepared());
         }
         _is_prepared = true;
         _prepare_time_us = butil::gettimeofday_us();

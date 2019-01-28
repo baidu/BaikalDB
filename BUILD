@@ -38,7 +38,7 @@ COPTS  = [
     "-Iinclude/exec",
     "-Iinclude/expr",
     "-Iinclude/meta_server",
-    "-Iinclude/new_logical_plan",
+    "-Iinclude/logical_plan",
     "-Iinclude/raft",
     "-Iinclude/raft_store",
     "-Iinclude/raft_meta",
@@ -205,8 +205,8 @@ cc_library(
 )
 
 cc_library(
-    name = "new_expr",
-    srcs = glob(["src/new_expr/*.cpp"]),
+    name = "expr",
+    srcs = glob(["src/expr/*.cpp"]),
     hdrs = glob([
         "include/**/*.h",
         "include/**/*.hpp",
@@ -249,7 +249,7 @@ cc_library(
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
-        ":new_expr",
+        ":expr",
         ":session",
         ":protocol",
         ":runtime", 
@@ -283,7 +283,7 @@ cc_library(
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
-        ":new_expr",
+        ":expr",
         ":session",
         ":engine",
         ":runtime",
@@ -292,8 +292,8 @@ cc_library(
 )
 
 cc_library(
-    name = "new_logical_plan",
-    srcs = glob(["src/new_logical_plan/*.cpp"]),
+    name = "logical_plan",
+    srcs = glob(["src/logical_plan/*.cpp"]),
 
     hdrs = glob([
         "include/**/*.h",
@@ -302,7 +302,7 @@ cc_library(
 
     copts = COPTS,
     includes = [
-        "include/new_logical_plan/",
+        "include/logical_plan/",
     ],
     deps = [
         ":cc_baikaldb_internal_proto",
@@ -540,11 +540,11 @@ cc_binary(
         ":raft_store",
         ":sqlparser",
         ":reverse",
-        ":new_expr",
+        ":expr",
         ":exec",
         ":runtime",
         ":physical_plan",
-        ":new_logical_plan",
+        ":logical_plan",
         ":mem_row",
     ],
     linkstatic = True,
@@ -644,12 +644,12 @@ cc_binary(
         ":store",
         ":sqlparser",
         ":reverse",
-        ":new_expr",
+        ":expr",
         ":exec2",
         ":raft_dummy",
         ":runtime",
         ":physical_plan2",
-        ":new_logical_plan",
+        ":logical_plan",
         ":mem_row",
     ],
     linkstatic = True,

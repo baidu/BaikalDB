@@ -27,6 +27,9 @@
 
 namespace baikaldb {
 int Separate::analyze(QueryContext* ctx) {
+    if (ctx->is_explain) {
+        return 0;
+    }
     ExecNode* plan = ctx->root;
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     if (packet_node == nullptr) {

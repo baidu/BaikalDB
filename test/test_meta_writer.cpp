@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 #include "gtest/gtest.h"
 #include "meta_writer.h"
 #include "rocks_wrapper.h"
@@ -131,7 +130,7 @@ TEST_F(MetaWriterTest, test_encode) {
         txn.set_region_id(region_id);
         txn.set_region_version(log_index);
         batch.Put(_writer->get_handle(), 
-                _writer->transcation_pb_key(region_id, log_index), 
+                _writer->transcation_pb_key(region_id, 1, log_index), 
                 _writer->encode_transcation_pb_value(txn));
     }    
     ret = _writer->write_batch(&batch, region_id);
@@ -142,8 +141,12 @@ TEST_F(MetaWriterTest, test_encode) {
     ASSERT_EQ(ret, 0);
     ASSERT_EQ(prepared_txn_infos.size(), 2);
     for (auto& txn_info : prepared_txn_infos) {
+        baikaldb::pb::StoreReq txn;
+        if (!txn.ParseFromString(txn_info.second)) {
+            ASSERT_EQ(1, 0);
+        }
         DB_WARNING("log_index: %ld, txn_info:%s", 
-                    txn_info.first, txn_info.second.c_str());
+                    txn_info.first, txn.ShortDebugString().c_str());
     }
 
     ret = _writer->clear_meta_info(region_id);

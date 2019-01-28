@@ -323,7 +323,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
     }
     if (pb_scan_node->indexes_size() == 0) {
         //主键扫描
-        DB_WARNING("no index is selected, use primary key");
+        //DB_WARNING("no index is selected, use primary key");
         pb::PossibleIndex* pos_index = pb_scan_node->add_indexes();
         pos_index->set_index_id(table_id);
         pos_index->add_ranges();

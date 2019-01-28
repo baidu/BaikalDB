@@ -192,6 +192,7 @@ message PlanNode {
     //repeated int32 row_tuples = 4;
     optional int64 limit = 5;
     optional DerivePlanNode derive_node = 6;
+    optional bool is_explain = 7;
 };
 
 message Plan {

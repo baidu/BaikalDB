@@ -54,6 +54,7 @@ int AggFnCall::type_inferer() {
     int ret = 0;
     ret = ExprNode::type_inferer();
     if (ret < 0) {
+        DB_FATAL("ExprNode::type_inferer error");
         return ret;
     }
     switch (_agg_type) {
@@ -87,6 +88,7 @@ int AggFnCall::type_inferer() {
         case HLL_ADD_AGG:
         case HLL_MERGE_AGG:
             if (_children.size() == 0) {
+                DB_FATAL("children.size is 0");
                 return -1;
             }
             _col_type = pb::HLL;

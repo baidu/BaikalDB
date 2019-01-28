@@ -24,6 +24,8 @@
 #include <base/third_party/murmurhash3/murmurhash3.h>
 #include <base/endpoint.h>
 #include <base/base64.h>
+#include <webfoot_naming.h>
+#include "naming.pb.h"
 #else
 #include <bthread/bthread.h>
 #include <butil/time.h>
@@ -453,6 +455,10 @@ extern int end_key_compare(const std::string& key1, const std::string& key2);
 
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
+extern int get_instance_from_bns(int* ret,
+                          const std::string& bns_name, 
+                          std::vector<std::string>& instances,
+                          bool need_alive = true); 
 
 inline int end_key_compare(const std::string& key1, const std::string& key2) {
     if (key1 == key2) {

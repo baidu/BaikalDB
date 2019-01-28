@@ -193,8 +193,8 @@ public:
         DB_WARNING("heart beat bth join");
         _add_peer_queue.join();
         DB_WARNING("_add_peer_queue join");
-        _compact_queue.join();
-        DB_WARNING("_compact_queue join");
+        //_compact_queue.join();
+        //DB_WARNING("_compact_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
         _merge_bth.join();
@@ -212,7 +212,9 @@ public:
 private:
     Store(): _split_num(0),
              _disk_total("disk_total", 0),
-             _disk_used("disk_used", 0) {}
+             _disk_used("disk_used", 0),
+             dml_time_cost("dml_time_cost"),
+             select_time_cost("select_time_cost") {}
     
     int drop_region_from_store(int64_t drop_region_id);
 
@@ -228,7 +230,6 @@ private:
     void monitor_memory();
     void print_properties(const std::string& name);
     void print_heartbeat_info(const pb::StoreHeartBeatRequest& request);
-
 private:
     std::string                             _address;
     std::string                             _physical_room;
@@ -270,5 +271,8 @@ private:
     ExecutionQueue _compact_queue;
 
     bool _has_prepared_tran = true;
+public:
+    bvar::LatencyRecorder dml_time_cost;
+    bvar::LatencyRecorder select_time_cost;
 };
 }

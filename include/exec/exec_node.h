@@ -31,7 +31,7 @@ namespace baikaldb {
 class RuntimeState;
 class ExecNode {
 public:
-    ExecNode() : _limit(-1), _num_rows_returned(0) {
+    ExecNode() {
     }
     virtual ~ExecNode() {
         for (auto& e : _children) {
@@ -78,6 +78,11 @@ public:
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
         for (size_t idx = 0; idx < _children.size(); ++idx) {
             _children[idx]->find_place_holder(placeholders);
+        }
+    }
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output) {
+        for (auto child : _children) {
+            child->show_explain(output);
         }
     }
     void set_parent(ExecNode* parent_node) {
@@ -150,8 +155,9 @@ public:
         delete root;
     }
 protected:
-    int64_t _limit;
-    int64_t _num_rows_returned;
+    int64_t _limit = -1;
+    int64_t _num_rows_returned = 0;
+    bool _is_explain = false;
     pb::PlanNodeType _node_type;
     std::vector<ExecNode*> _children;
     ExecNode* _parent = nullptr;

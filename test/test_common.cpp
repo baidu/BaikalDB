@@ -165,13 +165,13 @@ TEST(test_ConcurrencyBthread, wait) {
     con_bth.join();
     DB_NOTICE("all bth done");
 }
-
+/*
 TEST(timestamp_to_str, str_to_timestamp) {
     std::string str = "1991-07-13 14:15:35";
     time_t time1 = str_to_timestamp(str.c_str());
     std::cout << str << " " << timestamp_to_str(time1) << std::endl;
 }
-
+*/
 TEST(ThreadSafeMap, set) {
     ThreadSafeMap<int64_t, std::string> map;
     map.set(1123124, "abc");

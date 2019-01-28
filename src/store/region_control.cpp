@@ -83,8 +83,10 @@ void RegionControl::compact_data(int64_t region_id) {
 }
 void RegionControl::compact_data_in_queue(int64_t region_id) {
     Store::get_instance()->compact_queue().run([region_id]() {
-        RegionControl::compact_data(region_id);
-        bthread_usleep(FLAGS_compact_interval * 1000 * 1000LL);
+        if (Store::get_instance()->get_is_running()) {
+            RegionControl::compact_data(region_id);
+            bthread_usleep(FLAGS_compact_interval * 1000 * 1000LL);
+        }
     });
 }
 

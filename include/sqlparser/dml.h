@@ -493,6 +493,13 @@ struct ShowStmt : public DmlNode {
     ExprNode* where = nullptr;
 };
 
+struct ExplainStmt : public DmlNode {
+    StmtNode* stmt = nullptr;
+    ExplainStmt() {
+        node_type = NT_EXPLAIN;
+    }
+};
+
 } 
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

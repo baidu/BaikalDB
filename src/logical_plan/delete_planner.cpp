@@ -85,6 +85,7 @@ int DeletePlanner::create_delete_node() {
     pb::PlanNode* delete_node = _ctx->add_plan_node();
     delete_node->set_node_type(pb::DELETE_NODE);
     delete_node->set_limit(-1);
+    delete_node->set_is_explain(_ctx->is_explain);
     delete_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = delete_node->mutable_derive_node();
     pb::DeleteNode* _delete = derive->mutable_delete_node();

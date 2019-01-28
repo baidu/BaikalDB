@@ -40,7 +40,6 @@ int PacketNode::init(const pb::PlanNode& node) {
         field.org_name = name;
         _fields.push_back(field);
     }
-
     return 0;
 }
 int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
@@ -70,24 +69,50 @@ int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     }
     return 0;
 }
+
+int PacketNode::handle_explain(RuntimeState* state) {
+    _fields.clear();
+    std::vector<std::string> names = {
+        "id", "select_type", "table", "type", "possible_keys",
+        "key", "key_len", "ref", "rows", "Extra"
+    };
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.push_back(field);
+    }
+    pack_head();
+    pack_fields();
+    std::vector<std::map<std::string, std::string>> explains;
+    show_explain(explains);
+    for (auto& m : explains) {
+        std::vector<std::string> row;
+        for (auto& name : names) {
+            row.push_back(m[name]);
+        }
+        pack_vector_row(row);
+    }
+    pack_eof();
+    return 0;
+}
+
 int PacketNode::open(RuntimeState* state) {
     auto client = state->client_conn();
 
+    _send_buf = state->send_buf();
+    _wrapper = MysqlWrapper::get_instance();
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode::open fail:%d", ret);
         return ret;
     }
-    _send_buf = state->send_buf();
-    _wrapper = MysqlWrapper::get_instance();
+    if (_is_explain) {
+        return handle_explain(state);
+    }
     state->set_num_affected_rows(ret);
     if (op_type() != pb::OP_SELECT) {
-        // if (op_type() == pb::OP_INSERT) {
-        //     pack_ok(state->num_affected_rows(), client.get());
-        // } else {
-        //     pack_ok(state->num_affected_rows());
-        // }
         pack_ok(state->num_affected_rows(), client);
         return 0;
     }
@@ -134,7 +159,7 @@ int PacketNode::open(RuntimeState* state) {
                 }
             }
         } while (!eos);
-        DB_WARNING("txn_id: %lu, pack_time: %ld", state->txn_id, pack_time);
+        //DB_WARNING("txn_id: %lu, pack_time: %ld", state->txn_id, pack_time);
     }
     pack_eof();
     return 0;
@@ -221,6 +246,38 @@ int PacketNode::pack_fields(DataBuffer* buffer, int packet_id) {
     }
     ++packet_id;
     _wrapper->make_eof_packet(buffer, packet_id);
+    return 0;
+}
+
+int PacketNode::pack_vector_row(const std::vector<std::string>& row) {
+    ++_packet_id;
+    int start_pos = _send_buf->_size;
+    uint8_t bytes[4];
+    bytes[0] = '\x01';
+    bytes[1] = '\x00';
+    bytes[2] = '\x00';
+    bytes[3] = _packet_id & 0xff;
+    if (!_send_buf->byte_array_append_len(bytes, 4)) {
+        DB_FATAL("Failed to append len. value:[%s], len:[1]", bytes);
+        return -1;
+    }
+
+    // package body.
+    for (auto& item : row) {
+        uint64_t length = item.size();
+        if (!_send_buf->byte_array_append_length_coded_binary(length)) {
+            DB_FATAL("Failed to append length coded binary.length:[%lu]", length);
+            return -1;
+        }
+        if (!_send_buf->byte_array_append_len((const uint8_t *)item.c_str(), item.size())) {
+            DB_FATAL("Failed to append table cell.");
+            return -1;
+        }
+    }
+    int packet_body_len = _send_buf->_size - start_pos - 4;
+    _send_buf->_data[start_pos] = packet_body_len & 0xff;
+    _send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
+    _send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
     return 0;
 }
 

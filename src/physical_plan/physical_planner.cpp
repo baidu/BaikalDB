@@ -71,7 +71,7 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
-    // F1与store的计划分离，生成FetcherNode，并且根据region数量做不同决策
+    // db与store的计划分离，生成FetcherNode，并且根据region数量做不同决策
     ret = Separate().analyze(ctx);
     if (ret < 0) {
         return ret;

@@ -65,7 +65,7 @@ public:
     std::string num_table_lines_key(int64_t region_id) const;
     std::string transcation_log_index_key(int64_t region_id, uint64_t txn_id) const;
     std::string log_index_key_prefix(int64_t region_id) const;
-    std::string transcation_pb_key(int64_t region_id, int64_t log_index) const;
+    std::string transcation_pb_key(int64_t region_id, uint64_t txn_id, int64_t log_index) const;
     std::string transcation_pb_key_prefix(int64_t region_id) const;
     std::string encode_applied_index(int64_t index) const;
     std::string encode_num_table_lines(int64_t line) const;
@@ -73,6 +73,7 @@ public:
     std::string encode_transcation_pb_value(const pb::StoreReq& txn) const;
     std::string encode_transcation_log_index_value(int64_t log_index) const;
     int64_t decode_log_index_value(const rocksdb::Slice& value);
+    uint64_t decode_log_index_key(const rocksdb::Slice& key);
 
     std::string meta_info_prefix(int64_t region_id);
     rocksdb::ColumnFamilyHandle* get_handle() {

@@ -66,11 +66,15 @@ public:
         ExecNode::find_place_holder(placeholders);
     }
 
+    virtual int select_index(std::vector<int>& multi_reverse_index) {
+        return 0;
+    }
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 protected:
     pb::Engine _engine = pb::ROCKSDB;
     int32_t _tuple_id = 0;
     int64_t _table_id = -1;
-    pb::TupleDescriptor* _tuple_desc;
+    pb::TupleDescriptor* _tuple_desc = nullptr;
 };
 }
 

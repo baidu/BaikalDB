@@ -45,7 +45,7 @@ void DMLClosure::Run() {
                     log_id);
     }
     done->Run();
-    if (region != nullptr) {
+    if (region != nullptr && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
         region->update_average_cost(cost.get_time());
     }
     DB_NOTICE("dml log_id:%lu, type:%d, raft_total_cost:%ld, region_id: %ld, "

@@ -38,6 +38,8 @@ enum MysqlType : uint8_t {
     MYSQL_TYPE_NEWDATE, 
     MYSQL_TYPE_VARCHAR,
     MYSQL_TYPE_BIT,
+    MYSQL_TYPE_HLL = 244,
+    MYSQL_TYPE_JSON = 245,
     MYSQL_TYPE_NEWDECIMAL = 246,
     MYSQL_TYPE_ENUM = 247,
     MYSQL_TYPE_SET = 248,
@@ -237,7 +239,7 @@ inline uint8_t to_mysql_type(pb::PrimitiveType type) {
         case pb::HLL:
             return MYSQL_TYPE_LONGLONG;
         default:
-            return MYSQL_TYPE_BLOB;
+            return MYSQL_TYPE_STRING;
     }
 }
 

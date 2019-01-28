@@ -157,7 +157,7 @@ int SortNode::open(RuntimeState* state) {
         fill_tuple(batch.get());
         _sorter->add_batch(batch);
     } while (!eos);
-    DB_WARNING_STATE(state, "sort_size:%d", count);
+    //DB_WARNING_STATE(state, "sort_size:%d", count);
     _sorter->sort();
     return 0;
 }

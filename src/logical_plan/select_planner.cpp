@@ -105,6 +105,7 @@ int SelectPlanner::create_limit_node() {
     pb::PlanNode* limit_node = _ctx->add_plan_node();
     limit_node->set_node_type(pb::LIMIT_NODE);
     limit_node->set_limit(-1);
+    limit_node->set_is_explain(_ctx->is_explain);
     limit_node->set_num_children(1); //TODO
 
     pb::DerivePlanNode* derive = limit_node->mutable_derive_node();
@@ -132,6 +133,7 @@ int SelectPlanner::create_agg_node() {
         pb::PlanNode* agg_node = _ctx->add_plan_node();
         agg_node->set_node_type(pb::AGG_NODE);
         agg_node->set_limit(-1);
+        agg_node->set_is_explain(_ctx->is_explain);
         agg_node->set_num_children(1); //TODO 
         pb::DerivePlanNode* derive = agg_node->mutable_derive_node();
         pb::AggNode* agg = derive->mutable_agg_node();
@@ -156,6 +158,7 @@ int SelectPlanner::create_agg_node() {
         agg_node->set_node_type(pb::MERGE_AGG_NODE);
     }
     agg_node->set_limit(-1);
+    agg_node->set_is_explain(_ctx->is_explain);
     agg_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = agg_node->mutable_derive_node();
     pb::AggNode* agg = derive->mutable_agg_node();
@@ -178,6 +181,7 @@ int SelectPlanner::create_agg_node() {
         pb::PlanNode* agg_node2 = _ctx->add_plan_node();
         agg_node2->set_node_type(pb::AGG_NODE);
         agg_node2->set_limit(-1);
+        agg_node2->set_is_explain(_ctx->is_explain);
         agg_node2->set_num_children(1); //TODO 
         pb::DerivePlanNode* derive = agg_node2->mutable_derive_node();
         pb::AggNode* agg2 = derive->mutable_agg_node();

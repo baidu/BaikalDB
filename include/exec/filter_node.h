@@ -50,6 +50,7 @@ public:
         }
     }
     void remove_primary_conjunct(int64_t index_id);
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 private:
     bool need_copy(MemRow* row);
 

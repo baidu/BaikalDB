@@ -42,6 +42,9 @@ int DeleteNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
+    if (_is_explain) {
+        return 0;
+    }
     ret = init_schema_info(state);
     if (ret == -1) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);

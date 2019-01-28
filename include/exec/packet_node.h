@@ -51,11 +51,13 @@ public:
     }
 
 private:
+    int handle_explain(RuntimeState* state);
     int pack_ok(int num_affected_rows, NetworkSocket* client);
     // 先不用，err在外部填
     int pack_err();
     int pack_head();
     int pack_fields();
+    int pack_vector_row(const std::vector<std::string>& row);
     int pack_text_row(MemRow* row);
     int pack_binary_row(MemRow* row);
     int pack_eof();

@@ -61,7 +61,7 @@ ExprValue lower(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::STRING);
-    tmp.str_val = input[0].str_val;
+    tmp.str_val = input[0].get_string();
     std::transform(tmp.str_val.begin(), tmp.str_val.end(), tmp.str_val.begin(), ::tolower); 
     return tmp;
 }
@@ -71,7 +71,7 @@ ExprValue lower_gbk(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::STRING);
-    tmp.str_val = input[0].str_val;
+    tmp.str_val = input[0].get_string();
     std::string& literal = tmp.str_val;
     size_t idx = 0;
     while (idx < literal.size()) {
@@ -90,7 +90,7 @@ ExprValue upper(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::STRING);
-    tmp.str_val = input[0].str_val;
+    tmp.str_val = input[0].get_string();
     std::transform(tmp.str_val.begin(), tmp.str_val.end(), tmp.str_val.begin(), ::toupper); 
     return tmp;
 }
@@ -266,33 +266,42 @@ ExprValue timestampdiff(const std::vector<ExprValue>& input) {
 }
 
 ExprValue hll_add(const std::vector<ExprValue>& input) {
-    if (input.size() < 2) {
+    if (input.size() == 0) {
         return ExprValue::Null();
     }
     if (input[0].is_null()) {
-        return hll::hll_init();
+        (ExprValue&)input[0] = hll::hll_init();
     }
-    if (input[1].is_null()) {
-        return input[0];
+    for (size_t i = 1; i < input.size(); i++) {
+        if (!input[i].is_null()) {
+            hll::hll_add((ExprValue&)input[0], input[i].hash());
+        }
     }
-    return hll::hll_add((ExprValue&)input[0], input[1].hash());
+    return input[0];
 }
 ExprValue hll_merge(const std::vector<ExprValue>& input) {
-    if (input.size() < 2) {
+    if (input.size() == 0) {
         return ExprValue::Null();
     }
     if (input[0].is_null()) {
-        return input[1];
-    } else if (input[1].is_null()) {
-        return input[0];
+        (ExprValue&)input[0] = hll::hll_init();
     }
-    return hll::hll_merge((ExprValue&)input[0], (ExprValue&)input[1]);
+    for (size_t i = 1; i < input.size(); i++) {
+        if (!input[i].is_null()) {
+            hll::hll_merge((ExprValue&)input[0], (ExprValue&)input[i]);
+        }
+    }
+    return input[0];
 }
 ExprValue hll_estimate(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::INT64);
+    if (input[0].is_null()) {
+        tmp._u.int64_val = 0;
+        return tmp;
+    }
     tmp._u.int64_val = hll::hll_estimate(input[0]);
     return tmp;
 }

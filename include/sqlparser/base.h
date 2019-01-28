@@ -53,6 +53,7 @@ enum NodeType {
     NT_SELECT,
     NT_TRUNCATE,
     NT_SHOW,
+    NT_EXPLAIN,
     /*EXPR*/
     NT_EXPR,
 

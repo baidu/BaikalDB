@@ -50,6 +50,7 @@ enum MysqlType : unsigned char {
     MYSQL_TYPE_TIMESTAMP2, 
     MYSQL_TYPE_DATETIME2, 
     MYSQL_TYPE_TIME2,
+    MYSQL_TYPE_HLL          = 244,
     MYSQL_TYPE_JSON         = 245, 
     MYSQL_TYPE_NEWDECIMAL   = 246, 
     MYSQL_TYPE_ENUM         = 247, 

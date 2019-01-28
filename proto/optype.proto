@@ -19,6 +19,7 @@ enum OpType {
     OP_ADD_VERSION_FOR_SPLIT_REGION         = 12; //该接口是通过网络请求发送的， 上边三个都不是
     OP_TRUNCATE_TABLE                       = 13;
     OP_PREPARE_V2                           = 14; 
+    OP_EXPLAIN                              = 15;
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
     OP_ADD_PHYSICAL                         = 115; //建物理机房
     OP_ADD_INSTANCE                         = 116; //建实例, 实例通过上报心跳创建，此借口暂时无用

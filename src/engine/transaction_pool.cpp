@@ -50,7 +50,7 @@ int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn) {
     if (!res.ok()) {
         DB_WARNING("unknown error: %d, %s", res.code(), res.ToString().c_str());
     }
-    DB_WARNING("txn_begin: %p, %s", txn->get_txn(), txn_name.c_str());
+    //DB_WARNING("txn_begin: %p, %s", txn->get_txn(), txn_name.c_str());
     _txn_map.insert(std::make_pair(txn_id, txn));
     _txn_count++;
     return 0;
@@ -62,7 +62,7 @@ void TransactionPool::remove_txn(uint64_t txn_id) {
         return;
     }
     auto txn = _txn_map[txn_id]->get_txn();
-    DB_WARNING("txn_removed: %p, %lu", txn, txn->GetName().c_str());
+    //DB_WARNING("txn_removed: %p, %lu", txn, txn->GetName().c_str());
     _txn_map.erase(txn_id);
     _txn_count--;
 }

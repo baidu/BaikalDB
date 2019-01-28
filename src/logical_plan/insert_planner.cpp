@@ -25,6 +25,7 @@ int InsertPlanner::plan() {
     insert_node->set_node_type(pb::INSERT_NODE);
     
     insert_node->set_limit(-1);
+    insert_node->set_is_explain(_ctx->is_explain);
     insert_node->set_num_children(0); //TODO
 
     pb::DerivePlanNode* derive = insert_node->mutable_derive_node();

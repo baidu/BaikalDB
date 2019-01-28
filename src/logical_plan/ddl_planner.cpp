@@ -527,6 +527,9 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     case parser::MYSQL_TYPE_TIMESTAMP: {
         return pb::TIMESTAMP;
     } break;
+    case parser::MYSQL_TYPE_HLL: {
+        return pb::HLL;
+    } break;
     default : {
         DB_WARNING("unsupported item type: %d", field_type->type);
         return pb::INVALID_TYPE;

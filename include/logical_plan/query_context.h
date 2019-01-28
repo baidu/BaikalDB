@@ -50,6 +50,7 @@ struct QueryStat {
     timeval     end_stamp;
     //std::string traceid;
     std::string family;
+    std::string table;
     std::string server_ip;
 
     MysqlErrCode error_code;
@@ -89,6 +90,7 @@ struct QueryStat {
         end_stamp.tv_usec   = 0;
         //traceid.clear();
         family.clear();
+        table.clear();
         server_ip.clear();
 
         error_code          = ER_ERROR_FIRST;
@@ -160,6 +162,7 @@ public:
     // new sql parser data structs
     parser::StmtNode*   stmt;
     parser::NodeType    stmt_type;
+    bool                is_explain = false;
 
     uint8_t             mysql_cmd;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.

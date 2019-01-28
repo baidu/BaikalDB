@@ -53,6 +53,77 @@ int ScanNode::open(RuntimeState* state) {
 void ScanNode::close(RuntimeState* state) {
     ExecNode::close(state);
 }
+void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
+    std::map<std::string, std::string> explain_info = {
+        {"id", "1"},
+        {"select_type", "SIMPLE"},
+        {"table", "NULL"},
+        {"type", "NULL"},
+        {"possible_keys", "NULL"},
+        {"key", "NULL"},
+        {"key_len", "NULL"},
+        {"ref", "NULL"},
+        {"rows", "NULL"},
+        {"Extra", ""},
+        {"sort_index", "0"}
+    };
+    auto factory = SchemaFactory::get_instance();
+    explain_info["table"] = factory->get_table_info(_table_id).name;
+    if (!has_index()) {
+        explain_info["type"] = "ALL";
+    } else {
+        explain_info["possible_keys"] = "";
+        for (auto& pos_index : _pb_node.derive_node().scan_node().indexes()) {
+            int64_t index_id = pos_index.index_id();
+            explain_info["possible_keys"] += factory->get_index_info(index_id).short_name;
+            explain_info["possible_keys"] += ",";
+        }
+        explain_info["possible_keys"].pop_back();
+        std::vector<int> tmp;
+        int idx = select_index(tmp);
+        auto& pos_index = _pb_node.derive_node().scan_node().indexes(idx);
+        int64_t index_id = pos_index.index_id();
+        auto index_info = factory->get_index_info(index_id);
+        auto pri_info = factory->get_index_info(_table_id);
+        explain_info["key"] = index_info.short_name;
+        explain_info["type"] = "range";
+        if (pos_index.ranges_size() == 1) {
+            int field_cnt = pos_index.ranges(0).left_field_cnt();
+            if (field_cnt == index_info.fields.size() && 
+                    pos_index.ranges(0).left_pb_record() == pos_index.ranges(0).right_pb_record()) {
+                explain_info["type"] = "eq_ref";
+                if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_PRIMARY) {
+                    explain_info["type"] = "const";
+                }
+            }
+        }
+        if (pos_index.has_sort_index()) {
+            explain_info["sort_index"] = "1";
+        }
+        std::set<int32_t> field_map;
+        for (auto& f : pri_info.fields) {
+            field_map.insert(f.id);
+        }
+        if (index_info.type == pb::I_KEY || index_info.type == pb::I_UNIQ) {
+            for (auto& f : index_info.fields) {
+                field_map.insert(f.id);
+            }
+        }
+        if (_tuple_desc != nullptr) {
+            bool is_covering_index = true;
+            for (auto slot : _tuple_desc->slots()) {
+                if (field_map.count(slot.field_id()) == 0) {
+                    is_covering_index = false;
+                    break;
+                }
+            }
+            if (is_covering_index) {
+                explain_info["Extra"] = "Using index;";
+            }
+        }
+    }
+    output.push_back(explain_info);
+}
 
 ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node) {
     if (node.derive_node().scan_node().has_engine()) {

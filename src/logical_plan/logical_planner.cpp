@@ -178,7 +178,12 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         DB_WARNING("sql parser stmt is null, sql: %s", ctx->sql.c_str());
         return -1;
     }
-    ctx->stmt = parser.result[0];
+    if (parser.result[0]->node_type == parser::NT_EXPLAIN) {
+        ctx->stmt = static_cast<parser::ExplainStmt*>(parser.result[0])->stmt;
+        ctx->is_explain = true;
+    } else {
+        ctx->stmt = parser.result[0];
+    }
     ctx->stmt_type = ctx->stmt->node_type;
 
     std::unique_ptr<LogicalPlanner> planner;
@@ -325,7 +330,6 @@ int LogicalPlanner::parse_db_tables(const parser::TableName* table_name) {
         DB_WARNING("parse db name from table name fail");
         return -1;
     }
-    _ctx->stat_info.family = database;
     if (0 != add_table(database, table, alias)) {
         DB_WARNING("invalid database or table:%s.%s", database.c_str(), table.c_str());
         return -1;
@@ -341,7 +345,6 @@ int LogicalPlanner::parse_db_tables(const parser::TableSource* table_source) {
         DB_WARNING("parse db name from table name fail");
         return -1;
     }
-    _ctx->stat_info.family = database;
     if (0 != add_table(database, table, alias)) {
         DB_WARNING("invalid database or table:%s.%s", database.c_str(), table.c_str());
         return -1;
@@ -355,7 +358,7 @@ int LogicalPlanner::parse_db_tables(const parser::Node* table_refs, JoinMemTmp**
         return -1;
     }
     if (table_refs->node_type == parser::NT_TABLE) {
-        DB_WARNING("tbls item is table name");
+        //DB_WARNING("tbls item is table name");
         if (0 != create_join_node_from_table_name((parser::TableName*)table_refs, join_root_ptr)) {
             DB_WARNING("parse_db_table_item failed from linked list");
             return -1;
@@ -367,7 +370,7 @@ int LogicalPlanner::parse_db_tables(const parser::Node* table_refs, JoinMemTmp**
             return -1;
         }
     } else if (table_refs->node_type == parser::NT_JOIN) {
-        DB_WARNING("tbls item is item join");
+        //DB_WARNING("tbls item is item join");
         parser::JoinNode* join_item = (parser::JoinNode*)(table_refs);
         if (0 != create_join_node_from_item_join(join_item, join_root_ptr)) {
             DB_WARNING("parse_db_table_item failed from item join");
@@ -631,6 +634,8 @@ int LogicalPlanner::parse_db_name_from_table_name(
         _ctx->stat_info.error_msg << "No database selected";
         return -1;
     }
+    _ctx->stat_info.family = db;
+    _ctx->stat_info.table = table;
     return 0;
 }
 
@@ -735,7 +740,7 @@ std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
 
 int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr) {
     static std::unordered_set<std::string> support_agg = {
-        "count", "sum", "avg", "min", "max"
+        "count", "sum", "avg", "min", "max", "hll_add_agg", "hll_merge_agg"
     };
     if (support_agg.count(expr_item->fn_name.to_lower()) == 0) {
         DB_WARNING("un-supported agg op or func: %s", expr_item->fn_name.c_str());
@@ -1104,7 +1109,7 @@ int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr
         return -1;
     }
     if (!column->table.empty()) {
-        DB_WARNING("alias no table");
+        //DB_WARNING("alias no table");
         return -1;
     }
     std::string lower_name = column->name.to_lower();
@@ -1351,6 +1356,7 @@ int LogicalPlanner::create_packet_node(pb::OpType op_type, int num_children) {
     pb::PlanNode* pack_node = _ctx->add_plan_node();
     pack_node->set_node_type(pb::PACKET_NODE);
     pack_node->set_limit(-1);
+    pack_node->set_is_explain(_ctx->is_explain);
     pack_node->set_num_children(num_children); //TODO 
     pb::DerivePlanNode* derive = pack_node->mutable_derive_node();
     pb::PacketNode* pack = derive->mutable_packet_node();
@@ -1377,6 +1383,7 @@ int LogicalPlanner::create_filter_node(std::vector<pb::Expr>& filters,
     pb::PlanNode* where_node = _ctx->add_plan_node();
     where_node->set_node_type(type);
     where_node->set_limit(-1);
+    where_node->set_is_explain(_ctx->is_explain);
     where_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = where_node->mutable_derive_node();
     pb::FilterNode* filter = derive->mutable_filter_node();
@@ -1396,6 +1403,7 @@ int LogicalPlanner::create_sort_node() {
     pb::PlanNode* sort_node = _ctx->add_plan_node();
     sort_node->set_node_type(pb::SORT_NODE);
     sort_node->set_limit(-1);
+    sort_node->set_is_explain(_ctx->is_explain);
     sort_node->set_num_children(1); //TODO
     pb::DerivePlanNode* derive = sort_node->mutable_derive_node();
     pb::SortNode* sort = derive->mutable_sort_node();
@@ -1425,6 +1433,7 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root) {
         pb::PlanNode* scan_node = _ctx->add_plan_node();
         scan_node->set_node_type(pb::SCAN_NODE);
         scan_node->set_limit(-1);
+        scan_node->set_is_explain(_ctx->is_explain);
         scan_node->set_num_children(0);
         pb::DerivePlanNode* derive = scan_node->mutable_derive_node();
         pb::ScanNode* scan = derive->mutable_scan_node();
@@ -1444,6 +1453,7 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root) {
     pb::PlanNode* join_node = _ctx->add_plan_node();
     join_node->set_node_type(pb::JOIN_NODE);
     join_node->set_limit(-1);
+    join_node->set_is_explain(_ctx->is_explain);
     join_node->set_num_children(2);
     pb::DerivePlanNode* derive = join_node->mutable_derive_node();
     pb::JoinNode* join = derive->mutable_join_node();
@@ -1463,6 +1473,7 @@ int LogicalPlanner::create_scan_nodes() {
         pb::PlanNode* scan_node = _ctx->add_plan_node();
         scan_node->set_node_type(pb::SCAN_NODE);
         scan_node->set_limit(-1);
+        scan_node->set_is_explain(_ctx->is_explain);
         scan_node->set_num_children(0); //TODO 
         pb::DerivePlanNode* derive = scan_node->mutable_derive_node();
         pb::ScanNode* scan = derive->mutable_scan_node();

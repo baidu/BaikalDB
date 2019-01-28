@@ -238,9 +238,6 @@ void NetworkServer::connection_timeout_check() {
 
     for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
         SmartSocket sock = _epoll_info->get_fd_mapping(idx);
-        if (!sock) {
-            continue;
-        }
         if (sock == NULL || sock->in_pool == true || sock->fd == 0) {
             continue;
         }

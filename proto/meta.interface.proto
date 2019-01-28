@@ -100,6 +100,7 @@ message FieldInfo {
     optional bytes default_value      = 8;
     optional bytes comment            = 9;
     optional bytes on_update_value    = 10;
+    optional bytes encrypt            = 11; //指定加密字段
 };
 
 enum IndexType {
@@ -183,6 +184,8 @@ message UserPrivilege {
     repeated string bns                           = 7;
     repeated string ip                            = 8;
     optional int64 version                        = 9;
+    optional bool encrypt                         = 10; //加密用户才能访问加密列
+    optional bool need_auth_addr                  = 11;
 };
 
 //集群信息

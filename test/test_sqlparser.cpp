@@ -28,14 +28,14 @@ int main(int argc, char* argv[])
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
-
+#include "uconv.h"
 namespace parser {
 
 TEST(test_parser, case_all) {
     parser::SqlParser parser;
     std::string sql = "insert into t1() values (1,'aaa'),('3',4+2)";
     //std::string sql2 = "insert \n \n in to t1 (a,b) values (1,1),(now(), (1+((2+3))));";
-    std::ifstream done_ifs("test_sql");
+    std::ifstream done_ifs("t");
     std::string sql2(
         (std::istreambuf_iterator<char>(done_ifs)),
         std::istreambuf_iterator<char>());
@@ -50,9 +50,11 @@ TEST(test_parser, case_all) {
         printf("%02x", sql2[i]);
     }
     */
-    std::cout << "\n" << sql2.size() << std::endl;
-    parser.parse(sql);
-    std::cout << "sql:" << sql << " " << parser.is_gbk << " " << parser.has_5c << std::endl;
+    int len = ::is_utf8_strict(sql2.c_str(), sql2.size(), true);
+    int len2 = ::uconv_is_gbk_n(sql2.c_str(), sql2.size());
+    std::cout << "\n" << sql2.size() << " " << len << " "<< len2 << std::endl;
+    parser.parse(sql2);
+    std::cout << "sql:" << sql2 << " " << parser.is_gbk << " " << parser.has_5c << std::endl;
     if (parser.error != parser::SUCC) {
         std::cout <<  parser.result.size() << " error:" << parser.syntax_err_str << std::endl;
         return;
@@ -76,6 +78,53 @@ TEST(test_parser, case_create_table) {
         "`state` int(11) NOT NULL COMMENT '状态 1-审核通过 2-审核拒绝 0-审核中 ',"
         "`update_time` datetime NOT NULL,"
         "`create_time` datetime NOT NULL,"
+        "PRIMARY KEY (book_id,score_type),"
+        "KEY score_type (score_type),"
+        "KEY level (level),"
+        "KEY state (state)"
+    ") ENGINE=Rocksdb DEFAULT CHARSET=gbk AVG_ROW_LENGTH=500 COMMENT='{\"comment\":"", \"resource_tag\":\"e0-nj\", \"namespace\":\"FENGCHAO\"}'";
+
+    parser.parse(sql);
+    //EXPECT_EQ(parser::SUCC, parser.error);
+    printf("errormsg: %d, %s\n", parser.error, parser.syntax_err_str.c_str());
+
+    EXPECT_EQ(1, parser.result.size());
+
+    if (parser.result.size() != 1) {
+        return;
+    }
+    EXPECT_EQ(parser::NT_CREATE_TABLE, parser.result[0]->node_type);
+    CreateTableStmt* stmt = (CreateTableStmt*)parser.result[0];
+    EXPECT_EQ(parser::NT_CREATE_TABLE, stmt->node_type);
+    EXPECT_FALSE(stmt->if_not_exist);
+
+    printf("stmt->table_name: %p", stmt->table_name);
+
+    if (!stmt->table_name->db.empty()) {
+        printf("db: %s\n", stmt->table_name->db.value);
+    }
+    if (stmt->table_name->table.value) {
+        printf("table: %s\n", stmt->table_name->table.value);
+    }
+    for (int idx = 0; idx < stmt->columns.size(); ++idx) {
+        stmt->columns[idx]->name->print();
+
+    }
+}
+
+TEST(test_parser, case_create_table_hll) {
+    parser::SqlParser parser;
+    
+    std::string sql = "create table score_diary_book ("
+        "`book_id` bigint(20) NOT NULL COMMENT '日记本ID',"
+        "`parent_id` bigint(20) NOT NULL COMMENT '父ID',"
+        "`score_type` int(11) NOT NULL COMMENT '1-日记本净分数 2-日记本总分',"
+        "`score` double NOT NULL COMMENT '分数',"
+        "`level` int(11) NOT NULL COMMENT '级别 0-不合格 1-普通 2-优秀 3-超优秀',"
+        "`state` int(11) NOT NULL COMMENT '状态 1-审核通过 2-审核拒绝 0-审核中 ',"
+        "`update_time` datetime NOT NULL,"
+        "`create_time` datetime NOT NULL,"
+        "`hll_field` HLL NOT NULL,"
         "PRIMARY KEY (book_id,score_type),"
         "KEY score_type (score_type),"
         "KEY level (level),"

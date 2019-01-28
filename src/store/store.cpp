@@ -127,6 +127,15 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     for (auto& region_info : region_infos) {
         DB_WARNING("region_info:%s when init store", region_info.ShortDebugString().c_str());
         int64_t region_id = region_info.region_id();
+        if (region_info.version() == 0) {
+            DB_WARNING("region_id: %ld version is 0, dropped. region_info: %s",
+                    region_id, region_info.ShortDebugString().c_str() );
+            RegionControl::remove_data(region_id);
+            RegionControl::remove_meta(region_id);
+            RegionControl::remove_snapshot_path(region_id);
+            RegionControl::remove_log_entry(region_id);
+            continue;
+        }
         //construct region
         braft::GroupId groupId(std::string("region_")
                 + boost::lexical_cast<std::string>(region_id));
@@ -344,6 +353,7 @@ void Store::query(google::protobuf::RpcController* controller,
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
+    //DB_WARNING("region_id: %ld before get_region, logid:%lu, remote_side: %s", request->region_id(), log_id, remote_side);
     SmartRegion region = get_region(request->region_id());
     if (region == NULL) {
         response->set_errcode(pb::REGION_NOT_EXIST);
@@ -352,10 +362,12 @@ void Store::query(google::protobuf::RpcController* controller,
                 request->region_id(), log_id, remote_side);
         return;
     }
+    //DB_WARNING("region_id: %ld after get_region, logid:%lu, remote_side: %s", request->region_id(), log_id, remote_side);
     region->query(controller,
                   request,
                   response,
                   done_guard.release());
+    //DB_WARNING("region_id: %ld after queryregion, logid:%lu, remote_side: %s", request->region_id(), log_id, remote_side);
 }
 
 void Store::remove_region(google::protobuf::RpcController* controller,
