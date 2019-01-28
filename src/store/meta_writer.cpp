@@ -23,7 +23,9 @@ const rocksdb::WriteOptions MetaWriter::write_options;
 const std::string MetaWriter::META_IDENTIFY(1, 0x01);
 const std::string MetaWriter::APPLIED_INDEX_INDENTIFY(1, 0x01);
 const std::string MetaWriter::NUM_TABLE_LINE_INDENTIFY(1, 0x02);
+//key: META_IDENTIFY + region_id + identify + txn_id : log_index
 const std::string MetaWriter::PREPARED_TXN_LOG_INDEX_IDENTIFY(1, 0x03);
+//key: META_IDENTIFY + region_id + identify + txn_id + log_indx: transaction_pb
 const std::string MetaWriter::PREPARED_TXN_PB_IDENTIYF(1, 0x04);
 const std::string MetaWriter::REGION_INFO_IDENTIFY(1, 0x05);
 
@@ -161,8 +163,8 @@ int MetaWriter::clear_txn_log_index(int64_t region_id) {
     return 0;
 }
 int MetaWriter::clear_txn_infos(int64_t region_id) {
-    std::string start_key = transcation_pb_key(region_id, 0);
-    std::string end_key = transcation_pb_key(region_id, INT64_MAX);
+    std::string start_key = transcation_pb_key(region_id, 0, 0);
+    std::string end_key = transcation_pb_key(region_id, UINT64_MAX, INT64_MAX);
     auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
             start_key, end_key);
     if (!status.ok()) {
@@ -174,13 +176,6 @@ int MetaWriter::clear_txn_infos(int64_t region_id) {
 }
 
 int MetaWriter::parse_region_infos(std::vector<pb::RegionInfo>& region_infos) {
-    //yq机房特殊处理，这些table_id下的region直接删除
-    //std::set<int64_t> drop_table_ids = {345, 347, 1145, 1146, 349, 351, 847, 385, 388, 961, 971, 875, 1169, 935, 934, 360, 359, 728, 733, 729, 732, 731,730, 
-    //                                 614, 433, 540, 432, 541, 435, 542, 434, 543, 1112, 1110, 1114, 1109, 1111, 1106, 1113, 1104, 
-    //                                 431, 544, 545, 430, 834, 835, 1117, 1101, 1116, 1100, 842, 844, 840, 841, 
-    //                                 838, 839, 836, 837, 950, 949, 952, 951, 1137, 1136, 1134, 1135, 
-    //                                 828, 830, 832, 833, 1119, 1098, 1097, 1121, 941, 939, 960, 959, 958, 957, 953, 954, 955, 956, 1115, 1107, 
-    //                                 608, 604, 603, 607, 606, 602};
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
     read_options.total_order_seek = false;
@@ -199,31 +194,6 @@ int MetaWriter::parse_region_infos(std::vector<pb::RegionInfo>& region_infos) {
             continue;
         }
         region_infos.push_back(region_info);
-        //int64_t table_id = region_info.table_id();
-        //int64_t region_id = region_info.region_id();
-        //if (drop_table_ids.find(table_id) == drop_table_ids.end()) {
-        //    region_infos.push_back(region_info);
-        //} else {
-        //     DB_WARNING("region_info in drop table, table_id: %ld, region_info: %s", 
-        //                table_id, region_info.ShortDebugString().c_str());
-        //     //删除这个region的相关信息
-        //     RegionControl::remove_data(region_id);
-        //     RegionControl::remove_meta(region_id);
-        //     RegionControl::remove_snapshot_path(region_id);
-        //     RegionControl::remove_log_entry(region_id);
-        //}
-        
-        //为yq机房特殊处理，暂时只加载entity_score表和
-        //int64_t entity_score_table_id = 625;
-        //int64_t entity_region_profile_table_id = 846;
-        //int64_t opt_center_custom_competitor_url_table_id = 830;
-        //if (region_info.table_id() == entity_score_table_id 
-        //        || region_info.table_id() == entity_region_profile_table_id
-        //        || region_info.table_id() == opt_center_custom_competitor_url_table_id) {
-        //    region_infos.push_back(region_info);
-        //} else {
-        //    DB_WARNING("region_info not in EntityScore, region_info: %s", region_info.ShortDebugString().c_str());
-        //}
     }
     return 0;
 }
@@ -239,7 +209,17 @@ int MetaWriter::parse_txn_infos(int64_t region_id, std::map<int64_t, std::string
             //DB_WARNING("read wrong info, region_id: %ld", region_id);
             continue;
         }
-        int64_t log_index = TableKey(iter->key()).extract_i64(1 + sizeof(int64_t) + 1);
+        int64_t log_index = 0;
+        //key: identify + region_id + identify + txn_id + log_index
+        if (iter->key().size() == (1 + sizeof(int64_t) + 1 + sizeof(uint64_t) + sizeof(int64_t))) {
+            log_index = TableKey(iter->key()).extract_i64(1 + sizeof(int64_t) + 1 + sizeof(uint64_t));
+            DB_WARNING("parse txn info, log_index: %ld, txn_id: %lu, region_id: %ld", 
+                        log_index, TableKey(iter->key()).extract_i64(1 + sizeof(int64_t) + 1), region_id);
+        } else {
+            log_index = TableKey(iter->key()).extract_i64(1 + sizeof(int64_t) + 1);
+            DB_WARNING("parse txn info, log_index: %ld, region_id: %ld",
+                        log_index, region_id);
+        }
         prepared_txn_infos[log_index] = iter->value().ToString();
     }
     return 0;
@@ -258,7 +238,8 @@ int MetaWriter::parse_txn_log_indexs(int64_t region_id, std::set<int64_t>& log_i
         }
         TableKey log_index(iter->value());
         log_indexs.insert(log_index.extract_i64(0));
-        DB_WARNING("read prepared transcation log index: %ld", log_index.extract_i64(0));
+        DB_WARNING("read prepared transcation log index: %ld, transaction_id: %lu", 
+                    log_index.extract_i64(0), decode_log_index_key(iter->key()));
     }
     return 0; 
 }
@@ -338,11 +319,12 @@ std::string MetaWriter::log_index_key_prefix(int64_t region_id) const {
     key.append_char(MetaWriter::PREPARED_TXN_LOG_INDEX_IDENTIFY.c_str(), 1);
     return key.data();
 }
-std::string MetaWriter::transcation_pb_key(int64_t region_id, int64_t log_index) const {
+std::string MetaWriter::transcation_pb_key(int64_t region_id, uint64_t txn_id, int64_t log_index) const {
     MutTableKey key;
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
     key.append_i64(region_id);
     key.append_char(MetaWriter::PREPARED_TXN_PB_IDENTIYF.c_str(), 1);
+    key.append_u64(txn_id);
     key.append_i64(log_index);
     return key.data();
 }
@@ -391,7 +373,10 @@ int64_t MetaWriter::decode_log_index_value(const rocksdb::Slice& value) {
     TableKey index_value(value);
     return index_value.extract_i64(0);
 }
-
+uint64_t MetaWriter::decode_log_index_key(const rocksdb::Slice& key) {
+    TableKey index_key(key);
+    return index_key.extract_u64(1 + sizeof(int64_t) + 1);
+}
 std::string MetaWriter::meta_info_prefix(int64_t region_id) {
     MutTableKey prefix_key;
     prefix_key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);

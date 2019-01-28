@@ -57,7 +57,6 @@ BaikalDB 的主要特性如下：
   * -meta_replica_number=1 //meta实例（副本）数量，线上推荐3，测试可用1
   * -meta_port=8010
   * -meta_server_bns=xx.xx.xx.xx:8010,xx.xx.xx.xx:8010,xx.xx.xx.xx:8010 //所有实例的IP+端口
-  * -meta_raft_peers=xx.xx.xx.xx:8010,xx.xx.xx.xx:8010,xx.xx.xx.xx:8010 //所有实例的IP+端口
 * 添加配置文件（conf/comlog.conf), 配置内容参考icode: fcdata-baikaldb/conf/comlog.conf
 * 启动实例 nohup bin/baikalMeta &
 * 找到leader地址，通过http://xx.xx.xx.xx:8010/raft_stat 查看当前leader是哪个实例；或者是第6步的脚本发送到任何一台机器，若该机器不是leader会返回leader地址

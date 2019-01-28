@@ -72,6 +72,16 @@ public:
         return _monotonic;
     }
 
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output) {
+        ExecNode::show_explain(output);
+        if (output.empty()) {
+            return;
+        }
+        if (output.back()["sort_index"] != "1") {
+            output.back()["Extra"] += "Using filesort";
+        }
+    }
+
 private:
     int fill_tuple(RowBatch* batch);
 

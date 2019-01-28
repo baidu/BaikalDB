@@ -17,6 +17,9 @@
 
 namespace baikaldb {
 int PlanRouter::analyze(QueryContext* ctx) {
+    if (ctx->is_explain) {
+        return 0;
+    }
     ExecNode* plan = ctx->root;
     if (!plan->need_seperate()) {
         return 0;

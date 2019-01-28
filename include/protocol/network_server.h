@@ -58,6 +58,9 @@ public:
     boost::asio::io_service* get_io_service() {
         return &_ios;
     }
+    EpollInfo* get_epoll_info() {
+        return _epoll_info;
+    }
     
     static uint8_t transaction_prefix;
 

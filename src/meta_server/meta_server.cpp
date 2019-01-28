@@ -33,10 +33,12 @@ namespace baikaldb {
 DEFINE_int32(meta_port, 8010, "Meta port");
 DEFINE_int32(meta_replica_number, 3, "Meta replica num");
 DEFINE_int32(concurrency_num, 40, "concurrency num, default: 40");
+#ifdef BAIDU_INTERNAL
 // for migrate
 DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(e0_meta_bns, "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all", "");
 DEFINE_string(qa_meta_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "");
+#endif
 
 const std::string MetaServer::CLUSTER_IDENTIFY(1, 0x01);
 const std::string MetaServer::LOGICAL_CLUSTER_IDENTIFY(1, 0x01);
@@ -95,12 +97,14 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     PrivilegeManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     ClusterManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     MetaServerInteract::get_instance()->init();
+#ifdef BAIDU_INTERNAL
     _meta_interact_map["e0"] = new MetaServerInteract;
     _meta_interact_map["e0"]->init_internal(FLAGS_e0_meta_bns);
     _meta_interact_map["qa"] = new MetaServerInteract;
-    _meta_interact_map["qa"]->init_internal(FLAGS_e0_meta_bns);
+    _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
     _meta_interact_map["ps"] = new MetaServerInteract;
-    _meta_interact_map["ps"]->init_internal(FLAGS_e0_meta_bns);
+    _meta_interact_map["ps"]->init_internal(FLAGS_ps_meta_bns);
+#endif
     
     _init_success = true;
     return 0;

@@ -227,32 +227,32 @@ int JoinNode::open(RuntimeState* state) {
         DB_WARNING("has no equal condition in join");
         return -1;
     }
-    DB_WARNING("_outer_node:%ld _inner_node:%ld", _outer_node, _inner_node);
-    for (auto& tuple_id : _outer_tuple_ids) {
-        DB_WARNING("_outer tuple_id:%d", tuple_id);
-    }
-    for (auto& tuple_id : _inner_tuple_ids) {
-        DB_WARNING("_inner tuple_id:%d", tuple_id);
-    }
-    for (auto& expr_node : _outer_equal_slot) {
-        DB_WARNING("outer join condition, slot_id:%d, tuple_id:%d", 
-                        static_cast<SlotRef*>(expr_node)->slot_id(),
-                        static_cast<SlotRef*>(expr_node)->tuple_id());
-    }
-    for (auto& expr_node : _inner_equal_slot) {
-        DB_WARNING("inner join condition, slot_id:%d, tuple_id:%d",
-                    static_cast<SlotRef*>(expr_node)->slot_id(),
-                    static_cast<SlotRef*>(expr_node)->tuple_id());
-    }
+    //DB_WARNING("_outer_node:%ld _inner_node:%ld", _outer_node, _inner_node);
+    //for (auto& tuple_id : _outer_tuple_ids) {
+    //    DB_WARNING("_outer tuple_id:%d", tuple_id);
+    //}
+    //for (auto& tuple_id : _inner_tuple_ids) {
+    //    DB_WARNING("_inner tuple_id:%d", tuple_id);
+    //}
+    //for (auto& expr_node : _outer_equal_slot) {
+    //    DB_WARNING("outer join condition, slot_id:%d, tuple_id:%d", 
+    //                    static_cast<SlotRef*>(expr_node)->slot_id(),
+    //                    static_cast<SlotRef*>(expr_node)->tuple_id());
+    //}
+    //for (auto& expr_node : _inner_equal_slot) {
+    //    DB_WARNING("inner join condition, slot_id:%d, tuple_id:%d",
+    //                static_cast<SlotRef*>(expr_node)->slot_id(),
+    //                static_cast<SlotRef*>(expr_node)->tuple_id());
+    //}
     _mem_row_desc = state->mem_row_desc();
-    DB_WARNING("when join, init join open, time_cost:%ld", join_time_cost.get_time());
+    //DB_WARNING("when join, init join open, time_cost:%ld", join_time_cost.get_time());
     join_time_cost.reset();
     ret = _outer_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode:: left table open fail");
         return ret;
     }
-    DB_WARNING("when join, outer join open(fetcher data), time_cost:%ld", join_time_cost.get_time());
+    //DB_WARNING("when join, outer join open(fetcher data), time_cost:%ld", join_time_cost.get_time());
     join_time_cost.reset();
     //从左表中把全部数据拿出
     ret = _fetcher_join_table(state, _outer_node, _outer_tuple_data);
@@ -264,12 +264,12 @@ int JoinNode::open(RuntimeState* state) {
         _outer_table_is_null = true;
         return 0;
     }
-    DB_WARNING("when join, fetch outer data size:%d, time_cost:%ld", 
-                _outer_tuple_data.size(), join_time_cost.get_time());
+    //DB_WARNING("when join, fetch outer data size:%d, time_cost:%ld", 
+    //            _outer_tuple_data.size(), join_time_cost.get_time());
     join_time_cost.reset();
     _save_join_value(_outer_tuple_data, _outer_equal_slot);
-    DB_WARNING("when join, save join value, time_cost:%ld",
-                join_time_cost.get_time());
+    //DB_WARNING("when join, save join value, time_cost:%ld",
+    //            join_time_cost.get_time());
     join_time_cost.reset();
     std::vector<ExprNode*> in_exprs;
     //驱动表表返回的join条件下推 todo
@@ -278,8 +278,8 @@ int JoinNode::open(RuntimeState* state) {
         DB_WARNING("ExecNode::create in condition for right table fail");
         return ret;
     }
-    DB_WARNING("when join, _construct_in_condition, time_cost:%ld",
-                join_time_cost.get_time());
+    //DB_WARNING("when join, _construct_in_condition, time_cost:%ld",
+    //            join_time_cost.get_time());
     join_time_cost.reset();
     //表达式下推，下推的那个节点重新做索引选择，路由选择
     _inner_node->predicate_pushdown(in_exprs);
@@ -287,8 +287,8 @@ int JoinNode::open(RuntimeState* state) {
         DB_WARNING("inner node add filter node");
         _inner_node->add_filter_node(in_exprs);
     }
-    DB_WARNING("when join,  re predicate pushdown, time_cost:%ld",
-                join_time_cost.get_time());
+    //DB_WARNING("when join,  re predicate pushdown, time_cost:%ld",
+    //            join_time_cost.get_time());
     join_time_cost.reset();
 
     std::vector<ExecNode*> scan_nodes;
@@ -313,16 +313,17 @@ int JoinNode::open(RuntimeState* state) {
                                         filter_node,
                                         NULL,
                                         NULL);
-        //路由选择
-        PlanRouter().scan_plan_router(scan_node);
-        FetcherNode* related_fetcher_node = scan_node->
-                                            get_related_fetcher_node();
-        auto region_infos = scan_node->region_infos();
-        //更改scan_node对应的fethcer_node的region信息
-        related_fetcher_node->set_region_infos(region_infos);
+        if (!_is_explain) {
+            //路由选择
+            PlanRouter().scan_plan_router(scan_node);
+            FetcherNode* related_fetcher_node = scan_node->get_related_fetcher_node();
+            auto region_infos = scan_node->region_infos();
+            //更改scan_node对应的fethcer_node的region信息
+            related_fetcher_node->set_region_infos(region_infos);
+        }
     }
-    DB_WARNING("when join, index_selector and scan plan, time_cost:%ld",
-                join_time_cost.get_time());
+    //DB_WARNING("when join, index_selector and scan plan, time_cost:%ld",
+    //            join_time_cost.get_time());
     join_time_cost.reset();
     //_inner_node->print_all_exec_node();
     ret = _inner_node->open(state);
@@ -330,8 +331,8 @@ int JoinNode::open(RuntimeState* state) {
         DB_WARNING("ExecNode::inner table open fial");
         return -1;
     }
-    DB_WARNING("when join, _inner_node open(fetcher data), time_cost:%ld",
-                join_time_cost.get_time());
+    //DB_WARNING("when join, _inner_node open(fetcher data), time_cost:%ld",
+    //            join_time_cost.get_time());
     join_time_cost.reset();
     if (_join_type == pb::LEFT_JOIN 
             || _join_type == pb::RIGHT_JOIN) {
@@ -341,16 +342,16 @@ int JoinNode::open(RuntimeState* state) {
             DB_WARNING("fetcher inner node fail");
             return ret;
         }
-        DB_WARNING("when join, fetch inner data size:%d, time_cost:%ld", 
-                    _outer_tuple_data.size(), join_time_cost.get_time());
+        //DB_WARNING("when join, fetch inner data size:%d, time_cost:%ld", 
+        //            _outer_tuple_data.size(), join_time_cost.get_time());
         join_time_cost.reset();
         _construct_hash_map(_inner_tuple_data, _inner_equal_slot);
-        DB_WARNING("when join, _construct_hash_map time_cost:%ld", join_time_cost.get_time());
+        //DB_WARNING("when join, _construct_hash_map time_cost:%ld", join_time_cost.get_time());
         _outer_iter = _outer_tuple_data.begin();
     } else {
         join_time_cost.reset();
         _construct_hash_map(_outer_tuple_data, _outer_equal_slot);
-        DB_WARNING("when join, _construct_hash_map time_cost:%ld", join_time_cost.get_time());
+        //DB_WARNING("when join, _construct_hash_map time_cost:%ld", join_time_cost.get_time());
     } 
     return 0;
 }
@@ -617,7 +618,7 @@ int JoinNode::get_next_for_inner_join(RuntimeState* state, RowBatch* batch, bool
                 ++_num_rows_returned;
             }
         }
-        DB_WARNING("outer mem rows trarvers over");
+        //DB_WARNING("outer mem rows trarvers over");
         _hash_mapped_index = 0; 
         _inner_row_batch.next();
     }
@@ -735,6 +736,10 @@ bool JoinNode::need_reorder(
         tuple_equals_map[right_tuple_id].insert(left_tuple_id);
     }
     return true;
+}
+void JoinNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
+    _outer_node->show_explain(output);
+    _inner_node->show_explain(output);
 }
 }//namespace
 

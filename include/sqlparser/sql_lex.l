@@ -368,6 +368,7 @@ VIEW { un_reserved_keyword(yylval, yyscanner, parser); return VIEW; }
 WARNINGS { un_reserved_keyword(yylval, yyscanner, parser); return WARNINGS; }
 WEEK { un_reserved_keyword(yylval, yyscanner, parser); return WEEK; }
 YEAR { un_reserved_keyword(yylval, yyscanner, parser); return YEAR; }
+HLL { un_reserved_keyword(yylval, yyscanner, parser); return HLL; }
 
 ADDDATE { un_reserved_keyword(yylval, yyscanner, parser); return ADDDATE; /* The following tokens belong to builtin functions. */}
 BIT_AND { un_reserved_keyword(yylval, yyscanner, parser); return BIT_AND; }
@@ -403,6 +404,7 @@ TRIM { un_reserved_keyword(yylval, yyscanner, parser); return TRIM; }
 VARIANCE { un_reserved_keyword(yylval, yyscanner, parser); return VARIANCE; }
 VAR_POP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_POP; }
 VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
+([A-Za-z0-9_]+)_AGG {un_reserved_keyword(yylval, yyscanner, parser); return USER_AGG;}
 
 ! { return NOT_OP;}
 = { return EQ_OP; }

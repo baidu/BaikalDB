@@ -132,6 +132,8 @@ private:
                                MemRow* inner_mem_row,
                                bool inner_join);
     int _construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_row);
+
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 private:
     pb::JoinType _join_type;
     std::vector<ExprNode*> _conditions;

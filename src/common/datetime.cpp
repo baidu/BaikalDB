@@ -30,23 +30,6 @@ std::string timestamp_to_str(time_t timestamp) {
     strftime(str_time, sizeof(str_time), "%Y-%m-%d %H:%M:%S", &tm);
     return std::string(str_time);
 }
-
-time_t str_to_timestamp(const char* str_time) {
-    if (str_time == nullptr) {
-        return 0;
-    }
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-    sscanf(str_time, "%4d-%2d-%2d %2d:%2d:%2d",
-           &tm.tm_year, &tm.tm_mon, &tm.tm_mday,  
-           &tm.tm_hour, &tm.tm_min, &tm.tm_sec);
-
-    tm.tm_year -= 1900;
-    tm.tm_mon--;
-    time_t ret = mktime(&tm);
-    return ret;
-}
-
 // encode DATETIME to string format
 // ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
 std::string datetime_to_str(uint64_t datetime) {
@@ -71,27 +54,40 @@ std::string datetime_to_str(uint64_t datetime) {
 }
 
 uint64_t str_to_datetime(const char* str_time) {
-    //YYYY-MM-DD HH:MM:SS.xxxxxx
+    //[YY]YY-MM-DD HH:MM:SS.xxxxxx
+    //[YY]YYMMDDHHMMSS.xxxxxx
+    while (*str_time == ' ') {
+        str_time++;
+    }
     const static size_t max_time_size = 26;
     size_t len = std::min(strlen(str_time), (size_t)max_time_size);
     char buf[max_time_size + 1] = {0};
     memcpy(buf, str_time, len);
+    
+    bool has_delim = true;
+    int delim_cnt = 0;
+    if (isdigit(buf[2]) && isdigit(buf[4])) {
+        has_delim = false;
+    }
     uint32_t idx = 0;
-    bool has_date = false;
     for (; idx < len; ++idx) {
-        if (buf[idx] == '-') {
-            has_date = true;
-        }
-        if (buf[idx] == '.') {
-            break;
+        if (has_delim) {
+            if (!isdigit(buf[idx])) {
+                delim_cnt++;
+            }
+            if (delim_cnt > 5 && buf[idx] == '.') {
+                break;
+            }
+        } else {
+            if (buf[idx] == '.') {
+                break;
+            }
         }
     }
-    if (!has_date) {
-        return time_to_datetime(str_to_time(str_time));
-    }
+    
     if (idx < len) {
         for (uint32_t i = idx + 1; i <= idx + 6 && i < max_time_size; ++i) {
-            if (buf[i] < '0' || buf[i] > '9') {
+            if (!isdigit(buf[i])) {
                 buf[i] = '0';
             }
         }
@@ -104,9 +100,41 @@ uint64_t str_to_datetime(const char* str_time) {
     uint64_t minute = 0;
     uint64_t second = 0;
     uint64_t macrosec = 0;
-
-    sscanf(buf, "%4lu-%2lu-%2lu %2lu:%2lu:%2lu.%6lu",
-        &year, &month, &day, &hour, &minute, &second, &macrosec);
+    if (has_delim) {
+        sscanf(buf, "%4lu%*[^0-9a-z]%2lu%*[^0-9a-z]%2lu"
+                "%*[^0-9a-z]%2lu%*[^0-9a-z]%2lu%*[^0-9a-z]%2lu.%6lu",
+                &year, &month, &day, &hour, &minute, &second, &macrosec);
+    } else {
+        if (idx <= 6) {
+            sscanf(buf, "%2lu%2lu%2lu", &year, &month, &day);
+        } else if (idx == 8) {
+            sscanf(buf, "%4lu%2lu%2lu", &year, &month, &day);
+        } else if (idx == 12) {
+            sscanf(buf, "%2lu%2lu%2lu%2lu%2lu%2lu.%6lu", 
+                    &year, &month, &day, &hour, &minute, &second, &macrosec);
+        } else if (idx <= 13) {
+            sscanf(buf, "%2lu%2lu%2lu%2lu%2lu%2lu", &year, &month, &day, &hour, &minute, &second);
+        } else if (idx >= 14) {
+            sscanf(buf, "%4lu%2lu%2lu%2lu%2lu%2lu.%6lu", 
+                    &year, &month, &day, &hour, &minute, &second, &macrosec);
+        } else {
+            return 0;
+        }
+    }
+    if (year > 70 && year < 100) {
+        year += 1900;
+    } else if (year < 70) {
+        year += 2000;
+    }
+    if (month == 0 || month > 12) {
+        return 0;
+    }
+    if (day > 31) {
+        return 0;
+    } 
+    if (hour > 23 || minute > 59 || second > 59) {
+        return 0;
+    }
 
     //datetime中间计算时会转化成int64, 最高位必须为0
     uint64_t datetime = 0;
@@ -204,18 +232,69 @@ std::string time_to_str(int32_t time) {
     return std::string(buf);
 }
 int32_t str_to_time(const char* str_time) {
+    while (*str_time == ' ') {
+        str_time++;
+    }
+    bool minus = false;
+    if (str_time[0] == '-') {
+        minus = true;
+        str_time++;
+    }
+    const static size_t max_time_size = 20;
+    size_t len = std::min(strlen(str_time), (size_t)max_time_size);
+    int day = 0;
     int hour = 0;
     int minute = 0;
     int second = 0;
     int32_t time = 0;
-    bool minus = false;
 
-    sscanf(str_time, "%d:%2u:%2u",
-         &hour, &minute, &second);
-    if (hour < 0) {
-        hour = -hour;
-        minus = true;
+    bool has_blank = false;
+    bool has_delim = false;
+    uint32_t idx = 0;
+    for (; idx < len; ++idx) {
+        if (str_time[idx] == ' ') {
+            has_blank = true;
+            has_delim = true;
+        }
+        if (str_time[idx] == ':') {
+            has_delim = true;
+        }
+        if (str_time[idx] == '.') {
+            break;
+        }
     }
+
+    if (has_blank) {
+        sscanf(str_time, "%d %u:%2u:%2u",
+                &day, &hour, &minute, &second);
+    } else if (has_delim) {
+        sscanf(str_time, "%d:%2u:%2u",
+                &hour, &minute, &second);
+    } else {
+        if (idx >= 4) {
+            idx -= 2;
+            std::string sec_str(str_time + idx, 2);
+            second = strtod(sec_str.c_str(), NULL);
+            idx -= 2;
+            std::string min_str(str_time + idx, 2);
+            minute = strtod(min_str.c_str(), NULL);
+            std::string hour_str(str_time, idx);
+            hour = strtod(hour_str.c_str(), NULL);
+        } else if (idx >= 2) {
+            idx -= 2;
+            std::string sec_str(str_time + idx, 2);
+            second = strtod(sec_str.c_str(), NULL);
+            std::string min_str(str_time, idx);
+            minute = strtod(min_str.c_str(), NULL);
+        } else {
+            std::string sec_str(str_time, idx);
+            second = strtod(sec_str.c_str(), NULL);
+        }
+    }
+    if (day < 0 || hour < 0 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return 0;
+    }
+    hour += day * 24;
     time |= second;
     time |= (minute << 6);
     time |= (hour << 12);

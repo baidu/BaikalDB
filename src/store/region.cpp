@@ -49,6 +49,7 @@ DEFINE_int64(snapshot_log_exec_time_s, 60, "save_snapshot when log entries apply
 //分裂判断标准，如果3600S没有收到请求，则认为分裂失败
 DEFINE_int64(split_duration_us, 3600 * 1000 * 1000LL, "split duration time : 3600s");
 DEFINE_int64(compact_delete_lines, 200000, "compact when _num_delete_lines > compact_delete_lines");
+DEFINE_int64(time_cost_us, 10000, "print dml log when dml_time_cost > gflags_dml_time_cost(us)");
 
 //const size_t  Region::REGION_MIN_KEY_SIZE = sizeof(int64_t) * 2 + sizeof(uint8_t);
 const uint8_t Region::PRIMARY_INDEX_FLAG = 0x01;                                   
@@ -291,9 +292,9 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
     }
     const pb::TransactionInfo& txn_info = request.txn_infos(0);
     int last_seq = (txn == nullptr)? 0 : txn->seq_id();
-    DB_WARNING("TransactionNote: region_id: %ld, txn_id: %lu, op_type: %d, "
-            "last_seq: %d, cache_plan_size: %d, log_id: %lu",
-            _region_id, txn_id, request.op_type(), last_seq, txn_info.cache_plans_size(), log_id);
+    //DB_WARNING("TransactionNote: region_id: %ld, txn_id: %lu, op_type: %d, "
+    //        "last_seq: %d, cache_plan_size: %d, log_id: %lu",
+    //        _region_id, txn_id, request.op_type(), last_seq, txn_info.cache_plans_size(), log_id);
 
     // executed the cached cmd from last_seq + 1
     for (auto& cache_item : txn_info.cache_plans()) {
@@ -313,11 +314,11 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
         }
         int seq_id = cache_item.seq_id();
         if (seq_id <= last_seq) {
-            DB_WARNING("TransactionNote: txn %ld_%lu:%d has been executed.", _region_id, txn_id, seq_id);
+            //DB_WARNING("TransactionNote: txn %ld_%lu:%d has been executed.", _region_id, txn_id, seq_id);
             continue;
         } else {
-            DB_WARNING("TransactionNote: txn %ld_%lu:%d executed cached. op_type: %d",  
-                _region_id, txn_id, seq_id, op_type);
+            //DB_WARNING("TransactionNote: txn %ld_%lu:%d executed cached. op_type: %d",  
+            //    _region_id, txn_id, seq_id, op_type);
         }
         
         // normally, cache plan should be execute successfully, because it has been executed 
@@ -346,7 +347,7 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
             return -1;
         }
     }
-    DB_WARNING("region_id: %ld, txn_id: %lu, execute_cached success.", _region_id, txn_id);
+    //DB_WARNING("region_id: %ld, txn_id: %lu, execute_cached success.", _region_id, txn_id);
     return 0;
 }
 
@@ -434,7 +435,7 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
         char errmsg[100];
         snprintf(errmsg, sizeof(errmsg), "region_id: %ld, txn_id: %lu, txn_last_seq: %d, request_start_seq: %d", 
             _region_id, txn_id, last_seq, txn_info.start_seq_id());
-        DB_WARNING("%s", errmsg);
+        //DB_WARNING("%s", errmsg);
         response->set_errcode(pb::TXN_FOLLOW_UP);
         response->set_last_seq_id(last_seq);
         response->set_errmsg(errmsg);
@@ -462,10 +463,14 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
         case pb::OP_SELECT: {
             TimeCost cost;
             select(*request, *response);
-            DB_NOTICE("select type: %s, region_id: %ld, txn_id: %lu, seq_id: %d, "
-                    "time_cost: %ld, log_id: %lu, remote_side: %s", 
-                    pb::OpType_Name(request->op_type()).c_str(), _region_id, txn_id, seq_id, 
-                    cost.get_time(), log_id, remote_side);
+            int64_t select_cost = cost.get_time();
+            Store::get_instance()->select_time_cost << select_cost;
+            if (select_cost > FLAGS_time_cost_us) {
+                DB_NOTICE("select type: %s, region_id: %ld, txn_id: %lu, seq_id: %d, "
+                        "time_cost: %ld, log_id: %lu, remote_side: %s", 
+                        pb::OpType_Name(request->op_type()).c_str(), _region_id, txn_id, seq_id, 
+                        cost.get_time(), log_id, remote_side);
+            }
             if (txn != nullptr) {
                 txn->set_seq_id(seq_id);
             }
@@ -589,8 +594,12 @@ void Region::exec_out_txn_query(google::protobuf::RpcController* controller,
         case pb::OP_SELECT: {
             TimeCost cost;
             select(*request, *response);
-            DB_NOTICE("select type:%s, seq_id: %d, region_id: %ld, time_cost:%ld, log_id: %lu, remote_side: %s", 
-                    pb::OpType_Name(request->op_type()).c_str(), 0, _region_id, cost.get_time(), log_id, remote_side);
+            int64_t select_cost = cost.get_time();
+            Store::get_instance()->select_time_cost << select_cost;
+            if (select_cost > FLAGS_time_cost_us) {
+                DB_NOTICE("select type:%s, seq_id: %d, region_id: %ld, time_cost:%ld, log_id: %lu, remote_side: %s", 
+                        pb::OpType_Name(request->op_type()).c_str(), 0, _region_id, cost.get_time(), log_id, remote_side);
+            }
             break;
         }
         case pb::OP_INSERT:
@@ -912,7 +921,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
                 plan_item.add_tuples()->CopyFrom(tuple);
             }
             plan_map.insert(std::make_pair(seq_id, plan_item));
-            DB_WARNING("put txn cmd to cache: region_id: %ld, txn_id: %lu:%d", _region_id, txn_id, seq_id);
+            //DB_WARNING("put txn cmd to cache: region_id: %ld, txn_id: %lu:%d", _region_id, txn_id, seq_id);
         }
     } else if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
         // after commit or rollback, txn will be deleted
@@ -954,17 +963,25 @@ void Region::dml_2pc(const pb::StoreReq& request,
         batch.Delete(_writer->get_handle(), _writer->transcation_log_index_key(_region_id, txn_id));
         auto ret = _writer->write_batch(&batch, _region_id);
         //DB_WARNING("write meta info wheen commit or rollback,"
-        //            " region_id: %ld, applied_index: %ld, num_table_line: %ld", 
-        //            _region_id, applied_index, _num_table_lines.load()); 
+        //            " region_id: %ld, applied_index: %ld, num_table_line: %ld, txn_id: %lu", 
+        //            _region_id, applied_index, _num_table_lines.load(), txn_id); 
         if (ret < 0) {
             DB_FATAL("Write Metainfo fail, region_id: %ld, txn_id: %lu, log_index: %ld", 
                         _region_id, txn_id, applied_index);
         }
     }
-    DB_NOTICE("dml type:%d, time_cost:%ld, region_id: %ld, txn_id: %lu, num_table_lines:%ld, "
-              "affected_rows:%d, applied_index:%ld, term:%d, txn_num_rows:%ld, log_id:%lu", 
-            op_type, cost.get_time(), _region_id, txn_id, _num_table_lines.load(), ret, 
-            applied_index, term, txn_num_increase_rows, state.log_id());
+    if (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE) {
+       update_average_cost(cost.get_time()); 
+    }
+    int64_t dml_cost = cost.get_time();
+    Store::get_instance()->dml_time_cost << dml_cost;
+    if (dml_cost > FLAGS_time_cost_us) {
+        DB_NOTICE("dml type:%d, time_cost:%ld, region_id: %ld, txn_id: %lu, num_table_lines:%ld, "
+                  "affected_rows:%d, applied_index:%ld, term:%d, txn_num_rows:%ld,"
+                  " average_cost: %ld, log_id:%lu", 
+                op_type, cost.get_time(), _region_id, txn_id, _num_table_lines.load(), ret, 
+                applied_index, term, txn_num_increase_rows, _average_cost.load(), state.log_id());
+    }
 }
 
 void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
@@ -1087,11 +1104,6 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         _num_table_lines = tmp_num_table_lines;
         response.set_affected_rows(ret);
         response.set_errcode(pb::SUCCESS);
-        //DB_NOTICE("dml type:%d, time_cost:%ld, region_id: %ld, txn_id: %lu, "
-        //            "num_table_lines:%ld, affected_rows:%d, "
-        //            "applied_index:%ld, term:%d, txn_num_rows:%ld, log_id:%lu", 
-        //            op_type, cost.get_time(), _region_id, state.txn_id, _num_table_lines.load(), 
-        //            ret, applied_index, term, txn_num_increase_rows, state.log_id());
     } else {
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("txn commit failed.");
@@ -1105,18 +1117,27 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         batch.Put(_writer->get_handle(), _writer->num_table_lines_key(_region_id), _writer->encode_num_table_lines(_num_table_lines));
         batch.Delete(_writer->get_handle(), _writer->transcation_log_index_key(_region_id, state.txn_id));
         auto ret = _writer->write_batch(&batch, _region_id);
-        //DB_WARNING("write meta info wheen commit or rollback,"
-        //            " region_id: %ld, applied_index: %ld, num_table_line: %ld", 
-        //            _region_id, applied_index, _num_table_lines.load()); 
+        DB_WARNING("write meta info wheen commit or rollback,"
+                    " region_id: %ld, applied_index: %ld, num_table_line: %ld, txn_id: %lu", 
+                    _region_id, applied_index, _num_table_lines.load(), state.txn_id); 
         if (ret < 0) {
             DB_FATAL("Write Metainfo fail, region_id: %ld, txn_id: %lu, log_index: %ld", 
                         _region_id, state.txn_id, applied_index);
         }
     }
-    DB_NOTICE("dml type:%d, time_cost:%ld, region_id: %ld, txn_id: %lu, num_table_lines:%ld, "
-              "affected_rows:%d, applied_index:%ld, term:%d, txn_num_rows:%ld, log_id:%lu", 
-            op_type, cost.get_time(), _region_id, state.txn_id, _num_table_lines.load(), ret, 
-            applied_index, term, txn_num_increase_rows, state.log_id());
+    if (state.txn_id != 0 && 
+            (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
+       update_average_cost(cost.get_time());  
+    }
+    int64_t dml_cost = cost.get_time();
+    Store::get_instance()->dml_time_cost << dml_cost;
+    if (dml_cost > FLAGS_time_cost_us) {
+        DB_NOTICE("dml type:%d, time_cost:%ld, region_id: %ld, txn_id: %lu, num_table_lines:%ld, "
+                  "affected_rows:%d, applied_index:%ld, term:%d, txn_num_rows:%ld,"
+                  " average_cost: %ld, log_id:%lu", 
+                op_type, cost.get_time(), _region_id, state.txn_id, _num_table_lines.load(), ret, 
+                applied_index, term, txn_num_increase_rows, _average_cost.load(), state.log_id());
+    }
 }
 
 void Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
@@ -2472,7 +2493,7 @@ void Region::send_log_entry_to_new_region_for_split() {
     if (write_count_max == 0) {
         write_count_max = 1;
     }
-    while ((_applied_index - start_index) > write_count_max && while_count < 10) {
+    do {
         TimeCost time_cost_one_pass;
         ++while_count;
         int64_t end_index = 0;
@@ -2517,14 +2538,14 @@ void Region::send_log_entry_to_new_region_for_split() {
         DB_WARNING("qps:%ld for send log entry, qps:%ld for region_id: %ld, split_slow_down:%ld",
                     qps_send_log_entry, _qps.load(), _region_id, _split_param.split_slow_down_cost);
         start_index = end_index + 1;
-    }
+    } while ((_applied_index - start_index) > write_count_max && while_count < 10);
    
     DB_WARNING("send log entry before not allow success when split, "
                 "region_id: %ld, new_region_id:%ld, instance:%s, time_cost:%ld, "
-                "start_index:%ld, end_index:%ld, applied_index:%ld, while_count:%d",
+                "start_index:%ld, end_index:%ld, applied_index:%ld, while_count:%d, write_count_max: %d",
                 _region_id, _split_param.new_region_id,
                 _split_param.instance.c_str(), send_first_log_entry_time.get_time(),
-                _split_param.split_start_index, start_index, _applied_index, while_count);
+                _split_param.split_start_index, start_index, _applied_index, while_count, write_count_max);
 
     _split_param.send_first_log_entry_cost = send_first_log_entry_time.get_time();
     

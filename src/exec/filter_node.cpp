@@ -289,7 +289,6 @@ int FilterNode::open(RuntimeState* state) {
         }
         _pruned_conjuncts.push_back(conjunct);
     }
-    //DB_WARNING_STATE(state, "_conjuncts_size:%ld, pruned_conjuncts_size:%ld", _conjuncts.size(), _pruned_conjuncts.size());
     return 0;
 }
 
@@ -359,7 +358,7 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             return 0;
         }
         std::unique_ptr<MemRow>& row = _child_row_batch.get_row();
-        if (need_copy(row.get())) {
+        if (_is_explain || need_copy(row.get())) {
             batch->move_row(std::move(row));
             ++_num_rows_returned;
         }
@@ -372,6 +371,15 @@ void FilterNode::close(RuntimeState* state) {
     ExecNode::close(state);
     for (auto conjunct : _conjuncts) {
         conjunct->close();
+    }
+}
+void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
+    ExecNode::show_explain(output);
+    if (output.empty()) {
+        return;
+    }
+    if (!_pruned_conjuncts.empty()) {
+        output.back()["Extra"] += "Using where";
     }
 }
 }

@@ -16,10 +16,6 @@
 
 #include <string>
 #include <vector>
-#ifdef BAIDU_INTERNAL
-#include <webfoot_naming.h>
-#include "naming.pb.h"
-#endif
 #include "common.h"
 
 namespace baikaldb {
@@ -52,10 +48,6 @@ namespace baikaldb {
         }\
     } while (0);
 
-extern int get_instance_from_bns(int* ret,
-                          const std::string& bns_name, 
-                          std::vector<std::string>& instances,
-                          bool need_alive = true); 
 }//namespace baikaldb
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

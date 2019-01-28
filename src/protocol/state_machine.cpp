@@ -247,11 +247,14 @@ void StateMachine::_print_query_time(SmartSocket client) {
 
     PacketNode* root = (PacketNode*)(ctx->root);
     int rows = 0;
+    pb::OpType op_type = pb::OP_NONE;
     if (root != nullptr) {
+        op_type = root->op_type();
         rows = (root->op_type() == pb::OP_SELECT)?
             stat_info->num_returned_rows : stat_info->num_affected_rows;
     }
 
+    boost::replace_all(ctx->sql, "\n", " ");
     if (ctx->mysql_cmd == COM_QUERY 
             || ctx->mysql_cmd == COM_STMT_PREPARE 
             || ctx->mysql_cmd == COM_STMT_EXECUTE
@@ -259,6 +262,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
         std::string  namespace_name = client->user_info->namespace_;
         std::string database = namespace_name + "." + ctx->stat_info.family;
         if (ctx->stat_info.family.empty()) {
+            ctx->stat_info.family = "no";
             database += "adp";
         }
         {
@@ -286,11 +290,16 @@ void StateMachine::_print_query_time(SmartSocket client) {
             }
             database_request_count[database] << 1;
         }
-        DB_NOTICE("common_query: family=[%s] ip=[%s:%d] fd=[%d] cost=[%ld] "
-            "field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] bufsize=[%d] "
+        if (stat_info->table.empty()) {
+            stat_info->table = "no";
+        }
+        DB_NOTICE("common_query: family=[%s] table=[%s] op_type=[%d] ip=[%s:%d] fd=[%d] "
+            "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] bufsize=[%d] "
             "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] "
             "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sqllen=[%d] sql=[%s]",
             stat_info->family.c_str(),
+            stat_info->table.c_str(),
+            op_type,
             client->ip.c_str(),
             client->port,
             client->fd,
@@ -344,6 +353,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 client->username.c_str());
         }
     }
+    ctx->mysql_cmd = COM_SLEEP; 
+    client->last_active = time(NULL);
     return;
 }
 
@@ -435,6 +446,11 @@ int StateMachine::_auth_read(SmartSocket sock) {
     } else {
         DB_WARNING_CLIENT(sock, "client connect Baikal with wrong password, "
                 "client->scramble_len=%d should be 0 or 20", len);
+        return RET_AUTH_FAILED;
+    }
+
+    if (!sock->user_info->allow_addr(sock->ip)) {
+        DB_WARNING_CLIENT(sock, "client connect Baikal with invalid ip");
         return RET_AUTH_FAILED;
     }
 
@@ -783,6 +799,10 @@ bool StateMachine::_query_process(SmartSocket client) {
             ret = _handle_client_query_show_warnings(client);
         } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_REGION)) {
             ret = _handle_client_query_show_region(client);
+        } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_SOCKET)) {
+            ret = _handle_client_query_show_socket(client);
+        } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_PROCESSLIST)) {
+            ret = _handle_client_query_show_processlist(client);
         } else if (type == SQL_SHOW_NUM
                     && boost::algorithm::istarts_with(
                             client->query_ctx->sql, SQL_SHOW_VARIABLES)) {
@@ -1692,6 +1712,163 @@ bool StateMachine::_handle_client_query_show_region(SmartSocket client) {
     return true;
 }
 
+bool StateMachine::_handle_client_query_show_socket(SmartSocket client) {
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    do {
+        ResultField field;
+        field.name = "ip";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    do {
+        ResultField field;
+        field.name = "count";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    std::map<std::string, int> ip_map;
+    EpollInfo* epoll_info = NetworkServer::get_instance()->get_epoll_info();
+    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+        SmartSocket sock = epoll_info->get_fd_mapping(idx);
+        if (sock == NULL || sock->in_pool == true || sock->fd == 0 || sock->ip == "") {
+            continue;
+        }
+        ip_map[sock->ip]++;
+    }
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+
+    for (auto& pair : ip_map) {
+        std::vector<std::string> row;
+        row.push_back(pair.first);
+        row.push_back(std::to_string(pair.second));
+        rows.push_back(row);
+    }
+
+    // Make mysql packet.
+    MysqlWrapper* wrapper = MysqlWrapper::get_instance();
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool StateMachine::_handle_client_query_show_processlist(SmartSocket client) {
+    // Make fields.
+    std::vector<ResultField> fields;
+    do {
+        ResultField field;
+        field.name = "Id";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "User";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Host";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "db";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Command";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Time";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "State";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Info";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    EpollInfo* epoll_info = NetworkServer::get_instance()->get_epoll_info();
+    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+        SmartSocket sock = epoll_info->get_fd_mapping(idx);
+        if (sock == NULL || sock->in_pool == true || sock->fd == 0 || sock->ip == "") {
+            continue;
+        }
+        std::vector<std::string> row;
+        row.push_back(std::to_string(sock->conn_id));
+        row.push_back(sock->user_info->username);
+        row.push_back(sock->ip);
+        row.push_back(sock->current_db);
+        auto command = sock->query_ctx->mysql_cmd;
+        if (command == COM_SLEEP) {
+            row.push_back("Sleep");
+        } else {
+            row.push_back("Query");
+        }
+        row.push_back(std::to_string(time(NULL) - sock->last_active));
+        if (command == COM_SLEEP) {
+            row.push_back(" ");
+        } else {
+            row.push_back("executing");
+        }
+        if (command == COM_SLEEP) {
+            row.push_back("");
+        } else {
+            row.push_back(sock->query_ctx->sql);
+        }
+        rows.push_back(row);
+    }
+
+    // Make mysql packet.
+    MysqlWrapper* wrapper = MysqlWrapper::get_instance();
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+
 bool StateMachine::_handle_client_query_show_collation(SmartSocket client) {
     if (client == nullptr) {
         DB_FATAL("param invalid");
@@ -2399,10 +2576,10 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     }
     client->query_ctx->stat_info.query_plan_time = cost.get_time();
     cost.reset();
-    DB_WARNING("logical success cost:%ld, txn_id: %lu, phiscal success cost:%ld", 
-            logical_cost, client->txn_id, cost1.get_time());
+    //DB_WARNING("logical success cost:%ld, txn_id: %lu, phiscal success cost:%ld", 
+    //        logical_cost, client->txn_id, cost1.get_time());
     //pb::Plan plan;
-    //ExecNode::create_pb_plan(&plan, client->query_ctx->root);
+    //ExecNode::create_pb_plan(0, &plan, client->query_ctx->root);
     //DB_NOTICE("%s", client->query_ctx->plan.DebugString().c_str());
     //for (uint32_t idx = 0; idx < plan.nodes_size(); ++idx) {
     //    DB_WARNING("plan_node: %s", plan.nodes(idx).DebugString().c_str());

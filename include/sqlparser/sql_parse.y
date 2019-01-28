@@ -414,6 +414,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     WARNINGS
     WEEK
     YEAR
+    HLL
 
     /* The following tokens belong to builtin functions. */
     ADDDATE
@@ -450,6 +451,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     VARIANCE
     VAR_POP
     VAR_SAMP
+    USER_AGG
 
 %token EQ_OP ASSIGN_OP  MOD_OP  GE_OP  GT_OP LE_OP LT_OP NE_OP AND_OP OR_OP NOT_OP LS_OP RS_OP CHINESE_DOT
 %token <string> IDENT 
@@ -576,6 +578,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TruncateStmt 
     ShowStmt
     ShowTargetFilterable
+    ExplainStmt
+    ExplainableStmt
 
 %type <stmt> 
     CreateTableStmt
@@ -689,6 +693,7 @@ Statement:
     | NewPrepareStmt
     | ExecPrepareStmt
     | DeallocPrepareStmt
+    | ExplainStmt
     ;
 
 InsertStmt:
@@ -2041,6 +2046,13 @@ SumExpr:
         fun->children.push_back($4, parser->arena);
         $$ = fun;
     }
+    | USER_AGG '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->func_type = FT_AGG;
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
     ;
 
 DistinctKwd:
@@ -3163,6 +3175,12 @@ StringType:
         field_type->type = MYSQL_TYPE_JSON;
         $$ = field_type;
     }
+    | HLL 
+    {
+        FieldType* field_type = new_node(FieldType);
+        field_type->type = MYSQL_TYPE_HLL;
+        $$ = field_type;
+    }
     ;
 
 NationalOpt:
@@ -4058,6 +4076,26 @@ DeallocPrepareStmt:
         stmt->name = $3;
         $$ = stmt;
     }
+    ;
+
+ExplainSym:
+    EXPLAIN | DESCRIBE | DESC
+    ;
+
+ExplainStmt:
+    ExplainSym ExplainableStmt {
+        ExplainStmt* explain = new_node(ExplainStmt);
+        explain->stmt = $2;
+        $$ = explain;
+    }
+    ;
+
+ExplainableStmt:
+    SelectStmt
+    | DeleteStmt
+    | UpdateStmt
+    | InsertStmt
+    | ReplaceStmt
     ;
 
 %%

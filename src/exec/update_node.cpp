@@ -48,6 +48,9 @@ int UpdateNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
+    if (_is_explain) {
+        return 0;
+    }
     for (auto expr : _update_exprs) {
         ret = expr->open();
         if (ret < 0) {

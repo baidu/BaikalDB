@@ -69,12 +69,12 @@ public:
             expr->find_place_holder(placeholders);
         }
     }
+    virtual int select_index(std::vector<int>& multi_reverse_index); 
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos);
-    int select_index(RuntimeState* state, const pb::PlanNode& node, std::vector<int>& multi_reverse_index); 
     int choose_index(RuntimeState* state);
 
 private:

@@ -36,6 +36,7 @@ int ExecNode::init(const pb::PlanNode& node) {
     _limit = node.limit();
     _num_rows_returned = 0;
     _node_type = node.node_type();
+    _is_explain = node.is_explain();
     return 0;
 }
 
@@ -66,6 +67,7 @@ void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
     pb::PlanNode pb_plan_node;
     pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
     pb_plan_node.set_num_children(1);
+    pb_plan_node.set_is_explain(_is_explain);
     pb_plan_node.set_limit(-1);
     auto filter_node = new FilterNode();
     filter_node->init(pb_plan_node);

@@ -714,8 +714,23 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
         const pb::PrivilegeTable& tbl = user.privilege_table(idx);
         user_info->table[tbl.table_id()] = tbl.table_rw();
     }
-    _user_info_mapping[username] = user_info;
     //TODO ip and bns access control
+    user_info->need_auth_addr = user.need_auth_addr();
+    for (auto ip : user.ip()) {
+        boost::trim(ip);
+        user_info->auth_ip_set.insert(ip);
+    }
+    for (auto bns : user.bns()) {
+        std::vector<std::string> instances;
+        int ret = 0;
+        boost::trim(bns);
+        get_instance_from_bns(&ret, bns, instances, false);
+        for (auto& instance : instances) {
+            auto pos = instance.find(":");
+            user_info->auth_ip_set.insert(instance.substr(0, pos));
+        }
+    }
+    _user_info_mapping[username] = user_info;
 }
 
 // create a new table record (aka. a table row)

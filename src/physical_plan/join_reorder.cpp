@@ -106,6 +106,7 @@ int JoinReorder::analyze(QueryContext* ctx) {
         pb::PlanNode pb;
         pb.set_node_type(pb::JOIN_NODE);
         pb.set_limit(-1);
+        pb.set_is_explain(ctx->is_explain);
         pb.set_num_children(2);
         pb::JoinNode* pb_join = pb.mutable_derive_node()->mutable_join_node();
         pb_join->set_join_type(pb::INNER_JOIN);

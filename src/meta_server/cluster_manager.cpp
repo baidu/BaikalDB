@@ -790,8 +790,13 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
             continue;
         }
         if (instance_count.second.find(table_id) == instance_count.second.end()) {
-            selected_instance = instance;
-            break;
+            if (average_count == 0) {
+                selected_instance = instance;
+                break;
+            } else {
+                candicate_instances.push_back(instance);
+                continue;
+            }
         }
         if (average_count != 0 && instance_count.second[table_id] < average_count) {
             candicate_instances.push_back(instance);

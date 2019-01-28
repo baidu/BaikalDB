@@ -23,20 +23,20 @@
 #include "parser.h"
 
 namespace baikaldb {
-int RocksdbScanNode::select_index(RuntimeState* state, 
-                           const pb::PlanNode& node, 
-                           std::vector<int>& multi_reverse_index) {
+int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
     int i = 0;
     //int index_size = node.derive_node().scan_node().indexes_size();
+    const pb::PlanNode& node = _pb_node;
     int sort_index = -1;
 
     std::multimap<uint32_t, int> prefix_ratio_id_mapping;
     for (auto& pos_index : node.derive_node().scan_node().indexes()) {
         int64_t index_id = pos_index.index_id();
-        IndexInfo& info = state->resource()->get_index_info(index_id);
-        if (info.id == -1) {
+        IndexInfo* info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
             continue;
         }
+        IndexInfo& info = *info_ptr;
         int field_count = 0;
         for (auto& range : pos_index.ranges()) {
             if (range.has_left_field_cnt() && range.left_field_cnt() > 0) {
@@ -100,7 +100,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
 
     std::vector<int> multi_reverse_index;
-    int idx = select_index(state, _pb_node, multi_reverse_index);
+    int idx = select_index(multi_reverse_index);
     if (multi_reverse_index.size() == 1) {
         idx = multi_reverse_index[0];
     }
@@ -141,7 +141,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
     _index_ids.push_back(_index_id);
     if (pos_index.ranges_size() == 0) {
-        return -1;
+        return 0;
     }
     //DB_WARNING_STATE(state, "use_index: %ld table_id: %ld left:%d, right:%d", 
     //        _index_id, _table_id, pos_index.ranges(0).left_field_cnt(), pos_index.ranges(0).right_field_cnt());
@@ -212,7 +212,7 @@ int RocksdbScanNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     //DB_WARNING("node:%ld is pushdown", this);
     if (_parent->get_node_type() == pb::WHERE_FILTER_NODE
             || _parent->get_node_type() == pb::TABLE_FILTER_NODE) {
-        DB_WARNING("parent is filter node,%d", _parent->get_node_type());
+        //DB_WARNING("parent is filter node,%d", _parent->get_node_type());
         return 0;
     }
     if (input_exprs.size() > 0) {
@@ -274,7 +274,7 @@ bool RocksdbScanNode::need_pushdown(ExprNode* expr) {
 int RocksdbScanNode::index_condition_pushdown() {
     //DB_WARNING("node:%ld is pushdown", this);
     if (_parent == NULL) {
-        DB_WARNING("parent is null");
+        //DB_WARNING("parent is null");
         return 0;
     }
     if (_parent->get_node_type() != pb::WHERE_FILTER_NODE &&
@@ -304,6 +304,10 @@ int RocksdbScanNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
+    _mem_row_desc = state->mem_row_desc();
+    if (_is_explain) {
+        return 0;
+    }
     ret = choose_index(state);
     if (ret < 0) {
         DB_WARNING_STATE(state, "calc index fail:%d", ret);
@@ -320,7 +324,6 @@ int RocksdbScanNode::open(RuntimeState* state) {
     }
     std::sort(_field_ids.begin(), _field_ids.end());
 
-    _mem_row_desc = state->mem_row_desc();
     _region_id = state->region_id();
     //DB_WARNING_STATE(state, "use_index: %ld table_id: %ld region_id: %ld", _index_id, _table_id, _region_id);
     _region_info = &(state->resource()->region_info);
@@ -414,6 +417,18 @@ int RocksdbScanNode::open(RuntimeState* state) {
 }
 
 int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    if (_is_explain) {
+        // 生成一条临时数据跑通所有流程
+        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+        for (auto slot : _tuple_desc->slots()) {
+            ExprValue tmp(pb::INT64);
+            row->set_value(slot.tuple_id(), slot.slot_id(), tmp);
+        }
+        batch->move_row(std::move(row));
+        ++_num_rows_returned;
+        *eos = true;
+        return 0;
+    }
     if (_index_id == _table_id) {
         if (_use_get) {
             return get_next_by_table_get(state, batch, eos);
@@ -494,8 +509,8 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
         auto txn = state->txn();
         int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, record, GET_ONLY, true);
         if (ret < 0) {
-            DB_WARNING_STATE(state, "get index:%ld fail, not exist, ret:%d, record: %s", 
-                    _table_id, ret, record->to_string().c_str());
+            //DB_WARNING_STATE(state, "get index:%ld fail, not exist, ret:%d, record: %s", 
+            //        _table_id, ret, record->to_string().c_str());
             continue;
         }
         if (!_is_covering_index) {

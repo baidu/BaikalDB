@@ -108,6 +108,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(log_index_prefix)) {
             ++key_num;
             int64_t log_index = MetaWriter::get_instance()->decode_log_index_value(iter_context->iter->value());
+            uint64_t txn_id = MetaWriter::get_instance()->decode_log_index_key(iter_context->iter->key());
             std::string txn_info;
             auto ret  = LogEntryReader::get_instance()->read_log_entry(_region_id, log_index, txn_info);
             if (ret < 0) {
@@ -116,10 +117,10 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
                 return -1;
             }
             if (iter_context->offset >= offset) {
-                read_size += serialize_to_iobuf(portal, MetaWriter::get_instance()->transcation_pb_key(_region_id, log_index));
+                read_size += serialize_to_iobuf(portal, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id,  log_index));
                 read_size += serialize_to_iobuf(portal, rocksdb::Slice(txn_info));
             } else {
-                read_size += serialize_to_iobuf(nullptr, MetaWriter::get_instance()->transcation_pb_key(_region_id, log_index));
+                read_size += serialize_to_iobuf(nullptr, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id,  log_index));
                 read_size += serialize_to_iobuf(nullptr, rocksdb::Slice(txn_info));
             }
         } else {

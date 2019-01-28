@@ -33,6 +33,9 @@
 using google::protobuf::FieldDescriptorProto;
 
 namespace baikaldb {
+DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
+DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
+DEFINE_int32(snapshot_load_num, 8, "snapshot load concurrency, default 8");
 DECLARE_string(default_physical_room);
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
@@ -371,7 +374,33 @@ int get_physical_room(const std::string& ip_and_port_str, std::string& physical_
 #endif
 }
 
-DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
-DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
-DEFINE_int32(snapshot_load_num, 8, "snapshot load concurrency, default 8");
+int get_instance_from_bns(int* ret,
+                          const std::string& bns_name,
+                          std::vector<std::string>& instances,
+                          bool need_alive) {
+#ifdef BAIDU_INTERNAL
+    instances.clear();
+    BnsInput input;
+    BnsOutput output;
+    input.set_service_name(bns_name);
+    input.set_type(0);
+    *ret = webfoot::get_instance_by_service(input, &output);
+    // bns service not exist
+    if (*ret == webfoot::WEBFOOT_RET_SUCCESS ||
+            *ret == webfoot::WEBFOOT_SERVICE_BEYOND_THRSHOLD) {
+        for (int i = 0; i < output.instance_size(); ++i) {
+            if (output.instance(i).status() == 0 || !need_alive) {
+                instances.push_back(output.instance(i).host_ip() + ":" 
+                        + boost::lexical_cast<std::string>(output.instance(i).port()));
+            }   
+        }   
+        return 0;
+    }   
+    DB_WARNING("get instance from service fail, bns_name:%s, ret:%d",
+            bns_name.c_str(), *ret);
+    return -1; 
+#else
+    return -1;
+#endif
+}
 }  // baikaldb
