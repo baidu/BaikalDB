@@ -1,4 +1,4 @@
-##安装sysbench环境
+## 安装sysbench环境
 * 安装sysbench0.5以上版本
 * 安装MYSQL
 * 机器支持lua
@@ -7,7 +7,7 @@
     * source ~/.bashrc
 
 
-##sysbench有哪些功能
+## sysbench有哪些功能
 * sysbench支持以下几种测试模式
     * 支持CPU运算性能测试
 	* 支持磁盘IO性能测试
@@ -19,13 +19,13 @@
 
 
 
-##执行sysbench测试case
+## 执行sysbench测试case
 * 将scripts目录防在src目录下与lua同级
 * 配置自己的baikaldb连接信息到config.conf
 * 到scripts目录下执行sh prepare.sh/cleanup.sh/read-write_noprepare.sh等测试脚本
 
 
-##分析sysbench执行结果
+## 分析sysbench执行结果
 
 ```javascript
   SQL statistics:
