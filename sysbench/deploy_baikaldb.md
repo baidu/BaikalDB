@@ -1,4 +1,4 @@
-##安装baikalDB环境
+## 安装baikalDB环境
 * 编译baikalDB+baikalMeta+baikalStore bin文件
 * 创建文件目录
   * bin
@@ -25,7 +25,7 @@
     * -baikal_port=baikalport
     * 其余参数可根据需要更新
 
-##启动baikalDB环境
+## 启动baikalDB环境
 * 启动baikalMeta
 * 启动三个baikalStore
 * 创建数据库、表
@@ -33,7 +33,7 @@
   * 执行sh create_internal_table.sh 创建内部表,$1为metaIP:metaport
 * 启动baikaldb
 
-##测试baikalDB环境
+## 测试baikalDB环境
 * 找到一个安装mysql环境的机器，mysql -hbaikaldbIP -pbaikaldbport -uroot -proot进行测试连接
 * baikaldb的使用方式与mysql完全一致
 
