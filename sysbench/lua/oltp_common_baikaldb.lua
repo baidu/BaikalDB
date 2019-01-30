@@ -172,7 +172,7 @@ function create_table(drv, con, table_num)
          id_def = "INTEGER NOT NULL"
       end
       engine_def = "ENGINE = " .. sysbench.opt.mysql_storage_engine .. " "
-      extra_table_options = mysql_table_options or " DEFAULT CHARSET=utf8 AVG_ROW_LENGTH=100 COMMENT='{\"resource_tag\":\"e0-mix\", \"namespace\":\"FENGCHAO\"}';"
+      extra_table_options = mysql_table_options or " DEFAULT CHARSET=utf8 AVG_ROW_LENGTH=100 COMMENT='{\"resource_tag\":\"resource_tag\", \"namespace\":\"TEST\"}';"
    elseif drv:name() == "pgsql"
    then
       if not sysbench.opt.auto_inc then
