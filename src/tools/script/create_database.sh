@@ -9,7 +9,7 @@ curl -d '{
     "op_type":"OP_CREATE_DATABASE",
     "database_info": {
         "database":"TestDB",
-        "namespace_name":"FENGCHAO",
+        "namespace_name":"TEST_NAMESPACE",
         "quota": 524288
     }
 }' http://$1/MetaService/meta_manager
