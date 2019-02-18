@@ -9,8 +9,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo",
-        "database": "Feed",
-        "namespace_name": "FENGCHAO",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -77,8 +77,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo1",
-        "database": "Feed",
-        "namespace_name": "FENGCHAO",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -146,8 +146,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo2",
-        "database": "Feed",
-        "namespace_name": "FENGCHAO",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -216,8 +216,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo3",
-        "database": "Feed",
-        "namespace_name": "FENGCHAO",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
