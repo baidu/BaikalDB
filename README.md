@@ -1,4 +1,3 @@
-[中文版](README_cn.md) \|[20181225前BaikalStore升级须知](https://github.com/baidu/BaikalDB/wiki/Upgrade-BaikalStore)
 
 [![Build Status](https://travis-ci.org/baidu/BaikalDB.svg?branch=master)](https://travis-ci.org/baidu/BaikalDB)
 
@@ -11,7 +10,12 @@ BaikalDB internally provides projections, filter operators (corresponding with S
 BaikalDB also supports full-text search by building inverted indices after words segmentation. 
 Users can harness fuzzy search feature simply by adding a `FULLTEXT KEY` type index when creating tables and then use LIKE clause in their queries.
 
-## Acknowledgements
+See the github [wiki](https://github.com/baidu/BaikalDB/wiki) for more explanation.
+
+# License
+baidu/BaikalDB is licensed under the Apache License 2.0
+
+# Acknowledgements
 * We are especially grateful to the teams of RocksDB, brpc and braft, who built powerful and stable libraries to support important features of BaikalDB.
 * We give special thanks to TiDB team and Impala team. We referred their design schemes when designing and developing BaikalDB.
 * Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
