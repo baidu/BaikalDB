@@ -1,4 +1,4 @@
-## BaikalDB：A Distributed Hybrid Transactional and Analytical Processing (HTAP) Database
+## BaikalDB：A Distributed HTAP Database
 [![Build Status](https://travis-ci.org/baidu/BaikalDB.svg?branch=master)](https://travis-ci.org/baidu/BaikalDB)
 
 BaikalDB supports sequential and randomised realtime read/write of structural data in petabytes-scale.
