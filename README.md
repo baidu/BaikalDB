@@ -1,5 +1,6 @@
-# BaikalDB：A Distributed Hybrid Transactional and Analytical Processing (HTAP) Database
+## BaikalDB：A Distributed Hybrid Transactional and Analytical Processing (HTAP) Database
 [![Build Status](https://travis-ci.org/baidu/BaikalDB.svg?branch=master)](https://travis-ci.org/baidu/BaikalDB)
+
 BaikalDB supports sequential and randomised realtime read/write of structural data in petabytes-scale.
 BaikalDB is compatible with MySQL protocol and it supports MySQL style SQL dialect, by which users can migrate their data storage from MySQL to BaikalDB seamlessly.
 
@@ -10,10 +11,10 @@ Users can harness fuzzy search feature simply by adding a `FULLTEXT KEY` type in
 
 See the github [wiki](https://github.com/baidu/BaikalDB/wiki) for more explanation.
 
-# License
+## License
 baidu/BaikalDB is licensed under the Apache License 2.0
 
-# Acknowledgements
+## Acknowledgements
 * We are especially grateful to the teams of RocksDB, brpc and braft, who built powerful and stable libraries to support important features of BaikalDB.
 * We give special thanks to TiDB team and Impala team. We referred their design schemes when designing and developing BaikalDB.
 * Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
