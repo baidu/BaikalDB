@@ -17,5 +17,5 @@ baidu/BaikalDB is licensed under the Apache License 2.0
 ## Acknowledgements
 * We are especially grateful to the teams of RocksDB, brpc and braft, who built powerful and stable libraries to support important features of BaikalDB.
 * We give special thanks to TiDB team and Impala team. We referred their design schemes when designing and developing BaikalDB.
-* Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
 * Thanks our friend team -- The Baidu TafDB team, who provide the space efficient snapshot scheme based on braft.
+* Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
