@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <functional>
 #include <execinfo.h>
 #include <type_traits>
 #include <unordered_map>
@@ -78,7 +79,7 @@ enum MysqlCommand : uint8_t {
     COM_CREATE_DB           = 0x05,   // mysql_create_db
     COM_DROP_DB             = 0x06,   // mysql_drop_db
     COM_REFRESH             = 0x07,   // mysql_refresh
-    COM_SHUTDOWN            = 0x08,   // 
+    COM_SHUTDOWN            = 0x08,   //
     COM_STATISTICS          = 0x09,   // mysql_stat
     COM_PROCESS_INFO        = 0x0a,   // mysql_list_processes
     COM_CONNECT             = 0x0b,   // (during authentication handshake)
@@ -88,7 +89,7 @@ enum MysqlCommand : uint8_t {
     COM_TIME                = 0x0f,   // (special value for slow logs?)
     COM_DELAYED_INSERT      = 0x10,
     COM_CHANGE_USER         = 0x11,   // mysql_change_user
-    COM_BINLOG_DUMP         = 0x12,   // 
+    COM_BINLOG_DUMP         = 0x12,   //
     COM_TABLE_DUMP          = 0x13,
     COM_CONNECT_OUT         = 0x14,
     COM_REGISTER_SLAVE      = 0x15,
@@ -184,7 +185,7 @@ public:
         bthread_cond_broadcast(&_cond);
         bthread_mutex_unlock(&_mutex);
     }
-    
+
     int wait(int cond = 0) {
         int ret = 0;
         bthread_mutex_lock(&_mutex);
@@ -235,14 +236,14 @@ public:
             ret = bthread_cond_timedwait(&_cond, &_mutex, &tm);
             if (ret != 0) {
                 DB_WARNING("wait timeout, ret:%d", ret);
-                break; 
+                break;
             }
         }
         ++_count;
         bthread_mutex_unlock(&_mutex);
         return ret;
     }
-    
+
 private:
     int _count;
     bthread_cond_t _cond;
@@ -259,8 +260,8 @@ public:
     void run(const std::function<void()>& call) {
         std::function<void()>* _call = new std::function<void()>;
         *_call = call;
-        bthread_start_background(&_tid, _attr, 
-                [](void*p) -> void* { 
+        bthread_start_background(&_tid, _attr,
+                [](void*p) -> void* {
                     auto call = static_cast<std::function<void()>*>(p);
                     (*call)();
                     delete call;
@@ -270,8 +271,8 @@ public:
     void run_urgent(const std::function<void()>& call) {
         std::function<void()>* _call = new std::function<void()>;
         *_call = call;
-        bthread_start_urgent(&_tid, _attr, 
-                [](void*p) -> void* { 
+        bthread_start_urgent(&_tid, _attr,
+                [](void*p) -> void* {
                     auto call = static_cast<std::function<void()>*>(p);
                     (*call)();
                     delete call;
@@ -291,10 +292,10 @@ private:
 };
 class ConcurrencyBthread {
 public:
-    explicit ConcurrencyBthread(int concurrency) : 
+    explicit ConcurrencyBthread(int concurrency) :
         _concurrency(concurrency) {
     }
-    ConcurrencyBthread(int concurrency, const bthread_attr_t* attr) : 
+    ConcurrencyBthread(int concurrency, const bthread_attr_t* attr) :
         _concurrency(concurrency),
         _attr(attr) {
     }
@@ -317,7 +318,7 @@ private:
 // RAII
 class ScopeGuard {
 public:
-    explicit ScopeGuard(std::function<void()> exit_func) : 
+    explicit ScopeGuard(std::function<void()> exit_func) :
         _exit_func(exit_func) {}
     ~ScopeGuard() {
         if (!_is_release) {
@@ -402,7 +403,7 @@ public:
        for (uint32_t i = 0; i < MAP_COUNT; i++) {
             BAIDU_SCOPED_LOCK(_mutex[i]);
             _map[i].clear();
-        } 
+        }
     }
 private:
     uint32_t map_idx(KEY key) {
@@ -456,9 +457,9 @@ extern int end_key_compare(const std::string& key1, const std::string& key2);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 extern int get_instance_from_bns(int* ret,
-                          const std::string& bns_name, 
+                          const std::string& bns_name,
                           std::vector<std::string>& instances,
-                          bool need_alive = true); 
+                          bool need_alive = true);
 
 inline int end_key_compare(const std::string& key1, const std::string& key2) {
     if (key1 == key2) {
