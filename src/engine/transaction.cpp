@@ -17,6 +17,7 @@
 #include "tuple_record.h"
 #include <boost/scoped_array.hpp>
 #include <gflags/gflags.h>
+#include "runtime_state.h"
 
 namespace baikaldb {
 DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raft log");
@@ -41,6 +42,15 @@ int Transaction::begin() {
     if (nullptr == (_txn = _db->begin_transaction(_write_opt, _txn_opt))) {
         DB_WARNING("start_trananction failed");
         return -1;
+    }
+    if (FLAGS_rocks_column_based) {
+        if (_resource == nullptr) {
+            DB_WARNING("no resource");
+            return -1;
+        }
+        for (auto& field_info : _resource->pri_info.fields) {
+           _pri_field_ids.insert(field_info.id);
+       }
     }
     last_active_time = butil::gettimeofday_us();
     return 0;
@@ -214,14 +224,22 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         return -1;
     }
     std::string value;
-    ret = record->encode(value);
-    if (ret != 0) {
-        DB_WARNING("encode record failed: reg=%ld, tab=%ld", region, pk_index.id);
-        return -1;
+    if (!FLAGS_rocks_column_based) {
+        ret = record->encode(value);
+        if (ret != 0) {
+            DB_WARNING("encode record failed: reg=%ld, tab=%ld", region, pk_index.id);
+            return -1;
+        }
+    } else {
+        value = "";
     }
     auto res = _txn->Put(_data_cf, key.data(), value);
     if (!res.ok()) {
         return -1;
+    }
+    // cstore, put non-pk columns values to db
+    if (FLAGS_rocks_column_based) {
+        return put_primary_columns(key, record);
     }
     return 0;
 }
@@ -373,11 +391,19 @@ int Transaction::get_update_primary(
         DB_DEBUG("lock ok and key exist");
         if (mode == GET_ONLY || mode == GET_LOCK) {
             //TimeCost cost;
-            TupleRecord tuple_record(_value);
-            // only decode the required field (field_ids stored in fields)
-            if (0 != tuple_record.decode_fields(fields, val)) {
-                DB_WARNING("decode value failed: %d", pk_index.id);
-                return -1;
+            if (!FLAGS_rocks_column_based) {
+                TupleRecord tuple_record(_value);
+                // only decode the required field (field_ids stored in fields)
+                if (0 != tuple_record.decode_fields(fields, val)) {
+                    DB_WARNING("decode value failed: %d", pk_index.id);
+                    return -1;
+                }
+            } else {
+                // cstore, get non-pk columns value from db.
+                if (0 != get_update_primary_columns(_key, val, fields)) {
+                    DB_WARNING("get_update_primary_columns failed: %d", pk_index.id);
+                    return -1;
+                }
             }
             // // 外部传来的record可能包含一些额外的信息需要保留
             // SmartRecord tmp_val = val->clone();
@@ -542,6 +568,10 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
         DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
         return -1;
     }
+    // for cstore only, remove_columns
+    if (FLAGS_rocks_column_based && index.type == pb::I_PRIMARY) {
+        return remove_columns(_key);
+    }
     return 0;
 }
 
@@ -650,4 +680,117 @@ void Transaction::rollback_to_point(int seq_id) {
     }
 }
 
+// for cstore only, only put column which HasField in record
+int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord record) {
+    if (_resource == nullptr) {
+        DB_WARNING("no resource");
+        return -1;
+    }
+    int32_t table_id = primary_key.extract_i64(sizeof(int64_t));
+    for (auto& field_info : _resource->table_info.fields) {
+        int32_t field_id = field_info.id;
+        // skip pk fields
+        if (_pri_field_ids.count(field_id) != 0) {
+            continue;
+        }
+        std::string value;
+        // skip null fields
+        if (record->encode_field(field_info, value) != 0) {
+            DB_DEBUG("no value for field=%d", field_id);
+            continue;
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        auto res = _txn->Put(_data_cf, key.data(), value);
+        DB_DEBUG("put key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
+                 record->get_value(record->get_field_by_tag(field_id)).get_string().c_str(),
+                 res.ToString().c_str());
+        if (!res.ok()) {
+            return -1;
+        }
+    }
+    return 0;
+}
+// get required and non-pk field value from cstore
+int Transaction::get_update_primary_columns(
+        const TableKey& primary_key,
+        SmartRecord val,
+        std::vector<int32_t>& fields) {
+    if (_resource == nullptr) {
+       DB_WARNING("no resource");
+       return -1;
+    }
+    if (fields.size() == 0) {
+        return 0;
+    }
+    std::set<int32_t> field_ids;
+    for (auto& field_id : fields) {
+        field_ids.insert(field_id);
+    }
+    int32_t table_id = primary_key.extract_i64(sizeof(int64_t));
+    for (auto& field_info : _resource->table_info.fields) {
+        int32_t field_id = field_info.id;
+        // skip pk fields
+        if (_pri_field_ids.count(field_id) != 0) {
+            continue;
+        }
+        // skip no required field
+        if (field_ids.count(field_id) == 0) {
+           continue;
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        std::string value;
+        rocksdb::Status res = _txn->Get(_read_opt, _data_cf, key.data(), &value);
+        if (res.ok()){
+        const FieldDescriptor* field = val->get_field_by_tag(field_id);
+            if (0 != val->decode_field(field_info, value)) {
+                DB_WARNING("decode value failed: %d", field_id);
+                return -1;
+            }
+            DB_DEBUG("get key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
+                     val->get_value(field).get_string().c_str(), res.ToString().c_str());
+        } else if (res.IsNotFound()) {
+            DB_DEBUG("cell not exist");
+        } else if (res.IsBusy()) {
+            DB_WARNING("get failed, busy: %s", res.ToString().c_str());
+            return -1;
+        } else if (res.IsTimedOut()) {
+            DB_WARNING("timedout: %s", res.ToString().c_str());
+            return -1;
+        } else {
+            DB_WARNING("unknown error: %d, %s", res.code(), res.ToString().c_str());
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// for cstore only, delete non-pk columns.
+int Transaction::remove_columns(const TableKey& primary_key) {
+    if (_resource == nullptr) {
+       DB_WARNING("no resource");
+       return -1;
+    }
+    int32_t table_id = primary_key.extract_i64(sizeof(int64_t));
+    for (auto& field_info : _resource->table_info.fields) {
+        int32_t field_id = field_info.id;
+        // skip pk fields
+        if (_pri_field_ids.count(field_id) != 0) {
+            continue;
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        auto res = _txn->Delete(_data_cf, key.data());
+        DB_DEBUG("del key=%s, res=%s", str_to_hex(key.data()).c_str(), res.ToString().c_str());
+        if (!res.ok()) {
+           DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
+           return -1;
+        }
+    }
+    return 0;
+}
 } //nanespace baikaldb

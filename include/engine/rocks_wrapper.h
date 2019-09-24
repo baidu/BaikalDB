@@ -27,6 +27,8 @@
 
 namespace baikaldb {
 
+DECLARE_bool(rocks_column_based);
+
 enum KVMode {
     KEY_ONLY,
     VAL_ONLY,

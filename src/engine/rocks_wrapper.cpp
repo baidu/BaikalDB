@@ -30,6 +30,8 @@ DEFINE_int32(rocks_block_size, 64 * 1024, "rocksdb block_cache size, default: 64
 DEFINE_bool(rocks_data_dynamic_level_bytes, true, 
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
 
+DEFINE_bool(rocks_column_based, true, "rocksdb stores a table in a sequence of columns.");
+
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::DATA_CF = "data";
 const std::string RocksWrapper::METAINFO_CF = "meta_info";

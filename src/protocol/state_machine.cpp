@@ -109,6 +109,7 @@ void StateMachine::run_machine(SmartSocket client,
         // If auth is ok, go on doing next status.
         if (go_on == 0) { break; }
     }
+    /* no break */
     case STATE_READ_AUTH: {
         if (shutdown) {
             client->state = STATE_ERROR;

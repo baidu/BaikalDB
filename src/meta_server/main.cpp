@@ -29,7 +29,7 @@
 namespace baikaldb {
 DECLARE_int32(meta_port);
 DECLARE_string(meta_server_bns);
-DECLARE_int32(meta_replica_number);
+DECLARE_int32(meta_replica_number); // @suppress("Unused variable declaration in file scope")
 }
 
 int main(int argc, char **argv) {

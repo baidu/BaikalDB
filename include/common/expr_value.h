@@ -294,6 +294,7 @@ struct ExprValue {
                 return;
             case pb::NULL_TYPE:
                 *this = value;
+                return;
             default:
                 return;
         }

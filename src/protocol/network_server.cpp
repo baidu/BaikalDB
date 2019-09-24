@@ -570,7 +570,7 @@ int NetworkServer::make_worker_process() {
 
             // Check socket event.
             // EPOLLHUP: closed by client. because of protocol of sending package is wrong.
-            if (event & EPOLLHUP || event & EPOLLERR) {
+            if (event & EPOLLHUP || event & EPOLLERR) { // @suppress("Suggested parenthesis around expression")
                 if (sock->socket_type == CLIENT_SOCKET) {
                     if ((event & EPOLLHUP) && sock->shutdown == false) {
                         DB_WARNING("CLIENT EPOLL event is EPOLLHUP, fd=%d event=0x%x",

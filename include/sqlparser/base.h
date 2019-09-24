@@ -85,6 +85,7 @@ enum NodeType {
 };
 
 struct Node {
+    virtual ~Node(){}
     NodeType node_type = NT_BASE;
     // children 可以用来作为子树，函数参数，列表等功能
     Vector<Node*> children;

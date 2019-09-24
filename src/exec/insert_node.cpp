@@ -17,7 +17,7 @@
 #include <unordered_set>
 
 namespace baikaldb {
-DECLARE_bool(disable_writebatch_index);
+DECLARE_bool(disable_writebatch_index); // @suppress("Unused variable declaration in file scope")
 int InsertNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);

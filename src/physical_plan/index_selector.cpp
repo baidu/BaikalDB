@@ -476,7 +476,7 @@ IndexSelector::RangeType IndexSelector::index_expr_type(ExprNode* expr, int32_t 
                 default:
                     return NONE;
             }
-        }
+        } // @suppress("No break at end of case")
         case pb::IS_NULL_PREDICATE:
             return EQ;
         case pb::IN_PREDICATE:

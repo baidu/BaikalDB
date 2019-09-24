@@ -33,8 +33,8 @@
 namespace baikaldb {
 DECLARE_int32(store_heart_beat_interval_us);
 DECLARE_int32(balance_periodicity);
-DECLARE_string(stable_uri);
-DECLARE_string(snapshot_uri);
+DECLARE_string(stable_uri); // @suppress("Unused variable declaration in file scope")
+DECLARE_string(snapshot_uri); // @suppress("Unused variable declaration in file scope")
 DEFINE_int32(reverse_merge_interval_us, 2 * 1000 * 1000,  "reverse_merge_interval(2 s)");
 //DEFINE_int32(update_status_interval_us, 2 * 1000 * 1000,  "update_status_interval(2 s)");
 DEFINE_int32(store_port, 8110, "Server port");

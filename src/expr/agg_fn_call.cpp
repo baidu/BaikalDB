@@ -153,6 +153,7 @@ int AggFnCall::open() {
                 DB_WARNING("_agg_type:%d , _children.size() == 0", _agg_type)
                 return -1;
             }
+            break;
         default:
             return 0;
     }

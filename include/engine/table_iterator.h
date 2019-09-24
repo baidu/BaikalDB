@@ -100,9 +100,15 @@ public:
     virtual ~Iterator() {
         delete _iter;
         _iter = nullptr;
+        for (auto& iter : _column_iters) {
+            delete iter;
+            iter = nullptr;
+        }
     }
 
     virtual int open(const IndexRange& range, std::vector<int32_t>& fields, SmartTransaction txn = nullptr);
+    virtual int open_columns(const rocksdb::ReadOptions& read_options,
+                             std::vector<int32_t>& fields, SmartTransaction txn = nullptr);
 
     virtual bool valid() const {
         return _valid;
@@ -153,6 +159,9 @@ protected:
     rocksdb::ColumnFamilyHandle* _data_cf;
     std::vector<int32_t>    _fields;
 
+    std::vector<rocksdb::Iterator*>     _column_iters; // cstore, own it, should delete when destruct
+    std::vector<FieldInfo*>             _non_pk_fields; // cstore, not own it, don't delete when destruct
+
     int _prefix_len = sizeof(int64_t) * 2;
 
     bool _fits_left_bound();
@@ -170,6 +179,10 @@ public:
     virtual ~TableIterator() {}
 
     int get_next(SmartRecord record);
+
+    // _iter is used to fit_bound and set pk field value,
+    // _column_iters is only used for set non-pk field value
+    int get_next_columns(SmartRecord record);
 
     void set_mode(KVMode mode) {
         _mode = mode;

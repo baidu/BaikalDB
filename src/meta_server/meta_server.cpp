@@ -459,7 +459,7 @@ static std::string url_decode(const std::string& str) {
     return strTemp;  
 }
 
-static std::string url_encode(const std::string& str) {
+static std::string url_encode(const std::string& str) { // @suppress("Unused static function")
     std::string strTemp = "";  
     size_t length = str.length();  
     for (size_t i = 0; i < length; i++) {  

@@ -30,6 +30,7 @@ DECLARE_bool(disable_wal);
 typedef std::map<int, pb::CachePlan> CachePlanMap;
 
 class TransactionPool;
+class RegionResource;
 class Transaction {
 public:
     Transaction(uint64_t txn_id, TransactionPool* pool) : 
@@ -68,8 +69,13 @@ public:
 
     // Key format: region_id(8 bytes) + table_id(8 bytes) + primary_key_fields;
     // Value format: protobuf of all non-primary key fields;
+    // Value is null if FLAGS_rocks_column_based is true;
     // First encode key with @record, and then erase the key fields from @record;
     int put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record);
+
+    // Key format: region_id(8 bytes) + table_id(4 bytes) + field_id(4 bytes) + primary_key_fields;
+    // Value format: non-primary key fields encode value;
+    int put_primary_columns(const TableKey& primary_key, SmartRecord record);
 
     // UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields, primary_key>
     // NON-UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields + primary_key, NULL>
@@ -96,6 +102,11 @@ public:
             std::vector<int32_t>& fields,
             bool            check_region);
 
+    int get_update_primary_columns(
+            const TableKey& primary_key,
+            SmartRecord val,
+            std::vector<int32_t>& fields);
+
     // TODO: update return status
     // Return -2 if key not found
     int get_update_secondary(
@@ -117,6 +128,7 @@ public:
 
     int remove(int64_t region, IndexInfo& index, const SmartRecord key);
     int remove(int64_t region, IndexInfo& index, const TableKey&   key);
+    int remove_columns(const TableKey& primary_key);
 
     rocksdb::Transaction* get_txn() {
         return _txn;
@@ -173,6 +185,9 @@ public:
     }
     void set_region_info(pb::RegionInfo* region_info) {
         _region_info = region_info;
+    }
+    void set_resource(std::shared_ptr<RegionResource> resource) {
+        _resource = resource;
     }
 
     // 
@@ -235,6 +250,9 @@ private:
     pb::RegionInfo*                 _region_info = nullptr;
     RocksWrapper*                   _db = nullptr;
     TransactionPool*                _pool = nullptr;
+    std::shared_ptr<RegionResource> _resource = nullptr; // for cstore
+    std::set<int32_t>               _pri_field_ids; // for cstore
+
 
     bthread_mutex_t                 _txn_mutex;
 };

@@ -147,6 +147,10 @@ public:
     int encode_primary_key(IndexInfo& index, MutTableKey& key, int field_cnt);
     int decode_primary_key(IndexInfo& index, const TableKey& key, int& pos);
 
+    // those two funcs are only used for encode/decode non-pk fields after primary, for cstore
+    int encode_field(const FieldInfo& field_info, std::string& out);
+    int decode_field(const FieldInfo& field_info, const std::string& in);
+
     const FieldDescriptor* get_field_by_idx(int32_t idx) {
         auto descriptor = _message->GetDescriptor();
         return descriptor->field(idx);

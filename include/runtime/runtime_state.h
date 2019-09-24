@@ -122,6 +122,7 @@ public:
         }
         _txn = SmartTransaction(new Transaction(0, _txn_pool));
         _txn->set_region_info(&(_resource->region_info));
+        _txn->set_resource(_resource);
         _txn->begin();
         return _txn;
     }

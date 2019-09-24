@@ -32,7 +32,7 @@
 #include "parser.h"
 
 namespace bthread {
-DECLARE_int32(bthread_concurrency); //bthread.cpp
+DECLARE_int32(bthread_concurrency); //bthread.cpp // @suppress("Unused variable declaration in file scope")
 }
 
 namespace baikaldb {

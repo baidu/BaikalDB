@@ -91,6 +91,7 @@ public:
             case pb::PLACE_HOLDER_LITERAL:
                 _value.type = pb::PLACE_HOLDER;
                 _value._u.int64_val = node.derive_node().int_val(); // place_holder id
+                break;
             default:
                 return -1;
         }

@@ -65,6 +65,7 @@ int RuntimeState::init(const pb::StoreReq& req,
     _txn = _txn_pool->get_txn(txn_id);
     if (_txn != nullptr) {
         _txn->set_region_info(&(_resource->region_info));
+        _txn->set_resource(_resource);
     }
     return 0;
 }
