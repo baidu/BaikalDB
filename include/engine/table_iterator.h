@@ -160,7 +160,8 @@ protected:
     std::vector<int32_t>    _fields;
 
     std::vector<rocksdb::Iterator*>     _column_iters; // cstore, own it, should delete when destruct
-    std::vector<FieldInfo*>             _non_pk_fields; // cstore, not own it, don't delete when destruct
+    std::vector<int32_t>                _non_pk_fields; // cstore
+    std::vector<pb::PrimitiveType>      _non_pk_types;  // cstore
 
     int _prefix_len = sizeof(int64_t) * 2;
 

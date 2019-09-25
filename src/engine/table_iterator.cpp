@@ -339,7 +339,8 @@ int Iterator::open_columns(const rocksdb::ReadOptions& read_options,
             DB_DEBUG("region:%ld, field:%d, SeekForPrev cost:%ld, valid=%d",
                      _region, field_id, cost.get_time(), iter->Valid());
         }
-        _non_pk_fields.push_back(&field_info);
+        _non_pk_fields.push_back(field_info.id);
+        _non_pk_types.push_back(field_info.type);
         _column_iters.push_back(iter);
     }
     return 0;
@@ -424,12 +425,14 @@ int TableIterator::get_next(SmartRecord record) {
             // only decode the required field (field_ids stored in fields)
             if (0 != tuple_record.decode_fields(_fields, record)) {
                 DB_WARNING("decode value failed: %ld", _index_info->id);
+                _valid = false;
                 return -1;
             }
         } else {
             // for cstore, column value may be null.
             if (0 != get_next_columns(record)) {
                 DB_WARNING("get non-pk cloumn value failed: %ld", _index_info->id);
+                _valid = false;
                 return -1;
             }
         }
@@ -460,9 +463,9 @@ int TableIterator::get_next_columns(SmartRecord record) {
     pk.remove_prefix(_prefix_len);
     int64_t table_id = _pri_info->id;
     for (size_t i = 0; i < _non_pk_fields.size(); i++) {
-        const FieldInfo& field_info = *_non_pk_fields[i];
+        int32_t field_id = _non_pk_fields[i];
+        pb::PrimitiveType field_type = _non_pk_types[i];
         rocksdb::Iterator* iter = _column_iters[i];
-        int32_t field_id = field_info.id;
         const FieldDescriptor* field = record->get_field_by_tag(field_id);
 
         // total valid is depend on pk's _iter, column iter's valid is not necessary
@@ -481,7 +484,7 @@ int TableIterator::get_next_columns(SmartRecord record) {
         // when column pure key is equal to pk's pure key, get column value to record.
         if (cmp == 0) {
             std::string value(iter->value().data_, iter->value().size_);
-            if (0 != record->decode_field(field_info, value)) {
+            if (0 != record->decode_field(field_id, field_type, value)) {
                 DB_WARNING("decode value failed: %d", field_id);
                 return -1;
             }

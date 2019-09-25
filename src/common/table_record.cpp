@@ -652,19 +652,19 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
 }
 
 // for cstore
-int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
+int TableRecord::encode_field(int32_t field_id, pb::PrimitiveType field_type, std::string& out) {
     const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
-    const FieldDescriptor* field = _descriptor->FindFieldByNumber(field_info.id);
+    const FieldDescriptor* field = _descriptor->FindFieldByNumber(field_id);
     if (field == nullptr) {
-        DB_WARNING("invalid field: %d", field_info.id);
+        DB_WARNING("invalid field: %d", field_id);
         return -1;
     }
     if (!_reflection->HasField(*_message, field)) {
         DB_WARNING("missing field: %d", field->number());
         return -2;
     }
-    switch (field_info.type) {
+    switch (field_type) {
         case pb::INT8: {
             int8_t val = _reflection->GetInt32(*_message, field);
             out.append((char*)&val, sizeof(int8_t));
@@ -718,23 +718,23 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
             out.append(val.data(), val.size());
         } break;
         default: {
-            DB_WARNING("un-supported field type: %d, %d", field->number(), field_info.type);
+            DB_WARNING("un-supported field type: %d, %d", field->number(), field_type);
             return -1;
         } break;
     }
     return 0;
 }
 // for cstore
-int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in) {
+int TableRecord::decode_field(int32_t field_id, pb::PrimitiveType field_type, const std::string& in) {
     const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
-    const FieldDescriptor* field = _descriptor->FindFieldByNumber(field_info.id);
+    const FieldDescriptor* field = _descriptor->FindFieldByNumber(field_id);
     if (field == nullptr) {
-        DB_WARNING("invalid field: %d", field_info.id);
+        DB_WARNING("invalid field: %d", field_id);
         return -1;
     }
     char* c = const_cast<char*>(in.data());
-    switch (field_info.type) {
+    switch (field_type) {
         case pb::INT8: {
             if (sizeof(int8_t) > in.size()) {
                 DB_WARNING("int8_t out of bound: %d %zu", field->number(), in.size());
@@ -820,7 +820,7 @@ int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in
             _reflection->SetString(_message, field, in);
         } break;
         default: {
-            DB_WARNING("un-supported field type: %d, %d", field->number(), field_info.type);
+            DB_WARNING("un-supported field type: %d, %d", field->number(), field_type);
             return -1;
         } break;
     }

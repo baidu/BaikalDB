@@ -695,7 +695,7 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
         }
         std::string value;
         // skip null fields
-        if (record->encode_field(field_info, value) != 0) {
+        if (record->encode_field(field_info.id, field_info.type, value) != 0) {
             DB_DEBUG("no value for field=%d", field_id);
             continue;
         }
@@ -746,7 +746,7 @@ int Transaction::get_update_primary_columns(
         rocksdb::Status res = _txn->Get(_read_opt, _data_cf, key.data(), &value);
         if (res.ok()){
         const FieldDescriptor* field = val->get_field_by_tag(field_id);
-            if (0 != val->decode_field(field_info, value)) {
+            if (0 != val->decode_field(field_info.id, field_info.type, value)) {
                 DB_WARNING("decode value failed: %d", field_id);
                 return -1;
             }
