@@ -186,11 +186,9 @@ public:
     void set_region_info(pb::RegionInfo* region_info) {
         _region_info = region_info;
     }
-    void set_resource(std::shared_ptr<RegionResource> resource) {
-        _resource = resource;
-    }
+    void set_resource(std::shared_ptr<RegionResource> resource);
 
-    // 
+    //
     static int get_full_primary_key(
             rocksdb::Slice  index_bytes, 
             rocksdb::Slice  pk_bytes,

@@ -408,7 +408,17 @@ bool Iterator::_fits_right_bound() {
     }
     return fits;
 }
-
+bool Iterator::_fits_prefix(rocksdb::Iterator* iter, int32_t field_id) {
+    MutTableKey  prefix_key;
+    prefix_key.append_i64(_region);
+    if (field_id) {
+        prefix_key.append_i32(_index_info->id);
+        prefix_key.append_i32(field_id);
+    } else {
+        prefix_key.append_i64(_index_info->id);
+    }
+    return iter->key().starts_with(prefix_key.data());
+}
 int TableIterator::get_next(SmartRecord record) {
     if (!_valid) {
         return -1;
@@ -431,7 +441,7 @@ int TableIterator::get_next(SmartRecord record) {
         } else {
             // for cstore, column value may be null.
             if (0 != get_next_columns(record)) {
-                DB_WARNING("get non-pk cloumn value failed: %ld", _index_info->id);
+                DB_WARNING("get non-pk cloumn value failed table_id: %ld", _index_info->id);
                 _valid = false;
                 return -1;
             }
@@ -458,26 +468,34 @@ int TableIterator::get_next(SmartRecord record) {
 }
 // for cstore only
 int TableIterator::get_next_columns(SmartRecord record) {
+    if (!_fits_prefix(_iter)) {
+        DB_DEBUG("not match prefix, field_id=%d, key=%s",
+                 0, _iter->key().ToString(true).c_str());
+        return -1;
+    }
     TableKey primary_key(_iter->key(), true);
     rocksdb::Slice pk = _iter->key();
     pk.remove_prefix(_prefix_len);
     int64_t table_id = _pri_info->id;
+
     for (size_t i = 0; i < _non_pk_fields.size(); i++) {
         int32_t field_id = _non_pk_fields[i];
         pb::PrimitiveType field_type = _non_pk_types[i];
         rocksdb::Iterator* iter = _column_iters[i];
         const FieldDescriptor* field = record->get_field_by_tag(field_id);
-
         // total valid is depend on pk's _iter, column iter's valid is not necessary
         if (!iter->Valid()) {
             DB_DEBUG("iter not valid, field_id=%d, pk=%s", field_id,pk.ToString(true).c_str());
             continue;
         }
+        if (!_fits_prefix(iter, field_id)) {
+            DB_DEBUG("not match prefix, field_id=%d, key=%s",
+                     field_id, iter->key().ToString(true).c_str());
+            continue;
+        }
         MutTableKey key(primary_key);
         key.replace_i32(table_id, sizeof(int64_t));
         key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
-
-
         rocksdb::Slice column_key = iter->key();
         column_key.remove_prefix(_prefix_len);
         auto cmp = pk.compare(column_key);

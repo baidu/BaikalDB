@@ -43,15 +43,6 @@ int Transaction::begin() {
         DB_WARNING("start_trananction failed");
         return -1;
     }
-    if (FLAGS_rocks_column_based) {
-        if (_resource == nullptr) {
-            DB_WARNING("no resource");
-            return -1;
-        }
-        for (auto& field_info : _resource->pri_info.fields) {
-           _pri_field_ids.insert(field_info.id);
-       }
-    }
     last_active_time = butil::gettimeofday_us();
     return 0;
 }
@@ -792,5 +783,18 @@ int Transaction::remove_columns(const TableKey& primary_key) {
         }
     }
     return 0;
+}
+void Transaction::set_resource(std::shared_ptr<RegionResource> resource) {
+    if (resource.get() == nullptr) {
+        DB_FATAL("error: no esource");
+        return;
+    }
+    if (FLAGS_rocks_column_based) {
+        _resource = resource;
+        _pri_field_ids.clear();
+        for (auto& field_info : _resource->pri_info.fields) {
+              _pri_field_ids.insert(field_info.id);
+        }
+    }
 }
 } //nanespace baikaldb
