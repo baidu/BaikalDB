@@ -1273,7 +1273,8 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
     }
     static std::map<pb::Engine, std::string> engine_map = {
         {pb::ROCKSDB, "Rocksdb"},
-        {pb::REDIS, "Redis"}
+        {pb::REDIS, "Redis"},
+        {pb::ROCKSDB_CSTORE, "Rocksdb_cstore"}
     };
     oss << ") ENGINE=" << engine_map[info.engine];
     oss << " DEFAULT CHARSET=" << charset_map[info.charset];
