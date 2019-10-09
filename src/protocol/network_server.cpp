@@ -175,7 +175,8 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
         auto req_info = request.add_schema_infos();
         req_info->set_table_id(info_pair.second.id);
         req_info->set_version(info_pair.second.version);
-        if (info_pair.second.engine != pb::ROCKSDB) {
+        if (info_pair.second.engine != pb::ROCKSDB &&
+                info_pair.second.engine != pb::ROCKSDB_CSTORE) {
             continue;
         }
         std::map<int64_t, pb::RegionInfo> region_infos;

@@ -679,8 +679,9 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
     pb::SchemaInfo simple_table_info = table_mem.schema_pb;
     simple_table_info.clear_init_store();
     simple_table_info.clear_split_keys();
-    for (auto i = 0; i < table_mem.schema_pb.partition_num() && 
-            table_mem.schema_pb.engine() == pb::ROCKSDB; ++i) {
+    for (auto i = 0; i < table_mem.schema_pb.partition_num() &&
+            (table_mem.schema_pb.engine() == pb::ROCKSDB ||
+            table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE); ++i) {
         do {
             pb::InitRegion init_region_request;
             pb::RegionInfo* region_info = init_region_request.mutable_region_info();
@@ -745,7 +746,8 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
     }
     
     //leader发送请求
-    if (done && table_mem.schema_pb.engine() == pb::ROCKSDB) {
+    if (done && (table_mem.schema_pb.engine() == pb::ROCKSDB
+            || table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE)) {
         std::string namespace_name = table_mem.schema_pb.namespace_name();
         std::string database = table_mem.schema_pb.database();
         std::string table_name = table_mem.schema_pb.table_name();

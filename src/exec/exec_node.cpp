@@ -114,6 +114,9 @@ bool ExecNode::need_seperate() {
             if (static_cast<ScanNode*>(this)->engine() == pb::ROCKSDB) {
                 return true;
             }
+            if (static_cast<ScanNode*>(this)->engine() == pb::ROCKSDB_CSTORE) {
+                return true;
+            }
             break;
         default:
             break;

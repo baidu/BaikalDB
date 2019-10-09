@@ -112,6 +112,7 @@ inline void glog_error_writelog(const char* fmt, ...) {
 
 #define DB_TRACE(_fmt_, args...) \
     do {\
+        if (!FLAGS_enable_self_trace) break; \
         ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);

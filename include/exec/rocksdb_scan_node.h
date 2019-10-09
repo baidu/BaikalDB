@@ -28,6 +28,8 @@ class RocksdbScanNode : public ScanNode {
 public:
     RocksdbScanNode() {
     }
+    RocksdbScanNode(pb::Engine engine):ScanNode(engine) {
+    }
     virtual ~RocksdbScanNode() {
         for (auto expr : _index_conjuncts) {
             ExprNode::destroy_tree(expr);
