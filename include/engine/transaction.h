@@ -224,6 +224,8 @@ private:
             bool            parse_key,
             bool            check_region);
 
+    bool is_cstore();
+
     // seq_id should be updated after each query execution regardless of success or failure 
     int                             _seq_id = 0;
     uint64_t                        _txn_id = 0;

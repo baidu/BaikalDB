@@ -64,6 +64,7 @@ enum SchemaType {
 enum Engine {
     ROCKSDB = 1;
     REDIS = 2;
+    ROCKSDB_CSTORE= 3;
 };
 
 message SlotDescriptor {

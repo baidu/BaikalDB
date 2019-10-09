@@ -215,7 +215,7 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         return -1;
     }
     std::string value;
-    if (!FLAGS_rocks_column_based) {
+    if (!is_cstore()) {
         ret = record->encode(value);
         if (ret != 0) {
             DB_WARNING("encode record failed: reg=%ld, tab=%ld", region, pk_index.id);
@@ -229,7 +229,7 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         return -1;
     }
     // cstore, put non-pk columns values to db
-    if (FLAGS_rocks_column_based) {
+    if (is_cstore()) {
         return put_primary_columns(key, record);
     }
     return 0;
@@ -382,7 +382,7 @@ int Transaction::get_update_primary(
         DB_DEBUG("lock ok and key exist");
         if (mode == GET_ONLY || mode == GET_LOCK) {
             //TimeCost cost;
-            if (!FLAGS_rocks_column_based) {
+            if (!is_cstore()) {
                 TupleRecord tuple_record(_value);
                 // only decode the required field (field_ids stored in fields)
                 if (0 != tuple_record.decode_fields(fields, val)) {
@@ -560,7 +560,7 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
         return -1;
     }
     // for cstore only, remove_columns
-    if (FLAGS_rocks_column_based && index.type == pb::I_PRIMARY) {
+    if (is_cstore() && index.type == pb::I_PRIMARY) {
         return remove_columns(_key);
     }
     return 0;
@@ -789,12 +789,19 @@ void Transaction::set_resource(std::shared_ptr<RegionResource> resource) {
         DB_FATAL("error: no esource");
         return;
     }
-    if (FLAGS_rocks_column_based) {
-        _resource = resource;
+    _resource = resource;
+    if (is_cstore()) {
         _pri_field_ids.clear();
         for (auto& field_info : _resource->pri_info.fields) {
               _pri_field_ids.insert(field_info.id);
         }
     }
 }
-} //nanespace baikaldb
+bool Transaction::is_cstore() {
+    if (_resource.get() == nullptr) {
+        DB_FATAL("error: no esource");
+        return false;
+    }
+    return _resource->table_info.engine == pb::ROCKSDB_CSTORE;
+}
+} // nanespace baikaldb

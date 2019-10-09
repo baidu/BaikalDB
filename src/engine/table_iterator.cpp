@@ -281,7 +281,7 @@ int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartT
     }
     _valid = _iter->Valid();
     // for cstore, open iters for non-pk fields
-    if (FLAGS_rocks_column_based && _idx_type == pb::I_PRIMARY && _valid) {
+    if (is_cstore() && _idx_type == pb::I_PRIMARY && _valid) {
         if (0 != open_columns(read_options, fields, txn)) {
             DB_FATAL("create column iterators failed: %ld", index_id);
             return -1;
@@ -419,6 +419,13 @@ bool Iterator::_fits_prefix(rocksdb::Iterator* iter, int32_t field_id) {
     }
     return iter->key().starts_with(prefix_key.data());
 }
+bool Iterator::is_cstore() {
+    if (nullptr == _schema) {
+        DB_WARNING("get schema factory failed");
+        return false;
+     }
+    return _schema->get_table_engine(_pri_info->id) == pb::ROCKSDB_CSTORE;
+}
 int TableIterator::get_next(SmartRecord record) {
     if (!_valid) {
         return -1;
@@ -430,7 +437,7 @@ int TableIterator::get_next(SmartRecord record) {
 
     //create a record and parse key and value
     if (VAL_ONLY == _mode || KEY_VAL == _mode) {
-        if (!FLAGS_rocks_column_based) {
+        if (!is_cstore()) {
             TupleRecord tuple_record(_iter->value());
             // only decode the required field (field_ids stored in fields)
             if (0 != tuple_record.decode_fields(_fields, record)) {
@@ -578,4 +585,4 @@ int IndexIterator::get_next(SmartRecord index) {
     }
     return -1;
 }
-}
+} // nanespace baikaldb

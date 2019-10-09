@@ -172,6 +172,7 @@ protected:
     bool _fits_region();
 
     bool _fits_prefix(rocksdb::Iterator* iter, int32_t field_id = 0); // cstore
+    bool is_cstore();
 };
 
 class TableIterator : public Iterator {
