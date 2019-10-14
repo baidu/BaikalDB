@@ -96,9 +96,9 @@ public:
     int append_entry(const braft::LogEntry* entry) override;
 
     // append entries to log, return append success number
-    int append_entries(const std::vector<braft::LogEntry*>& entries, 
+    int append_entries(const std::vector<braft::LogEntry*>& entries 
 #ifdef BAIDU_INTERNAL
-            braft::IOMetric* metric
+            , braft::IOMetric* metric
 #endif
             ) override;
 

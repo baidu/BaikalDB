@@ -281,9 +281,9 @@ int MyRaftLogStorage::append_entry(const braft::LogEntry* entry) {
     return append_entries(entries, nullptr) == 1 ? 0 : -1;
 }
 
-int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entries, 
+int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entries
 #ifdef BAIDU_INTERNAL
-        braft::IOMetric* metric
+        , braft::IOMetric* metric
 #endif
         ) {
     TimeCost time_cost;
