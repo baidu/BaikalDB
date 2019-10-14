@@ -65,7 +65,14 @@ namespace baikaldb {
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 */
+#define SQL_TRACE(_fmt_, args...) \
+    do {\
+        com_writelog("MY_TRACE", "[%s:%d][%s][%llu]" _fmt_, \
+                strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
+    } while (0);
+
 #else 
+
 const int MAX_LOG_LEN = 2048;
 inline void glog_info_writelog(const char* fmt, ...) {
     char buf[MAX_LOG_LEN];
@@ -130,6 +137,13 @@ inline void glog_error_writelog(const char* fmt, ...) {
         ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
+
+#define SQL_TRACE(_fmt_, args...) \
+    do {\
+        ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
+                strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
+    } while (0);
+
 #endif
 
 #define DB_DEBUG_CLIENT(sock, _fmt_, args...) \

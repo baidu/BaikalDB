@@ -15,6 +15,7 @@
 #include "network_server.h"
 #include "physical_planner.h"
 #include "transaction_manager_node.h"
+#include "log.h"
 #include <gflags/gflags.h>
 
 namespace bthread {
@@ -181,11 +182,6 @@ void NetworkServer::report_heart_beat() {
     }
 }
 
-#define SQL_TRACE(_fmt_, args...) \
-    do {\
-        com_writelog("MY_TRACE", "[%s:%d][%s][%llu]" _fmt_, \
-                strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0);
 void NetworkServer::print_agg_sql() {
     while (!_shutdown) {
         bthread_usleep(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL);
