@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,12 +22,13 @@
 
 namespace baikaldb {
 class FetcherNode : public ExecNode {
+public:
 enum ErrorType {
     E_OK = 0,
     E_WARNING,
-    E_FATAL
+    E_FATAL,
+    E_BIG_SQL
 };
-public:
     FetcherNode() {
         bthread_mutex_init(&_region_lock, NULL);
     }
@@ -52,32 +53,26 @@ public:
             expr->close();
         }
     }
-    void set_region_infos(std::map<int64_t, pb::RegionInfo> region_infos) {
-        _region_infos.swap(region_infos);
-    }
-
-    std::map<int64_t, pb::RegionInfo>& region_infos() {
-        return _region_infos;
-    }
     void choose_opt_instance(pb::RegionInfo& info, std::string& addr);
 
-private:
-    int push_cmd_to_cache(RuntimeState* state);
-    
+protected:
     std::map<int64_t, std::shared_ptr<RowBatch>> _region_batch;
-    std::map<int64_t, pb::RegionInfo> _region_infos;
     std::map<std::string, int64_t> _start_key_sort;
+    bthread_mutex_t _region_lock;
+    ErrorType _error = E_OK;
     pb::OpType _op_type;
+
+private:
+    int push_cache(RuntimeState* state);
     //允许fetcher回来后排序
     std::vector<ExprNode*> _slot_order_exprs;
     std::vector<bool> _is_asc;
     std::vector<bool> _is_null_first;
     std::shared_ptr<MemRowCompare> _mem_row_compare;
     std::shared_ptr<Sorter> _sorter;
-    ErrorType _error = E_OK;
     std::atomic<int> _affected_rows;
     // 因为split会导致多region出来,加锁保护公共资源
-    bthread_mutex_t _region_lock;
+    int64_t _row_cnt = 0;
 };
 }
 

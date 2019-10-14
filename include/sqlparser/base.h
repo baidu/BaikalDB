@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -81,11 +81,19 @@ enum NodeType {
     NT_VAR_ASSIGN,
     NT_NEW_PREPARE,
     NT_EXEC_PREPARE,
-    NT_DEALLOC_PREPARE
+    NT_DEALLOC_PREPARE,
+    NT_KILL
 };
 
 struct Node {
     NodeType node_type = NT_BASE;
+    bool print_sample = false;
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < children.size(); i++) {
+            children[i]->set_print_sample(print_sample_);
+        }
+    }
     // children 可以用来作为子树，函数参数，列表等功能
     Vector<Node*> children;
     virtual void print() const {
@@ -97,7 +105,7 @@ struct Node {
     //   os.str();
     virtual void to_stream(std::ostream& os) const {}
 
-    std::string to_string() const {
+    virtual std::string to_string() const {
         std::ostringstream os;
         to_stream(os);
         return os.str();

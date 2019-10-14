@@ -11,7 +11,7 @@ curl -d '{
         "capacity" : 107374182400,
         "used_size" : 0,
         "resource_tag" :"",
-        "physical_room" :"bjyz",
+        "physical_room" :"default",
         "status": "FAULTY"
     }
 }' http://$1/MetaService/meta_manager

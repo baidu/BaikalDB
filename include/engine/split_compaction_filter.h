@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -60,21 +60,23 @@ public:
             return false;
         }
         int64_t index_id = table_key.extract_i64(sizeof(int64_t));
-        // double buffer has 100ms interval
-        IndexInfo* index_info = _factory->get_index_info_ptr(index_id);
+        auto index_info = _factory->get_index_info_ptr(index_id);
         if (index_info == nullptr) {
             return false;
         }
-        IndexInfo* pk_info = _factory->get_index_info_ptr(index_info->pk);
+        auto pk_info = _factory->get_index_info_ptr(index_info->pk);
         if (pk_info == nullptr) {
             return false;
         }
 
         //int ret1 = 0;
         int ret2 = 0;
-        if (index_info->type == pb::I_PRIMARY) {
+        if (index_info->type == pb::I_PRIMARY || index_info->is_global) {
             ret2 = end_key.empty()? 1 : end_key.compare(0, std::string::npos, 
                     key.data() + prefix_len, key.size() - prefix_len);
+           // DB_WARNING("split compaction filter, region_id: %ld, index_id: %ld, end_key: %s, key: %s, ret: %d",
+           //     region_id, index_id, rocksdb::Slice(end_key).ToString(true).c_str(), 
+           //     key.ToString(true).c_str(), ret2);
             return (ret2 <= 0);
         } else if (index_info->type == pb::I_UNIQ || index_info->type == pb::I_KEY) {
             rocksdb::Slice key_slice(key);

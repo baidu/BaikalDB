@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ int DeleteNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _table_id =  node.derive_node().delete_node().table_id();
+    _global_index_id = _table_id;
     for (auto& slot : node.derive_node().delete_node().primary_slots()) {
         _primary_slots.push_back(slot);
     }
@@ -68,6 +69,7 @@ int DeleteNode::open(RuntimeState* state) {
         i++;
     }
     SmartRecord record = _factory->new_record(*_table_info);
+    int64_t tmp_num_increase_rows = 0;
     do {
         RowBatch batch;
         ret = _children[0]->get_next(state, &batch, &eos);
@@ -75,6 +77,15 @@ int DeleteNode::open(RuntimeState* state) {
             DB_WARNING_STATE(state, "children:get_next fail:%d", ret);
             return ret;
         }
+
+        // 不在事务模式下，采用小事务提交防止内存暴涨
+        // 最后一个batch和原txn放在一起，这样对小事务可以和原来保持一致
+        if (state->txn_id == 0 && !eos) {
+            _txn = state->create_batch_txn();
+        } else {
+            _txn = state->txn();
+        }
+
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             MemRow* row = batch.get_row().get();
             //SmartRecord record = record_template->clone(false);
@@ -91,9 +102,19 @@ int DeleteNode::open(RuntimeState* state) {
             }
             num_affected_rows += ret;
         }
+        _txn->batch_num_increase_rows = _num_increase_rows - tmp_num_increase_rows;
+
+        if (state->txn_id == 0 && !eos) {
+            if (state->is_separate) {
+                //batch单独走raft,raft on_apply中commit
+                state->raft_func(state, _txn);
+            } else {
+                _txn->commit();
+            }
+        }
+        
+        tmp_num_increase_rows = _num_increase_rows;
     } while (!eos);
-    // auto_rollback.release();
-    // txn->commit();
     state->set_num_increase_rows(_num_increase_rows);
     return num_affected_rows;
 }

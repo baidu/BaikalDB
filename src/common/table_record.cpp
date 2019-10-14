@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -301,7 +301,7 @@ int TableRecord::encode_field(const Reflection* _reflection,
         const FieldDescriptor* field, 
         const FieldInfo& field_info,
         MutTableKey& key, 
-        bool clear) {
+        bool clear, bool like_prefix) {
     switch (field_info.type) {
         case pb::INT8: {
             int32_t val = _reflection->GetInt32(*_message, field);
@@ -354,7 +354,11 @@ int TableRecord::encode_field(const Reflection* _reflection,
         case pb::STRING: {
             //TODO no string pk-field is supported
             std::string val = _reflection->GetString(*_message, field);;
-            key.append_string(val);
+            if (like_prefix) {
+                key.append_string_prefix(val);   
+            } else {
+                key.append_string(val);
+            }
         } break;
         default: {
             DB_WARNING("un-supported field type: %d, %d", field->number(), field_info.type);
@@ -486,7 +490,7 @@ int TableRecord::decode_field(const Reflection* _reflection,
     return 0;
 }
 
-int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, bool clear) {
+int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, bool clear, bool like_prefx) {
     uint8_t null_flag = 0;
     int pos = (int)key.size();
     if (index.type == pb::I_NONE) {
@@ -505,6 +509,7 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
     const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
     for (uint32_t idx = 0; idx < col_cnt; ++idx) {
+        bool last_field_like_prefx = like_prefx && idx == (col_cnt - 1);
         auto& info = index.fields[idx];
         const FieldDescriptor* field = _descriptor->FindFieldByNumber(info.id);
         if (field == nullptr) {
@@ -517,19 +522,19 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
                 DB_WARNING("missing pk field: %d", field->number());
                 return -2;
             }
-            res = encode_field(_reflection, field, info, key, clear);
+            res = encode_field(_reflection, field, info, key, clear, last_field_like_prefx);
         } else if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
             if (!_reflection->HasField(*_message, field)) {
                 // this field is null
                 //DB_DEBUG("missing index field: %u, set null-flag", idx);
                 if (!info.can_null) {
                     //DB_WARNING("encode not_null field");
-                    res = encode_field(_reflection, field, info, key, clear);
+                    res = encode_field(_reflection, field, info, key, clear, last_field_like_prefx);
                 } else {
                     null_flag |= (0x01 << (7 - idx));
                 }
             } else {
-                res = encode_field(_reflection, field, info, key, clear);
+                res = encode_field(_reflection, field, info, key, clear, last_field_like_prefx);
             }
         } else {
             DB_WARNING("invalid index type: %u", index.type);
@@ -571,7 +576,7 @@ int TableRecord::encode_primary_key(IndexInfo& index, MutTableKey& key, int fiel
             DB_WARNING("missing pk field: %d", field->number());
             return -2;
         }
-        res = encode_field(_reflection, field, info, key, false);
+        res = encode_field(_reflection, field, info, key, false, false);
         if (0 != res) {
             DB_WARNING("encode index field error: %u, %d", idx, res);
             return -1;

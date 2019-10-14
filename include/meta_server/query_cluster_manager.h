@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ public:
     void get_flatten_instance(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_diff_region_ids(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_region_ids(const pb::QueryRequest* request, pb::QueryResponse* response);
+    void process_console_heartbeat(const pb::ConsoleHeartBeatRequest* request,
+            pb::ConsoleHeartBeatResponse* response);
 private:
     void mem_instance_to_pb(const Instance& instance_mem, pb::InstanceInfo* instance_pb);
     void get_region_ids_per_instance(const std::string& instance, 

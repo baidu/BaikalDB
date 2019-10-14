@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,9 @@ public:
     int32_t tuple_id() {
         return _tuple_id;
     }
+    void set_router_index_id(int64_t router_index_id) {
+        _router_index_id = router_index_id;
+    }
     pb::Engine engine() {
         return _engine;
     }
@@ -44,6 +47,9 @@ public:
                     return true;
                 }
                 if (range.right_field_cnt() > 0) {
+                    return true;
+                }
+                if (pos_index.has_sort_index()) {
                     return true;
                 }
             }
@@ -70,10 +76,12 @@ public:
         return 0;
     }
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
+    
 protected:
     pb::Engine _engine = pb::ROCKSDB;
     int32_t _tuple_id = 0;
     int64_t _table_id = -1;
+    int64_t _router_index_id = -1;
     pb::TupleDescriptor* _tuple_desc = nullptr;
 };
 }

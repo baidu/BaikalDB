@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -47,6 +47,7 @@ int main(int argc, char **argv) {
     DB_WARNING("log file load success");
     baikaldb::register_myraft_extension();
     int ret = 0;
+    baikaldb::Tokenizer::get_instance()->init();
 #ifdef BAIDU_INTERNAL
     //init wordrank_client
     std::unique_ptr<drpc::NLPCClient> wordrank_client_ptr(new drpc::NLPCClient());
@@ -69,29 +70,28 @@ int main(int argc, char **argv) {
     }
 #endif
     /* 
-    std::ifstream extra_fs("test_file");
-    std::string word((std::istreambuf_iterator<char>(extra_fs)),
-            std::istreambuf_iterator<char>());
-    baikaldb::TimeCost tt1;
-    for (int i = 0; i < 1000000; i++) {
-        word+="1";
-        nlpc::ver_1_0_0::wordrank_outputPtr s_output = 
-            sofa::create<nlpc::ver_1_0_0::wordrank_output>();
-        baikaldb::word_seg(*baikaldb::wordrank_client, word, s_output);
-        if (i%1000==0) {
-            DB_WARNING("wordrank:%d",i);
+    auto call = []() {
+        std::ifstream extra_fs("test_file");
+        std::string word((std::istreambuf_iterator<char>(extra_fs)),
+                std::istreambuf_iterator<char>());
+        baikaldb::TimeCost tt1;
+        for (int i = 0; i < 1000000000; i++) {
+            //word+="1";
+            std::string word2 = word + "1";
+            std::map<std::string, float> term_map;
+            baikaldb::Tokenizer::get_instance()->wordrank(word2, term_map);
+            if (i%1000==0) {
+                DB_WARNING("wordrank:%d",i);
+            }
         }
+        DB_WARNING("wordrank:%ld", tt1.get_time());
+    };
+    baikaldb::ConcurrencyBthread cb(100);
+    for (int i = 0; i < 100; i++) {
+        cb.run(call);
     }
-    DB_WARNING("wordrank:%ld", tt1.get_time());
-    tt1.reset();
-    for (int i = 0; i < 1000; i++) {
-    nlpc::ver_1_0_0::wordseg_outputPtr s_output2 =
-        sofa::create<nlpc::ver_1_0_0::wordseg_output>();
-    baikaldb::word_seg2(*baikaldb::wordseg_client, word, s_output2);
-    }
-    DB_WARNING("wordseg:%ld", tt1.get_time());
+    cb.join();
     return 0;
-    
     */
     // init singleton
     baikaldb::FunctionManager::instance()->init();

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 #include "closure.h"
 
 namespace baikaldb {
+DECLARE_int64(print_time_us);
 void DMLClosure::Run() {
     int64_t region_id = 0;
     butil::EndPoint leader;
@@ -48,16 +49,18 @@ void DMLClosure::Run() {
     if (region != nullptr && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
         region->update_average_cost(cost.get_time());
     }
-    DB_NOTICE("dml log_id:%lu, type:%d, raft_total_cost:%ld, region_id: %ld, "
-                "qps:%ld, average_cost:%ld, num_prepared:%d remote_side:%s",
-                log_id, 
-                op_type, 
-                cost.get_time(), 
-                region_id, 
-                (region != nullptr)?region->get_qps():0, 
-                (region != nullptr)?region->get_average_cost():0, 
-                (region != nullptr)?region->num_prepared():0, 
-                remote_side.c_str());
+    if (cost.get_time() > FLAGS_print_time_us) {
+        DB_NOTICE("dml log_id:%lu, type:%s, raft_total_cost:%ld, region_id: %ld, "
+                    "qps:%ld, average_cost:%ld, num_prepared:%d remote_side:%s",
+                    log_id, 
+                    pb::OpType_Name(op_type).c_str(), 
+                    cost.get_time(), 
+                    region_id, 
+                    (region != nullptr)?region->get_qps():0, 
+                    (region != nullptr)?region->get_average_cost():0, 
+                    (region != nullptr)?region->num_prepared():0, 
+                    remote_side.c_str());
+    }
     delete this;
 }
 
@@ -85,6 +88,30 @@ void AddPeerClosure::Run() {
         done->Run();
     }
     cond.decrease_broadcast();
+    delete this;
+}
+
+void MergeClosure::Run() {
+    if (is_dst_region) {
+        if (!status().ok()) {
+            if (response) {
+                response->set_errcode(pb::NOT_LEADER);
+                response->set_leader(butil::endpoint2str(region->get_leader()).c_str());
+                response->set_errmsg("not leader");
+            }
+        }
+        //目标region需要返回给源region
+        response->add_regions()->CopyFrom(*region->get_region_info());
+        if (done) {
+            done->Run();
+        }
+        region->reset_region_status();
+    } else {
+        ScopeMergeStatus merge_status(region);
+        if (!status().ok()) {
+            //目标region需要回退version和key TODO
+        }
+    }
     delete this;
 }
 
@@ -128,14 +155,33 @@ void SplitClosure::Run() {
 
 void ConvertToSyncClosure::Run() {
     if (!status().ok()) { 
-        DB_FATAL("asyn step exec fail, status:%s, time_cost:%ld", 
-                 status().error_cstr(), 
-                 cost.get_time());
+        DB_FATAL("region_id: %ld, asyn step exec fail, status:%s, time_cost:%ld", 
+                region_id,
+                status().error_cstr(), 
+                cost.get_time());
     } else {
-        DB_WARNING("asyn step exec success, time_cost: %ld", cost.get_time());
+        DB_WARNING("region_id: %ld, asyn step exec success, time_cost: %ld", 
+                region_id, cost.get_time());
     }
     sync_sign.decrease_signal();
     delete this;
 }
 
+void Dml1pcClosure::Run() {
+    if (!status().ok()) {
+        DB_FATAL("dml 1pc exec fail, status:%s, time_cost:%ld", 
+                 status().error_cstr(), 
+                 cost.get_time());
+        if (txn != nullptr) {
+            txn->rollback();
+            state->is_fail = true;
+            state->raft_error_msg = status().error_cstr();
+        }
+    } 
+    if (done) {
+        done->Run();
+    }
+    txn_cond.decrease_signal();
+    delete this;
+}
 } // end of namespace

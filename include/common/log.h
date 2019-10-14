@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,13 +57,15 @@ namespace baikaldb {
         com_writelog("FATAL", "[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
-
+#define SELF_TRACE(_fmt_, args...)
+/* 
 #define SELF_TRACE(_fmt_, args...) \
     do {\
         com_writelog("MY_TRACE", "[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
-#else
+*/
+#else 
 const int MAX_LOG_LEN = 2048;
 inline void glog_info_writelog(const char* fmt, ...) {
     char buf[MAX_LOG_LEN];

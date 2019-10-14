@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 #include "scalar_fn_call.h"
 #include "slot_ref.h"
+#include "parser.h"
 
 namespace baikaldb {
 int ScalarFnCall::init(const pb::ExprNode& node) {
@@ -39,7 +40,7 @@ int ScalarFnCall::type_inferer() {
     }
     std::vector<pb::PrimitiveType> types;
     for (auto c : _children) {
-        if (c->col_type() == pb::INVALID_TYPE) {
+        if (c->col_type() == pb::INVALID_TYPE && !c->is_row_expr()) {
             DB_WARNING("_children is pb::INVALID_TYPE, node:%d", c->node_type());
             return -1;
         }
@@ -52,16 +53,16 @@ int ScalarFnCall::type_inferer() {
     return 0;
 }
 
-// 111 > aaa => aaa < 111
+// 111 > aaa => aaa < 111 
+// (11,22) < (a,b) => (a,b) > (11,22)
 void ScalarFnCall::children_swap() {
     if (_children.size() != 2) {
         return;
     }
-    if (_children[0]->is_constant() && _children[1]->is_slot_ref()) {
+    if (_children[0]->is_constant() && !_children[1]->is_constant() &&
+        (_children[1]->is_slot_ref() || _children[1]->is_row_expr())) {
         FunctionManager* fn_manager = FunctionManager::instance();
-        std::string swap_op = fn_manager->get_swap_op(_fn.name());
-        if (!swap_op.empty()) {
-            _fn.set_name(swap_op);
+        if (fn_manager->swap_op(_fn)) {
             std::swap(_children[0], _children[1]);
         }
     }
@@ -79,6 +80,26 @@ int ScalarFnCall::open() {
                 _children.size(), _fn.arg_types_size());
         return -1;
     }
+    if (children_size() > 0 && children(0)->is_row_expr()) {
+        if (_fn.fn_op() != parser::FT_EQ &&
+            _fn.fn_op() != parser::FT_NE &&
+            _fn.fn_op() != parser::FT_GE &&
+            _fn.fn_op() != parser::FT_GT &&
+            _fn.fn_op() != parser::FT_LE &&
+            _fn.fn_op() != parser::FT_LT) {
+            DB_FATAL("Operand should contain 1 column(s)");
+            return -1;
+        }
+        _is_row_expr = true;
+        size_t col_size = children(0)->children_size();
+        for (size_t i = 1; i < children_size(); i++) {
+            if (!children(i)->is_row_expr() ||
+                children(i)->children_size() != col_size) {
+                DB_FATAL("Operand should contain %lu column(s)", col_size);
+                return -1;
+            }
+        }
+    }
     /*
     if (_fn.return_type() != _col_type) {
         DB_WARNING("_fn.return_type:%d != _col_type:%d", _fn.return_type(), _col_type);
@@ -93,12 +114,32 @@ int ScalarFnCall::open() {
     _fn_call = fn_manager->get_object(_fn.name());
     if (node_type() == pb::FUNCTION_CALL && _fn_call == NULL) {
         DB_WARNING("fn call is null, name:%s", _fn.name().c_str());
-        return -1;
     }
     return 0;
 }
 
 ExprValue ScalarFnCall::get_value(MemRow* row) {
+    if (_is_row_expr) {
+        switch (_fn.fn_op()) {
+            case parser::FT_EQ:
+                return multi_eq_value(row);
+            case parser::FT_NE:
+                return multi_ne_value(row);
+            case parser::FT_GE:
+                return multi_ge_value(row);
+            case parser::FT_GT:
+                return multi_gt_value(row);
+            case parser::FT_LE:
+                return multi_le_value(row);
+            case parser::FT_LT:
+                return multi_lt_value(row);
+            default:
+                return ExprValue::Null();
+        }
+    }
+    if (_fn_call == NULL) {
+        return ExprValue::Null();
+    }
     std::vector<ExprValue> args;
     for (auto c : _children) {
         args.push_back(c->get_value(row));

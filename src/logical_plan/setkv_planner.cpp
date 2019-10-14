@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -66,6 +66,10 @@ int SetKVPlanner::plan() {
             if (key == "autocommit" && !global_var) {
                 //_ctx->succ_after_logical_plan = true;
                 return set_autocommit(var_assign->value);
+            } else if (key == "sql_mode") { 
+                // ignore sql_mode: may be support in the future
+                _ctx->succ_after_logical_plan = true;
+                return 0;                
             } else {
                 DB_WARNING("unrecoginized command: %s", _ctx->sql.c_str());
                 _ctx->succ_after_logical_plan = true;
@@ -118,7 +122,7 @@ int SetKVPlanner::set_autocommit_0() {
         _ctx->succ_after_logical_plan = true;
         return 0;
     }
-    _ctx->runtime_state.set_autocommit(false);
+    _ctx->runtime_state.set_single_sql_autocommit(false);
     return 0;
 }
 
@@ -130,7 +134,7 @@ int SetKVPlanner::set_autocommit_1() {
         return 0;
     }
     plan_commit_txn();
-    _ctx->runtime_state.set_autocommit(false); // autocommit status before set autocommit=1
+    _ctx->runtime_state.set_single_sql_autocommit(false); // autocommit status before set autocommit=1
     return 0;
 }
 
@@ -167,7 +171,7 @@ int SetKVPlanner::set_user_variable(const std::string& key, parser::ExprNode* ex
         pb::ExprNode pb_node;
         var_expr->transfer_pb(&pb_node);
         ExprNode::destroy_tree(var_expr);
-        client->user_vars[key.substr(1)] = pb_node;
+        client->user_vars[key] = pb_node;
     } else {
         DB_WARNING("user variable should be constant expression");
         return -1;

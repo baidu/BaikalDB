@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 #include "scalar_fn_call.h"
 #include "agg_fn_call.h"
 #include "slot_ref.h"
+#include "row_expr.h"
 
 namespace baikaldb {
 // only pre_calc children nodes
@@ -25,7 +26,7 @@ void ExprNode::const_pre_calc() {
     if (_children.size() == 0 || _node_type == pb::AGG_EXPR) {
         return;
     }
-    //只有标量函数才会走到这
+    //标量函数RowExpr会走到这
     _is_constant = true;
     for (auto& c : _children) {
         c->const_pre_calc();
@@ -35,13 +36,16 @@ void ExprNode::const_pre_calc() {
     }
     //const表达式等着父节点来替换
     //root是const表达式则外部替换
-    if (_is_constant) {
+    if (!is_row_expr() && is_constant()) {
         return;
     }
     int ret = 0;
     //把constant表达式计算成literal
     for (auto& c : _children) {
-        if (!c->_is_constant) {
+        if (c->is_row_expr()) {
+            continue;
+        }
+        if (!c->is_constant()) {
             continue;
         }
         if (c->is_literal()) {
@@ -102,6 +106,25 @@ ExprNode* ExprNode::get_parent(ExprNode* child) {
     return nullptr;
 }
 
+void ExprNode::get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids) {
+    if (_node_type == pb::SLOT_REF) {
+        tuple_ids.insert(static_cast<SlotRef*>(this)->tuple_id());
+    }
+    for (auto& child : _children) {
+        child->get_all_tuple_ids(tuple_ids);
+    }
+}
+
+void ExprNode::get_all_slot_ids(std::unordered_set<int32_t>& slot_ids) {
+    if (_node_type == pb::SLOT_REF) {
+        slot_ids.insert(static_cast<SlotRef*>(this)->slot_id());
+    }
+    for (auto& child : _children) {
+        child->get_all_slot_ids(slot_ids);
+    }
+}
+
+
 void ExprNode::transfer_pb(pb::ExprNode* pb_node) {
     pb_node->set_node_type(_node_type);
     pb_node->set_col_type(_col_type);
@@ -133,24 +156,6 @@ int ExprNode::create_tree(const pb::Expr& expr, ExprNode** root) {
         return -1;
     }
     return 0;
-}
-
-void ExprNode::get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids) {
-    if (_node_type == pb::SLOT_REF) {
-        tuple_ids.insert(static_cast<SlotRef*>(this)->tuple_id());
-    }
-    for (auto& child : _children) {
-        child->get_all_tuple_ids(tuple_ids);
-    }
-}
-
-void ExprNode::get_all_slot_ids(std::unordered_set<int32_t>& slot_ids) {
-    if (_node_type == pb::SLOT_REF) {
-        slot_ids.insert(static_cast<SlotRef*>(this)->slot_id());
-    }
-    for (auto& child : _children) {
-        child->get_all_slot_ids(slot_ids);
-    }
 }
 
 int ExprNode::create_tree(const pb::Expr& expr, int* idx, ExprNode* parent, ExprNode** root) {
@@ -201,6 +206,7 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
         case pb::INT_LITERAL:
         case pb::DOUBLE_LITERAL:
         case pb::STRING_LITERAL:
+        case pb::HLL_LITERAL:
         case pb::DATE_LITERAL:
         case pb::DATETIME_LITERAL:
         case pb::TIME_LITERAL:
@@ -247,6 +253,10 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
             return 0;
         case pb::AGG_EXPR:
             *expr_node = new AggFnCall;
+            (*expr_node)->init(node);
+            return 0;
+        case pb::ROW_EXPR:
+            *expr_node = new RowExpr;
             (*expr_node)->init(node);
             return 0;
         default:

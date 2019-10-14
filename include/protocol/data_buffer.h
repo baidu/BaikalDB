@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,13 +28,14 @@ public:
     ~DataBuffer();
 
     bool byte_array_append_size(int len, int is_pow);
+    bool byte_array_insert_len(const uint8_t *data, int start_pos, int len);
     bool byte_array_append_len(const uint8_t *data, int len);
     bool append_text_value(const ExprValue& value);
     bool append_binary_value(const ExprValue& value, uint8_t type, uint8_t* null_map, int field_idx, int null_offset);
     bool byte_array_append_length_coded_binary(uint64_t num);
     bool pack_length_coded_string(const std::string& str, bool is_null);
     bool network_queue_send_append(const uint8_t* data, int len, 
-                                    uint8_t packet_id, int append_data_later);
+                                    int packet_id, int append_data_later);
     void byte_array_clear();
 
 public:

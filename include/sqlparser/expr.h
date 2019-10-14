@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -67,6 +67,7 @@ enum FuncType {
     FT_IS_UNKNOWN,
     FT_IN,
     FT_LIKE,
+    FT_EXACT_LIKE,
     FT_BETWEEN,
     /* use in on dup key update */
     FT_VALUES
@@ -173,6 +174,7 @@ struct LiteralExpr : public ExprNode {
         std::cout << std::endl;
     }
     virtual void to_stream(std::ostream& os) const override;
+    virtual std::string to_string() const override;
 
     static LiteralExpr* make_int(const char* str, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
@@ -212,7 +214,7 @@ struct LiteralExpr : public ExprNode {
     static LiteralExpr* make_false(butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_BOOL;
-        lit->_u.bool_val = true;
+        lit->_u.bool_val = false;
         return lit;
     }
     static LiteralExpr* make_null(butil::Arena& arena) {

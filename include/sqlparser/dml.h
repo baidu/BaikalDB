@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -121,6 +121,18 @@ struct JoinNode : public Node {
     JoinNode() {
         node_type = NT_JOIN;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (left != nullptr) {
+            left->set_print_sample(print_sample_);
+        }
+        if (right != nullptr) {
+            right->set_print_sample(print_sample_);
+        }
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         static const char* natural_str[] = {"", " NATURE"};
         static const char* straight_str[] = {"", " STRAIGHT"};
@@ -151,6 +163,12 @@ struct ByItem : public Node {
     ByItem() {
         node_type = NT_BY_ITEM;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         static const char* desc_str[] = {" ASC", " DESC"};
         os << expr << desc_str[is_desc];
@@ -161,6 +179,12 @@ struct GroupByClause : public Node {
     Vector<ByItem*> items;
     GroupByClause() {
         node_type = NT_GROUP_BY;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < items.size(); i++) {
+            items[i]->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         for (int i = 0; i < items.size(); i++) {
@@ -176,6 +200,12 @@ struct OrderByClause : public Node {
     Vector<ByItem*> items;
     OrderByClause() {
         node_type = NT_ORDER_BY;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < items.size(); i++) {
+            items[i]->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         for (int i = 0; i < items.size(); i++) {
@@ -194,6 +224,15 @@ struct LimitClause : public Node {
        node_type = NT_LIMIT;
        offset = nullptr;
        count = nullptr;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (offset != nullptr) {
+            offset->set_print_sample(print_sample_);
+        }
+        if (count != nullptr) {
+            count->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         os << " " << offset << ", " << count;
@@ -227,6 +266,12 @@ struct SelectField : public Node {
         node_type = NT_SELECT_FEILD;
         as_name = nullptr;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         os << " " << expr << wild_card;
         if (!as_name.empty()) {
@@ -240,6 +285,12 @@ struct Assignment : public Node {
     ExprNode* expr = nullptr;
     Assignment() {
         node_type = NT_ASSIGNMENT;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         os << name << " = " << expr;
@@ -256,6 +307,15 @@ struct InsertStmt : public DmlNode {
     Vector<Assignment*> on_duplicate;
     InsertStmt() {
         node_type = NT_INSERT;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < lists.size(); i++) {
+            lists[i]->set_print_sample(print_sample_);
+        }
+        for (int i = 0; i < on_duplicate.size(); i++) {
+            on_duplicate[i]->set_print_sample(print_sample_);
+        }
     }
     static InsertStmt* New(butil::Arena& arena) {
         InsertStmt* insert = new(arena.allocate(sizeof(InsertStmt)))InsertStmt();
@@ -285,11 +345,15 @@ struct InsertStmt : public DmlNode {
             os << ")";
         }
         os << " VALUES";
-        for (int i = 0; i < lists.size(); ++i) {
-            os << " ";
-            lists[i]->to_stream(os);
-            if (i != lists.size() - 1) {
-                os << ",";
+        if (print_sample) {
+            os << " (?) ";
+        } else {
+            for (int i = 0; i < lists.size(); ++i) {
+                os << " ";
+                lists[i]->to_stream(os);
+                if (i != lists.size() - 1) {
+                    os << ",";
+                }
             }
         }
         if (on_duplicate.size() != 0) {
@@ -327,6 +391,21 @@ struct DeleteStmt : public DmlNode {
     DeleteStmt() {
         node_type = NT_DELETE;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (from_table != nullptr) {
+            from_table->set_print_sample(print_sample_);
+        }
+        if (where != nullptr) {
+            where->set_print_sample(print_sample_);
+        }
+        if (order != nullptr) {
+            order->set_print_sample(print_sample_);
+        }
+        if (limit != nullptr) {
+            limit->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         static const char* ignore_str[] = {"", " IGNORE"};
         static const char* quick_str[] = {"", " QUICK"};
@@ -342,7 +421,7 @@ struct DeleteStmt : public DmlNode {
                 }
             }
         }
-        os << " FROM";
+        os << " FROM ";
         from_table->to_stream(os);
         if (where != nullptr) {
             os << " WHERE ";
@@ -369,6 +448,24 @@ struct UpdateStmt : public DmlNode {
     LimitClause* limit = nullptr;
     UpdateStmt() {
         node_type = NT_UPDATE;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (table_refs != nullptr) {
+            table_refs->set_print_sample(print_sample_);
+        }
+        if (where != nullptr) {
+            where->set_print_sample(print_sample_);
+        }
+        for (int i = 0; i < set_list.size(); i++) {
+            set_list[i]->set_print_sample(print_sample_);
+        }
+        if (order != nullptr) {
+            order->set_print_sample(print_sample_);
+        }
+        if (limit != nullptr) {
+            limit->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         static const char* ignore_str[] = {"", " IGNORE"};
@@ -428,18 +525,46 @@ struct SelectStmt : public DmlNode {
     SelectStmt() {
         node_type = NT_SELECT;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < fields.size(); i++) {
+            fields[i]->set_print_sample(print_sample_);
+        }
+        if (table_refs != nullptr) {
+            table_refs->set_print_sample(print_sample_);
+        }
+        if (where != nullptr) {
+            where->set_print_sample(print_sample_);
+        }
+        if (group != nullptr) {
+            group->set_print_sample(print_sample_);
+        }
+        if (having != nullptr) {
+            having->set_print_sample(print_sample_);
+        }
+        if (order != nullptr) {
+            order->set_print_sample(print_sample_);
+        }
+        if (limit != nullptr) {
+            limit->set_print_sample(print_sample_);
+        }
+    }
+
     virtual void to_stream(std::ostream& os) const override {
         static const char* for_lock_str[] = {"", " FOR UPDATE", " IN SHARED MODE"};
         os << "SELECT";
         select_opt->to_stream(os);
         for (int i = 0; i < fields.size(); ++i) {
+            if (i != 0) {
+                os << ",";
+            }
             os << fields[i];
         }
         if (table_refs != nullptr) {
             os << " FROM" << table_refs;
         }
         if (where != nullptr) {
-            os << " WHERE" << where;
+            os << " WHERE " << where;
         }
         if (group != nullptr) {
             os << " GROUP BY" << group;

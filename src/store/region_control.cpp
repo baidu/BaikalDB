@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -91,7 +91,7 @@ void RegionControl::compact_data_in_queue(int64_t region_id) {
 }
 
 int RegionControl::remove_meta(int64_t drop_region_id) {
-    return MetaWriter::get_instance()->clear_meta_info(drop_region_id);
+    return MetaWriter::get_instance()->clear_all_meta_info(drop_region_id);
 }
 
 int RegionControl::remove_log_entry(int64_t drop_region_id) {
@@ -148,6 +148,13 @@ int RegionControl::remove_snapshot_path(int64_t drop_region_id) {
     DB_WARNING("drop snapshot directory, region_id: %ld", drop_region_id);
     return 0;
 }
+int RegionControl::clear_all_infos_for_region(int64_t drop_region_id) {
+    remove_data(drop_region_id);
+    remove_meta(drop_region_id);
+    remove_snapshot_path(drop_region_id);
+    remove_log_entry(drop_region_id);
+    return 0;
+}
 int RegionControl::ingest_data_sst(const std::string& data_sst_file, int64_t region_id) {
     auto rocksdb = RocksWrapper::get_instance();
     rocksdb::IngestExternalFileOptions ifo;
@@ -165,6 +172,7 @@ int RegionControl::ingest_meta_sst(const std::string& meta_sst_file, int64_t reg
 }
 
 void RegionControl::sync_do_snapshot() {
+    DB_WARNING("region_id: %ld sync_do_snapshot start", _region_id);
     std::string address = Store::get_instance()->address();
     butil::EndPoint leader = _region->get_leader();
     if (leader.ip != butil::IP_ANY) {
@@ -178,9 +186,10 @@ void RegionControl::sync_do_snapshot() {
     }
     BthreadCond sync_sign;
     sync_sign.increase();
-    ConvertToSyncClosure* done = new ConvertToSyncClosure(sync_sign);
+    ConvertToSyncClosure* done = new ConvertToSyncClosure(sync_sign, _region_id);
     _region->_node.snapshot(done);
     sync_sign.wait(); 
+    DB_WARNING("region_id: %ld sync_do_snapshot success", _region_id);
 }
 
 void RegionControl::raft_control(google::protobuf::RpcController* controller,
@@ -215,7 +224,7 @@ void RegionControl::raft_control(google::protobuf::RpcController* controller,
     }
 }
 
-void RegionControl::add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue) {
+void RegionControl::add_peer(const pb::AddPeer& add_peer, SmartRegion region, ExecutionQueue& queue) {
     //这是按照在metaServer里add_peer的构造规则解析出来的newew——instance,
     //是解析new_instance的偷懒版本
     std::string new_instance = add_peer.new_peers(add_peer.new_peers_size() - 1);
@@ -225,29 +234,32 @@ void RegionControl::add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue)
         DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
         return;
     }
-    DB_WARNING("region status to doning becase of add peer of heartbeat response, region_id: %ld",
-                _region_id);
+    DB_WARNING("region status to doing becase of add peer of heartbeat response, region_id: %ld new_instance: %s",
+                _region_id, new_instance.c_str());
     if (legal_for_add_peer(add_peer, NULL) != 0) {
         reset_region_status();
         return;
     }
-    auto init_and_add_peer = [add_peer, new_instance, this]() {
-        if (_region->_shutdown) {
-            reset_region_status();
+    auto init_and_add_peer = [add_peer, new_instance, region]() {
+        RegionControl& control = region->get_region_control();
+        if (region->_shutdown) {
+            DB_WARNING("region_id:%ld has REMOVE", region->get_region_id());
+            control.reset_region_status();
             return;
         }
+        DB_WARNING("start init_region, region_id: %ld", region->get_region_id())
         pb::InitRegion init_request;
-        construct_init_region_request(init_request);
-        if (init_region_to_store(new_instance, init_request, NULL) != 0) {
-            reset_region_status();
+        control.construct_init_region_request(init_request);
+        if (control.init_region_to_store(new_instance, init_request, NULL) != 0) {
+            control.reset_region_status();
             return;
         }
-        if (legal_for_add_peer(add_peer, NULL) != 0) {
-            reset_region_status();
-            _region->start_thread_to_remove_region(_region_id, new_instance);
+        if (control.legal_for_add_peer(add_peer, NULL) != 0) {
+            control.reset_region_status();
+            region->start_thread_to_remove_region(region->get_region_id(), new_instance);
             return;
         }
-        node_add_peer(add_peer, new_instance, NULL, NULL); 
+        control.node_add_peer(add_peer, new_instance, NULL, NULL);
     };
     queue.run(init_and_add_peer);
 }
@@ -279,7 +291,7 @@ void RegionControl::add_peer(const pb::AddPeer* request,
         response->set_errmsg("new region fail");
         return;
     }
-    DB_WARNING("region status to doning becase of add peer of heartbeat response, region_id: %ld",
+    DB_WARNING("region status to doing becase of add peer of request, region_id: %ld",
                 _region_id);
     if (legal_for_add_peer(*request, response) != 0) {
         reset_region_status();
@@ -330,6 +342,7 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
 int RegionControl::init_region_to_store(const std::string instance_address,
                          const pb::InitRegion& init_region_request,
                          pb::StoreRes* store_response) {
+    TimeCost cost;
     pb::StoreRes response;
     RpcSender::send_init_region_method(instance_address, init_region_request, response);
     if (response.errcode() == pb::CONNECT_FAIL) {
@@ -366,8 +379,8 @@ int RegionControl::init_region_to_store(const std::string instance_address,
         }
         return -1;
     }
-    DB_WARNING("send init region to store:%s success, region_id: %ld",
-                instance_address.c_str(), _region_id);
+    DB_WARNING("send init region to store:%s success, region_id: %ld, cost: %ld",
+                instance_address.c_str(), _region_id, cost.get_time());
     return 0;
 }
 
@@ -386,9 +399,18 @@ void RegionControl::construct_init_region_request(pb::InitRegion& init_request) 
 }
 
 int RegionControl::legal_for_add_peer(const pb::AddPeer& add_peer, pb::StoreRes* response) {
+    DB_WARNING("start legal_for_add_peer, region_id: %ld", _region_id)
     //判断收到请求的合法性，包括该peer是否是leader，list_peer值跟add_peer的old_peer是否相等，该peer的状态是否是IDEL
     if (!_region->is_leader()) {
         DB_WARNING("node is not leader when add_peer, region_id: %ld", _region_id);
+        if (response != NULL) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("not leader");
+        }
+        return -1;
+    }
+    if (_region->_shutdown) {
+        DB_WARNING("node is shutdown when add_peer, region_id: %ld", _region_id);
         if (response != NULL) {
             response->set_errcode(pb::NOT_LEADER);
             response->set_errmsg("not leader");

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,6 +49,8 @@ struct IndexRange {
     bool left_open = false;
     bool right_open = false;
 
+    bool like_prefix = false;
+
     IndexRange() {}
 
     IndexRange(TableRecord* _left, 
@@ -59,7 +61,8 @@ struct IndexRange {
         int left_cnt,
         int right_cnt,
         bool _l_open,
-        bool _r_open) :
+        bool _r_open,
+        bool _like_prefix) :
         left(_left),
         right(_right),
         index_info(_index_info),
@@ -68,8 +71,9 @@ struct IndexRange {
         left_field_cnt(left_cnt),
         right_field_cnt(right_cnt),
         left_open(_l_open),
-        right_open(_r_open) {}
-
+        right_open(_r_open),
+        like_prefix(_like_prefix) {}
+/*
     IndexRange(TableKey* _left, 
         TableKey* _right,
         IndexInfo*  _index_info,
@@ -88,6 +92,7 @@ struct IndexRange {
         right_field_cnt(right_cnt),
         left_open(_l_open),
         right_open(_r_open) {}
+        */
 };
 
 class Iterator {
@@ -102,7 +107,8 @@ public:
         _iter = nullptr;
     }
 
-    virtual int open(const IndexRange& range, std::vector<int32_t>& fields, SmartTransaction txn = nullptr);
+    virtual int open(const IndexRange& range, std::map<int32_t, FieldInfo*>& fields, 
+            SmartTransaction txn = nullptr);
 
     virtual bool valid() const {
         return _valid;
@@ -111,7 +117,7 @@ public:
     static TableIterator* scan_primary(
         SmartTransaction        txn,
         const IndexRange&       range, 
-        std::vector<int32_t>&   fields, 
+        std::map<int32_t, FieldInfo*>&   fields, 
         bool                    check_region, 
         bool                    forward);
 
@@ -126,6 +132,8 @@ protected:
     MutTableKey             _end;
     MutTableKey             _lower_bound;
     MutTableKey             _upper_bound;
+    rocksdb::Slice          _lower_bound_slice;
+    rocksdb::Slice          _upper_bound_slice;
 
     bool                    _left_open;
     bool                    _right_open;
@@ -151,7 +159,7 @@ protected:
     bool                    _need_check_region;
     bool                    _forward;
     rocksdb::ColumnFamilyHandle* _data_cf;
-    std::vector<int32_t>    _fields;
+    std::map<int32_t, FieldInfo*>    _fields;
 
     int _prefix_len = sizeof(int64_t) * 2;
 

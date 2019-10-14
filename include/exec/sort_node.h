@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -46,6 +46,10 @@ public:
         for (auto expr : _order_exprs) {
             ExprNode::create_pb_expr(sort_node->add_order_exprs(), expr);
         }
+        sort_node->clear_slot_order_exprs();
+        for (auto expr : _slot_order_exprs) {
+            ExprNode::create_pb_expr(sort_node->add_slot_order_exprs(), expr);
+        }
     }
     
     void transfer_fetcher_pb(pb::FetcherNode* pb_fetcher) {
@@ -59,7 +63,7 @@ public:
             pb_fetcher->add_is_null_first(is_null_first);
         }
     }
-
+    
     std::vector<ExprNode*>& slot_order_exprs() {
         return _slot_order_exprs;
     }

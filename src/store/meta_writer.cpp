@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,15 +19,22 @@
 
 namespace baikaldb {
 const rocksdb::WriteOptions MetaWriter::write_options;
-//key: META_IDENTIFY + region_id + identify + other: value
 const std::string MetaWriter::META_IDENTIFY(1, 0x01);
+//key: META_IDENTIFY + region_id + identify: value
 const std::string MetaWriter::APPLIED_INDEX_INDENTIFY(1, 0x01);
 const std::string MetaWriter::NUM_TABLE_LINE_INDENTIFY(1, 0x02);
 //key: META_IDENTIFY + region_id + identify + txn_id : log_index
 const std::string MetaWriter::PREPARED_TXN_LOG_INDEX_IDENTIFY(1, 0x03);
 //key: META_IDENTIFY + region_id + identify + txn_id + log_indx: transaction_pb
 const std::string MetaWriter::PREPARED_TXN_PB_IDENTIYF(1, 0x04);
+//key: META_IDENTIFY + region_id + identify:
 const std::string MetaWriter::REGION_INFO_IDENTIFY(1, 0x05);
+//key: META_IDENIFY + region_id + identify + txn_id : num_table_lines + applied_index
+const std::string MetaWriter::PRE_COMMIT_IDENTIFY(1, 0x06);
+//key: META_IDENIFY + region_id + identify
+const std::string MetaWriter::DOING_SNAPSHOT_IDENTIFY(1, 0x07);
+//key: META_IDENIFY + region_id + identify
+const std::string MetaWriter::REGION_DDL_INFO_IDENTIFY(1, 0x08);
 
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
@@ -73,6 +80,24 @@ int MetaWriter::update_region_info(const pb::RegionInfo& region_info) {
     return 0; 
 }
 
+int MetaWriter::update_region_ddl_info(const pb::StoreRegionDdlInfo& region_ddl_info) {
+    int64_t region_id = region_ddl_info.region_id();
+    std::string string_region_ddl_info;
+    if (!region_ddl_info.SerializeToString(&string_region_ddl_info)) {
+        DB_FATAL("region_ddl_info: %s serialize to string fail, region_id: %ld",
+                region_ddl_info.ShortDebugString().c_str(), region_id);
+    }
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf, 
+                rocksdb::Slice(region_ddl_info_key(region_id)), rocksdb::Slice(string_region_ddl_info));
+    if (!status.ok()) {
+        DB_FATAL("write update_region_ddl_info fail, err_msg: %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1;
+    } else {
+        DB_NOTICE("write region info success, region_ddl_info: %s", region_ddl_info.ShortDebugString().c_str());
+    }
+    return 0; 
+}
 int MetaWriter::update_num_table_lines(int64_t region_id, int64_t num_table_lines) {
     auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
                     rocksdb::Slice(num_table_lines_key(region_id)), 
@@ -101,7 +126,30 @@ int MetaWriter::update_apply_index(int64_t region_id, int64_t applied_index) {
     }
     return 0; 
 }
-
+int MetaWriter::write_pre_commit(int64_t region_id, uint64_t txn_id, int64_t num_table_lines, int64_t applied_index) {
+    MutTableKey line_value;
+    line_value.append_i64(num_table_lines).append_i64(applied_index);
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(pre_commit_key(region_id, txn_id)),
+                rocksdb::Slice(line_value.data()));
+    if (!status.ok()) {
+        DB_FATAL("write pre commit fail, err_msg: %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
+int MetaWriter::write_doing_snapshot(int64_t region_id) {
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+            rocksdb::Slice(doing_snapshot_key(region_id)),
+            rocksdb::Slice(""));
+    if (!status.ok()) {
+        DB_FATAL("write doing snapshot fail, err_msg: %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
 int MetaWriter::write_batch(rocksdb::WriteBatch* updates, int64_t region_id) {
     auto status = _rocksdb->write(MetaWriter::write_options, updates);
     if (!status.ok()) {
@@ -112,6 +160,21 @@ int MetaWriter::write_batch(rocksdb::WriteBatch* updates, int64_t region_id) {
     return 0; 
 }
 
+int MetaWriter::write_meta_after_commit(int64_t region_id, int64_t num_table_lines, 
+            int64_t applied_index, uint64_t txn_id) {
+     rocksdb::WriteBatch batch;
+     batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(applied_index));
+     batch.Put(_meta_cf, num_table_lines_key(region_id), encode_num_table_lines(num_table_lines));
+     batch.Delete(_meta_cf, pre_commit_key(region_id, txn_id));
+     batch.Delete(_meta_cf, transcation_log_index_key(region_id, txn_id));
+     return write_batch(&batch, region_id);
+}
+int MetaWriter::write_meta_before_prepared(int64_t region_id, int64_t log_index, uint64_t txn_id) {
+    rocksdb::WriteBatch batch;
+    batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(log_index));
+    batch.Put(_meta_cf, transcation_log_index_key(region_id, txn_id), encode_transcation_log_index_value(log_index));
+    return write_batch(&batch, region_id);
+}
 int MetaWriter::ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id) {
     rocksdb::IngestExternalFileOptions ifo;
     auto res = _rocksdb->ingest_external_file(_meta_cf, {meta_sst_file}, ifo);
@@ -127,9 +190,10 @@ int MetaWriter::clear_meta_info(int64_t drop_region_id) {
     TimeCost cost;
     rocksdb::WriteBatch batch;
     rocksdb::WriteOptions options;
-    batch.Delete(_meta_cf, region_info_key(drop_region_id));
+    //batch.Delete(_meta_cf, region_info_key(drop_region_id));
     batch.Delete(_meta_cf, applied_index_key(drop_region_id));
     batch.Delete(_meta_cf, num_table_lines_key(drop_region_id));
+    //batch.Delete(_meta_cf, doing_snapshot_key(drop_region_id));
     auto status = _rocksdb->write(options, &batch);
     if (!status.ok()) {
         DB_FATAL("drop region fail, error: code=%d, msg=%s, region_id: %ld", 
@@ -144,6 +208,44 @@ int MetaWriter::clear_meta_info(int64_t drop_region_id) {
     ret = clear_txn_log_index(drop_region_id);
     if (ret < 0) {
         DB_FATAL("clear txn log index fail, region_id: %ld", drop_region_id);
+        return ret;
+    }
+    ret = clear_pre_commit_infos(drop_region_id);
+    if (ret < 0) {
+        DB_FATAL("clear pre commit infos fail, region_id: %ld", drop_region_id);
+        return ret;
+    }
+    DB_WARNING("clear meta info success, cost: %ld, region_id: %ld", cost.get_time(), drop_region_id);
+    return 0;
+}
+
+int MetaWriter::clear_all_meta_info(int64_t drop_region_id) {
+    TimeCost cost;
+    rocksdb::WriteBatch batch;
+    rocksdb::WriteOptions options;
+    batch.Delete(_meta_cf, region_info_key(drop_region_id));
+    batch.Delete(_meta_cf, applied_index_key(drop_region_id));
+    batch.Delete(_meta_cf, num_table_lines_key(drop_region_id));
+    batch.Delete(_meta_cf, doing_snapshot_key(drop_region_id));
+    auto status = _rocksdb->write(options, &batch);
+    if (!status.ok()) {
+        DB_FATAL("drop region fail, error: code=%d, msg=%s, region_id: %ld", 
+        status.code(), status.ToString().c_str(), drop_region_id);
+        return -1;
+    }
+    auto ret = clear_txn_infos(drop_region_id);
+    if (ret < 0) {
+        DB_FATAL("clear_txn_infos fail, region_id: %ld", drop_region_id);
+        return ret;
+    }
+    ret = clear_txn_log_index(drop_region_id);
+    if (ret < 0) {
+        DB_FATAL("clear txn log index fail, region_id: %ld", drop_region_id);
+        return ret;
+    }
+    ret = clear_pre_commit_infos(drop_region_id);
+    if (ret < 0) {
+        DB_FATAL("clear pre commit infos fail, region_id: %ld", drop_region_id);
         return ret;
     }
     DB_WARNING("clear meta info success, cost: %ld, region_id: %ld", cost.get_time(), drop_region_id);
@@ -175,6 +277,44 @@ int MetaWriter::clear_txn_infos(int64_t region_id) {
     return 0;
 }
 
+int MetaWriter::clear_pre_commit_infos(int64_t region_id) {
+    std::string start_key = pre_commit_key(region_id, 0);
+    std::string end_key = pre_commit_key(region_id, UINT64_MAX);
+    auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
+            start_key, end_key);
+    if (!status.ok()) {
+        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
+            status.code(), status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
+
+int MetaWriter::clear_doing_snapshot(int64_t region_id) {
+    rocksdb::WriteBatch batch;
+    rocksdb::WriteOptions options;
+    batch.Delete(_meta_cf, doing_snapshot_key(region_id));
+    auto status = _rocksdb->write(options, &batch);
+    if (!status.ok()) {
+        DB_FATAL("drop region fail, error: code=%d, msg=%s, region_id: %ld", 
+        status.code(), status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
+
+int MetaWriter::clear_region_info(int64_t region_id) {
+    rocksdb::WriteBatch batch;
+    rocksdb::WriteOptions options;
+    batch.Delete(_meta_cf, region_info_key(region_id));
+    auto status = _rocksdb->write(options, &batch);
+    if (!status.ok()) {
+        DB_FATAL("drop region fail, error: code=%d, msg=%s, region_id: %ld", 
+        status.code(), status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
 int MetaWriter::parse_region_infos(std::vector<pb::RegionInfo>& region_infos) {
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
@@ -206,15 +346,15 @@ int MetaWriter::parse_txn_infos(int64_t region_id, std::map<int64_t, std::string
     std::string prefix = transcation_pb_key_prefix(region_id) ;
     for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
         if (!iter->key().starts_with(prefix)) {
-            //DB_WARNING("read wrong info, region_id: %ld", region_id);
-            continue;
+            DB_WARNING("read wrong info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());
+            break;
         }
         int64_t log_index = 0;
         //key: identify + region_id + identify + txn_id + log_index
         if (iter->key().size() == (1 + sizeof(int64_t) + 1 + sizeof(uint64_t) + sizeof(int64_t))) {
             log_index = TableKey(iter->key()).extract_i64(1 + sizeof(int64_t) + 1 + sizeof(uint64_t));
             DB_WARNING("parse txn info, log_index: %ld, txn_id: %lu, region_id: %ld", 
-                        log_index, TableKey(iter->key()).extract_i64(1 + sizeof(int64_t) + 1), region_id);
+                        log_index, TableKey(iter->key()).extract_u64(1 + sizeof(int64_t) + 1), region_id);
         } else {
             log_index = TableKey(iter->key()).extract_i64(1 + sizeof(int64_t) + 1);
             DB_WARNING("parse txn info, log_index: %ld, region_id: %ld",
@@ -225,7 +365,7 @@ int MetaWriter::parse_txn_infos(int64_t region_id, std::map<int64_t, std::string
     return 0;
 }
 
-int MetaWriter::parse_txn_log_indexs(int64_t region_id, std::set<int64_t>& log_indexs) {
+int MetaWriter::parse_txn_log_indexs(int64_t region_id, std::unordered_map<uint64_t, int64_t>& log_indexs) {
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
     read_options.total_order_seek = false;
@@ -233,15 +373,33 @@ int MetaWriter::parse_txn_log_indexs(int64_t region_id, std::set<int64_t>& log_i
     std::string prefix = log_index_key_prefix(region_id);
     for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
         if (!iter->key().starts_with(prefix)) {
-            //DB_WARNING("read wrong info, region_id: %ld", region_id);
-            continue;
+            DB_WARNING("read wrong info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());
+            break;
         }
         TableKey log_index(iter->value());
-        log_indexs.insert(log_index.extract_i64(0));
-        DB_WARNING("read prepared transcation log index: %ld, transaction_id: %lu", 
-                    log_index.extract_i64(0), decode_log_index_key(iter->key()));
+        log_indexs[decode_log_index_key(iter->key())] = log_index.extract_i64(0);
+        DB_WARNING("region_id: %ld read prepared transcation log index: %ld, transaction_id: %lu", 
+
+                    region_id, log_index.extract_i64(0), decode_log_index_key(iter->key()));
     }
     return 0; 
+}
+
+int MetaWriter::parse_doing_snapshot(std::set<int64_t>& region_ids) {
+    rocksdb::ReadOptions read_options;
+    read_options.prefix_same_as_start = true;
+    read_options.total_order_seek = false;
+    std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _meta_cf));
+    std::string prefix = MetaWriter::META_IDENTIFY;
+    for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
+        std::string identify;
+        TableKey(iter->key()).extract_char(1 + sizeof(int64_t), 1, identify);
+        if (identify != MetaWriter::DOING_SNAPSHOT_IDENTIFY) {
+            continue;
+        }
+        region_ids.insert(TableKey(rocksdb::Slice(iter->key())).extract_i64(1));
+    }
+    return 0;
 }
 
 int64_t MetaWriter::read_applied_index(int64_t region_id) {
@@ -283,11 +441,63 @@ int MetaWriter::read_region_info(int64_t region_id, pb::RegionInfo& region_info)
     }
     return 0;
 }
+
+int MetaWriter::read_region_ddl_info(int64_t region_id, pb::StoreRegionDdlInfo& region_ddl_info) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(region_ddl_info_key(region_id)), &value);
+    if (!status.ok()) {
+        DB_WARNING("Error while read ddl info, Error %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1; 
+    }
+    if (!region_ddl_info.ParseFromString(value)) {
+        DB_FATAL("parse from pb fail when read region ddl info, region_id: %ld, value:%s",
+            region_id, value.c_str());
+        return -1;
+    }
+    return 0;
+}
+int MetaWriter::read_doing_snapshot(int64_t region_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(doing_snapshot_key(region_id)), &value);
+    if (!status.ok()) {
+        DB_WARNING("region_id: %ld not doing snapshot", region_id);
+        return -1;
+    }
+    DB_WARNING("region_id: %ld read doing snapshot success", region_id);
+    return 0;
+}
+int MetaWriter::read_pre_commit_key(int64_t region_id, uint64_t txn_id, 
+            int64_t& num_table_lines,
+            int64_t& applied_index) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(pre_commit_key(region_id, txn_id)), &value);
+    if (!status.ok()) {
+        return -1;
+    }
+    num_table_lines = TableKey(rocksdb::Slice(value)).extract_i64(0);
+    applied_index = TableKey(rocksdb::Slice(value)).extract_i64(sizeof(int64_t));
+    DB_WARNING("region_id: %ld read pre commit value, num_table_lines: %ld, applied_index: %ld",
+                region_id, num_table_lines, applied_index);
+    return 0;
+}
+
 std::string MetaWriter::region_info_key(int64_t region_id) const {
     MutTableKey key;
     key.append_char(MetaWriter::META_IDENTIFY.data(), 1);
     key.append_i64(region_id);
     key.append_char(MetaWriter::REGION_INFO_IDENTIFY.data(), 1);
+    return key.data();
+}
+
+std::string MetaWriter::region_ddl_info_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.data(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::REGION_DDL_INFO_IDENTIFY.data(), 1);
     return key.data();
 }
 std::string MetaWriter::applied_index_key(int64_t region_id) const {
@@ -335,6 +545,29 @@ std::string MetaWriter::transcation_pb_key_prefix(int64_t region_id) const {
     key.append_char(MetaWriter::PREPARED_TXN_PB_IDENTIYF.c_str(), 1);
     return key.data(); 
 }
+std::string MetaWriter::pre_commit_key_prefix(int64_t region_id)  const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::PRE_COMMIT_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+std::string MetaWriter::pre_commit_key(int64_t region_id, uint64_t txn_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::PRE_COMMIT_IDENTIFY.c_str(), 1);
+    key.append_u64(txn_id);
+    return key.data();
+}
+
+std::string MetaWriter::doing_snapshot_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::DOING_SNAPSHOT_IDENTIFY.c_str(), 1);
+    return key.data();
+}
 std::string MetaWriter::encode_applied_index(int64_t index) const {
     MutTableKey index_value;
     index_value.append_i64(index);
@@ -374,6 +607,11 @@ int64_t MetaWriter::decode_log_index_value(const rocksdb::Slice& value) {
     return index_value.extract_i64(0);
 }
 uint64_t MetaWriter::decode_log_index_key(const rocksdb::Slice& key) {
+    TableKey index_key(key);
+    return index_key.extract_u64(1 + sizeof(int64_t) + 1);
+}
+
+uint64_t MetaWriter::decode_pre_commit_key(const rocksdb::Slice& key) {
     TableKey index_key(key);
     return index_key.extract_u64(1 + sizeof(int64_t) + 1);
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,10 @@
 #include "region_manager.h"
 #include "meta_util.h"
 #include "rocks_wrapper.h"
+#include "query_cluster_manager.h"
+#include "query_privilege_manager.h"
+#include "query_table_manager.h"
+#include "query_region_manager.h"
 
 namespace baikaldb {
 DECLARE_int32(healthy_check_interval_times);
@@ -57,33 +61,44 @@ void MetaStateMachine::store_heartbeat(google::protobuf::RpcController* controll
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
     TimeCost step_time_cost;
+    //判断instance是否是新增，同时更新instance的容量信息
     ClusterManager::get_instance()->process_instance_heartbeat_for_store(request->instance_info());
     int64_t instance_time = step_time_cost.get_time();
     step_time_cost.reset();
 
+    //半个小时上报一次peer信息，做peer的负载均衡
     ClusterManager::get_instance()->process_peer_heartbeat_for_store(request, response);
     int64_t peer_balance_time = step_time_cost.get_time();
     step_time_cost.reset();
 
+    //table是否有新增、更新和删除
     SchemaManager::get_instance()->process_schema_heartbeat_for_store(request, response);
     int64_t schema_time = step_time_cost.get_time(); 
     step_time_cost.reset();
 
+    //peer信息半小时上报一次，判断peer所在的table是否存在以及自身是否是过期的peer
     SchemaManager::get_instance()->process_peer_heartbeat_for_store(request, response, log_id);
     int64_t peer_time = step_time_cost.get_time();
     step_time_cost.reset();
 
+    //更新leader状态信息，leader的负载均衡.是否是新增region、分裂或者peer变更region。是否需要add_peer
+    //or remove_peer
     SchemaManager::get_instance()->process_leader_heartbeat_for_store(request, response, log_id);
     int64_t leader_time = step_time_cost.get_time();
+    step_time_cost.reset();
 
-    SELF_TRACE("store:%s heart beat, time_cost: %ld, "
+    TableManager::get_instance()->process_ddl_heartbeat_for_store(request, response, log_id);
+    int64_t ddlwork_time = step_time_cost.get_time();
+
+    DB_DEBUG("store_heart_beat req[%s]", request->ShortDebugString().c_str());
+    DB_DEBUG("store_heart_beat resp[%s]", response->ShortDebugString().c_str());
+
+    DB_NOTICE("store:%s heart beat, time_cost: %ld, "
                 "instance_time: %ld, peer_balance_time: %ld, schema_time: %ld,"
-                " peer_time: %ld, leader_time: %ld "
-                "response: %s, log_id: %lu", 
+                " peer_time: %ld, leader_time: %ld, ddlwork_time: %ld, log_id: %lu", 
                 request->instance_info().address().c_str(),
                 time_cost.get_time(),
-                instance_time, peer_balance_time, schema_time, peer_time, leader_time,
-                response->ShortDebugString().c_str(), log_id);
+                instance_time, peer_balance_time, schema_time, peer_time, leader_time, ddlwork_time, log_id);
 }
 
 void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* controller,
@@ -107,14 +122,59 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     }
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
+    TimeCost step_time_cost;
+    DatabaseManager::get_instance()->process_baikal_heartbeat(request, response);
     ClusterManager::get_instance()->process_baikal_heartbeat(request, response);
+    int64_t cluster_time = step_time_cost.get_time();
+    step_time_cost.reset();
     PrivilegeManager::get_instance()->process_baikal_heartbeat(request, response);
+    int64_t privilege_time = step_time_cost.get_time();
+    step_time_cost.reset();
     SchemaManager::get_instance()->process_baikal_heartbeat(request, response, log_id);
-    SELF_TRACE("baikaldb:%s heart beat, time_cost: %ld, response: %s, log_id: %lu", 
+    int64_t schema_time = step_time_cost.get_time();
+    step_time_cost.reset();
+    DB_NOTICE("baikaldb:%s heart beat, time_cost: %ld, cluster_time: %ld, "
+                "privilege_time: %ld, schema_time: %ld, log_id: %lu", 
                 butil::endpoint2str(cntl->remote_side()).c_str(),
                 time_cost.get_time(),
-                response->ShortDebugString().c_str(),
+                cluster_time, privilege_time, schema_time,
                 log_id);
+}
+
+void MetaStateMachine::console_heartbeat(google::protobuf::RpcController* controller,
+                                        const pb::ConsoleHeartBeatRequest* request,
+                                        pb::ConsoleHeartBeatResponse* response,
+                                        google::protobuf::Closure* done) {
+    TimeCost time_cost;
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+    uint64_t log_id = 0;
+    if (cntl->has_log_id()) {
+        log_id = cntl->log_id();
+    }
+    if (!_is_leader.load()) {
+        DB_WARNING("NOT LEADER, logid:%lu", log_id);
+        response->set_errcode(pb::NOT_LEADER);
+        response->set_errmsg("not leader");
+        response->set_leader(_node.leader_id().to_string());
+        return;
+    }
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    TimeCost step_time_cost;
+    QueryClusterManager::get_instance()->process_console_heartbeat(request, response);
+    int64_t cluster_time = step_time_cost.get_time();
+    step_time_cost.reset();
+    QueryPrivilegeManager::get_instance()->process_console_heartbeat(request, response);
+    int64_t privilege_time = step_time_cost.get_time();
+    step_time_cost.reset();
+    QueryTableManager::get_instance()->process_console_heartbeat(request, response, log_id);
+    DB_NOTICE("baikaldb:%s heart beat, time_cost: %ld, "
+                "cluster_time: %ld, privilege_time: %ld, table_time: %ld"
+                "log_id: %lu",
+                butil::endpoint2str(cntl->remote_side()).c_str(),
+                time_cost.get_time(), cluster_time, privilege_time, step_time_cost.get_time(), log_id);
 }
 
 void MetaStateMachine::on_apply(braft::Iterator& iter) {
@@ -140,7 +200,7 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         if (done && ((MetaServerClosure*)done)->response) {
             ((MetaServerClosure*)done)->response->set_op_type(request.op_type());
         }
-        DB_NOTICE("on applye, term:%ld, index:%ld, request op_type:%s", 
+        DB_NOTICE("on apply, term:%ld, index:%ld, request op_type:%s", 
                     iter.term(), iter.index(), 
                     pb::OpType_Name(request.op_type()).c_str());
         switch (request.op_type()) {
@@ -217,55 +277,79 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             break;
         }
         case pb::OP_CREATE_TABLE: {
-            TableManager::get_instance()->create_table(request, done);
+            TableManager::get_instance()->create_table(request, iter.index(), done);
             break;
         }
         case pb::OP_DROP_TABLE: {
-            TableManager::get_instance()->drop_table(request, done);
+            TableManager::get_instance()->drop_table(request, iter.index(), done);
             break;
         }
         case pb::OP_RENAME_TABLE: {
-            TableManager::get_instance()->rename_table(request, done);
+            TableManager::get_instance()->rename_table(request, iter.index(), done);
             break;
         }
         case pb::OP_ADD_FIELD: {
-            TableManager::get_instance()->add_field(request, done);
+            TableManager::get_instance()->add_field(request, iter.index(), done);
             break;
         }
         case pb::OP_DROP_FIELD: {
-            TableManager::get_instance()->drop_field(request, done);
+            TableManager::get_instance()->drop_field(request, iter.index(), done);
             break;
         }
         case pb::OP_RENAME_FIELD: {
-            TableManager::get_instance()->rename_field(request, done);
+            TableManager::get_instance()->rename_field(request, iter.index(), done);
             break;
         }
         case pb::OP_MODIFY_FIELD: {
-            TableManager::get_instance()->modify_field(request, done);
+            TableManager::get_instance()->modify_field(request, iter.index(), done);
             break;
         }
         case pb::OP_UPDATE_DISTS: {
-            TableManager::get_instance()->update_dists(request, done);
+            TableManager::get_instance()->update_dists(request, iter.index(), done);
             break; 
         }
         case pb::OP_UPDATE_BYTE_SIZE: {
-            TableManager::get_instance()->update_byte_size(request, done);
+            TableManager::get_instance()->update_byte_size(request, iter.index(), done);
             break;
         }
         case pb::OP_UPDATE_SPLIT_LINES: {
-            TableManager::get_instance()->update_split_lines(request, done);
+            TableManager::get_instance()->update_split_lines(request, iter.index(), done);
+            break;
+        }        
+        case pb::OP_UPDATE_SCHEMA_CONF: {
+            TableManager::get_instance()->update_schema_conf(request, iter.index(), done);
             break;
         }
         case pb::OP_DROP_REGION: {
-            RegionManager::get_instance()->drop_region(request, done);
+            RegionManager::get_instance()->drop_region(request, iter.index(), done);
             break;
         }
         case pb::OP_UPDATE_REGION: {
-            RegionManager::get_instance()->update_region(request, done);
+            RegionManager::get_instance()->update_region(request, iter.index(), done);
             break;
         }
         case pb::OP_SPLIT_REGION: {
             RegionManager::get_instance()->split_region(request, done);
+            break;
+        }
+        case pb::OP_MODIFY_RESOURCE_TAG: {
+            TableManager::get_instance()->update_resource_tag(request, iter.index(), done);
+            break;            
+        }
+        case pb::OP_ADD_INDEX: {
+            TableManager::get_instance()->add_index(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_DROP_INDEX: {
+            TableManager::get_instance()->drop_index(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_UPDATE_INDEX_STATUS: {
+            TableManager::get_instance()->update_index_status(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_DELETE_DDLWORK: {
+            TableManager::get_instance()->delete_ddlwork(request, done);
             break;
         }
         default: {
@@ -273,11 +357,21 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             IF_DONE_SET_RESPONSE(done, pb::UNSUPPORT_REQ_TYPE, "unsupport request type");
         }
         }
+        _applied_index = iter.index();
         if (done) {
             braft::run_closure_in_bthread(done_guard.release());
         }
     }
 }
+
+int64_t MetaStateMachine::snapshot_index(std::string& snapshot_path) {
+    base::FilePath path(snapshot_path);
+    int64_t index = 0;
+    int ret = sscanf(path.BaseName().value().c_str(), "snapshot_%020ld", &index);
+    CHECK_EQ(ret, 1);
+    return index;
+}
+
 void MetaStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
     DB_WARNING("start on shnapshot save");
     DB_WARNING("max_namespace_id: %ld, max_database_id: %ld,"
@@ -379,6 +473,8 @@ int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
         DB_WARNING("snapshot load file:%s", file.c_str());
         if (file == "/meta_info.sst") {
             std::string snapshot_path = reader->get_path();
+            _applied_index = snapshot_index(snapshot_path);
+            DB_WARNING("_applied_index:%ld path:%s", _applied_index, snapshot_path.c_str());
             snapshot_path.append("/meta_info.sst");
         
             //恢复文件
@@ -394,11 +490,25 @@ int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
                     
             }
             //恢复内存状态
-            ClusterManager::get_instance()->load_snapshot();
-            PrivilegeManager::get_instance()->load_snapshot();
-            SchemaManager::get_instance()->load_snapshot();    
+            int ret = 0;
+            ret = ClusterManager::get_instance()->load_snapshot();
+            if (ret != 0) {
+                DB_FATAL("ClusterManager loadsnapshot fail");
+                return -1;
+            }
+            ret = PrivilegeManager::get_instance()->load_snapshot();
+            if (ret != 0) {
+                DB_FATAL("PrivilegeManager loadsnapshot fail");
+                return -1;
+            }
+            ret = SchemaManager::get_instance()->load_snapshot();    
+            if (ret != 0) {
+                DB_FATAL("SchemaManager loadsnapshot fail");
+                return -1;
+            }
         }
     }
+    _have_data = true;
     return 0;
 }
 
@@ -445,7 +555,7 @@ void MetaStateMachine::healthy_check_function() {
 
 void MetaStateMachine::on_leader_stop() {
     _is_leader.store(false);
-    set_global_load_balance(false);
+    set_global_load_balance(true);
     set_global_migrate(true);
     _unsafe_decision = false;
     if (_healthy_check_start) {

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -61,6 +61,8 @@ void SqlParser::parse(const std::string& sql_) {
     sql_lex_init(&scanner);
     YY_BUFFER_STATE bp;
     bp = sql__scan_bytes(sql.c_str(), sql.size(), scanner);
+    bp->yy_bs_lineno = 1;
+    bp->yy_bs_column = 0;
     sql__switch_to_buffer(bp, scanner);
     sql_parse(scanner, this);
     sql__delete_buffer(bp, scanner);

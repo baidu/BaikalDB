@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,7 +31,8 @@ public:
     static int analyze(QueryContext* ctx);
 
     static int execute(QueryContext* ctx, DataBuffer* send_buf);
-
+    static int full_export_start(QueryContext* ctx, DataBuffer* send_buf);
+    static int full_export_next(QueryContext* ctx, DataBuffer* send_buf, bool shutdown);
     static int execute_recovered_commit(NetworkSocket* client, const pb::CachePlan& commit_plan);
     // insert user variables to record for prepared stmt
     static int insert_values_to_record(QueryContext* ctx);

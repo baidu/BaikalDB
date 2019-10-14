@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -162,6 +162,14 @@ int DatabaseManager::load_database_snapshot(const std::string& value) {
                 database_pb.namespace_id(), 
                 database_pb.database_id());
     return 0;
+}
+void DatabaseManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request, 
+                                               pb::BaikalHeartBeatResponse* response) {
+    BAIDU_SCOPED_LOCK(_database_mutex);
+    for (auto& db_info : _database_info_map) {
+        auto db = response->add_db_info();    
+        *db = db_info.second;
+    }
 }
 
 }//namespace 

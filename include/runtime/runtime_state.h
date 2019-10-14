@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,20 +33,12 @@ class QueryContext;
 class NetworkSocket;
 
 // 不同region资源隔离，不需要每次从SchemaFactory加锁获取
-// todo:SchemaFactory目前无锁获取，后续相关信息可以直接从SchemaFactory获取
 struct RegionResource {
-    IndexInfo& get_index_info(int64_t index_id) {
-        return index_infos[index_id];
-    }
-    int64_t        region_id;
-    int64_t        table_id;
     pb::RegionInfo region_info;
-    TableInfo      table_info;
-    IndexInfo      pri_info;
-    // 包含primary
-    std::map<int64_t, IndexInfo>  index_infos;
+    DllParam* ddl_param_ptr;
 };
 
+class RuntimeStatePool;
 class RuntimeState {
 
 public:
@@ -56,7 +48,8 @@ public:
     int init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
-        TransactionPool* pool);
+        TransactionPool* pool,
+        bool store_compute_separate = false);
 
     // baikaldb init
     int init(QueryContext* ctx, DataBuffer* send_buf);
@@ -70,6 +63,7 @@ public:
     std::map<int64_t, ReverseIndexBase*>& reverse_index_map() {
         return _reverse_index_map;
     }
+    void conn_id_cancel(uint64_t db_conn_id);
     void cancel() {
         _is_cancelled = true;
     }
@@ -99,9 +93,12 @@ public:
     int64_t region_id() {
         return _region_id;
     }
+    int64_t region_version() {
+        return _region_version;
+    }
     int64_t table_id() {
         if (_resource != nullptr) {
-            return _resource->table_id;
+            return _resource->region_info.table_id();
         }
         return 0;
     }
@@ -122,8 +119,18 @@ public:
         }
         _txn = SmartTransaction(new Transaction(0, _txn_pool));
         _txn->set_region_info(&(_resource->region_info));
+        _txn->set_ddl_state(_resource->ddl_param_ptr);
         _txn->begin();
+        _txn->_is_separate = is_separate;
         return _txn;
+    }
+    SmartTransaction create_batch_txn() {
+        auto txn = SmartTransaction(new Transaction(0, _txn_pool));
+        txn->set_region_info(&(_resource->region_info));
+        txn->set_ddl_state(_resource->ddl_param_ptr);
+        txn->_is_separate = is_separate;
+        txn->begin();
+        return txn;
     }
     void set_num_increase_rows(int num) {
         _num_increase_rows = num;
@@ -205,17 +212,20 @@ public:
     void set_resource(std::shared_ptr<RegionResource> resource) {
         _resource = resource;
     }
+    void set_pool(RuntimeStatePool* pool) {
+        _pool = pool;
+    }
     // runtime release at last
     RegionResource* resource() {
         return _resource.get();
     }
 
-    void set_autocommit(bool autocommit) {
-        _autocommit = autocommit;
+    void set_single_sql_autocommit(bool single_sql_autocommit) {
+        _single_sql_autocommit = single_sql_autocommit;
     }
 
-    bool autocommit() {
-        return _autocommit;
+    bool single_sql_autocommit() {
+        return _single_sql_autocommit;
     }
 
     void set_optimize_1pc(bool optimize) {
@@ -226,17 +236,33 @@ public:
         return _optimize_1pc;
     }
 
+    bool is_eos() { 
+        return _eos;
+    }
+
+    void set_eos() {
+        _eos = true;
+    }
+
 public:
     uint64_t          txn_id = 0;
     int32_t           seq_id = 0;
     MysqlErrCode      error_code = ER_ERROR_FIRST;
     std::ostringstream error_msg;
+    bool              is_full_export = false;
+    bool              is_separate = false; //是否为计算存储分离模式
+    BthreadCond       txn_cond;
+    std::function<void(RuntimeState* state, SmartTransaction txn)> raft_func;
+    bool              is_fail = false;
+    std::string       raft_error_msg;
 
 private:
     bool _is_cancelled = false;
+    bool _eos          = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
     MemRowDescriptor _mem_row_desc;
     int64_t          _region_id = 0;
+    int64_t          _region_version = 0;
     // index_id => ReverseIndex
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     DataBuffer*     _send_buf= nullptr;
@@ -248,7 +274,7 @@ private:
     int _num_returned_rows = 0; //存储baikaldb读返回的行数
     int64_t _log_id = 0;
 
-    bool              _autocommit = true;     // used for baikaldb and store
+    bool              _single_sql_autocommit = true;     // used for baikaldb and store
     bool              _optimize_1pc = false;  // 2pc de-generates to 1pc when autocommit=true and
                                               // there is only 1 region.
     NetworkSocket*    _client_conn = nullptr; // used for baikaldb
@@ -261,7 +287,9 @@ private:
     std::vector<int64_t> _scan_indices;
     size_t _row_batch_capacity = ROW_BATCH_CAPACITY;
     int _multiple = 1;
+    RuntimeStatePool* _pool = nullptr;
 };
+typedef std::shared_ptr<RuntimeState> SmartState;
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

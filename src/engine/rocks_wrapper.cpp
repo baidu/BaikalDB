@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,10 +23,12 @@
 #include "split_compaction_filter.h"
 namespace baikaldb {
 
-DEFINE_int32(rocks_transaction_lock_timeout_ms, 1000, "rocksdb transaction_lock_timeout(ms)");
-DEFINE_int32(rocks_default_lock_timeout_ms, 1000, "rocksdb default_lock_timeout(ms)");
+DEFINE_int32(rocks_transaction_lock_timeout_ms, 30000, "rocksdb transaction_lock_timeout(ms)");
+DEFINE_int32(rocks_default_lock_timeout_ms, 30000, "rocksdb default_lock_timeout(ms)");
 
 DEFINE_int32(rocks_block_size, 64 * 1024, "rocksdb block_cache size, default: 64KB");
+DEFINE_int32(rocks_max_open_files, 1024, "rocksdb max_open_files, default: 1024");
+DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
 DEFINE_bool(rocks_data_dynamic_level_bytes, true, 
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
 
@@ -48,7 +50,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     rocksdb::Options db_options;
     db_options.IncreaseParallelism();
     db_options.create_if_missing = true;
-    db_options.max_open_files = -1;
+    db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
     db_options.max_background_compactions = 20;
@@ -57,6 +59,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     //db_options.max_background_flushes = 1;
     //db_options.memtable_prefix_bloom_bits = 1024 * 1024 * 8;
     rocksdb::TransactionDBOptions txn_db_options;
+    DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
     txn_db_options.default_lock_timeout = FLAGS_rocks_default_lock_timeout_ms;
 
@@ -67,7 +70,7 @@ int32_t RocksWrapper::init(const std::string& path) {
             rocksdb::NewFixedPrefixTransform(sizeof(int64_t) + 1));
     _log_cf_option.OptimizeLevelStyleCompaction();
     _log_cf_option.compaction_pri = rocksdb::kOldestLargestSeqFirst;
-    _log_cf_option.compaction_filter = RaftLogCompactionFilter::get_instance();
+    //_log_cf_option.compaction_filter = RaftLogCompactionFilter::get_instance();
     _log_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
     //log_cf_option.compression = rocksdb::kLZ4Compression;
     _log_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
@@ -77,6 +80,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     _log_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _log_cf_option.target_file_size_base = 128 * 1024 * 1024;
     _log_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;
+    _log_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
     //todo
     // prefix length: regionid(8 Bytes) tableid(8 Bytes)
     _data_cf_option.prefix_extractor.reset(
@@ -89,7 +93,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _data_cf_option.level0_file_num_compaction_trigger = 5;
     _data_cf_option.level0_slowdown_writes_trigger = 10;
-    _data_cf_option.level0_stop_writes_trigger = 20;
+    _data_cf_option.level0_stop_writes_trigger = FLAGS_stop_write_sst_cnt;
     _data_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _data_cf_option.target_file_size_base = 128 * 1024 * 1024;
     _data_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;

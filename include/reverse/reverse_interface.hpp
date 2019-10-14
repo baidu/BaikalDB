@@ -1,5 +1,5 @@
 
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,11 @@ namespace baikaldb {
 
 template<typename Schema>
 int CommRindexNodeParser<Schema>::init(const std::string& term) {
+    auto* exist_parser = this->_schema->get_term(term);
+    if (exist_parser != NULL) {
+        *this = *exist_parser;
+        return 0;
+    }
     this->_schema->get_reverse_list(term, _new_list_ptr, _old_list_ptr);
     _new_list = (ReverseList*)_new_list_ptr.get();
     _old_list = (ReverseList*)_old_list_ptr.get();
@@ -53,6 +58,7 @@ int CommRindexNodeParser<Schema>::init(const std::string& term) {
     if (!_key_range.first.empty()) {
         advance(_key_range.first);
     }
+    this->_schema->set_term(term, this);
     return 0;
 } 
 

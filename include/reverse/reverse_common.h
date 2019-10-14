@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,8 @@
 
 #pragma once
 #include <map>
-#include <gflags/gflags.h>
+#include <unordered_map>
+#include <unordered_set>
 #include "proto/reverse.pb.h"
 #include "rocks_wrapper.h"
 #include "key_encoder.h"
@@ -31,18 +32,40 @@ typedef std::shared_ptr<google::protobuf::Message> MessageSP;
 typedef std::pair<std::string, std::string> KeyRange;
 extern std::atomic_long g_statistic_insert_key_num;
 extern std::atomic_long g_statistic_delete_key_num;
+
 #ifdef BAIDU_INTERNAL
 extern drpc::NLPCClient* wordrank_client;
 extern drpc::NLPCClient* wordseg_client;
-
-template <typename OUT>
-int nlpc_seg(drpc::NLPCClient& client, 
-             const std::string& word, 
-             OUT& s_output);
-int wordrank(const std::string& word, std::map<std::string, float>& term_map);
-int wordseg_basic(const std::string& word, std::map<std::string, float>& term_map);
 #endif
-int simple_seg_gbk(const std::string& word, std::map<std::string, float>& term_map);
+class Tokenizer {
+public:
+    static Tokenizer* get_instance() {
+        static Tokenizer _instance;
+        return &_instance;
+    }
+    int init();
+
+#ifdef BAIDU_INTERNAL
+    template <typename OUT>
+        int nlpc_seg(drpc::NLPCClient& client, 
+                const std::string& word, 
+                OUT& s_output);
+    int wordrank(std::string word, std::map<std::string, float>& term_map);
+    int wordrank_q2b_icase(std::string word, std::map<std::string, float>& term_map);
+    int wordseg_basic(std::string word, std::map<std::string, float>& term_map);
+#endif
+    int q2b_tolower_gbk(std::string& word);
+    int es_standard_gbk(std::string word, std::map<std::string, float>& term_map);
+    int simple_seg_gbk(std::string word, uint32_t word_count, std::map<std::string, float>& term_map);
+    void split_str_gbk(const std::string& word, std::vector<std::string>& split_word, char delim);
+private:
+    Tokenizer() {};
+    void normalization_gbk(std::string& word);
+    void normalization_utf8(std::string& word);
+    std::unordered_set<std::string> _punctuation_blank;
+    std::unordered_map<std::string, std::string> _q2b_gbk;
+    std::unordered_map<std::string, std::string> _q2b_utf8;
+};
 
 //自动管理原子对象
 template<class T>
@@ -187,7 +210,7 @@ public:
     int64_t create_exe_time = 0;
     int64_t bool_engine_time = 0;
     void print_log() {
-        int64_t all_time = delete_time + segment_time + create_exe_time + bool_engine_time;
+        int64_t all_time = delete_time + segment_time + bool_engine_time;
         DB_NOTICE("Reverse index search time : all_time[%ld]{"
                   "delete_time[%ld], segment_time[%ld],"
                   "create_exe_time[%ld], bool_engine_time[%ld]}", 

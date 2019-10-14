@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,15 +36,6 @@ public:
     void set_txn_cmd(pb::TxnCmdType cmd) {
         _txn_cmd = cmd;
     }
-
-    static int add_commit_log_entry(
-            uint64_t txn_id, 
-            int32_t  seq_id,
-            ExecNode* commit_fetch,
-            std::map<int64_t, pb::RegionInfo>& region_infos);
-
-    static int remove_commit_log_entry(uint64_t txn_id);
-
 private:
     pb::TxnCmdType     _txn_cmd = pb::TXN_INVALID;
 };

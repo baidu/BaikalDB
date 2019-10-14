@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,9 +42,11 @@ ExprValue timestampdiff(const std::vector<ExprValue>& input);
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);
 ExprValue hll_estimate(const std::vector<ExprValue>& input);
+ExprValue hll_init(const std::vector<ExprValue>& input);
 // case when functions
 ExprValue case_when(const std::vector<ExprValue>& input);
 ExprValue case_expr_when(const std::vector<ExprValue>& input);
+ExprValue if_(const std::vector<ExprValue>& input);
 // MurmurHash sign
 ExprValue murmur_hash(const std::vector<ExprValue>& input);
 }

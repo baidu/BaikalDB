@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -278,10 +278,14 @@ int64_t MyRaftLogStorage::get_term(const int64_t index) {
 int MyRaftLogStorage::append_entry(const braft::LogEntry* entry) {
     std::vector<braft::LogEntry*> entries;
     entries.push_back(const_cast<braft::LogEntry*>(entry));
-    return append_entries(entries) == 1 ? 0 : -1;
+    return append_entries(entries, nullptr) == 1 ? 0 : -1;
 }
 
-int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entries) {
+int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entries, 
+#ifdef BAIDU_INTERNAL
+        braft::IOMetric* metric
+#endif
+        ) {
     TimeCost time_cost;
     if (entries.empty()) {
         return 0;
@@ -345,7 +349,6 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
 }
 
 int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
-    std::unique_lock<bthread_mutex_t> lck(_mutex);
     if (first_index_kept <= _first_log_index.load()) {
         return 0;
     }
@@ -356,9 +359,30 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     if (first_index_kept > _last_log_index.load()) {
         _last_log_index.store(first_index_kept - 1);
     }
-    _term_map.truncate_prefix(first_index_kept);
-    RaftLogCompactionFilter::get_instance()->update_first_index_map(_region_id, first_index_kept);
-    lck.unlock();
+    {
+        std::unique_lock<bthread_mutex_t> lck(_mutex);
+        _term_map.truncate_prefix(first_index_kept);
+    }
+    //替换为remove_range
+    char start_key[LOG_DATA_KEY_SIZE];
+    _encode_log_data_key(start_key, LOG_DATA_KEY_SIZE, 0);
+    char end_key[LOG_DATA_KEY_SIZE];
+    _encode_log_data_key(end_key, LOG_DATA_KEY_SIZE, first_index_kept);
+   
+    auto status = _db->remove_range(rocksdb::WriteOptions(), 
+                _handle, 
+                rocksdb::Slice(start_key, LOG_DATA_KEY_SIZE), 
+                rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE));
+    if (!status.ok()) {
+        DB_WARNING("tuncate log entry fail, region_id: %ld, truncate to first index kept:%ld from first log index:%ld",
+                 _region_id, first_index_kept, _first_log_index.load());
+        return -1;
+    } else {
+        DB_WARNING("tuncate log entry success, region_id: %ld, truncate to first index kept:%ld from first log index:%ld",
+                    _region_id, first_index_kept, _first_log_index.load());
+    }
+    //RaftLogCompactionFilter::get_instance()->update_first_index_map(_region_id, first_index_kept);
+    
     CanAddPeerSetter::get_instance()->set_can_add_peer(_region_id);
     //write first_log_index to rocksdb, real delete when compaction
     char key_buf[LOG_META_KEY_SIZE]; 
@@ -367,10 +391,10 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     rocksdb::WriteOptions write_option;
     //write_option.sync = true;
     //write_option.disableWAL = true;
-    rocksdb::Status status = _db->put(write_option, 
-                                      _handle,
-                                      rocksdb::Slice(key_buf, LOG_META_KEY_SIZE),
-                                      rocksdb::Slice((char*)&first_index_kept, sizeof(int64_t)));
+    status = _db->put(write_option, 
+                      _handle,
+                      rocksdb::Slice(key_buf, LOG_META_KEY_SIZE),
+                      rocksdb::Slice((char*)&first_index_kept, sizeof(int64_t)));
     if (!status.ok()) {
         DB_WARNING("update first log index to rocksdb fail, region_id: %ld, err_mes:%s",
                         _region_id, status.ToString().c_str());

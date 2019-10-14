@@ -9,8 +9,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo",
-        "database": "TestDB",
-        "namespace_name": "TEST_NAMESPACE",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -77,8 +77,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo1",
-        "database": "TestDB",
-        "namespace_name": "TEST_NAMESPACE",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -146,8 +146,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo2",
-        "database": "TestDB",
-        "namespace_name": "TEST_NAMESPACE",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -216,8 +216,8 @@ curl -d '{
     "op_type":128,
     "table_info": {
         "table_name": "ideainfo3",
-        "database": "TestDB",
-        "namespace_name": "TEST_NAMESPACE",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ 
                     {
                         "field_name" : "eventday",

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,10 @@
 
 namespace baikaldb {
 //DECLARE_int32(rocks_transaction_expiration_ms);
-DEFINE_int32(transaction_clear_delay_ms, 3600 * 1000, \
+DEFINE_int32(transaction_clear_delay_ms, 3600 * 1000, 
         "delay duration to clear prepared and expired transactions");
+DEFINE_int64(clean_finished_txn_interval_us, 600 * 1000 * 1000LL, 
+        "clean_finished_txn_interval_us");
 
 int TransactionPool::init(int64_t region_id) {
     _region_id = region_id;
@@ -61,7 +63,7 @@ void TransactionPool::remove_txn(uint64_t txn_id) {
     if (_txn_map.count(txn_id) == 0) {
         return;
     }
-    auto txn = _txn_map[txn_id]->get_txn();
+    (*_finished_txn_map.read())[txn_id] = _txn_map[txn_id]->dml_num_affected_rows;
     //DB_WARNING("txn_removed: %p, %lu", txn, txn->GetName().c_str());
     _txn_map.erase(txn_id);
     _txn_count--;
@@ -70,14 +72,23 @@ void TransactionPool::remove_txn(uint64_t txn_id) {
 // 清理僵尸事务：包括长时间（clear_delay_ms）未更新的事务
 void TransactionPool::clear_transactions(int32_t clear_delay_ms) {
     std::unique_lock<std::mutex> lock(_map_mutex);
+    // 10分钟清理过期幂等事务id
+    if (_clean_finished_txn_cost.get_time() > FLAGS_clean_finished_txn_interval_us) {
+        _finished_txn_map.read_background()->clear();
+        _finished_txn_map.swap();
+        _clean_finished_txn_cost.reset();
+    }
+
     auto iter = _txn_map.begin();
     while (iter != _txn_map.end()) {
         auto txn = iter->second;
         bool clear = false;
         auto cur_time = butil::gettimeofday_us();
 
-        if (!txn->is_prepared() && cur_time - txn->last_active_time > clear_delay_ms * 1000LL) {
-            DB_WARNING("TransactionWarn: txn %s is idle for %d ms, %ld, %ld, %ld, %ld",
+        //if (!txn->is_prepared() && cur_time - txn->last_active_time > clear_delay_ms * 1000LL) {
+        // 事务太久没提交，就回滚掉
+        if (cur_time - txn->last_active_time > clear_delay_ms * 1000LL) {
+            DB_FATAL("TransactionFatal: txn %s is idle for %d ms, %ld, %ld, %ld, %ld",
                 txn->get_txn()->GetName().c_str(), clear_delay_ms, 
                 cur_time, 
                 txn->last_active_time,

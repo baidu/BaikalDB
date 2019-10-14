@@ -8,8 +8,8 @@ echo -e "drop database\n"
 curl -d '{
     "op_type":"OP_DROP_DATABASE",
     "database_info": {
-        "database":"FC_Content",
-        "namespace_name":"FENGCHAO"
+        "database":"TEST",
+        "namespace_name":"TEST"
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,35 +25,38 @@
 #include "table_manager.h"
 
 namespace baikaldb {
-typedef std::shared_ptr<pb::RegionInfo> SmartRegionInfo;
 struct RegionStateInfo { 
     int64_t timestamp; //上次收到该实例心跳的时间戳
     pb::Status status; //实例状态
 }; 
-     
+typedef std::shared_ptr<RegionStateInfo> SmartRegionStateInfo;
 class RegionManager {
 public:
     ~RegionManager() {
-        bthread_mutex_destroy(&_region_mutex);
+        bthread_mutex_destroy(&_instance_region_mutex);
         bthread_mutex_destroy(&_count_mutex);
-        bthread_mutex_destroy(&_region_state_mutex);
         bthread_mutex_destroy(&_resource_tag_mutex);
+        bthread_mutex_destroy(&_log_entry_mutex);
     }
     static RegionManager* get_instance() {
         static RegionManager instance;
         return &instance;
     }
     friend class QueryRegionManager;
-    void update_region(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void update_region(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void restore_region(const pb::MetaManagerRequest& request, pb::MetaManagerResponse* response);
-    void drop_region(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void drop_region(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void split_region(const pb::MetaManagerRequest& request, braft::Closure* done);
     void send_remove_region_request(const std::vector<int64_t>& drop_region_ids);
 
-    void delete_all_region_for_store(const std::string& instance, pb::Status status);
+     void delete_all_region_for_store(const std::string& instance, pb::Status status);
     void pre_process_remove_peer_for_store(const std::string& instance,
-                                    std::vector<pb::RaftControlRequest>& requests); 
-
+                                                std::vector<pb::RaftControlRequest>& requests); 
+    //void add_peer_for_dead_store(const std::string& instance, pb::Status status);
+    //void pre_process_add_peer_for_store(const std::string& instance,
+    //                                std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests);
+    bool add_region_is_exist(int64_t table_id, const std::string& start_key, 
+                                            const std::string& end_key);
     void check_update_region(const pb::BaikalHeartBeatRequest* request,
                 pb::BaikalHeartBeatResponse* response);
     void add_region_info(const std::vector<int64_t>& new_add_region_ids, 
@@ -76,6 +79,10 @@ public:
                         const pb::LeaderHeartBeat& leader_region,
                         const std::set<std::string>& peers_in_heart,
                         const std::set<std::string>& peers_in_master,
+                        std::unordered_map<int64_t, int64_t>& table_replica_nums,
+                        std::unordered_map<int64_t, std::string>& table_resource_tags,
+                        std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>>& table_replica_dists_maps,
+                        std::unordered_map<std::string, std::string>& peer_resource_tags,
                         std::vector<std::pair<std::string, pb::RaftControlRequest>>& remove_peer_requests,
                         pb::StoreHeartBeatResponse* response);
     
@@ -104,6 +111,10 @@ public:
         _region_state_map.clear();
         _instance_region_map.clear();
         _instance_leader_count.clear();
+        RegionIncrementalMap* background = _incremental_regioninfo_map.read_background();
+        background->clear();
+        RegionIncrementalMap* frontground = _incremental_regioninfo_map.read();
+        frontground->clear();
     }
 public:
     void set_max_region_id(int64_t max_region_id) {
@@ -114,15 +125,15 @@ public:
     }
     
     void get_region_peers(int64_t region_id, std::vector<std::string>& peers) {
-        BAIDU_SCOPED_LOCK(_region_mutex);
-        if (_region_info_map.find(region_id) != _region_info_map.end()) {
-            for (auto peer : _region_info_map[region_id]->peers()) {
-                peers.push_back(peer);                
+        SmartRegionInfo region_ptr = _region_info_map.get(region_id);
+        if (region_ptr != nullptr) {
+            for (auto peer : region_ptr->peers()) {
+                peers.push_back(peer);
             }
         }
     }
     void get_region_ids(const std::string& instance, std::vector<int64_t>& region_ids) {
-        BAIDU_SCOPED_LOCK(_region_mutex);
+        BAIDU_SCOPED_LOCK(_instance_region_mutex);
         if (_instance_region_map.find(instance) ==  _instance_region_map.end()) {
             return;
         }
@@ -133,7 +144,7 @@ public:
         }
     }
     void print_region_ids(const std::string& instance) {
-        BAIDU_SCOPED_LOCK(_region_mutex);
+        BAIDU_SCOPED_LOCK(_instance_region_mutex);
         if (_instance_region_map.find(instance) ==  _instance_region_map.end()) {
             return;
         }
@@ -145,11 +156,11 @@ public:
         }
     }
     int get_region_status(int64_t region_id, pb::Status& status) {
-        BAIDU_SCOPED_LOCK(_region_state_mutex);
-        if (_region_state_map.find(region_id) == _region_state_map.end()) {
+        RegionStateInfo region_state = _region_state_map.get(region_id);
+        if (region_state.timestamp == 0) {
             return -1;
         }
-        status = _region_state_map[region_id].status;
+        status = region_state.status;
         return 0;
     }
 
@@ -184,34 +195,35 @@ public:
     void set_region_info(const pb::RegionInfo& region_info) {
         int64_t table_id = region_info.table_id();
         int64_t region_id = region_info.region_id();
-        BAIDU_SCOPED_LOCK(_region_mutex);
-        if (_region_info_map.find(region_id) != _region_info_map.end()) {
-            for (auto& peer : _region_info_map[region_id]->peers()) {
-                _instance_region_map[peer][table_id].erase(region_id);                
+        SmartRegionInfo region_ptr = _region_info_map.get(region_id);
+        {
+            BAIDU_SCOPED_LOCK(_instance_region_mutex);
+            if (region_ptr != nullptr) {
+                for (auto& peer : region_ptr->peers()) {
+                    _instance_region_map[peer][table_id].erase(region_id);
+                }
             }
-        }
-        for (auto& peer : region_info.peers()) {
-            _instance_region_map[peer][table_id].insert(region_id);
-        }
-        //如果原peer下已不存在region，则erase这个table_id
-        if (_region_info_map.find(region_id) != _region_info_map.end()) {
-            for (auto& peer : _region_info_map[region_id]->peers()) {
-                if (_instance_region_map[peer][table_id].size() <= 0) {
-                    _instance_region_map[peer].erase(table_id);
-                } 
+            for (auto& peer : region_info.peers()) {
+                _instance_region_map[peer][table_id].insert(region_id);
             }
-        }
+            //如果原peer下已不存在region，则erase这个table_id
+            if (region_ptr != nullptr) {
+                for (auto& peer : region_ptr->peers()) {
+                    if (_instance_region_map[peer][table_id].size() <= 0) {
+                        _instance_region_map[peer].erase(table_id);
+                    } 
+                }
+            }
+         }
         auto ptr_region = std::make_shared<pb::RegionInfo>(region_info);
-        _region_info_map[region_id] = ptr_region;
+        _region_info_map.set(region_id, ptr_region);
     }
     
     void set_region_state(int64_t region_id, const RegionStateInfo& region_state) {
-        BAIDU_SCOPED_LOCK(_region_state_mutex);
-        _region_state_map[region_id] = region_state;
+        _region_state_map.set(region_id, region_state);
     }
    
     void erase_region_state(const std::vector<std::int64_t>& drop_region_ids) {
-        BAIDU_SCOPED_LOCK(_region_state_mutex);
         for (auto& region_id : drop_region_ids) {
             _region_state_map.erase(region_id);
         }
@@ -220,62 +232,37 @@ public:
                              int64_t new_log_index,
                              int64_t used_size,
                              int64_t num_table_lines) {
-        BAIDU_SCOPED_LOCK(_region_mutex);
-        if (_region_info_map.find(region_id) != _region_info_map.end()) {
-            _region_info_map[region_id]->set_log_index(new_log_index);
-            _region_info_map[region_id]->set_used_size(used_size);
-            _region_info_map[region_id]->set_num_table_lines(num_table_lines);
+        SmartRegionInfo region_ptr = _region_info_map.get(region_id);
+        if (region_ptr != nullptr) {
+            region_ptr->set_log_index(new_log_index);
+            region_ptr->set_used_size(used_size);
+            region_ptr->set_num_table_lines(num_table_lines);
         }
     }
     void set_region_leader(int64_t region_id,
                             const std::string& new_leader) {
-        BAIDU_SCOPED_LOCK(_region_mutex);
-        if (_region_info_map.find(region_id) != _region_info_map.end()) {
-            auto new_region_ptr = std::make_shared<pb::RegionInfo>(*(_region_info_map[region_id]));
+        SmartRegionInfo region_ptr = _region_info_map.get(region_id);
+        if (region_ptr != nullptr) {
+            auto new_region_ptr = std::make_shared<pb::RegionInfo>(*region_ptr);
             new_region_ptr->set_leader(new_leader);
-            _region_info_map[region_id] = new_region_ptr;
+            _region_info_map.set(region_id, new_region_ptr);
         }
     }
     void erase_region_info(const std::vector<int64_t>& drop_region_ids, 
                             std::vector<int64_t>& result_region_ids,
                             std::vector<int64_t>& result_partition_ids,
-                            std::vector<int64_t>& result_table_ids) {
-        {
-            BAIDU_SCOPED_LOCK(_region_mutex);
-            for (auto drop_region_id : drop_region_ids) {
-                if (_region_info_map.find(drop_region_id) == _region_info_map.end()) {
-                    continue;
-                }
-                result_region_ids.push_back(drop_region_id);
-                result_partition_ids.push_back(_region_info_map[drop_region_id]->partition_id());
-                int64_t table_id = _region_info_map[drop_region_id]->table_id();
-                result_table_ids.push_back(table_id);
-                for (auto peer : _region_info_map[drop_region_id]->peers()) {
-                    if (_instance_region_map.find(peer) != _instance_region_map.end()
-                            && _instance_region_map[peer].find(table_id) != _instance_region_map[peer].end()) {
-                        _instance_region_map[peer][table_id].erase(drop_region_id);
-                        if (_instance_region_map[peer][table_id].size() == 0) {
-                            _instance_region_map[peer].erase(table_id);
-                        }
-                        if (_instance_region_map[peer].size() == 0) {
-                            _instance_region_map.erase(peer);
-                        }
-                    }
-                }
-                _region_info_map.erase(drop_region_id);
-            }
-        }
-        BAIDU_SCOPED_LOCK(_region_state_mutex);
-        for (auto drop_region_id : drop_region_ids) {
-            _region_state_map.erase(drop_region_id);
-        }
-    }
+                            std::vector<int64_t>& result_table_ids,
+                            std::vector<std::string>& result_start_keys,
+                            std::vector<std::string>& result_end_keys);
     
     void erase_region_info(const std::vector<int64_t>& drop_region_ids) {
         std::vector<int64_t> result_region_ids;
         std::vector<int64_t> result_partition_ids;
         std::vector<int64_t> result_table_ids;
-        erase_region_info(drop_region_ids, result_region_ids, result_partition_ids, result_table_ids);
+        std::vector<std::string> result_start_keys;
+        std::vector<std::string> result_end_keys;
+        erase_region_info(drop_region_ids, result_region_ids, result_partition_ids, 
+                          result_table_ids, result_start_keys, result_end_keys);
     }
    
     void set_instance_leader_count(const std::string& instance, const std::unordered_map<int64_t, int64_t>& table_leader_count) {
@@ -307,30 +294,49 @@ public:
                             + SchemaManager::MAX_REGION_ID_KEY;
         return max_region_id_key;
     }
+ 
+    void traverse_region_map(const std::function<void(SmartRegionInfo& region)>& call) {
+        _region_info_map.traverse(call);
+    }
+    void traverse_copy_region_map(const std::function<void(SmartRegionInfo& region)>& call) {
+        _region_info_map.traverse_copy(call);
+    }
+    void put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos);
+    bool check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
+                         pb::BaikalHeartBeatResponse* response, int64_t applied_index); 
+    
 private:
     RegionManager(): _max_region_id(0) {
-        bthread_mutex_init(&_region_mutex, NULL);
+        bthread_mutex_init(&_instance_region_mutex, NULL);
         bthread_mutex_init(&_count_mutex, NULL);
-        bthread_mutex_init(&_region_state_mutex, NULL);
         bthread_mutex_init(&_resource_tag_mutex, NULL);
+        bthread_mutex_init(&_log_entry_mutex, NULL);
+        //bthread_mutex_init(&_doing_mutex, NULL);
     }
 private:
-    bthread_mutex_t                                     _region_mutex;
     int64_t                                             _max_region_id;
     
     //region_id 与table_id的映射关系, key:region_id, value:table_id
-    std::unordered_map<int64_t, SmartRegionInfo>        _region_info_map;
+    ThreadSafeMap<int64_t, SmartRegionInfo>             _region_info_map;
+    
+    bthread_mutex_t                                     _instance_region_mutex;
     //实例和region_id的映射关系，在需要主动发送迁移实例请求时需要
     std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_region_map;
 
-    bthread_mutex_t                                     _region_state_mutex;
-    std::unordered_map<int64_t, RegionStateInfo>        _region_state_map;
+    ThreadSafeMap<int64_t, RegionStateInfo>        _region_state_map;
     //该信息只在meta_server的leader中内存保存, 该map可以单用一个锁
     bthread_mutex_t                                     _count_mutex;
     std::unordered_map<std::string, std::unordered_map<int64_t, int64_t>> _instance_leader_count;
     //临时方案，为了安全，每个resource_tag只控制单实例迁移
     bthread_mutex_t                                     _resource_tag_mutex;
-    std::map<std::string, std::string>                         _resource_tag_delete_region_map; 
+    std::map<std::string, std::string>                         _resource_tag_delete_region_map;
+
+    //bthread_mutex_t                                     _doing_mutex;
+    //std::set<std::string>                               _doing_migrate; 
+    bthread_mutex_t                                      _log_entry_mutex;
+    typedef std::map<int64_t, std::vector<pb::RegionInfo>> RegionIncrementalMap;
+    DoubleBuffer<RegionIncrementalMap>                   _incremental_regioninfo_map;
+    TimeCost                                             _gc_time_cost;
 }; //class
 
 }//namespace

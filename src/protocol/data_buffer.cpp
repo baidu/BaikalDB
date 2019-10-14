@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -80,6 +80,26 @@ bool DataBuffer::byte_array_append_size(int len, int is_pow) {
     _capacity = want_alloc;
     return true;
 }
+
+// packet大于16M时插入4字节包头，导致内存移动，需要后续优化
+bool DataBuffer::byte_array_insert_len(const uint8_t *data, int start_pos, int len) {
+    if (data == nullptr) {
+        DB_FATAL("data buffer is null");
+        return false;
+    }
+    if (len <= 0) {
+        return true;
+    }
+    if (!byte_array_append_size(len, 1)) {
+        DB_FATAL("byte_array_append_size fail");
+        return false;
+    }
+    memmove(_data + start_pos + len, _data + start_pos, _size - start_pos);
+    memcpy(_data + start_pos, data, len);
+    _size += len;
+    return true;
+}
+
 bool DataBuffer::byte_array_append_len(const uint8_t *data, int len) {
     if (data == nullptr) {
         DB_FATAL("data buffer is null");
@@ -223,7 +243,7 @@ bool DataBuffer::pack_length_coded_string(const std::string& str, bool is_null) 
 bool DataBuffer::network_queue_send_append(
         const uint8_t *data,
         int len,
-        uint8_t packet_id,
+        int packet_id,
         int append_data_later) {
     if (len <= 0 || (data == nullptr && append_data_later == 0)) {
         DB_FATAL("send_buf==NULL||len=%d<= 0 ||(data == null&& append_data_later=%d == 0)",
@@ -234,7 +254,7 @@ bool DataBuffer::network_queue_send_append(
     header[0] = (len >> 0) & 0xFF;
     header[1] = (len >> 8) & 0xFF;
     header[2] = (len >> 16) & 0xFF;
-    header[3] = packet_id; // out of 255 ??
+    header[3] = packet_id & 0xFF;
 
     if (!byte_array_append_len(header, 4)) {
         DB_FATAL("Failed to append length.length:[4]");

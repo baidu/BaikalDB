@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -269,7 +269,7 @@ ExprValue hll_add(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();
     }
-    if (input[0].is_null()) {
+    if (!input[0].is_hll()) {
         (ExprValue&)input[0] = hll::hll_init();
     }
     for (size_t i = 1; i < input.size(); i++) {
@@ -279,15 +279,29 @@ ExprValue hll_add(const std::vector<ExprValue>& input) {
     }
     return input[0];
 }
+
+ExprValue hll_init(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue hll_init = hll::hll_init();
+    for (size_t i = 0; i < input.size(); i++) {
+        if (!input[i].is_null()) {
+            hll::hll_add(hll_init, input[i].hash());
+        }
+    }
+    return hll_init;
+}
+
 ExprValue hll_merge(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();
     }
-    if (input[0].is_null()) {
+    if (!input[0].is_hll()) {
         (ExprValue&)input[0] = hll::hll_init();
     }
     for (size_t i = 1; i < input.size(); i++) {
-        if (!input[i].is_null()) {
+        if (input[i].is_hll()) {
             hll::hll_merge((ExprValue&)input[0], (ExprValue&)input[i]);
         }
     }
@@ -336,6 +350,13 @@ ExprValue case_expr_when(const std::vector<ExprValue>& input) {
      } else {
         return input[input.size() - 1];
     }
+}
+
+ExprValue if_(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    return input[0].get_numberic<bool>() ? input[1] : input[2];
 }
 
 ExprValue murmur_hash(const std::vector<ExprValue>& input) {

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -181,7 +181,7 @@ void CommonStateMachine::check_migrate() {
     std::string remove_peer;
     std::string add_peer;
     int ret = 0;
-    if (get_instance_from_bns(&ret,FLAGS_meta_server_bns, instances) != 0 || 
+    if (get_instance_from_bns(&ret,FLAGS_meta_server_bns, instances, false) != 0 || 
             (int32_t)instances.size() != FLAGS_meta_replica_number) {
         DB_WARNING("get instance from bns fail, bns:%s, ret:%d, instance.size:%d",
                     FLAGS_meta_server_bns.c_str(), ret, instances.size());

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,12 +17,14 @@
 #include "key_encoder.h"
 #include "table_record.h"
 #include "rocks_wrapper.h"
+#include "transaction.h"
 #include "boolean_executor.h"
 #include "reverse_common.h"
 #include "schema_factory.h"
 #include "expr_node.h"
 #include <atomic>
 #include <map>
+#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
 
@@ -35,12 +37,14 @@ public:
     //新加正排 创建倒排索引
     virtual int insert_reverse(
                        rocksdb::Transaction* txn,
+                       pb::StoreReq* req,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
     //删除正排 删除倒排索引
     virtual int delete_reverse(
                        rocksdb::Transaction* txn,
+                       pb::StoreReq* req,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
@@ -179,7 +183,7 @@ public:
             pb::SegmentType segment_type = pb::S_DEFAULT,
             bool is_over_cache = true,
             bool is_seg_cache = true,
-            int cache_size = 1000,
+            int cache_size = 300,
             int cached_list_length = 3000) : 
                         _region_id(region_id),
                         _index_id(index_id),
@@ -204,12 +208,14 @@ public:
     //0:success    -1:fail
     virtual int insert_reverse(
                         rocksdb::Transaction* txn,
+                        pb::StoreReq* req,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
     //0:success    -1:fail
     virtual int delete_reverse(
                         rocksdb::Transaction* txn,
+                        pb::StoreReq* req,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
@@ -225,7 +231,9 @@ public:
     }
     // release immediately
     virtual void clear() {
+        TimeCost timer;
         delete _schema;
+        DB_NOTICE("reverse delete time:%ld", timer.get_time());
         _schema = nullptr;
     }
     virtual int get_next(SmartRecord record) {
@@ -272,6 +280,7 @@ private:
     //0:success    -1:fail
     int handle_reverse(
                         rocksdb::Transaction* txn,
+                        pb::StoreReq* req,
                         pb::ReverseNodeType flag,
                         const std::string& word, 
                         const std::string& pk,
@@ -280,7 +289,7 @@ private:
     //key = tableid_regionid_level
     int _create_reverse_key_prefix(uint8_t level, std::string& key);
     //first(0/1) level merge to second(2) level
-    int _reverse_merge_to_second_level(std::unique_ptr<rocksdb::Iterator>&, rocksdb::Transaction*);
+    int _reverse_merge_to_second_level(std::unique_ptr<rocksdb::Iterator>&, uint8_t);
     //get some level list
     int _get_level_reverse_list(
                     rocksdb::Transaction* txn, 
@@ -297,20 +306,20 @@ private:
     //对一条倒排链增加一个倒排节点
     int _insert_one_reverse_node( 
                     rocksdb::Transaction* txn, 
+                    pb::StoreReq* req,
                     const std::string& term, 
                     const ReverseNode* node);
 
 private:
     int64_t             _region_id;
     int64_t             _index_id;
-    uint8_t             _reverse_prefix = 0;
-    uint8_t             _merge_prefix = 1;
+    uint8_t             _reverse_prefix = 1;
     std::atomic<long>    _sync_prefix_0;
     std::atomic<long>    _sync_prefix_1;
-    bool                _merge_success_flag = true;
     int                 _second_level_length;
     RocksWrapper*       _rocksdb;
     KeyRange            _key_range;
+    bool                _prefix_0_succ = false;
     // todo: replace thread_local because bthread will switch thread
     static thread_local SchemaBase<ReverseNode, ReverseList>* _schema;
     Cache<std::string, std::shared_ptr<google::protobuf::Message>> _cache;
@@ -345,7 +354,7 @@ public:
             const TableInfo& table_info,
             const std::vector<ReverseIndexBase*>& reverse_indexes,
             const std::vector<std::string>& search_datas,
-            bool is_fast, bool or_bool); 
+            bool is_fast, bool bool_or); 
     bool valid() {
         if (_exe != NULL) {
             while (true) {

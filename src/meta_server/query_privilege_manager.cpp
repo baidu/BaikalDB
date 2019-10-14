@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,6 +70,25 @@ void QueryPrivilegeManager::get_flatten_privilege(const pb::QueryRequest* reques
         }
     }
 }
+
+void QueryPrivilegeManager::process_console_heartbeat(const pb::ConsoleHeartBeatRequest* request,
+                                               pb::ConsoleHeartBeatResponse* response) {
+    TimeCost cost;
+    PrivilegeManager* manager = PrivilegeManager::get_instance();
+    BAIDU_SCOPED_LOCK(manager->_user_mutex);
+    std::map<std::string, std::multimap<std::string, pb::QueryUserPrivilege>> namespace_privileges;
+    for (auto& privilege_info : manager->_user_privilege) {
+        construct_query_response_for_privilege(privilege_info.second, namespace_privileges);
+    }
+    for (auto& namespace_privilege : namespace_privileges) {
+        for (auto& user_privilege : namespace_privilege.second) {
+            pb::QueryUserPrivilege* privilege_info = response->add_flatten_privileges();
+            *privilege_info = user_privilege.second;
+        }                                       
+    }                                           
+    SELF_TRACE("privilege_info update cost time:%ld", cost.get_time());
+}  
+
 void QueryPrivilegeManager::construct_query_response_for_privilege(const pb::UserPrivilege& user_privilege, 
         std::map<std::string, std::multimap<std::string, pb::QueryUserPrivilege>>& namespace_privileges) {
     std::string namespace_name =  user_privilege.namespace_name();

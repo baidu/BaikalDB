@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -96,7 +96,11 @@ public:
     int append_entry(const braft::LogEntry* entry) override;
 
     // append entries to log, return append success number
-    int append_entries(const std::vector<braft::LogEntry*>& entries) override;
+    int append_entries(const std::vector<braft::LogEntry*>& entries, 
+#ifdef BAIDU_INTERNAL
+            braft::IOMetric* metric
+#endif
+            ) override;
 
     // delete logs from storage's head, [first_log_index, first_index_kept) will be discarded
     int truncate_prefix(const int64_t first_index_kept) override;

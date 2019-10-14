@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ int TransactionPlanner::plan() {
         DB_WARNING("unsupported Trasanction command: %d", _ctx->stmt_type);
         return -1;
     }
-    _ctx->runtime_state.set_autocommit(false);
+    _ctx->runtime_state.set_single_sql_autocommit(false);
     return 0;
 }
 

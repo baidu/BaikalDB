@@ -125,6 +125,7 @@ KILL { return KILL; }
 LEADING { un_reserved_keyword(yylval, yyscanner, parser); return LEADING; }
 LEFT { return LEFT; }
 LIKE { return LIKE; }
+EXACT_LIKE { return EXACT_LIKE; }
 LIMIT { return LIMIT; }
 LINES { return LINES; }
 LOAD { return LOAD; }

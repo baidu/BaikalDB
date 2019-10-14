@@ -78,7 +78,7 @@ new_git_repository(
     remote = "https://github.com/facebook/rocksdb.git",
     #sha256 = "6e8d0844adc37da331844ac4b21ae33ba1f5265d8914c745760d9209a57e9cc9",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
-    tag = "v5.12.4"
+    tag = "v5.18.3"
 )
 
 bind(
@@ -132,8 +132,8 @@ bind(
 
 git_repository(
     name = "com_github_brpc_brpc",
-    remote= "https://github.com/brpc/brpc.git",
-    tag = "v0.9.0",
+    remote= "https://github.com/apache/incubator-brpc.git",
+    tag = "v0.9.6",
 )
 
 bind(

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,6 +52,7 @@ struct QueryStat {
     std::string family;
     std::string table;
     std::string server_ip;
+    std::ostringstream sample_sql;
 
     MysqlErrCode error_code;
     std::ostringstream error_msg;
@@ -59,6 +60,8 @@ struct QueryStat {
     int         num_affected_rows;
     int         num_returned_rows;
     uint64_t    log_id;
+    uint64_t    old_txn_id;
+    int         old_seq_id;
 
     QueryStat() {
         reset();
@@ -92,12 +95,15 @@ struct QueryStat {
         family.clear();
         table.clear();
         server_ip.clear();
+        sample_sql.str("");
 
         error_code          = ER_ERROR_FIRST;
         error_msg.str("");
         num_affected_rows   = 0;
         num_returned_rows   = 0;
         log_id              = butil::fast_rand();
+        old_txn_id          = 0;
+        old_seq_id          = 0;
     }
 };
 
@@ -163,6 +169,7 @@ public:
     parser::StmtNode*   stmt;
     parser::NodeType    stmt_type;
     bool                is_explain = false;
+    bool                is_full_export = false;
 
     uint8_t             mysql_cmd;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
@@ -195,6 +202,7 @@ public:
     // user can enable 2pc by comments /*{"enable_2pc":1}*/ preceding a DML statement
     bool                enable_2pc = false;
     bool                is_cancelled = false;
+    std::shared_ptr<QueryContext> kill_ctx;
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

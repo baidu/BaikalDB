@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ private:
     int parse_alter_table(pb::MetaManagerRequest& alter_request);
 
     int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column);
+    int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint);
     pb::PrimitiveType to_baikal_type(parser::FieldType* field_type);
 };
 } //namespace baikal

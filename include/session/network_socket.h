@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,6 +51,7 @@ enum SocketStatus{
     STATE_SEND_AUTH_RESULT      = 4,    // STATE_SEND_AUTH_RESULT
     STATE_READ_QUERY            = 5,
     STATE_READ_QUERY_RESULT     = 6,    // STATE_READ_QUERY_RESULT
+    STATE_READ_QUERY_RESULT_MORE= 7,    // has more result
     STATE_ERROR_REUSE           = 100,
     STATE_ERROR                 = 101   // STATE_ERROR
 };
@@ -73,6 +74,7 @@ struct NetworkSocket {
     void on_begin(uint64_t txn_id);
     void on_commit_rollback();
     bool transaction_has_write();
+    uint64_t get_global_conn_id();
 
     // Socket basic infomation.
     bool                shutdown;
@@ -95,12 +97,12 @@ struct NetworkSocket {
     DataBuffer*     send_buf;                       // Send buffer.
     int             send_buf_offset;
     DataBuffer*     self_buf;                       // receive buffer.
+    bool            has_multi_packet;
     int             header_read_len;                // readed header length.
-    int             header_offset;                  // Current query's head offset,
-                                                    // because many querys in a buffer.
     bool            has_error_packet;               //
-    size_t          packet_id;                      // Packet id for result packet(mysql protocal).
+    int             packet_id;                      // Packet id for result packet(mysql protocal).
     int             packet_len;                     // Packet length for read packet.
+    int             current_packet_len;
     int             packet_read_len;                // Current read length of packet.
     int             is_handshake_send_partly;       // Handshake is sended partly, go on sending.
     int             is_auth_result_send_partly;     // Auth result is sended partly,
@@ -137,6 +139,7 @@ struct NetworkSocket {
 
     std::unordered_map<std::string, pb::ExprNode> session_vars;
     std::unordered_map<std::string, pb::ExprNode> user_vars;
+    std::unordered_map<std::string, std::unordered_map<uint64_t, std::string>> long_data_vars;
 };
 
 class SocketPool {

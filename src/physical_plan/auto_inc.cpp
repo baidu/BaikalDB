@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,14 +33,14 @@ int AutoInc::analyze(QueryContext* ctx) {
         table_id = insert_node->table_id();
     }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
-    TableInfo table_info = schema_factory->get_table_info(table_id);
-    if (table_info.auto_inc_field_id == -1) {
+    auto table_info_ptr = schema_factory->get_table_info_ptr(table_id);
+    if (table_info_ptr == nullptr || table_info_ptr->auto_inc_field_id == -1) {
         return 0;
     }
     int auto_id_count = 0;
     int64_t max_id = 0;
     for (auto& record : ctx->insert_records) {
-            auto field = record->get_field_by_tag(table_info.auto_inc_field_id);
+            auto field = record->get_field_by_tag(table_info_ptr->auto_inc_field_id);
             ExprValue value = record->get_value(field);
             // 兼容mysql，值为0会分配自增id
             if (value.is_null() || value.get_numberic<int64_t>() == 0) {
@@ -77,7 +77,7 @@ int AutoInc::analyze(QueryContext* ctx) {
     auto client = ctx->runtime_state.client_conn();
     client->last_insert_id = start_id;
     for (auto& record : ctx->insert_records) {
-        auto field = record->get_field_by_tag(table_info.auto_inc_field_id);
+        auto field = record->get_field_by_tag(table_info_ptr->auto_inc_field_id);
         ExprValue value = record->get_value(field);
         if (value.is_null() || value.get_numberic<int64_t>() == 0) {
             value.type = pb::INT64;

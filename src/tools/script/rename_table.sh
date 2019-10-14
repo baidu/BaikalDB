@@ -10,8 +10,8 @@ curl -d '{
     "table_info": {
         "table_name": "wordinfo",
         "new_table_name": "wordinfo_new",
-        "database": "FC_Content",
-        "namespace_name": "FENGCHAO"
+        "database": "TEST",
+        "namespace_name": "TEST"
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

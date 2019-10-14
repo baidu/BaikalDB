@@ -9,7 +9,7 @@ curl -d '{
     "op_type":"OP_CREATE_TABLE",
     "table_info": {
         "table_name": "ideacontent",
-        "database": "TestDB",
+        "database": "FC_Content",
         "namespace_name": "TEST_NAMESPACE",
         "fields": [ {
                         "field_name" : "account_id",

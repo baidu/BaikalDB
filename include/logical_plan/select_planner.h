@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -56,6 +56,8 @@ private:
     int parse_orderby();
 
     int parse_limit();
+  
+    bool is_full_export();
 
     // create tuples for table scan
     void create_agg_tuple_desc();

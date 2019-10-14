@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <map>
 #include <bvar/bvar.h>
 #include <boost/regex.hpp>
 #include "network_socket.h"
@@ -24,8 +25,6 @@
 #include "physical_planner.h"
 
 namespace baikaldb {
-
-const uint32_t PACKET_LEN_MAX = 0x00ffffff;
 
 const std::string SQL_SELECT                     = "select";
 const std::string SQL_SHOW                       = "show";
@@ -120,9 +119,11 @@ private:
     StateMachine& operator=(const StateMachine& other);
 
     int _auth_read(SmartSocket sock);
+    int _read_packet_header(SmartSocket sock);
     int _read_packet(SmartSocket sock);
     int _query_read(SmartSocket sock);
     int _query_read_stmt_execute(SmartSocket sock);
+    int _query_read_stmt_long_data(SmartSocket sock);
     int _get_query_type(std::shared_ptr<QueryContext> ctx);
     int _get_json_attributes(std::shared_ptr<QueryContext> ctx);
     bool _query_process(SmartSocket sock);
@@ -156,6 +157,8 @@ private:
                                         std::vector<std::vector<std::string> >& rows);
 
     int _query_result_send(SmartSocket sock);
+    int _query_more(SmartSocket client, bool shutdown);
+    bool _has_more_result(SmartSocket client);
     int _send_result_to_client_and_reset_status(EpollInfo* epoll_info, SmartSocket client);
     int _reset_network_socket_client_resource(SmartSocket client);
     void _print_query_time(SmartSocket client);
@@ -167,6 +170,9 @@ private:
     std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_day;
 
     MysqlWrapper*   _wrapper = nullptr;
+
+public:
+    bvar::Adder<BvarMap> sql_agg_cost;
 };
 
 } // namespace baikal

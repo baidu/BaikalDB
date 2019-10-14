@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -65,6 +65,10 @@ inline bool is_double(pb::PrimitiveType type) {
         default:
             return false;
     }
+}
+
+inline bool has_double(pb::PrimitiveType t1, pb::PrimitiveType t2) {
+    return is_double(t1) || is_double(t2);
 }
 
 inline bool has_double(std::vector<pb::PrimitiveType> types) {
@@ -156,6 +160,24 @@ inline bool has_int(std::vector<pb::PrimitiveType> types) {
         }
     }
     return false;
+}
+
+inline bool all_uint(std::vector<pb::PrimitiveType> types) {
+    for (auto type : types) {
+        if (!is_uint(type)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool all_int(std::vector<pb::PrimitiveType> types) {
+    for (auto type : types) {
+        if (!is_int(type)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 inline bool is_string(pb::PrimitiveType type) {
