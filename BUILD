@@ -308,6 +308,7 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:unordered",
         "@boost//:thread",
+        "@boost//:asio",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",

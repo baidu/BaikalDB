@@ -365,7 +365,7 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
 }
 
 int64_t MetaStateMachine::snapshot_index(std::string& snapshot_path) {
-    base::FilePath path(snapshot_path);
+    butil::FilePath path(snapshot_path);
     int64_t index = 0;
     int ret = sscanf(path.BaseName().value().c_str(), "snapshot_%020ld", &index);
     CHECK_EQ(ret, 1);
