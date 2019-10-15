@@ -522,6 +522,7 @@ cc_binary(
         ":engine",
         ":raft",
         ":raft_meta",
+        "@boost//:filesystem",
     ],
     linkstatic = True,
 )
