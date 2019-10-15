@@ -8,8 +8,8 @@ echo -e "创建database\n"
 curl -d '{
     "op_type":"OP_CREATE_DATABASE",
     "database_info": {
-        "database":"TEST",
-        "namespace_name":"TEST",
+        "database":"TestDB",
+        "namespace_name":"TEST_NAMESPACE",
         "quota": 524288
     }
 }' http://$1/MetaService/meta_manager

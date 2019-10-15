@@ -8,9 +8,9 @@ echo -e "创建table\n"
 curl -d '{
     "op_type":128,
     "table_info": {
-        "table_name": "ideainfo",
-        "database": "TEST",
-        "namespace_name": "TEST",
+        "table_name": "TestTB",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -76,9 +76,9 @@ echo -e "schema set auto_increment start value\n"
 curl -d '{
     "op_type":128,
     "table_info": {
-        "table_name": "ideainfo1",
-        "database": "TEST",
-        "namespace_name": "TEST",
+        "table_name": "TestTB",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -145,9 +145,9 @@ echo -e "one table only has one auto increment field\n"
 curl -d '{
     "op_type":128,
     "table_info": {
-        "table_name": "ideainfo2",
-        "database": "TEST",
-        "namespace_name": "TEST",
+        "table_name": "TestTB",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
@@ -215,9 +215,9 @@ echo -e "auto increment field can not be null\n"
 curl -d '{
     "op_type":128,
     "table_info": {
-        "table_name": "ideainfo3",
-        "database": "TEST",
-        "namespace_name": "TEST",
+        "table_name": "TestTB",
+        "database": "TestDB",
+        "namespace_name": "TEST_NAMESPACE",
         "fields": [ 
                     {
                         "field_name" : "eventday",
