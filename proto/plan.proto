@@ -26,6 +26,21 @@ enum PlanNodeType {
     REPLACE_NODE = 16;
     TRUNCATE_NODE = 17;
     TRANSACTION_NODE = 18;  //TransactionNode
+    KILL_NODE = 19;
+    BEGIN_MANAGER_NODE = 20;
+    COMMIT_MANAGER_NODE = 21;
+    ROLLBACK_MANAGER_NODE = 22;
+    TXN_ROLLBACK_MANAGER_NODE = 23;
+    SIGNEL_TXN_MANAGER_NODE = 24;
+    SELECT_MANAGER_NODE = 25;
+    INSERT_MANAGER_NODE = 26;
+    UPDATE_MANAGER_NODE = 27;
+    DELETE_MANAGER_NODE = 28;
+    TRUNCATE_MANAGER_NODE = 29;
+    KILL_MANAGER_NODE = 30;
+    LOCK_PRIMARY_NODE = 31;
+    LOCK_SECONDARY_NODE = 32;
+    FULL_EXPORT_NODE = 33;
 };
 
 enum TxnCmdType {
@@ -40,7 +55,14 @@ enum TxnCmdType {
     TXN_ROLLBACK_BEGIN = 8; // rollback txn and then begin a new one
     TXN_PREPARE = 9;        // prepare
 };
-
+enum LockCmdType {
+    LOCK_INVALID = 0;
+    LOCK_GET = 1;
+    LOCK_GET_ONLY_PRIMARY = 2;
+    LOCK_DML = 3;
+    LOCK_GET_DML = 4;
+    LOCK_NO  = 5; //不加锁的操作
+};
 message PossibleIndex {
     message Range {
         optional bytes left_pb_record = 3;
@@ -49,6 +71,7 @@ message PossibleIndex {
         optional int32 right_field_cnt = 6;
         optional bool left_open = 7;
         optional bool right_open = 8;
+        optional bool like_prefix = 9;
     };
 
     message SortIndex {
@@ -58,12 +81,11 @@ message PossibleIndex {
     };
 
     required int64 index_id = 1;
-    //in可以用到n个等值索引
-    //repeated bytes eq_pb_records = 2; 
     repeated Range ranges = 2;
     //索引相关的谓词下推
     repeated Expr index_conjuncts = 3;
     optional SortIndex sort_index = 4;
+    optional bool bool_and = 5;
 };
 
 message ScanNode {
@@ -72,6 +94,7 @@ message ScanNode {
     repeated PossibleIndex indexes = 3; //baikal列举可能的index，region自己决定用哪个
     repeated int64 use_indexes = 4;
     optional Engine engine = 5;
+    repeated int64 ignore_indexes = 6;
 };
 
 message LimitNode {
@@ -138,6 +161,21 @@ message InsertNode {
     repeated int32 field_ids = 9;   // store field ids for prepared stmt
     repeated Expr  insert_values = 10;   // store values for prepared stmt
 };
+message LockPrimaryNode {
+    required int64        table_id       = 1;
+    required LockCmdType  lock_type      = 2;
+    repeated bytes        put_records    = 3;
+    repeated bytes        delete_records = 4; 
+    optional bool         affect_primary = 5 [default = true];
+    repeated int64        affect_index_ids = 6;
+};
+message LockSecondaryNode {
+    required int64        table_id        = 1;
+    required int64        global_index_id = 2;
+    required LockCmdType  lock_type       = 3;
+    repeated bytes        put_records     = 4;
+    repeated bytes        delete_records  = 5;
+};
 
 message DeleteNode {
     required int64 table_id = 1;
@@ -169,6 +207,11 @@ message TransactionNode {
     required TxnCmdType txn_cmd = 1;
 };
 
+message KillNode {
+    required uint64 db_conn_id = 1;
+    optional bool is_query = 2;
+};
+
 message DerivePlanNode {
     optional ScanNode scan_node = 1;
     optional SortNode sort_node = 2;
@@ -183,6 +226,9 @@ message DerivePlanNode {
     optional PacketNode packet_node = 11;
     optional TruncateNode truncate_node = 12;
     optional TransactionNode transaction_node = 13;
+    optional KillNode kill_node = 14;
+    optional LockPrimaryNode lock_primary_node = 15;
+    optional LockSecondaryNode lock_secondary_node = 16;
 };
 
 message PlanNode {

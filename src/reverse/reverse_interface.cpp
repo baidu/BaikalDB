@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,15 +49,24 @@ int CommonSchema::segment(
         case pb::S_NO_SEGMENT:
             term_map[word] = 0;
             break;
-        case pb::S_SIMPLE:
-            ret = simple_seg_gbk(word, term_map);
+        case pb::S_UNIGRAMS:
+            ret = Tokenizer::get_instance()->simple_seg_gbk(word, 1, term_map);
+            break;
+        case pb::S_BIGRAMS:
+            ret = Tokenizer::get_instance()->simple_seg_gbk(word, 2, term_map);
+            break;
+        case pb::S_ES_STANDARD:
+            ret = Tokenizer::get_instance()->es_standard_gbk(word, term_map);
             break;
 #ifdef BAIDU_INTERNAL
         case pb::S_WORDRANK: 
-            ret = wordrank(word, term_map);
+            ret = Tokenizer::get_instance()->wordrank(word, term_map);
+            break;
+        case pb::S_WORDRANK_Q2B_ICASE: 
+            ret = Tokenizer::get_instance()->wordrank_q2b_icase(word, term_map);
             break;
         case pb::S_WORDSEG_BASIC: 
-            ret = wordseg_basic(word, term_map);
+            ret = Tokenizer::get_instance()->wordseg_basic(word, term_map);
             break;
 #endif
         default:
@@ -83,57 +92,89 @@ int CommonSchema::create_executor(const std::string& search_data, pb::SegmentTyp
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
     //segment
     TimeCost timer;
-    std::map<std::string, float> term_map;
-    int ret = 0;
-    switch (segment_type) {
-        case pb::S_NO_SEGMENT:
-            term_map[search_data] = 0;
-            break;
-        case pb::S_SIMPLE:
-            ret = simple_seg_gbk(search_data, term_map);
-            break;
+    std::vector<std::string> or_search;
+    // 先用规则支持 or 操作
+    // TODO 用bison来支持mysql bool查询
+    Tokenizer::get_instance()->split_str_gbk(search_data, or_search, '|');
+    LogicalQuery<CommonSchema> logical_query(this);
+    ExecutorNode<CommonSchema>* parent = nullptr;
+    ExecutorNode<CommonSchema>* root = &logical_query._root;
+    if (or_search.size() == 0) {
+        _exe = NULL;
+        return 0;
+    } else if (or_search.size() == 1) {
+        root->_type = AND;
+        root->_merge_func = CommonSchema::merge_and;
+    } else {
+        root->_type = OR;
+        root->_merge_func = CommonSchema::merge_or;
+        parent = root;
+    }
+    for (auto& or_item : or_search) {
+        std::map<std::string, float> term_map;
+        std::vector<std::string> and_terms;
+        int ret = 0;
+        switch (segment_type) {
+            case pb::S_NO_SEGMENT:
+                term_map[or_item] = 0;
+                break;
+            case pb::S_UNIGRAMS:
+                ret = Tokenizer::get_instance()->simple_seg_gbk(or_item, 1, term_map);
+                break;
+            case pb::S_BIGRAMS:
+                ret = Tokenizer::get_instance()->simple_seg_gbk(or_item, 2, term_map);
+                break;
+            case pb::S_ES_STANDARD:
+                ret = Tokenizer::get_instance()->es_standard_gbk(or_item, term_map);
+                break;
 #ifdef BAIDU_INTERNAL
-        case pb::S_WORDRANK: 
-            ret = wordrank(search_data, term_map);
-            break;
-        case pb::S_WORDSEG_BASIC: 
-            ret = wordseg_basic(search_data, term_map);
-            break;
+            case pb::S_WORDRANK: 
+                ret = Tokenizer::get_instance()->wordrank(or_item, term_map);
+                break;
+            case pb::S_WORDRANK_Q2B_ICASE: 
+                ret = Tokenizer::get_instance()->wordrank_q2b_icase(or_item, term_map);
+                break;
+            case pb::S_WORDSEG_BASIC: 
+                ret = Tokenizer::get_instance()->wordseg_basic(or_item, term_map);
+                break;
 #endif
-        default:
-            DB_WARNING("un-support segment:%d", segment_type);
-            ret = -1;
-            break;
-    }
-    if (ret < 0) {
-        DB_WARNING("[word:%s]segment error %d", search_data.c_str(), ret);
-        return -1;
-    }
-    for (auto& pair : term_map) {
-        _and_terms.push_back(pair.first);
+            default:
+                DB_WARNING("un-support segment:%d", segment_type);
+                ret = -1;
+                break;
+        }
+        if (ret < 0) {
+            DB_WARNING("[word:%s]segment error %d", or_item.c_str(), ret);
+            return -1;
+        }
+        if (term_map.size() == 0) {
+            continue;
+        } 
+        ExecutorNode<CommonSchema>* and_node = nullptr;
+        if (parent != nullptr) {
+            and_node = new ExecutorNode<CommonSchema>();
+        } else {
+            and_node = root;
+        }
+        if (term_map.size() == 1) {
+            and_node->_type = TERM;
+            and_node->_term = term_map.begin()->first;
+        } else {
+            and_node->_type = AND;
+            and_node->_merge_func = CommonSchema::merge_and;
+            for (auto& pair : term_map) {
+                auto sub_node = new ExecutorNode<CommonSchema>();
+                sub_node->_type = TERM;
+                sub_node->_term = pair.first;
+                and_node->_sub_nodes.push_back(sub_node);
+            }
+        }
+        if (parent != nullptr) {
+            parent->_sub_nodes.push_back(and_node);
+        }
     }
     _statistic.segment_time += timer.get_time();
     timer.reset();
-    LogicalQuery<CommonSchema> logical_query(this);
-    if (_and_terms.size() == 0) {
-        _exe = NULL;
-        return 0;
-    }
-    ExecutorNode<CommonSchema>& root = logical_query._root;
-    if (_and_terms.size() == 1) {
-        root._type = TERM;
-        root._term = _and_terms[0];
-    } else {
-        root._type = AND;
-        root._merge_func = CommonSchema::merge_and;
-        for (uint32_t j = 0; j < _and_terms.size(); ++j) {
-            std::string& term = _and_terms[j];
-            ExecutorNode<CommonSchema>* node = new ExecutorNode<CommonSchema>();
-            node->_type = TERM;
-            node->_term = term;
-            root._sub_nodes.push_back(node);
-        }
-    }
     _exe = logical_query.create_executor();
     _statistic.create_exe_time += timer.get_time();
     return 0;

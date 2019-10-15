@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -152,6 +152,35 @@ void QueryClusterManager::get_flatten_instance(const pb::QueryRequest* request,
         }
     }
 }
+
+void QueryClusterManager::process_console_heartbeat(const pb::ConsoleHeartBeatRequest* request,
+            pb::ConsoleHeartBeatResponse* response) {
+    TimeCost cost;
+    ClusterManager* manager = ClusterManager::get_instance(); 
+    std::vector<Instance> instance_mems;
+    {   
+        BAIDU_SCOPED_LOCK(manager->_instance_mutex);
+        for (auto& instance : manager->_instance_info) {
+            instance_mems.push_back(instance.second);
+        }
+    }
+    SELF_TRACE("cluster_info mutex cost time:%ld", cost.get_time());
+    cost.reset();
+    
+    std::map<std::string, std::multimap<std::string, pb::QueryInstance>> logical_instance_infos;
+    for (auto& instance_mem : instance_mems) {
+        construct_query_response_for_instance(instance_mem, logical_instance_infos);
+    }   
+    
+    for (auto& logical_instance : logical_instance_infos) {
+        for (auto& query_instance : logical_instance.second) {
+            auto query_instance_ptr = response->add_flatten_instances();
+            *query_instance_ptr = query_instance.second;
+        }
+    }   
+    SELF_TRACE("cluster_info update cost time:%ld", cost.get_time());
+}
+
 void QueryClusterManager::get_diff_region_ids(const pb::QueryRequest* request, 
                 pb::QueryResponse* response) {
     if (!request->has_instance_address()) {

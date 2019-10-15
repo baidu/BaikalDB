@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -55,9 +55,9 @@ struct SlotPredicate {
     static bool lt_le_less(ExprNode* left, ExprNode* right) {
         ExprValue l = left->children(1)->get_value(nullptr);
         ExprValue r = right->children(1)->get_value(nullptr);
-        if (l.compare(r) < 0) {
+        if (l.compare_diff_type(r) < 0) {
             return true;
-        } else if (l.compare(r) == 0) {
+        } else if (l.compare_diff_type(r) == 0) {
             if (static_cast<ScalarFnCall*>(left)->fn().fn_op() == parser::FT_LT) {
                 return true;
             }
@@ -67,9 +67,9 @@ struct SlotPredicate {
     static bool gt_ge_less(ExprNode* left, ExprNode* right) {
         ExprValue l = left->children(1)->get_value(nullptr);
         ExprValue r = right->children(1)->get_value(nullptr);
-        if (l.compare(r) > 0) {
+        if (l.compare_diff_type(r) > 0) {
             return true;
-        } else if (l.compare(r) == 0) {
+        } else if (l.compare_diff_type(r) == 0) {
             if (static_cast<ScalarFnCall*>(left)->fn().fn_op() == parser::FT_GT) {
                 return true;
             }
@@ -102,6 +102,53 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
         }
         return 0;
     }
+    // 多个in条件合并,只有in条件都是常量才处理
+    if (preds.in_preds.size() > 1) {
+        DB_NOTICE("enter in_preds");
+        // 取交集
+        std::map<std::string, ExprNode*> and_map;
+        std::map<std::string, ExprNode*> out_map;
+        for (uint32_t i = 1; i < preds.in_preds[0]->children_size(); i++) {
+            auto lit = preds.in_preds[0]->children(i);
+            if (!lit->is_constant()) {
+                return 0;
+            }
+            and_map[lit->get_value(nullptr).get_string()] = lit;
+        }
+        for (uint32_t j = 1; j < preds.in_preds.size(); j++) {
+            for (uint32_t i = 1; i < preds.in_preds[j]->children_size(); i++) {
+                auto lit = preds.in_preds[j]->children(i);
+                if (!lit->is_constant()) {
+                    cut_preds.clear();
+                    return 0;
+                }
+                const auto& key = lit->get_value(nullptr).get_string();
+                if (and_map.count(key) == 1) {
+                    out_map[key] = and_map[key];
+                }
+            }
+            out_map.swap(and_map);
+            out_map.clear();
+            cut_preds.insert(preds.in_preds[j]);
+        }
+        if (and_map.empty()) {
+            return -1;
+        }
+        std::set<ExprNode*> keep;
+        for (auto& pair : and_map) {
+            keep.insert(pair.second);
+        }
+        // 反过来删
+        for (uint32_t i = preds.in_preds[0]->children_size() - 1; i >= 1; i--) {
+            auto lit = preds.in_preds[0]->children(i);
+            if (keep.count(lit) == 0) {
+                preds.in_preds[0]->del_child(i);
+            }
+        }
+        DB_NOTICE("in size:%lu", preds.in_preds[0]->children_size());
+
+        return 0;
+    }
     ExprNode* lt_le = nullptr;
     ExprNode* gt_ge = nullptr;
     if (preds.lt_le_preds.size() > 0) {
@@ -123,9 +170,9 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
     if (lt_le != nullptr && gt_ge != nullptr) {
         ExprValue l = lt_le->children(1)->get_value(nullptr);
         ExprValue g = gt_ge->children(1)->get_value(nullptr);
-        if (l.compare(g) < 0) {
+        if (l.compare_diff_type(g) < 0) {
             return -1;
-        } else if (l.compare(g) == 0) {
+        } else if (l.compare_diff_type(g) == 0) {
             if (static_cast<ScalarFnCall*>(lt_le)->fn().fn_op() == parser::FT_LE &&
                 static_cast<ScalarFnCall*>(gt_ge)->fn().fn_op() == parser::FT_GE) {
                 // transfer to eq
@@ -168,11 +215,11 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         if (expr->children_size() < 2) {
             continue;
         }
-        if (expr->children(0)->node_type() != pb::SLOT_REF) {
+        if (!expr->children(0)->is_slot_ref()) {
             continue;
         }
         SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
-        int64_t sign = (slot_ref->tuple_id() << 8) + slot_ref->slot_id();
+        int64_t sign = (slot_ref->tuple_id() << 16) + slot_ref->slot_id();
         bool all_const = true;
         for (uint32_t i = 1; i < expr->children_size(); i++) { 
             if (!expr->children(i)->is_constant()) {
@@ -314,6 +361,7 @@ void FilterNode::remove_primary_conjunct(int64_t index_id) {
             iter = _conjuncts.erase(iter);
             continue;
         }
+        // transfer_pb还会构建，后面删掉试试
         ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
         ++iter;
     }

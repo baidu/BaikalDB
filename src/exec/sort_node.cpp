@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -107,6 +107,14 @@ int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         expr->const_pre_calc();
         idx++;
     }
+    for (auto expr : _slot_order_exprs) {
+        if (expr->node_type() == pb::AGG_EXPR) {
+            ret = expr->type_inferer();
+            if (ret < 0) {
+                return ret;
+            }
+        }
+    }
     return 0;
 }
 
@@ -143,6 +151,10 @@ int SortNode::open(RuntimeState* state) {
     bool eos = false;
     int count = 0;
     do {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            return 0;
+        }
         std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
         ret = _children[0]->get_next(state, batch.get(), &eos);
         if (ret < 0) {
@@ -163,6 +175,11 @@ int SortNode::open(RuntimeState* state) {
 }
 
 int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    if (state->is_cancelled()) {
+        DB_WARNING_STATE(state, "cancelled");
+        *eos = true;
+        return 0;
+    }
     if (reached_limit()) {
         *eos = true;
         return 0;

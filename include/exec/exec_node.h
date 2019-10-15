@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,11 +20,17 @@
 #include "proto/plan.pb.h"
 #include "proto/meta.interface.pb.h"
 #include "mem_row_descriptor.h"
+#include "table_record.h"
 
 namespace baikaldb { 
 #define DB_WARNING_STATE(state, _fmt_, args...) \
     do {\
         DB_WARNING("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
+                state->log_id(), state->region_id(), state->table_id(), ##args); \
+    } while (0);
+#define DB_FATAL_STATE(state, _fmt_, args...) \
+    do {\
+        DB_FATAL("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
                 state->log_id(), state->region_id(), state->table_id(), ##args); \
     } while (0);
 
@@ -53,9 +59,6 @@ public:
         //DB_WARNING("node:%ld is predicating pushdown", this);
     void add_filter_node(const std::vector<ExprNode*>& input_exprs);
     
-    pb::PlanNodeType get_node_type() const {
-        return _node_type;
-    }
     void get_node(pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     ExecNode* get_node(pb::PlanNodeType node_type);
     ExecNode* get_parent() {
@@ -146,7 +149,9 @@ public:
     std::map<int64_t, pb::RegionInfo>& region_infos() {
         return _region_infos;
     }
-
+    void set_region_infos(std::map<int64_t, pb::RegionInfo> region_infos) {
+        _region_infos.swap(region_infos);
+    }
     //除了表达式外大部分直接沿用保存的pb
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     static void create_pb_plan(int64_t region_id, pb::Plan* plan, ExecNode* root);
@@ -154,6 +159,17 @@ public:
     static void destroy_tree(ExecNode* root) {
         delete root;
     }
+    virtual int push_cmd_to_cache(RuntimeState* state,
+                                  pb::OpType op_type,
+                                  ExecNode* store_request,
+                                  int seq_id);
+    virtual int push_cmd_to_cache(RuntimeState* state,
+                                  pb::OpType op_type,
+                                  ExecNode* store_request);
+    std::map<int64_t, std::vector<SmartRecord>>& get_return_records() {
+        return _return_records;
+    }
+    virtual pb::LockCmdType lock_type() { return pb::LOCK_INVALID; }
 protected:
     int64_t _limit = -1;
     int64_t _num_rows_returned = 0;
@@ -163,7 +179,9 @@ protected:
     ExecNode* _parent = nullptr;
     pb::PlanNode _pb_node;
     std::map<int64_t, pb::RegionInfo> _region_infos;
-
+    
+    //返回给baikaldb的结果
+    std::map<int64_t, std::vector<SmartRecord>> _return_records;
 private:
     static int create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, ExecNode** root);
     static int create_exec_node(const pb::PlanNode& node, ExecNode** exec_node);

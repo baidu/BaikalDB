@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -83,9 +83,18 @@ public:
                     return 0;
                 }
             }
+
+            DB_DEBUG("meta_req[%s], meta_resp[%s]", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
             if (cntl.Failed()) {
                 DB_WARNING("connect with server fail. send request fail, error:%s, log_id:%lu",
                             cntl.ErrorText().c_str(), cntl.log_id());
+                _set_leader_address(butil::EndPoint());
+                ++retry_time;
+                continue;
+            }
+            if (response.errcode() == pb::HAVE_NOT_INIT) {
+                DB_WARNING("connect with server fail. HAVE_NOT_INIT  log_id:%lu",
+                        cntl.log_id());
                 _set_leader_address(butil::EndPoint());
                 ++retry_time;
                 continue;

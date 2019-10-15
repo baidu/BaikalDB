@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,6 +36,8 @@ struct IteratorContext {
     bool reading = false;
     std::unique_ptr<rocksdb::Iterator> iter;
     std::string prefix;
+    std::string upper_bound;
+    rocksdb::Slice upper_bound_slice;
     bool is_meta_sst = false;
     int64_t offset = 0;
     bool done = false;

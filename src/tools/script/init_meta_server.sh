@@ -17,7 +17,7 @@ curl -d '{
     "op_type": "OP_ADD_PHYSICAL",
     "physical_rooms": {
         "logical_room" : "bj",
-        "physical_rooms" : ["tc", "yf01", "m1", "bjyz", "cq01", "cq02", "cp01", "dbl01", "st01"]
+        "physical_rooms" : ["tc", "yf01", "m1", "bjyz", "cq01", "cq02", "cp01", "dbl01", "st01", "bjhw"]
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

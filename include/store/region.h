@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -46,11 +46,13 @@
 #include "transaction_pool.h"
 //#include "region_resource.h"
 #include "runtime_state.h"
+#include "runtime_state_pool.h"
 #include "rapidjson/document.h"
 #include "rocksdb_file_system_adaptor.h"
 #include "region_control.h"
 #include "meta_writer.h"
 #include "rpc_sender.h"
+#include "ddl_common.h"
 
 using google::protobuf::Message;
 using google::protobuf::RepeatedPtrField;
@@ -75,8 +77,18 @@ public:
 private:
     Region* _region;
 };
-
+class ScopeMergeStatus {
+public:
+    ScopeMergeStatus(Region* region) : _region(region) {}
+    ~ScopeMergeStatus();
+    void reset() {
+        _region = NULL;
+    }
+private:
+    Region* _region;
+};
 class TransactionPool;
+typedef std::shared_ptr<Region> SmartRegion;
 class Region : public braft::StateMachine {
 friend class RegionControl;
 public:
@@ -89,6 +101,7 @@ public:
         for (auto& pair : _reverse_index_map) {
             delete pair.second;
         }
+        bthread_mutex_destroy(&_commit_meta_mutex);
     }
 
     void shutdown() {
@@ -131,7 +144,10 @@ public:
                 _region_control(this, region_id),
                 _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)) {
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
+        bthread_mutex_init(&_commit_meta_mutex, NULL);
         _region_control.store_status(_region_info.status());
+        _is_global_index = _region_info.has_main_table_id() && 
+                    region_info.table_id() != _region_info.main_table_id();
     }
 
     int init(bool new_region, int32_t snapshot_times);
@@ -198,15 +214,20 @@ public:
     void on_snapshot_load_for_restart(braft::SnapshotReader* reader,
             std::map<int64_t, std::string>& prepared_log_entrys);
 
-    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance); 
+    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance, 
+        std::set<int64_t>& ddl_wait_doing_table_ids); 
     
     void set_can_add_peer();
     
     //leader收到从metaServer心跳包中的解析出来的add_peer请求
-    void add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue) { 
-        _region_control.add_peer(add_peer, queue); 
+    void add_peer(const pb::AddPeer& add_peer, SmartRegion region, ExecutionQueue& queue) {
+        _region_control.add_peer(add_peer, region, queue);
     }
-    
+
+    RegionControl& get_region_control() {
+        return _region_control;
+    }
+
     void add_peer(const pb::AddPeer* request,  
             pb::StoreRes* response, 
             google::protobuf::Closure* done) {
@@ -243,7 +264,17 @@ public:
     void validate_and_add_version(const pb::StoreReq& request, braft::Closure* done, int64_t applied_index, int64_t term);
     void add_version_for_split_region(const pb::StoreReq& request, braft::Closure* done, int64_t applied_index, int64_t term);
     void apply_txn_request(const pb::StoreReq& request, braft::Closure* done, int64_t index, int64_t term);
-
+    void adjustkey_and_add_version(const pb::StoreReq& request, 
+                                           braft::Closure* done, 
+                                           int64_t applied_index, 
+                                           int64_t term);
+    
+    void adjustkey_and_add_version_query(google::protobuf::RpcController* controller,
+            const pb::StoreReq* request, 
+            pb::StoreRes* response, 
+            google::protobuf::Closure* done);
+    //开始做merge操作
+    void start_process_merge(const pb::RegionMergeResponse& merge_response);
     //开始做split操作
     //第一步通过raft状态机,创建迭代器，取出当前的index,自此之后的log不能再删除
     void start_process_split(const pb::RegionSplitResponse& split_response,
@@ -325,6 +356,12 @@ public:
     }
     void get_region_info(pb::RegionInfo& region_info) {
         region_info = _region_info;
+    }    
+    std::string get_start_key() {
+        return _region_info.start_key();
+    }
+    std::string get_end_key() {
+        return _region_info.end_key();
     }
     pb::RegionInfo* get_region_info() {
         return &_region_info;
@@ -332,6 +369,12 @@ public:
     int64_t get_log_index() const {
         return _applied_index;
     }
+    int64_t get_log_index_lastcycle() const {
+        return _applied_index_lastcycle;
+    }
+    void reset_log_index_lastcycle() {
+        _applied_index_lastcycle = _applied_index;
+    }    
     rocksdb::ColumnFamilyHandle* get_data_cf() const {
         return _data_cf;
     }
@@ -387,6 +430,22 @@ public:
     bool is_tail() {
         return  (!_region_info.has_end_key() || _region_info.end_key() == "");
     }
+    
+    bool is_head() {
+        return (!_region_info.has_start_key() || _region_info.start_key() == "");
+    }
+    
+    bool empty() {
+        return (_region_info.start_key() == _region_info.end_key() && !is_tail() && !is_head());
+    }
+    
+    int64_t get_timecost() {
+        return _time_cost.get_time();
+    }
+    
+    void reset_timecost() {
+        return _time_cost.reset();
+    }
 
     int64_t get_qps() {
         return _qps.load();
@@ -424,7 +483,11 @@ public:
             const pb::StoreReq* request, 
             pb::StoreRes* response, 
             google::protobuf::Closure* done);
-
+    
+    void exec_dml_out_txn_query(const pb::StoreReq* request, 
+                                        pb::StoreRes* response, 
+                                        google::protobuf::Closure* done);
+    
     int execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& response, 
             uint64_t txn_id, 
             SmartTransaction& txn, 
@@ -440,28 +503,6 @@ public:
         return _txn_pool;
     }
 
-    void update_resource_table() {
-        std::shared_ptr<RegionResource> new_resource(new RegionResource);
-        new_resource->region_info = _region_info;
-        // 初始化倒排索引
-        TableInfo& table_info = new_resource->table_info;
-        new_resource->region_id = _region_id;
-        new_resource->table_id = _region_info.table_id();
-        table_info = _factory->get_table_info(_region_info.table_id());
-        for (int64_t index_id : table_info.indices) {
-            IndexInfo info = _factory->get_index_info(index_id);
-            if (info.id == -1) {
-                continue;
-            }
-            if (info.type == pb::I_PRIMARY) {
-                new_resource->pri_info = info;
-            }
-            new_resource->index_infos[info.id] = info;
-        }
-        BAIDU_SCOPED_LOCK(_ptr_mutex);
-        _resource = new_resource;
-    }
-    
     void start_thread_to_remove_region(int64_t drop_region_id, std::string instance_address) {
         Bthread bth(&BTHREAD_ATTR_SMALL);
         std::function<void()> remove_region_function =
@@ -484,6 +525,44 @@ public:
         std::lock_guard<std::mutex> lock(_region_lock);
         region_info->CopyFrom(_region_info);
     }
+    void kv_apply_raft(RuntimeState* state, SmartTransaction txn);
+    void set_separate_switch(bool is_separate) {
+        _storage_compute_separate = is_separate;
+    }
+    void lock_commit_meta_mutex() {
+        bthread_mutex_lock(&_commit_meta_mutex); 
+    }
+    void unlock_commit_meta_mutex() {
+        bthread_mutex_unlock(&_commit_meta_mutex);
+    }
+
+    int ddlwork_process(const pb::DdlWorkInfo& store_ddl_work);
+    int ddlwork_common_init_process(const pb::DdlWorkInfo& store_ddl_work);
+    void ddlwork_finish_check_process(std::set<int64_t>& ddlwork_table_ids);
+
+    void start_add_index();
+    void write_local_rocksdb_for_ddl();
+    int ddlwork_add_index_process();
+
+    void start_drop_index();
+    void delete_local_rocksdb_for_ddl();
+    int ddlwork_del_index_process();
+
+    bool is_wait_ddl();
+    int add_reverse_index();
+    int ddl_schema_state(pb::IndexState& state);
+
+    void ddlwork_rollback(pb::ErrCode errcode, bool& is_success) {
+        BAIDU_SCOPED_LOCK(_region_ddl_lock);
+        if (_region_ddl_info.ddlwork_infos_size() > 0) {
+            _region_ddl_info.mutable_ddlwork_infos(0)->set_errcode(errcode);
+            _region_ddl_info.mutable_ddlwork_infos(0)->set_rollback(true);
+        } else {
+            DB_FATAL("DDL_LOG region_%lld ddlwork_infos_size is zero, rollback failed.", _region_id);
+        }
+        is_success = false;
+    }
+
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -520,8 +599,15 @@ private:
         std::unordered_map<uint64_t, pb::TransactionInfo> prepared_txn;
     };
 
+    void apply_kv_in_txn(const pb::StoreReq& request, braft::Closure* done, 
+                         int64_t index, int64_t term);
+
+    void apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done, 
+                                  int64_t index, int64_t term);
+    void apply_kv_split(const pb::StoreReq& request, braft::Closure* done, 
+                                int64_t index, int64_t term);
     bool validate_version(const pb::StoreReq* request, pb::StoreRes* response);
-    
+
     void set_region(const pb::RegionInfo& region_info) {
         std::lock_guard<std::mutex> lock(_region_lock);
         _region_info.CopyFrom(region_info);
@@ -542,6 +628,14 @@ private:
                 _region_id,
                 region_info.start_key(),
                 region_info.end_key());
+        DB_WARNING("region_id: %ld, start_ke: %s, end_key: %s", _region_id, 
+            rocksdb::Slice(region_info.start_key()).ToString(true).c_str(), 
+            rocksdb::Slice(region_info.end_key()).ToString(true).c_str());
+    }
+
+    void set_region_ddl(const pb::StoreRegionDdlInfo& region_ddl_info) {
+        std::lock_guard<std::mutex> lock(_region_ddl_lock);
+        _region_ddl_info.CopyFrom(region_ddl_info);
     }
 
 private:
@@ -559,6 +653,9 @@ private:
     std::vector<pb::RegionInfo> _new_region_infos;
     pb::RegionInfo      _new_region_info;
     int64_t             _region_id;
+    
+    //merge后该region为空，记录目标region，供baikaldb使用，只会merge一次，不必使用vector
+    pb::RegionInfo      _merge_region_info;
     // 倒排索引需要
     // todo liguoqiang  如何初始化这个
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
@@ -567,6 +664,7 @@ private:
     BthreadCond _disable_write_cond;
     BthreadCond _real_writing_cond;
     SplitParam _split_param;
+    DllParam _ddl_param;
 
 
     std::mutex _legal_mutex;
@@ -579,10 +677,14 @@ private:
     std::atomic<int64_t> _qps;
     std::atomic<int64_t> _average_cost;
     bool                                _restart = false;
+    //计算存储分离开关，在store定时任务中更新，避免每次dml都访问schema factory
+    bool                                _storage_compute_separate = false;
     //raft node
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;
     int64_t                             _applied_index = 0;  //current log index
+    // bthread cycle: set _applied_index_lastcycle = _applied_index when _num_table_lines == 0
+    int64_t                             _applied_index_lastcycle = 0;  
 
     bool                                _report_peer_info = false;
     std::atomic<bool>                   _shutdown;
@@ -597,16 +699,20 @@ private:
     int64_t                             _snapshot_index = 0; //last snapshot log index
     bool                                _removed = false;
     TransactionPool                     _txn_pool;
+    RuntimeStatePool                    _state_pool;
 
     // shared_ptr is not thread safe when assign
     std::mutex  _ptr_mutex;
     std::shared_ptr<RegionResource>     _resource;
 
     RegionControl                           _region_control;
-    MetaWriter*                             _writer = nullptr;
+    MetaWriter*                             _meta_writer = nullptr;
+    bthread_mutex_t                         _commit_meta_mutex;
     scoped_refptr<braft::FileSystemAdaptor>  _snapshot_adaptor = nullptr;
+    std::mutex          _region_ddl_lock;    
+    pb::StoreRegionDdlInfo     _region_ddl_info;
+    bool                                     _is_global_index = false; //是否是全局索引的region
+    std::mutex       _reverse_index_map_lock;
 };
-
-typedef std::shared_ptr<Region> SmartRegion;
 
 } // end of namespace

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 namespace baikaldb {
 #ifdef BAIDU_INTERNAL
 template <typename OUT>
-int nlpc_seg(drpc::NLPCClient& client, 
+int Tokenizer::nlpc_seg(drpc::NLPCClient& client, 
              const std::string& word, 
              OUT& s_output)
 {
@@ -77,13 +77,23 @@ int FirstLevelMSIterator<ReverseNode>::next(std::string& key, bool& res) {
             return 0;
         }
         res = true;
-        if (!_curr_node.ParseFromArray(_iter->value().data(), _iter->value().size())) {
+        rocksdb::Status s;
+        rocksdb::ReadOptions read_opt;
+        std::string value;
+        auto data_cf = _rocksdb->get_data_handle();
+        s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &value);
+        if (!s.ok()) {
+            DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
+                      term.c_str(), _iter->key().ToString(true).c_str());
+            return -1;
+        }
+        
+        if (!_curr_node.ParseFromArray(value.data(), value.size())) {
             DB_FATAL("parse first level from pb failed");
             return -1;
         }
         key = _curr_node.key();
         if (_del) {
-            auto data_cf = _rocksdb->get_data_handle();
             auto remove_res = _txn->Delete(data_cf, _iter->key());
             if (!remove_res.ok()) {
                 DB_WARNING("rocksdb delete error: code=%d, msg=%s",
@@ -164,8 +174,15 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
     std::string old_key;
     bool new_not_end;
     bool old_not_end;
-    new_iter->next(new_key, new_not_end);
-    old_iter->next(old_key, old_not_end);
+    int ret = 0;
+    ret = new_iter->next(new_key, new_not_end);
+    if (ret < 0) {
+        return -1;
+    }
+    ret = old_iter->next(old_key, old_not_end);
+    if (ret < 0) {
+        return -1;
+    }
     while (true) {
         if (new_not_end && old_not_end) {
             MergeSortIterator<ReverseNode>* choose_iter;
@@ -183,12 +200,24 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
                 choose_iter->fill_node(tmp_node);
             }
             if (res < 0) {
-                new_iter->next(new_key, new_not_end);
+                ret = new_iter->next(new_key, new_not_end);
+                if (ret < 0) {
+                    return -1;
+                }
             } else if (res == 0) {               
-                new_iter->next(new_key, new_not_end);
-                old_iter->next(old_key, old_not_end);
+                ret = new_iter->next(new_key, new_not_end);
+                if (ret < 0) {
+                    return -1;
+                }
+                ret = old_iter->next(old_key, old_not_end);
+                if (ret < 0) {
+                    return -1;
+                }
             } else if (res > 0) {
-                old_iter->next(old_key, old_not_end);
+                ret = old_iter->next(old_key, old_not_end);
+                if (ret < 0) {
+                    return -1;
+                }
             }
             continue;
         } else if (new_not_end) {
@@ -197,7 +226,10 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
                 ReverseNode* tmp_node = res_list.add_reverse_nodes();
                 new_iter->fill_node(tmp_node);
             }
-            new_iter->next(new_key, new_not_end);
+            ret = new_iter->next(new_key, new_not_end);
+            if (ret < 0) {
+                return -1;
+            }
             continue;
         } else if (old_not_end) {
             pb::ReverseNodeType flag = old_iter->get_flag();
@@ -205,7 +237,10 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
                 ReverseNode* tmp_node = res_list.add_reverse_nodes();
                 old_iter->fill_node(tmp_node);
             }
-            old_iter->next(old_key, old_not_end);
+            ret = old_iter->next(old_key, old_not_end);
+            if (ret < 0) {
+                return -1;
+            }
             continue;
         } else {
             break;

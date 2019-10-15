@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,12 +16,16 @@
 
 #include <execinfo.h>
 #include <type_traits>
+#include <set>
+#include <unordered_set>
 #include <unordered_map>
 #include <bthread/butex.h>
+#include <bvar/bvar.h>
 #ifdef BAIDU_INTERNAL
 #include <bthread.h>
 #include <base/time.h>
 #include <base/third_party/murmurhash3/murmurhash3.h>
+#include <base/containers/doubly_buffered_data.h>
 #include <base/endpoint.h>
 #include <base/base64.h>
 #include <webfoot_naming.h>
@@ -30,6 +34,7 @@
 #include <bthread/bthread.h>
 #include <butil/time.h>
 #include <butil/third_party/murmurhash3/murmurhash3.h>
+#include <butil/containers/doubly_buffered_data.h>
 #include <butil/endpoint.h>
 #include <butil/base64.h>
 #endif
@@ -59,7 +64,8 @@ enum RETURN_VALUE {
     RET_AUTH_FAILED      = 4,   // Auth login failed.
     RET_COMMAND_SHUTDOWN = 5,   // Shutdown by client command.
     RET_CMD_UNSUPPORT    = 6,   // un-supported command
-    RET_NO_MEMORY        = 7
+    RET_NO_MEMORY        = 7,
+    RET_CMD_DONE         = 8
 };
 
 enum SerializeStatus {
@@ -354,6 +360,16 @@ public:
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         return _map[idx].count(key);
     }
+    uint32_t size() {
+        uint32_t size = 0;
+        for (int i = 0; i < MAP_COUNT; i++) {
+            {
+                BAIDU_SCOPED_LOCK(_mutex[i]);
+                size += _map[i].size();
+            }
+        }
+        return size;
+    }
     void set(const KEY& key, const VALUE& value) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
@@ -378,11 +394,20 @@ public:
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         _map[idx].erase(key);
     }
+    // 会加锁，轻量级操作采用traverse否则用copy
     void traverse(const std::function<void(VALUE& value)>& call) {
         for (uint32_t i = 0; i < MAP_COUNT; i++) {
             BAIDU_SCOPED_LOCK(_mutex[i]);
             for (auto& pair : _map[i]) {
                 call(pair.second);
+            }
+        }
+    }
+    void traverse_with_key_value(const std::function<void(const KEY key, VALUE& value)>& call) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
+            BAIDU_SCOPED_LOCK(_mutex[i]);
+            for (auto& pair : _map[i]) {
+                call(pair.first, pair.second);
             }
         }
     }
@@ -435,6 +460,51 @@ private:
     int _index = 0;
 };
 
+struct BvarMap {
+    struct SumCount {
+        SumCount() {}
+        SumCount(int64_t sum, int64_t count) : sum(sum), count(count) {}
+        SumCount& operator+=(const SumCount& other) {
+            sum += other.sum;
+            count += other.count;
+            return *this;
+        }
+        SumCount& operator-=(const SumCount& other) {
+            sum -= other.sum;
+            count -= other.count;
+            return *this;
+        }
+        int64_t sum = 0;
+        int64_t count = 0;
+    };
+public:
+    BvarMap() {}
+    BvarMap(const std::string& key, int64_t cost) {
+        internal_map[key] = SumCount(cost, 1);
+    }
+    BvarMap& operator+=(const BvarMap& other) {
+        for (auto& pair : other.internal_map) {
+            internal_map[pair.first] += pair.second;
+        }
+        return *this;
+    }
+    BvarMap& operator-=(const BvarMap& other) {
+        for (auto& pair : other.internal_map) {
+            internal_map[pair.first] -= pair.second;
+        }
+        return *this;
+    }
+public:
+    std::map<std::string, SumCount> internal_map;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const BvarMap& bm) {
+    for (auto& pair : bm.internal_map) {
+        os << pair.first << " : " << pair.second.sum << "," << pair.second.count << std::endl;
+    }
+    return os;
+}
+
 extern int64_t timestamp_diff(timeval _start, timeval _end);
 extern std::string pb2json(const google::protobuf::Message& message);
 extern std::string json2pb(const std::string& json, google::protobuf::Message* message);
@@ -459,6 +529,9 @@ extern int get_instance_from_bns(int* ret,
                           const std::string& bns_name, 
                           std::vector<std::string>& instances,
                           bool need_alive = true); 
+extern bool is_digits(const std::string& str);
+extern std::string url_decode(const std::string& str);
+extern std::string url_encode(const std::string& str);
 
 inline int end_key_compare(const std::string& key1, const std::string& key2) {
     if (key1 == key2) {
@@ -478,5 +551,19 @@ inline uint64_t make_sign(const std::string& key) {
     butil::MurmurHash3_x64_128(key.c_str(), key.size(), 1234, out);
     return out[0];
 }
+
+//set double buffer
+template<typename T>
+using DoubleBufferSet = butil::DoublyBufferedData<std::unordered_set<T>>;
+using DoubleBufferStringSet = DoubleBufferSet<std::string>;
+
+inline int set_insert(std::unordered_set<std::string>& set, const std::string& item) {
+    set.insert(item);
+    return 1;
+}
+
+//map double buffer
+template<typename Key, typename Val>
+using DoubleBufferMap = butil::DoublyBufferedData<std::unordered_map<Key, Val>>;
 } // namespace baikaldb
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 #include "index_selector.h"
 #include "slot_ref.h"
 #include "scalar_fn_call.h"
+#include "predicate.h"
 #include "join_node.h"
 #include "agg_node.h"
 #include "parser.h"
@@ -37,8 +38,8 @@ int IndexSelector::analyze(QueryContext* ctx) {
         }
 
         FilterNode* filter_node = nullptr;
-        if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
-                || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
+        if (parent_node_ptr->node_type() == pb::WHERE_FILTER_NODE
+                || parent_node_ptr->node_type() == pb::TABLE_FILTER_NODE) {
             filter_node = static_cast<FilterNode*>(parent_node_ptr);
         }
         auto get_slot_id = [ctx](int32_t tuple_id, int32_t field_id)-> 
@@ -50,6 +51,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
                             static_cast<ScanNode*>(scan_node_ptr), 
                             filter_node, 
                             NULL,
+                            join_node,
                             &ctx->has_recommend);
         } else {
             index_selector(get_slot_id,
@@ -57,6 +59,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
                            static_cast<ScanNode*>(scan_node_ptr), 
                            filter_node, 
                            sort_node,
+                           join_node,
                            &ctx->has_recommend);
         }
         pb::ScanNode* pb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->mutable_pb_node()->
@@ -76,6 +79,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                                     ScanNode* scan_node, 
                                     FilterNode* filter_node, 
                                     SortNode* sort_node,
+                                    JoinNode* join_node,
                                     bool* has_recommend) {
     int64_t table_id = scan_node->table_id();
     int32_t tuple_id = scan_node->tuple_id();
@@ -90,30 +94,56 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         }
     }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
-    std::vector<int64_t> index_ids = schema_factory->get_table_info(table_id).indices;
+    std::vector<int64_t> index_ids = schema_factory->get_table_info_ptr(table_id)->indices;
     if (pb_scan_node->use_indexes_size() != 0) {
         index_ids.clear();
         for (auto& index_id : pb_scan_node->use_indexes()) {
             index_ids.push_back(index_id);
         }
     }
+    std::set<int64_t> ignore_indexs;
+    for (auto& ignore_index_id : pb_scan_node->ignore_indexes()) {
+        ignore_indexs.insert(ignore_index_id);
+    }
     SmartRecord record_template = schema_factory->new_record(table_id);
     for (auto index_id : index_ids) {
-        IndexInfo index_info = schema_factory->get_index_info(index_id); 
+        if (ignore_indexs.count(index_id) != 0 && index_id != table_id) {
+            continue;
+        }
+        auto info_ptr = schema_factory->get_index_info_ptr(index_id); 
+        if (info_ptr == nullptr) {
+            continue;
+        }
+        IndexInfo& index_info = *info_ptr;
         pb::IndexType index_type = index_info.type;
+        auto index_state = index_info.state;
+        if (index_state != pb::IS_PUBLIC) {
+            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+                index_id, pb::IndexState_Name(index_state).c_str());
+            continue;
+        }
+
         int left_field_cnt = 0;
         int right_field_cnt = 0;
         bool left_open = false;
         bool right_open = false;
+        bool like_prefix = false;
         SmartRecord left_record = record_template->clone(false);
         SmartRecord right_record = record_template->clone(false);
-        //SmartRecord eq_record = schema_factory->new_record(table_id);
         std::vector<SmartRecord> in_records;
         int field_cnt = 0;
 
         bool range_pred = false; //是否是范围(= > < >= <=)条件
+        if (index_type == pb::I_PRIMARY ||
+            index_type == pb::I_UNIQ ||
+            index_type == pb::I_KEY) {
+            range_pred = true;
+        }
         bool in_pred = false;   //是否是in条件
+        bool bool_and = false;   //是否LIKE AND, OR_LIKE是bool or
+        bool in_part_pred = false; //是否RowExpr IN
 
+        RangeType last_rg_type = NONE;
         for (auto field : index_info.fields) {
             ++field_cnt;
             int32_t slot_id = get_slot_id(tuple_id, field.id);
@@ -125,16 +155,21 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
             for (auto expr : *conjuncts) {
                 std::vector<ExprValue> values;
                 bool expr_break = true;
-                RangeType rg_type = index_expr_type(expr, tuple_id, slot_id, index_type, &values);
+                RangeType rg_type = index_expr_type(last_rg_type, expr, tuple_id, slot_id, 
+                        index_info, field_cnt, &values);
                 // a,b联合索引，a in (1,2) and b=3也能使用索引
-                if (in_pred && rg_type != EQ) {
+                if (in_pred && rg_type != EQ && !in_part_pred) {
                     rg_type = NONE;
+                }
+                if (rg_type != NONE) {
+                    last_rg_type = rg_type;
                 }
                 switch (rg_type) {
                     case NONE:
                         expr_break = false;
                         field_break = true;
                         break;
+                    case EQ_PART:
                     case EQ:
                         left_field_cnt = field_cnt;
                         right_field_cnt = field_cnt;
@@ -152,50 +187,83 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                         }
                         expr_break = true;
                         field_break = false;
-                        expr->add_filter_index(index_id);
+                        if (index_type != pb::I_FULLTEXT && rg_type == EQ) {
+                            expr->add_filter_index(index_id);
+                        } else {
+                            in_records.push_back(left_record);
+                            left_record = left_record->clone(true);
+                        }
                         break;
+                    case LEFT_OPEN_PART:
                     case LEFT_OPEN:
                         left_open = true;
                         left_field_cnt = field_cnt;
                         left_record->set_value(left_record->get_field_by_tag(field.id), values[0]);
                         expr_break = false;
                         field_break = true;
+                        if (rg_type == LEFT_OPEN_PART) {
+                            field_break = false;
+                        }
                         range_pred = true;
-                        expr->add_filter_index(index_id);
+                        if (rg_type == LEFT_OPEN) {
+                            expr->add_filter_index(index_id);
+                        }
                         break;
+                    case LEFT_CLOSE_PART:
                     case LEFT_CLOSE:
                         left_open = false;
                         left_field_cnt = field_cnt;
                         left_record->set_value(left_record->get_field_by_tag(field.id), values[0]);
                         expr_break = false;
                         field_break = true;
+                        if (rg_type == LEFT_CLOSE_PART) {
+                            field_break = false;
+                        }
                         range_pred = true;
-                        expr->add_filter_index(index_id);
+                        if (rg_type == LEFT_CLOSE) {
+                            expr->add_filter_index(index_id);
+                        }
                         break;
+                    case RIGHT_OPEN_PART:
                     case RIGHT_OPEN:
                         right_open = true;
                         right_field_cnt = field_cnt;
                         right_record->set_value(right_record->get_field_by_tag(field.id), values[0]);
                         expr_break = false;
                         field_break = true;
+                        if (rg_type == RIGHT_OPEN_PART) {
+                            field_break = false;
+                        }
                         range_pred = true;
-                        expr->add_filter_index(index_id);
+                        if (rg_type == RIGHT_OPEN) {
+                            expr->add_filter_index(index_id);
+                        }
                         break;
+                    case RIGHT_CLOSE_PART:
                     case RIGHT_CLOSE:
                         right_open = false;
                         right_field_cnt = field_cnt;
                         right_record->set_value(right_record->get_field_by_tag(field.id), values[0]);
                         expr_break = false;
                         field_break = true;
+                        if (rg_type == RIGHT_CLOSE_PART) {
+                            field_break = false;
+                        }
                         range_pred = true;
-                        expr->add_filter_index(index_id);
+                        if (rg_type == RIGHT_CLOSE) {
+                            expr->add_filter_index(index_id);
+                        }
                         break;
+                    case LIKE_PART:
                     case LIKE:
                         //todo
                         left_open = false;
-                        left_field_cnt = field_cnt;
+                        left_field_cnt = 1;
+                        // planname LIKE 'a' AND planname LIKE 'b'
+                        left_record = left_record->clone(true);
                         left_record->set_value(left_record->get_field_by_tag(field.id), values[0]);
-                        expr_break = true;
+                        in_records.push_back(left_record);
+                        expr_break = false;
                         field_break = true;
                         if (index_type == pb::I_RECOMMEND) {
                             if (has_recommend != NULL) {
@@ -203,31 +271,68 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                             }
                         }
                         range_pred = false;
-                        expr->add_filter_index(index_id);
+                        bool_and = true;
+                        if (rg_type == LIKE) {
+                            expr->add_filter_index(index_id);
+                        }
                         break;
+                    case LIKE_PREFIX:
+                        left_open = false;
+                        right_open = false;
+                        left_field_cnt = field_cnt;
+                        right_field_cnt = field_cnt;
+                        left_record->set_value(left_record->get_field_by_tag(field.id), values[0]);
+                        right_record->set_value(right_record->get_field_by_tag(field.id), values[0]);
+                        like_prefix = true;
+                        range_pred = true;
+                        expr_break = true;
+                        field_break = true;
+                        break;
+                    case OR_LIKE_PART:
                     case OR_LIKE:
                         left_open = false;
                         left_field_cnt = field_cnt;
+                        left_record = left_record->clone(true);
                         left_record->set_value(left_record->get_field_by_tag(field.id), values[0]);
+                        in_records.push_back(left_record);
                         expr_break = true;
                         field_break = true;
                         range_pred = false;
-                        expr->add_filter_index(index_id);
+                        if (rg_type == OR_LIKE) {
+                            expr->add_filter_index(index_id);
+                        }
                         break;
+                    case IN_PART:
+                        in_part_pred = true;
                     case IN: {
                         // 特殊逻辑
                         left_field_cnt = field_cnt;
                         right_field_cnt = field_cnt;
                         range_pred = false;
                         in_pred = true;
-                        for (auto value : values) {
-                            auto record = left_record->clone(true);
-                            record->set_value(record->get_field_by_tag(field.id), value);
-                            in_records.push_back(record);
+                        if (in_records.empty()) {
+                            for (auto value : values) {
+                                auto record = left_record->clone(true);
+                                record->set_value(record->get_field_by_tag(field.id), value);
+                                in_records.push_back(record);
+                            }
+                        } else {
+                            if (in_records.size() >= values.size()) {
+                                for (size_t vi = 0; vi < values.size(); vi++) {
+                                    auto record = in_records[vi];
+                                    record->set_value(record->get_field_by_tag(field.id), values[vi]);
+                                }
+                            } else {
+                                DB_FATAL("inx:%ld in_records.size() %lu values.size() %lu ", 
+                                        index_id, in_records.size(), values.size());
+                            }
                         }
                         expr_break = true;
                         field_break = false;
-                        expr->add_filter_index(index_id);
+                        if (index_type != pb::I_FULLTEXT && rg_type == IN) {
+                            in_part_pred = false;
+                            expr->add_filter_index(index_id);
+                        }
                         break;
                     }
                     case INDEX_HAS_NULL: {
@@ -246,18 +351,24 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                 break;
             }
         }
-
+        //DB_WARNING("index:%ld range_pred:%d", index_id, range_pred);
         if (left_field_cnt == 0 && right_field_cnt == 0 && !range_pred) {
             continue;
         }
         //如果是IN条件，不考虑sort index.
-        if (in_pred) {
+        if (in_pred || index_type == pb::I_FULLTEXT || index_type == pb::I_RECOMMEND) {
+            std::set<std::string> filter;
             auto pos_index = pb_scan_node->add_indexes();
             pos_index->set_index_id(index_id);
+            pos_index->set_bool_and(bool_and);
             for (auto record : in_records) {
-                auto range = pos_index->add_ranges();
                 std::string str;
                 record->encode(str);
+                if (filter.count(str) == 1) {
+                    continue;
+                }
+                filter.insert(str);
+                auto range = pos_index->add_ranges();
                 range->set_left_pb_record(str);
                 range->set_right_pb_record(str);
                 range->set_left_field_cnt(left_field_cnt);
@@ -300,7 +411,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
             } else if (left_field_cnt < right_field_cnt) { // (EQ)*(LE/LT)
                 use_by_sort = check_sort_use_index(get_slot_id, index_info, order_exprs, tuple_id, left_field_cnt);
             }
-            // DB_WARNING("index: %ld, field_count:%d, %d, sort_index:%d", index_id, left_field_cnt, right_field_cnt, use_by_sort);
+            //DB_WARNING("index: %ld, field_count:%d, %d, sort_index:%d", index_id, left_field_cnt, right_field_cnt, use_by_sort);
         }
         if (left_field_cnt == 0 && right_field_cnt == 0 && !use_by_sort) {
             continue;
@@ -314,7 +425,8 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         range->set_right_field_cnt(right_field_cnt);
         range->set_left_open(left_open);
         range->set_right_open(right_open);
-        if (use_by_sort) {
+        range->set_like_prefix(like_prefix);
+        if (use_by_sort && sort_node != nullptr) {
             auto sort_index = pos_index->mutable_sort_index();
             sort_index->set_is_asc(is_asc);
             sort_index->set_sort_limit(sort_node->get_limit());
@@ -328,8 +440,10 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         pos_index->set_index_id(table_id);
         pos_index->add_ranges();
     }
-    // 纯kv类优化，只主键索引时候过滤掉in条件
-    if (pb_scan_node->indexes_size() == 1 && pb_scan_node->indexes(0).index_id() == table_id) {
+    // 单表纯kv类优化，只主键索引时候过滤掉in条件
+    if (join_node == NULL &&
+        pb_scan_node->indexes_size() == 1 && 
+        pb_scan_node->indexes(0).index_id() == table_id) {
         if (filter_node != nullptr) {
             filter_node->remove_primary_conjunct(table_id);
         }
@@ -391,24 +505,58 @@ IndexSelector::RangeType IndexSelector::or_like_index_type(
         return NONE;
     }
     *value = parent->children(1)->get_value(nullptr);
-    return OR_LIKE;
+    if (static_cast<ScalarFnCall*>(parent)->fn().fn_op() == parser::FT_EXACT_LIKE) {
+        return OR_LIKE_PART;
+    } else {
+        return OR_LIKE;
+    }
 }
 
-IndexSelector::RangeType IndexSelector::index_expr_type(ExprNode* expr, int32_t tuple_id, int32_t slot_id,
-        pb::IndexType index_type, std::vector<ExprValue>* values) {
+IndexSelector::RangeType IndexSelector::index_expr_type(RangeType last_rg_type, ExprNode* expr, 
+        int32_t tuple_id, int32_t slot_id,
+        const IndexInfo& index_info, int field_cnt, std::vector<ExprValue>* values) {
+    auto index_type = index_info.type;
     if (index_type == pb::I_FULLTEXT) {
         ExprValue value(pb::NULL_TYPE);
         auto type = or_like_index_type(expr, tuple_id, slot_id, &value);
-        if (type == OR_LIKE) {
+        if (type == OR_LIKE || type == OR_LIKE_PART) {
             values->push_back(value);
-            return OR_LIKE;
+            return type;
         }
     }
     if (expr->children_size() < 2) {
         return NONE;
     }
-    if (expr->children(0)->node_type() != pb::SLOT_REF) {
+    if (expr->children(0)->is_row_expr()) {
+        // a > 2 and (a,b) > (1,1) 
+        // a > 2命中索引后，(a,b) > (1,1)的后半段不能接着
+        // TODO:更好的做法是可以把条件(a,b)>(1,1)裁剪掉
+        switch (last_rg_type) {
+            case LEFT_OPEN:
+            case LEFT_CLOSE:
+            case RIGHT_OPEN:
+            case RIGHT_CLOSE:
+                return NONE;
+            default:
+                break;
+        }
+        return index_row_expr_type(expr, tuple_id, slot_id, index_info, field_cnt, values);
+    }
+    if (!expr->children(0)->is_slot_ref()) {
         return NONE;
+    }
+    // b > 2 and (a,b) > (1,1)
+    // b > 2 不能接着前一个LEFT_CLOSE_PART条件
+    switch (last_rg_type) {
+        case EQ_PART:
+        case IN_PART:
+        case LEFT_OPEN_PART:
+        case LEFT_CLOSE_PART:
+        case RIGHT_OPEN_PART:
+        case RIGHT_CLOSE_PART:
+            return NONE;
+        default:
+            break;
     }
     SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
     if (slot_ref->tuple_id() != tuple_id || slot_ref->slot_id() != slot_id) {
@@ -438,26 +586,35 @@ IndexSelector::RangeType IndexSelector::index_expr_type(ExprNode* expr, int32_t 
     }
     // fulltext support normal type
     if (index_type == pb::I_FULLTEXT) {
-        switch (expr->node_type()) {
-            case pb::LIKE_PREDICATE:
+        if (expr->node_type() == pb::LIKE_PREDICATE) {
+            if (static_cast<ScalarFnCall*>(expr)->fn().fn_op() == parser::FT_EXACT_LIKE) {
+                return LIKE_PART;
+            } else {
                 return LIKE;
-            case pb::FUNCTION_CALL: {
-                int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
-                if (fn_op == parser::FT_EQ) {
-                    return EQ;
-                } else {
-                    return NONE;
-                }
             }
-            case pb::IN_PREDICATE:
-                if (values->size() == 1) { 
-                    return EQ;
-                } else {
-                    return IN;
-                }
-            default:
-                return NONE;
         }
+        // only NO_SEGMENT can use in and =
+        if (index_info.segment_type == pb::S_NO_SEGMENT) {
+            switch (expr->node_type()) {
+                case pb::FUNCTION_CALL: {
+                    int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
+                    if (fn_op == parser::FT_EQ) {
+                        return EQ;
+                    } else {
+                        return NONE;
+                    }
+                }
+                case pb::IN_PREDICATE:
+                    if (values->size() == 1) { 
+                        return EQ;
+                    } else {
+                        return IN;
+                    }
+                default:
+                    return NONE;
+            }
+        }
+        return NONE;
     }
     switch (expr->node_type()) {
         case pb::FUNCTION_CALL: {
@@ -477,18 +634,126 @@ IndexSelector::RangeType IndexSelector::index_expr_type(ExprNode* expr, int32_t 
                     return NONE;
             }
         }
-        case pb::IS_NULL_PREDICATE:
-            return EQ;
         case pb::IN_PREDICATE:
             if (values->size() == 1) { 
                 return EQ;
             } else {
                 return IN;
             }
+        case pb::LIKE_PREDICATE: {
+            bool is_eq = false;
+            bool is_prefix = false;
+            ExprValue prefix_value(pb::STRING);
+            static_cast<LikePredicate*>(expr)->hit_index(&is_eq, &is_prefix, &(prefix_value.str_val));
+            if (is_eq) {
+                return EQ;
+            } else if (is_prefix) {
+                values->clear();
+                values->push_back(prefix_value);
+                return LIKE_PREFIX;
+            } else {
+                return NONE;
+            }
+        }
         default:
             return NONE;
     }
 }
+// https://dev.mysql.com/doc/refman/5.6/en/comparison-operators.html#operator_less-than-or-equal
+IndexSelector::RangeType IndexSelector::index_row_expr_type(ExprNode* expr, 
+        int32_t tuple_id, int32_t slot_id,
+        const IndexInfo& index_info, int field_cnt, std::vector<ExprValue>* values) {
+    if (index_info.type == pb::I_FULLTEXT || index_info.type == pb::I_RECOMMEND) {
+        return NONE;
+    }
+    RowExpr* row_expr = static_cast<RowExpr*>(expr->children(0));
+    row_expr->open();
+    int idx = row_expr->get_slot_ref_idx(tuple_id, slot_id);
+    if (idx == -1) {
+        return NONE;
+    }
+    size_t row_size = row_expr->children_size();
+    pb::PrimitiveType col_type = row_expr->children(idx)->col_type();
+    for (uint32_t i = 1; i < expr->children_size(); i++) {
+        if (!expr->children(i)->is_constant()) {
+            return NONE;
+        }
+        auto val = static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx);
+        if (!val.is_null()) {
+            values->push_back(val.cast_to(col_type));
+        }
+    }
+    if (values->size() == 0) {
+        return INDEX_HAS_NULL;
+    }
+    switch (expr->node_type()) {
+        case pb::FUNCTION_CALL: {
+            int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
+            switch (fn_op) {
+                case parser::FT_EQ:
+                // 全部匹配才能裁剪条件
+                if (row_size == field_cnt) {
+                    return EQ;
+                } else {
+                    return EQ_PART;
+                }
+                case parser::FT_GE:
+                    if (idx + 1 != field_cnt) {
+                        return NONE;
+                    } else if (row_size == field_cnt) {
+                        return LEFT_CLOSE;
+                    } else {
+                        return LEFT_CLOSE_PART;
+                    }
+                case parser::FT_GT:
+                    if (idx + 1 != field_cnt) {
+                        return NONE;
+                    } else if (row_size == field_cnt) {
+                        return LEFT_OPEN;
+                    } else {
+                        // 前缀匹配时只能闭区间
+                        // 例如:索引a, (a,b) > (1,1)只能命中a索引闭区间，因为a=1时(1,0)也能满足条件 < (1,1)
+                        return LEFT_CLOSE_PART;
+                    }
+                case parser::FT_LE:
+                    if (idx + 1 != field_cnt) {
+                        return NONE;
+                    } else if (row_size == field_cnt) {
+                        return RIGHT_CLOSE;
+                    } else {
+                        return RIGHT_CLOSE_PART;
+                    }
+                case parser::FT_LT:
+                    if (idx + 1 != field_cnt) {
+                        return NONE;
+                    } else if (row_size == field_cnt) {
+                        return RIGHT_OPEN;
+                    } else {
+                        return RIGHT_CLOSE_PART;
+                    }
+                default:
+                    return NONE;
+            }
+        }
+        case pb::IN_PREDICATE:
+            if (values->size() == 1) { 
+                if (row_size == field_cnt) {
+                    return EQ;
+                } else {
+                    return EQ_PART;
+                }
+            } else {
+                if (row_size == field_cnt) {
+                    return IN;
+                } else {
+                    return IN_PART;
+                }
+            }
+        default:
+            return NONE;
+    }
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -25,6 +25,8 @@ enum ExprNodeType {
     IS_TRUE_PREDICATE = 19;
     TIME_LITERAL = 20;
     PLACE_HOLDER_LITERAL = 21;
+    ROW_EXPR = 22;
+    HLL_LITERAL = 23;
 };
 
 message Function {

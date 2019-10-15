@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -230,6 +230,7 @@ struct Constraint : public Node {
     Vector<ColumnName*> columns;  // Used for PRIMARY KEY, KEY, UNIQUE, FULLTEXT
     // ReferenceDef*   refer = nullptr;    // Used for foreign key.
     IndexOption* index_option = nullptr;
+    bool            global = false;
 
     Constraint() {
         node_type = NT_CONSTRAINT;
@@ -301,6 +302,9 @@ struct AlterTableSpec : public Node {
     Vector<TableOption*>    table_options;
     TableName*              new_table_name = nullptr;
     Vector<ColumnDef*>      new_columns;
+    //add constraint
+    Vector<Constraint*>     new_constraints;
+    String           index_name;
 
     AlterTableSpec() {
         node_type = NT_ALTER_SEPC;

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -58,7 +58,8 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
     }
     
     int64_t other_limit = limit;
-    if (ctx->has_recommend && node->node_type() == pb::FETCHER_NODE) {
+    if (ctx->has_recommend && (node->node_type() == pb::SELECT_MANAGER_NODE 
+        || node->node_type() == pb::FETCHER_NODE || node->node_type() == pb::FULL_EXPORT_NODE)) {
         other_limit /= 80;
         if (other_limit == 0) {
             other_limit = 1;

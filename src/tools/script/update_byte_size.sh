@@ -8,9 +8,9 @@ echo -e "update byte_size_per_record\n"
 curl -d '{
     "op_type":"OP_UPDATE_BYTE_SIZE",
     "table_info": {
-        "table_name": "invoice_record",
-        "database": "DRFN",
-        "namespace_name": "FENGCHAO",
+        "table_name": "hotmap",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "byte_size_per_record": 50
     }
 }' http://$1/MetaService/meta_manager

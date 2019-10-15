@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -53,18 +53,22 @@ int RedisScanNode::open(RuntimeState* state) {
     // 如果数据源支持各种索引，可以在这边做处理
     const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(0);
     _index_id = pos_index.index_id();
-    SchemaFactory* _factory = SchemaFactory::get_instance();
-    TableInfo _table_info = _factory->get_table_info(_table_id);
-    IndexInfo _index_info = _factory->get_index_info(_index_id);
-    if (_index_info.id == -1 || _index_info.type != pb::I_PRIMARY) {
-        DB_WARNING_STATE(state, "no index_info found for index id: %ld or not primary: %d", 
-                _index_id, _index_info.type);
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    auto index_info_ptr = factory->get_index_info_ptr(_index_id);
+    if (index_info_ptr == nullptr) {
+        DB_WARNING_STATE(state, "no index_info found for index id: %ld", 
+                _index_id);
+        return -1;
+    }
+    if (index_info_ptr->type != pb::I_PRIMARY) {
+        DB_WARNING_STATE(state, "index id: %ld not primary: %d", 
+                _index_id, index_info_ptr->type);
         return -1;
     }
     for (auto& range : pos_index.ranges()) {
         // 空指针容易出错
-        SmartRecord left_record = _factory->new_record(_table_info);
-        SmartRecord right_record = _factory->new_record(_table_info);
+        SmartRecord left_record = factory->new_record(_table_id);
+        SmartRecord right_record = factory->new_record(_table_id);
         left_record->decode(range.left_pb_record());
         right_record->decode(range.right_pb_record());
         int left_field_cnt = range.left_field_cnt();

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 namespace baikaldb {
 class Region;
 class RegionControl {
+typedef std::shared_ptr<Region> SmartRegion;
 public:
     static int remove_data(int64_t drop_region_id);
     static void compact_data(int64_t region_id);
@@ -28,6 +29,7 @@ public:
     static int remove_log_entry(int64_t drop_region_id);
     static int remove_meta(int64_t drop_region_id);
     static int remove_snapshot_path(int64_t drop_region_id);
+    static int clear_all_infos_for_region(int64_t drop_region_id);
     static int ingest_data_sst(const std::string& data_sst_file, int64_t region_id);
     static int ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id);
 
@@ -40,7 +42,7 @@ public:
                       const pb::RaftControlRequest* request,
                       pb::RaftControlResponse* response,
                       google::protobuf::Closure* done);
-    void add_peer(const pb::AddPeer& add_peer, ExecutionQueue& queue);
+    void add_peer(const pb::AddPeer& add_peer, SmartRegion region, ExecutionQueue& queue);
     void add_peer(const pb::AddPeer* request,
                     pb::StoreRes* response,
                     google::protobuf::Closure* done);

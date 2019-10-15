@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,6 +44,11 @@ public:
                          pb::BaikalHeartBeatResponse* response,                    
                          google::protobuf::Closure* done); 
     
+    void console_heartbeat(google::protobuf::RpcController* controller,             
+                         const pb::ConsoleHeartBeatRequest* request,                
+                         pb::ConsoleHeartBeatResponse* response,                    
+                         google::protobuf::Closure* done); 
+
     void healthy_check_function();
     
     // state machine method
@@ -56,6 +61,9 @@ public:
     virtual void on_leader_start();
 
     virtual void on_leader_stop();
+
+    int64_t snapshot_index(std::string& snapshot_path);
+    int64_t applied_index() { return _applied_index; }
 
     //经过3个周期后才可以做决策
     bool whether_can_decide();
@@ -98,6 +106,9 @@ public:
     bool get_unsafe_decision() {
         return _unsafe_decision;
     }
+    bool have_data() {
+        return _have_data;
+    }
 private:
     void save_snapshot(braft::Closure* done,
                         rocksdb::Iterator* iter,
@@ -107,7 +118,7 @@ private:
     Bthread _bth;    
     bool _healthy_check_start;
     bthread_mutex_t         _load_balance_mutex;
-    bool _global_load_balance = false;
+    bool _global_load_balance = true;
     std::map<std::string, bool> _resource_load_balance;
     
     bthread_mutex_t         _migrate_mutex;
@@ -115,6 +126,8 @@ private:
     std::map<std::string, bool> _resource_migrate;
 
     bool _unsafe_decision = false;
+    bool _have_data = false;
+    int64_t _applied_index = 0;
 };
 
 } //namespace baikaldb

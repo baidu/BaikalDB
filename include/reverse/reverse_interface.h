@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -107,9 +107,18 @@ public:
     int create_executor(const std::string& search_data, pb::SegmentType segment_type);
     int next(SmartRecord record);
     bool_executor_type executor_type = NODE_NOT_COPY;
+    void set_term(const std::string& term, Parser* parse) {
+        _temp_map[term] = parse;
+    }
+    Parser* get_term(const std::string& term) {
+        if (_temp_map.count(term) == 1) {
+            return _temp_map[term];
+        }
+        return NULL;
+    }
 private:
-    std::vector<std::string> _and_terms;
     int _weight_field_id = 0;
+    std::map<std::string, Parser*> _temp_map;
 };
 //--xbs
 class XbsArg : public BoolArg {
@@ -159,6 +168,16 @@ public:
     bool_executor_type executor_type = NODE_COPY;
     static std::unordered_map<std::string, std::set<uint32_t>> xbs_black_terms;
     static int init_black_terms(const std::string& file_name);
+
+    void set_term(const std::string& term, Parser* parse) {
+        _temp_map[term] = parse;
+    }
+    Parser* get_term(const std::string& term) {
+        if (_temp_map.count(term) == 1) {
+            return _temp_map[term];
+        }
+        return NULL;
+    }
 private:
     int32_t _weight_field_id = 0;
     int32_t _pic_scores_field_id = 0;
@@ -166,6 +185,7 @@ private:
     int32_t _source_field_id = 0;
     std::multiset<ReverseNode, XbsNodeCmp> _res;
     std::multiset<ReverseNode, XbsNodeCmp>::iterator _it;
+    std::map<std::string, Parser*> _temp_map;
 
 };
 

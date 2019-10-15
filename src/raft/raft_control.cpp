@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -219,6 +219,16 @@ void _set_peer(google::protobuf::RpcController* controller,
     }
     std::vector<braft::PeerId> inner_peers;
     auto status = node->list_peers(&inner_peers);
+    if (!status.ok() && status.error_code() == 1) {
+        response->set_errcode(pb::NOT_LEADER);
+        response->set_leader(butil::endpoint2str(node->leader_id().addr).c_str());
+        DB_WARNING("node:%s %s list peers fail, not leader, status:%d %s, log_id: %lu", 
+                    node->node_id().group_id.c_str(),
+                    node->node_id().peer_id.to_string().c_str(),
+                    status.error_code(), status.error_cstr(),
+                    log_id);
+        return;
+    }
     if (!status.ok()) {
         response->set_errcode(pb::PEER_NOT_EQUAL);
         response->set_errmsg("node list peer fail");

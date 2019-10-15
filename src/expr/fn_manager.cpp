@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,11 +41,26 @@ namespace baikaldb {
 static std::unordered_map<std::string, pb::PrimitiveType> return_type_map;
 static std::unordered_map<std::string, std::string> predicate_swap_map;
 
-std::string FunctionManager::get_swap_op(const std::string& name) {
-    if (predicate_swap_map.count(name) == 1) {
-        return predicate_swap_map[name];
+bool FunctionManager::swap_op(pb::Function& fn) {
+    if (predicate_swap_map.count(fn.name()) == 1) {
+        fn.set_name(predicate_swap_map[fn.name()]);
+        switch (fn.fn_op()) {
+            case parser::FT_GE:
+                fn.set_fn_op(parser::FT_LE);
+                break;
+            case parser::FT_GT:
+                fn.set_fn_op(parser::FT_LT);
+                break;
+            case parser::FT_LE:
+                fn.set_fn_op(parser::FT_GE);
+                break;
+            case parser::FT_LT:
+                fn.set_fn_op(parser::FT_GT);
+                break;
+        }
+        return true;
     }
-    return "";
+    return false;
 }
 
 void FunctionManager::register_operators() {
@@ -110,8 +125,11 @@ void FunctionManager::register_operators() {
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);
     register_object_ret("hll_estimate", hll_estimate, pb::INT64);
+    register_object_ret("hll_init", hll_init, pb::HLL);
+    // condition
     register_object_ret("case_when", case_when, pb::STRING);
     register_object_ret("case_expr_when", case_expr_when, pb::STRING);
+    register_object_ret("if", if_, pb::STRING);
     // MurmurHash sign
     register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
 }
@@ -130,20 +148,24 @@ int FunctionManager::complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType
         case parser::FT_GT:
         case parser::FT_LE:
         case parser::FT_LT:
-            if (has_timestamp(types)) {
-                complete_fn(fn, 2, pb::TIMESTAMP, pb::BOOL);
+            if (all_int(types)) {
+                if (has_uint(types)) {
+                    complete_fn(fn, 2, pb::UINT64, pb::BOOL);
+                } else {
+                    complete_fn(fn, 2, pb::INT64, pb::BOOL);
+                }
             } else if (has_datetime(types)) {
                 complete_fn(fn, 2, pb::DATETIME, pb::BOOL);
+            } else if (has_timestamp(types)) {
+                complete_fn(fn, 2, pb::TIMESTAMP, pb::BOOL);
             } else if (has_date(types)) {
                 complete_fn(fn, 2, pb::DATE, pb::BOOL);
             } else if (has_time(types)) {
                 complete_fn(fn, 2, pb::TIME, pb::BOOL);
             } else if (has_double(types)) {
                 complete_fn(fn, 2, pb::DOUBLE, pb::BOOL);
-            } else if (has_uint(types)) {
-                complete_fn(fn, 2, pb::UINT64, pb::BOOL);
             } else if (has_int(types)) {
-                complete_fn(fn, 2, pb::INT64, pb::BOOL);
+                complete_fn(fn, 2, pb::DOUBLE, pb::BOOL);
             } else {
                 complete_fn(fn, 2, pb::STRING, pb::BOOL);
             }
@@ -202,37 +224,6 @@ int FunctionManager::complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType
         case parser::FT_COMMON:
             fn.set_return_type(return_type_map[fn.name()]);
             return 0;
-        /*
-        case FUNC_LENGTH:
-        case FUNC_LOWER:
-        case FUNC_UPPER:
-        case FUNC_CONCAT:
-        case FUNC_LEFT:
-        case FUNC_RIGHT:
-        case FUNC_SUBSTR:
-        case FUNC_SUBSTRING:
-            complete_fn_simple(fn, 1, pb::STRING, pb::STRING);
-            return 0;
-        case FUNC_UNIX_TIMESTAMP:
-            complete_fn_simple(fn, 0, pb::TIMESTAMP, pb::UINT32);
-            return 0;
-        case FUNC_FROM_UNIXTIME:
-            complete_fn_simple(fn, 1, pb::UINT32, pb::TIMESTAMP);
-            return 0;
-        case FUNC_NOW:
-            complete_fn_simple(fn, 0, pb::TIMESTAMP, pb::DATETIME);
-            return 0;
-        case FUNC_DATE_FORMAT:
-            complete_fn_simple(fn, 1, pb::DATETIME, pb::STRING);
-            return 0;
-        case FUNC_HLL_ADD:
-        case FUNC_HLL_MERGE:
-            complete_fn_simple(fn, 1, pb::HLL, pb::HLL);
-            return 0;
-        case FUNC_HLL_ESTIMATE:
-            complete_fn_simple(fn, 1, pb::HLL, pb::INT64);
-            return 0;
-        */
         default:
             //un-support
             return -1;

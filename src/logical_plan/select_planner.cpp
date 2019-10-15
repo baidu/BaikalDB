@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ int SelectPlanner::plan() {
         //DB_WARNING("no sql from");
         return 0;
     }
+
     // parse from
     if (0 != parse_db_tables(_select->table_refs, &_join_root)) {
         return -1;
@@ -60,11 +61,16 @@ int SelectPlanner::plan() {
     if (0 != parse_limit()) {
         return -1;        
     }
+
     create_scan_tuple_descs();
     create_agg_tuple_desc();
     create_order_by_tuple_desc();
     //print_debug_log();
     //_create_group_tuple_desc();
+
+    if (is_full_export()) {
+        _ctx->is_full_export = true;
+    }
 
     // exec node: scan -> filter -> group by -> having -> order by -> limit -> select
     create_packet_node(pb::OP_SELECT);
@@ -94,14 +100,47 @@ int SelectPlanner::plan() {
     }
     auto client = _ctx->runtime_state.client_conn();
     if (client->txn_id == 0) {
-        _ctx->runtime_state.set_autocommit(true);
+        _ctx->runtime_state.set_single_sql_autocommit(true);
     } else {
-        _ctx->runtime_state.set_autocommit(false);
+        _ctx->runtime_state.set_single_sql_autocommit(false);
     }
     return 0;
 }
 
+bool SelectPlanner::is_full_export() {
+    if (_select->where != nullptr) {
+        return false;
+    } 
+    if (_select->group != nullptr) {
+        return false;
+    } 
+    if (_select->having != nullptr) {
+        return false;
+    } 
+    if (_select->order != nullptr) {
+        return false;
+    }
+    //if (_select->limit != nullptr) {
+    //    return false;
+    //}
+    if (_select->table_refs->node_type == parser::NT_JOIN) {
+        return false;
+    }
+    if (_select->select_opt != nullptr 
+        && _select->select_opt->distinct == true) {
+        return false;
+    }
+    if ((_agg_funcs.size() > 0) || (_distinct_agg_funcs.size() > 0) 
+         || (_group_exprs.size() > 0)) {
+        return false;
+    }
+    return true;
+}
+
 int SelectPlanner::create_limit_node() {
+    if (_select->limit == nullptr) {
+        return 0;
+    }
     pb::PlanNode* limit_node = _ctx->add_plan_node();
     limit_node->set_node_type(pb::LIMIT_NODE);
     limit_node->set_limit(-1);
@@ -238,7 +277,7 @@ int SelectPlanner::parse_select_star(parser::SelectField* field) {
     if (wild_card->db_name.empty() && wild_card->table_name.empty()) {
         // select * ...
         for (auto& table_name : _table_names) {
-            TableInfo* table_info = get_table_info(table_name);
+            auto table_info = get_table_info_ptr(table_name);
             if (table_info == nullptr) {
                 DB_WARNING("no table found for select field: %s", field->to_string().c_str());
                 return -1;
@@ -253,27 +292,21 @@ int SelectPlanner::parse_select_star(parser::SelectField* field) {
         }
         std::string table_name = wild_card->table_name.value;
         std::string db_name;
-        if (!wild_card->db_name.empty()) {
+        std::string full_name;
+        // try to search alias table
+        if (_table_alias_mapping.count(table_name) == 1) {
+            full_name = _table_alias_mapping[table_name];
+        } else if (!wild_card->db_name.empty()) {
             db_name = wild_card->db_name.value;
+            full_name = db_name + "." + table_name;
         } else if (!_ctx->cur_db.empty()) {
             db_name = _ctx->cur_db;
+            full_name = db_name + "." + table_name;
         } else {
             DB_WARNING("no db selected, please specify db name");
             return -1;
         }
-        std::string full_name = db_name + "." + table_name;
-        TableInfo* table_info = get_table_info(full_name);
-        if (table_info != nullptr) {
-            add_single_table_columns(table_info);
-            return 0;
-        }
-        // table not found, try to search alias table
-        if (_table_alias_mapping.count(table_name) == 0) {
-            DB_WARNING("no table found for select field: %s", field->to_string().c_str());
-            return -1;
-        }
-        full_name = _table_alias_mapping[table_name];
-        table_info = get_table_info(full_name);
+        auto table_info = get_table_info_ptr(full_name);
         if (table_info == nullptr) {
             DB_WARNING("no table found for select field: %s", field->to_string().c_str());
             return -1;

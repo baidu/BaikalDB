@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ namespace baikaldb {
 TableIterator* Iterator::scan_primary(
         SmartTransaction        txn,
         const IndexRange&       range, 
-        std::vector<int32_t>&   fields, 
+        std::map<int32_t, FieldInfo*>&   fields, 
         bool                    check_region, 
         bool                    forward) {
     txn->reset_active_time();
@@ -47,7 +47,7 @@ IndexIterator* Iterator::scan_secondary(
     if (nullptr == iter) {
         return nullptr;
     }
-    std::vector<int32_t> dummy;
+    std::map<int32_t, FieldInfo*> dummy;
     if (0 != iter->open(range, dummy, txn)) {
         DB_WARNING("open index iterator failed");
         delete iter;
@@ -56,7 +56,7 @@ IndexIterator* Iterator::scan_secondary(
     return iter;
 }
 
-int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartTransaction txn) {
+int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn) {
     _left_open   = range.left_open;
     _right_open  = range.right_open;
     //_index       = range.index_info->id;
@@ -67,6 +67,7 @@ int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartT
     _region      = range.region_info->region_id();
     _txn         = txn ? txn->get_txn() : nullptr;
     _fields      = fields;
+    bool like_prefix = range.like_prefix;
 
     int64_t index_id = _index_info->id;
     if (pb::I_NONE == (_idx_type = _index_info->type)) {
@@ -100,7 +101,7 @@ int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartT
         right_primary_field_cnt = std::max(0, (range.right_field_cnt - col_cnt));
     }
     if (range.left) {
-        int ret = range.left->encode_key(*_index_info, _start, left_secondary_field_cnt, false);
+        int ret = range.left->encode_key(*_index_info, _start, left_secondary_field_cnt, false, like_prefix);
         if (-2 == ret) {
             DB_WARNING("left key has null fields: %ld", index_id);
             _valid = false;
@@ -123,7 +124,7 @@ int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartT
     }
 
     if (range.right) {
-        int ret = range.right->encode_key(*_index_info, _end, right_secondary_field_cnt, false);
+        int ret = range.right->encode_key(*_index_info, _end, right_secondary_field_cnt, false, like_prefix);
         if (-2 == ret) {
             DB_WARNING("right key has null fields: %ld", index_id);
             _valid = false;
@@ -145,7 +146,7 @@ int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartT
     }
 
     //取[left_key, right_key]和[start_key, end_key)的交集
-    if (_need_check_region && _idx_type == pb::I_PRIMARY) {
+    if (_need_check_region && (_idx_type == pb::I_PRIMARY || _index_info->is_global)) {
         std::string left_key = _start.data().substr(sizeof(int64_t) * 2);
         std::string right_key = _end.data().substr(sizeof(int64_t) * 2);
         std::string lower_bound;
@@ -231,15 +232,35 @@ int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartT
     //     _lower_is_start, _upper_is_end);
 
     rocksdb::ReadOptions read_options;
+    if (_left_open) {
+        _lower_bound.append_u64(UINT64_MAX);
+        _lower_suffix = 8;
+    }
+    _lower_bound_slice = _lower_bound.data();
+    if (!_right_open) {
+        //右闭区间时，_upper_bound有可能不是逻辑上的上边界
+        //这种情况下有可能会漏数据(key为FFFF...时)，暂时没有更好的解决方案
+        _upper_bound.append_u64(UINT64_MAX);
+        _upper_bound.append_u64(UINT64_MAX);
+        _upper_bound.append_u64(UINT64_MAX);
+        _upper_sufix = 24;
+    }
+    _upper_bound_slice = _upper_bound.data();
+    // 通过rocksdb来过滤边界
+    // TODO 自己判断边界是否可以省略
     if (_forward) {
         read_options.prefix_same_as_start = true;
         read_options.total_order_seek = false;
+        read_options.iterate_upper_bound = &_upper_bound_slice;
     } else {
         read_options.prefix_same_as_start = false;
         read_options.total_order_seek = true;
+        read_options.iterate_lower_bound = &_lower_bound_slice;
     }
 
+
     if (_txn != nullptr) {
+        read_options.snapshot = txn->get_snapshot();
         _iter = _txn->GetIterator(read_options, _data_cf);
     } else {
         _iter = _db->new_iterator(read_options, RocksWrapper::DATA_CF);
@@ -251,31 +272,20 @@ int Iterator::open(const IndexRange& range, std::vector<int32_t>& fields, SmartT
 
     if (_forward) {
         //append an 0xFF for left open range
-        if (_left_open) {
-            _lower_bound.append_u64(0xFFFFFFFFFFFFFFFF);
-            _lower_suffix = 8;
-        }
         TimeCost cost;
         _iter->Seek(_lower_bound.data());
         DB_DEBUG("region:%ld, Seek cost:%ld", _region, cost.get_time());
         //skip left bound if _left_open
         if (_left_open) {
             while (_iter->Valid() && !_fits_left_bound() && _fits_right_bound()) {
+                //DB_WARNING("open, left bound filter, region_id: %ld", _region);
                 _iter->Next();
             }
         }
     } else {
-        if (!_right_open) {
-            //右闭区间时，_upper_bound有可能不是逻辑上的上边界
-            //这种情况下有可能会漏数据(key为FFFF...时)，暂时没有更好的解决方案
-            _upper_bound.append_u64(0xFFFFFFFFFFFFFFFF);
-            _upper_bound.append_u64(0xFFFFFFFFFFFFFFFF);
-            _upper_bound.append_u64(0xFFFFFFFFFFFFFFFF);
-            _upper_sufix = 8;
-        }
         TimeCost cost;
         _iter->SeekForPrev(_upper_bound.data());
-        DB_DEBUG("region:%ld, SeekForPrev cost:%ld", _region, cost.get_time());
+        //DB_DEBUG("region:%ld, SeekForPrev cost:%ld", _region, cost.get_time());
         while (_iter->Valid() && !_fits_right_bound() && _fits_left_bound()) {
             _iter->Prev();
         }
@@ -289,12 +299,6 @@ bool Iterator::_fits_left_bound() {
     rocksdb::Slice lower(_lower_bound.data().c_str(), _lower_bound.size() - _lower_suffix);
     rocksdb::Slice left_key(_start.data());
 
-    if (_forward) {
-        // forward iterator use prefix_extractor, skip <regionid+tableid> part
-        key.remove_prefix(_prefix_len);
-        lower.remove_prefix(_prefix_len);
-        left_key.remove_prefix(_prefix_len);
-    }
     bool fits = false;
     auto cmp = key.compare(lower);
     if (!_left_open) {
@@ -322,20 +326,15 @@ bool Iterator::_fits_right_bound() {
     rocksdb::Slice key = _iter->key();
     rocksdb::Slice upper(_upper_bound.data().c_str(), _upper_bound.size() - _upper_sufix);
     rocksdb::Slice right_key(_end.data());
-
-    if (_forward) {
-        // forward iterator use prefix_extractor, skip <regionid+tableid> part
-        key.remove_prefix(_prefix_len);
-        upper.remove_prefix(_prefix_len);
-        right_key.remove_prefix(_prefix_len);
-    }
     bool fits = false;
     auto cmp = key.compare(upper);
     if (_right_open) {
         fits = (cmp < 0);
     } else if (_upper_is_end) {
-        if (upper.size() == 0) { //无穷大
-            fits = true;
+        if (upper.size() == _prefix_len) {//无穷大  
+            // https://github.com/facebook/rocksdb/issues/5100
+            // rocksdb事务前缀搜索有bug
+            fits = key.starts_with(upper);
         } else {
             //上边界为region end_key, 不能越界
             fits = (cmp < 0);
@@ -344,6 +343,7 @@ bool Iterator::_fits_right_bound() {
         //上边界为Range right_key，前缀相同时可以越界，但不能超越end_key
         fits = (cmp <= 0 || key.starts_with(right_key));
     }
+    //DB_WARNING("_fits_right_bound: %d", fits);
     return fits;
 }
 
@@ -355,13 +355,13 @@ int TableIterator::get_next(SmartRecord record) {
         _valid = false;
         return -1;
     }
-
     //create a record and parse key and value
     if (VAL_ONLY == _mode || KEY_VAL == _mode) {
         TupleRecord tuple_record(_iter->value());
         // only decode the required field (field_ids stored in fields)
         if (0 != tuple_record.decode_fields(_fields, record)) {
             DB_WARNING("decode value failed: %ld", _index_info->id);
+            _valid = false;
             return -1;
         }
     }
@@ -389,6 +389,8 @@ int IndexIterator::get_next(SmartRecord index) {
     while (_valid) {
         if ((_forward && !_fits_right_bound()) || (!_forward && !_fits_left_bound())) {
             _valid = false;
+            //DB_WARNING("get next, right bound filter, region_id: %ld, index: %s", _region, 
+            //    index->debug_string().c_str());
             return -1;
         }
         if (!_fits_region()) {
@@ -398,9 +400,12 @@ int IndexIterator::get_next(SmartRecord index) {
                 _iter->Prev();
             }
             _valid = _valid && _iter->Valid();
+            //DB_WARNING("get next, fits region filter, region_id: %ld, index: %s", 
+            //    _region, index->debug_string().c_str());
             continue;
         }
-
+        //DB_WARNING("get next, in range, region_id: %ld, ke: %s",
+        //    _region, _iter->key().ToString(true).c_str());
         TableKey key(_iter->key(), true);
         //create a record and parse index and primary key
         //index.reset(TableRecord::new_record(_pk_table).get());

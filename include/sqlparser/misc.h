@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -75,6 +75,14 @@ struct DeallocPrepareStmt : public StmtNode {
     DeallocPrepareStmt() {
         node_type = NT_DEALLOC_PREPARE;
         name = nullptr;
+    }
+};
+
+struct KillStmt : public StmtNode {
+    int64_t conn_id = 0;
+    bool is_query = false;
+    KillStmt() {
+        node_type = NT_KILL;
     }
 };
 }

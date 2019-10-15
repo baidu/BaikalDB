@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 #pragma once
 #include "exec_node.h"
+#include "transaction.h"
 #include "schema_factory.h"
 
 namespace baikaldb {
@@ -34,11 +35,54 @@ public:
     int64_t table_id() {
         return _table_id;
     }
+    int64_t tuple_id() {
+        return _tuple_id;
+    }
+    int64_t values_tuple_id() {
+        return _values_tuple_id;
+    }
+    std::map<int64_t, std::vector<SmartRecord>>& insert_records_by_region() {
+        return _insert_records_by_region;
+    }
+    std::map<int64_t, std::vector<SmartRecord>>& delete_records_by_region() {
+        return _delete_records_by_region;
+    }
+    int64_t global_index_id() const {
+        return _global_index_id;
+    }
+    pb::LockCmdType lock_type() { return _lock_type; }
+    void set_affect_primary(bool affect_primary) {
+        _affect_primary = affect_primary;
+    }
+    void set_affected_index_ids(const std::vector<int64_t>& ids) {
+        _affected_index_ids.insert(_affected_index_ids.end(), ids.begin(), ids.end());
+    }
+    bool is_replace() {
+        return _is_replace;
+    }
+    bool need_ignore() {
+        return _need_ignore;
+    }
+    std::vector<pb::SlotDescriptor>& update_slots() {
+        return _update_slots;
+    }
+    std::vector<pb::SlotDescriptor>& primary_slots() {
+        return _primary_slots;
+    }
+    std::vector<ExprNode*>& update_exprs() {
+        return _update_exprs;
+    }
+    void clear_update_exprs() {
+        _update_exprs.clear();
+    }
+    SmartTable table_info() {
+        return _table_info;
+    }
 
 protected:
     int init_schema_info(RuntimeState* state);
 
-    int64_t _table_id = -1;
+    int64_t _table_id = -1; //主表的table_id,不管是二级索引表还是主表
     int64_t _region_id = -1;
     int32_t _tuple_id = -1; // dup key update 原始数据tuple_id
     int32_t _values_tuple_id = -1; // insert values tuple_id
@@ -56,11 +100,18 @@ protected:
     std::vector<pb::SlotDescriptor> _update_slots;
     std::vector<ExprNode*> _update_exprs;
 
-    TableInfo*               _table_info = nullptr;
-    IndexInfo*               _pri_info = nullptr;
+    SmartTransaction         _txn = nullptr; 
+    SmartTable               _table_info;
+    SmartIndex               _pri_info;
     std::vector<int64_t>     _affected_index_ids;
-    std::vector<int32_t>     _field_ids;
-    std::set<int32_t>        _pri_field_ids;
+
+    SmartIndex        _global_index_info; 
+    pb::LockCmdType   _lock_type;
+    int64_t           _global_index_id = 0; //如果是二级索引表则为索引ID，主表为主表id
+    std::map<int64_t, std::vector<SmartRecord>> _insert_records_by_region;
+    std::map<int64_t, std::vector<SmartRecord>> _delete_records_by_region;
+    std::map<int32_t, FieldInfo*> _field_ids;
+    std::set<int32_t> _pri_field_ids;
 };
 }
 

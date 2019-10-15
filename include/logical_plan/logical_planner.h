@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ struct JoinMemTmp {
     std::multiset<std::string> left_full_table_names; //db.table跟该join相关的所有table
     std::multiset<std::string> right_full_table_names;
     std::set<std::int64_t> use_indexes;
-
+    std::set<std::int64_t> ignore_indexes;
     virtual ~JoinMemTmp() {
         delete left_node;
         delete right_node;
@@ -96,18 +96,18 @@ protected:
         return std::unordered_set<std::string>();
     }
 
-    TableInfo* get_table_info(const std::string& table) {
+    TableInfo* get_table_info_ptr(const std::string& table) {
         auto iter = _table_info.find(table);
         if (iter != _table_info.end()) {
-            return &(iter->second);
+            return iter->second.get();
         }
         return nullptr;
     }
 
-    FieldInfo* get_field_info(const std::string& field) {
+    FieldInfo* get_field_info_ptr(const std::string& field) {
         auto iter = _field_info.find(field);
         if (iter != _field_info.end()) {
-            return &iter->second;
+            return iter->second;
         }
         return nullptr;
     }
@@ -138,7 +138,8 @@ protected:
     int create_join_node_from_terminator(const std::string db, 
                                          const std::string table, 
                                          const std::string alias, 
-                                         const std::vector<std::string>& use_index_names, 
+                                         const std::vector<std::string>& use_index_names,
+                                         const std::vector<std::string>& ignore_index_names, 
                                          JoinMemTmp** join_root_ptr); 
 
     int parse_db_name_from_table_name(const parser::TableName* table_name, 
@@ -182,6 +183,8 @@ protected:
 
     //TODO: primitive len for STRING, BOOL and NULL
     int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr);
+    // (a,b)
+    int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr);
 
     void create_scan_tuple_descs();
     void create_values_tuple_desc(); 
@@ -202,7 +205,7 @@ protected:
     int create_join_and_scan_nodes(baikaldb::JoinMemTmp* join_root);
 
 
-    void    set_dml_txn_state();
+    void    set_dml_txn_state(int64_t table_id);
     uint64_t get_txn_id();
     void    plan_begin_txn();
     void    plan_commit_txn();
@@ -243,15 +246,15 @@ protected:
     std::unordered_map<std::string, std::vector<pb::SlotDescriptor>> _agg_slot_mapping;
 
     //db => databaseinfo
-    std::unordered_map<std::string, DatabaseInfo> _database_info;
+    std::unordered_map<std::string, DatabaseInfo>  _database_info;
     //db.table => tableinfo
-    std::unordered_map<std::string, TableInfo>    _table_info;
+    std::unordered_map<std::string, SmartTable>    _table_info;
 
     // table names, the order in From clause is preserved
     std::vector<std::string> _table_names;
 
     //db.table.field => fieldinfo
-    std::unordered_map<std::string, FieldInfo>    _field_info;
+    std::unordered_map<std::string, FieldInfo*>    _field_info;
 
     // table_alias => db.table
     std::unordered_map<std::string, std::string>  _table_alias_mapping;

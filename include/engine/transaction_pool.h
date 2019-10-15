@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,6 +52,18 @@ public:
         }
         return _txn_map[txn_id];
     }
+    // -1 not found;
+    int get_finished_txn_affected_rows(uint64_t txn_id) {
+
+        std::unique_lock<std::mutex> lock(_map_mutex);
+        if (_finished_txn_map.read()->count(txn_id) == 1) {
+            return _finished_txn_map.read()->at(txn_id);
+        }
+        if (_finished_txn_map.read_background()->count(txn_id) == 1) {
+            return _finished_txn_map.read_background()->at(txn_id);
+        }
+        return -1;
+    }
 
     void increase_prepared() {
         _num_prepared_txn.increase();
@@ -98,6 +110,9 @@ private:
 
     // txn_id => txn handler mapping
     std::unordered_map<uint64_t, SmartTransaction>  _txn_map;
+    // txn_id => affected_rows use for idempotent
+    DoubleBuffer<std::unordered_map<uint64_t, int>> _finished_txn_map;
+    TimeCost _clean_finished_txn_cost;
     std::mutex _map_mutex;
 
     BthreadCond  _num_prepared_txn;  // total number of prepared transactions

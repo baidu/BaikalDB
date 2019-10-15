@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include "meta_state_machine.h"
 
 namespace baikaldb {
+typedef std::shared_ptr<pb::RegionInfo> SmartRegionInfo;
 DECLARE_int32(balance_periodicity);
 DECLARE_int32(store_heart_beat_interval_us);
 class SchemaManager {
@@ -61,6 +62,9 @@ public:
 private:
     SchemaManager() {}
     int pre_process_for_create_table(const pb::MetaManagerRequest* request,
+                                    pb::MetaManagerResponse* response,
+                                    uint64_t log_id);
+    int pre_process_for_merge_region(const pb::MetaManagerRequest* request,
                                     pb::MetaManagerResponse* response,
                                     uint64_t log_id);
     int pre_process_for_split_region(const pb::MetaManagerRequest* request, 

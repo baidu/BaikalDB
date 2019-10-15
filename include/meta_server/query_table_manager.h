@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,9 +33,19 @@ public:
     pb::PrimitiveType get_field_type(int64_t table_id, 
                                      int32_t field_id, 
                                      const pb::SchemaInfo& table_info);
+    void process_console_heartbeat(const pb::ConsoleHeartBeatRequest* request,
+            pb::ConsoleHeartBeatResponse* response, uint64_t log_id);
+
+    void get_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response);    
 
 private:
     QueryTableManager() {}
+    void check_table_and_update(
+                  const std::unordered_map<int64_t, std::tuple<pb::SchemaInfo, int64_t, int64_t>> table_schema_map,
+                  std::unordered_map<int64_t, int64_t>& report_table_map,
+                  pb::ConsoleHeartBeatResponse* response, uint64_t log_id);  
+    void construct_query_table(const TableMem& table, pb::QueryTable* query_table);
+
 }; //class
 
 }//namespace

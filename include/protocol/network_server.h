@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -74,12 +74,14 @@ private:
     int make_worker_process();
     void construct_heart_beat_request(pb::BaikalHeartBeatRequest& request);
     void process_heart_beat_response(const pb::BaikalHeartBeatResponse& response);
+    void process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response);
 
     std::string state2str(SmartSocket client);
 
     int fetch_instance_info();
 
     void report_heart_beat();
+    void print_agg_sql();
     void recovery_transactions();
     
 private:
@@ -99,6 +101,7 @@ private:
     pthread_t       _timer_tid;
     Bthread         _heartbeat_bth;
     Bthread         _recover_bth;
+    Bthread         _agg_sql_bth;
     uint32_t        _driver_thread_num;
     //Cache           _cache;
     uint64_t        _instance_id = 0;

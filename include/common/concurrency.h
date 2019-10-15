@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ namespace baikaldb {
 DECLARE_int32(snapshot_load_num);
 DECLARE_int32(raft_write_concurrency);
 DECLARE_int32(service_write_concurrency);
+DECLARE_int32(service_lock_concurrency);
+DECLARE_int32(ddl_work_concurrency);
 
 struct Concurrency {
     static Concurrency* get_instance() {
@@ -31,12 +33,16 @@ struct Concurrency {
     BthreadCond add_peer_concurrency;
     BthreadCond raft_write_concurrency;
     BthreadCond service_write_concurrency;
+    BthreadCond service_lock_concurrency;
+    BthreadCond ddl_work_concurrency;
 private:
     Concurrency(): snapshot_load_concurrency(-FLAGS_snapshot_load_num), 
                    init_region_concurrency(-FLAGS_snapshot_load_num), 
                    add_peer_concurrency(-FLAGS_snapshot_load_num), 
                    raft_write_concurrency(-FLAGS_raft_write_concurrency), 
-                   service_write_concurrency(-FLAGS_service_write_concurrency) {
+                   service_write_concurrency(-FLAGS_service_write_concurrency),
+                   service_lock_concurrency(-FLAGS_service_lock_concurrency),
+                   ddl_work_concurrency(-FLAGS_ddl_work_concurrency) {
                    }
 };
 }

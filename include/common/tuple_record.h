@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 #include "common.h"
 #include "table_record.h"
+#include "schema_factory.h"
 #include "rocksdb/slice.h"
 
 namespace baikaldb {
@@ -73,14 +74,14 @@ public:
     }
 
     // decode 'required' (rather than 'all') fields from serialized protobuf bytes
-    // and fill to SmartRecord
-    int decode_fields(const std::vector<int32_t>& fields, SmartRecord record) {
+    // and fill to SmartRecord, if null, fill default_value
+    int decode_fields(const std::map<int32_t, FieldInfo*>& fields, SmartRecord record) {
         uint64_t field_key  = 0;
         uint64_t field_num  = 0;
         int32_t  wired_type = 0;
-        size_t   fetch_idx  = 0;
+        auto iter = fields.begin();
 
-        while (_offset < _size && fetch_idx < fields.size()) {
+        while (_offset < _size && iter != fields.end()) {
             field_key = get_varint<uint64_t>();
             field_num = field_key >> 3;
             wired_type = field_key & 0x07;
@@ -90,14 +91,21 @@ public:
                 return -1;
             }
 
-            while (fetch_idx < fields.size() && field_num > (uint64_t)fields[fetch_idx]) {
-                fetch_idx++;
+            while (iter != fields.end() && field_num > static_cast<uint64_t>(iter->first)) {
+                //add default value
+                auto field = record->get_field_by_tag(iter->first);
+                if (field == nullptr) {
+                    DB_WARNING("invalid field: %d", iter->first);
+                    return -1;
+                }
+                record->set_value(field, iter->second->default_expr_value);
+                iter++;
             }
-            if (fetch_idx == fields.size()) {
+            if (iter == fields.end()) {
                 //DB_WARNING("tag1: %d");
                 return 0;
             }
-            if (field_num < (uint64_t)fields[fetch_idx]) {
+            if (field_num < static_cast<uint64_t>(iter->first)) {
                 // skip current field in proto
                 if (wired_type == 0) {
                     skip_varint();
@@ -111,10 +119,10 @@ public:
                     DB_WARNING("invalid wired_type: %d", wired_type);
                     return -1;
                 }
-            } else if (field_num == (uint64_t)fields[fetch_idx]) {
-                auto field = record->get_field_by_tag(fields[fetch_idx]);
+            } else if (field_num == static_cast<uint64_t>(iter->first)) {
+                auto field = record->get_field_by_tag(iter->first);
                 if (field == nullptr) {
-                    DB_WARNING("invalid field: %d", fields[fetch_idx]);
+                    DB_WARNING("invalid field: %d", iter->first);
                     return -1;
                 }
                 switch (field->cpp_type()) {
@@ -170,8 +178,18 @@ public:
                     return -1;
                 } break;
                 }
-                fetch_idx++;
+                iter++;
             }
+        }
+        while (iter != fields.end()) {
+            //add default value
+            auto field = record->get_field_by_tag(iter->first);
+            if (field == nullptr) {
+                DB_WARNING("invalid field: %d", iter->first);
+                return -1;
+            }
+            record->set_value(field, iter->second->default_expr_value);
+            iter++;
         }
         return 0;
     }

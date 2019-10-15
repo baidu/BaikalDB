@@ -5,11 +5,11 @@
 curl -d '{
     "op_type":"OP_DROP_PRIVILEGE",
     "user_privilege" : {
-        "username" : "root",
-        "password" : "root",
-        "namespace_name" : "FENGCHAO",
+        "username" : "******",
+        "password" : "******",
+        "namespace_name" : "TEST",
         "privilege_table" : [{
-                                    "database" : "FC_Content",
+                                    "database" : "TEST",
                                     "table_name" : "wordinfo"                           
                                 }]
     }

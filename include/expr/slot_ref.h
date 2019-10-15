@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,15 @@ public:
             return ExprValue::Null();
         }
         return row->get_value(_tuple_id, _slot_id).cast_to(_col_type);
+    }
+
+    SlotRef* clone() {
+        SlotRef* s = new SlotRef;
+        s->_tuple_id = _tuple_id;
+        s->_slot_id = _slot_id;
+        s->_node_type = _node_type;
+        s->_col_type = _col_type;
+        return s;
     }
 
     int32_t tuple_id() {

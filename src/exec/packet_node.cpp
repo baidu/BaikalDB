@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "packet_node.h"
+#include "full_export_node.h"
 #include "runtime_state.h"
 #include "network_socket.h"
 
@@ -98,7 +99,7 @@ int PacketNode::handle_explain(RuntimeState* state) {
 }
 
 int PacketNode::open(RuntimeState* state) {
-    auto client = state->client_conn();
+    _client = state->client_conn();
 
     _send_buf = state->send_buf();
     _wrapper = MysqlWrapper::get_instance();
@@ -109,11 +110,15 @@ int PacketNode::open(RuntimeState* state) {
         return ret;
     }
     if (_is_explain) {
-        return handle_explain(state);
+        handle_explain(state);
+        if (state->is_full_export) {
+            state->set_eos();
+        }
+        return 0;
     }
     state->set_num_affected_rows(ret);
     if (op_type() != pb::OP_SELECT) {
-        pack_ok(state->num_affected_rows(), client);
+        pack_ok(state->num_affected_rows(), _client);
         return 0;
     }
     for (auto expr : _projections) {
@@ -125,6 +130,11 @@ int PacketNode::open(RuntimeState* state) {
     }
     pack_head();
     pack_fields();
+    
+    if (state->is_full_export) {
+        return 0;
+    }
+
     if (_children.size() == 0) {
         if (!reached_limit()) {
             if (_binary_protocol) {
@@ -165,6 +175,38 @@ int PacketNode::open(RuntimeState* state) {
     return 0;
 }
 
+int PacketNode::get_next(RuntimeState* state) {
+    if (_is_explain) {
+        return 0;
+    } 
+    bool eos = false;
+    int ret = 0;
+    RowBatch batch;
+    ret = _children[0]->get_next(state, &batch, &eos);
+    if (ret < 0) {
+        DB_WARNING("children:get_next fail:%d", ret);
+        return ret;
+    }
+    for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
+        TimeCost cost;
+        if (_binary_protocol) {
+            ret = pack_binary_row(batch.get_row().get());
+        } else {
+            ret = pack_text_row(batch.get_row().get());
+        }
+        state->inc_num_returned_rows(1);
+        if (ret < 0) {
+            DB_WARNING("pack_row fail:%d", ret);
+            return ret;
+        }
+    }
+
+    if (state->is_eos()) {
+        pack_eof();
+    }
+    return 0;
+}
+
 void PacketNode::close(RuntimeState* state) {
     ExecNode::close(state);
     for (auto expr : _projections) {
@@ -199,7 +241,8 @@ int PacketNode::pack_ok(int num_affected_rows, NetworkSocket* client) {
     bytes[0] = 0 & 0xff;
     bytes[1] = (0 >> 8) & 0xff;
     tmp_buf.byte_array_append_len(bytes, 2);
-    return _send_buf->network_queue_send_append(tmp_buf._data, tmp_buf._size, 1, 0);
+
+    return _send_buf->network_queue_send_append(tmp_buf._data, tmp_buf._size, ++client->packet_id, 0);
 }
 
 int PacketNode::pack_err() {
@@ -223,23 +266,23 @@ int PacketNode::pack_head() {
         return -1;
     }
     int packet_body_len = _send_buf->_size - start_pos - 4;
-    _send_buf->_data[start_pos] = packet_body_len & 0xff;
-    _send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
-    _send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
+    _send_buf->_data[start_pos] = packet_body_len & 0xFF;
+    _send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xFF;
+    _send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xFF;
+    _send_buf->_data[start_pos + 3] = (++_client->packet_id) & 0xFF;
     return 0;
 }
 
 int PacketNode::pack_fields() {
     for (auto& field : _fields) {
-        ++_packet_id;
-        _wrapper->make_field_packet(_send_buf, &field, _packet_id);
+        _wrapper->make_field_packet(_send_buf, &field, ++_client->packet_id);
     }
     pack_eof();
     return 0;
 }
 
 // use for make_stmt_prepare_ok_packet
-int PacketNode::pack_fields(DataBuffer* buffer, int packet_id) {
+int PacketNode::pack_fields(DataBuffer* buffer, int& packet_id) {
     for (auto& field : _fields) {
         ++packet_id;
         _wrapper->make_field_packet(buffer, &field, packet_id);
@@ -250,13 +293,12 @@ int PacketNode::pack_fields(DataBuffer* buffer, int packet_id) {
 }
 
 int PacketNode::pack_vector_row(const std::vector<std::string>& row) {
-    ++_packet_id;
     int start_pos = _send_buf->_size;
     uint8_t bytes[4];
     bytes[0] = '\x01';
     bytes[1] = '\x00';
     bytes[2] = '\x00';
-    bytes[3] = _packet_id & 0xff;
+    bytes[3] = (++_client->packet_id) & 0xFF;
     if (!_send_buf->byte_array_append_len(bytes, 4)) {
         DB_FATAL("Failed to append len. value:[%s], len:[1]", bytes);
         return -1;
@@ -282,13 +324,12 @@ int PacketNode::pack_vector_row(const std::vector<std::string>& row) {
 }
 
 int PacketNode::pack_text_row(MemRow* row) {
-    ++_packet_id;
     int start_pos = _send_buf->_size;
     uint8_t bytes[4];
     bytes[0] = '\x01';
     bytes[1] = '\x00';
     bytes[2] = '\x00';
-    bytes[3] = _packet_id & 0xff;
+    bytes[3] = (++_client->packet_id) & 0xFF;
     if (!_send_buf->byte_array_append_len(bytes, 4)) {
         DB_FATAL("Failed to append len. value:[%s], len:[1]", bytes);
         return -1;
@@ -302,6 +343,22 @@ int PacketNode::pack_text_row(MemRow* row) {
         }
     }
     int packet_body_len = _send_buf->_size - start_pos - 4;
+    while (packet_body_len >= PACKET_LEN_MAX) {
+        _send_buf->_data[start_pos] = PACKET_LEN_MAX & 0xff;
+        _send_buf->_data[start_pos + 1] = (PACKET_LEN_MAX >> 8) & 0xff;
+        _send_buf->_data[start_pos + 2] = (PACKET_LEN_MAX >> 16) & 0xff;
+        start_pos += PACKET_LEN_MAX + 4;
+        packet_body_len -= PACKET_LEN_MAX;
+        uint8_t bytes[4];
+        bytes[0] = '\x01';
+        bytes[1] = '\x00';
+        bytes[2] = '\x00';
+        bytes[3] = (++_client->packet_id) & 0xFF;
+        if (!_send_buf->byte_array_insert_len(bytes, start_pos, 4)) {
+            DB_FATAL("Failed to insert len. value:[%s], len:[4]", bytes);
+            return -1;
+        }
+    }
     _send_buf->_data[start_pos] = packet_body_len & 0xff;
     _send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
     _send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
@@ -309,13 +366,12 @@ int PacketNode::pack_text_row(MemRow* row) {
 }
 
 int PacketNode::pack_binary_row(MemRow* row) {
-    ++_packet_id;
     int start_pos = _send_buf->_size;
     uint8_t bytes[4];
     bytes[0] = '\x01';
     bytes[1] = '\x00';
     bytes[2] = '\x00';
-    bytes[3] = _packet_id & 0xff;
+    bytes[3] = (++_client->packet_id) & 0xFF;
     if (!_send_buf->byte_array_append_len(bytes, 4)) {
         DB_FATAL("Failed to append len. value:[%s], len:[4]", bytes);
         return -1;
@@ -356,6 +412,22 @@ int PacketNode::pack_binary_row(MemRow* row) {
         _send_buf->_data[null_map_pos + idx] = null_map[idx];
     }
     int packet_body_len = _send_buf->_size - start_pos - 4;
+    while (packet_body_len >= PACKET_LEN_MAX) {
+        _send_buf->_data[start_pos] = PACKET_LEN_MAX & 0xff;
+        _send_buf->_data[start_pos + 1] = (PACKET_LEN_MAX >> 8) & 0xff;
+        _send_buf->_data[start_pos + 2] = (PACKET_LEN_MAX >> 16) & 0xff;
+        start_pos += PACKET_LEN_MAX + 4;
+        packet_body_len -= PACKET_LEN_MAX;
+        uint8_t bytes[4];
+        bytes[0] = '\x00';
+        bytes[1] = '\x00';
+        bytes[2] = '\x00';
+        bytes[3] = (++_client->packet_id) & 0xFF;
+        if (!_send_buf->byte_array_insert_len(bytes, start_pos, 4)) {
+            DB_FATAL("Failed to insert len. value:[%s], len:[4]", bytes);
+            return -1;
+        }
+    }
     _send_buf->_data[start_pos] = packet_body_len & 0xff;
     _send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
     _send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
@@ -363,8 +435,7 @@ int PacketNode::pack_binary_row(MemRow* row) {
 }
 
 int PacketNode::pack_eof() {
-    ++_packet_id;
-    _wrapper->make_eof_packet(_send_buf, _packet_id);
+    _wrapper->make_eof_packet(_send_buf, ++_client->packet_id);
     return 0;
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ int InsertNode::init(const pb::PlanNode& node) {
     }
     const pb::InsertNode& insert_node = node.derive_node().insert_node();
     _table_id = insert_node.table_id();
+    _global_index_id = _table_id;
     _tuple_id = insert_node.tuple_id();
     _values_tuple_id = insert_node.values_tuple_id();
     _is_replace = insert_node.is_replace();
@@ -46,7 +47,7 @@ int InsertNode::init(const pb::PlanNode& node) {
         _update_exprs.push_back(up_expr);
     }
     for (auto id : insert_node.field_ids()) {
-        _field_ids.push_back(id);
+        _prepared_field_ids.push_back(id);
     }
     for (auto& expr : insert_node.insert_values()) {
         ExprNode* value_expr = nullptr;
@@ -116,6 +117,7 @@ int InsertNode::open(RuntimeState* state) {
     }
     // auto_rollback.release();
     // txn->commit();
+    _txn->batch_num_increase_rows = _num_increase_rows;
     state->set_num_increase_rows(_num_increase_rows);
     return num_affected_rows;
 }
@@ -161,45 +163,46 @@ int InsertNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 }
 
 int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert_records) {
-    if (_field_ids.size() == 0) {
+    if (_prepared_field_ids.size() == 0) {
         DB_WARNING("not execute a prepared stmt");
         return 0;
     }
-    if ((_insert_values.size() % _field_ids.size()) != 0) {
-        DB_WARNING("_field_ids should not be empty()");
+    if ((_insert_values.size() % _prepared_field_ids.size()) != 0) {
+        DB_WARNING("_prepared_field_ids should not be empty()");
         return -1;
     }
-    TableInfo tbl = _factory->get_table_info(_table_id);
-    if (tbl.id == -1) {
+    auto tbl_ptr = _factory->get_table_info_ptr(_table_id);
+    if (tbl_ptr == nullptr) {
         DB_WARNING("no table found with table_id: %ld", _table_id);
         return -1;
     }
+    auto& tbl = *tbl_ptr;
     std::unordered_map<int32_t, FieldInfo> table_field_map;
-    std::unordered_set<int32_t> insert_field_ids;
+    std::unordered_set<int32_t> insert_prepared_field_ids;
     std::vector<FieldInfo>  insert_fields;
     std::vector<FieldInfo>  default_fields;
 
     for (auto& field : tbl.fields) {
         table_field_map.insert({field.id, field});
     }
-    for (auto id : _field_ids) {
+    for (auto id : _prepared_field_ids) {
         if (table_field_map.count(id) == 0) {
             DB_WARNING("No field for field id: %d", id);
             return -1;
         }
-        insert_field_ids.insert(id);
+        insert_prepared_field_ids.insert(id);
         insert_fields.push_back(table_field_map[id]);
     }
     for (auto& field : tbl.fields) {
-        if (insert_field_ids.count(field.id) == 0) {
+        if (insert_prepared_field_ids.count(field.id) == 0) {
             default_fields.push_back(field);
         }
     }
-    size_t row_size = _insert_values.size() / _field_ids.size();
+    size_t row_size = _insert_values.size() / _prepared_field_ids.size();
     for (size_t row_idx = 0; row_idx < row_size; ++row_idx) {
         SmartRecord row = _factory->new_record(_table_id);
-        for (size_t col_idx = 0; col_idx < _field_ids.size(); ++col_idx) {
-            size_t idx = row_idx * _field_ids.size() + col_idx;
+        for (size_t col_idx = 0; col_idx < _prepared_field_ids.size(); ++col_idx) {
+            size_t idx = row_idx * _prepared_field_ids.size() + col_idx;
             ExprNode* expr = _insert_values[idx];
             if (0 != expr->open()) {
                 DB_WARNING("expr open fail");

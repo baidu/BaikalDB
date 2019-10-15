@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -121,6 +121,7 @@ public:
     
     void whether_split_thread();
 
+    void process_merge_request(int64_t table_id, int64_t region_id);
     //发送请求到metasever, 分配region_id 和 instance
     void process_split_request(int64_t table_id, int64_t region_id, bool tail_split, std::string split_key);
    
@@ -193,8 +194,8 @@ public:
         DB_WARNING("heart beat bth join");
         _add_peer_queue.join();
         DB_WARNING("_add_peer_queue join");
-        //_compact_queue.join();
-        //DB_WARNING("_compact_queue join");
+        _compact_queue.join();
+        DB_WARNING("_compact_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
         _merge_bth.join();
@@ -237,7 +238,7 @@ private:
 
     RocksWrapper*                           _rocksdb;
     SchemaFactory*                          _factory;
-    MetaWriter*                             _writer = nullptr;
+    MetaWriter*                             _meta_writer = nullptr;
     
     // region_id => Region handler
     ThreadSafeMap<int64_t, SmartRegion> _region_mapping;
@@ -272,6 +273,21 @@ private:
 
     bool _has_prepared_tran = true;
 public:
+    bool exist_prepared_log(int64_t region_id, uint64_t txn_id) {
+        if (prepared_txns.find(region_id) != prepared_txns.end()
+                && prepared_txns[region_id].find(txn_id) != prepared_txns[region_id].end()) {
+            return true;
+        } 
+        return false;
+    }
+    bool doing_snapshot_when_stop(int64_t region_id) {
+        if (doing_snapshot_regions.find(region_id) != doing_snapshot_regions.end()) {
+            return true;
+        }
+        return false;
+    }
+    std::unordered_map<int64_t, std::set<uint64_t>> prepared_txns;
+    std::set<int64_t>   doing_snapshot_regions;
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
 };

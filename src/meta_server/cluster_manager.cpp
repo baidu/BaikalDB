@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ namespace baikaldb {
 DEFINE_int32(migrate_percent, 60, "migrate percent. default:60%");
 DEFINE_int32(error_judge_percent, 10, "error judge percen. default:10");
 DEFINE_int32(error_judge_number, 3, "error judge number. default:3");
-DEFINE_int32(mem_used_percent, 50, "mem userd percent. default:50%");
+DEFINE_int32(disk_used_percent, 80, "disk used percent. default:80%");
 
 DECLARE_int32(store_heart_beat_interval_us);
 DECLARE_int32(store_dead_interval_times);
@@ -543,7 +543,52 @@ void ClusterManager::set_instance_migrate(const pb::MetaManagerRequest* request,
     }
     //RegionManager::get_instance()->delete_all_region_for_store(instance, pb::MIGRATE); 
 }
-
+void ClusterManager::set_instance_full(const pb::MetaManagerRequest* request,
+            pb::MetaManagerResponse* response,
+            uint64_t log_id) {
+    response->set_op_type(request->op_type());
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("sucess");
+    if (_meta_state_machine != NULL && !_meta_state_machine->is_leader()) {
+        ERROR_SET_RESPONSE(response, pb::NOT_LEADER, "not leader", request->op_type(), log_id)
+        response->set_leader(butil::endpoint2str(_meta_state_machine->get_leader()).c_str());
+        return;
+    }
+    if (!request->has_instance()) {
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, "no instance", request->op_type(), log_id)
+        response->set_errmsg("no instance");
+        return;
+    }
+    std::string instance = request->instance().address();
+    auto ret = set_full_for_instance(instance);
+    if (ret < 0) {
+        response->set_errmsg("instance not exist");
+        return;
+    }
+}
+void ClusterManager::set_instance_no_full(const pb::MetaManagerRequest* request,
+            pb::MetaManagerResponse* response,
+            uint64_t log_id) {
+    response->set_op_type(request->op_type());
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("sucess");
+    if (_meta_state_machine != NULL && !_meta_state_machine->is_leader()) {
+        ERROR_SET_RESPONSE(response, pb::NOT_LEADER, "not leader", request->op_type(), log_id)
+        response->set_leader(butil::endpoint2str(_meta_state_machine->get_leader()).c_str());
+        return;
+    }
+    if (!request->has_instance()) {
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, "no instance", request->op_type(), log_id)
+        response->set_errmsg("no instance");
+        return;
+    }
+    std::string instance = request->instance().address();
+    auto ret = set_no_full_for_instance(instance);
+    if (ret < 0) {
+        response->set_errmsg("instance not exist");
+        return;
+    }
+}
 void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* /*request*/,
             pb::BaikalHeartBeatResponse* response) {
     auto idc_info_ptr = response->mutable_idc_info();
@@ -566,6 +611,7 @@ void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* 
         }
     }  
 }
+
 void ClusterManager::process_instance_heartbeat_for_store(const pb::InstanceInfo& instance_heart_beat) {
     auto ret = update_instance_info(instance_heart_beat);
     if (ret == 0) {
@@ -608,14 +654,6 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
     }
     DB_WARNING("peer load balance, instance_info: %s, resource_tag: %s", 
                 instance.c_str(), resource_tag.c_str());
-    for (auto& table_region: table_regions) {
-        //std::string str_region_id;
-        //for (auto& region_id : table_region.second) {
-        //    str_region_id += std::to_string(region_id) + ",";
-        //}
-        DB_WARNING("table_id: %ld, region_count: %ld", 
-                table_region.first, table_region_counts[table_region.first]);
-    }
     int64_t instance_count_for_logical = get_instance_count(resource_tag, logical_room);
     int64_t instance_count = get_instance_count(resource_tag);
     //peer均衡是先增加后减少, 代表这个表需要有多少个region先add_peer
@@ -748,6 +786,7 @@ void ClusterManager::store_healthy_check_function() {
             DB_WARNING("store:%s is dead, resource_tag: %s", 
                     store.c_str(), store_pair.first.c_str());
             if (_meta_state_machine->get_migrate(store_pair.first)) {
+                //RegionManager::get_instance()->add_peer_for_dead_store(store, pb::DEAD);
                 RegionManager::get_instance()->delete_all_region_for_store(store, pb::DEAD);
             }
         }
@@ -757,6 +796,7 @@ void ClusterManager::store_healthy_check_function() {
             DB_WARNING("store:%s is migrating, resource_tag: %s", 
                     store.c_str(), store_pair.first.c_str());
             if (_meta_state_machine->get_migrate(store_pair.first)) {
+                //RegionManager::get_instance()->add_peer_for_dead_store(store, pb::MIGRATE);
                 RegionManager::get_instance()->delete_all_region_for_store(store, pb::MIGRATE);
             }
         }
@@ -860,7 +900,7 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
     }
     return 0;
 }
-void ClusterManager::load_snapshot() {
+int ClusterManager::load_snapshot() {
     _physical_info.clear();
     _logical_physical_map.clear();
     _instance_physical_map.clear();
@@ -896,17 +936,23 @@ void ClusterManager::load_snapshot() {
 
     std::string instance_prefix = MetaServer::CLUSTER_IDENTIFY;
     instance_prefix += MetaServer::INSTANCE_CLUSTER_IDENTIFY;
+    int ret = 0;
     for (; iter->Valid(); iter->Next()) {
         if (iter->key().starts_with(instance_prefix)) {
-            load_instance_snapshot(instance_prefix, iter->key().ToString(), iter->value().ToString());
+            ret = load_instance_snapshot(instance_prefix, iter->key().ToString(), iter->value().ToString());
         } else if (iter->key().starts_with(physical_prefix)) {
-            load_physical_snapshot(physical_prefix, iter->key().ToString(), iter->value().ToString());
+            ret = load_physical_snapshot(physical_prefix, iter->key().ToString(), iter->value().ToString());
         } else if (iter->key().starts_with(logical_prefix)) {
-            load_logical_snapshot(logical_prefix, iter->key().ToString(), iter->value().ToString());
+            ret = load_logical_snapshot(logical_prefix, iter->key().ToString(), iter->value().ToString());
         } else {
             DB_FATAL("unsupport cluster info when load snapshot, key:%s", iter->key().data());
         }
+        if (ret != 0) {
+            DB_FATAL("ClusterManager load snapshot fail, key:%s", iter->key().data());
+            return -1;
+        }
     }
+    return 0;
 }
 bool ClusterManager::whether_legal_for_select_instance(
             const std::string& candicate_instance,
@@ -928,26 +974,24 @@ bool ClusterManager::whether_legal_for_select_instance(
     if (exclude_stores.count(candicate_instance) != 0) {
         return false;
     }
-    /* 后续再考虑容量
     if ((_instance_info[candicate_instance].used_size  * 100 / _instance_info[candicate_instance].capacity)  > 
-                FLAGS_mem_used_percent) {
+                FLAGS_disk_used_percent) {
         DB_WARNING("instance:%s left size is not engout, used_size:%ld, capactity:%ld",
-                    candicate_instancec_str(), 
+                    candicate_instance.c_str(), 
                     _instance_info[candicate_instance].used_size, 
                     _instance_info[candicate_instance].capacity);
         return false;
     }
-    */
     return true;
 }
-void ClusterManager::load_instance_snapshot(const std::string& instance_prefix,
+int ClusterManager::load_instance_snapshot(const std::string& instance_prefix,
                                              const std::string& key, 
                                              const std::string& value) {
     std::string address(key, instance_prefix.size());
     pb::InstanceInfo instance_pb;
     if (!instance_pb.ParseFromString(value)) {
         DB_FATAL("parse from pb fail when load instance snapshot, key:%s", key.c_str());
-        return;
+        return -1;
     }
     DB_WARNING("instance_pb:%s", instance_pb.ShortDebugString().c_str());
 
@@ -959,6 +1003,7 @@ void ClusterManager::load_instance_snapshot(const std::string& instance_prefix,
         if (_physical_info.find(physical_room) != _physical_info.end()) {
             instance_pb.set_logical_room(_physical_info[physical_room]);
         } else {
+            //TODO 是否需要出错
             DB_FATAL("get logical room for physical room: %s fail", physical_room.c_str());
         }
     }
@@ -972,15 +1017,16 @@ void ClusterManager::load_instance_snapshot(const std::string& instance_prefix,
     if (_instance_regions_count_map.find(address) == _instance_regions_count_map.end()) {
         _instance_regions_count_map[address] = std::unordered_map<int64_t, int64_t>{};
     }
+    return 0;
 }
 
-void ClusterManager::load_physical_snapshot(const std::string& physical_prefix, 
+int ClusterManager::load_physical_snapshot(const std::string& physical_prefix, 
                                              const std::string& key, 
                                              const std::string& value) {
     pb::PhysicalRoom physical_logical_pb;
     if (!physical_logical_pb.ParseFromString(value)) {
          DB_FATAL("parse from pb fail when load physical snapshot, key:%s", key.c_str());
-         return;
+         return -1;
     }
     DB_WARNING("physical_logical_info:%s", physical_logical_pb.ShortDebugString().c_str());
     BAIDU_SCOPED_LOCK(_physical_mutex);
@@ -992,21 +1038,23 @@ void ClusterManager::load_physical_snapshot(const std::string& physical_prefix,
         _physical_instance_map[physical_room] = std::set<std::string>{};
     }
     _logical_physical_map[logical_room] = physical_rooms;
+    return 0;
 }
 
-void ClusterManager::load_logical_snapshot(const std::string& logical_prefix, 
+int ClusterManager::load_logical_snapshot(const std::string& logical_prefix, 
                                             const std::string& key, 
                                             const std::string& value) {
     pb::LogicalRoom logical_info;
     if (!logical_info.ParseFromString(value)) {
         DB_FATAL("parse from pb fail when load logical snapshot, key:%s", key.c_str());
-        return;
+        return -1;
     }
     DB_WARNING("logical_info:%s", logical_info.ShortDebugString().c_str());
     BAIDU_SCOPED_LOCK(_physical_mutex);
     for (auto logical_room : logical_info.logical_rooms()) {
         _logical_physical_map[logical_room] = std::set<std::string>{};
     }
+    return 0;
 }
 
 }//namespace
