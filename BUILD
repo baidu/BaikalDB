@@ -385,6 +385,7 @@ cc_library(
         "@boost//:lexical_cast",
         "//external:braft",
         "//external:rocksdb",
+        "//external:rapidjson",
     ],
     visibility = ["//visibility:public"],
 )
