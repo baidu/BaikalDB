@@ -22,6 +22,8 @@ class ScanNode : public ExecNode {
 public:
     ScanNode() {
     }
+    ScanNode(pb::Engine engine): _engine(engine) {
+    }
     virtual ~ScanNode() {
     }
     static ScanNode* create_scan_node(const pb::PlanNode& node);

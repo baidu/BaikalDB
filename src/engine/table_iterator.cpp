@@ -291,6 +291,65 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
         }
     }
     _valid = _iter->Valid();
+    // for cstore, open iters for non-pk fields
+    if (is_cstore() && _idx_type == pb::I_PRIMARY && _valid) {
+       if (0 != open_columns(read_options, fields, txn)) {
+           DB_FATAL("create column iterators failed: %ld", index_id);
+           return -1;
+       }
+    }
+    return 0;
+}
+
+// for cstore only
+int Iterator::open_columns(const rocksdb::ReadOptions& read_options,
+                           std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn) {
+    std::set<int32_t>    pri_field_ids;
+    for (auto& field_info : _pri_info->fields) {
+        pri_field_ids.insert(field_info.id);
+    }
+    const TableKey& primary_key = _iter->key();
+    int64_t table_id = _pri_info->id;
+    for (auto& field_info : _schema->get_table_info(table_id).fields) {
+        // primary key => primary column key. column key may be not exists.
+        // replace field_id of format <regionid+tableid+fieldid> + pure_pk
+        int32_t field_id = field_info.id;
+        // skip pk fields
+        if (pri_field_ids.count(field_id) != 0) {
+            continue;
+        }
+        // skip no required field
+        if (fields.count(field_id) == 0) {
+            continue;
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        rocksdb::Iterator* iter;
+        if (_txn != nullptr) {
+            iter = _txn->GetIterator(read_options, _data_cf);
+        } else {
+            iter = _db->new_iterator(read_options, RocksWrapper::DATA_CF);
+        }
+        if (!iter) {
+            DB_FATAL("create iterator failed: %ld", field_id);
+            return -1;
+        }
+        if (_forward) {
+            TimeCost cost;
+            iter->Seek(key.data());
+            DB_DEBUG("region:%ld, field:%d, Seek cost:%ld, valid=%d",
+                     _region, field_id, cost.get_time(), iter->Valid());
+        } else {
+        TimeCost cost;
+            iter->SeekForPrev(key.data());
+            DB_DEBUG("region:%ld, field:%d, SeekForPrev cost:%ld, valid=%d",
+                     _region, field_id, cost.get_time(), iter->Valid());
+        }
+        _non_pk_fields.push_back(field_info.id);
+        _non_pk_types.push_back(field_info.type);
+        _column_iters.push_back(iter);
+    }
     return 0;
 }
 
@@ -346,6 +405,24 @@ bool Iterator::_fits_right_bound() {
     //DB_WARNING("_fits_right_bound: %d", fits);
     return fits;
 }
+bool Iterator::_fits_prefix(rocksdb::Iterator* iter, int32_t field_id) {
+    MutTableKey  prefix_key;
+    prefix_key.append_i64(_region);
+    if (field_id) {
+        prefix_key.append_i32(_index_info->id);
+        prefix_key.append_i32(field_id);
+    } else {
+        prefix_key.append_i64(_index_info->id);
+    }
+    return iter->key().starts_with(prefix_key.data());
+}
+bool Iterator::is_cstore() {
+    if (nullptr == _schema) {
+        DB_WARNING("get schema factory failed");
+        return false;
+     }
+    return _schema->get_table_engine(_pri_info->id) == pb::ROCKSDB_CSTORE;
+}
 
 int TableIterator::get_next(SmartRecord record) {
     if (!_valid) {
@@ -357,12 +434,21 @@ int TableIterator::get_next(SmartRecord record) {
     }
     //create a record and parse key and value
     if (VAL_ONLY == _mode || KEY_VAL == _mode) {
-        TupleRecord tuple_record(_iter->value());
-        // only decode the required field (field_ids stored in fields)
-        if (0 != tuple_record.decode_fields(_fields, record)) {
-            DB_WARNING("decode value failed: %ld", _index_info->id);
-            _valid = false;
-            return -1;
+        if (!is_cstore()) {
+            TupleRecord tuple_record(_iter->value());
+            // only decode the required field (field_ids stored in fields)
+            if (0 != tuple_record.decode_fields(_fields, record)) {
+                DB_WARNING("decode value failed: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            }
+        } else {
+            // for cstore, column value may be null.
+            if (0 != get_next_columns(record)) {
+                DB_WARNING("get non-pk cloumn value failed table_id: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            }
         }
     }
     if (KEY_ONLY == _mode || KEY_VAL == _mode) {
@@ -382,6 +468,66 @@ int TableIterator::get_next(SmartRecord record) {
     
     //DB_WARNING("parse:%ld add_batch:%ld nexttime:%ld", parse, add_batch,next_time);
     _valid = _valid && _iter->Valid();
+    return 0;
+}
+
+// for cstore only
+int TableIterator::get_next_columns(SmartRecord record) {
+    if (!_fits_prefix(_iter)) {
+        DB_DEBUG("not match prefix, field_id=%d, key=%s",
+                 0, _iter->key().ToString(true).c_str());
+        return -1;
+    }
+    TableKey primary_key(_iter->key(), true);
+    rocksdb::Slice pk = _iter->key();
+    pk.remove_prefix(_prefix_len);
+    int64_t table_id = _pri_info->id;
+
+    for (size_t i = 0; i < _non_pk_fields.size(); i++) {
+        int32_t field_id = _non_pk_fields[i];
+        pb::PrimitiveType field_type = _non_pk_types[i];
+        rocksdb::Iterator* iter = _column_iters[i];
+        const FieldDescriptor* field = record->get_field_by_tag(field_id);
+        // total valid is depend on pk's _iter, column iter's valid is not necessary
+        if (!iter->Valid()) {
+            DB_DEBUG("iter not valid, field_id=%d, pk=%s", field_id,pk.ToString(true).c_str());
+            continue;
+        }
+        if (!_fits_prefix(iter, field_id)) {
+            DB_DEBUG("not match prefix, field_id=%d, key=%s",
+                     field_id, iter->key().ToString(true).c_str());
+            continue;
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        rocksdb::Slice column_key = iter->key();
+        column_key.remove_prefix(_prefix_len);
+        auto cmp = pk.compare(column_key);
+        // when column pure key is equal to pk's pure key, get column value to record.
+        if (cmp == 0) {
+            std::string value(iter->value().data_, iter->value().size_);
+            if (0 != record->decode_field(field_id, field_type, value)) {
+                DB_WARNING("decode value failed: %d", field_id);
+                return -1;
+            }
+            DB_DEBUG("key=%s,val=%s", iter->key().ToString(true).c_str(),
+                     record->get_value(field).get_string().c_str());
+        } else {
+            DB_DEBUG("field_id=%d, pk=%s, key=%s, cmp=%d", field_id,
+                            pk.ToString(true).c_str(),
+                            column_key.ToString(true).c_str(),
+                            cmp);
+        }
+        // as the pure key maybe not exists in column iter,
+        // only need to move iter when pk are greater or equal.
+        if (_forward && cmp >= 0) {
+            iter->Next();
+        }
+        if(!_forward && cmp <= 0)  {
+            iter->Prev();
+        }
+    }
     return 0;
 }
 

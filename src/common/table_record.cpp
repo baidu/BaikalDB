@@ -655,4 +655,179 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
     }
     return 0;
 }
+// for cstore
+int TableRecord::encode_field(int32_t field_id, pb::PrimitiveType field_type, std::string& out) {
+    const Descriptor* _descriptor = _message->GetDescriptor();
+    const Reflection* _reflection = _message->GetReflection();
+    const FieldDescriptor* field = _descriptor->FindFieldByNumber(field_id);
+    if (field == nullptr) {
+        DB_WARNING("invalid field: %d", field_id);
+        return -1;
+    }
+    if (!_reflection->HasField(*_message, field)) {
+        DB_WARNING("missing field: %d", field->number());
+        return -2;
+    }
+    switch (field_type) {
+        case pb::INT8: {
+            int8_t val = _reflection->GetInt32(*_message, field);
+            out.append((char*)&val, sizeof(int8_t));
+        } break;
+        case pb::INT16: {
+            int16_t val = _reflection->GetInt32(*_message, field);
+            out.append((char*)&val, sizeof(int16_t));
+        } break;
+        case pb::TIME:
+        case pb::INT32: {
+            int32_t val = _reflection->GetInt32(*_message, field);
+            out.append((char*)&val, sizeof(int32_t));
+        } break;
+        case pb::INT64: {
+            int64_t val = _reflection->GetInt64(*_message, field);
+            out.append((char*)&val, sizeof(int64_t));
+        } break;
+        case pb::UINT8: {
+            uint8_t val = _reflection->GetUInt32(*_message, field);
+            out.append((char*)&val, sizeof(uint8_t));
+        } break;
+        case pb::UINT16: {
+            uint16_t val = _reflection->GetUInt32(*_message, field);
+            out.append((char*)&val, sizeof(uint16_t));
+        } break;
+        case pb::TIMESTAMP:
+        case pb::DATE:
+        case pb::UINT32: {
+            uint32_t val = _reflection->GetUInt32(*_message, field);
+            out.append((char*)&val, sizeof(uint32_t));
+        } break;
+        case pb::DATETIME:
+        case pb::UINT64: {
+            uint64_t val = _reflection->GetUInt64(*_message, field);
+            out.append((char*)&val, sizeof(uint64_t));
+        } break;
+        case pb::FLOAT: {
+            float val = _reflection->GetFloat(*_message, field);
+            out.append((char*)&val, sizeof(float));
+        } break;
+        case pb::DOUBLE: {
+           double val = _reflection->GetDouble(*_message, field);
+           out.append((char*)&val, sizeof(double));
+        } break;
+        case pb::BOOL: {
+            uint8_t  val = _reflection->GetBool(*_message, field);
+            out.append((char*)&val, sizeof(uint8_t ));
+        } break;
+        case pb::STRING: {
+            std::string val = _reflection->GetString(*_message, field);;
+            out.append(val.data(), val.size());
+        } break;
+        default: {
+            DB_WARNING("un-supported field type: %d, %d", field->number(), field_type);
+            return -1;
+        } break;
+    }
+    return 0;
+}
+// for cstore
+int TableRecord::decode_field(int32_t field_id, pb::PrimitiveType field_type, const std::string& in) {
+    const Descriptor* _descriptor = _message->GetDescriptor();
+    const Reflection* _reflection = _message->GetReflection();
+    const FieldDescriptor* field = _descriptor->FindFieldByNumber(field_id);
+    if (field == nullptr) {
+        DB_WARNING("invalid field: %d", field_id);
+        return -1;
+    }
+    char* c = const_cast<char*>(in.data());
+    switch (field_type) {
+        case pb::INT8: {
+            if (sizeof(int8_t) > in.size()) {
+                DB_WARNING("int8_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetInt32(_message, field, *reinterpret_cast<int8_t*>(c));
+        } break;
+        case pb::INT16: {
+            if (sizeof(int16_t) > in.size()) {
+                DB_WARNING("int16_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetInt32(_message, field, *reinterpret_cast<int16_t*>(c));
+        } break;
+        case pb::TIME:
+        case pb::INT32: {
+            if (sizeof(int32_t) > in.size()) {
+                DB_WARNING("int32_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetInt32(_message, field, *reinterpret_cast<int32_t*>(c));
+        } break;
+        case pb::INT64: {
+            if (sizeof(int64_t) > in.size()) {
+                DB_WARNING("int64_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetInt64(_message, field, *reinterpret_cast<int64_t*>(c));
+        } break;
+        case pb::UINT8: {
+            if (sizeof(uint8_t) > in.size()) {
+                DB_WARNING("uint8_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetUInt32(_message, field, *reinterpret_cast<uint8_t*>(c));
+        } break;
+        case pb::UINT16: {
+            if (sizeof(uint16_t) > in.size()) {
+                DB_WARNING("uint16_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetUInt32(_message, field, *reinterpret_cast<uint16_t*>(c));
+        } break;
+        case pb::TIMESTAMP:
+        case pb::DATE:
+        case pb::UINT32: {
+            if (sizeof(uint32_t) > in.size()) {
+                DB_WARNING("uint32_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetUInt32(_message, field, *reinterpret_cast<uint32_t*>(c));
+        } break;
+        case pb::DATETIME:
+        case pb::UINT64: {
+            if (sizeof(uint64_t) > in.size()) {
+                DB_WARNING("uint64_t out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetUInt64(_message, field, *reinterpret_cast<uint64_t*>(c));
+        } break;
+        case pb::FLOAT: {
+            if (sizeof(float) > in.size()) {
+                DB_WARNING("float out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetFloat(_message, field, *reinterpret_cast<float*>(c));
+        } break;
+        case pb::DOUBLE: {
+            if (sizeof(double) > in.size()) {
+                DB_WARNING("double out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetDouble(_message, field, *reinterpret_cast<double*>(c));
+        } break;
+        case pb::BOOL: {
+            if (sizeof(uint8_t) > in.size()) {
+                DB_WARNING("bool out of bound: %d %zu", field->number(), in.size());
+                return -2;
+            }
+            _reflection->SetBool(_message, field, *reinterpret_cast<uint8_t*>(c));
+        } break;
+        case pb::STRING: {
+            _reflection->SetString(_message, field, in);
+        } break;
+        default: {
+            DB_WARNING("un-supported field type: %d, %d", field->number(), field_type);
+            return -1;
+        } break;
+    }
+    return 0;
+}
 }

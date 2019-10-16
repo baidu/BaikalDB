@@ -1075,7 +1075,8 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
     }
     //有split_key的索引先处理
     for (auto i = 0; i < table_mem.schema_pb.partition_num() && 
-            table_mem.schema_pb.engine() == pb::ROCKSDB; ++i) {
+            (table_mem.schema_pb.engine() == pb::ROCKSDB ||
+            table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE); ++i) {
         for (auto& split_key : table_mem.schema_pb.split_keys()) {
             std::string index_name = split_key.index_name();
             for (auto j = 0; j <= split_key.split_keys_size(); ++j, ++instance_count) {
@@ -1104,7 +1105,8 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
     }
     //没有指定split_key的索引
     for (auto i = 0; i < table_mem.schema_pb.partition_num() &&
-                        table_mem.schema_pb.engine() == pb::ROCKSDB; ++i) {
+            (table_mem.schema_pb.engine() == pb::ROCKSDB ||
+            table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE); ++i) {
         for (auto& index : global_index) {
             pb::InitRegion init_region_request;
             pb::RegionInfo* region_info = init_region_request.mutable_region_info();
@@ -1156,7 +1158,8 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
     }
     
     //leader发送请求
-    if (done && table_mem.schema_pb.engine() == pb::ROCKSDB) {
+    if (done && (table_mem.schema_pb.engine() == pb::ROCKSDB
+        || table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE)) {
         std::string namespace_name = table_mem.schema_pb.namespace_name();
         std::string database = table_mem.schema_pb.database();
         std::string table_name = table_mem.schema_pb.table_name();

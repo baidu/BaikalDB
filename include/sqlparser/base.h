@@ -86,6 +86,7 @@ enum NodeType {
 };
 
 struct Node {
+    virtual ~Node() {}
     NodeType node_type = NT_BASE;
     bool print_sample = false;
     virtual void set_print_sample(bool print_sample_) {
