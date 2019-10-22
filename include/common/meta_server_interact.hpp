@@ -84,7 +84,7 @@ public:
                 }
             }
 
-            DB_DEBUG("meta_req[%s], meta_resp[%s]", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+            SELF_TRACE("meta_req[%s], meta_resp[%s]", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
             if (cntl.Failed()) {
                 DB_WARNING("connect with server fail. send request fail, error:%s, log_id:%lu",
                             cntl.ErrorText().c_str(), cntl.log_id());

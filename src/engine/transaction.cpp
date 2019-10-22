@@ -840,8 +840,8 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
             continue;
         }
         std::string value;
-        // skip null fields
-        if (record->encode_field(field_info.id, field_info.type, value) != 0) {
+        // skip null or default_value fields
+        if (record->encode_field(field_info, value) != 0) {
             DB_DEBUG("no value for field=%d", field_id);
             continue;
         }
@@ -892,14 +892,16 @@ int Transaction::get_update_primary_columns(
         }
         rocksdb::Status res = _txn->Get(read_opt, _data_cf, key.data(), &value);
         if (res.ok()){
-        const FieldDescriptor* field = val->get_field_by_tag(field_id);
-            if (0 != val->decode_field(field_info.id, field_info.type, value)) {
+            const FieldDescriptor* field = val->get_field_by_tag(field_id);
+            if (0 != val->decode_field(field_info, value)) {
                 DB_WARNING("decode value failed: %d", field_id);
                 return -1;
             }
             DB_DEBUG("get key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
                      val->get_value(field).get_string().c_str(), res.ToString().c_str());
         } else if (res.IsNotFound()) {
+            const FieldDescriptor* field = val->get_field_by_tag(field_id);
+            val->set_value(field, field_info.default_expr_value);
             DB_DEBUG("cell not exist");
         } else if (res.IsBusy()) {
             DB_WARNING("get failed, busy: %s", res.ToString().c_str());

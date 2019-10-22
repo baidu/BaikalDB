@@ -114,8 +114,7 @@ public:
     virtual int open(const IndexRange& range, std::map<int32_t, FieldInfo*>& fields, 
             SmartTransaction txn = nullptr);
 
-    virtual int open_columns(const rocksdb::ReadOptions& read_options,
-            std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn = nullptr);
+    virtual int open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn = nullptr);
 
     virtual bool valid() const {
         return _valid;
@@ -169,8 +168,7 @@ protected:
     std::map<int32_t, FieldInfo*>    _fields;
 
     std::vector<rocksdb::Iterator*>     _column_iters; // cstore, own it, should delete when destruct
-    std::vector<int32_t>                _non_pk_fields; // cstore
-    std::vector<pb::PrimitiveType>      _non_pk_types;  // cstore
+    std::vector<FieldInfo*>             _non_pk_fields; // cstore
 
     int _prefix_len = sizeof(int64_t) * 2;
 

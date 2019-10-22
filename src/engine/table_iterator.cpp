@@ -293,7 +293,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     _valid = _iter->Valid();
     // for cstore, open iters for non-pk fields
     if (is_cstore() && _idx_type == pb::I_PRIMARY && _valid) {
-       if (0 != open_columns(read_options, fields, txn)) {
+       if (0 != open_columns(fields, txn)) {
            DB_FATAL("create column iterators failed: %ld", index_id);
            return -1;
        }
@@ -302,15 +302,22 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
 }
 
 // for cstore only
-int Iterator::open_columns(const rocksdb::ReadOptions& read_options,
-                           std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn) {
+int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn) {
+    rocksdb::ReadOptions read_options;
+    if (_forward) {
+        read_options.prefix_same_as_start = true;
+        read_options.total_order_seek = false;
+    } else {
+        read_options.prefix_same_as_start = false;
+        read_options.total_order_seek = true;
+    }
     std::set<int32_t>    pri_field_ids;
     for (auto& field_info : _pri_info->fields) {
         pri_field_ids.insert(field_info.id);
     }
     const TableKey& primary_key = _iter->key();
     int64_t table_id = _pri_info->id;
-    for (auto& field_info : _schema->get_table_info(table_id).fields) {
+    for (auto& field_info : _schema->get_table_info_ptr(table_id)->fields) {
         // primary key => primary column key. column key may be not exists.
         // replace field_id of format <regionid+tableid+fieldid> + pure_pk
         int32_t field_id = field_info.id;
@@ -346,8 +353,9 @@ int Iterator::open_columns(const rocksdb::ReadOptions& read_options,
             DB_DEBUG("region:%ld, field:%d, SeekForPrev cost:%ld, valid=%d",
                      _region, field_id, cost.get_time(), iter->Valid());
         }
-        _non_pk_fields.push_back(field_info.id);
-        _non_pk_types.push_back(field_info.type);
+//        _non_pk_fields.push_back(field_info.id);
+//        _non_pk_types.push_back(field_info.type);
+        _non_pk_fields.push_back(&field_info);
         _column_iters.push_back(iter);
     }
     return 0;
@@ -484,8 +492,8 @@ int TableIterator::get_next_columns(SmartRecord record) {
     int64_t table_id = _pri_info->id;
 
     for (size_t i = 0; i < _non_pk_fields.size(); i++) {
-        int32_t field_id = _non_pk_fields[i];
-        pb::PrimitiveType field_type = _non_pk_types[i];
+        int32_t field_id = _non_pk_fields[i]->id;
+        pb::PrimitiveType field_type = _non_pk_fields[i]->type;
         rocksdb::Iterator* iter = _column_iters[i];
         const FieldDescriptor* field = record->get_field_by_tag(field_id);
         // total valid is depend on pk's _iter, column iter's valid is not necessary
@@ -507,13 +515,14 @@ int TableIterator::get_next_columns(SmartRecord record) {
         // when column pure key is equal to pk's pure key, get column value to record.
         if (cmp == 0) {
             std::string value(iter->value().data_, iter->value().size_);
-            if (0 != record->decode_field(field_id, field_type, value)) {
+            if (0 != record->decode_field(*_non_pk_fields[i], value)) {
                 DB_WARNING("decode value failed: %d", field_id);
                 return -1;
             }
             DB_DEBUG("key=%s,val=%s", iter->key().ToString(true).c_str(),
                      record->get_value(field).get_string().c_str());
         } else {
+            record->set_value(field, _non_pk_fields[i]->default_expr_value);
             DB_DEBUG("field_id=%d, pk=%s, key=%s, cmp=%d", field_id,
                             pk.ToString(true).c_str(),
                             column_key.ToString(true).c_str(),
