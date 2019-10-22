@@ -498,12 +498,17 @@ int TableIterator::get_next_columns(SmartRecord record) {
         const FieldDescriptor* field = record->get_field_by_tag(field_id);
         // total valid is depend on pk's _iter, column iter's valid is not necessary
         if (!iter->Valid()) {
-            DB_DEBUG("iter not valid, field_id=%d, pk=%s", field_id,pk.ToString(true).c_str());
+            record->set_value(field, _non_pk_fields[i]->default_expr_value);
+            DB_DEBUG("iter not valid, field_id=%d, pk=%s, default_value=%s",
+                     field_id, pk.ToString(true).c_str(),
+                     _non_pk_fields[i]->default_value.c_str());
             continue;
         }
         if (!_fits_prefix(iter, field_id)) {
-            DB_DEBUG("not match prefix, field_id=%d, key=%s",
-                     field_id, iter->key().ToString(true).c_str());
+            record->set_value(field, _non_pk_fields[i]->default_expr_value);
+            DB_DEBUG("not match prefix, field_id=%d, key=%s, default_value=%s",
+                     field_id, iter->key().ToString(true).c_str(),
+                     _non_pk_fields[i]->default_value.c_str());
             continue;
         }
         MutTableKey key(primary_key);
@@ -523,9 +528,10 @@ int TableIterator::get_next_columns(SmartRecord record) {
                      record->get_value(field).get_string().c_str());
         } else {
             record->set_value(field, _non_pk_fields[i]->default_expr_value);
-            DB_DEBUG("field_id=%d, pk=%s, key=%s, cmp=%d", field_id,
+            DB_DEBUG("field_id=%d, pk=%s, key=%s, default_value=%s, cmp=%d", field_id,
                             pk.ToString(true).c_str(),
                             column_key.ToString(true).c_str(),
+                            _non_pk_fields[i]->default_value.c_str(),
                             cmp);
         }
         // as the pure key maybe not exists in column iter,

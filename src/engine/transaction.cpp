@@ -272,7 +272,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
 
 //TODO: finer return status
 //return -3 when region not match
-int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record) {
+int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record, bool is_update) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
     MutTableKey key;
@@ -301,10 +301,10 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
             DB_FATAL("put primary fail, error: %s", res.ToString().c_str());
             return -1;
         }
-    }
-    // cstore, put non-pk columns values to db
-    if (is_cstore()) {
-        return put_primary_columns(key, record);
+        // cstore, put non-pk columns values to db
+        if (is_cstore()) {
+            return put_primary_columns(key, record, is_update);
+        }
     }
     //DB_WARNING("put primary, region_id: %ld, index_id: %ld, put_key: %s, put_value: %s",
     //    region, pk_index.id, rocksdb::Slice(key.data()).ToString(true).c_str(), rocksdb::Slice(value).ToString(true).c_str());
@@ -687,14 +687,15 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
         add_kvop_delete(_key.data());
     } else {
         auto res = _txn->Delete(_data_cf, _key.data());
+        DB_DEBUG("delete key=%s", str_to_hex(_key.data()).c_str());
         if (!res.ok()) {
             DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
             return -1;
         }
-    }
-    // for cstore only, remove_columns
-    if (is_cstore() && index.type == pb::I_PRIMARY) {
-        return remove_columns(_key);
+        // for cstore only, remove_columns
+        if (is_cstore() && index.type == pb::I_PRIMARY) {
+            return remove_columns(_key);
+        }
     }
     return 0;
 }
@@ -717,6 +718,10 @@ int Transaction::remove(int64_t region, IndexInfo& index, const TableKey& key) {
         if (!res.ok()) {
             DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
             return -1;
+        }
+        // for cstore only, remove_columns
+        if (is_cstore() && index.type == pb::I_PRIMARY) {
+            return remove_columns(_key);
         }
     }
 
@@ -827,7 +832,7 @@ void Transaction::rollback_to_point(int seq_id) {
 //    }
 }
 // for cstore only, only put column which HasField in record
-int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord record) {
+int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord record, bool is_update) {
     if (_table_info.get() == nullptr) {
         DB_WARNING("no table_info");
         return -1;
@@ -840,14 +845,29 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
             continue;
         }
         std::string value;
-        // skip null or default_value fields
+        bool update_by_delete_old = false;
+        // if the field value is null or default_value
         if (record->encode_field(field_info, value) != 0) {
-            DB_DEBUG("no value for field=%d", field_id);
-            continue;
+            if (is_update) { // delete when update
+                update_by_delete_old = true;
+            } else { // skip null or default_value fields when insert
+                DB_DEBUG("no value for field=%d", field_id);
+                continue;
+            }
+
         }
         MutTableKey key(primary_key);
         key.replace_i32(table_id, sizeof(int64_t));
         key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        if (update_by_delete_old) {
+            auto res = _txn->Delete(_data_cf, key.data());
+            DB_DEBUG("del key=%s, res=%s", str_to_hex(key.data()).c_str(),
+                     res.ToString().c_str());
+            if (!res.ok()) {
+                return -1;
+            }
+            continue;
+        }
         auto res = _txn->Put(_data_cf, key.data(), value);
         DB_DEBUG("put key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
                  record->get_value(record->get_field_by_tag(field_id)).get_string().c_str(),
@@ -902,7 +922,8 @@ int Transaction::get_update_primary_columns(
         } else if (res.IsNotFound()) {
             const FieldDescriptor* field = val->get_field_by_tag(field_id);
             val->set_value(field, field_info.default_expr_value);
-            DB_DEBUG("cell not exist");
+            DB_DEBUG("cell not exist, default value: %s",
+                     field_info.default_value.c_str());
         } else if (res.IsBusy()) {
             DB_WARNING("get failed, busy: %s", res.ToString().c_str());
             return -1;

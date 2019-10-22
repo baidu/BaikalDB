@@ -656,6 +656,7 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
     return 0;
 }
 // for cstore
+// return -3 when equals to default value
 int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
     const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
