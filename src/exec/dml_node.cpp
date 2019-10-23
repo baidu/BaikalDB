@@ -301,7 +301,8 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             return ret;
         }
     }
-    ret = _txn->put_primary(_region_id, *_pri_info, record, is_update);
+    ret = _txn->put_primary(_region_id, *_pri_info, record,
+                            is_update || (_affect_primary && _is_replace));
     if (ret < 0) {
         DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;

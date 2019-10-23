@@ -812,11 +812,6 @@ int TableRecord::decode_field(const FieldInfo& field_info, const std::string& in
         DB_WARNING("invalid field: %d", field_id);
         return -1;
     }
-    // set default value
-    if (in.size() == 0) {
-        set_value(field, field_info.default_expr_value);
-        return 0;
-    }
     char* c = const_cast<char*>(in.data());
     switch (field_type) {
         case pb::INT8: {
