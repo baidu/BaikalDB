@@ -135,6 +135,8 @@ ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node) {
         switch (engine) {
             case pb::ROCKSDB:
                 return new RocksdbScanNode;
+            case pb::ROCKSDB_CSTORE:
+                return new RocksdbScanNode(pb::ROCKSDB_CSTORE);
             case pb::REDIS:
                 return new RedisScanNode;
                 break;

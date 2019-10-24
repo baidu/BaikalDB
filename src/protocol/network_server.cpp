@@ -203,7 +203,8 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
     SchemaFactory* factory = SchemaFactory::get_instance();
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
         for (auto& info_pair : schema.table_info_mapping) {
-            if (info_pair.second->engine != pb::ROCKSDB) {
+            if (info_pair.second->engine != pb::ROCKSDB &&
+                    info_pair.second->engine != pb::ROCKSDB_CSTORE) {
                 continue;
             }
             //主键索引和全局二级索引都需要传递region信息

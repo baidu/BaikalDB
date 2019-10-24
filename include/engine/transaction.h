@@ -111,8 +111,13 @@ public:
 
     // Key format: region_id(8 bytes) + table_id(8 bytes) + primary_key_fields;
     // Value format: protobuf of all non-primary key fields;
+    // Value is null if engine = rocksdb_cstore;
     // First encode key with @record, and then erase the key fields from @record;
-    int put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record);
+    int put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record, bool is_update = false);
+
+    // Key format: region_id(8 bytes) + table_id(4 bytes) + field_id(4 bytes) + primary_key_fields;
+    // Value format: non-primary key fields encode value;
+    int put_primary_columns(const TableKey& primary_key, SmartRecord record, bool is_update);
 
     // UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields, primary_key>
     // NON-UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields + primary_key, NULL>
@@ -139,6 +144,12 @@ public:
             std::map<int32_t, FieldInfo*>& fields,
             bool            check_region);
 
+    int get_update_primary_columns(
+            const TableKey& primary_key,
+            GetMode         mode,
+            SmartRecord     val,
+            std::map<int32_t, FieldInfo*>& fields);
+
     // TODO: update return status
     // Return -2 if key not found
     int get_update_secondary(
@@ -163,6 +174,7 @@ public:
     
     int remove(int64_t region, IndexInfo& index, const SmartRecord key);
     int remove(int64_t region, IndexInfo& index, const TableKey&   key);
+    int remove_columns(const TableKey& primary_key);
 
     rocksdb::Transaction* get_txn() {
         return _txn;
@@ -219,6 +231,25 @@ public:
     }
     void set_region_info(pb::RegionInfo* region_info) {
         _region_info = region_info;
+        if (_region_info == nullptr) {
+            DB_WARNING("no region_info");
+            return;
+        }
+        _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_region_info->table_id());
+        _pri_info = SchemaFactory::get_instance()->get_index_info_ptr(_region_info->table_id());
+        if (is_cstore()) {
+           _pri_field_ids.clear();
+           for (auto& field_info : _pri_info->fields) {
+                 _pri_field_ids.insert(field_info.id);
+           }
+       }
+    }
+    bool is_cstore() {
+        if (_table_info.get() == nullptr) {
+            DB_FATAL("error: no table_info");
+            return false;
+        }
+        return _table_info->engine == pb::ROCKSDB_CSTORE;
     }
 
     // 
@@ -358,6 +389,9 @@ private:
     pb::RegionInfo*                 _region_info = nullptr;
     RocksWrapper*                   _db = nullptr;
     TransactionPool*                _pool = nullptr;
+    SmartTable                      _table_info; // for cstore
+    SmartIndex                      _pri_info;  // for cstore
+    std::set<int32_t>               _pri_field_ids; // for cstore
 
     bthread_mutex_t                 _txn_mutex;
     SmartDllTransactionState            _ddl_state = nullptr;

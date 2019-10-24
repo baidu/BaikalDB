@@ -1303,7 +1303,7 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         BAIDU_SCOPED_LOCK(_ptr_mutex);
         state.set_resource(_resource);
     }
-    ret = state.init(request, plan, tuples, &_txn_pool, nullptr);
+    ret = state.init(request, plan, tuples, &_txn_pool, static_cast<bool>(nullptr));
     if (ret < 0) {
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("RuntimeState init fail");
@@ -3235,11 +3235,11 @@ void Region::write_local_rocksdb_for_split() {
     int64_t global_index_id = get_table_id();
     int64_t main_table_id = global_index_id;
     std::vector<int64_t> indices;
+    TableInfo table_info = _factory->get_table_info(main_table_id);
     if (_is_global_index) {
         main_table_id = _region_info.main_table_id();
         indices.push_back(global_index_id);
     } else {
-        TableInfo table_info = _factory->get_table_info(main_table_id);
         for (auto index_id: table_info.indices) {
             if (SchemaFactory::get_instance()->is_global_index(index_id)) {
                 continue;
@@ -3322,6 +3322,70 @@ void Region::write_local_rocksdb_for_split() {
 
         };
         copy_bth.run(read_and_write); 
+    }
+    if (!_is_global_index) {
+        // write all non-pk column values to cstore
+        std::set<int32_t> pri_field_ids;
+        for (auto& field_info : pk_info.fields) {
+            pri_field_ids.insert(field_info.id);
+        }
+        for (auto& field_info : table_info.fields) {
+            int32_t field_id = field_info.id;
+            // skip pk fields
+            if (pri_field_ids.count(field_id) != 0) {
+                continue;
+            }
+            auto read_and_write_column = [this, &pk_info, &write_sst_lines,
+                                   field_id] () {
+                MutTableKey table_prefix;
+                table_prefix.append_i64(_region_id);
+                table_prefix.append_i32(_region_info.table_id()).append_i32(field_id);
+                rocksdb::WriteOptions write_options;
+                TimeCost cost;
+                int64_t num_write_lines = 0;
+                int64_t skip_write_lines = 0;
+                rocksdb::ReadOptions read_options;
+                read_options.prefix_same_as_start = true;
+                read_options.total_order_seek = false;
+                read_options.snapshot = _split_param.snapshot;
+
+                std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _data_cf));
+                table_prefix.append_index(_split_param.split_key);
+                int64_t count = 0;
+                for (iter->Seek(table_prefix.data()); iter->Valid(); iter->Next()) {
+                    ++count;
+                    if (count % 100 == 0 && (!is_leader() || _shutdown)) {
+                        DB_WARNING("field %d, old region_id: %ld write to new region_id: %ld failed, not leader",
+                                    field_id, _region_id, _split_param.new_region_id);
+                        _split_param.err_code = -1;
+                        return;
+                    }
+                    //int ret1 = 0;
+                    rocksdb::Slice key_slice(iter->key());
+                    key_slice.remove_prefix(2 * sizeof(int64_t));
+                    // check end_key
+                    // tail split need not send rocksdb
+                    if (key_slice.compare(_region_info.end_key()) >= 0) {
+                        break;
+                    }
+                    MutTableKey key(iter->key());
+                    key.replace_i64(_split_param.new_region_id, 0);
+                    auto s = _rocksdb->put(write_options, _data_cf, key.data(), iter->value());
+                    if (!s.ok()) {
+                        DB_FATAL("index %ld, old region_id: %ld write to new region_id: %ld failed, status: %s",
+                        field_id, _region_id, _split_param.new_region_id, s.ToString().c_str());
+                        _split_param.err_code = -1;
+                        return;
+                    }
+                    num_write_lines++;
+                }
+                write_sst_lines += num_write_lines;
+                DB_WARNING("scan filed:%d, cost=%ld, lines=%ld, skip:%ld, region_id: %ld",
+                            field_id, cost.get_time(), num_write_lines, skip_write_lines, _region_id);
+
+            };
+            copy_bth.run(read_and_write_column);
+        }
     }
     copy_bth.join();
     if (_split_param.err_code != 0) {

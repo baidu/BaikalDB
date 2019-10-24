@@ -976,7 +976,7 @@ bool ClusterManager::whether_legal_for_select_instance(
     }
     if ((_instance_info[candicate_instance].used_size  * 100 / _instance_info[candicate_instance].capacity)  > 
                 FLAGS_disk_used_percent) {
-        DB_WARNING("instance:%s left size is not engout, used_size:%ld, capactity:%ld",
+        DB_WARNING("instance:%s left size is not enough, used_size:%ld, capactity:%ld",
                     candicate_instance.c_str(), 
                     _instance_info[candicate_instance].used_size, 
                     _instance_info[candicate_instance].capacity);

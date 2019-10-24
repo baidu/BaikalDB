@@ -23,6 +23,8 @@
 #endif
 
 namespace baikaldb {
+DECLARE_bool(enable_debug);
+DECLARE_bool(enable_self_trace);
 #ifdef BAIDU_INTERNAL
 #ifndef NDEBUG
 #define DB_DEBUG(_fmt_, args...) \
@@ -101,15 +103,17 @@ inline void glog_error_writelog(const char* fmt, ...) {
 #ifndef NDEBUG
 #define DB_DEBUG(_fmt_, args...) \
     do {\
+        if (!FLAGS_enable_debug) break; \
         ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0); 
+    } while (0);
 #else
 #define DB_DEBUG(_fmt_, args...) 
 #endif
 
 #define DB_TRACE(_fmt_, args...) \
     do {\
+        if (!FLAGS_enable_self_trace) break; \
         ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
@@ -134,12 +138,14 @@ inline void glog_error_writelog(const char* fmt, ...) {
 
 #define SELF_TRACE(_fmt_, args...) \
     do {\
+        if (!FLAGS_enable_self_trace) break; \
         ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 
 #define SQL_TRACE(_fmt_, args...) \
     do {\
+        if (!FLAGS_enable_self_trace) break; \
         ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);

@@ -230,6 +230,8 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             table.set_engine(pb::ROCKSDB);
             if (boost::algorithm::iequals(str_val, "redis")) {
                 table.set_engine(pb::REDIS);
+            } else if (boost::algorithm::iequals(str_val, "rocksdb_cstore")) {
+                table.set_engine(pb::ROCKSDB_CSTORE);
             }
         } else if (option->type == parser::TABLE_OPT_CHARSET) {
             std::string str_val(option->str_value.value);

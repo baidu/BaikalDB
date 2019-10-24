@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <functional>
 #include <execinfo.h>
 #include <type_traits>
 #include <set>

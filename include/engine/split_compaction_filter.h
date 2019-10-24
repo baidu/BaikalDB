@@ -60,6 +60,10 @@ public:
             return false;
         }
         int64_t index_id = table_key.extract_i64(sizeof(int64_t));
+        // cstore, primary column key format: index_id = table_id(32byte) + field_id(32byte)
+        if ((index_id & SIGN_MASK_32) != 0) {
+            index_id = index_id >> 32;
+        }
         auto index_info = _factory->get_index_info_ptr(index_id);
         if (index_info == nullptr) {
             return false;

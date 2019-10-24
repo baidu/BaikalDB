@@ -301,7 +301,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             return ret;
         }
     }
-    ret = _txn->put_primary(_region_id, *_pri_info, record);
+    // 列存为节省空间, 插入默认值时不会put, 因此不会覆盖未被删除的旧值
+    // 更新时, _affect_primary=false时旧值会保留, 需要删除旧值
+    // 替换时, _affect_primary=true且旧行已存在时, 需要删除旧值
+    ret = _txn->put_primary(_region_id, *_pri_info, record,
+            (!_affect_primary && is_update) ||
+            (_affect_primary && (ret==0) &&_is_replace));
     if (ret < 0) {
         DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;

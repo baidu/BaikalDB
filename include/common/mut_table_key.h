@@ -69,6 +69,13 @@ public:
         return *this;
     }
 
+    MutTableKey& replace_i32(int32_t val, size_t pos) { // cstore
+       uint32_t encode = KeyEncoder::to_endian_u32(KeyEncoder::encode_i32(val));
+       size_t len = sizeof(uint32_t);
+       _data.replace(pos, len, (char*)&encode, sizeof(uint32_t));
+       return *this;
+    }
+
     MutTableKey& append_u32(uint32_t val) {
         uint32_t encode = KeyEncoder::to_endian_u32(val);
         _data.append((char*)&encode, sizeof(uint32_t));

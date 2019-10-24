@@ -57,6 +57,7 @@ COPTS  = [
     "-g", 
     "-fno-omit-frame-pointer", 
     "-Wno-strict-aliasing",
+    "-UNDEBUG",
 ]
 
 cc_library(
