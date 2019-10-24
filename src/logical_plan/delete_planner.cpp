@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,11 +13,17 @@
 // limitations under the License.
 
 #include "delete_planner.h"
+#include <gflags/gflags.h>
 #include "network_socket.h"
 
 namespace baikaldb {
+DEFINE_bool(delete_all_to_truncate, false,  "delete from xxx; treat as truncate");
 int DeletePlanner::plan() {
     if (_ctx->stmt_type == parser::NT_TRUNCATE) {
+        if (_ctx->runtime_state.client_conn()->txn_id != 0) {
+            DB_FATAL("not allowed truncate table in txn connection");
+            return -1;
+        }
         _truncate_stmt = (parser::TruncateStmt*)(_ctx->stmt);
         if (0 != parse_db_tables(_truncate_stmt->table_name)) {
             DB_WARNING("get truncate_table plan failed");
@@ -45,6 +51,18 @@ int DeletePlanner::plan() {
     if (0 != parse_db_tables((parser::TableName*)_delete_stmt->from_table)) {
         return -1;
     }
+    // delete from xxx; => truncate table xxx;
+    if (FLAGS_delete_all_to_truncate &&
+        _delete_stmt->where == nullptr &&
+        _delete_stmt->limit == nullptr) {
+        create_packet_node(pb::OP_TRUNCATE_TABLE);
+        if (0 != create_truncate_node()) {
+            DB_WARNING("get truncate_table plan failed");
+            return -1;
+        }
+        return 0;
+    }
+
     if (0 != parse_where()) {
         return -1;
     }
@@ -70,7 +88,9 @@ int DeletePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    set_dml_txn_state();
+    auto iter = _table_tuple_mapping.begin();
+    int64_t table_id = iter->first;
+    set_dml_txn_state(table_id);
     return 0;
 }
 
@@ -91,15 +111,26 @@ int DeletePlanner::create_delete_node() {
     pb::DeleteNode* _delete = derive->mutable_delete_node();
     _delete->set_table_id(table_id);
 
-    IndexInfo pk = _factory->get_index_info(iter->first);
-    if (pk.id == -1) {
+    auto pk = _factory->get_index_info_ptr(iter->first);
+    if (pk == nullptr) {
         DB_WARNING("no pk found with id: %ld", iter->first);
         return -1;
     }
-    for (auto& field : pk.fields) {
+    for (auto& field : pk->fields) {
         auto& slot = get_scan_ref_slot(iter->first, field.id, field.type);
         _delete->add_primary_slots()->CopyFrom(slot);
     }
+    //全局唯一索引涉及的field_id都要放到slot_ref中
+    //auto table_info = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
+    //for (auto& index_id : table_info->indices) {
+    //    if (!SchemaFactory::get_instance()->is_global_index(index_id)) {
+    //        continue;
+    //    }
+    //    auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+    //    for (auto& field : index_info->fields) {
+    //        get_scan_ref_slot(table_id, field.id, field.type);
+    //    }
+    //}
     return 0;
 }
 

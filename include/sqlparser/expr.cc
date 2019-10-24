@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,6 +52,7 @@ static std::unordered_map<int, std::string> FUNC_STR_MAP = {
     {FT_IS_UNKNOWN, "IS UNKNOWN"},
     {FT_IN, "IN"},
     {FT_LIKE, "LIKE"},
+    {FT_EXACT_LIKE, "EXACT_LIKE"},
     {FT_BETWEEN, "BETWEEN"},
     {FT_VALUES, "values"}
 };
@@ -92,6 +93,7 @@ static std::unordered_map<int, const char*> FUNC_FN_NAME_MAP = {
     {FT_IS_UNKNOWN, "is_unknown"},
     {FT_IN, "in"},
     {FT_LIKE, "like"},
+    {FT_EXACT_LIKE, "exact_like"},
     {FT_BETWEEN, "between"}
 };
 
@@ -193,10 +195,17 @@ void FuncExpr::to_stream(std::ostream& os) const {
             os << children[0] << " IS" << not_str[is_not] << " UNKNOWN";
             break;
         case FT_IN:
-            os << children[0] << not_str[is_not] << " IN " << children[1]; 
+            if (print_sample) {
+                os << children[0] << not_str[is_not] << " IN (?)"; 
+            } else {
+                os << children[0] << not_str[is_not] << " IN " << children[1]; 
+            }
             break;
         case FT_LIKE:
             os << children[0] << not_str[is_not] << " LIKE " << children[1]; 
+            break;
+        case FT_EXACT_LIKE:
+            os << children[0] << not_str[is_not] << " EXACT_LIKE " << children[1]; 
             break;
         case FT_BETWEEN:
             os << children[0] << not_str[is_not] << 
@@ -221,6 +230,42 @@ void ColumnName::to_stream(std::ostream& os) const {
 }
 
 void LiteralExpr::to_stream(std::ostream& os) const {
+    if (print_sample) {
+        os << "?";
+        return;
+    }
+    static const char* true_str[] = {"FALSE", "TRUE"};
+    switch (literal_type) {
+        case LT_INT:
+            os << _u.int64_val;
+            break;
+        case LT_DOUBLE:
+            os << _u.double_val;
+            break;
+        case LT_STRING:
+            os << "'" << _u.str_val.value << "'";
+            break;
+        case LT_BOOL:
+            os << true_str[_u.bool_val];
+            break;
+        case LT_NULL:
+            os << "NULL";
+            break;
+        case LT_PLACE_HOLDER:
+            os << "?";
+            break;
+        default:
+            break;
+    }
+}
+
+std::string LiteralExpr::to_string() const {
+    std::ostringstream os;        
+    if (print_sample) {
+        os << "?";
+        return os.str();
+    }
+    static const char* true_str[] = {"FALSE", "TRUE"};
     switch (literal_type) {
         case LT_INT:
             os << _u.int64_val;
@@ -232,7 +277,7 @@ void LiteralExpr::to_stream(std::ostream& os) const {
             os << _u.str_val.value;
             break;
         case LT_BOOL:
-            os << _u.bool_val;
+            os << true_str[_u.bool_val];
             break;
         case LT_NULL:
             os << "NULL";
@@ -243,6 +288,7 @@ void LiteralExpr::to_stream(std::ostream& os) const {
         default:
             break;
     }
+    return os.str();
 }
 
 }

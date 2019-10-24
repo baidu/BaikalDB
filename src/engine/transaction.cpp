@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,6 +24,11 @@ DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raf
 //         "rocksdb transaction_expiration timeout(us)");
 
 int Transaction::begin() {
+    rocksdb::TransactionOptions txn_opt;
+    return begin(txn_opt);
+}
+
+int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
     if (nullptr == (_db = RocksWrapper::get_instance())) {
         DB_WARNING("get rocksdb instance failed");
         return -1;
@@ -36,14 +41,14 @@ int Transaction::begin() {
         DB_WARNING("get rocksdb data column family failed");
         return -1;
     }
-    //_txn_opt.lock_timeout = 2000;
-    //_txn_opt.expiration = FLAGS_rocks_transaction_expiration_ms;
+    _txn_opt = txn_opt;
     if (nullptr == (_txn = _db->begin_transaction(_write_opt, _txn_opt))) {
         DB_WARNING("start_trananction failed");
         return -1;
     }
     last_active_time = butil::gettimeofday_us();
-    return 0;
+    _snapshot = _db->get_snapshot();
+    return 0; 
 }
 
 int Transaction::begin(rocksdb::Transaction* txn) {
@@ -63,7 +68,8 @@ int Transaction::begin(rocksdb::Transaction* txn) {
     last_active_time = butil::gettimeofday_us();
     _is_prepared = true;
     _prepare_time_us = butil::gettimeofday_us();
-    _pool->increase_prepared();
+    _snapshot = _db->get_snapshot();
+    //_pool->increase_prepared();
     return 0;
 }
 
@@ -91,6 +97,49 @@ int Transaction::get_full_primary_key(
     return 0;
 }
 
+int Transaction::fits_region_range_for_global_index(IndexInfo& pk_index, 
+        IndexInfo& index_info, 
+        SmartRecord record,
+        bool& result) {
+    MutTableKey _key;
+    if (0 != _key.append_index(index_info, record.get(), -1, false)) {
+        DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", 
+            _region_info->region_id(), index_info.id);
+        return -1;
+    }
+    if (index_info.type == pb::I_KEY) {
+        if (0 != record->encode_primary_key(index_info, _key, -1)) {
+            DB_FATAL("Fail to append_pk_index, reg:%ld,tab:%ld", 
+                _region_info->region_id(), index_info.id);
+            return -1;
+        }
+    }
+    result = fits_region_range(rocksdb::Slice(_key.data()), 
+            rocksdb::Slice(""), 
+            &_region_info->start_key(), 
+            &_region_info->end_key(), 
+            pk_index, 
+            index_info);
+    return 0;
+}
+int Transaction::fits_region_range_for_primary(IndexInfo& pk_index,
+        SmartRecord record,
+        bool& result) {
+    result = true;
+    MutTableKey _key;
+    if (0 != _key.append_index(pk_index, record.get(), -1, false)) {
+        DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", 
+            _region_info->region_id(), pk_index.id);
+        return -1;
+    }
+    result = fits_region_range(rocksdb::Slice(_key.data()), 
+            rocksdb::Slice(""), 
+            &_region_info->start_key(), 
+            &_region_info->end_key(), 
+            pk_index, 
+            pk_index);
+    return 0;
+}
 // start指针为空表示不用判断region start_key
 // end指针为空表示不用判断region end_key
 // 传入待测试的key和value不包含regionid+table前缀
@@ -102,16 +151,24 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
     }
     int ret1 = 1;
     int ret2 = -1;
-    if (index_info.type == pb::I_PRIMARY) {
+    //全局二级索引
+    if (index_info.type == pb::I_PRIMARY || index_info.is_global) {
         if (start) {
+            //DB_WARNING("index_id: %ld, start_key: %s, key: %s", 
+            //    index_info.id,
+            //    rocksdb::Slice(*start).ToString(true).c_str(), key.ToString(true).c_str());
             ret1 = key.compare(*start);
             if (ret1 < 0) {
                 return false;
             }
         }
         if (end && !end->empty()) {
+            //DB_WARNING("index_id: %ld, start_key: %s, key: %s",
+            //    index_info.id,
+            //    rocksdb::Slice(*end).ToString(true).c_str(), key.ToString(true).c_str());
             ret2 = key.compare(*end);
         }
+        //DB_WARNING("ret1: %d, ret2: %d", ret1, ret2);
     } else if (index_info.type == pb::I_UNIQ) {
         if (pk_index.length > 0 && index_info.length > 0 && index_info.overlap) {
             boost::scoped_array<char> pk_buf(new(std::nothrow)char[pk_index.length]);
@@ -143,6 +200,10 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
     } else if (index_info.type == pb::I_KEY) {
         if (pk_index.length > 0 && index_info.length > 0 && index_info.overlap) {
             rocksdb::Slice _value(key);
+            if (_value.size() < index_info.length) {
+                DB_FATAL("index:%ld value_size:%d len:%d", index_info.id, _value.size(), index_info.length);
+                return false;
+            }
             _value.remove_prefix(index_info.length);
             boost::scoped_array<char> pk_buf(new(std::nothrow)char[pk_index.length]);
             int ret = get_full_primary_key(key, _value, pk_index, index_info, pk_buf.get());
@@ -161,6 +222,10 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
             }
         } else {
             if (index_info.length > 0) {
+                if (key.size() < index_info.length) {
+                    DB_FATAL("index:%ld value_size:%d len:%d", index_info.id, key.size(), index_info.length);
+                    return false;
+                }
                 // index_info为定长
                 key.remove_prefix(index_info.length);
             } else {
@@ -181,6 +246,10 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
                         pos += index_info.fields[idx].size;
                     }
                 }
+                if (key.size() < pos) {
+                    DB_FATAL("index:%ld value_size:%d pos:%d", index_info.id, key.size(), pos);
+                    return false;
+                }
                 key.remove_prefix(pos);
             }
             if (start) {
@@ -194,6 +263,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
             }
         }
     }
+    
     if (ret1 >= 0 && ret2 < 0) {
         return true;
     }
@@ -202,7 +272,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
 
 //TODO: finer return status
 //return -3 when region not match
-int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record) {
+int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record, bool is_update) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
     MutTableKey key;
@@ -214,15 +284,30 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         return -1;
     }
     std::string value;
-    ret = record->encode(value);
-    if (ret != 0) {
-        DB_WARNING("encode record failed: reg=%ld, tab=%ld", region, pk_index.id);
-        return -1;
+    if (!is_cstore()) {
+        ret = record->encode(value);
+        if (ret != 0) {
+            DB_WARNING("encode record failed: reg=%ld, tab=%ld", region, pk_index.id);
+            return -1;
+        }
+    } else {
+        value = "";
     }
-    auto res = _txn->Put(_data_cf, key.data(), value);
-    if (!res.ok()) {
-        return -1;
+    if (_is_separate) {
+        add_kvop_put(key.data(), value);
+    } else {
+        auto res = _txn->Put(_data_cf, key.data(), value);
+        if (!res.ok()) {
+            DB_FATAL("put primary fail, error: %s", res.ToString().c_str());
+            return -1;
+        }
+        // cstore, put non-pk columns values to db
+        if (is_cstore()) {
+            return put_primary_columns(key, record, is_update);
+        }
     }
+    //DB_WARNING("put primary, region_id: %ld, index_id: %ld, put_key: %s, put_value: %s",
+    //    region, pk_index.id, rocksdb::Slice(key.data()).ToString(true).c_str(), rocksdb::Slice(value).ToString(true).c_str());
     return 0;
 }
 
@@ -231,7 +316,6 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
 int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord record) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
-    //IndexInfo index_info = _factory->get_index_info(index);
     if (index.type != pb::I_KEY && index.type != pb::I_UNIQ) {
         DB_WARNING("invalid index type, region_id: %ld, table_id: %ld, index_type:%d", region, index.id, index.type);
         return -1;
@@ -245,22 +329,70 @@ int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord rec
         return -1;
     }
     rocksdb::Status res;
+    MutTableKey pk;
     if (index.type == pb::I_KEY) {
         if (0 != record->encode_primary_key(index, key, -1)) {
             DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", region, index.pk);
             return -1;
         }
+        if (_is_separate) {
+            std::string value = "";
+            add_kvop_put(key.data(), value);
+            return 0;
+        }
         res = _txn->Put(_data_cf, key.data(), "");
         //DB_FATAL("data:%s", str_to_hex(key.data()).c_str());
     } else if (index.type == pb::I_UNIQ) {
-        MutTableKey pk;
+        //MutTableKey pk;
         if (0 != record->encode_primary_key(index, pk, -1)) {
             DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", region, index.pk);
             return -1;
         }
+        if (_is_separate) {
+            add_kvop_put(key.data(), pk.data());
+            return 0;
+        }
         res = _txn->Put(_data_cf, key.data(), pk.data());
     }
     if (!res.ok()) {
+        DB_FATAL("put secondary fail, error: %s", res.ToString().c_str());
+        return -1;
+    }
+    //DB_WARNING("put secondary, region_id: %ld, index_id: %ld, put_key: %s, put_value: %s",
+    //    region, index.id, rocksdb::Slice(key.data()).ToString(true).c_str(), rocksdb::Slice(pk.data()).ToString(true).c_str());
+    return 0;
+}
+
+int Transaction::get_for_update(const std::string& key, std::string* value) {
+    BAIDU_SCOPED_LOCK(_txn_mutex);
+    rocksdb::ReadOptions read_opt;
+    auto res = _txn->GetForUpdate(read_opt, _data_cf, key, value);
+    if (res.ok()) {
+        return 0;
+    } else if (res.IsNotFound()) {
+        //DB_WARNING("lock ok but key not exist");
+        return -2;
+    } else {
+        DB_WARNING("get_for_update error: %d, %s", res.code(), res.ToString().c_str());
+        return -1;
+    }
+}
+
+int Transaction::put_kv(const std::string& key, const std::string& value) {
+    BAIDU_SCOPED_LOCK(_txn_mutex);
+    auto res = _txn->Put(_data_cf, rocksdb::Slice(key), rocksdb::Slice(value));
+    if (!res.ok()) {
+        DB_FATAL("put kv info fail, error: %s", res.ToString().c_str());
+        return -1;
+    }
+    return 0;
+}
+
+int Transaction::delete_kv(const std::string& key) {
+    BAIDU_SCOPED_LOCK(_txn_mutex);
+    auto res = _txn->Delete(_data_cf, rocksdb::Slice(key));
+    if (!res.ok()) {
+        DB_FATAL("delete kv info fail, error: %s", res.ToString().c_str());
         return -1;
     }
     return 0;
@@ -288,7 +420,7 @@ int Transaction::get_update_primary(
         int64_t             region, 
         IndexInfo&          pk_index,
         SmartRecord         key, 
-        std::vector<int32_t>& fields,
+        std::map<int32_t, FieldInfo*>& fields,
         GetMode             mode,
         bool                check_region) {
     MutTableKey         _key;
@@ -308,7 +440,7 @@ int Transaction::get_update_primary(
         const TableKey& key,
         GetMode         mode,
         SmartRecord     val,
-        std::vector<int32_t>& fields,
+        std::map<int32_t, FieldInfo*>& fields,
         bool            check_region) {
     return get_update_primary(region, pk_index, key, 
             mode, val, fields, true, check_region);
@@ -323,7 +455,7 @@ int Transaction::get_update_primary(
         const TableKey& key,
         GetMode         mode,
         SmartRecord     val,
-        std::vector<int32_t>& fields,
+        std::map<int32_t, FieldInfo*>& fields,
         bool            parse_key,
         bool            check_region) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
@@ -333,7 +465,6 @@ int Transaction::get_update_primary(
     }
     last_active_time = butil::gettimeofday_us();
     int ret = -1;
-    //IndexInfo index_info = _factory->get_index_info(table);
     if (pk_index.type != pb::I_PRIMARY) {
         DB_WARNING("invalid index type: %d", pk_index.type);
         return -1;
@@ -359,10 +490,13 @@ int Transaction::get_update_primary(
     rocksdb::Status res;
     if (mode == GET_ONLY) {
         //TimeCost cost;
-        res = _txn->Get(_read_opt, _data_cf, _key.data(), val_ptr);
+        rocksdb::ReadOptions read_opt;
+        read_opt.snapshot = _snapshot;
+        res = _txn->Get(read_opt, _data_cf, _key.data(), val_ptr);
         //DB_NOTICE("txn get time:%ld", cost.get_time());
     } else if (mode == LOCK_ONLY || mode == GET_LOCK) {
-        res = _txn->GetForUpdate(_read_opt, _data_cf, _key.data(), val_ptr);
+        rocksdb::ReadOptions read_opt;
+        res = _txn->GetForUpdate(read_opt, _data_cf, _key.data(), val_ptr);
         //DB_WARNING("data: %s %d", _value.c_str(), _value.size());
     } else {
         DB_WARNING("invalid GetMode: %d", mode);
@@ -373,11 +507,19 @@ int Transaction::get_update_primary(
         DB_DEBUG("lock ok and key exist");
         if (mode == GET_ONLY || mode == GET_LOCK) {
             //TimeCost cost;
-            TupleRecord tuple_record(_value);
-            // only decode the required field (field_ids stored in fields)
-            if (0 != tuple_record.decode_fields(fields, val)) {
-                DB_WARNING("decode value failed: %d", pk_index.id);
-                return -1;
+            if (!is_cstore()) {
+                TupleRecord tuple_record(_value);
+                // only decode the required field (field_ids stored in fields)
+                if (0 != tuple_record.decode_fields(fields, val)) {
+                    DB_WARNING("decode value failed: %d", pk_index.id);
+                    return -1;
+                }
+            } else {
+                // cstore, get non-pk columns value from db.
+                if (0 != get_update_primary_columns(_key, mode, val, fields)) {
+                    DB_WARNING("get_update_primary_columns failed: %d", pk_index.id);
+                    return -1;
+                }
             }
             // // 外部传来的record可能包含一些额外的信息需要保留
             // SmartRecord tmp_val = val->clone();
@@ -486,9 +628,12 @@ int Transaction::get_update_secondary(
     }
     rocksdb::Status res;
     if (mode == GET_ONLY) {
-        res = _txn->Get(_read_opt, _data_cf, _key.data(), &pk_val);
+        rocksdb::ReadOptions read_opt;
+        read_opt.snapshot = _snapshot;
+        res = _txn->Get(read_opt, _data_cf, _key.data(), &pk_val);
     } else if (mode == LOCK_ONLY || mode == GET_LOCK) {
-        res = _txn->GetForUpdate(_read_opt, _data_cf, _key.data(), val_ptr);
+        rocksdb::ReadOptions read_opt;
+        res = _txn->GetForUpdate(read_opt, _data_cf, _key.data(), val_ptr);
     } else {
         DB_WARNING("invalid GetMode: %d", mode);
         return -1;
@@ -537,10 +682,20 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
             return -1;
         }
     }
-    auto res = _txn->Delete(_data_cf, _key.data());
-    if (!res.ok()) {
-        DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
-        return -1;
+    
+    if (_is_separate) {
+        add_kvop_delete(_key.data());
+    } else {
+        auto res = _txn->Delete(_data_cf, _key.data());
+        DB_DEBUG("delete key=%s", str_to_hex(_key.data()).c_str());
+        if (!res.ok()) {
+            DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
+            return -1;
+        }
+        // for cstore only, remove_columns
+        if (is_cstore() && index.type == pb::I_PRIMARY) {
+            return remove_columns(_key);
+        }
     }
     return 0;
 }
@@ -555,11 +710,21 @@ int Transaction::remove(int64_t region, IndexInfo& index, const TableKey& key) {
         DB_WARNING("cannot delete type KEY index");
         return -1;
     }
-    auto res = _txn->Delete(_data_cf, _key.data());
-    if (!res.ok()) {
-        DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
-        return -1;
+    
+    if (_is_separate) {
+        add_kvop_delete(_key.data());
+    } else {
+        auto res = _txn->Delete(_data_cf, _key.data());
+        if (!res.ok()) {
+            DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
+            return -1;
+        }
+        // for cstore only, remove_columns
+        if (is_cstore() && index.type == pb::I_PRIMARY) {
+            return remove_columns(_key);
+        }
     }
+
     return 0;
 }
 
@@ -571,10 +736,12 @@ rocksdb::Status Transaction::prepare() {
     last_active_time = butil::gettimeofday_us();
     auto res = _txn->Prepare();
     if (res.ok()) {
+        /*
         if (_pool && !_is_prepared) {
             _pool->increase_prepared();
             //DB_WARNING("increase_prepared: %d", _pool->num_prepared());
         }
+        */
         _is_prepared = true;
         _prepare_time_us = butil::gettimeofday_us();
     }
@@ -594,9 +761,11 @@ rocksdb::Status Transaction::commit() {
     }
     auto res = _txn->Commit();
     if (res.ok()) {
+        /*
         if (_pool && _is_prepared && !_is_finished) {
             _pool->decrease_prepared();
         }
+        */
         _is_finished = true;
     }
     return res;
@@ -611,9 +780,11 @@ rocksdb::Status Transaction::rollback() {
     }
     auto res = _txn->Rollback();
     if (res.ok()) {
+        /*
         if (_pool && _is_prepared && !_is_finished) {
             _pool->decrease_prepared();
         }
+        */
         _is_finished = true;
         _is_rolledback = true;
     }
@@ -623,6 +794,11 @@ rocksdb::Status Transaction::rollback() {
 int Transaction::set_save_point() {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
+    //if (_save_point_seq.empty()) {
+    //    DB_WARNING("txn:%s seq_id:%d top_seq:%d",_txn->GetName().c_str(),  _seq_id, -1);
+    //} else {
+    //    DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), _seq_id, _save_point_seq.top());
+    //}
     if (_save_point_seq.empty() || _save_point_seq.top() < _seq_id) {
         _txn->SetSavePoint();
         _save_point_seq.push(_seq_id);
@@ -634,20 +810,157 @@ int Transaction::set_save_point() {
 void Transaction::rollback_to_point(int seq_id) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
-    if (!_save_point_seq.empty() && _save_point_seq.top() >= seq_id) {
+    // 不管是否需要Rollback,_cache_plan_map对应的条目都需要erase
+    // 因为_cache_plan_map会发给follower
+    if (_save_point_seq.empty()) {
+        DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), seq_id, -1);
+    } else {
+        DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), seq_id, _save_point_seq.top());
+    }
+    _cache_plan_map.erase(seq_id);
+    if (!_save_point_seq.empty() && _save_point_seq.top() == seq_id) {
         num_increase_rows = _save_point_increase_rows.top();
         _save_point_seq.pop();
         _save_point_increase_rows.pop();
         _txn->RollbackToSavePoint();
-        auto iter = _cache_plan_map.rbegin();
-        DB_WARNING("rollback cmd seq_id: %d, num_increase_rows: %ld", 
-            iter->first, num_increase_rows);
-        _cache_plan_map.erase(iter->first);
+        DB_WARNING("txn:%s rollback cmd seq_id: %d, num_increase_rows: %ld", 
+            _txn->GetName().c_str(), seq_id, num_increase_rows);
     }
-    if (!_save_point_seq.empty() && _save_point_seq.top() >= seq_id) {
-        DB_FATAL("TransactionError: need to rollback to earlier point: top: %d, seq_id: %d",
-            _save_point_seq.top(), seq_id);
+//    if (!_save_point_seq.empty() && _save_point_seq.top() >= seq_id) {
+//        DB_FATAL("TransactionError: need to rollback to earlier point: top: %d, seq_id: %d",
+//            _save_point_seq.top(), seq_id);
+//    }
+}
+// for cstore only, only put column which HasField in record
+int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord record, bool is_update) {
+    if (_table_info.get() == nullptr) {
+        DB_WARNING("no table_info");
+        return -1;
     }
+    int32_t table_id = primary_key.extract_i64(sizeof(int64_t));
+    for (auto& field_info : _table_info->fields) {
+        int32_t field_id = field_info.id;
+        // skip pk fields
+        if (_pri_field_ids.count(field_id) != 0) {
+            continue;
+        }
+        std::string value;
+        bool update_by_delete_old = false;
+        // if the field value is null or default_value
+        if (record->encode_field(field_info, value) != 0) {
+            if (is_update) { // delete when update
+                update_by_delete_old = true;
+            } else { // skip null or default_value fields when insert
+                DB_DEBUG("no value for field=%d", field_id);
+                continue;
+            }
+
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        if (update_by_delete_old) {
+            auto res = _txn->Delete(_data_cf, key.data());
+            DB_DEBUG("del key=%s, res=%s", str_to_hex(key.data()).c_str(),
+                     res.ToString().c_str());
+            if (!res.ok()) {
+                return -1;
+            }
+            continue;
+        }
+        auto res = _txn->Put(_data_cf, key.data(), value);
+        DB_DEBUG("put key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
+                 record->get_value(record->get_field_by_tag(field_id)).get_string().c_str(),
+                 res.ToString().c_str());
+        if (!res.ok()) {
+            return -1;
+        }
+    }
+    return 0;
+}
+// get required and non-pk field value from cstore
+int Transaction::get_update_primary_columns(
+        const TableKey& primary_key,
+        GetMode         mode,
+        SmartRecord     val,
+        std::map<int32_t, FieldInfo*>& fields) {
+    if (_table_info.get() == nullptr) {
+       DB_WARNING("no table_info");
+       return -1;
+    }
+    if (fields.size() == 0) {
+        return 0;
+    }
+    int32_t table_id = primary_key.extract_i64(sizeof(int64_t));
+    for (auto& field_info : _table_info->fields) {
+        int32_t field_id = field_info.id;
+        // skip pk fields
+        if (_pri_field_ids.count(field_id) != 0) {
+            continue;
+        }
+        // skip no required field
+        if (fields.count(field_id) == 0) {
+           continue;
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        std::string value;
+        rocksdb::ReadOptions read_opt;
+        if (mode == GET_ONLY) {
+            read_opt.snapshot = _snapshot;
+        }
+        rocksdb::Status res = _txn->Get(read_opt, _data_cf, key.data(), &value);
+        if (res.ok()){
+            const FieldDescriptor* field = val->get_field_by_tag(field_id);
+            if (0 != val->decode_field(field_info, value)) {
+                DB_WARNING("decode value failed: %d", field_id);
+                return -1;
+            }
+            DB_DEBUG("get key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
+                     val->get_value(field).get_string().c_str(), res.ToString().c_str());
+        } else if (res.IsNotFound()) {
+            const FieldDescriptor* field = val->get_field_by_tag(field_id);
+            val->set_value(field, field_info.default_expr_value);
+            DB_DEBUG("cell not exist, default value: %s",
+                     field_info.default_value.c_str());
+        } else if (res.IsBusy()) {
+            DB_WARNING("get failed, busy: %s", res.ToString().c_str());
+            return -1;
+        } else if (res.IsTimedOut()) {
+            DB_WARNING("timedout: %s", res.ToString().c_str());
+            return -1;
+        } else {
+            DB_WARNING("unknown error: %d, %s", res.code(), res.ToString().c_str());
+            return -1;
+        }
+    }
+    return 0;
 }
 
+// for cstore only, delete non-pk columns.
+int Transaction::remove_columns(const TableKey& primary_key) {
+    if (_table_info.get() == nullptr) {
+       DB_WARNING("no table_info");
+       return -1;
+    }
+    int32_t table_id = primary_key.extract_i64(sizeof(int64_t));
+    for (auto& field_info : _table_info->fields) {
+        int32_t field_id = field_info.id;
+        // skip pk fields
+        if (_pri_field_ids.count(field_id) != 0) {
+            continue;
+        }
+        MutTableKey key(primary_key);
+        key.replace_i32(table_id, sizeof(int64_t));
+        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
+        auto res = _txn->Delete(_data_cf, key.data());
+        DB_DEBUG("del key=%s, res=%s", str_to_hex(key.data()).c_str(), res.ToString().c_str());
+        if (!res.ok()) {
+           DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
+           return -1;
+        }
+    }
+    return 0;
+}
 } //nanespace baikaldb

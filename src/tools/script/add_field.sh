@@ -9,8 +9,8 @@ curl -d '{
     "op_type":"OP_ADD_FIELD",
     "table_info": {
         "table_name": "wordinfo_new",
-        "database": "FC_Content",
-        "namespace_name": "FENGCHAO",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ {
                         "field_name" : "test",
                         "mysql_type": 6 
@@ -36,8 +36,8 @@ curl -d '{
     "op_type":"OP_ADD_FIELD",
     "table_info": {
         "table_name": "quality_diary",
-        "database": "Lemonb",
-        "namespace_name": "FENGCHAO",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ {
                         "field_name" : "image_front_score",
                         "mysql_type": 13

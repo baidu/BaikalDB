@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,9 @@ public:
     virtual void on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done);
 
     virtual int on_snapshot_load(braft::SnapshotReader* reader);
+    bool have_data() {
+        return _have_data;
+    }
 private:
     void save_auto_increment(std::string& max_id_string);
     void save_snapshot(braft::Closure* done, 
@@ -47,6 +50,7 @@ private:
     int parse_json_string(const std::string& json_string);
 
     std::unordered_map<int64_t, uint64_t>               _auto_increment_map;
+    bool _have_data = false;
 };
 
 } //namespace baikaldb

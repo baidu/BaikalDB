@@ -6,11 +6,11 @@
 curl -d '{
     "op_type":"OP_ADD_PRIVILEGE",
     "user_privilege" : {
-        "username" : "root",
-        "password" : "root",
-        "namespace_name" : "FENGCHAO",
+        "username" : "******",
+        "password" : "******",
+        "namespace_name" : "TEST",
         "privilege_database" : [{
-                                    "database" : "OCPC_API",
+                                    "database" : "TEST",
                                     "database_rw" : 2                        
                                 }]
     }

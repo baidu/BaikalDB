@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -169,10 +169,10 @@ void JoinNode::convert_to_inner_join(std::vector<ExprNode*>& input_exprs) {
     for (auto& expr : _conditions) {
         full_exprs.push_back(expr);
     }
-    if (_inner_node->get_node_type() == pb::JOIN_NODE) {
+    if (_inner_node->node_type() == pb::JOIN_NODE) {
         ((JoinNode*)_inner_node)->convert_to_inner_join(full_exprs);
     }
-    if (_outer_node->get_node_type() == pb::JOIN_NODE) {
+    if (_outer_node->node_type() == pb::JOIN_NODE) {
         ((JoinNode*)_outer_node)->convert_to_inner_join(full_exprs);
     }
     if (_join_type == pb::INNER_JOIN) {
@@ -298,13 +298,17 @@ int JoinNode::open(RuntimeState* state) {
         RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
         ExecNode* parent_node_ptr = scan_node->get_parent();
         FilterNode* filter_node = nullptr;
-        if (parent_node_ptr->get_node_type() == pb::WHERE_FILTER_NODE
-                || parent_node_ptr->get_node_type() == pb::TABLE_FILTER_NODE) {
+        if (parent_node_ptr->node_type() == pb::WHERE_FILTER_NODE
+                || parent_node_ptr->node_type() == pb::TABLE_FILTER_NODE) {
             filter_node = static_cast<FilterNode*>(parent_node_ptr);
         }
 
         auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
                 int32_t {return state->get_slot_id(tuple_id, field_id);};
+
+        auto get_tuple_desc = [state] (int32_t tuple_id)->
+        pb::TupleDescriptor* { return state->get_tuple_desc(tuple_id);};
+        
         scan_node->clear_possible_indexes();
         //索引选择
         IndexSelector().index_selector(get_slot_id,
@@ -312,14 +316,17 @@ int JoinNode::open(RuntimeState* state) {
                                         scan_node, 
                                         filter_node,
                                         NULL,
+                                        NULL,
                                         NULL);
         if (!_is_explain) {
-            //路由选择
-            PlanRouter().scan_plan_router(scan_node);
-            FetcherNode* related_fetcher_node = scan_node->get_related_fetcher_node();
+            //路由选择,
+            //这一块做完索引选择之后如果命中二级索引需要重构mem_row的结构，mem_row已经在run_time
+            //init中构造了，需要销毁重新搞(todo)
+            PlanRouter().scan_plan_router(scan_node, get_slot_id, get_tuple_desc, false);
+            SelectManagerNode* related_manager_node = scan_node->get_related_manager_node();
             auto region_infos = scan_node->region_infos();
             //更改scan_node对应的fethcer_node的region信息
-            related_fetcher_node->set_region_infos(region_infos);
+            related_manager_node->set_region_infos(region_infos);
         }
     }
     //DB_WARNING("when join, index_selector and scan plan, time_cost:%ld",
@@ -415,9 +422,11 @@ int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs,
                              std::vector<std::vector<ExprValue>>& in_values, 
                              std::vector<ExprNode*>& in_exprs) {
     //手工构造pb格式的表达式，再转为内存结构的表达式
-    for (size_t i = 0; i < slot_refs.size(); ++i) {
-        ExprNode* conjunct = nullptr;
+    if (slot_refs.size() == 0) {
+        return 0;
+    } else if (slot_refs.size() == 1) {
         pb::Expr expr;
+        ExprNode* conjunct = nullptr;
         //增加一个in
         pb::ExprNode* in_node = expr.add_nodes();
         in_node->set_node_type(pb::IN_PREDICATE);
@@ -425,15 +434,13 @@ int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs,
         func->set_name("in");
         func->set_fn_op(parser::FT_IN);
         in_node->set_num_children(1);
-
         //增加一个slot_ref
         pb::ExprNode* slot_node = expr.add_nodes();
         slot_node->set_node_type(pb::SLOT_REF);
-        slot_node->set_col_type(slot_refs[i]->col_type());
+        slot_node->set_col_type(slot_refs[0]->col_type());
         slot_node->set_num_children(0);
-        slot_node->mutable_derive_node()->set_tuple_id(static_cast<SlotRef*>(slot_refs[i])->tuple_id());
-        slot_node->mutable_derive_node()->set_slot_id(static_cast<SlotRef*>(slot_refs[i])->slot_id());
-        
+        slot_node->mutable_derive_node()->set_tuple_id(static_cast<SlotRef*>(slot_refs[0])->tuple_id());
+        slot_node->mutable_derive_node()->set_slot_id(static_cast<SlotRef*>(slot_refs[0])->slot_id());
         auto ret = ExprNode::create_tree(expr, &conjunct);
         if (ret < 0) {
             //如何释放资源
@@ -441,11 +448,46 @@ int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs,
             return ret;
         }
         for (auto& in_value : in_values) {
-            ExprNode* literal_node = new Literal(in_value[i]);
+            ExprNode* literal_node = new Literal(in_value[0]);
             conjunct->add_child(literal_node); 
         }
         conjunct->type_inferer();
         in_exprs.push_back(conjunct);
+        return 0;
+    } else {
+        pb::Expr expr;
+        ExprNode* conjunct = nullptr;
+        //增加一个in
+        pb::ExprNode* in_node = expr.add_nodes();
+        in_node->set_node_type(pb::IN_PREDICATE);
+        pb::Function* func = in_node->mutable_fn();
+        func->set_name("in");
+        func->set_fn_op(parser::FT_IN);
+        in_node->set_num_children(0);
+        auto ret = ExprNode::create_tree(expr, &conjunct);
+        if (ret < 0) {
+            //如何释放资源
+            DB_WARNING("create in condition fail");
+            return ret;
+        }
+        //增加一个row_expr
+        RowExpr* row_expr = new RowExpr;
+        for (auto& slot : slot_refs) {
+            row_expr->add_child(static_cast<SlotRef*>(slot)->clone());
+        }
+        conjunct->add_child(row_expr);
+        for (auto& in_value : in_values) {
+            //增加一个row_expr
+            RowExpr* row_expr = new RowExpr;
+            for (auto val : in_value) {
+                ExprNode* literal_node = new Literal(val);
+                row_expr->add_child(literal_node);
+            }
+            conjunct->add_child(row_expr); 
+        }
+        conjunct->type_inferer();
+        in_exprs.push_back(conjunct);
+        return 0;
     }
     return 0;
 }

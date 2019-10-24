@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,6 +42,8 @@ public:
             _node_type = pb::BOOL_LITERAL;
         } else if (_value.is_double()) {
             _node_type = pb::DOUBLE_LITERAL;
+        } else if (_value.is_hll()) {
+            _node_type = pb::HLL_LITERAL;
         } else {
             _node_type = pb::NULL_LITERAL;
         }
@@ -64,12 +66,20 @@ public:
                 _value.type = pb::INT64;
                 _value._u.int64_val = node.derive_node().int_val();
                 break;
+            case pb::BOOL_LITERAL:
+                _value.type = pb::BOOL;
+                _value._u.bool_val = node.derive_node().bool_val();
+                break;
             case pb::DOUBLE_LITERAL:
                 _value.type = pb::DOUBLE;
                 _value._u.double_val = node.derive_node().double_val();
                 break;
             case pb::STRING_LITERAL:
                 _value.type = pb::STRING;
+                _value.str_val = node.derive_node().string_val();
+                break;
+            case pb::HLL_LITERAL:
+                _value.type = pb::HLL;
                 _value.str_val = node.derive_node().string_val();
                 break;
             case pb::DATETIME_LITERAL:
@@ -91,6 +101,7 @@ public:
             case pb::PLACE_HOLDER_LITERAL:
                 _value.type = pb::PLACE_HOLDER;
                 _value._u.int64_val = node.derive_node().int_val(); // place_holder id
+                break;
             default:
                 return -1;
         }
@@ -109,6 +120,9 @@ public:
         switch (node_type()) {
             case pb::NULL_LITERAL:
                 break;
+            case pb::BOOL_LITERAL:
+                pb_node->mutable_derive_node()->set_bool_val(_value.get_numberic<bool>());
+                break;
             case pb::INT_LITERAL:
             case pb::PLACE_HOLDER_LITERAL:
                 pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
@@ -117,6 +131,7 @@ public:
                 pb_node->mutable_derive_node()->set_double_val(_value.get_numberic<double>());
                 break;
             case pb::STRING_LITERAL:
+            case pb::HLL_LITERAL:
                 pb_node->mutable_derive_node()->set_string_val(_value.get_string());
                 break;
             case pb::DATETIME_LITERAL:

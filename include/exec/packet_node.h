@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ public:
     virtual int init(const pb::PlanNode& node);
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
     virtual int open(RuntimeState* state);
+    virtual int get_next(RuntimeState* state);
     virtual void close(RuntimeState* state);
 
     pb::OpType op_type() {
@@ -43,7 +44,7 @@ public:
     size_t field_count() {
         return _fields.size();
     }
-    int pack_fields(DataBuffer* buffer, int packet_id);
+    int pack_fields(DataBuffer* buffer, int& packet_id);
     
     // COM_STMT_EXECUTE use ProtocolBinary for result set
     void set_binary_protocol(bool binary) {
@@ -67,7 +68,7 @@ private:
     pb::OpType _op_type;
     std::vector<ExprNode*> _projections;
     std::vector<ResultField> _fields;
-    int _packet_id = 1;
+    NetworkSocket* _client = nullptr;
     MysqlWrapper* _wrapper = nullptr;
     DataBuffer* _send_buf = nullptr;
 };

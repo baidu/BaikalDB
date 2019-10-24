@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -160,6 +160,9 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     for (auto& ip : user_privilege.ip()) {
         insert_ip(ip, tmp_mem_privilege);
     }
+    if (user_privilege.has_need_auth_addr()) {
+        tmp_mem_privilege.set_need_auth_addr(user_privilege.need_auth_addr());
+    }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
     std::string value;
@@ -208,6 +211,9 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
     for (auto& ip : user_privilege.ip()) {
         delete_ip(ip, tmp_mem_privilege);
     }
+    if (user_privilege.has_need_auth_addr()) {
+        tmp_mem_privilege.set_need_auth_addr(user_privilege.need_auth_addr());
+    }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
     std::string value;
@@ -238,7 +244,7 @@ void PrivilegeManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest
     }
 }
 
-void PrivilegeManager::load_snapshot() {
+int PrivilegeManager::load_snapshot() {
     _user_privilege.clear();
     std::string privilege_prefix = MetaServer::PRIVILEGE_IDENTIFY;
     rocksdb::ReadOptions read_options;
@@ -254,12 +260,13 @@ void PrivilegeManager::load_snapshot() {
         if (!user_privilege.ParseFromString(iter->value().ToString())) {
             DB_FATAL("parse from pb fail when load privilege snapshot, key:%s", 
                      iter->key().data());
-            return;
+            return -1;
         }
         DB_WARNING("user_privilege:%s", user_privilege.ShortDebugString().c_str());
         BAIDU_SCOPED_LOCK(_user_mutex);
         _user_privilege[username] = user_privilege;
     }
+    return 0;
 }
 
 void PrivilegeManager::insert_database_privilege(const pb::PrivilegeDatabase& privilege_database,

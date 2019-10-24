@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -91,6 +91,12 @@ public:
     void set_instance_migrate(const pb::MetaManagerRequest* request,
                              pb::MetaManagerResponse* response,
                              uint64_t log_id); 
+    void set_instance_full(const pb::MetaManagerRequest* request,
+                             pb::MetaManagerResponse* response,
+                             uint64_t log_id); 
+    void set_instance_no_full(const pb::MetaManagerRequest* request,
+                             pb::MetaManagerResponse* response,
+                             uint64_t log_id); 
     void process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request,
             pb::BaikalHeartBeatResponse* response); 
     void process_instance_heartbeat_for_store(const pb::InstanceInfo& request);
@@ -110,7 +116,7 @@ public:
                             const std::string& logical_room,
                             std::string& selected_instance,
                             int64_t average_count = 0);
-    void load_snapshot();
+    int load_snapshot();
     bool logical_room_exist(const std::string& logical_room) {
         BAIDU_SCOPED_LOCK(_physical_mutex);
         if (_logical_physical_map.find(logical_room) != _logical_physical_map.end()
@@ -125,7 +131,9 @@ public:
         BAIDU_SCOPED_LOCK(_instance_mutex);
         for (auto& instance_info : _instance_info) {
             if (instance_info.second.resource_tag == resource_tag
-                    && instance_info.second.logical_room == logical_room) {
+                    && instance_info.second.logical_room == logical_room
+                    && (instance_info.second.instance_status.state == pb::NORMAL
+                    || instance_info.second.instance_status.state == pb::FAULTY)) {
                 ++count;
             }
         }
@@ -136,12 +144,25 @@ public:
         int64_t count = 0; 
         BAIDU_SCOPED_LOCK(_instance_mutex);
         for (auto& instance_info : _instance_info) {
-            if (instance_info.second.resource_tag == resource_tag) {
+            if (instance_info.second.resource_tag == resource_tag 
+                && (instance_info.second.instance_status.state == pb::NORMAL
+                || instance_info.second.instance_status.state == pb::FAULTY)) {
                 ++count;
             }
         }
         return count;
     }
+
+    bool check_resource_tag_exist(const std::string& resource_tag) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& instance_info : _instance_info) {
+            if (instance_info.second.resource_tag == resource_tag) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     int64_t get_peer_count(int64_t table_id, const std::string& logical_room) {
         int64_t count = 0;
         BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -197,13 +218,36 @@ public:
                     std::unordered_map<int64_t, int64_t>{};
         }
     }
-
+    pb::Status get_instance_status(std::string instance) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_instance_info.find(instance) == _instance_info.end()) {
+            return pb::NORMAL;
+        }
+        return _instance_info[instance].instance_status.state;
+    }
     Instance get_instance(std::string instance) {
         BAIDU_SCOPED_LOCK(_instance_mutex);
         if (_instance_info.find(instance) == _instance_info.end()) {
             return Instance();
         }
         return _instance_info[instance];
+    }
+    std::string get_resource_tag(const std::string& instance) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_instance_info.find(instance) != _instance_info.end()) {
+            return _instance_info[instance].resource_tag;
+        }
+        DB_FATAL("instance: %s not exist", instance.c_str());
+        return "";
+    }
+    void get_resource_tag(const std::set<std::string>& related_peers,
+                std::unordered_map<std::string, std::string>& peer_resource_tags) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& peer : related_peers) {
+            if (_instance_info.find(peer) != _instance_info.end()) {
+                peer_resource_tags[peer] = _instance_info[peer].resource_tag;
+            }
+        }
     }
     bool instance_exist(std::string instance) {
         BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -244,7 +288,26 @@ public:
         _instance_info[instance].instance_status.state = pb::MIGRATE;
         return 0;
     }
-    
+   
+    int set_full_for_instance(const std::string& instance) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_instance_info.find(instance) == _instance_info.end()) {
+            return -1;
+        }
+        _instance_info[instance].instance_status.state = pb::FULL;
+        return 0;
+    }
+
+    int set_no_full_for_instance(const std::string& instance) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_instance_info.find(instance) == _instance_info.end()) {
+            return -1;
+        }
+        if (_instance_info[instance].instance_status.state == pb::FULL) {
+            _instance_info[instance].instance_status.state = pb::NORMAL;
+        }
+        return 0;
+    }    
     void set_meta_state_machine(MetaStateMachine* meta_state_machine) {
         _meta_state_machine = meta_state_machine;
     }
@@ -292,13 +355,13 @@ private:
                 + MetaServer::INSTANCE_CLUSTER_IDENTIFY
                 + instance;
     }
-    void load_instance_snapshot(const std::string& instance_prefix,
+    int load_instance_snapshot(const std::string& instance_prefix,
                                  const std::string& key, 
                                  const std::string& value);
-    void load_physical_snapshot(const std::string& physical_prefix,
+    int load_physical_snapshot(const std::string& physical_prefix,
                                  const std::string& key, 
                                  const std::string& value);
-    void load_logical_snapshot(const std::string& logical_prefix,
+    int load_logical_snapshot(const std::string& logical_prefix,
                                 const std::string& key, 
                                 const std::string& value);
 private:

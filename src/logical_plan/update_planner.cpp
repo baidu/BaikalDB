@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -67,7 +67,9 @@ int UpdatePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    set_dml_txn_state();
+    auto iter = _table_tuple_mapping.begin();
+    int64_t table_id = iter->first;
+    set_dml_txn_state(table_id);
     return 0;
 }
 
@@ -102,12 +104,12 @@ int UpdatePlanner::create_update_node() {
         update->add_update_exprs()->CopyFrom(_update_values[idx]);
     }
 
-    IndexInfo pk = _factory->get_index_info(iter->first);
-    if (pk.id == -1) {
+    auto pk = _factory->get_index_info_ptr(iter->first);
+    if (pk == nullptr) {
         DB_WARNING("no pk found with id: %ld", iter->first);
         return -1;
     }
-    for (auto& field : pk.fields) {
+    for (auto& field : pk->fields) {
         auto& slot = get_scan_ref_slot(iter->first, field.id, field.type);
         update->add_primary_slots()->CopyFrom(slot);
     }
@@ -116,7 +118,12 @@ int UpdatePlanner::create_update_node() {
 
 int UpdatePlanner::parse_kv_list() {
     int64_t table_id = _table_tuple_mapping.begin()->first;
-    TableInfo table_info = _factory->get_table_info(table_id); 
+    auto table_info_ptr = _factory->get_table_info_ptr(table_id); 
+    if (table_info_ptr == nullptr) {
+        DB_WARNING("table:%ld is nullptr", table_id);
+        return -1;
+    }
+    TableInfo& table_info = *table_info_ptr;
     parser::Vector<parser::Assignment*> set_list = _update->set_list;
     std::set<int32_t> update_field_ids;
     for (int idx = 0; idx < set_list.size(); ++idx) {
@@ -130,7 +137,7 @@ int UpdatePlanner::parse_kv_list() {
             return -1;
         }
         FieldInfo* field_info = nullptr;
-        if (nullptr == (field_info = get_field_info(full_name))) {
+        if (nullptr == (field_info = get_field_info_ptr(full_name))) {
             DB_WARNING("invalid field name in");
             return -1;
         }

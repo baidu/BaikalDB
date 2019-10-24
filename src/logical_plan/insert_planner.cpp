@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -61,7 +61,7 @@ int InsertPlanner::plan() {
     if (0 != parse_values_list(insert)) {
         return -1;
     }
-    set_dml_txn_state();
+    set_dml_txn_state(_table_id);
     return 0;
 }
 
@@ -74,21 +74,23 @@ int InsertPlanner::parse_db_table(pb::InsertNode* node) {
     } else if (!_ctx->cur_db.empty()) {
         database = _ctx->cur_db;
     } else {
+        _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+        _ctx->stat_info.error_msg << "No database selected";
         DB_WARNING("db name is empty,sql:%s", _ctx->sql.c_str());
         return -1;
     }
-    _ctx->stat_info.family = database;
     if (!_insert_stmt->table_name->table.empty()) {
         table = _insert_stmt->table_name->table.value;
     } else {
         return -1;
     }
+    _ctx->stat_info.family = database;
+    _ctx->stat_info.table = table;
     if (0 != add_table(database, table, alias)) {
         DB_WARNING("invalid database or table:%s.%s", database.c_str(), table.c_str());
         return -1;
     }
-    TableInfo tbl_info = _table_info[database + "." + table];
-    _table_id = tbl_info.id;
+    _table_id = _table_info[database + "." + table]->id;
     node->set_table_id(_table_id);
     // DB_DEBUG("db:%s, tbl:%s, tbl_id:%lu", database.c_str(), table.c_str(), _table_id);
     return 0;
@@ -106,7 +108,7 @@ int InsertPlanner::parse_kv_list() {
             return -1;
         }
         FieldInfo* field_info = nullptr;
-        if (nullptr == (field_info = get_field_info(full_name))) {
+        if (nullptr == (field_info = get_field_info_ptr(full_name))) {
             DB_WARNING("invalid field name in: %s", full_name.c_str());
             return -1;
         }
@@ -124,11 +126,12 @@ int InsertPlanner::parse_kv_list() {
 }
 
 int InsertPlanner::parse_field_list(pb::InsertNode* node) {
-    TableInfo tbl = _factory->get_table_info(_table_id);
-    if (tbl.id == -1) {
+    auto tbl_ptr = _factory->get_table_info_ptr(_table_id);
+    if (tbl_ptr == nullptr) {
         DB_WARNING("no table found with id: %ld", _table_id);
         return -1;
     }
+    auto& tbl = *tbl_ptr;
     if (_insert_stmt->columns.size() == 0) {
         _fields = tbl.fields;
         if (_ctx->new_prepared) {
@@ -146,7 +149,7 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
             return -1;
         }
         FieldInfo* field_info = nullptr;
-        if (nullptr == (field_info = get_field_info(full_name))) {
+        if (nullptr == (field_info = get_field_info_ptr(full_name))) {
             DB_WARNING("invalid field name in: %s", full_name.c_str());
             return -1;
         }
@@ -168,6 +171,8 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
     for (int i = 0; i < _insert_stmt->lists.size(); ++i) {
         parser::RowExpr* row_expr = _insert_stmt->lists[i];
         if ((size_t)row_expr->children.size() != _fields.size()) {
+            _ctx->stat_info.error_code = ER_WRONG_VALUE_COUNT_ON_ROW;
+            _ctx->stat_info.error_msg << "Column count doesn't match value count";
             DB_WARNING("values do not match with field_list");
             return -1;
         }

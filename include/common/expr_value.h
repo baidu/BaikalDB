@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -294,6 +294,7 @@ struct ExprValue {
                 return;
             case pb::NULL_TYPE:
                 *this = value;
+                return;
             default:
                 return;
         }
@@ -338,6 +339,43 @@ struct ExprValue {
             default:
                 return 0;
         }
+    }
+
+    int64_t compare_diff_type(ExprValue& other) {
+        if (type == other.type) {
+            return compare(other);
+        }
+        if (is_int() && other.is_int()) {
+            if (is_uint() || other.is_uint()) {
+                cast_to(pb::UINT64);
+                other.cast_to(pb::UINT64);
+            } else {
+                cast_to(pb::INT64);
+                other.cast_to(pb::INT64);
+            }
+        } else if (is_datetime() || other.is_datetime()) {
+            cast_to(pb::DATETIME);
+            other.cast_to(pb::DATETIME);
+        } else if (is_timestamp() || other.is_timestamp()) {
+            cast_to(pb::TIMESTAMP);
+            other.cast_to(pb::TIMESTAMP);
+        } else if (is_date() || other.is_date()) {
+            cast_to(pb::DATE);
+            other.cast_to(pb::DATE);
+        } else if (is_time() || other.is_time()) {
+            cast_to(pb::TIME);
+            other.cast_to(pb::TIME);
+        } else if (is_double() || other.is_double()) {
+            cast_to(pb::DOUBLE);
+            other.cast_to(pb::DOUBLE);
+        } else if (is_int() || other.is_int()) {
+            cast_to(pb::DOUBLE);
+            other.cast_to(pb::DOUBLE);
+        } else {
+            cast_to(pb::STRING);
+            other.cast_to(pb::STRING);
+        }
+        return compare(other);
     }
     
     bool is_null() const { 

@@ -3,7 +3,7 @@
 // Use of this source code is governed by a BSD-style   
 // license that can be found in the LICENSES/QL-LICENSE file.   
 // Copyright 2015 PingCAP, Inc. 
-// Modifications copyright (C) 2018, Baidu.com, Inc.    
+// Modifications copyright (C) 2018-present, Baidu.com, Inc.    
 // Licensed under the Apache License, Version 2.0 (the "License");  
 // you may not use this file except in compliance with the License. 
 // You may obtain a copy of the License at  
@@ -156,6 +156,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     KILL
     LEFT
     LIKE
+    EXACT_LIKE
     LIMIT
     LINES
     LOAD
@@ -580,6 +581,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ShowTargetFilterable
     ExplainStmt
     ExplainableStmt
+    KillStmt
 
 %type <stmt> 
     CreateTableStmt
@@ -694,6 +696,7 @@ Statement:
     | ExecPrepareStmt
     | DeallocPrepareStmt
     | ExplainStmt
+    | KillStmt
     ;
 
 InsertStmt:
@@ -819,14 +822,14 @@ EqAssign:
     ;
 
 ValueList:
-    RowExpr {
+    '(' ExprList ')' {
         InsertStmt* insert = InsertStmt::New(parser->arena);
-        insert->lists.push_back((RowExpr*)$1, parser->arena);
+        insert->lists.push_back((RowExpr*)$2, parser->arena);
         $$ = insert;
     }
-    | ValueList ',' RowExpr {
+    | ValueList ',' '(' ExprList ')' {
         InsertStmt* insert = (InsertStmt*)$1;
-        insert->lists.push_back((RowExpr*)$3, parser->arena);
+        insert->lists.push_back((RowExpr*)$4, parser->arena);
         $$ = insert;
     }
     ;
@@ -845,8 +848,13 @@ RowExprList:
     }
     ;
 RowExpr:
-    '(' ExprList ')' {
+    '(' ExprList ',' Expr ')' {
+        $2->children.push_back($4, parser->arena);
         $$ = (RowExpr*)$2;
+    }
+    | ROW '(' ExprList ',' Expr ')' {
+        $3->children.push_back($5, parser->arena);
+        $$ = (RowExpr*)$3;
     }
     ;
 ExprList:
@@ -1932,6 +1940,15 @@ FunctionCallKeyword:
         fun->children.push_back($5, parser->arena);
         $$ = fun; 
     }
+    | IF '(' Expr ',' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "if";
+        fun->func_type = FT_COMMON;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        fun->children.push_back($7, parser->arena);
+        $$ = fun; 
+    }
     ;
 SumExpr:
     AVG '(' BuggyDefaultFalseDistinctOpt Expr')' {
@@ -2489,6 +2506,10 @@ PredicateOp:
         fun->is_not = $2;
         $$ = fun;
     }
+    | SimpleExpr EXACT_LIKE SimpleExpr LikeEscapeOpt %prec LIKE {
+        FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_EXACT_LIKE, $1, $3, $4, parser->arena);
+        $$ = fun;
+    }
     | SimpleExpr BetweenOrNot SimpleExpr AND SimpleExpr {
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_BETWEEN, $1, $3, $5, parser->arena);
         fun->is_not = $2;
@@ -2826,6 +2847,30 @@ ConstraintElem:
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
+    | KeyOrIndex GLOBAL IndexName '(' ColumnNameList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_INDEX;
+        item->global = true;
+        item->name = $3;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$7;
+        $$ = item;
+    }
+    | UNIQUE KeyOrIndexOpt GLOBAL IndexName '(' ColumnNameList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_UNIQ;
+        item->global = true;
+        item->name = $4;
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$8;
+        $$ = item;
+    }
     ;
 
 IndexName:
@@ -3152,7 +3197,7 @@ StringType:
         FieldType* field_type = (FieldType*)$1;
         field_type->charset = $3;
         field_type->collate = $4;
-        if (2 == true) {
+        if ($2 == true) {
             field_type->flag |= MYSQL_FIELD_FLAG_BINARY;
         }
         $$ = field_type;
@@ -3653,6 +3698,17 @@ SetStmt:
     {
         $$ = $2;
     }
+//    | SET GLOBAL TRANSACTION TransactionChars
+//    {
+//        $$ = $4;
+//    }
+//    | SET SESSION TRANSACTION TransactionChars 
+//        $$ = $4;
+//    {
+//    }
+//    | SET TRANSACTION TransactionChars {
+//        $$ = $3;
+//    }
     ;
 
 VarAssignList:
@@ -3759,6 +3815,66 @@ VarName:
     }
     ;
 
+//TransactionChars:
+//    TransactionChar
+//    {
+//        SetStmt* set = new_node(SetStmt);
+//        set->var_list.push_back((VarAssign*)$1, parser->arena);
+//        $$ = set;
+//    }
+//    | TransactionChars ',' TransactionChar 
+//    {
+//        ((SetStmt*)$1)->var_list.push_back((VarAssign*)$3, parser->arena);
+//        $$ = $1;
+//    }
+//    ;
+//
+//TransactionChar: 
+//    ISOLATION LEVEL IsolationLevel 
+//    {
+//        VarAssign* assign = new_node(VarAssign);
+//        assign->key.strdup(""
+//        if ($3 != nullptr && $3->expr_type == ET_COLUMN) {
+//            ColumnName* col_name = (ColumnName*)$3;
+//            if (col_name->name.to_lower() == "off") {
+//                // SET XXX = OFF
+//                // OFF to 0
+//                assign->value = LiteralExpr::make_int("0", parser->arena);
+//            } else {
+//                assign->value = $3;
+//            }
+//        } else {
+//            assign->value = $3;
+//        }
+//        $$ = assign;
+//    }
+//    | READ WRITE
+//    {
+//    }
+//    | READ ONLY
+//    {
+//    }
+//    ;
+//
+//IsolationLevel:
+//    REPEATABLE READ
+//    {
+//        $$ = ast.RepeatableRead
+//    }
+//    | READ COMMITTED
+//    {
+//        $$ = ast.ReadCommitted
+//    }
+//    | READ UNCOMMITTED
+//    {
+//        $$ = ast.ReadUncommitted
+//    }
+//    | SERIALIZABLE
+//    {
+//        $$ = ast.Serializable
+//    }
+//    ;
+//
 ShowStmt:
     SHOW ShowTargetFilterable ShowLikeOrWhereOpt {
         $$ = nullptr;
@@ -3994,6 +4110,20 @@ AlterSpec:
         spec->new_table_name = (TableName*)$3;
         $$ = spec;
     }
+    | ADD ConstraintKeywordOpt ConstraintElem
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->new_constraints.push_back((Constraint*)$3, parser->arena);
+        $$ = spec;
+    }
+    | DROP INDEX IndexName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_INDEX;
+        spec->index_name = $3;
+        $$ = spec;
+    }
     ;
 
 // Prepare Statement
@@ -4090,6 +4220,25 @@ ExplainStmt:
     }
     ;
 
+KillStmt:
+    KILL INTEGER_LIT {
+        KillStmt* k = new_node(KillStmt);
+        k->conn_id = ((LiteralExpr*)$2)->_u.int64_val;
+        $$ = k;
+    }
+    | KILL CONNECTION INTEGER_LIT {
+        KillStmt* k = new_node(KillStmt);
+        k->conn_id = ((LiteralExpr*)$3)->_u.int64_val;
+        $$ = k;
+    }
+    | KILL QUERY INTEGER_LIT {
+        KillStmt* k = new_node(KillStmt);
+        k->conn_id = ((LiteralExpr*)$3)->_u.int64_val;
+        k->is_query = true;
+        $$ = k;
+    }
+    ;
+
 ExplainableStmt:
     SelectStmt
     | DeleteStmt
@@ -4097,6 +4246,43 @@ ExplainableStmt:
     | InsertStmt
     | ReplaceStmt
     ;
+
+//CreateUserStmt:
+//    CREATE USER IfNotExists UserSpecList {
+//        // See https://dev.mysql.com/doc/refman/5.7/en/create-user.html
+//    }
+//    ;
+//
+//UserSpecList:
+//    UserSpec {
+//    }
+//    | UserSpecList ',' UserSpec {
+//    }
+//    ;
+//
+//UserSpec:
+//    Username AuthOption {
+//    }
+//    ;
+//
+//Username:
+//    STRING_LIT {
+//    }
+//    | STRING_LIT '@' STRING_LIT {
+//    }
+//    ;
+//
+//AuthOption:
+//    {
+//        $$ = nil;
+//    }
+//    | IDENTIFIED BY STRING_LIT {
+//        $$ = $3;
+//    }
+//    | IDENTIFIED BY PASSWORD STRING_LIT {
+//        $$ = $4;
+//    }
+//    ;
 
 %%
 int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser *parser, const char *s) {    

@@ -57,6 +57,7 @@ COPTS  = [
     "-g", 
     "-fno-omit-frame-pointer", 
     "-Wno-strict-aliasing",
+    "-UNDEBUG",
 ]
 
 cc_library(
@@ -308,6 +309,7 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:unordered",
         "@boost//:thread",
+        "@boost//:asio",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
@@ -384,6 +386,7 @@ cc_library(
         "@boost//:lexical_cast",
         "//external:braft",
         "//external:rocksdb",
+        "//external:rapidjson",
     ],
     visibility = ["//visibility:public"],
 )
@@ -520,6 +523,7 @@ cc_binary(
         ":engine",
         ":raft",
         ":raft_meta",
+        "@boost//:filesystem",
     ],
     linkstatic = True,
 )

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,14 @@
 #include "packet_node.h"
 #include "limit_node.h"
 #include "truncate_node.h"
+#include "kill_node.h"
 #include "transaction_node.h"
+#include "begin_manager_node.h"
+#include "commit_manager_node.h"
+#include "rollback_manager_node.h"
+#include "lock_primary_node.h"
+#include "lock_secondary_node.h"
+#include "full_export_node.h"
 #include "runtime_state.h"
 
 namespace baikaldb {
@@ -44,13 +51,14 @@ int ExecNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     if (_limit == 0) {
         return -2;
     }
+    int ret = 0;
     for (auto c : _children) {
-        int ret = c->expr_optimize(tuple_descs);
-        if (ret < 0) {
-            return ret;
+        int ret2 = c->expr_optimize(tuple_descs);
+        if (ret2 < 0) {
+            ret = ret2;
         }
     }
-    return 0;
+    return ret;
 }
 
 int ExecNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
@@ -107,11 +115,18 @@ bool ExecNode::need_seperate() {
         case pb::DELETE_NODE:
         case pb::REPLACE_NODE:
         case pb::TRUNCATE_NODE:
+        case pb::KILL_NODE:
         case pb::TRANSACTION_NODE:
+        case pb::BEGIN_MANAGER_NODE:
+        case pb::COMMIT_MANAGER_NODE:
+            case pb::ROLLBACK_MANAGER_NODE:
             return true;
         case pb::SCAN_NODE:
             //DB_NOTICE("engine:%d", static_cast<ScanNode*>(this)->engine());
             if (static_cast<ScanNode*>(this)->engine() == pb::ROCKSDB) {
+                return true;
+            }
+            if (static_cast<ScanNode*>(this)->engine() == pb::ROCKSDB_CSTORE) {
                 return true;
             }
             break;
@@ -245,11 +260,32 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
         case pb::TRUNCATE_NODE:
             *exec_node = new TruncateNode;
             return (*exec_node)->init(node);
+        case pb::KILL_NODE:
+            *exec_node = new KillNode;
+            return (*exec_node)->init(node);
         case pb::TRANSACTION_NODE:
             *exec_node = new TransactionNode;
             return (*exec_node)->init(node);
+        case pb::BEGIN_MANAGER_NODE:
+            *exec_node = new BeginManagerNode;
+            return (*exec_node)->init(node);
+        case pb::COMMIT_MANAGER_NODE:
+            *exec_node = new CommitManagerNode;
+            return (*exec_node)->init(node);
+        case pb::ROLLBACK_MANAGER_NODE:
+            *exec_node = new RollbackManagerNode;
+            return (*exec_node)->init(node);
         case pb::JOIN_NODE:
             *exec_node = new JoinNode;
+            return (*exec_node)->init(node);
+        case pb::LOCK_PRIMARY_NODE:
+            *exec_node = new LockPrimaryNode;
+            return (*exec_node)->init(node);
+        case pb::LOCK_SECONDARY_NODE:
+            *exec_node = new LockSecondaryNode;
+            return (*exec_node)->init(node);
+        case pb::FULL_EXPORT_NODE:
+            *exec_node = new FullExportNode;
             return (*exec_node)->init(node);
         default:
             DB_FATAL("create_exec_node failed: %s", node.DebugString().c_str());
@@ -257,6 +293,42 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
     }
     return -1;
 }
+//>0代表放到cache里，==0代表不需要放到cache里
+int ExecNode::push_cmd_to_cache(RuntimeState* state,
+                                pb::OpType op_type,
+                                ExecNode* store_request,
+                                int seq_id) {
+    //DB_WARNING("txn_id: %lu op_type: %s, seq_id: %d, exec_node:%p", 
+    //    state->txn_id, pb::OpType_Name(op_type).c_str(), seq_id, store_request);
+    if (state->txn_id == 0) {
+        return 0;
+    }
+    auto client = state->client_conn();
+    // cache dml cmd in baikaldb before sending to store
+    if (op_type != pb::OP_INSERT
+            && op_type != pb::OP_DELETE
+            && op_type != pb::OP_UPDATE
+            && op_type != pb::OP_BEGIN) {
+        return 0;
+    }
+    if (client->cache_plans.count(seq_id)) {
+        DB_WARNING("seq_id duplicate seq_id:%d", seq_id);
+    }
+    CachePlan& plan_item = client->cache_plans[seq_id];
+    plan_item.op_type = op_type;
+    plan_item.sql_id = seq_id;
+    plan_item.root = store_request;
+    store_request->set_parent(nullptr);
+    plan_item.tuple_descs = state->tuple_descs();
+    return 1;
 }
 
+int ExecNode::push_cmd_to_cache(RuntimeState* state,
+                                pb::OpType op_type,
+                                ExecNode* store_request) {
+    return push_cmd_to_cache(state, op_type, store_request,
+                     state->client_conn()->seq_id);
+}
+
+}
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

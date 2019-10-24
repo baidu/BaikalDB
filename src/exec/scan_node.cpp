@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -81,8 +81,12 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         explain_info["possible_keys"].pop_back();
         std::vector<int> tmp;
         int idx = select_index(tmp);
+        if (tmp.size() >= 1) {
+            idx = tmp[0];
+        }
         auto& pos_index = _pb_node.derive_node().scan_node().indexes(idx);
         int64_t index_id = pos_index.index_id();
+        DB_NOTICE("explain tmp.size()%lu %d %ld", tmp.size(),  idx, index_id);
         auto index_info = factory->get_index_info(index_id);
         auto pri_info = factory->get_index_info(_table_id);
         explain_info["key"] = index_info.short_name;
@@ -131,6 +135,8 @@ ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node) {
         switch (engine) {
             case pb::ROCKSDB:
                 return new RocksdbScanNode;
+            case pb::ROCKSDB_CSTORE:
+                return new RocksdbScanNode(pb::ROCKSDB_CSTORE);
             case pb::REDIS:
                 return new RedisScanNode;
                 break;

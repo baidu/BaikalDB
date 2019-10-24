@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -122,7 +122,7 @@ public:
     int encode_field(const Reflection* _reflection, 
             const FieldDescriptor* field, 
             const FieldInfo& field_info,
-            MutTableKey& key, bool clear);
+            MutTableKey& key, bool clear, bool like_prefix);
 
     //TODO: secondary key
     int decode_field(const Reflection* _reflection,
@@ -132,7 +132,8 @@ public:
 
     //TODO: secondary key
     //(field_cnt == -1) means encode all key field
-    int encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, bool clear);
+    int encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, 
+            bool clear, bool like_prefix = false);
 
     // decode and fill into *this (primary/secondary) starting from 0
     int decode_key(IndexInfo& index, const TableKey& key);
@@ -146,6 +147,10 @@ public:
     // these two funcs are only used for encode/decode pk fields after secondary index
     int encode_primary_key(IndexInfo& index, MutTableKey& key, int field_cnt);
     int decode_primary_key(IndexInfo& index, const TableKey& key, int& pos);
+
+    // those two funcs are only used for encode/decode non-pk fields after primary, for cstore
+    int encode_field(const FieldInfo& field_info, std::string& out);
+    int decode_field(const FieldInfo& field_info, const std::string& in);
 
     const FieldDescriptor* get_field_by_idx(int32_t idx) {
         auto descriptor = _message->GetDescriptor();

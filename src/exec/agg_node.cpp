@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -129,6 +129,10 @@ int AggNode::open(RuntimeState* state) {
     for (auto child : _children) {
         bool eos = false;
         do {
+            if (state->is_cancelled()) {
+                DB_WARNING_STATE(state, "cancelled");
+                return 0;
+            }
             TimeCost cost;
             RowBatch batch;
             ret = child->get_next(state, &batch, &eos);
@@ -201,6 +205,11 @@ void AggNode::process_row_batch(RowBatch& batch) {
 
 int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     while (1) {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            *eos = true;
+            return 0;
+        }
         if (reached_limit() || _iter == _hash_map.end()) {
             *eos = true;
             return 0;
@@ -210,6 +219,7 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         }
         AggFnCall::finalize_all(_agg_fn_calls, _iter->second);
         batch->move_row(std::move(std::unique_ptr<MemRow>(_iter->second)));
+        _num_rows_returned++;
         _iter->second = nullptr;
         _iter++;
     }

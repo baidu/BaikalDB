@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@
 namespace baikaldb {
 class ExprNode {
 public:
-    ExprNode() : _is_constant(true) {}
+    ExprNode() {}
     virtual ~ExprNode() {
         for (auto& e : _children) {
             delete e;
@@ -65,6 +65,9 @@ public:
     }
     bool is_slot_ref() {
         return _node_type == pb::SLOT_REF;
+    }
+    bool is_row_expr() {
+        return _node_type == pb::ROW_EXPR;
     }
     //常量表达式预计算,eg. id * 2 + 2 * 4 => id * 2 + 8
     //TODO 考虑做各种左右变化,eg. id + 2 - 4 => id - 2; id * 2 + 4 > 4 / 2 => id > -1
@@ -169,9 +172,9 @@ public:
     void get_all_slot_ids(std::unordered_set<int32_t>& slot_ids);
 protected:
     pb::ExprNodeType _node_type;
-    pb::PrimitiveType _col_type;
+    pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
-    bool     _is_constant;
+    bool     _is_constant = true;
 
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用
     std::unordered_set<int64_t> _index_ids;

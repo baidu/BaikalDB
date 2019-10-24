@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
         for (size_t i = 0; i < packet_node->children_size(); i++) {
             ExecNode::destroy_tree(packet_node->children(i));
         }
-        packet_node->clear_children();
+        packet_node->mutable_children()->clear();
         packet_node->set_limit(0);
     };
     // 包括类型推导与常量表达式计算
@@ -71,6 +71,11 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
+    if (ctx->return_empty) {
+        DB_WARNING("kill no regions");
+        return_empty_func();
+        return 0;
+    }
     // db与store的计划分离，生成FetcherNode，并且根据region数量做不同决策
     ret = Separate().analyze(ctx);
     if (ret < 0) {
@@ -87,6 +92,7 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
 int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     int ret = 0;
     RuntimeState& state = ctx->runtime_state;
+    //DB_WARNING("state.client_conn(): %ld ,seq_id: %d", state.client_conn(), state.client_conn()->seq_id);
     ret = state.init(ctx, send_buf);
     if (ret < 0) {
         DB_FATAL("RuntimeState init fail");
@@ -106,6 +112,51 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     ctx->stat_info.error_code = state.error_code;
     
     return 0;
+}
+
+int PhysicalPlanner::full_export_start(QueryContext* ctx, DataBuffer* send_buf) {
+    int ret = 0;
+    RuntimeState& state = ctx->runtime_state;
+    
+    ret = state.init(ctx, send_buf);
+    if (ret < 0) {
+        DB_FATAL("RuntimeState init fail");
+        ctx->stat_info.error_code = state.error_code;
+        return ret;
+    }
+    state.is_full_export = true;
+    ret = ctx->root->open(&state);
+    if (ret < 0) {
+        DB_WARNING("plan open fail: %d, %s", state.error_code, state.error_msg.str().c_str());
+        ctx->stat_info.error_code = state.error_code;
+        ctx->stat_info.error_msg.str(state.error_msg.str());
+        ctx->root->close(&state);
+        return ret;
+    }
+    ret = full_export_next(ctx, send_buf, false);
+    return ret;
+}
+
+int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, bool shutdown) {
+    int ret = 0;
+    RuntimeState& state = ctx->runtime_state;
+    PacketNode* root = (PacketNode*)(ctx->root);
+    ret = root->get_next(&state);
+    if (ret < 0) {
+        root->close(&state);
+        DB_WARNING("plan get_next fail: %d, %s", state.error_code, state.error_msg.str().c_str());
+        ctx->stat_info.error_code = state.error_code;
+        ctx->stat_info.error_msg.str(state.error_msg.str());
+        return ret;
+    }
+    if (state.is_eos() || shutdown) {
+        root->close(&state);
+        ctx->stat_info.num_returned_rows = state.num_returned_rows();
+        ctx->stat_info.num_affected_rows = state.num_affected_rows();
+        ctx->stat_info.error_code = state.error_code;
+        ctx->stat_info.error_msg.str(state.error_msg.str());
+    }
+    return 0;            
 }
 
 int PhysicalPlanner::execute_recovered_commit(NetworkSocket* client, const pb::CachePlan& commit_plan) {

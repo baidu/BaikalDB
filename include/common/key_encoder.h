@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,6 +54,40 @@ public:
     static uint64_t to_endian_u64(uint64_t in) {
         static bool is_big = is_big_endian();
         if (is_big) {
+            return in;
+        }
+        return ((in & 0x00000000000000FF) << 56) |
+               ((in & 0x000000000000FF00) << 40) |
+               ((in & 0x0000000000FF0000) << 24) |
+               ((in & 0x00000000FF000000) << 8) |
+               ((in & 0x000000FF00000000) >> 8) |
+               ((in & 0x0000FF0000000000) >> 24) |
+               ((in & 0x00FF000000000000) >> 40) |
+               ((in & 0xFF00000000000000) >> 56);
+    }
+
+    static uint16_t to_little_endian_u16(uint16_t in) {
+        static bool is_big = is_big_endian();
+        if (!is_big) {
+            return in;
+        }
+        return ((in & 0x00FF) << 8) | ((in & 0xFF00) >> 8);
+    }
+
+    static uint32_t to_little_endian_u32(uint32_t in) {
+        static bool is_big = is_big_endian();
+        if (!is_big) {
+            return in;
+        }
+        return ((in & 0x000000FF) << 24) |
+               ((in & 0x0000FF00) << 8) |
+               ((in & 0x00FF0000) >> 8) |
+               ((in & 0xFF000000) >> 24);
+    }
+
+    static uint64_t to_little_endian_u64(uint64_t in) {
+        static bool is_big = is_big_endian();
+        if (!is_big) {
             return in;
         }
         return ((in & 0x00000000000000FF) << 56) |

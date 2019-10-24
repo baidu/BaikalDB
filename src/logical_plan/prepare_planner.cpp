@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -123,6 +123,7 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
         delete iter->second;
         client->prepared_plans.erase(iter);
     }
+    //DB_WARNING("stmt_name:%s stmt_sql:%s", stmt_name.c_str(), stmt_sql.c_str());
     parser::SqlParser parser;
     parser.parse(stmt_sql);
     if (parser.error != parser::SUCC) {
@@ -248,6 +249,7 @@ int PreparePlanner::stmt_close(const std::string& stmt_name) {
         delete iter->second;
         client->prepared_plans.erase(iter);
     }
+    client->long_data_vars.erase(stmt_name);
     return 0;
 }
 } // end of namespace baikaldb

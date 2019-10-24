@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,13 +23,18 @@ namespace baikaldb {
 class MetaWriter {
 public:
     static const rocksdb::WriteOptions write_options;
+    //level one
     static const std::string META_IDENTIFY;
+    //level two
     static const std::string APPLIED_INDEX_INDENTIFY;
     static const std::string NUM_TABLE_LINE_INDENTIFY;
     static const std::string PREPARED_TXN_LOG_INDEX_IDENTIFY;
     static const std::string PREPARED_TXN_PB_IDENTIYF;
     static const std::string REGION_INFO_IDENTIFY;
-    
+    static const std::string PRE_COMMIT_IDENTIFY;
+    static const std::string DOING_SNAPSHOT_IDENTIFY; 
+    static const std::string REGION_DDL_INFO_IDENTIFY; 
+
     virtual ~MetaWriter() {}
    
     static MetaWriter* get_instance() {
@@ -45,19 +50,31 @@ public:
     int update_region_info(const pb::RegionInfo& region_info);
     int update_num_table_lines(int64_t region_id, int64_t num_table_lines);
     int update_apply_index(int64_t region_id, int64_t applied_index);
+    int write_pre_commit(int64_t region_id, uint64_t txn_id, int64_t num_table_lines, int64_t applied_index);
+    int write_doing_snapshot(int64_t region_id);
     int write_batch(rocksdb::WriteBatch* updates, int64_t region_id);
+    int write_meta_after_commit(int64_t region_id, int64_t num_table_lines, int64_t applied_index, uint64_t txn_id);
+    int write_meta_before_prepared(int64_t region_id, int64_t log_index, uint64_t txn_id);
+
     int ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id);
     
     int clear_meta_info(int64_t drop_region_id);
+    int clear_all_meta_info(int64_t drop_region_id);
+    int clear_region_info(int64_t drop_region_id);
     int clear_txn_log_index(int64_t region_id);
     int clear_txn_infos(int64_t region_id);
+    int clear_pre_commit_infos(int64_t region_id);
+    int clear_doing_snapshot(int64_t region_id);
 
     int parse_region_infos(std::vector<pb::RegionInfo>& region_infos);
     int parse_txn_infos(int64_t region_id, std::map<int64_t, std::string>& prepared_txn_infos);
-    int parse_txn_log_indexs(int64_t region_id, std::set<int64_t>& log_indexs);
+    int parse_txn_log_indexs(int64_t region_id, std::unordered_map<uint64_t, int64_t>& log_indexs);
+    int parse_doing_snapshot(std::set<int64_t>& region_ids);
     int64_t read_applied_index(int64_t region_id);
     int64_t read_num_table_lines(int64_t region_id);
     int read_region_info(int64_t region_id, pb::RegionInfo& region_info);
+    int read_pre_commit_key(int64_t region_id, uint64_t txn_id, int64_t& num_table_lines, int64_t& applied_index);
+    int read_doing_snapshot(int64_t region_id);
 public:
     std::string region_info_key(int64_t region_id) const;
     std::string region_for_store_key(int64_t region_id) const;
@@ -67,6 +84,9 @@ public:
     std::string log_index_key_prefix(int64_t region_id) const;
     std::string transcation_pb_key(int64_t region_id, uint64_t txn_id, int64_t log_index) const;
     std::string transcation_pb_key_prefix(int64_t region_id) const;
+    std::string pre_commit_key_prefix(int64_t region_id) const;
+    std::string pre_commit_key(int64_t region_id, uint64_t txn_id) const;
+    std::string doing_snapshot_key(int64_t region_id) const;
     std::string encode_applied_index(int64_t index) const;
     std::string encode_num_table_lines(int64_t line) const;
     std::string encode_region_info(const pb::RegionInfo& region_info) const;
@@ -74,6 +94,10 @@ public:
     std::string encode_transcation_log_index_value(int64_t log_index) const;
     int64_t decode_log_index_value(const rocksdb::Slice& value);
     uint64_t decode_log_index_key(const rocksdb::Slice& key);
+    uint64_t decode_pre_commit_key(const rocksdb::Slice& key);
+    std::string region_ddl_info_key(int64_t region_id) const;
+    int update_region_ddl_info(const pb::StoreRegionDdlInfo& region_ddl_info);
+    int read_region_ddl_info(int64_t region_id, pb::StoreRegionDdlInfo& region_ddl_info);
 
     std::string meta_info_prefix(int64_t region_id);
     rocksdb::ColumnFamilyHandle* get_handle() {

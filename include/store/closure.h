@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ struct DMLClosure : public braft::Closure {
     virtual void Run();
 
     brpc::Controller* cntl = nullptr;
-    int op_type;
+    pb::OpType op_type;
     pb::StoreRes* response = nullptr;
     google::protobuf::Closure* done = nullptr;
     Region* region = nullptr;
@@ -42,7 +42,14 @@ struct AddPeerClosure : public braft::Closure {
     pb::StoreRes* response = nullptr;
     BthreadCond& cond;
 };
-
+struct MergeClosure : public braft::Closure {
+    virtual void Run();
+    pb::StoreRes* response = nullptr;
+    google::protobuf::Closure* done = nullptr;
+    Region* region = nullptr;
+    bool is_dst_region = false;
+    TimeCost cost;
+};
 struct SplitClosure : public braft::Closure {
     virtual void Run();
     std::function<void()> next_step;
@@ -56,10 +63,12 @@ struct SplitClosure : public braft::Closure {
 };
 
 struct ConvertToSyncClosure : public braft::Closure {
-    ConvertToSyncClosure(BthreadCond& _sync_sign) : sync_sign(_sync_sign) {};
+    ConvertToSyncClosure(BthreadCond& _sync_sign,int64_t _region_id) : 
+        sync_sign(_sync_sign), region_id(_region_id) {};
     virtual void Run();
     BthreadCond& sync_sign;
     TimeCost cost;
+    int64_t region_id = 0;
 };
 
 struct SnapshotClosure : public braft::Closure {
@@ -77,4 +86,17 @@ struct SnapshotClosure : public braft::Closure {
     int ret = 0;
     //int retry = 0;
 };
+
+struct Dml1pcClosure : public braft::Closure {
+    Dml1pcClosure(BthreadCond& _txn_cond) : txn_cond(_txn_cond) {};
+
+    virtual void Run();
+
+    RuntimeState* state = nullptr;
+    SmartTransaction txn = nullptr;
+    BthreadCond& txn_cond;
+    google::protobuf::Closure* done = nullptr;
+    TimeCost cost;
+};
+
 } // end of namespace

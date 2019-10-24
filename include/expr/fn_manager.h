@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ class FunctionManager : public ObjectManager<
                         FunctionManager> {
 public:
     int init();
-    std::string get_swap_op(const std::string& name);
+    bool swap_op(pb::Function& fn);
     static int complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType> types);
 
 private:

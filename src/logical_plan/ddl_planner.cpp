@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -60,6 +60,7 @@ int DDLPlanner::plan() {
             return -1;
         }
         error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
+        
     } else {
         DB_WARNING("unsupported DDL command: %d", _ctx->stmt_type);
         return -1;
@@ -168,6 +169,9 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
     for (int idx = 0; idx < constraint_len; ++idx) {
         parser::Constraint* constraint = stmt->constraints[idx];
         pb::IndexInfo* index = table.add_indexs();
+        if (constraint->global == true) {
+            index->set_is_global(true);
+        }
         if (constraint->type == parser::CONSTRAINT_PRIMARY) {
             index->set_index_type(pb::I_PRIMARY);
         } else if (constraint->type == parser::CONSTRAINT_INDEX) {
@@ -203,16 +207,8 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 auto json_iter = root.FindMember("segment_type");
                 if (json_iter != root.MemberEnd()) {
                     std::string segment_type = json_iter->value.GetString();
-                    static std::map<std::string, pb::SegmentType> segment_map = {
-                        {"S_NO_SEGMENT", pb::S_NO_SEGMENT},
-                        {"S_WORDRANK", pb::S_WORDRANK},
-                        {"S_WORDSEG_BASIC", pb::S_WORDSEG_BASIC},
-                        {"S_SIMPLE", pb::S_SIMPLE}
-                    };
                     pb::SegmentType pb_segment_type = pb::S_DEFAULT;
-                    if (segment_map.count(segment_type) == 1) {
-                        pb_segment_type = segment_map[segment_type];
-                    }
+                    SegmentType_Parse(segment_type, &pb_segment_type);
                     index->set_segment_type(pb_segment_type);
                 }
             } catch (...) {
@@ -234,6 +230,8 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             table.set_engine(pb::ROCKSDB);
             if (boost::algorithm::iequals(str_val, "redis")) {
                 table.set_engine(pb::REDIS);
+            } else if (boost::algorithm::iequals(str_val, "rocksdb_cstore")) {
+                table.set_engine(pb::ROCKSDB_CSTORE);
             }
         } else if (option->type == parser::TABLE_OPT_CHARSET) {
             std::string str_val(option->str_value.value);
@@ -282,6 +280,23 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         dist->set_logical_room(dist_value["logical_room"].GetString());
                         dist->set_count(dist_value["count"].GetInt());
                     }
+                }
+                json_iter = root.FindMember("region_split_lines");
+                if (json_iter != root.MemberEnd()) {
+                    int64_t region_split_lines = json_iter->value.GetInt64();
+                    table.set_region_split_lines(region_split_lines);
+                    DB_WARNING("region_split_lines: %ld", region_split_lines);
+                }
+                json_iter = root.FindMember("storage_compute_separate");
+                if (json_iter != root.MemberEnd()) {
+                    int64_t separate = json_iter->value.GetInt64();
+                    auto* schema_conf = table.mutable_schema_conf();
+                    if (separate == 0) {
+                        schema_conf->set_storage_compute_separate(false);
+                    } else {
+                        schema_conf->set_storage_compute_separate(true);
+                    }
+                    DB_WARNING("storage_compute_separate: %ld", separate);
                 }
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", option->str_value.value);
@@ -459,6 +474,34 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             return -1;
         }
         table->set_new_table_name(spec->new_table_name->table.value);
+        DB_DEBUG("DDL_LOG schema_info[%s]", table->DebugString().c_str());
+
+    } else if (spec->spec_type == parser::ALTER_SPEC_ADD_INDEX) {
+        alter_request.set_op_type(pb::OP_ADD_INDEX);
+        int constraint_len = spec->new_constraints.size();
+
+        for (int idx = 0; idx < constraint_len; ++idx) {
+            parser::Constraint* constraint = spec->new_constraints[idx];
+            if (constraint == nullptr) {
+                DB_WARNING("constraint is nullptr");
+                return -1;
+            }
+            if (0 != add_constraint_def(*table, constraint)) {
+                DB_WARNING("add constraint to table failed.");
+                return -1;
+            }
+        }
+        DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
+
+    } else if (spec->spec_type == parser::ALTER_SPEC_DROP_INDEX) {
+        alter_request.set_op_type(pb::OP_DROP_INDEX);
+        if (spec->index_name.empty()) {
+            DB_WARNING("index_name is null.");
+            return -1;
+        }
+        pb::IndexInfo* index = table->add_indexs();
+        index->set_index_name(spec->index_name.value);
+        DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
     } else {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
         _ctx->stat_info.error_msg << "alter_specification type (" 
@@ -536,5 +579,62 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     }
     }
     return pb::INVALID_TYPE;
+}
+
+int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint) {
+    pb::IndexInfo* index = table.add_indexs();
+    pb::IndexType index_type;
+    switch (constraint->type) {
+        case parser::CONSTRAINT_INDEX:
+            index_type = pb::I_KEY;
+            break;
+        case parser::CONSTRAINT_UNIQ:
+            index_type = pb::I_UNIQ;
+            break;
+        case parser::CONSTRAINT_FULLTEXT:
+            index_type = pb::I_FULLTEXT;
+            if (constraint->columns.size() > 1) {
+                DB_WARNING("fulltext index only support one field.");
+                return -1;
+            }
+            break;
+        default:
+            DB_WARNING("only support uniqe、key index type");
+            return -1;
+    }
+    if (constraint->name.empty()) {
+        DB_WARNING("lack of index name");
+        return -1;
+    }
+    index->set_index_type(index_type);
+    index->set_index_name(constraint->name.value);
+
+    for (int32_t column_index = 0; column_index < constraint->columns.size(); ++column_index) {
+        index->add_field_names(constraint->columns[column_index]->name.value);
+    }
+    if (constraint->index_option != nullptr) {
+        rapidjson::Document root;
+        const char* value = constraint->index_option->comment.c_str();
+        try {
+            root.Parse<0>(value);
+            if (root.HasParseError()) {
+                rapidjson::ParseErrorCode code = root.GetParseError();
+                DB_WARNING("parse create table json comments error [code:%d][%s]", 
+                    code, value);
+                return -1;
+            }
+            auto json_iter = root.FindMember("segment_type");
+            if (json_iter != root.MemberEnd()) {
+                std::string segment_type = json_iter->value.GetString();
+                pb::SegmentType pb_segment_type = pb::S_DEFAULT;
+                SegmentType_Parse(segment_type, &pb_segment_type);
+                index->set_segment_type(pb_segment_type);
+            }
+        } catch (...) {
+            DB_WARNING("parse create table json comments error [%s]", value);
+            return -1;
+        }
+    }
+    return 0;
 }
 } // end of namespace baikaldb

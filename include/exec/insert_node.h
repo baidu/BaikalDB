@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -46,10 +46,16 @@ public:
     std::map<int64_t, std::vector<SmartRecord>>& records_by_region() {
         return _records_by_region;
     }
+    std::vector<ExprNode*>& insert_values() {
+        return _insert_values;
+    }
+    //std::vector<int32_t>& field_ids() {
+    //    return _field_ids;
+    //}
 
 private:
     std::vector<SmartRecord> _records;
-    std::vector<int32_t>     _field_ids;
+    std::vector<int32_t>     _prepared_field_ids;
     std::vector<ExprNode*>   _insert_values;
 
     // the insertion records grouped by region id

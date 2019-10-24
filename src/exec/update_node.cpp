@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ int UpdateNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _table_id =  node.derive_node().update_node().table_id();
+    _global_index_id = _table_id;
     for (auto& slot : node.derive_node().update_node().primary_slots()) {
         _primary_slots.push_back(slot);
     }
@@ -71,7 +72,8 @@ int UpdateNode::open(RuntimeState* state) {
     //临时存放被影响的index_id
     std::vector<int64_t> affected_indices;
     for (auto index_id : _affected_index_ids) {
-        IndexInfo& info = state->resource()->get_index_info(index_id);
+        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        IndexInfo& info = *info_ptr;
         bool has_id = false;
         for (auto& field : info.fields) {
             if (affect_field_ids.count(field.id) == 1) {
@@ -113,6 +115,15 @@ int UpdateNode::open(RuntimeState* state) {
             DB_WARNING_STATE(state, "children:get_next fail:%d", ret);
             return ret;
         }
+
+        // 不在事务模式下，采用小事务提交防止内存暴涨
+        // 最后一个batch和原txn放在一起，这样对小事务可以和原来保持一致
+        if (state->txn_id == 0 && !eos) {
+            _txn = state->create_batch_txn();
+        } else {
+            _txn = state->txn();
+        }
+
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             MemRow* row = batch.get_row().get();
             record->clear();
@@ -128,9 +139,16 @@ int UpdateNode::open(RuntimeState* state) {
             }
             num_affected_rows += ret;
         }
+
+        if (state->txn_id == 0 && !eos) {
+            if (state->is_separate) {
+                //batch单独走raft,raft on_apply中commit
+                state->raft_func(state, _txn);
+            } else {
+                _txn->commit();
+            }
+        }
     } while (!eos);
-    // auto_rollback.release();
-    // txn->commit();
     return num_affected_rows;
 }
 

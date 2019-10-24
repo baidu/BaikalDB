@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -904,6 +904,7 @@ static std::vector<MysqlErrorItem> mysql_err_item = {
     { ER_MAKE_RESULT_PACKET, "ER_MAKE_RESULT_PACKET", "HY000", "" },
     { ER_GEN_PLAN_FAILED, "ER_GEN_PLAN_FAILED", "HY000", "" },
     { ER_EXEC_PLAN_FAILED, "ER_EXEC_PLAN_FAILED", "HY000", "" },
-    { ER_QUERY_EXCEED_QUOTA, "ER_QUERY_EXCEED_QUOTA", "HY000", "" }
+    { ER_QUERY_EXCEED_QUOTA, "ER_QUERY_EXCEED_QUOTA", "HY000", "" },
+    { ER_SQL_TOO_BIG, "ER_SQL_TOO_BIG", "HY000", "" },
 };
 } // end of namespace baikaldb

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "runtime_state.h"
+#include "runtime_state_pool.h"
 #include "query_context.h"
 #include "network_socket.h"
 
@@ -23,7 +24,8 @@ RuntimeState::~RuntimeState() {}
 int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
-        TransactionPool* pool) {
+        TransactionPool* pool,
+        bool store_compute_separate) {
 
     for (auto& tuple : tuples) {
         _tuple_descs.push_back(tuple);
@@ -36,6 +38,7 @@ int RuntimeState::init(const pb::StoreReq& req,
         }
     }
     _region_id = req.region_id();
+    _region_version = req.region_version();
     if (req.has_not_check_region()) {
         _need_check_region = !req.not_check_region();
     }
@@ -60,11 +63,13 @@ int RuntimeState::init(const pb::StoreReq& req,
         DB_WARNING("error: txn pool is null: %ld", _region_id);
         return -1;
     }
+    is_separate = store_compute_separate;
     _log_id = req.log_id();
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
     if (_txn != nullptr) {
         _txn->set_region_info(&(_resource->region_info));
+        _txn->set_ddl_state(_resource->ddl_param_ptr);
     }
     return 0;
 }
@@ -97,6 +102,14 @@ int RuntimeState::init(const pb::CachePlan& commit_plan) {
         return -1;
     }
     return 0;
+}
+void RuntimeState::conn_id_cancel(uint64_t db_conn_id) {
+    if (_pool != nullptr) {
+        auto s = _pool->get(db_conn_id);
+        if (s != nullptr) {
+            s->cancel();
+        }
+    }
 }
 }
 

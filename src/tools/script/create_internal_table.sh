@@ -24,6 +24,7 @@ curl -d '{
         "table_name": "__baikaldb_instance",
         "database": "baikaldb",
         "namespace_name": "INTERNAL",
+        "resource_tag": "DMPxinghe",
         "fields": [ 
                     {
                         "field_name" : "instance_id",

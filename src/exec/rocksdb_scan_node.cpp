@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,19 +24,27 @@
 
 namespace baikaldb {
 int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
-    int i = 0;
     //int index_size = node.derive_node().scan_node().indexes_size();
     const pb::PlanNode& node = _pb_node;
     int sort_index = -1;
 
     std::multimap<uint32_t, int> prefix_ratio_id_mapping;
-    for (auto& pos_index : node.derive_node().scan_node().indexes()) {
+    std::set<int32_t> primary_fields;
+    for (int i = 0; i < node.derive_node().scan_node().indexes_size(); i++) {
+        auto& pos_index = node.derive_node().scan_node().indexes(i);
         int64_t index_id = pos_index.index_id();
-        IndexInfo* info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
             continue;
         }
         IndexInfo& info = *info_ptr;
+        auto index_state = info.state;
+        if (index_state != pb::IS_PUBLIC) {
+            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+                index_id, pb::IndexState_Name(index_state).c_str());
+            continue;
+        }
+
         int field_count = 0;
         for (auto& range : pos_index.ranges()) {
             if (range.has_left_field_cnt() && range.left_field_cnt() > 0) {
@@ -50,6 +58,9 @@ int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
         uint16_t prefix_ratio_round = prefix_ratio * 10;
         uint16_t index_priority = 0;
         if (info.type == pb::I_PRIMARY) {
+            for (int j = 0; j < field_count; j++) {
+                primary_fields.insert(info.fields[j].id);
+            }
             index_priority = 300;
         } else if (info.type == pb::I_UNIQ) {
             index_priority = 200;
@@ -57,6 +68,19 @@ int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
             index_priority = 100 + field_count;
         } else {
             index_priority = 0;
+        }
+        // 普通索引如果都包含在主键里，则不选
+        if (info.type == pb::I_UNIQ || info.type == pb::I_KEY) {
+            bool contain_by_primary = true;
+            for (int j = 0; j < field_count; j++) {
+                if (primary_fields.count(info.fields[j].id) == 0) {
+                    contain_by_primary = false;
+                    break;
+                }
+            }
+            if (contain_by_primary) {
+                continue;
+            }
         }
         uint32_t prefix_ratio_index_score = (prefix_ratio_round << 16) | index_priority;
         //DB_WARNING("scan node insert prefix_ratio_index_score:%u, i: %d", prefix_ratio_index_score, i);
@@ -69,14 +93,12 @@ int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
                 break;
             case pb::I_RECOMMEND:
                 return i;
-                break;
             default:
                 break;
         }
-        if (pos_index.has_sort_index()) {
+        if (pos_index.has_sort_index() && field_count > 0) {
             sort_index = i;
         }
-        ++i;
     }
     if (sort_index != -1) {
         return sort_index;
@@ -91,23 +113,24 @@ int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
 }
 
 int RocksdbScanNode::choose_index(RuntimeState* state) {
-    _table_info = &(state->resource()->table_info);
-    _pri_info = &(state->resource()->pri_info);
+    _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
+    _pri_info = SchemaFactory::get_instance()->get_index_info_ptr(_table_id);
 
     // 做完logical plan还没有索引
     if (_pb_node.derive_node().scan_node().indexes_size() == 0) {
-        return 0;
+        DB_FATAL_STATE(state, "no index");
+        return -1;
     }
 
     std::vector<int> multi_reverse_index;
     int idx = select_index(multi_reverse_index);
-    if (multi_reverse_index.size() == 1) {
+    if (multi_reverse_index.size() >= 1) {
         idx = multi_reverse_index[0];
     }
     const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(idx);
     _index_id = pos_index.index_id();
-    _index_info = &state->resource()->get_index_info(_index_id);
-    if (_index_info->id == -1) {
+    _index_info = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
+    if (_index_info == nullptr || _index_info->id == -1) {
         DB_WARNING_STATE(state, "no index_info found for index id: %ld", _index_id);
         return -1;
     }
@@ -117,24 +140,25 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         for (auto id : multi_reverse_index) {
             const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(id);
             auto index_id = pos_index.index_id();
-            IndexInfo& index_info = state->resource()->get_index_info(index_id);
-            if (index_info.id == -1) {
+            auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+            if (index_info == nullptr|| index_info->id == -1) {
                 DB_WARNING_STATE(state, "no index_info found for index id: %ld", index_id);
                 return -1;
             }
             for (auto& range : pos_index.ranges()) {
-                SmartRecord record = _factory->new_record(*_table_info);
+                SmartRecord record = _factory->new_record(_table_id);
                 record->decode(range.left_pb_record());
                 std::string word;
-                ret = record->get_reverse_word(index_info, word);
+                ret = record->get_reverse_word(*index_info, word);
                 if (ret < 0) {
                     DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", index_id);
                     return ret;
                 }
-                _reverse_infos.push_back(index_info);
+                _reverse_infos.push_back(*index_info);
                 _query_words.push_back(word);
             }
             _index_ids.push_back(index_id);
+            _bool_and = pos_index.bool_and();
             //DB_WARNING_STATE(state, "use multi %d", _reverse_infos.size());
         }
         return 0;
@@ -147,16 +171,18 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     //        _index_id, _table_id, pos_index.ranges(0).left_field_cnt(), pos_index.ranges(0).right_field_cnt());
 
     bool is_eq = true;
+    bool like_prefix = true;
     for (auto& range : pos_index.ranges()) {
         // 空指针容易出错
-        SmartRecord left_record = _factory->new_record(*_table_info);
-        SmartRecord right_record = _factory->new_record(*_table_info);
+        SmartRecord left_record = _factory->new_record(_table_id);
+        SmartRecord right_record = _factory->new_record(_table_id);
         left_record->decode(range.left_pb_record());
         right_record->decode(range.right_pb_record());
         int left_field_cnt = range.left_field_cnt();
         int right_field_cnt = range.right_field_cnt();
         bool left_open = range.left_open();
         bool right_open = range.right_open();
+        like_prefix = range.like_prefix();
         if (range.left_pb_record() != range.right_pb_record()) {
             is_eq = false;
         }
@@ -173,9 +199,10 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         _right_field_cnts.push_back(right_field_cnt);
         _left_opens.push_back(left_open);
         _right_opens.push_back(right_open);
+        _like_prefixs.push_back(like_prefix);
     }
     if (_index_info->type == pb::I_PRIMARY || _index_info->type == pb::I_UNIQ) {
-        if (_left_field_cnts[_idx] == (int)_index_info->fields.size() && is_eq) {
+        if (_left_field_cnts[_idx] == (int)_index_info->fields.size() && is_eq && !like_prefix) {
             //DB_WARNING_STATE(state, "index use get ,index:%ld", _index_info.id);
             _use_get = true;
         }
@@ -210,9 +237,9 @@ int RocksdbScanNode::init(const pb::PlanNode& node) {
 
 int RocksdbScanNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     //DB_WARNING("node:%ld is pushdown", this);
-    if (_parent->get_node_type() == pb::WHERE_FILTER_NODE
-            || _parent->get_node_type() == pb::TABLE_FILTER_NODE) {
-        //DB_WARNING("parent is filter node,%d", _parent->get_node_type());
+    if (_parent->node_type() == pb::WHERE_FILTER_NODE
+            || _parent->node_type() == pb::TABLE_FILTER_NODE) {
+        //DB_WARNING("parent is filter node,%d", _parent->node_type());
         return 0;
     }
     if (input_exprs.size() > 0) {
@@ -277,9 +304,9 @@ int RocksdbScanNode::index_condition_pushdown() {
         //DB_WARNING("parent is null");
         return 0;
     }
-    if (_parent->get_node_type() != pb::WHERE_FILTER_NODE &&
-            _parent->get_node_type() != pb::TABLE_FILTER_NODE) {
-        DB_WARNING("parent is not filter node:%d", _parent->get_node_type());
+    if (_parent->node_type() != pb::WHERE_FILTER_NODE &&
+            _parent->node_type() != pb::TABLE_FILTER_NODE) {
+        DB_WARNING("parent is not filter node:%d", _parent->node_type());
         return 0;
     }
     
@@ -313,16 +340,29 @@ int RocksdbScanNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "calc index fail:%d", ret);
         return ret;
     }
+    if (_index_info == nullptr) {
+        DB_WARNING_STATE(state, "index null:%d", ret);
+        return -1;
+    }
     if (_index_info->type == pb::I_RECOMMEND) {
         state->set_sort_use_index();
     } 
     if (_sort_use_index) {
         state->set_sort_use_index();
     }
-    for (auto& slot : _tuple_desc->slots()) {
-        _field_ids.push_back(slot.field_id());
+    std::set<int32_t> pri_field_ids;
+    for (auto& field_info : _pri_info->fields) {
+        pri_field_ids.insert(field_info.id);
     }
-    std::sort(_field_ids.begin(), _field_ids.end());
+    for (auto& slot : _tuple_desc->slots()) {
+        if (pri_field_ids.count(slot.field_id()) == 0) {
+            auto field = _table_info->get_field_ptr(slot.field_id());
+            // 这两个倒排的特殊字段
+            if (field->short_name != "__weight" && field->short_name != "__pic_scores") {
+                _field_ids[slot.field_id()] = _table_info->get_field_ptr(slot.field_id());
+            }
+        }
+    }
 
     _region_id = state->region_id();
     //DB_WARNING_STATE(state, "use_index: %ld table_id: %ld region_id: %ld", _index_id, _table_id, _region_id);
@@ -363,6 +403,9 @@ int RocksdbScanNode::open(RuntimeState* state) {
     // 索引条件下推，减少主表查询次数
     index_condition_pushdown();
     for (auto expr : _index_conjuncts) {
+        //pb::Expr pb;
+        //ExprNode::create_pb_expr(&pb, expr);
+        //DB_NOTICE("where:%s", pb.ShortDebugString().c_str());
         ret = expr->open();
         if (ret < 0) {
             DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
@@ -379,16 +422,15 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 return -1;
             }
         }
-        bool or_bool = true;
         //DB_WARNING_STATE(state, "_m_index search");
         // reverse has in, need not or boolean
-        if (_reverse_indexes.size() > _index_ids.size()) {
-            or_bool = false;
-        }
-        DB_NOTICE("or_bool:%d", or_bool);
+        //if (_reverse_indexes.size() > _index_ids.size()) {
+        //    or_bool = false;
+        //}
+        //DB_NOTICE("or_bool:%d", or_bool);
         // 为了性能,多索引倒排查找不seek
         _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                    _reverse_indexes, _query_words, true, or_bool);
+                    _reverse_indexes, _query_words, true, !_bool_and);
     } else if (reverse_index_map.count(_index_id) == 1) {
         //倒排索引不允许是多字段
         if (_index_info->fields.size() != 1) {
@@ -397,13 +439,19 @@ int RocksdbScanNode::open(RuntimeState* state) {
         }
         _reverse_index = reverse_index_map[_index_id];
         std::string word;
+        if (_left_records.empty()) {
+            DB_WARNING_STATE(state, "pb_node:%s", _pb_node.DebugString().c_str());
+            return -1;
+        }
         ret = _left_records[_idx]->get_reverse_word(*_index_info, word);
         if (ret < 0) {
             DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", _index_id);
             return ret;
         }
         //DB_NOTICE("word:%s", str_to_hex(word).c_str());
-        bool dont_seek = _index_info->type == pb::I_RECOMMEND;
+        //bool dont_seek = _index_info->type == pb::I_RECOMMEND;
+        // seek性能太差了，倒排索引都不做seek
+        bool dont_seek = true;
         ret = _reverse_index->search(txn->get_txn(), *_pri_info, *_table_info, 
                 word, _index_conjuncts, dont_seek);
         if (ret < 0) {
@@ -460,6 +508,11 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
     }
     SmartRecord record;
     while (1) {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            *eos = true;
+            return 0;
+        }
         if (reached_limit()) {
             *eos = true;
             return 0;
@@ -491,8 +544,18 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
 }
 
 int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos) {
+    bool is_global_index = false;
+    if (_region_info->has_main_table_id() 
+        && _region_info->main_table_id() != _region_info->table_id()) {
+        is_global_index = true;
+    }
     SmartRecord record;
     while (1) {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            *eos = true;
+            return 0;
+        }
         if (reached_limit()) {
             *eos = true;
             return 0;
@@ -513,7 +576,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
             //        _table_id, ret, record->to_string().c_str());
             continue;
         }
-        if (!_is_covering_index) {
+        if (!_is_covering_index && !is_global_index) {
             ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
             if (ret < 0) {
                 DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s", 
@@ -534,9 +597,14 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
 }
 
 int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
-    SmartRecord record = _factory->new_record(*_table_info);
+    SmartRecord record = _factory->new_record(_table_id);
     int64_t time = 0;
     while (1) {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            *eos = true;
+            return 0;
+        }
         if (reached_limit()) {
             *eos = true;
             return 0;
@@ -551,13 +619,14 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             } else {
                 IndexRange range(_left_records[_idx].get(), 
                         _right_records[_idx].get(), 
-                        _index_info,
-                        _pri_info,
+                        _index_info.get(),
+                        _pri_info.get(),
                         _region_info,
                         _left_field_cnts[_idx], 
                         _right_field_cnts[_idx], 
                         _left_opens[_idx], 
-                        _right_opens[_idx]);
+                        _right_opens[_idx],
+                        _like_prefixs[_idx]);
                 delete _table_iter;
                 _table_iter = Iterator::scan_primary(state->txn(), range, _field_ids, true, _scan_forward);
                 if (_table_iter == nullptr) {
@@ -591,9 +660,19 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
 }
 
 int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
+    bool is_global_index = false;
+    if (_region_info->has_main_table_id() 
+        && _region_info->main_table_id() != _region_info->table_id()) {
+        is_global_index = true;
+    }
     int ret = 0;
-    SmartRecord record = _factory->new_record(*_table_info);
+    SmartRecord record = _factory->new_record(_table_id);
     while (1) {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            *eos = true;
+            return 0;
+        }
         if (reached_limit()) {
             *eos = true;
             return 0;
@@ -619,13 +698,14 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 } else {
                     IndexRange range(_left_records[_idx].get(), 
                             _right_records[_idx].get(), 
-                            _index_info,
-                            _pri_info,
+                            _index_info.get(),
+                            _pri_info.get(),
                             _region_info,
                             _left_field_cnts[_idx], 
                             _right_field_cnts[_idx], 
                             _left_opens[_idx], 
-                            _right_opens[_idx]);
+                            _right_opens[_idx],
+                            _like_prefixs[_idx]);
                     delete _index_iter;
                     _index_iter = Iterator::scan_secondary(state->txn(), range, true, _scan_forward);
                     if (_index_iter == nullptr) {
@@ -654,6 +734,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             }
         } else {
             ret = _index_iter->get_next(record);
+            //DB_DEBUG("rocksdb_scan region_%lld record[%s]", _region_id, record->to_string().c_str());
             if (ret < 0) {
                 //DB_WARNING_STATE(state, "get index fail, maybe reach end");
                 continue;
@@ -666,21 +747,24 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             auto field = record->get_field_by_tag(pair.second);
             row->set_value(_tuple_id, pair.first, record->get_value(field));
         }
+        //DB_NOTICE("record_before:%s", record->debug_string().c_str());
         if (!need_copy(row.get(), _index_conjuncts)) {
             continue;
         }
         //DB_NOTICE("get index: %ld", cost.get_time());
         //cost.reset();
-        if (!_is_covering_index) {
+        if (!_is_covering_index && !is_global_index) {
             auto txn = state->txn();
             ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
             if (ret < 0) {
-                DB_FATAL("get primary:%ld fail, ret:%d, index primary may be not consistency: %s", 
-                        _table_id, ret, record->to_string().c_str());
+                if (_reverse_indexes.size() == 0 && _reverse_index == nullptr) {
+                    DB_FATAL("get primary:%ld fail, ret:%d, index primary may be not consistency: %s", 
+                            _table_id, ret, record->to_string().c_str());
+                }
                 continue;
             }
         }
-        //DB_NOTICE("get pri: %ld", cost.get_time());
+        //DB_NOTICE("record:%s", record->debug_string().c_str());
         //cost.reset();
         //row->set_tuple(_tuple_id, _mem_row_desc);
         for (auto slot : _tuple_desc->slots()) {
@@ -695,13 +779,29 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
 }
 void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
+    bool ignore_primary = false;
+    auto scan_pb = pb_node->mutable_derive_node()->mutable_scan_node();
+    // 临时代码，后面删除
+    for (auto i : scan_pb->ignore_indexes()) {
+        if (i == _router_index_id) {
+            ignore_primary = true;
+            break;
+        }
+    }
+    if (ignore_primary) {
+        for (auto& pos_index : *scan_pb->mutable_indexes()) {
+            if (pos_index.index_id() == _router_index_id) {
+                pos_index.mutable_ranges()->Clear();
+            }
+        }
+        return;
+    }
     if (region_id == 0 || _region_primary.count(region_id) == 0) {
         return;
     }
-    auto scan_pb = pb_node->mutable_derive_node()->mutable_scan_node();
     pb::PossibleIndex* primary = nullptr;
     for (auto& pos_index : *scan_pb->mutable_indexes()) {
-        if (pos_index.index_id() == _table_id) {
+        if (pos_index.index_id() == _router_index_id) {
             primary = &pos_index;
             break;
         }

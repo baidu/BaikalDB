@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,7 +33,6 @@ NetworkSocket::NetworkSocket() {
 
     in_pool = false;
     send_buf_offset = 0;
-    header_offset = 0;
     header_read_len = 0;
     fd = -1;
     port = 0;
@@ -41,8 +40,10 @@ NetworkSocket::NetworkSocket() {
     use_times = 0;
     is_authed = false;
     is_counted = false;
+    has_multi_packet = false;
     packet_id = 0;
     packet_len = 0;
+    current_packet_len = 0;
     packet_read_len = 0;
     is_handshake_send_partly = 0;
     last_insert_id = 0;
@@ -94,9 +95,6 @@ NetworkSocket::~NetworkSocket() {
 }
 
 void NetworkSocket::reset_send_buf() {
-    //send_buf.reset();
-    //send_buf = boost::make_shared<DataBuffer>();
-    //send_buf_offset = 0;
 }
 
 bool NetworkSocket::reset() {
@@ -116,15 +114,16 @@ bool NetworkSocket::reset() {
     memset(&addr, 0, sizeof(addr));
     fd = -1;
     in_pool = false;
+    has_multi_packet = false;
     socket_type = CLIENT_SOCKET;
     use_times = 0;
     send_buf_offset = 0;
     header_read_len = 0;
-    header_offset = 0;
     is_authed = false;
     is_counted = false;
     packet_id = 0;
     packet_len = 0;
+    current_packet_len = 0;
     packet_read_len = 0;
     is_handshake_send_partly = 0;
     is_auth_result_send_partly = 0;
@@ -187,12 +186,12 @@ void NetworkSocket::on_commit_rollback() {
 
 bool NetworkSocket::reset_when_err() {
     packet_len = 0;
+    current_packet_len = 0;
     packet_read_len = 0;
     packet_id = 0;
-
+    has_multi_packet = false;
     send_buf_offset = 0;
     header_read_len = 0;
-    header_offset = 0;
     is_auth_result_send_partly = 0;
     is_handshake_send_partly = 0;
     self_buf->byte_array_clear();
@@ -210,6 +209,11 @@ SocketPool::~SocketPool() {
         //delete sock;
     }
     pthread_mutex_destroy(&_pool_mutex);
+}
+
+uint64_t NetworkSocket::get_global_conn_id() {
+    uint64_t instance_part = server_instance_id & 0x7FFFFF;
+    return (instance_part << 40 | (conn_id & 0xFFFFFFFFFFUL));
 }
 
 SmartSocket SocketPool::fetch(SocketType type) {

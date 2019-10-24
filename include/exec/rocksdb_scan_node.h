@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,12 +21,15 @@
 #include "transaction.h"
 #include "reverse_index.h"
 #include "reverse_interface.h"
+#include "select_manager_node.h"
 
 namespace baikaldb {
 class ReverseIndexBase;
 class RocksdbScanNode : public ScanNode {
 public:
     RocksdbScanNode() {
+    }
+    RocksdbScanNode(pb::Engine engine): ScanNode(engine) {
     }
     virtual ~RocksdbScanNode() {
         for (auto expr : _index_conjuncts) {
@@ -56,11 +59,11 @@ public:
     std::map<int64_t, pb::PossibleIndex>* mutable_region_primary() {
         return &_region_primary;
     }
-    void set_related_fetcher_node(FetcherNode* fetcher_node) {
-        _related_fetcher_node = fetcher_node;
+    void set_related_manager_node(SelectManagerNode* manager_node) {
+        _related_manager_node = manager_node;
     }
-    FetcherNode* get_related_fetcher_node() const {
-        return _related_fetcher_node;
+    SelectManagerNode* get_related_manager_node() const {
+        return _related_manager_node;
     }
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
@@ -70,6 +73,18 @@ public:
         }
     }
     virtual int select_index(std::vector<int>& multi_reverse_index); 
+    void add_index_id(int64_t index_id) {
+        _index_ids.push_back(index_id);
+    }
+    const std::vector<int64_t>& index_ids() {
+        return _index_ids;
+    }
+    void set_covering_index(bool covering_index) {
+        _is_covering_index = covering_index;
+    }
+    bool covering_index() {
+        return _is_covering_index;
+    }
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -78,9 +93,9 @@ private:
     int choose_index(RuntimeState* state);
 
 private:
-    std::vector<int32_t> _field_ids;
+    std::map<int32_t, FieldInfo*> _field_ids;
     MemRowDescriptor* _mem_row_desc;
-    FetcherNode* _related_fetcher_node = NULL;
+    SelectManagerNode* _related_manager_node = NULL;
     SchemaFactory* _factory = nullptr;
     int64_t _index_id = -1;
     int64_t _region_id;
@@ -101,6 +116,7 @@ private:
     std::vector<int> _right_field_cnts;
     std::vector<bool> _left_opens;
     std::vector<bool> _right_opens;
+    std::vector<bool> _like_prefixs;
     size_t _idx = 0;
     //后续做下推用
     std::vector<ExprNode*> _index_conjuncts;
@@ -108,14 +124,15 @@ private:
     TableIterator* _table_iter = nullptr;
     ReverseIndexBase* _reverse_index = nullptr;
 
-    TableInfo*       _table_info;
-    IndexInfo*       _pri_info;
-    IndexInfo*       _index_info;
+    SmartTable       _table_info;
+    SmartIndex       _pri_info;
+    SmartIndex       _index_info;
     pb::RegionInfo*  _region_info;
     std::vector<IndexInfo> _reverse_infos;
     std::vector<std::string> _query_words;
     std::vector<ReverseIndexBase*> _reverse_indexes;
     MutilReverseIndex<CommonSchema> _m_index;
+    bool _bool_and = false;
 
     std::map<int64_t, pb::PossibleIndex> _region_primary;
     std::map<int32_t, int32_t> _index_slot_field_map;

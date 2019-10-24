@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -118,6 +118,8 @@ public:
     std::atomic<uint32_t>    query_count;
     std::map<int64_t, pb::RW> database;
     std::map<int64_t, pb::RW> table;
+    // show databases使用
+    std::set<int64_t> all_database;
     std::unordered_set<std::string> auth_ip_set;
 };
 } // namespace baikaldb

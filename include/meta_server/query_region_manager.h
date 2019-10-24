@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,7 +39,13 @@ public:
     void send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_set_peer(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_remove_region_request(std::string instance_address, int64_t region_id);
+    void check_region_and_update(
+            const std::unordered_map<int64_t, std::tuple<int64_t,int64_t, std::string, int64_t>>&  
+            region_version_map,
+            pb::ConsoleHeartBeatResponse* response);
 private:
+    void construct_query_region(const pb::RegionInfo* region_info, 
+            pb::QueryRegion* query_region_info);
     QueryRegionManager() {}
 }; //class
 

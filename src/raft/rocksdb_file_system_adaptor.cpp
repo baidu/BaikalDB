@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 #include "mut_table_key.h"
 #include "sst_file_writer.h"
 #include "meta_writer.h"
+#include "store.h"
 #include "log_entry_reader.h"
 
 namespace baikaldb {
@@ -91,6 +92,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     int64_t key_num = 0;
     std::string log_index_prefix = MetaWriter::get_instance()->log_index_key_prefix(_region_id);
     std::string txn_info_prefix = MetaWriter::get_instance()->transcation_pb_key_prefix(_region_id);
+    std::string pre_commit_prefix = MetaWriter::get_instance()->pre_commit_key_prefix(_region_id);
     while (count < size) {
         if (!iter_context->iter->Valid()
                 || !iter_context->iter->key().starts_with(iter_context->prefix)) {
@@ -100,6 +102,12 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         }
         //txn_info请求不发送，理论上leader上没有该类请求
         if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(txn_info_prefix)) {
+            iter_context->iter->Next();
+            continue;
+        }
+        if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(pre_commit_prefix)) {
+            DB_FATAL("region_id: %ld should not have this message, txn_id: %lu",
+                        MetaWriter::get_instance()->decode_pre_commit_key(iter_context->iter->key()));
             iter_context->iter->Next();
             continue;
         }
@@ -114,7 +122,9 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
             if (ret < 0) {
                 iter_context->done = true;
                 DB_FATAL("read txn info fail, may be has removed, region_id: %ld", _region_id);
-                return -1;
+                iter_context->iter->Next();
+                continue;
+                //return -1;
             }
             if (iter_context->offset >= offset) {
                 read_size += serialize_to_iobuf(portal, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id,  log_index));
@@ -374,12 +384,16 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
     TimeCost time_cost;
     (void) file_meta;
     std::string prefix;
+    std::string upper_bound;
     size_t len = path.size();
     if (is_snapshot_data_file(path)) {
         len -= SNAPSHOT_DATA_FILE.size();
-        MutTableKey prefix_key;
-        prefix_key.append_i64(_region_id);
-        prefix = prefix_key.data();
+        MutTableKey key;
+        key.append_i64(_region_id);
+        prefix = key.data();
+        key.append_u64(UINT64_MAX);
+        upper_bound = key.data();
+
     } else {
         len -= SNAPSHOT_META_FILE.size();
         prefix = MetaWriter::get_instance()->meta_info_prefix(_region_id);
@@ -396,8 +410,6 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
     }
     bool is_meta_reader = false;
     IteratorContext* iter_context = nullptr;
-    rocksdb::ReadOptions read_options;
-    read_options.snapshot = sc->snapshot;
     if (is_snapshot_data_file(path)) {
         is_meta_reader = false;
         iter_context = sc->data_context;
@@ -406,7 +418,12 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context = new IteratorContext;
             iter_context->prefix = prefix;
             iter_context->is_meta_sst = false;
+            iter_context->upper_bound = upper_bound;
+            iter_context->upper_bound_slice = iter_context->upper_bound;
+            rocksdb::ReadOptions read_options;
+            read_options.snapshot = sc->snapshot;
             read_options.total_order_seek = true;
+            read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
             rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_data_handle();
             iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
             iter_context->iter->Seek(prefix);
@@ -420,6 +437,8 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context = new IteratorContext;
             iter_context->prefix = prefix;
             iter_context->is_meta_sst = true;
+            rocksdb::ReadOptions read_options;
+            read_options.snapshot = sc->snapshot;
             read_options.prefix_same_as_start = true;
             read_options.total_order_seek = false;
             rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
@@ -488,7 +507,15 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
 
     _mutil_snapshot_cond.increase();
     // create new Rocksdb Snapshot
+    DB_WARNING("region_id: %ld try lock before open snapshot", _region_id);
+    auto region = Store::get_instance()->get_region(_region_id);
+    DB_WARNING("region_id: %ld get region success", _region_id);
+    region->lock_commit_meta_mutex();
+    DB_WARNING("region_id: %ld get lock before open snapshot", _region_id);
     _snapshots[path].first.reset(new SnapshotContext());
+    region = Store::get_instance()->get_region(_region_id);
+    region->unlock_commit_meta_mutex();
+    DB_WARNING("region_id: %ld relase lock before open snapshot", _region_id);
     _snapshots[path].second++;
     DB_WARNING("region_id: %ld open snapshot path: %s", _region_id, path.c_str());
     return true;

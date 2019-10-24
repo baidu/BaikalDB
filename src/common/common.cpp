@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 #include "common.h"
 #include <unordered_map>
 #include <cstdlib>
+#include <cctype>
 
 #ifdef BAIDU_INTERNAL
 #include <pb_to_json.h>
@@ -35,8 +36,12 @@ using google::protobuf::FieldDescriptorProto;
 namespace baikaldb {
 DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
 DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
-DEFINE_int32(snapshot_load_num, 8, "snapshot load concurrency, default 8");
+DEFINE_int32(service_lock_concurrency, 40, "service_write concurrency, default:40");
+DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
+DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
 DECLARE_string(default_physical_room);
+DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
+DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
         + (_end.tv_usec-_start.tv_usec); //macro second
@@ -267,7 +272,11 @@ std::string remove_quote(const char* str, char quote) {
 }
 
 std::string str_to_hex(const std::string& str) {
-    return rocksdb::Slice(str).ToString(true).c_str();
+    return rocksdb::Slice(str).ToString(true);
+}
+
+bool is_digits(const std::string& str) {
+    return std::all_of(str.begin(), str.end(), ::isdigit);
 }
 
 void stripslashes(std::string& str) {
@@ -402,5 +411,58 @@ int get_instance_from_bns(int* ret,
 #else
     return -1;
 #endif
+}
+
+static unsigned char to_hex(unsigned char x)   {   
+    return  x > 9 ? x + 55 : x + 48;   
+}
+
+static unsigned char from_hex(unsigned char x) {   
+    unsigned char y = '\0';  
+    if (x >= 'A' && x <= 'Z') { 
+        y = x - 'A' + 10;  
+    } else if (x >= 'a' && x <= 'z') { 
+        y = x - 'a' + 10;  
+    } else if (x >= '0' && x <= '9') {
+        y = x - '0';  
+    }
+    return y;  
+}  
+
+std::string url_decode(const std::string& str) {
+    std::string strTemp = "";  
+    size_t length = str.length();  
+    for (size_t i = 0; i < length; i++)  {  
+        if (str[i] == '+') {
+            strTemp += ' ';
+        }  else if (str[i] == '%')  {  
+            unsigned char high = from_hex((unsigned char)str[++i]);  
+            unsigned char low = from_hex((unsigned char)str[++i]);  
+            strTemp += high * 16 + low;  
+        }  
+        else strTemp += str[i];  
+    }  
+    return strTemp;  
+}
+
+std::string url_encode(const std::string& str) {
+    std::string strTemp = "";  
+    size_t length = str.length();  
+    for (size_t i = 0; i < length; i++) {  
+        if (isalnum((unsigned char)str[i]) ||   
+                (str[i] == '-') ||  
+                (str[i] == '_') ||   
+                (str[i] == '.') ||   
+                (str[i] == '~')) {
+            strTemp += str[i];  
+        } else if (str[i] == ' ') {
+            strTemp += "+";  
+        } else  {  
+            strTemp += '%';  
+            strTemp += to_hex((unsigned char)str[i] >> 4);  
+            strTemp += to_hex((unsigned char)str[i] % 16);  
+        }  
+    }  
+    return strTemp; 
 }
 }  // baikaldb

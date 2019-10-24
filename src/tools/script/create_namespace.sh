@@ -7,7 +7,7 @@ echo -e "创建namespace\n"
 curl -d '{
     "op_type":"OP_CREATE_NAMESPACE",
     "namespace_info":{
-        "namespace_name": "TEST_NAMESPACE",
+        "namespace_name": "TEST",
         "quota": 1048576
     }
 }' http://$1/MetaService/meta_manager

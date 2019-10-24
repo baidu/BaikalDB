@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@ public:
     static const std::string DATABASE_SCHEMA_IDENTIFY;
     static const std::string TABLE_SCHEMA_IDENTIFY;
     static const std::string REGION_SCHEMA_IDENTIFY;
+    static const std::string DDLWORK_IDENTIFY;
     
     static const std::string MAX_IDENTIFY;
 
@@ -81,13 +82,19 @@ public:
                                   pb::BaikalHeartBeatResponse* response,
                                   google::protobuf::Closure* done); 
 
+    virtual void console_heartbeat(google::protobuf::RpcController* controller,
+                                  const pb::ConsoleHeartBeatRequest* request,
+                                  pb::ConsoleHeartBeatResponse* response,
+                                  google::protobuf::Closure* done); 
+
     virtual void migrate(google::protobuf::RpcController* controller,
             const pb::MigrateRequest* /*request*/,
             pb::MigrateResponse* response,
             google::protobuf::Closure* done);
 
     void shutdown_raft();
-    
+    bool have_data();
+
 private:
     MetaServerInteract* meta_proxy(const std::string& plat) {
         if (_meta_interact_map.count(plat) == 1) {

@@ -26,6 +26,8 @@ enum ErrCode {
     CANNOT_ADD_PEER = 19;
     PEER_NOT_EQUAL  = 20;
     CONNECT_FAIL    = 21;
+    CANCELLED = 22;
+    DDL_UNIQUE_KEY_FAIL = 23;
 };
 
 enum PrimitiveType {
@@ -51,11 +53,6 @@ enum PrimitiveType {
     PLACE_HOLDER = 19;
 };
 
-//message ColumnType {
-//    required PrimitiveType primitive_type = 1;
-//    optional uint32 len = 2;
-//};
-
 enum SchemaType {
     DYNAMIC = 1;
     STATIC = 2;
@@ -64,6 +61,7 @@ enum SchemaType {
 enum Engine {
     ROCKSDB = 1;
     REDIS = 2;
+    ROCKSDB_CSTORE = 3;
 };
 
 message SlotDescriptor {

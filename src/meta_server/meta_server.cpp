@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@ DEFINE_int32(concurrency_num, 40, "concurrency num, default: 40");
 DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(e0_meta_bns, "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all", "");
 DEFINE_string(qa_meta_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "");
+DEFINE_string(dmp_meta_bns, "group.opera-online-baikalMeta-000-bj.DMP.all", "");
 #endif
 
 const std::string MetaServer::CLUSTER_IDENTIFY(1, 0x01);
@@ -55,6 +56,7 @@ const std::string MetaServer::DATABASE_SCHEMA_IDENTIFY(1, 0x03);
 const std::string MetaServer::TABLE_SCHEMA_IDENTIFY(1, 0x04);
 const std::string MetaServer::REGION_SCHEMA_IDENTIFY(1, 0x05);
 
+const std::string MetaServer::DDLWORK_IDENTIFY(1, 0x06);
 const std::string MetaServer::MAX_IDENTIFY(1, 0xFF);
 
 MetaServer::~MetaServer() {}
@@ -104,6 +106,8 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
     _meta_interact_map["ps"] = new MetaServerInteract;
     _meta_interact_map["ps"]->init_internal(FLAGS_ps_meta_bns);
+    _meta_interact_map["dmp"] = new MetaServerInteract;
+    _meta_interact_map["dmp"]->init_internal(FLAGS_dmp_meta_bns);
 #endif
     
     _init_success = true;
@@ -163,9 +167,15 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_REGION
             || request->op_type() == pb::OP_DROP_REGION
             || request->op_type() == pb::OP_SPLIT_REGION
+            || request->op_type() == pb::OP_MERGE_REGION
             || request->op_type() == pb::OP_UPDATE_BYTE_SIZE
             || request->op_type() == pb::OP_UPDATE_SPLIT_LINES
-            || request->op_type() == pb::OP_UPDATE_DISTS) {
+            || request->op_type() == pb::OP_UPDATE_SCHEMA_CONF
+            || request->op_type() == pb::OP_UPDATE_DISTS
+            || request->op_type() == pb::OP_MODIFY_RESOURCE_TAG
+            || request->op_type() == pb::OP_ADD_INDEX
+            || request->op_type() == pb::OP_DROP_INDEX
+            || request->op_type() == pb::OP_DELETE_DDLWORK) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,
@@ -184,6 +194,14 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
     }
     if (request->op_type() == pb::OP_SET_INSTANCE_MIGRATE) {
         ClusterManager::get_instance()->set_instance_migrate(request, response, log_id);
+        return;
+    }
+    if (request->op_type() == pb::OP_SET_FULL) {
+        ClusterManager::get_instance()->set_instance_full(request, response, log_id);
+        return;
+    }
+    if (request->op_type() == pb::OP_SET_NO_FULL) {
+        ClusterManager::get_instance()->set_instance_no_full(request, response, log_id);
         return;
     }
     if (request->op_type() == pb::OP_OPEN_LOAD_BALANCE) {
@@ -353,6 +371,10 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         QueryClusterManager::get_instance()->get_region_ids(request, response);
         break;                           
     }
+    case pb::QUERY_DDLWORK: {
+        QueryTableManager::get_instance()->get_ddlwork_info(request, response);
+        break;                           
+    }
     default: {
         DB_WARNING("invalid op_type, request:%s logid:%lu", 
                     request->ShortDebugString().c_str(), log_id);
@@ -416,69 +438,42 @@ void MetaServer::baikal_heartbeat(google::protobuf::RpcController* controller,
     }
 }
 
-static std::string plat_mapping(const std::string& plat) {
+void MetaServer::console_heartbeat(google::protobuf::RpcController* controller,
+                                  const pb::ConsoleHeartBeatRequest* request,
+                                  pb::ConsoleHeartBeatResponse* response,
+                                  google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+    uint64_t log_id = 0;
+    if (cntl->has_log_id()) {
+        log_id = cntl->log_id();
+    }
+    RETURN_IF_NOT_INIT(_init_success, response, log_id);
+    if (_meta_state_machine != nullptr) {
+        _meta_state_machine->console_heartbeat(controller, request, response, done_guard.release());
+    }
+}
+
+static std::string bns_to_plat(const std::string& bns) {
     static std::map<std::string, std::string> mapping = {
         {"e0", "e0"},
         {"qa", "qa"},
+        {"qadisk", "qa"},
     };
-    if (mapping.count(plat) == 1) {
-        return mapping[plat];
+    std::vector<std::string> vec;
+    boost::split(vec, bns, boost::is_any_of(".-"));
+    // DMP产品线采用独立的meta
+    if (vec.size() > 6 && vec[6] == "DMP") {
+        return "dmp";
+    } else if (vec.size() > 2) {
+        if (mapping.count(vec[2]) == 1) {
+            return mapping[vec[2]];
+        }
     }
     return "ps";
 }
 
-static unsigned char to_hex(unsigned char x)   {   
-    return  x > 9 ? x + 55 : x + 48;   
-}
-
-static unsigned char from_hex(unsigned char x) {   
-    unsigned char y = '\0';  
-    if (x >= 'A' && x <= 'Z') { 
-        y = x - 'A' + 10;  
-    } else if (x >= 'a' && x <= 'z') { 
-        y = x - 'a' + 10;  
-    } else if (x >= '0' && x <= '9') {
-        y = x - '0';  
-    }
-    return y;  
-}  
-
-static std::string url_decode(const std::string& str) {
-    std::string strTemp = "";  
-    size_t length = str.length();  
-    for (size_t i = 0; i < length; i++)  {  
-        if (str[i] == '+') {
-            strTemp += ' ';
-        }  else if (str[i] == '%')  {  
-            unsigned char high = from_hex((unsigned char)str[++i]);  
-            unsigned char low = from_hex((unsigned char)str[++i]);  
-            strTemp += high * 16 + low;  
-        }  
-        else strTemp += str[i];  
-    }  
-    return strTemp;  
-}
-
-static std::string url_encode(const std::string& str) {
-    std::string strTemp = "";  
-    size_t length = str.length();  
-    for (size_t i = 0; i < length; i++) {  
-        if (isalnum((unsigned char)str[i]) ||   
-                (str[i] == '-') ||  
-                (str[i] == '_') ||   
-                (str[i] == '.') ||   
-                (str[i] == '~')) {
-            strTemp += str[i];  
-        } else if (str[i] == ' ') {
-            strTemp += "+";  
-        } else  {  
-            strTemp += '%';  
-            strTemp += to_hex((unsigned char)str[i] >> 4);  
-            strTemp += to_hex((unsigned char)str[i] % 16);  
-        }  
-    }  
-    return strTemp; 
-}
 
 void MetaServer::migrate(google::protobuf::RpcController* controller,
                                  const pb::MigrateRequest* /*request*/,
@@ -500,13 +495,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
     static std::mutex bns_mutex;
     for (auto& instance : request.targets_list().instances()) {
         std::string bns = instance.name();
-        std::vector<std::string> vec;
-        std::string plat = "e0";
-        boost::split(vec, bns, boost::is_any_of("-"));
-        if (vec.size() > 2) {
-            plat = plat_mapping(vec[1]);
-        }
-        DB_WARNING("plat:%s", plat.c_str());
+        std::string plat = bns_to_plat(bns);
         std::string event = instance.event();
         auto res_instance = response->mutable_data()->mutable_targets_list()->add_instances();
         res_instance->set_name(bns);
@@ -526,6 +515,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
             ip_port = bns_instances[0];
         }
         if (event == "EXPECTED_MIGRATE") {
+            DB_WARNING("bns: %s, plat: %s allowed", bns.c_str(), plat.c_str());
             pb::MetaManagerRequest internal_req;
             pb::MetaManagerResponse internal_res;
             internal_req.set_op_type(pb::OP_SET_INSTANCE_MIGRATE);
@@ -543,6 +533,12 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
             BAIDU_SCOPED_LOCK(bns_mutex);
             bns_pre_ip_port[bns] = ip_port;
         } else if (event == "MIGRATED") {
+            if (instance.pre_host() == instance.post_host()) {
+                res_instance->set_status("SUCCESS");
+                DB_WARNING("instance not migrate, request: %s", instance.ShortDebugString().c_str());
+                DB_FATAL("bns: %s, plat: %s not migrate", bns.c_str(), plat.c_str());
+                //return;
+            }
             {
                 BAIDU_SCOPED_LOCK(bns_mutex);
                 if (bns != "" && bns_pre_ip_port.count(bns) == 1) {
@@ -574,6 +570,10 @@ void MetaServer::shutdown_raft() {
     if (_auto_incr_state_machine != nullptr) {
         _auto_incr_state_machine->shutdown_raft();
     }    
+}
+
+bool MetaServer::have_data() {
+    return _meta_state_machine->have_data() && _auto_incr_state_machine->have_data();
 }
 }//namespace
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

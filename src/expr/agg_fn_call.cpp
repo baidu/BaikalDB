@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -153,6 +153,7 @@ int AggFnCall::open() {
                 DB_WARNING("_agg_type:%d , _children.size() == 0", _agg_type)
                 return -1;
             }
+            break;
         default:
             return 0;
     }
@@ -271,7 +272,7 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
             if (!value.is_null()) {
                 std::string* hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
                 if (hll != NULL) {
-                    hll::hll_add((uint8_t*)hll->data(), value.hash());
+                    hll::hll_add(hll, value.hash());
                 }
             }
             return 0;
@@ -281,7 +282,7 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
             if (!value.is_null()) {
                 std::string* hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
                 if (hll != NULL) {
-                    hll::hll_merge((uint8_t*)hll->data(), (uint8_t*)value.str_val.data());
+                    hll::hll_merge(hll, &value.str_val);
                 }
             }
             return 0;
@@ -351,7 +352,7 @@ int AggFnCall::merge(MemRow* src, MemRow* dst) {
             std::string* src_hll = src->mutable_string(_tuple_id, _intermediate_slot_id);
             std::string* dst_hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
             if (src_hll != NULL && dst_hll != NULL) {
-                hll::hll_merge((uint8_t*)dst_hll->data(), (uint8_t*)src_hll->data());
+                hll::hll_merge(dst_hll, src_hll);
             }
             return 0;
         }
