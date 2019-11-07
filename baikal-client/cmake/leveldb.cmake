@@ -1,10 +1,10 @@
-# Copyright (c) 2019 Baidu, Inc. All Rights Reserved.
+# Copyright (c) 2016 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,27 +20,19 @@ SET(LEVELDB_INCLUDE_DIR "${LEVELDB_INSTALL_DIR}/include" CACHE PATH "leveldb inc
 SET(LEVELDB_LIBRARIES "${LEVELDB_INSTALL_DIR}/lib/libleveldb.a" CACHE FILEPATH "leveldb library." FORCE)
 INCLUDE_DIRECTORIES(${LEVELDB_INCLUDE_DIR})
 
+## level must be compile with CXXFLAGS=-fPIC for brpc
+## but it's pretty hard to pass it to BUILD_COMMAND
+## so we sed file to patch Makefile
 ExternalProject_Add(
         extern_leveldb
         ${EXTERNAL_PROJECT_LOG_ARGS}
         PREFIX ${LEVELDB_SOURCES_DIR}
         GIT_REPOSITORY "https://github.com/google/leveldb"
-        GIT_TAG "1.22"
-        UPDATE_COMMAND ""
-        CMAKE_ARGS -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-        -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
-        -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
-        -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
-        -DCMAKE_INSTALL_PREFIX=${LEVELDB_INSTALL_DIR}
-        -DLEVELDB_BUILD_TESTS=OFF
-        -DLEVELDB_BUILD_BENCHMARKS=OFF
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-        -DCMAKE_BUILD_TYPE=${THIRD_PARTY_BUILD_TYPE}
-        ${EXTERNAL_OPTIONAL_ARGS}
-        CMAKE_CACHE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${LEVELDB_INSTALL_DIR}
-        -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
-        -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
-        ${THIRD_PARTY_DEP_LOG}
+        GIT_TAG "v1.18"
+        CONFIGURE_COMMAND sed -i "s/CXXFLAGS += -fPIC//" ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/Makefile COMMAND sed -i "/CXXFLAGS +=/aCXXFLAGS += -fPIC" ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/Makefile
+        BUILD_IN_SOURCE 1
+        BUILD_COMMAND $(MAKE) -j ${NUM_OF_PROCESSOR} libleveldb.a
+        INSTALL_COMMAND mkdir -p ${LEVELDB_INSTALL_DIR}/lib/ COMMAND cp ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/libleveldb.a ${LEVELDB_LIBRARIES} COMMAND cp -r ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/include ${LEVELDB_INSTALL_DIR}/
 )
 
 ADD_LIBRARY(leveldb STATIC IMPORTED GLOBAL)

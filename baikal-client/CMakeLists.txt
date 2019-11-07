@@ -1,10 +1,29 @@
-cmake_minimum_required(VERSION 3.0)
+# Copyright (c) 2016 Baidu Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+cmake_minimum_required(VERSION 3.1)
 project(baikal_client C CXX)
+
+option(WITH_SYSTEM_LIBS "use system installed headers and libraries instead of auto dependency" OFF)
+option(WITH_DEBUG_SYMBOLS "With debug symbols" OFF)
 
 message(STATUS "CXX compiler: ${CMAKE_CXX_COMPILER}, version: "
         "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "C compiler: ${CMAKE_C_COMPILER}, version: "
         "${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # require at least gcc 4.8
@@ -22,8 +41,8 @@ else ()
 endif ()
 
 SET(THIRD_PARTY_PATH ${CMAKE_CURRENT_BINARY_DIR}/third-party)
-set(THIRD_PARTY_BUILD_TYPE Release)
-SET(THIRD_PARTY_DEP_LOG
+SET(THIRD_PARTY_BUILD_TYPE Release)
+SET(EXTERNAL_PROJECT_LOG_ARGS
         LOG_DOWNLOAD 1
         LOG_UPDATE 1
         LOG_CONFIGURE 1
@@ -39,52 +58,80 @@ message(NUM_OF_PROCESSOR: ${NUM_OF_PROCESSOR})
 include(FindOpenSSL)
 
 #zlib
-include(cmake/zlib.cmake)
+include(zlib)
 
 #boost
-set(Boost_USE_STATIC_LIBS ON)
-find_package(Boost 1.56.0 REQUIRED filesystem regex system thread)
+if (WITH_SYSTEM_LIBS)
+    set(Boost_NO_BOOST_CMAKE 1)
+    set(Boost_USE_MULTITHREADED ON)
+    set(Boost_USE_STATIC_LIBS ON)
+    find_package(Boost 1.56.0 REQUIRED thread)
+else ()
+    include(boost)
+endif ()
 message(boost: ${Boost_VERSION}, ${Boost_LIB_VERSION}, DIRS: ${Boost_INCLUDE_DIRS}, LIBS: ${Boost_LIBRARIES})
 
-#mysqlclient TODO..auto dep
-find_path(MYSQL_INCLUDE_PATH NAMES mysql.h)
-if (NOT MYSQL_INCLUDE_PATH)
-    message(FATAL_ERROR "Fail to find mysql")
+#mysqlclient
+if (WITH_SYSTEM_LIBS)
+    find_path(MARIADB_INCLUDE_DIR NAMES mariadb/mysql.h)
+    if (MARIADB_INCLUDE_DIR)
+        set(MARIADB_INCLUDE_DIR ${MARIADB_INCLUDE_DIR}/mariadb)
+    else ()
+        find_path(MARIADB_INCLUDE_DIR NAMES mysql.h)
+    endif ()
+    find_library(MARIADB_LIBRARIES NAMES mariadbclient)
+    if ((NOT MARIADB_INCLUDE_DIR) OR (NOT MARIADB_LIBRARIES))
+        message(FATAL_ERROR "Fail to find mariadbclient")
+    endif ()
+else ()
+    include(libmariadb)
 endif ()
-find_library(MYSQL_LIB NAMES mariadbclient)
-if (NOT MYSQL_LIB)
-    message(FATAL_ERROR "Fail to find mysql")
-endif ()
-message(mysqlclient: ${MYSQL_INCLUDE_PATH}, ${MYSQL_LIB})
+message(mysqlclient: ${MARIADB_INCLUDE_DIR}, ${MARIADB_LIBRARIES})
 
 #gflags
-include(cmake/gflags.cmake)
-#find_path(GFLAGS_INCLUDE_PATH NAMES gflags/gflags.h)
-#find_library(GFLAGS_LIB NAMES gflags)
-#if ((NOT GFLAGS_INCLUDE_PATH) OR (NOT GFLAGS_LIB))
-#    message(FATAL_ERROR "Fail to find gflags")
-#endif ()
+if (WITH_SYSTEM_LIBS)
+    find_path(GFLAGS_INCLUDE_DIR NAMES gflags/gflags.h)
+    find_library(GFLAGS_LIBRARIES NAMES gflags)
+    if ((NOT GFLAGS_INCLUDE_DIR) OR (NOT GFLAGS_LIBRARIES))
+        message(FATAL_ERROR "Fail to find gflags")
+    endif ()
+else ()
+    include(gflags)
+endif ()
 
 #glog
-include(cmake/glog.cmake)
-#find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
-#find_library(GLOG_LIB NAMES glog)
-#if ((NOT GLOG_INCLUDE_PATH) OR (NOT GLOG_LIB))
-#    message(FATAL_ERROR "Fail to find glog")
-#endif ()
+if (WITH_SYSTEM_LIBS)
+    find_path(GLOG_INCLUDE_DIR NAMES glog/logging.h)
+    find_library(GLOG_LIBRARIES NAMES glog)
+    if ((NOT GLOG_INCLUDE_DIR) OR (NOT GLOG_LIBRARIES))
+        message(FATAL_ERROR "Fail to find glog")
+    endif ()
+else ()
+    include(glog)
+endif ()
 
-#protobuf(for protobuf)
-include(cmake/protobuf.cmake)
-#leveldb(for brpc)
-include(cmake/leveldb.cmake)
 #brpc
-include(cmake/brpc.cmake)
-#find_path(BRPC_INCLUDE_PATH NAMES brpc/server.h)
-#find_library(BRPC_LIB NAMES libbrpc.a brpc)
-#if ((NOT BRPC_INCLUDE_PATH) OR (NOT BRPC_LIB))
-#    message(FATAL_ERROR "Fail to find brpc")
-#endif ()
-message(brpc lib : ${BRPC_LIBRARIES})
+if (WITH_SYSTEM_LIBS)
+    #protobuf(for brpc)
+    include(FindProtobuf)
+
+    #leveldb(for brpc)
+    find_library(LEVELDB_LIBRARIES NAMES leveldb)
+    if (NOT LEVELDB_LIBRARIES)
+        message(FATAL_ERROR "Fail to find leveldb")
+    endif ()
+
+    find_path(BRPC_INCLUDE_DIR NAMES brpc/server.h)
+    find_library(BRPC_LIBRARIES NAMES libbrpc.a brpc)
+    if ((NOT BRPC_INCLUDE_DIR) OR (NOT BRPC_LIBRARIES))
+        message(FATAL_ERROR "Fail to find brpc")
+    endif ()
+else ()
+    include(protobuf)
+    include(leveldb)
+    include(brpc)
+endif ()
+message(BRPC:${BRPC_INCLUDE_DIR}, ${BRPC_LIBRARIES})
 
 #tcmalloc
 #find_library(TCMALLOC_LIB NAMES tcmalloc)
@@ -95,53 +142,39 @@ message(brpc lib : ${BRPC_LIBRARIES})
 message(CUR_DIR : ${CMAKE_CURRENT_BINARY_DIR}, SRC_DIR : ${CMAKE_SOURCE_DIR})
 
 set(DEP_INC
-        ${CMAKE_CURRENT_BINARY_DIR}/proto
-
-        ${ZLIB_INCLUDE_DIR}
-
-        ${Boost_INCLUDE_DIRS}
         ${OPENSSL_INCLUDE_DIR}
-
+        ${ZLIB_INCLUDE_DIR}
+        ${Boost_INCLUDE_DIRS}
         ${GFLAGS_INCLUDE_DIR}
         ${GLOG_INCLUDE_DIR}
         ${BRPC_INCLUDE_DIR}
-
-        #        ${TCMALLOC_INCLUDE_PATH}
-        ${MYSQL_INCLUDE_PATH}/mariadb
+        ${MARIADB_INCLUDE_DIR}
+        #${TCMALLOC_INCLUDE_PATH}
         )
 
 set(DEP_LIB
-        ${CMAKE_THREAD_LIBS_INIT}
-
+        ${OPENSSL_LIBRARIES}
         ${ZLIB_LIBRARIES}
         ${Boost_LIBRARIES}
-        ${OPENSSL_LIBRARIES}
-
         ${GFLAGS_LIBRARIES}
         ${GLOG_LIBRARIES}
+        ${LEVELDB_LIBRARIES}
         ${BRPC_LIBRARIES}
-
-        #        ${TCMALLOC_LIB}
-
-        ${MYSQL_LIB}
-
+        ${MARIADB_LIBRARIES}
+        #${TCMALLOC_LIB}
         dl
         pthread
         )
 
-message("dep inc : ${DEP_INC}")
-message("dep lib : ${DEP_LIB}")
+message("DEP INCLUDE: ${DEP_INC}")
+message("DEP LIBRARY: ${DEP_LIB}")
 
-include_directories(
-        ${DEP_INC}
-        include
-)
-link_libraries(
-        ${DEP_LIB}
-)
+if(WITH_DEBUG_SYMBOLS)
+    set(DEBUG_SYMBOL "-ggdb")
+endif()
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -ggdb -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 -ggdb -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter")
 
 macro(use_cxx11)
     if (CMAKE_VERSION VERSION_LESS "3.1.3")
@@ -210,7 +243,11 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/lib)
 
 add_library(baikal_client ${BAIKAL_CLIENT})
-add_dependencies(baikal_client brpc)
+if (NOT WITH_SYSTEM_LIBS)
+    add_dependencies(baikal_client boost brpc mariadb)
+endif ()
+include_directories(${DEP_INC} include)
+target_link_libraries(baikal_client ${DEP_LIB})
 
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/include)

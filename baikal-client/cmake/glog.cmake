@@ -1,4 +1,4 @@
-# Copyright (c) 2019 Baidu, Inc. All Rights Reserved.
+# Copyright (c) 2019 PaddlePaddle, Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -56,7 +56,6 @@ ExternalProject_Add(
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DWITH_GFLAGS=ON
         -Dgflags_DIR=${GFLAGS_INSTALL_DIR}/lib/cmake/gflags
-#        -Dgflags_NAMESPACE=google
         -DBUILD_TESTING=OFF
         -DCMAKE_BUILD_TYPE=${THIRD_PARTY_BUILD_TYPE}
         -DCMAKE_PREFIX_PATH=${prefix_path}
@@ -65,7 +64,6 @@ ExternalProject_Add(
         -DCMAKE_INSTALL_LIBDIR:PATH=${GLOG_INSTALL_DIR}/lib
         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
-        ${THIRD_PARTY_DEP_LOG}
 )
 
 ADD_LIBRARY(glog STATIC IMPORTED GLOBAL)

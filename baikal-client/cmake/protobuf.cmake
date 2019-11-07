@@ -1,4 +1,4 @@
-# Copyright (c) 2019 Baidu, Inc. All Rights Reserved.
+# Copyright (c) 2019 PaddlePaddle, Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -176,7 +176,6 @@ FUNCTION(build_protobuf TARGET_NAME BUILD_FOR_HOST)
             -DCMAKE_VERBOSE_MAKEFILE:BOOL=OFF
             -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
             ${OPTIONAL_CACHE_ARGS}
-            ${THIRD_PARTY_DEP_LOG}
     )
 ENDFUNCTION()
 
