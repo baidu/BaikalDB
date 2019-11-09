@@ -1,10 +1,10 @@
-# Copyright (c) 2016 Baidu Authors. All Rights Reserved.
+# Copyright (c) 2019 Baidu, Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -58,7 +58,11 @@ message(NUM_OF_PROCESSOR: ${NUM_OF_PROCESSOR})
 include(FindOpenSSL)
 
 #zlib
-include(zlib)
+if (NOT WITH_SYSTEM_LIBS)
+    include(zlib)
+else()
+    set(ZLIB_LIBRARIES z)
+endif()
 
 #boost
 if (WITH_SYSTEM_LIBS)
@@ -209,16 +213,6 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     CHECK_FUNCTION_EXISTS(clock_gettime HAVE_CLOCK_GETTIME)
     if (NOT HAVE_CLOCK_GETTIME)
         set(DEFINE_CLOCK_GETTIME "-DNO_CLOCK_GETTIME_IN_MAC")
-    endif ()
-endif ()
-
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    #required by butil/crc32.cc to boost performance for 10x
-    if (NOT (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.4))
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4 -msse4.2")
-    endif ()
-    if (NOT (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7.0))
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-aligned-new")
     endif ()
 endif ()
 
