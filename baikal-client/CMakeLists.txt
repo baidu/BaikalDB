@@ -43,12 +43,12 @@ endif ()
 SET(THIRD_PARTY_PATH ${CMAKE_CURRENT_BINARY_DIR}/third-party)
 SET(THIRD_PARTY_BUILD_TYPE Release)
 SET(EXTERNAL_PROJECT_LOG_ARGS
-        LOG_DOWNLOAD 1
+        LOG_DOWNLOAD 0
         LOG_UPDATE 1
-        LOG_CONFIGURE 1
-        LOG_BUILD 1
+        LOG_CONFIGURE 0
+        LOG_BUILD 0
         LOG_TEST 1
-        LOG_INSTALL 1)
+        LOG_INSTALL 0)
 
 include(ProcessorCount)
 ProcessorCount(NUM_OF_PROCESSOR)
@@ -249,3 +249,5 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/lib)
 file(COPY ${CMAKE_SOURCE_DIR}/include/
         DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/output/include/
         FILES_MATCHING PATTERN "*.h")
+
+#TODO.. install

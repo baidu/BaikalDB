@@ -18,27 +18,41 @@ SET(MARIADB_SOURCES_DIR ${THIRD_PARTY_PATH}/mariadb)
 SET(MARIADB_DOWNLOAD_DIR ${MARIADB_SOURCES_DIR}/src/extern_mariadb)
 SET(MARIADB_INSTALL_DIR ${THIRD_PARTY_PATH}/install/mariadb)
 SET(MARIADB_INCLUDE_DIR "${MARIADB_INSTALL_DIR}/include/mariadb" CACHE PATH "mariadb include directory." FORCE)
-SET(MARIADB_LIBRARIES "${MARIADB_INSTALL_DIR}/lib/mariadb/libmariadb.a" CACHE FILEPATH "mariadb library." FORCE)
+SET(MARIADB_LIBRARIES "${MARIADB_INSTALL_DIR}/lib/mariadb/libmariadbclient.a" CACHE FILEPATH "mariadb library." FORCE)
 INCLUDE_DIRECTORIES(${MARIADB_INCLUDE_DIR})
 
-FILE(WRITE ${MARIADB_DOWNLOAD_DIR}/CMakeLists.txt
-        "PROJECT(MARIADB)\n"
-        "cmake_minimum_required(VERSION 3.0)\n"
-        "install(DIRECTORY mariadb-connector-c-2.3.1-linux-x86_64/include mariadb-connector-c-2.3.1-linux-x86_64/lib \n"
-        "        DESTINATION mariadb)\n")
+set(prefix_path "${THIRD_PARTY_PATH}/install/zlib")
 
 ExternalProject_Add(
         extern_mariadb
         ${EXTERNAL_PROJECT_LOG_ARGS}
+        DEPENDS zlib
         PREFIX ${MARIADB_SOURCES_DIR}
-        DOWNLOAD_DIR ${MARIADB_DOWNLOAD_DIR}
-        DOWNLOAD_NO_PROGRESS 1
-        DOWNLOAD_COMMAND wget --no-check-certificate https://downloads.mariadb.com/Connectors/c/connector-c-2.3.1/mariadb-connector-c-2.3.1-linux-x86_64.tar.gz -O mc.tar.gz COMMAND tar -zxf mc.tar.gz
+        GIT_REPOSITORY https://github.com/MariaDB/mariadb-connector-c.git
+        GIT_TAG "v2.3.1"
         UPDATE_COMMAND ""
-        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${THIRD_PARTY_PATH}/install
-        CMAKE_CACHE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${THIRD_PARTY_PATH}/install
+        CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+        -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+        -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
+        -DCMAKE_CXX_FLAGS_RELEASE=${CMAKE_CXX_FLAGS_RELEASE}
+        -DCMAKE_CXX_FLAGS_DEBUG=${CMAKE_CXX_FLAGS_DEBUG}
+        -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+        -DCMAKE_C_FLAGS_DEBUG=${CMAKE_C_FLAGS_DEBUG}
+        -DCMAKE_C_FLAGS_RELEASE=${CMAKE_C_FLAGS_RELEASE}
+        -DBUILD_STATIC_LIBS=ON
+        -DCMAKE_INSTALL_PREFIX=${MARIADB_INSTALL_DIR}
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DCMAKE_BUILD_TYPE=${THIRD_PARTY_BUILD_TYPE}
+        -DCMAKE_PREFIX_PATH=${prefix_path}
+        -DWITH_MYSQLCOMPAT=OFF
+        -DWITH_EXTERNAL_ZLIB=ON
+        ${EXTERNAL_OPTIONAL_ARGS}
+        LIST_SEPARATOR |
+        CMAKE_CACHE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${MARIADB_INSTALL_DIR}
+        -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
+        -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
 )
 
 ADD_LIBRARY(mariadb STATIC IMPORTED GLOBAL)
 SET_PROPERTY(TARGET mariadb PROPERTY IMPORTED_LOCATION ${MARIADB_LIBRARIES})
-ADD_DEPENDENCIES(mariadb extern_mariadb)
+ADD_DEPENDENCIES(mariadb extern_mariadb zlib)
