@@ -106,6 +106,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     //DB_WARNING_STATE(state, "insert record: %s", record->debug_string().c_str());
     int ret = 0;
     int affected_rows = 0;
+    bool delete_before_put_primary = !_affect_primary && is_update;
     auto& reverse_index_map = state->reverse_index_map();
     if (_on_dup_key_update) {
         _dup_update_row->clear();
@@ -172,6 +173,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                         DB_WARNING_STATE(state, "remove fail, table_id:%ld ,ret:%d", _table_id, ret);
                         return -1;
                     }
+                    delete_before_put_primary = true;
                     ++affected_rows;
                 } else {
                     DB_WARNING_STATE(state, "insert row must not exist, index:%ld, ret:%d", _table_id, ret);
@@ -304,9 +306,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     // 列存为节省空间, 插入默认值时不会put, 因此不会覆盖未被删除的旧值
     // 更新时, _affect_primary=false时旧值会保留, 需要删除旧值
     // 替换时, _affect_primary=true且旧行已存在时, 需要删除旧值
-    ret = _txn->put_primary(_region_id, *_pri_info, record,
-            (!_affect_primary && is_update) ||
-            (_affect_primary && (ret==0) &&_is_replace));
+    ret = _txn->put_primary(_region_id, *_pri_info, record, delete_before_put_primary);
     if (ret < 0) {
         DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;

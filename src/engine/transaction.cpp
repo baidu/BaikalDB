@@ -847,8 +847,9 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
         std::string value;
         bool update_by_delete_old = false;
         // if the field value is null or default_value
-        if (record->encode_field(field_info, value) != 0) {
-            if (is_update) { // delete when update
+        int ret = record->encode_field(field_info, value);
+        if (ret != 0) {
+            if (is_update && ret == -3) { // delete old when update default
                 update_by_delete_old = true;
             } else { // skip null or default_value fields when insert
                 DB_DEBUG("no value for field=%d", field_id);

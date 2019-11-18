@@ -127,15 +127,20 @@ public:
                 }
                 switch (field->cpp_type()) {
                 case FieldDescriptor::CPPTYPE_INT32: {
-                    uint32_t raw_val = get_varint<uint32_t>();
-                    int32_t value = 0;
-                    if (raw_val & 0x1) {
-                        value = (raw_val << 31) | ~(raw_val >> 1);
+                    if (field->type() == FieldDescriptor::TYPE_INT32 ||
+                        field->type() == FieldDescriptor::TYPE_SINT32 ) {
+                        uint32_t raw_val = get_varint<uint32_t>();
+                        int32_t value = 0;
+                        if (raw_val & 0x1) {
+                            value = (raw_val << 31) | ~(raw_val >> 1);
+                        } else {
+                            value = (raw_val >> 1);
+                        }
+                        record->set_int32(field, value);
+                        //DB_WARNING("value: %d", value);
                     } else {
-                        value = (raw_val >> 1);
+                        record->set_int32(field, get_fixed<uint32_t>());
                     }
-                    //DB_WARNING("value: %d", value);
-                    record->set_int32(field, value);
                 } break;
                 case FieldDescriptor::CPPTYPE_UINT32: {
                     if (field->type() == FieldDescriptor::TYPE_UINT32) {
