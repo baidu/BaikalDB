@@ -61,7 +61,7 @@ enum FuncType {
     FT_LOGIC_AND,
     FT_LOGIC_OR,
     FT_LOGIC_XOR,
-    // is like in null ture
+    // is like in null true
     FT_IS_NULL,
     FT_IS_TRUE,
     FT_IS_UNKNOWN,
