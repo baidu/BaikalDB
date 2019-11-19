@@ -668,7 +668,7 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
         return -1;
     }
     if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field: %d", field->number());
+        DB_DEBUG("missing field: %d", field->number());
         return -2;
     }
     // skip default value

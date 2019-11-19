@@ -272,7 +272,8 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
 
 //TODO: finer return status
 //return -3 when region not match
-int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record, bool is_update) {
+int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record,
+                             bool delete_before_put_primary) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
     MutTableKey key;
@@ -303,7 +304,7 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         }
         // cstore, put non-pk columns values to db
         if (is_cstore()) {
-            return put_primary_columns(key, record, is_update);
+            return put_primary_columns(key, record, delete_before_put_primary);
         }
     }
     //DB_WARNING("put primary, region_id: %ld, index_id: %ld, put_key: %s, put_value: %s",
@@ -832,7 +833,8 @@ void Transaction::rollback_to_point(int seq_id) {
 //    }
 }
 // for cstore only, only put column which HasField in record
-int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord record, bool is_update) {
+int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord record,
+                                     bool delete_before_put_primary) {
     if (_table_info.get() == nullptr) {
         DB_WARNING("no table_info");
         return -1;
@@ -849,7 +851,7 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
         // if the field value is null or default_value
         int ret = record->encode_field(field_info, value);
         if (ret != 0) {
-            if (is_update && ret == -3) { // delete old when update default
+            if (delete_before_put_primary && ret == -3) { // delete old when update default
                 update_by_delete_old = true;
             } else { // skip null or default_value fields when insert
                 DB_DEBUG("no value for field=%d", field_id);
