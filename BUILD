@@ -516,6 +516,10 @@ cc_binary(
         "include/engine",
         "include/common",
     ],
+    copts = [
+        "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
+        "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
+    ],
     deps = [
         ":meta_server",
         ":cc_baikaldb_internal_proto",
@@ -524,6 +528,7 @@ cc_binary(
         ":raft",
         ":raft_meta",
         "@boost//:filesystem",
+        "//external:tcmalloc_and_profiler",
     ],
     linkstatic = True,
 )
@@ -533,6 +538,10 @@ cc_binary(
     srcs = ["src/store/main.cpp"],
     includes = [
         "include/store",
+    ],
+    copts = [
+        "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
+        "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
     ],
     deps = [
         ":store",
@@ -550,6 +559,7 @@ cc_binary(
         ":physical_plan",
         ":logical_plan",
         ":mem_row",
+        "//external:tcmalloc_and_profiler",
     ],
     linkstatic = True,
 )
@@ -639,7 +649,10 @@ cc_library(
 cc_binary(
     name = "baikaldb",
     srcs = ["src/protocol/main.cpp"],
-    copts = COPTS,
+    copts = COPTS + [
+        "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
+        "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
+    ],
     deps = [
         ":protocol2",
         ":common",
@@ -655,6 +668,7 @@ cc_binary(
         ":physical_plan2",
         ":logical_plan",
         ":mem_row",
+        "//external:tcmalloc_and_profiler",
     ],
     linkstatic = True,
 )

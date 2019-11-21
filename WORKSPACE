@@ -133,7 +133,7 @@ bind(
 git_repository(
     name = "com_github_brpc_brpc",
     remote= "https://github.com/apache/incubator-brpc.git",
-    tag = "v0.9.0",
+    tag = "0.9.7-rc01",
 )
 
 bind(
@@ -159,4 +159,18 @@ bind(
 bind(
     name = "json2pb",
     actual = "@com_github_brpc_brpc//:json2pb",
+)
+
+# gperftools
+new_http_archive(
+    name = "com_github_gperftools_gperftools",
+    url = "https://github.com/gperftools/gperftools/archive/gperftools-2.7.tar.gz",
+    strip_prefix = "gperftools-gperftools-2.7",
+    sha256 = "3a88b4544315d550c87db5c96775496243fb91aa2cea88d2b845f65823f3d38a",
+    build_file = "third-party/gperftools.BUILD",
+)
+
+bind(
+    name = "tcmalloc_and_profiler",
+    actual = "@com_github_gperftools_gperftools//:tcmalloc_and_profiler",
 )
