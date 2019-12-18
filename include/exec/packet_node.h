@@ -52,6 +52,7 @@ public:
     }
 
 private:
+    int handle_trace(RuntimeState* state);
     int handle_explain(RuntimeState* state);
     int pack_ok(int num_affected_rows, NetworkSocket* client);
     // 先不用，err在外部填

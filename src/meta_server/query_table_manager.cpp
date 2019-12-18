@@ -509,11 +509,7 @@ void QueryTableManager::decode_key(int64_t table_id, const TableKey& start_key, 
 }
 
 void QueryTableManager::get_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response) {
-    std::vector<pb::DdlWorkInfo> ddlwork_infos;
-    TableManager::get_instance()->get_ddlwork_info(request->table_id(), ddlwork_infos);
-    for (const auto& ddlwork : ddlwork_infos) {
-        response->add_ddlwork_infos()->CopyFrom(ddlwork);
-    }
+    TableManager::get_instance()->get_ddlwork_info(request->table_id(), response);
 }
 }//namespace 
 

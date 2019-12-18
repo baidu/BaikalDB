@@ -273,10 +273,10 @@ public:
         _instance_info[instance].capacity = instance_info.capacity();
         _instance_info[instance].used_size = instance_info.used_size();
         _instance_info[instance].resource_tag = instance_info.resource_tag();
+        _instance_info[instance].instance_status.timestamp = butil::gettimeofday_us();
         if (_instance_info[instance].instance_status.state != pb::MIGRATE) {
             _instance_info[instance].instance_status.state = pb::NORMAL;
         }
-        _instance_info[instance].instance_status.timestamp = butil::gettimeofday_us();
         return 0;
     }
     

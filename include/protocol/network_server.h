@@ -19,7 +19,6 @@
 #include "state_machine.h"
 #include "epoll_info.h"
 #include "machine_driver.h"
-#include "infinite_timer.h"
 #include "proto/meta.interface.pb.h"
 #include "schema_factory.h"
 #include "common.h"
@@ -49,15 +48,6 @@ public:
 
     bool get_shutdown() { return _shutdown; }
 
-    void thread_alive_check();
-    void connection_timeout_check();
-    void start_io_service() {
-        _ios.run();
-    }
-
-    boost::asio::io_service* get_io_service() {
-        return &_ios;
-    }
     EpollInfo* get_epoll_info() {
         return _epoll_info;
     }
@@ -80,6 +70,7 @@ private:
 
     int fetch_instance_info();
 
+    void connection_timeout_check();
     void report_heart_beat();
     void print_agg_sql();
     void recovery_transactions();
@@ -98,15 +89,13 @@ private:
 
     // the last action time for each thread
     std::vector<ThreadTimeStamp> _last_time;
-    pthread_t       _timer_tid;
+    Bthread         _conn_check_bth;
     Bthread         _heartbeat_bth;
     Bthread         _recover_bth;
     Bthread         _agg_sql_bth;
     uint32_t        _driver_thread_num;
-    //Cache           _cache;
     uint64_t        _instance_id = 0;
 
-    boost::asio::io_service _ios;
 };
 
 } // namespace baikal

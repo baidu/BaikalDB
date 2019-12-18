@@ -82,10 +82,19 @@ void RegionControl::compact_data(int64_t region_id) {
     DB_WARNING("region_id: %ld, compact_range cost:%ld", region_id, cost.get_time());
 }
 void RegionControl::compact_data_in_queue(int64_t region_id) {
+    static ThreadSafeMap<int64_t, bool> in_compact_regions;
+    if (in_compact_regions.count(region_id) == 1) {
+        DB_WARNING("region_id: %ld have be put in queue before", region_id);
+        return;
+    }
+    in_compact_regions[region_id] = true;
     Store::get_instance()->compact_queue().run([region_id]() {
-        if (Store::get_instance()->get_is_running()) {
-            RegionControl::compact_data(region_id);
-            bthread_usleep(FLAGS_compact_interval * 1000 * 1000LL);
+        if (in_compact_regions.count(region_id) == 0) {
+            if (!Store::get_instance()->is_shutdown()) {
+                RegionControl::compact_data(region_id);
+                in_compact_regions.erase(region_id);
+                bthread_usleep(FLAGS_compact_interval * 1000 * 1000LL);
+            }
         }
     });
 }
@@ -214,11 +223,11 @@ void RegionControl::raft_control(google::protobuf::RpcController* controller,
     //每个region同时只能进行一个动作
     pb::RegionStatus expected_status = pb::IDLE;
     if (compare_exchange_strong(expected_status, pb::DOING)) {
-        DB_WARNING("region status to doning becase of raft control, region_id: %ld, request:%s",
+        DB_WARNING("region status to doing becase of raft control, region_id: %ld, request:%s",
                     _region_id, pb2json(*request).c_str());
         common_raft_control(controller, request, response, done_guard.release(), &_region->_node);
     } else {
-        DB_FATAL("region status is not idle, region_id: %ld, lod_id:%ld", _region_id, log_id);
+        DB_FATAL("region status is not idle, region_id: %ld, lod_id:%lu", _region_id, log_id);
         response->set_errcode(pb::REGION_ERROR_STATUS);
         response->set_errmsg("status not idle");
     }
@@ -228,26 +237,37 @@ void RegionControl::add_peer(const pb::AddPeer& add_peer, SmartRegion region, Ex
     //这是按照在metaServer里add_peer的构造规则解析出来的newew——instance,
     //是解析new_instance的偷懒版本
     std::string new_instance = add_peer.new_peers(add_peer.new_peers_size() - 1);
+    // 先校验，减少doing状态
+    // 该方法会多次check
+    if (legal_for_add_peer(add_peer, NULL) != 0) {
+        return;
+    }
     //在leader_send_init_region将状态置为doing, 在add_peer结束时将region状态置回来
     pb::RegionStatus expected_status = pb::IDLE;
     if (!compare_exchange_strong(expected_status, pb::DOING)) {
         DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
         return;
     }
-    DB_WARNING("region status to doing becase of add peer of heartbeat response, region_id: %ld new_instance: %s",
-                _region_id, new_instance.c_str());
+    TimeCost cost;
+    DB_WARNING("region status to doing becase of add peer of heartbeat response, "
+            "region_id: %ld new_instance: %s", _region_id, new_instance.c_str());
     if (legal_for_add_peer(add_peer, NULL) != 0) {
         reset_region_status();
         return;
     }
-    auto init_and_add_peer = [add_peer, new_instance, region]() {
+    auto init_and_add_peer = [add_peer, new_instance, region, cost]() {
         RegionControl& control = region->get_region_control();
         if (region->_shutdown) {
             DB_WARNING("region_id:%ld has REMOVE", region->get_region_id());
             control.reset_region_status();
             return;
         }
-        DB_WARNING("start init_region, region_id: %ld", region->get_region_id())
+        DB_WARNING("start init_region, region_id: %ld, wait_time:%ld", 
+                region->get_region_id(), cost.get_time())
+        if (control.legal_for_add_peer(add_peer, NULL) != 0) {
+            control.reset_region_status();
+            return;
+        }
         pb::InitRegion init_request;
         control.construct_init_region_request(init_request);
         if (control.init_region_to_store(new_instance, init_request, NULL) != 0) {
@@ -284,9 +304,14 @@ void RegionControl::add_peer(const pb::AddPeer* request,
         response->set_errmsg("no new peer");
         return;
     }
+    // 先校验，减少doing状态
+    // 该方法会多次check
+    if (legal_for_add_peer(*request, response) != 0) {
+        return;
+    }
     pb::RegionStatus expected_status = pb::IDLE;
     if (!compare_exchange_strong(expected_status, pb::DOING)) {
-        DB_FATAL("region status is not idle when add peer, region_id: %ld", _region_id);
+        DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
         response->set_errcode(pb::INTERNAL_ERROR);
         response->set_errmsg("new region fail");
         return;
@@ -484,6 +509,8 @@ void RegionControl::node_add_peer(const pb::AddPeer& add_peer,
     braft::PeerId add_peer_instance;
     add_peer_instance.parse(new_instance);
     _region->_node.add_peer(add_peer_instance, add_peer_done);
+    DB_WARNING("_leader_add_peer, region_id: %ld ,new_instance: %s send sucess",
+                _region_id, new_instance.c_str());
 }
 
 }

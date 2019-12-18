@@ -667,7 +667,7 @@ bool MysqlWrapper::make_eof_packet(DataBuffer* send_buf, const int packet_id) {
 bool MysqlWrapper::make_simple_ok_packet(SmartSocket sock) {
     if (sock == nullptr) {
         DB_FATAL("sock==NULL");
-        return RET_ERROR;
+        return false;
     }
     const uint8_t packet_ok[] =
         "\x00\x00"
@@ -854,8 +854,7 @@ int MysqlWrapper::protocol_get_length_coded_int(
 
 // https://dev.mysql.com/doc/refman/8.0/en/c-api-prepared-statement-type-codes.html
 // https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
-// TODO: support MYSQL_TYPE_TIME, MYSQL_TYPE_DATE, MYSQL_TYPE_DATETIME, MYSQL_TYPE_TIMESTAMP
-// MYSQL_TYPE_FLOAT and MYSQL_TYPE_DOUBLE
+// MYSQL_TYPE_TIME not correct FIXME
 int MysqlWrapper::decode_binary_protocol_value(
         uint8_t*    data, 
         int32_t     packet_len,
@@ -958,6 +957,153 @@ int MysqlWrapper::decode_binary_protocol_value(
         node.set_num_children(0);
         pb::DeriveExprNode* str_node = node.mutable_derive_node();
         str_node->set_int_val(result);
+        break;
+    }
+    case MYSQL_TYPE_FLOAT: {
+        if ((uint32_t)packet_len < offset + 4) {
+            DB_FATAL("packet_len(%u) < offset(%u) + len(%lu)", packet_len, offset, 4);
+            return RET_ERROR;
+        }
+        uint8_t* p = (uint8_t*)(data+offset);
+        float val = *reinterpret_cast<float*>(p);
+        offset += 4;
+        node.set_node_type(pb::DOUBLE_LITERAL);
+        node.set_col_type(pb::FLOAT);
+        node.set_num_children(0);
+        pb::DeriveExprNode* float_node = node.mutable_derive_node();
+        float_node->set_double_val(val);
+        break;
+    }
+    case MYSQL_TYPE_DOUBLE: {
+        if ((uint32_t)packet_len < offset + 8) {
+            DB_FATAL("packet_len(%u) < offset(%u) + len(%lu)", packet_len, offset, 8);
+            return RET_ERROR;
+        }
+        uint8_t* p = (uint8_t*)(data+offset);
+        double val = *reinterpret_cast<double*>(p);
+        offset += 8;
+        node.set_node_type(pb::DOUBLE_LITERAL);
+        node.set_col_type(pb::DOUBLE);
+        node.set_num_children(0);
+        pb::DeriveExprNode* double_node = node.mutable_derive_node();
+        double_node->set_double_val(val);
+        break;
+    }
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_TIMESTAMP: {
+        uint64_t length;
+        if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, length)) {
+            DB_FATAL("decode uint8 failed");
+            return RET_ERROR;
+        }
+        //DB_WARNING("lentgh: %lu type: %d", length, type.mysql_type);
+        DateTime time_struct = DateTime();
+        if (length == 4 || length == 7 || length == 11) {
+            if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 2, time_struct.year)) {
+                DB_FATAL("decode year failed type: %d", type.mysql_type);
+                return RET_ERROR;
+            }
+            if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.month)) {
+                DB_FATAL("decode month failed type: %d", type.mysql_type);
+                return RET_ERROR;
+            }
+            if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.day)) {
+                DB_FATAL("decode day failed type: %d", type.mysql_type);
+                return RET_ERROR;
+            }
+            if (length == 7 || length == 11) {
+                if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.hour)) {
+                    DB_FATAL("decode hour failed type: %d", type.mysql_type);
+                    return RET_ERROR;
+                }
+                if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.minute)) {
+                    DB_FATAL("decode minute failed type: %d", type.mysql_type);
+                    return RET_ERROR;
+                }
+                if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.second)) {
+                    DB_FATAL("decode second failed type: %d", type.mysql_type);
+                    return RET_ERROR;
+                }
+            }
+            if (length == 11) {
+                if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 4, time_struct.macrosec)) {
+                    DB_FATAL("decode macrosec failed type: %d", type.mysql_type);
+                    return RET_ERROR;
+                }
+            }
+
+        } else if (length == 0) {
+            // nothing to do
+        } else {
+           DB_FATAL("wrong lentgh: %lu type: %d", length, type.mysql_type);
+           return RET_ERROR;
+        }
+        node.set_num_children(0);
+        pb::DeriveExprNode* date_node = node.mutable_derive_node();
+        if (type.mysql_type == MYSQL_TYPE_DATE) {
+            node.set_node_type(pb::DATETIME_LITERAL);
+            node.set_col_type(pb::DATETIME);
+            date_node->set_int_val(bin_date_to_datetime(time_struct));
+        } else if (type.mysql_type == MYSQL_TYPE_DATETIME) {
+            node.set_node_type(pb::DATETIME_LITERAL);
+            node.set_col_type(pb::DATETIME);
+            date_node->set_int_val(bin_date_to_datetime(time_struct));
+        } else {
+            node.set_node_type(pb::DATETIME_LITERAL);
+            node.set_col_type(pb::DATETIME);
+            date_node->set_int_val(bin_date_to_datetime(time_struct));
+        }
+        //DB_WARNING("DEBUG %s", node.DebugString().c_str());
+        break;
+    }
+    case MYSQL_TYPE_TIME: {
+        uint64_t length;
+        if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, length)) {
+            DB_FATAL("decode uint8 failed");
+            return RET_ERROR;
+        }
+        //DB_WARNING("lentgh: %lu type: %d", length, type.mysql_type);
+        DateTime time_struct = DateTime();
+        if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.is_negative)) {
+            DB_FATAL("decode uint8 failed");
+            return RET_ERROR;
+        }
+        if (length == 8 || length == 12) {
+            if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 4, time_struct.day)) {
+                DB_FATAL("decode day failed type: %d", type.mysql_type);
+                return RET_ERROR;
+            }
+            if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.hour)) {
+                DB_FATAL("decode day failed type: %d", type.mysql_type);
+                return RET_ERROR;
+            }
+            if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.minute)) {
+                DB_FATAL("decode minute failed type: %d", type.mysql_type);
+                return RET_ERROR;
+            }
+            if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 1, time_struct.second)) {
+                DB_FATAL("decode second failed type: %d", type.mysql_type);
+                return RET_ERROR;
+            }
+            if (length == 12) {
+                if (RET_SUCCESS != protocol_get_length_fixed_int(data, packet_len, offset, 4, time_struct.macrosec)) {
+                    DB_FATAL("decode macrosec failed type: %d", type.mysql_type);
+                    return RET_ERROR;
+                }
+            }
+        } else if (length == 0) {
+            // nothing to do
+        } else {
+           DB_FATAL("wrong lentgh: %lu type: %d", length, type.mysql_type);
+           return RET_ERROR;
+        }
+        node.set_node_type(pb::TIME_LITERAL);
+        node.set_col_type(pb::TIME);
+        node.set_num_children(0);
+        pb::DeriveExprNode* date_node = node.mutable_derive_node();
+        date_node->set_int_val(bin_time_to_datetime(time_struct));
+        //DB_WARNING("DEBUG %s", node.DebugString().c_str());
         break;
     }
     default:

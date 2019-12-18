@@ -37,6 +37,7 @@ public:
     bool network_queue_send_append(const uint8_t* data, int len, 
                                     int packet_id, int append_data_later);
     void byte_array_clear();
+    void datetime_to_buf(uint64_t datetime, uint8_t* buf, int& length, uint8_t type);
 
 public:
     uint8_t*        _data = 0;

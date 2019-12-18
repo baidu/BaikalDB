@@ -38,7 +38,7 @@ public:
 
     TransactionPool() : _num_prepared_txn(0), _txn_count(0) {}
 
-    int init(int64_t region_id);
+    int init(int64_t region_id, bool use_ttl);
 
     // -1 means insert error (already exists)
     int begin_txn(uint64_t txn_id, SmartTransaction& txn);
@@ -81,6 +81,10 @@ public:
         return _txn_count.load();
     }
 
+    bool use_ttl() const {
+        return _use_ttl;
+    }
+
     void clear_transactions(int32_t clear_delay_ms = FLAGS_transaction_clear_delay_ms);
 
     void on_leader_stop_rollback();
@@ -107,6 +111,7 @@ public:
     void clear();
 private:
     int64_t _region_id = 0;
+    bool _use_ttl = false;
 
     // txn_id => txn handler mapping
     std::unordered_map<uint64_t, SmartTransaction>  _txn_map;

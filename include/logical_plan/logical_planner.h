@@ -198,7 +198,7 @@ protected:
     pb::SlotDescriptor& get_values_ref_slot(int64_t table, int32_t field, pb::PrimitiveType type);
 
     // create common plan nodes 
-    int create_packet_node(pb::OpType op_type, int num_children = 1);
+    int create_packet_node(pb::OpType op_type);
     int create_filter_node(std::vector<pb::Expr>& filters, pb::PlanNodeType type);
     int create_sort_node();
     int create_scan_nodes();

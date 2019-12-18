@@ -274,6 +274,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     // create table if not exists
     std::string table_name("table_" + std::to_string(table_id));
     //std::string old_tbl_name;
+    std::unordered_set<int64_t> last_indics;
 
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
     if (_table_info_mapping.count(table_id) == 0) {
@@ -284,6 +285,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     } else {
         *tbl_info_ptr = *_table_info_mapping[table_id];
         TableInfo& tbl_info = *tbl_info_ptr;
+        std::copy(tbl_info.indices.begin(), tbl_info.indices.end(), std::inserter(last_indics, last_indics.end()));
         // need not  update when version GE
         if (tbl_info.version >= table.version()) {
             //DB_WARNING("need not  update, orgin version:%ld, new version:%ld, table_id:%ld", 
@@ -418,7 +420,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     }
     bool pb_need_update = tbl_info.fields_sign != new_fields_sign.str();
     DB_NOTICE("double_buffer_write pb_need_update:%d, old:%s new:%s table:%s ", pb_need_update,
-    tbl_info.fields_sign.c_str(), new_fields_sign.str().c_str(), table.ShortDebugString().c_str());
+            tbl_info.fields_sign.c_str(), new_fields_sign.str().c_str(), table.ShortDebugString().c_str());
     tbl_info.fields_sign = new_fields_sign.str();
 
     const FileDescriptor *db_desc = tmp_pool->BuildFile(*tbl_info.file_proto);
@@ -464,12 +466,28 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         const pb::IndexInfo& cur = table.indexs(idx);
         int64_t index_id = cur.index_id();
         DB_WARNING("schema_factory_update_index: %ld", index_id);
+        last_indics.erase(index_id);
         update_index(tbl_info, cur, pk_index, background);
         if (cur.index_type() == pb::I_PRIMARY
                 || cur.is_global() == true) {
             _global_index_id_mapping[index_id] = table_id;
         }
         tbl_info.indices.push_back(index_id);
+    }
+    //删除index索引。
+    auto& index_info_mapping = background.index_info_mapping;
+    auto& index_name_id_mapping = background.index_name_id_mapping; 
+    for (auto index_id : last_indics) {
+        auto index_info_iter = index_info_mapping.find(index_id);
+        if (index_info_iter != index_info_mapping.end()) {
+            std::string fullname = tbl_info.namespace_ + "."  + index_info_iter->second->name;
+            index_info_mapping.erase(index_info_iter);
+            if (index_name_id_mapping.erase(fullname) != 1) {
+                DB_WARNING("delete index_name_id_mapping error.");
+            }
+            DB_NOTICE("delete index info: index_id[%lld] index_name[%s].", 
+                index_id, fullname.c_str());
+        }
     }
     
     if (pb_need_update) {
@@ -747,19 +765,26 @@ void SchemaFactory::get_clear_regions(const std::string& new_start_key,
                         std::map<std::string, int64_t>& clear_regions) {
     //获取key_region_map中新旧start key之间的所有key，这些key是已经发生merge的，需要删除，
     //包括origin_region
+    bool is_over = false;
     std::vector<int64_t> region_ids;
-    std::string start_key = new_start_key;
+    std::string key = new_start_key;
     std::vector<StrInt64Map>& vec = table_region_ptr->key_region_mapping;
     StrInt64Map& key_reg_map = vec[0];
     auto region_iter = key_reg_map.find(new_start_key);
     while (region_iter != key_reg_map.end()) {
-        if (end_key_compare(start_key, origin_start_key) > 0) {
-            break;
+        if (key.empty() || key > origin_start_key) {
+            //为空则为最后一个region
+            if (is_over) {
+                break;
+            } else {
+                clear_regions.clear();
+                return;
+            }
         }
-        if (start_key != region_iter->first) {
+        if (key != region_iter->first) {
             clear_regions.clear();
             DB_FATAL("region id:%ld, nonsequence start_key:%s vs %s", 
-                    region_iter->second, str_to_hex(start_key).c_str(), 
+                    region_iter->second, str_to_hex(key).c_str(), 
                     str_to_hex(region_iter->first).c_str());
             return;
         }
@@ -775,8 +800,11 @@ void SchemaFactory::get_clear_regions(const std::string& new_start_key,
                    region_id, region.version(), 
                    str_to_hex(region.start_key()).c_str(),
                    str_to_hex(region.end_key()).c_str());
-        clear_regions[start_key] = region_id;
-        start_key = region.end_key();
+        clear_regions[key] = region_id;
+        key = region.end_key();
+        if (key == origin_start_key) {
+            is_over = true;
+        }
         region_iter++;
     }
 }
@@ -984,14 +1012,17 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     _user_info_mapping[username] = user_info;
 }
 
-void SchemaFactory::update_show_db(const pb::DataBaseInfo& db_info) {
+void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
     BAIDU_SCOPED_LOCK(_update_show_db_mutex);
-    DatabaseInfo info;
-    info.id = db_info.database_id();
-    info.version = db_info.version();
-    info.name = db_info.database();
-    info.namespace_ = db_info.namespace_name();
-    _show_db_info[info.id] = info;
+    _show_db_info.clear();
+    for (auto db_info : db_infos) {
+        DatabaseInfo info;
+        info.id = db_info.database_id();
+        info.version = db_info.version();
+        info.name = db_info.database();
+        info.namespace_ = db_info.namespace_name();
+        _show_db_info[info.id] = info;
+    }
 }
 
 // create a new table record (aka. a table row)

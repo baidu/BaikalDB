@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "select_planner.h"
+#include "dual_scan_node.h"
 #include "network_socket.h"
 #include <boost/algorithm/string.hpp>
 
@@ -28,8 +29,18 @@ int SelectPlanner::plan() {
         if (0 != parse_select_fields()) {
             return -1;        
         }
-        create_packet_node(pb::OP_SELECT, 0);
-        //DB_WARNING("no sql from");
+        if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
+            create_packet_node(pb::OP_SELECT);
+            create_dual_scan_node();
+        } else {
+            create_agg_tuple_desc();
+            create_packet_node(pb::OP_SELECT);
+            // create_agg_node
+            if (0 != create_agg_node()) {
+                return -1;
+            }
+            create_dual_scan_node();
+        }
         return 0;
     }
 
@@ -135,6 +146,14 @@ bool SelectPlanner::is_full_export() {
         return false;
     }
     return true;
+}
+
+void SelectPlanner::create_dual_scan_node() {
+    pb::PlanNode* scan_node = _ctx->add_plan_node();
+    scan_node->set_node_type(pb::DUAL_SCAN_NODE);
+    scan_node->set_limit(1);
+    scan_node->set_is_explain(_ctx->is_explain);
+    scan_node->set_num_children(0); 
 }
 
 int SelectPlanner::create_limit_node() {

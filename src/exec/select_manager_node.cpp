@@ -19,6 +19,7 @@
 
 namespace baikaldb {
 int SelectManagerNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, nullptr);
     int ret = 0;
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
@@ -68,6 +69,10 @@ int SelectManagerNode::open(RuntimeState* state) {
 }
 
 int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+
     if (state->is_cancelled()) {
         DB_WARNING_STATE(state, "cancelled");
         *eos = true;
@@ -105,7 +110,15 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
     //能命中全局二级索引，不可能没有filter(不成立，可能有order by)
     if (filter_nodes.size() >0) {
         auto pri_info = _factory->get_index_info_ptr(main_table_id);
+        if (pri_info == nullptr) {
+            DB_WARNING("pri index info not found table_id:%ld", main_table_id);
+            return -1;
+        }
         auto index_info = _factory->get_index_info_ptr(global_index_id);
+        if (index_info == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", global_index_id);
+            return -1;
+        }
         for (auto& f : pri_info->fields) {
             auto slot_id = state->get_slot_id(scan_node->tuple_id(), f.id);
             if (slot_id > 0) {
@@ -181,6 +194,10 @@ int SelectManagerNode::construct_primary_possible_index(
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
     int32_t tuple_id = scan_node->tuple_id();
     auto pri_info = _factory->get_index_info_ptr(main_table_id);
+    if (pri_info == nullptr) {
+        DB_WARNING("pri index info not found table_id:%ld", main_table_id);
+        return -1;
+    }
     scan_node->clear_possible_indexes();
     pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     auto pos_index = pb_scan_node->add_indexes();

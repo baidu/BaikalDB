@@ -21,11 +21,8 @@ public:
     enum AggType {
         COUNT_STAR,
         COUNT,
-        COUNT_DISTINCT,
         SUM,
-        SUM_DISTINCT,
         AVG, 
-        AVG_DISTINCT,
         MIN,
         MAX,
         HLL_ADD_AGG,
@@ -48,17 +45,6 @@ public:
             return ExprValue::Null();
         }
         return row->get_value(_tuple_id, _final_slot_id);
-    }
-
-    bool is_distinct() {
-        switch (_agg_type) {
-            case COUNT_DISTINCT:
-            case SUM_DISTINCT:
-            case AVG_DISTINCT:
-                return true;
-            default:
-                return false;
-        }
     }
 
     // 聚合函数逻辑
@@ -97,6 +83,7 @@ private:
     int32_t _tuple_id;
     int32_t _intermediate_slot_id;
     int32_t _final_slot_id;
+    bool _is_distinct = false;
     //聚合函数参数列表，count(*)参数为空
     //merge的时候，类型是slotref，size=1
     //std::vector<ExprNode*> _arg_exprs;

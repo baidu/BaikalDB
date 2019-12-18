@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
+#include <sstream>
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
 #include "common.h"
@@ -237,10 +238,16 @@ struct ExprValue {
                 return std::to_string(_u.uint32_val);
             case pb::UINT64:
                 return std::to_string(_u.uint64_val);
-            case pb::FLOAT:
-                return std::to_string(_u.float_val);
-            case pb::DOUBLE:
-                return std::to_string(_u.double_val);
+            case pb::FLOAT: {
+                std::ostringstream oss;
+                oss << _u.float_val;
+                return oss.str();
+            }
+            case pb::DOUBLE: {
+                std::ostringstream oss;
+                oss << _u.double_val;
+                return oss.str();
+            }
             case pb::STRING:
             case pb::HLL:
                 return str_val;

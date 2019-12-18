@@ -53,7 +53,7 @@ int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     int i = 0;
     for (auto expr : _projections) {
         //类型推导
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("type_inferer fail");
             return ret;
@@ -64,8 +64,6 @@ int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         if (is_uint(expr->col_type())) {
             _fields[i].flags |= 32;
         }
-        //常量表达式计算
-        expr->const_pre_calc();
         ++i;
     }
     return 0;
@@ -94,6 +92,26 @@ int PacketNode::handle_explain(RuntimeState* state) {
         }
         pack_vector_row(row);
     }
+    pack_eof();
+    return 0;
+}
+
+int PacketNode::handle_trace(RuntimeState* state) {
+    _fields.clear();
+    std::vector<std::string> names = {
+        "trace"
+    };
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.push_back(field);
+    }
+    pack_head();
+    pack_fields();
+    std::vector<std::string> row;
+    row.push_back(_trace->DebugString().c_str());
+    pack_vector_row(row);
     pack_eof();
     return 0;
 }
@@ -128,54 +146,54 @@ int PacketNode::open(RuntimeState* state) {
             return ret;
         }
     }
-    pack_head();
-    pack_fields();
+    if (_trace == nullptr) {
+        pack_head();
+        pack_fields();
+    }
     
     if (state->is_full_export) {
         return 0;
     }
 
-    if (_children.size() == 0) {
-        if (!reached_limit()) {
-            if (_binary_protocol) {
-                pack_binary_row(nullptr);
-            } else {
-                pack_text_row(nullptr);
-            }
+    bool eos = false;
+    int64_t pack_time = 0;
+    do {
+        RowBatch batch;
+        ret = _children[0]->get_next(state, &batch, &eos);
+        if (ret < 0) {
+            DB_WARNING("children:get_next fail:%d", ret);
+            return ret;
         }
-    } else {
-        bool eos = false;
-        int64_t pack_time = 0;
-        do {
-            RowBatch batch;
-            ret = _children[0]->get_next(state, &batch, &eos);
-            if (ret < 0) {
-                DB_WARNING("children:get_next fail:%d", ret);
-                return ret;
-            }
-            for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
-                TimeCost cost;
+        for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
+            TimeCost cost;
+            if (_trace == nullptr) {
                 if (_binary_protocol) {
                     ret = pack_binary_row(batch.get_row().get());
                 } else {
                     ret = pack_text_row(batch.get_row().get());
                 }
-                pack_time += cost.get_time();
-                cost.reset();
-                state->inc_num_returned_rows(1);
-                if (ret < 0) {
-                    DB_WARNING("pack_row fail:%d", ret);
-                    return ret;
-                }
             }
-        } while (!eos);
-        //DB_WARNING("txn_id: %lu, pack_time: %ld", state->txn_id, pack_time);
+
+            pack_time += cost.get_time();
+            cost.reset();
+            state->inc_num_returned_rows(1);
+            if (ret < 0) {
+                DB_WARNING("pack_row fail:%d", ret);
+                return ret;
+            }
+        }
+    } while (!eos);
+    //DB_WARNING("txn_id: %lu, pack_time: %ld", state->txn_id, pack_time);
+    if (_trace == nullptr) {
+        pack_eof();
+    } else {
+        handle_trace(state);
     }
-    pack_eof();
     return 0;
 }
 
 int PacketNode::get_next(RuntimeState* state) {
+    //TraceLocalNode local_node("PacketNode get_next", get_trace(), GET_NEXT_TRACE);
     if (_is_explain) {
         return 0;
     } 

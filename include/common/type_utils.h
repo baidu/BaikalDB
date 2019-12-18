@@ -21,17 +21,17 @@
 namespace baikaldb {
 
 enum MysqlType : uint8_t { 
-    MYSQL_TYPE_DECIMAL, 
+    MYSQL_TYPE_DECIMAL,   // 0
     MYSQL_TYPE_TINY,
     MYSQL_TYPE_SHORT,  
     MYSQL_TYPE_LONG,
     MYSQL_TYPE_FLOAT,  
-    MYSQL_TYPE_DOUBLE,
+    MYSQL_TYPE_DOUBLE,   // 5
     MYSQL_TYPE_NULL,   
     MYSQL_TYPE_TIMESTAMP,
     MYSQL_TYPE_LONGLONG,
     MYSQL_TYPE_INT24,
-    MYSQL_TYPE_DATE,   
+    MYSQL_TYPE_DATE,     // 10
     MYSQL_TYPE_TIME,
     MYSQL_TYPE_DATETIME, 
     MYSQL_TYPE_YEAR,
@@ -57,6 +57,37 @@ struct SignedType {
     bool        is_unsigned = false;
 };
 
+struct DateTime {
+    uint64_t year;
+    uint64_t month;
+    uint64_t day;
+    uint64_t hour;
+    uint64_t minute;
+    uint64_t second;
+    uint64_t macrosec;
+    uint64_t is_negative;
+
+    int datetype_length() {
+        if (year == 0 && month == 0 && day == 0 && hour == 0
+            && minute == 0 && second == 0 && macrosec == 0) {
+                return 0;
+        } else if (hour == 0 && minute == 0 && second == 0 && macrosec == 0) {
+            return 4;
+        } else if (macrosec == 0) {
+            return 7;
+        }
+        return 11;
+    }
+    int timetype_length() {
+        if (hour == 0 && minute == 0 && second == 0 && macrosec == 0) {
+            return 0;
+        } else if (macrosec == 0) {
+            return 8;
+        }
+        return 12;
+    }
+};
+
 inline bool is_double(pb::PrimitiveType type) {
     switch (type) {
         case pb::FLOAT:
@@ -78,6 +109,18 @@ inline bool has_double(std::vector<pb::PrimitiveType> types) {
         }
     }
     return false;
+}
+
+inline bool is_datetime_specic(pb::PrimitiveType type) {
+    switch (type) {
+        case pb::DATETIME:
+        case pb::TIMESTAMP:
+        case pb::DATE:
+        case pb::TIME:
+            return true;
+        default:
+            return false;
+    }
 }
 
 inline bool has_timestamp(std::vector<pb::PrimitiveType> types) {

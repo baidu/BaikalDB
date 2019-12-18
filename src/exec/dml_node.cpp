@@ -28,30 +28,36 @@ int DMLNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         return ret;
     }
     for (auto expr : _update_exprs) {
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        expr->const_pre_calc();
     }
     return 0;
 }
 int DMLNode::init_schema_info(RuntimeState* state) {
     _region_id = state->region_id();
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id); 
-    if (!_table_info) {
+
+    if (_table_info == nullptr) {
         DB_WARNING("get table info failed table_id: %ld", _table_id);
         return -1;
     }
     _pri_info = SchemaFactory::get_instance()->get_index_info_ptr(_table_id);
-    if (!_pri_info) {
+    if (_pri_info == nullptr) {
         DB_WARNING("get primary index info failed table_id: %ld", _table_id);
         return -1;
     }
+
+    int64_t ttl_duration = _row_ttl_duration > 0 ? _row_ttl_duration : _table_info->ttl_duration;
+    if (ttl_duration > 0) {
+        _ttl_timestamp_us = butil::gettimeofday_us() + ttl_duration * 1000 * 1000;
+    }
+
     if (_global_index_id != 0) {
         _global_index_info = SchemaFactory::get_instance()->get_index_info_ptr(_global_index_id);
-        if (!_global_index_info) {
+        if (_global_index_info == nullptr) {
             DB_WARNING("get global index info failed _global_index_id: %ld", _global_index_id);
             return -1;
         }
@@ -62,7 +68,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
     if (_affected_index_ids.size() == 0) {
         for (auto index_id : _table_info->indices) {
             auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-            if (!index_info) {
+            if (index_info == nullptr) {
                 DB_WARNING("get index info failed index_id: %ld", index_id);
                 return -1;
             }
@@ -83,7 +89,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
     } else {
         for (auto index_id : _table_info->indices) {
             auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-            if (!index_info) {
+            if (index_info == nullptr) {
                 DB_WARNING("get index info failed index_id: %ld", index_id);
                 return -1;
             }
@@ -107,6 +113,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     int ret = 0;
     int affected_rows = 0;
     bool delete_before_put_primary = !_affect_primary && is_update;
+    bool need_increase = true;
     auto& reverse_index_map = state->reverse_index_map();
     if (_on_dup_key_update) {
         _dup_update_row->clear();
@@ -119,6 +126,8 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             }
         }
     }
+    _txn->set_write_ttl_timestamp_us(_ttl_timestamp_us);
+    DB_DEBUG("ttl_timestamp_us: %ld", _ttl_timestamp_us);
     MutTableKey pk_key;
     ret = record->encode_key(*_pri_info, pk_key, -1, false);
     if (ret < 0) {
@@ -138,7 +147,11 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             //DB_WARNING_STATE(state, "key not in this region:%ld, %s", _region_id, record->to_string().c_str());
             return 0;
         }
-        if (ret != -2) {
+        if (ret == -4) {
+            //过期的数据被覆盖，但是num_table_lines已经计算过旧数据了
+            need_increase = false;
+        }
+        if (ret != -2 && ret != -4) {
             if (_need_ignore) {
                 return 0;
             }
@@ -192,6 +205,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     // lock secondary keys
     for (auto& index_id: _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", index_id);
+            return -1;
+        }
         IndexInfo& info = *info_ptr;
 
         auto index_state = info.state;
@@ -248,7 +265,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         }
         // ret == -3 means the primary_key returned by get_update_secondary is out of the region
         // (dirty data), this does not affect the insertion
-        if (ret != -2 && ret != -3) {
+        if (ret != -2 && ret != -3 && ret != -4) {
             if (_need_ignore) {
                 return 0;
             }
@@ -258,6 +275,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     }
     for (auto& index_id : _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", index_id);
+            return -1;
+        }
         IndexInfo& info = *info_ptr;
         if (info.id == _table_id) {
             continue;
@@ -312,7 +333,9 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         return -1;
     }
     //DB_WARNING_STATE(state, "insert succes:%ld, %s", _region_id, record->to_string().c_str());
-    ++_num_increase_rows;
+    if (need_increase) {
+        ++_num_increase_rows;
+    }
     return ++affected_rows;
 }
 
@@ -348,6 +371,10 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
     auto& reverse_index_map = state->reverse_index_map();
     for (auto& index_id : _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", index_id);
+            return -1;
+        }
         IndexInfo& info = *info_ptr;
         auto index_state = info.state;
         if (index_state == pb::IS_NONE) {
@@ -408,8 +435,8 @@ int DMLNode::delete_row(RuntimeState* state, SmartRecord record) {
     if (ret == -3) {
         //DB_WARNING_STATE(state, "key not in this region:%ld", _region_id);
         return 0;
-    }else if (ret == -2) {
-        // deleted
+    }else if (ret == -2 || ret == -4) {
+        // deleted or expired
         return 0;
     } else if (ret != 0) {
         DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
@@ -425,8 +452,8 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     if (ret == -3) {
         //DB_WARNING_STATE(state, "key not in this region:%ld", _region_id);
         return 0;
-    }else if (ret == -2) {
-        // row deleted
+    }else if (ret == -2 || ret == -4) {
+        // row deleted or expired
         return 0;
     } else if (ret != 0) {
         DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);

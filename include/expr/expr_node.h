@@ -36,17 +36,6 @@ public:
         _col_type = node.col_type();
         return 0;
     }
-    //类型推导，只在baikal执行
-    virtual int type_inferer() {
-        for (auto c : _children) {
-            int ret = 0;
-            ret = c->type_inferer();
-            if (ret < 0) {
-                return ret;
-            }
-        }
-        return 0;
-    }
     virtual void children_swap() {}
 
     bool is_literal() {
@@ -56,6 +45,11 @@ public:
             case pb::INT_LITERAL:
             case pb::DOUBLE_LITERAL:
             case pb::STRING_LITERAL:
+            case pb::HLL_LITERAL:
+            case pb::DATE_LITERAL:
+            case pb::DATETIME_LITERAL:
+            case pb::TIME_LITERAL:
+            case pb::TIMESTAMP_LITERAL:
             case pb::PLACE_HOLDER_LITERAL:
                 return true;
             default:
@@ -66,8 +60,26 @@ public:
     bool is_slot_ref() {
         return _node_type == pb::SLOT_REF;
     }
+    bool is_constant() const {
+        return _is_constant;
+    }
     bool is_row_expr() {
         return _node_type == pb::ROW_EXPR;
+    }
+    int expr_optimize() {
+        const_pre_calc();
+        return type_inferer();
+    }
+    //类型推导，只在baikal执行
+    virtual int type_inferer() {
+        for (auto c : _children) {
+            int ret = 0;
+            ret = c->type_inferer();
+            if (ret < 0) {
+                return ret;
+            }
+        }
+        return 0;
     }
     //常量表达式预计算,eg. id * 2 + 2 * 4 => id * 2 + 8
     //TODO 考虑做各种左右变化,eg. id + 2 - 4 => id - 2; id * 2 + 4 > 4 / 2 => id > -1
@@ -140,9 +152,6 @@ public:
     }
     void set_col_type(pb::PrimitiveType col_type) {
         _col_type = col_type;
-    }
-    bool is_constant() const {
-        return _is_constant;
     }
 
     void clear_filter_index() {

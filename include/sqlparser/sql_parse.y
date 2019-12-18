@@ -2743,7 +2743,9 @@ ColumnOption:
 
 SignedLiteral:
     Literal {}
-    | '+' NumLiteral {}
+    | '+' NumLiteral {
+        $$ = $2;
+    }
     | '-' NumLiteral
     {
         LiteralExpr* literal = (LiteralExpr*)$2;
@@ -4216,6 +4218,13 @@ ExplainStmt:
     ExplainSym ExplainableStmt {
         ExplainStmt* explain = new_node(ExplainStmt);
         explain->stmt = $2;
+        explain->format = "row";
+        $$ = explain;
+    }
+    | ExplainSym FORMAT EQ_OP STRING_LIT ExplainableStmt {
+        ExplainStmt* explain = new_node(ExplainStmt);
+        explain->format = ((LiteralExpr*)$4)->_u.str_val;
+        explain->stmt = $5;
         $$ = explain;
     }
     ;

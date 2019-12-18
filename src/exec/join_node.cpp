@@ -62,13 +62,11 @@ int JoinNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     while (iter != _conditions.end()) {
         auto expr = *iter;
         //类型推导 
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        //常量表达式计算
-        expr->const_pre_calc();
         if (expr->is_constant()) {
             expr->open();
             ExprValue value = expr->get_value(nullptr);
@@ -333,6 +331,8 @@ int JoinNode::open(RuntimeState* state) {
     //            join_time_cost.get_time());
     join_time_cost.reset();
     //_inner_node->print_all_exec_node();
+    //谓词下推后可能生成新的plannode重新生成tracenode
+    _inner_node->create_trace();
     ret = _inner_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode::inner table open fial");

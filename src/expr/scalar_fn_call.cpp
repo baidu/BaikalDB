@@ -14,6 +14,7 @@
 
 #include "scalar_fn_call.h"
 #include "slot_ref.h"
+#include "literal.h"
 #include "parser.h"
 
 namespace baikaldb {
@@ -38,6 +39,25 @@ int ScalarFnCall::type_inferer() {
     if (ret < 0) {
         return ret;
     }
+    // 兼容mysql， predicate 处理成列的类型
+    switch (_fn.fn_op()) { 
+        case parser::FT_EQ:
+        case parser::FT_IN:
+        case parser::FT_NE:
+        case parser::FT_GE:
+        case parser::FT_GT:
+        case parser::FT_LE:
+        case parser::FT_LT: {
+            if (_children[0]->is_slot_ref() && _children[1]->is_constant()) {
+                for (size_t i = 1; i < _children.size(); i++) {
+                    _children[i]->set_col_type(_children[0]->col_type());
+                }
+            }
+            break;
+        } 
+        default:
+            break;
+    }
     std::vector<pb::PrimitiveType> types;
     for (auto c : _children) {
         if (c->col_type() == pb::INVALID_TYPE && !c->is_row_expr()) {
@@ -49,6 +69,12 @@ int ScalarFnCall::type_inferer() {
     ret = FunctionManager::complete_fn(_fn, types);
     if (_col_type == pb::INVALID_TYPE) {
         _col_type = _fn.return_type();
+    }
+    // Literal type cast
+    for (int i = 0; i < _fn.arg_types_size(); i++) {
+        if (_children[i]->is_literal()) {
+            static_cast<Literal*>(_children[i])->cast_to_col_type(_fn.arg_types(i));
+        }
     }
     return 0;
 }

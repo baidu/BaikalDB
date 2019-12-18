@@ -38,6 +38,7 @@ private:
     int parse_where();
     int parse_orderby();
     int parse_limit();
+    int reset_auto_incr_id();
 
 private:
     parser::DeleteStmt*         _delete_stmt;

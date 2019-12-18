@@ -180,12 +180,25 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         return -1;
     }
     if (parser.result[0]->node_type == parser::NT_EXPLAIN) {
-        ctx->stmt = static_cast<parser::ExplainStmt*>(parser.result[0])->stmt;
-        ctx->is_explain = true;
+        parser::ExplainStmt* stmt = static_cast<parser::ExplainStmt*>(parser.result[0]);
+        ctx->stmt = stmt->stmt;
+        std::string format(stmt->format.c_str());
+        if (format == "trace") {
+            ctx->is_trace = true;
+        } else if (format == "plan") {
+            ctx->is_print_plan = true;
+        } else {
+            ctx->is_explain = true;
+        }
+        DB_WARNING("stmt format:%s", format.c_str());
     } else {
         ctx->stmt = parser.result[0];
     }
     ctx->stmt_type = ctx->stmt->node_type;
+    if (ctx->stmt_type != parser::NT_SELECT && (ctx->is_explain || ctx->is_trace)) {
+        DB_WARNING("not support explain except select");
+        return -1;
+    }
 
     std::unique_ptr<LogicalPlanner> planner;
     switch (ctx->stmt_type) {
@@ -240,9 +253,17 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     if (ctx->plan.nodes_size() > 0 && ctx->plan.nodes(0).node_type() == pb::PACKET_NODE) {
         op_type = ctx->plan.nodes(0).derive_node().packet_node().op_type();
     }
-    if (!stat_info->family.empty() && !stat_info->table.empty()) {
-        stat_info->sample_sql << "family=[" << stat_info->family << "] table=["
-            << stat_info->table <<"] op_type=[" << op_type << "] plat=[" 
+
+    if (!stat_info->family.empty() && !stat_info->table.empty() ) {
+        std::string resource_tag;
+        auto table_ptr = planner->get_table_info_ptr(stat_info->family + "." + stat_info->table);
+        if (table_ptr == nullptr) {
+            resource_tag = "unknown";
+        } else {
+            resource_tag = table_ptr->resource_tag;
+        }
+        stat_info->sample_sql << "family_table_tag=[" << stat_info->family << "\t"
+            << stat_info->table << "\t" << resource_tag << "] op_type=[" << op_type << "] plat=["
             << FLAGS_log_plat_name << "] sql=[" << ctx->stmt << "]";
     }
     return 0;
@@ -827,13 +848,14 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
     } else {
         func->set_name(func->name() + "_star");
     }
-    if (expr_item->distinct) {
+    // min max无需distinct
+    if (expr_item->distinct && func->name() != "max" && func->name() != "min") {
         func->set_name(func->name() + "_distinct");
     }
     node->set_num_children(expr_item->children.size());
     expr.MergeFrom(agg_expr);
     if (new_slot) {
-        if (expr_item->distinct) {
+        if (expr_item->distinct && func->name() != "max" && func->name() != "min") {
             _distinct_agg_funcs.push_back(agg_expr);
         } else {
             _agg_funcs.push_back(agg_expr);
@@ -1423,12 +1445,12 @@ void LogicalPlanner::create_order_by_tuple_desc() {
     _ctx->add_tuple(order_tuple);
 }
 
-int LogicalPlanner::create_packet_node(pb::OpType op_type, int num_children) {
+int LogicalPlanner::create_packet_node(pb::OpType op_type) {
     pb::PlanNode* pack_node = _ctx->add_plan_node();
     pack_node->set_node_type(pb::PACKET_NODE);
     pack_node->set_limit(-1);
     pack_node->set_is_explain(_ctx->is_explain);
-    pack_node->set_num_children(num_children); //TODO 
+    pack_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = pack_node->mutable_derive_node();
     pb::PacketNode* pack = derive->mutable_packet_node();
 
@@ -1569,8 +1591,10 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
             client->txn_id = 0;
             client->seq_id = 0;
         }
+        //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->runtime_state.set_single_sql_autocommit(true);
     } else {
+        //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->runtime_state.set_single_sql_autocommit(false);
     }
 }

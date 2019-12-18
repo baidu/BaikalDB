@@ -101,7 +101,7 @@ void MergeClosure::Run() {
             }
         }
         //目标region需要返回给源region
-        response->add_regions()->CopyFrom(*region->get_region_info());
+        region->copy_region(response->add_regions());
         if (done) {
             done->Run();
         }

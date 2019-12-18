@@ -77,22 +77,24 @@ int FirstLevelMSIterator<ReverseNode>::next(std::string& key, bool& res) {
             return 0;
         }
         res = true;
-        rocksdb::Status s;
-        rocksdb::ReadOptions read_opt;
-        std::string value;
+        //rocksdb::Status s;
+        //rocksdb::ReadOptions read_opt;
+        //rocksdb::PinnableSlice pin_slice;
         auto data_cf = _rocksdb->get_data_handle();
-        s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &value);
-        if (!s.ok()) {
-            DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
-                      term.c_str(), _iter->key().ToString(true).c_str());
-            return -1;
-        }
+        //s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &pin_slice);
+        //if (!s.ok()) {
+        //    DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
+        //              term.c_str(), _iter->key().ToString(true).c_str());
+        //    return -1;
+        //}
+        rocksdb::Slice pin_slice = _iter->value();
         
-        if (!_curr_node.ParseFromArray(value.data(), value.size())) {
+        if (!_curr_node.ParseFromArray(pin_slice.data(), pin_slice.size())) {
             DB_FATAL("parse first level from pb failed");
             return -1;
         }
         key = _curr_node.key();
+        
         if (_del) {
             auto remove_res = _txn->Delete(data_cf, _iter->key());
             if (!remove_res.ok()) {
@@ -183,6 +185,7 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
     if (ret < 0) {
         return -1;
     }
+    int result_count = 0;
     while (true) {
         if (new_not_end && old_not_end) {
             MergeSortIterator<ReverseNode>* choose_iter;
@@ -198,6 +201,7 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
             if (!(is_del && (flag == pb::REVERSE_NODE_DELETE))) {
                 ReverseNode* tmp_node = res_list.add_reverse_nodes();
                 choose_iter->fill_node(tmp_node);
+                ++result_count;
             }
             if (res < 0) {
                 ret = new_iter->next(new_key, new_not_end);
@@ -225,6 +229,7 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
             if (!(is_del && (flag == pb::REVERSE_NODE_DELETE))) {
                 ReverseNode* tmp_node = res_list.add_reverse_nodes();
                 new_iter->fill_node(tmp_node);
+                ++result_count;
             }
             ret = new_iter->next(new_key, new_not_end);
             if (ret < 0) {
@@ -236,6 +241,7 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
             if (!(is_del && (flag == pb::REVERSE_NODE_DELETE))) {
                 ReverseNode* tmp_node = res_list.add_reverse_nodes();
                 old_iter->fill_node(tmp_node);
+                ++result_count;
             }
             ret = old_iter->next(old_key, old_not_end);
             if (ret < 0) {
@@ -246,7 +252,7 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
             break;
         }
     }
-    return 0;
+    return result_count;
 }
 
 } // end of namespace
