@@ -37,6 +37,7 @@ message KvOp {
     required OpType    op_type = 1;
     optional bytes     key     = 2;
     optional bytes     value   = 3;
+    optional int64     ttl_timestamp_us = 4;
 };
 
 message StoreReq {
@@ -61,6 +62,7 @@ message StoreReq {
     optional DdlWorkInfo ddlwork_info = 19; //更新ddl work
     optional int64   num_increase_rows = 20;
     repeated KvOp          kv_ops   = 21; //kv op
+    optional bool  is_trace         = 22;
 };
 
 message RowValue {
@@ -92,6 +94,7 @@ message StoreRes {
     repeated RegionLeader region_leaders = 13;
     optional bool  is_merge        = 14;//fetch node use it when error code is VERSION_OLD
     repeated IndexRecords  records        = 15;
+    optional int64  scan_rows     = 16;
 };
 
 message InitRegion {

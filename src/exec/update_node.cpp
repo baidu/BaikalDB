@@ -43,6 +43,11 @@ int UpdateNode::init(const pb::PlanNode& node) {
     return 0;
 }
 int UpdateNode::open(RuntimeState* state) { 
+    int num_affected_rows = 0;
+    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, ([&num_affected_rows](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(num_affected_rows);
+    }));
+
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -73,6 +78,10 @@ int UpdateNode::open(RuntimeState* state) {
     std::vector<int64_t> affected_indices;
     for (auto index_id : _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", index_id);
+            return -1;
+        }
         IndexInfo& info = *info_ptr;
         bool has_id = false;
         for (auto& field : info.fields) {
@@ -130,7 +139,6 @@ int UpdateNode::open(RuntimeState* state) {
     //     txn->rollback();
     // });
     bool eos = false;
-    int num_affected_rows = 0;
     AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
     int i = 0;
     for (auto& pair : state->reverse_index_map()) {
@@ -170,12 +178,21 @@ int UpdateNode::open(RuntimeState* state) {
             num_affected_rows += ret;
         }
 
+        if (state->need_txn_limit) {
+            bool is_limit = TxnLimitMap::get_instance()->check_txn_limit(state->txn_id, batch.size());
+            if (is_limit) {
+                DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%d", 
+                    state->region_id(), state->txn_id, batch.size());
+                return -1;
+            }
+        }
+
         if (state->txn_id == 0 && !eos) {
             if (state->is_separate) {
                 //batch单独走raft,raft on_apply中commit
                 state->raft_func(state, _txn);
             } else {
-                _txn->commit();
+                _txn->commit();                
             }
         }
     } while (!eos);

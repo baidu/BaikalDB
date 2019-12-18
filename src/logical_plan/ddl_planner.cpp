@@ -165,12 +165,14 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         }
     }
 
+    bool have_global_index = false;
     int constraint_len = stmt->constraints.size();
     for (int idx = 0; idx < constraint_len; ++idx) {
         parser::Constraint* constraint = stmt->constraints[idx];
         pb::IndexInfo* index = table.add_indexs();
         if (constraint->global == true) {
             index->set_is_global(true);
+            have_global_index = true;
         }
         if (constraint->type == parser::CONSTRAINT_PRIMARY) {
             index->set_index_type(pb::I_PRIMARY);
@@ -286,6 +288,20 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     int64_t region_split_lines = json_iter->value.GetInt64();
                     table.set_region_split_lines(region_split_lines);
                     DB_WARNING("region_split_lines: %ld", region_split_lines);
+                }
+                json_iter = root.FindMember("ttl_duration");
+                if (json_iter != root.MemberEnd()) {
+                    if (table.engine() != pb::ROCKSDB) {
+                        DB_FATAL("only ROCKSDB engine support ttl table");
+                        return -1;
+                    }
+                    if (have_global_index) {
+                        DB_FATAL("global index can not create ttl table");
+                        return -1;
+                    }
+                    int64_t ttl_duration = json_iter->value.GetInt64();
+                    table.set_ttl_duration(ttl_duration);
+                    DB_WARNING("ttl_duration: %ld", ttl_duration);
                 }
                 json_iter = root.FindMember("storage_compute_separate");
                 if (json_iter != root.MemberEnd()) {

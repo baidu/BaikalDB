@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <unordered_set>
+#include <set>
 
 #include "schema_manager.h"
 #include "meta_server.h"
@@ -65,11 +66,25 @@ struct TableMem {
     }
 };
 struct DdlPeerMem {
+    DdlPeerMem() = default;
+    DdlPeerMem(const DdlPeerMem& peer_mem) = default;
+    DdlPeerMem(pb::IndexState state, std::string peer_str) : workstate(state), peer(peer_str) {}
     pb::IndexState   workstate;
     std::string     peer;
 };
 
 struct DdlRegionMem {
+    DdlRegionMem() = default;
+    DdlRegionMem(int64_t id, pb::IndexState state, std::string peer_str) : region_id(id), workstate(state) {
+        peer_infos.emplace(peer_str, DdlPeerMem{state, peer_str});
+    }
+    template<class List>
+    DdlRegionMem(int64_t id, pb::IndexState state, List&& peers) : region_id(id), workstate(state) {
+        for (const auto& peer_str : peers) {
+            peer_infos.emplace(peer_str, DdlPeerMem{state, peer_str});
+        }
+    }
+    DdlRegionMem(const DdlRegionMem& region_mem) = default;
     int64_t region_id;
     pb::IndexState workstate;
     std::unordered_map<std::string, DdlPeerMem> peer_infos;
@@ -78,13 +93,28 @@ struct DdlRegionMem {
 struct DdlWorkMem {
     uint64_t table_id;
     pb::DdlWorkInfo work_info; //持久化、与store交互更新
-    bool is_rollback = false;
-    std::unordered_map<int64_t, DdlRegionMem> region_ddl_infos;
-    int32_t check_del_region_num = 0;
-    std::unordered_map<pb::IndexState, int, std::hash<int>> state_count;
-    int32_t all_peer_num = 0;
+    ThreadSafeMap<int64_t, DdlRegionMem, 257> region_ddl_infos;
     std::string resource_tag;
+    std::atomic<bool> is_rollback {false};
+    std::atomic<bool> is_leader_region_info_collected {false};
+    std::atomic<bool> is_doing {false};
+    ThreadSafeMap<int64_t, int64_t> need_scan_regions;
+    std::mutex mutex;
+    void set_rollback(bool rollback) {
+        std::lock_guard<std::mutex> lock(mutex);
+        work_info.set_rollback(rollback);
+    }
+    void set_state(pb::IndexState state) {
+        std::lock_guard<std::mutex> lock(mutex);
+        work_info.set_job_state(state);
+    }
+    void set_deleted(bool is_delete) {
+        std::lock_guard<std::mutex> lock(mutex);
+        work_info.set_deleted(true);
+    }
 };
+
+using DdlWorkMemPtr = std::shared_ptr<DdlWorkMem>;
 
 class TableManager {
 public:
@@ -165,9 +195,11 @@ public:
     int get_presplit_regions(int64_t table_id, 
                                            std::map<std::string, SmartRegionInfo>& key_newregion_map,
                                            pb::MetaManagerRequest& request);
-    void get_update_region_requests(int64_t table_id, 
+                                          
+    void get_update_region_requests(int64_t table_id, TableMem& table_info,
                                     std::vector<pb::MetaManagerRequest>& requests);
     void recycle_update_region();
+    void get_update_regions_apply_raft();
     void check_update_region(const pb::LeaderHeartBeat& leader_region,
                              const SmartRegionInfo& master_region_info);
     
@@ -487,21 +519,43 @@ public:
 
     int load_ddl_snapshot(const std::string& value);
 
-    int get_ddlwork_info(int64_t table_id, std::vector<pb::DdlWorkInfo>& ddlwork_infos) {
-        {
-            BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-            if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
-                ddlwork_infos.push_back(_table_ddlinfo_map[table_id].work_info);
+    bool check_table_has_ddlwork(int64_t table_id) {
+        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
+        if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
+            return true;
+        }
+        return false;
+    }
+
+    int get_ddlwork_info(int64_t table_id, pb::QueryResponse* query_response) {
+        auto ddlwork_ptr = get_ddlwork_ptr(table_id);
+        if (ddlwork_ptr != nullptr) {
+            {
+                BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
+                query_response->add_ddlwork_infos()->CopyFrom(ddlwork_ptr->work_info);
             }
+            auto ddl_info_ptr = query_response->add_query_ddl_infos();
+            ddl_info_ptr->set_table_id(table_id);
+
+            ddlwork_ptr->region_ddl_infos.traverse([ddl_info_ptr](const DdlRegionMem& region_info){
+                auto region_info_ptr = ddl_info_ptr->add_ddl_region_infos();
+                region_info_ptr->set_region_id(region_info.region_id);
+                region_info_ptr->set_state(region_info.workstate);
+
+                for (const auto& peer_ddl_info : region_info.peer_infos) {
+                    auto peer_info_ptr = region_info_ptr->add_ddl_peer_infos();
+                    peer_info_ptr->set_peer(peer_ddl_info.second.peer);
+                    peer_info_ptr->set_state(peer_ddl_info.second.workstate);
+                }
+            });
         }
         {
             BAIDU_SCOPED_LOCK(_all_table_ddlinfo_mutex);
             auto range = _all_table_ddlinfo_map.equal_range(table_id);
             for (auto i = range.first; i != range.second; ++i) {
-                ddlwork_infos.push_back(i->second.work_info);
+                query_response->add_ddlwork_infos()->CopyFrom(i->second.work_info);
             }
         }
-        
         return 0;
     }
 
@@ -611,7 +665,6 @@ private:
     void common_update_ddlwork_info_heartbeat_for_store(const pb::StoreHeartBeatRequest* request);
 
     void process_ddl_add_index_process(
-        pb::StoreHeartBeatResponse* response,
         DdlWorkMem& meta_work);
 
     void process_ddl_common_init(
@@ -619,7 +672,6 @@ private:
         const pb::DdlWorkInfo& work_info);
 
     void process_ddl_del_index_process(
-        pb::StoreHeartBeatResponse* response,
         DdlWorkMem& meta_work);
 
     void update_ddlwork_info(const pb::DdlWorkInfo& ddl_work, 
@@ -631,7 +683,7 @@ private:
     void update_index_status(const pb::DdlWorkInfo& ddl_work);
 
     bool process_ddl_update_job_index(DdlWorkMem& meta_work_info, pb::IndexState expected_state,
-        pb::IndexState state, pb::StoreHeartBeatResponse* response);
+        pb::IndexState state);
     void drop_index_request(const pb::DdlWorkInfo& ddl_work);
     void rollback_ddlwork(DdlWorkMem& ddlwork_mem);
 
@@ -640,47 +692,21 @@ private:
             (index_info.index_type() == pb::I_UNIQ || index_info.index_type() == pb::I_KEY);
     }
     void delete_ddl_region_info(DdlWorkMem& ddlwork, std::vector<int64_t>& region_ids);
-    void add_ddl_region_info(const pb::StoreHeartBeatRequest& store_ddlinfo_req);
     int init_region_ddlwork(DdlWorkMem& ddl_work_mem);
 
     void check_delete_ddl_region_info(DdlWorkMem& ddlwork);
-    
-    void init_ddlwork_for_store(const pb::StoreHeartBeatRequest* request,
-        pb::StoreHeartBeatResponse* response);
+
     void put_incremental_schemainfo(const int64_t apply_index, std::vector<pb::SchemaInfo>& schema_infos);
 
-    int get_ddlwork_state(int64_t table_id, pb::IndexState& state, pb::OpType& op_type) {
+    DdlWorkMemPtr get_ddlwork_ptr(int64_t table_id) {
+        DdlWorkMemPtr ddl_work_ptr {nullptr};
         BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
         auto table_ddlinfo_iter = _table_ddlinfo_map.find(table_id);
         if (table_ddlinfo_iter == _table_ddlinfo_map.end()) {
             DB_DEBUG("table_ddlinfo_map doesn't have table_id[%lld]", table_id);
-            return -1;
+            return nullptr;
         }
-        state = table_ddlinfo_iter->second.work_info.job_state();
-        op_type = table_ddlinfo_iter->second.work_info.op_type(); 
-        return 0;
-    }
-
-    bool exist_ddlwork_region(int64_t table_id, int64_t region_id) {
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        if (_table_ddlinfo_map.count(table_id) == 1) {
-            if (_table_ddlinfo_map[table_id].region_ddl_infos.count(region_id) == 1) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool exist_ddlwork_peer(int64_t table_id, int64_t region_id, const std::string& peer) {
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        if (_table_ddlinfo_map.count(table_id) == 1) {
-            if (_table_ddlinfo_map[table_id].region_ddl_infos.count(region_id) == 1) {
-                if (_table_ddlinfo_map[table_id].region_ddl_infos[region_id].peer_infos.count(peer) == 1) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return table_ddlinfo_iter->second;
     }
 
     void add_ddlwork_region(int64_t table_id, int64_t region_id, const std::string& peer) {
@@ -688,31 +714,17 @@ private:
         ddl_region_mem.region_id = region_id;
         ddl_region_mem.workstate = pb::IS_UNKNOWN;
         ddl_region_mem.peer_infos.emplace(peer, DdlPeerMem{pb::IS_UNKNOWN, peer});
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        if (_table_ddlinfo_map.count(table_id) == 1) {
-            _table_ddlinfo_map[table_id].region_ddl_infos.emplace(region_id, ddl_region_mem);
-            ++_table_ddlinfo_map[table_id].all_peer_num;
+        DdlWorkMemPtr ddl_work_ptr = get_ddlwork_ptr(table_id);
+        if (ddl_work_ptr != nullptr) {
+            ddl_work_ptr->region_ddl_infos.set(region_id, ddl_region_mem);
         }
     }
 
-    void add_ddlwork_peer(int64_t table_id, int64_t region_id, const std::string& peer) {
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        auto table_iter = _table_ddlinfo_map.find(table_id);
-        if (table_iter != _table_ddlinfo_map.end()) {
-            auto region_iter = table_iter->second.region_ddl_infos.find(region_id);
-            if (region_iter != table_iter->second.region_ddl_infos.end()) {
-                region_iter->second.peer_infos.emplace(peer, DdlPeerMem{pb::IS_UNKNOWN, peer});   
-                ++_table_ddlinfo_map[table_id].all_peer_num;
-            }
-        }
-    }
-
-    int init_ddlwork_region_info(
+    void init_ddlwork_region_info(
         DdlRegionMem& region_ddl_info,
         const pb::RegionInfo& region_info,
         pb::IndexState work_state
     ) {
-        auto init_peer_num = 0;
         region_ddl_info.region_id = region_info.region_id();
         region_ddl_info.workstate = work_state;
         for (const auto& peer : region_info.peers()) {
@@ -720,64 +732,64 @@ private:
             ddl_peer_mem.workstate = work_state;
             ddl_peer_mem.peer = peer;
             region_ddl_info.peer_infos.emplace(peer, ddl_peer_mem);
-            ++init_peer_num;
             DB_NOTICE("add_ddl_region region[%lld] peer[%s] state[%s]", region_ddl_info.region_id, peer.c_str(),
                         pb::IndexState_Name(work_state).c_str());
         }
-        return init_peer_num;    
     }
 
-    void update_ddlwork_peer_state(int64_t table_id, int64_t region_id, const std::string& peer,
+    void update_ddlwork_peer_state(DdlWorkMemPtr& ddl_work_ptr, int64_t table_id, int64_t region_id, const std::string& peer,
         pb::IndexState store_job_state, bool& debug_flag) {
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-
-        auto table_iter = _table_ddlinfo_map.find(table_id);
-        if (table_iter == _table_ddlinfo_map.end()) {
-            DB_WARNING("table_id[%ld] not in ddlinfo_map", table_id);
-            return;
-        }
-
-        auto region_iter = table_iter->second.region_ddl_infos.find(region_id);
-        if (region_iter == table_iter->second.region_ddl_infos.end()) {
-            DB_WARNING("table_id[%ld] region_id[%ld] not in ddlinfo_map", table_id, region_id);
-            return;
-        }
-        auto& region_info = region_iter->second;
-        auto peer_iter = region_info.peer_infos.find(peer);
-        if (peer_iter != region_info.peer_infos.end()) {
-
-            auto& peer_state = peer_iter->second.workstate;
-            if (store_job_state != peer_state) {
-                table_iter->second.state_count[store_job_state]++;
-                peer_state = store_job_state;
-                auto all_peer_done = std::all_of(region_info.peer_infos.begin(),
-                    region_info.peer_infos.end(), 
-                    [store_job_state](typename std::unordered_map<std::string, DdlPeerMem>::const_reference r){
-                        return r.second.workstate == store_job_state;
-                });
         
-                if (all_peer_done && region_info.workstate != store_job_state) {
-                    DB_NOTICE("region_%lld all peer state[%s]", region_id, 
-                        pb::IndexState_Name(store_job_state).c_str());
-                    region_info.workstate = store_job_state;
-                }
-                //debug
-                if (debug_flag && !all_peer_done) {
-                    debug_flag = false;
-                    for (const auto& peer_ddl_info : region_info.peer_infos) {
-                        DB_NOTICE("wait for region[%lld] peer[%s] state[%s]", region_info.region_id,
-                            peer_ddl_info.second.peer.c_str(), 
-                            pb::IndexState_Name(peer_ddl_info.second.workstate).c_str());
+        auto update_func = [&peer, store_job_state, table_id, region_id, &debug_flag](DdlRegionMem& region_info) {
+            if (store_job_state == region_info.workstate) {
+                return;
+            }
+            auto peer_iter = region_info.peer_infos.find(peer);
+            if (peer_iter != region_info.peer_infos.end()) {
+                auto& peer_state = peer_iter->second.workstate;
+                if (store_job_state != peer_state) {
+                    peer_state = store_job_state;
+                    auto all_peer_done = std::all_of(region_info.peer_infos.begin(),
+                        region_info.peer_infos.end(), 
+                        [store_job_state](typename std::unordered_map<std::string, DdlPeerMem>::const_reference r){
+                            return r.second.workstate == store_job_state;
+                    });
+
+                    if (all_peer_done && region_info.workstate != store_job_state) {
+                        DB_NOTICE("table_id_%lld region_%lld all peer state[%s]", table_id, region_id, 
+                            pb::IndexState_Name(store_job_state).c_str());
+                        region_info.workstate = store_job_state;
+                    }
+                    if (debug_flag && !all_peer_done) {
+                        debug_flag = false;
+                        for (const auto& peer_ddl_info : region_info.peer_infos) {
+                            DB_NOTICE("table_id_%lld wait for region[%lld] peer[%s] state[%s]", table_id, region_info.region_id,
+                                peer_ddl_info.second.peer.c_str(), 
+                                pb::IndexState_Name(peer_ddl_info.second.workstate).c_str());
+                        }
                     }
                 }
+            } else {
+                DB_NOTICE("DDL_LOG region[%lld] peer[%s] has been delete.", region_id, peer.c_str());
+                //region_info.peer_infos.emplace(peer, DdlPeerMem{pb::IS_UNKNOWN, peer});
             }
-        }
+        };
+        ddl_work_ptr->region_ddl_infos.update(region_id, update_func);
     }
+
+    //不要使用这种轮询方案，重构TODO
+    void delete_ddlwork_with_leader_region_info(const pb::StoreHeartBeatRequest& store_req, 
+        int start_index, int end_index);
+
+    //不要使用这种轮询方案，重构TODO
+    void init_ddlwork_with_leader_region_info(const pb::StoreHeartBeatRequest& store_req, 
+        int start_index, int end_index);
 
     int get_pb_ddlwork_info(int64_t table_id, pb::DdlWorkInfo& pb_ddlwork_info) {
         BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        if (_table_ddlinfo_map.count(table_id) == 1) {
-            pb_ddlwork_info = _table_ddlinfo_map[table_id].work_info;
+        auto table_iter = _table_ddlinfo_map.find(table_id);
+        if (table_iter != _table_ddlinfo_map.end()) {
+            pb_ddlwork_info = table_iter->second->work_info;
             return 0;
         }
         return -1;
@@ -789,6 +801,15 @@ private:
             table_ids.insert(ddlwork.first);
         }
     }
+
+    void init_store_ddl_work(const pb::StoreHeartBeatRequest* request,
+        pb::StoreHeartBeatResponse* response);
+
+    void update_ddl_work(const pb::StoreHeartBeatRequest& request, bool update_flag);
+
+    void ddlwork_process_leader_region(const pb::StoreHeartBeatRequest& store_req);
+
+    void collect_ddlwork_info(DdlWorkMem& meta_work);
 private:
     //std::mutex                                          _table_mutex;
     bthread_mutex_t                                          _table_mutex;
@@ -799,8 +820,11 @@ private:
     //table_name 与op映射关系， name: namespace\001\database\001\table_name
     std::unordered_map<std::string, int64_t>            _table_id_map;
     std::unordered_map<int64_t, TableMem>               _table_info_map;
-    std::unordered_map<int64_t, DdlWorkMem> _table_ddlinfo_map;
+
+    std::unordered_map<int64_t, DdlWorkMemPtr> _table_ddlinfo_map;
+    std::atomic<int64_t> _last_ddl_update_timestamp {0};
     std::multimap<int64_t, DdlWorkMem> _all_table_ddlinfo_map;
+    std::set<int64_t>                  _need_apply_raft_table_ids;
 
     typedef std::map<int64_t, std::vector<pb::SchemaInfo>> SchemaIncrementalMap;
     DoubleBuffer<SchemaIncrementalMap> _incremental_schemainfo_map;

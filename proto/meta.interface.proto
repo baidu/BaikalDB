@@ -105,7 +105,7 @@ message SchemaInfo {
     //optional bool   need_merge              = 35; //merge switch
     repeated SplitKey split_keys            = 36;
     optional SchemaConf schema_conf         = 37; //一些可以随意修改的配置放在这里
-    optional int64 ttl_duration             = 38; //0表示无ttl，>0表示有ttl，建表后指定，后续不能修改
+    optional int64 ttl_duration             = 38; //0表示无ttl，>0表示有ttl，建表时指定，后续不能修改
 };
 
 message PartitionRegion {
@@ -198,6 +198,7 @@ message PrivilegeDatabase {
     required string database   = 1;
     optional int64 database_id = 2;
     optional RW database_rw    = 3;
+    optional bool force        = 4;
 };
 
 message PrivilegeTable {
@@ -206,6 +207,7 @@ message PrivilegeTable {
     required string table_name = 3;
     optional int64 table_id    = 4;
     optional RW table_rw       = 5;
+    optional bool force        = 6;
 };
 
 message UserPrivilege {
@@ -517,9 +519,24 @@ message QueryResponse {
     repeated QueryRegion        flatten_regions     = 14;
     repeated QueryTable         flatten_tables      = 15;
     repeated QuerySchema        flatten_schema_infos= 16;
-    repeated int64              peer_ids       = 17;
-    repeated int64              region_ids     = 18;
-    repeated DdlWorkInfo ddlwork_infos = 19;
+    repeated int64              peer_ids            = 17;
+    repeated int64              region_ids          = 18;
+    repeated DdlWorkInfo ddlwork_infos              = 19;
+    repeated QueryDdlInfo query_ddl_infos           = 20;
+};
+
+message DdlPeerInfo {
+    optional string peer                     = 1;
+    optional IndexState state                = 2;
+};
+message DdlRegionInfo {
+    optional int64 region_id                = 1;
+    optional IndexState state               = 2;
+    repeated DdlPeerInfo ddl_peer_infos     = 3;
+};
+message QueryDdlInfo {
+    optional int64 table_id                 = 1;
+    repeated DdlRegionInfo ddl_region_infos = 2;
 };
 
 message QueryUserPrivilege {

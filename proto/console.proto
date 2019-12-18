@@ -6,20 +6,21 @@ option cc_generic_services = true;
 
 
 enum WatchOpType {
-    WATCH_OVERVIEW        = 1;
-    WATCH_TABLE           = 2;
-    WATCH_INSTANCE        = 3;
-    WATCH_REGION          = 4;
-    WATCH_USER            = 5;
-    WATCH_NAMESPACE       = 6;
-    WATCH_DATABASE        = 7;
-    WATCH_CLUSTER         = 8;
-    WATCH_SCHEMA          = 9;
-    WATCH_IMPORTTASK      = 10;
-    WATCH_IMPORTTASK2     = 11;
-    WATCH_TASKLIST        = 12;
-    SUBMIT_IMPORTTASK     = 13;
-    WATCH_UNKNOWN         = 14;
+    WATCH_UNKNOWN         = 1;
+    WATCH_PLATFORM        = 2;
+    WATCH_OVERVIEW        = 3;
+    WATCH_TABLE           = 4;
+    WATCH_INSTANCE        = 5;
+    WATCH_REGION          = 6;
+    WATCH_USER            = 7;
+    WATCH_NAMESPACE       = 8;
+    WATCH_DATABASE        = 9;
+    WATCH_CLUSTER         = 10;
+    WATCH_SCHEMA          = 11;
+    WATCH_IMPORTTASK      = 12;
+    WATCH_IMPORTTASK2     = 13;
+    WATCH_TASKLIST        = 14;
+    SUBMIT_IMPORTTASK     = 15;
 };
 
 message ConsoleRequest {
@@ -62,6 +63,8 @@ message QueryParam {
     optional string      modle              = 19;
     optional string      charset            = 20;
     optional string      interval_days      = 21;
+    optional string      crud_database      = 22;
+    optional string      platform           = 23;
 };
 
 message OverViewInfo {
@@ -180,6 +183,10 @@ message WatchSchemaInfo {
     repeated QuerySchema  schemas           = 2;
 };
 
+message WatchPlatForm {
+    repeated string plat_form         = 1;
+};
+
 message ConsoleResponse {
     required ErrCode            errcode             = 1;
     optional string             errmsg              = 2;
@@ -195,6 +202,7 @@ message ConsoleResponse {
     repeated WatchClusterInfo   cluster_infos       = 12;
     repeated WatchImportTask    import_task         = 13;
     repeated WatchTaskList      task_list           = 14;
+    optional WatchPlatForm      plat_forms          = 15;
 };
 
 service ConsoleService {

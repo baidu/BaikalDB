@@ -99,6 +99,7 @@ int TransactionNode::open(RuntimeState* state) {
             ret = -1;
         }
         txn_pool->remove_txn(state->txn_id);
+        TxnLimitMap::get_instance()->erase(state->txn_id);
         return ret;
     } else if (_txn_cmd == pb::TXN_ROLLBACK_STORE) {
         // TODO: rollback failure can be simply ignored
@@ -119,6 +120,7 @@ int TransactionNode::open(RuntimeState* state) {
                 region_id, state->txn_id, res.code(), res.ToString().c_str());
         }
         txn_pool->remove_txn(state->txn_id);
+        TxnLimitMap::get_instance()->erase(state->txn_id);
         return 0;
     }
     return 0;

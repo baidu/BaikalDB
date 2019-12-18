@@ -76,8 +76,9 @@ private:
 private: 
     Region* _region = nullptr;
     int64_t _region_id = 0;
-    //region status,用在分裂和add_peer remove_peer时
-    //只有leader有状态
+    //region status,用在split、merge、ddl、ttl、add_peer、remove_peer时
+    //保证操作串行
+    //只有leader有状态 ddl?
     std::atomic<pb::RegionStatus> _status;
 };
 } // end of namespace

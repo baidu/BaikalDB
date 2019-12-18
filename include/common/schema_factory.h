@@ -164,6 +164,7 @@ struct TableInfo {
     int64_t                 replica_num = 3;
     //table字段不变的话不需要重新构建动态pb
     std::string             fields_sign;
+    //>0表示配置有ttl，单位s
     int64_t                 ttl_duration = 0;
 
     const Descriptor*       tbl_desc;
@@ -253,7 +254,8 @@ using DoubleBufferedIdc = butil::DoublyBufferedData<IdcMapping>;
 
 class SchemaFactory {
 typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec; 
-typedef ::google::protobuf::RepeatedPtrField<pb::SchemaInfo> SchemaVec; 
+typedef ::google::protobuf::RepeatedPtrField<pb::SchemaInfo> SchemaVec;
+typedef ::google::protobuf::RepeatedPtrField<pb::DataBaseInfo> DataBaseVec;
 public:
     virtual ~SchemaFactory() {
         bthread_mutex_destroy(&_update_user_mutex);
@@ -318,7 +320,7 @@ public:
 
     //TODO 不考虑删除
     void update_user(const pb::UserPrivilege& user);
-    void update_show_db(const pb::DataBaseInfo& db_info);
+    void update_show_db(const DataBaseVec& db_infos);
 
     void schema_info_scope_read(std::function<void(const SchemaMapping&)> callback) {
         DoubleBufferedTable::ScopedPtr table_ptr;
@@ -368,7 +370,7 @@ public:
     int get_region_info(int64_t region_id, pb::RegionInfo& info);
     int get_region_info(int64_t table_id, int64_t region_id, pb::RegionInfo& info);
 
-    int get_region_capacity(int64_t table_id, int64_t& region_capacity);
+    int get_region_capacity(int64_t global_index_id, int64_t& region_capacity);
     bool get_merge_switch(int64_t table_id);
     bool get_separate_switch(int64_t table_id);
     int64_t get_ttl_duration(int64_t table_id);

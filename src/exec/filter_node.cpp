@@ -183,8 +183,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
                 func->set_name("eq");
                 func->set_fn_op(parser::FT_EQ);
                 lt_le->init(node);
-                lt_le->type_inferer();
-                lt_le->const_pre_calc();
+                lt_le->expr_optimize();
                 cut_preds.insert(gt_ge);
                 return 0;
             } else {
@@ -205,13 +204,11 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     std::map<int64_t, SlotPredicate> pred_map;
     for (auto& expr : _conjuncts) {
         //类型推导
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        //常量表达式计算
-        expr->const_pre_calc();
         if (expr->children_size() < 2) {
             continue;
         }
@@ -316,6 +313,8 @@ int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
 }
 
 int FilterNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, nullptr);
+    
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -378,6 +377,10 @@ inline bool FilterNode::need_copy(MemRow* row) {
 }
 
 int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+    
     while (1) {
         if (batch->is_full()) {
             return 0;

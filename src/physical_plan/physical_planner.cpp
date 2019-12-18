@@ -18,13 +18,19 @@ namespace baikaldb {
 int PhysicalPlanner::analyze(QueryContext* ctx) {
     int ret = 0;
     auto return_empty_func = [ctx]() {
-        ExecNode* plan = ctx->root;
-        PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
-        for (size_t i = 0; i < packet_node->children_size(); i++) {
-            ExecNode::destroy_tree(packet_node->children(i));
+        ExecNode* node = ctx->root;
+        if (node->children_size() > 0) {
+            if (node->children(0)->node_type() == pb::MERGE_AGG_NODE || 
+                    node->children(0)->node_type() == pb::AGG_NODE) {
+                node = node->children(0);
+            } else {
+                node->set_limit(0);
+            }
         }
-        packet_node->mutable_children()->clear();
-        packet_node->set_limit(0);
+        for (size_t i = 0; i < node->children_size(); i++) {
+            ExecNode::destroy_tree(node->children(i));
+        }
+        node->mutable_children()->clear();
     };
     // 包括类型推导与常量表达式计算
     ret = ExprOptimize().analyze(ctx);
@@ -99,7 +105,16 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
          ctx->stat_info.error_code = state.error_code;
         return ret;
     }
+    if (ctx->is_trace) {
+        ctx->trace_node.set_node_type(ctx->root->node_type());
+        ctx->root->set_trace(&ctx->trace_node);
+        ctx->root->create_trace();
+    }
+    
     ret = ctx->root->open(&state);
+    if (ctx->root->get_trace() != nullptr) {
+        DB_WARNING("execute:%s", ctx->root->get_trace()->DebugString().c_str());
+    }
     ctx->root->close(&state);
     if (ret < 0) {
         DB_WARNING("plan open fail: %d, %s", state.error_code, state.error_msg.str().c_str());
@@ -109,6 +124,7 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     }
     ctx->stat_info.num_returned_rows = state.num_returned_rows();
     ctx->stat_info.num_affected_rows = state.num_affected_rows();
+    ctx->stat_info.num_scan_rows = state.num_scan_rows();
     ctx->stat_info.error_code = state.error_code;
     
     return 0;
@@ -153,6 +169,7 @@ int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, b
         root->close(&state);
         ctx->stat_info.num_returned_rows = state.num_returned_rows();
         ctx->stat_info.num_affected_rows = state.num_affected_rows();
+        ctx->stat_info.num_scan_rows = state.num_scan_rows();
         ctx->stat_info.error_code = state.error_code;
         ctx->stat_info.error_msg.str(state.error_msg.str());
     }
@@ -196,6 +213,7 @@ int PhysicalPlanner::insert_values_to_record(QueryContext* ctx) {
         DB_WARNING("insert_node is null");
         return -1;
     }
+    ctx->insert_records.clear();
     return insert_node->insert_values_for_prepared_stmt(ctx->insert_records);
 }
 }

@@ -354,7 +354,7 @@ static int hll_sparse_set(std::string& hll, long index, uint8_t count) {
     int deltalen = seqlen-oldlen;
 
     if (deltalen > 0 && (hll_size+deltalen > hll_sparse_max_bytes)) {
-        DB_WARNING("size > 3000 hll_sparse_to_dense");
+        //DB_WARNING("size > 3000 hll_sparse_to_dense");
         return hll_sparse_set_promote(hll, index, count);
     }
     size_t front= p - start;

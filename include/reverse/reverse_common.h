@@ -163,7 +163,7 @@ private:
     int _index;
     bool _first;
 };
-//合并不同层次的倒排链表
+//合并不同层次的倒排链表，返回合并后的长度
 template<typename ReverseNode, typename ReverseList>
 int level_merge(MergeSortIterator<ReverseNode>* new_iter, 
                 MergeSortIterator<ReverseNode>* old_iter,

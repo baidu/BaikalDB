@@ -9,17 +9,17 @@ curl -d '{
     "op_type":"OP_UPDATE_DISTS",
     "table_info": {
         "table_name": "'$2'",
-        "database": "TEST",
-        "namespace_name": "TEST2",
+        "database": "testdb",
+        "namespace_name": "TEST",
         "replica_num": 3,
          "dists": [
             {
                 "logical_room": "bj",
-                "count" : 3
+                "count" : 0
             },
             {
                 "logical_room": "nj",
-                "count" : 0
+                "count" : 3
             },
             {
                 "logical_room": "gz",

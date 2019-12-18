@@ -24,6 +24,7 @@
 #include "mut_table_key.h"
 #include "proto/meta.interface.pb.h"
 #include "proto/store.interface.pb.h" 
+#include "trace_state.h"
 
 namespace baikaldb {
 DECLARE_bool(disable_wal);
@@ -38,13 +39,24 @@ struct DllTransactionState {
 
 using SmartDllTransactionState = std::shared_ptr<DllTransactionState>;
 
+inline uint64_t ttl_encode(int64_t ttl_timestamp_us) {
+    return KeyEncoder::to_endian_u64(
+            KeyEncoder::encode_i64(ttl_timestamp_us));
+}
+
+inline int64_t ttl_decode(rocksdb::Slice value) {
+    return KeyEncoder::decode_i64(
+            KeyEncoder::to_endian_u64(
+                *reinterpret_cast<const uint64_t*>(value.data())));
+}
 
 class TransactionPool;
 class Transaction {
 public:
-    Transaction(uint64_t txn_id, TransactionPool* pool) : 
+    Transaction(uint64_t txn_id, TransactionPool* pool, bool use_ttl) : 
             _txn_id(txn_id),
-            _pool(pool) {
+            _pool(pool),
+            _use_ttl(use_ttl) {
         _write_opt.disableWAL = FLAGS_disable_wal;
         bthread_mutex_init(&_txn_mutex, nullptr);
     }
@@ -171,6 +183,7 @@ public:
             MutTableKey&      pk_val,
             bool              check_region);
     int get_for_update(const std::string& key, std::string* value);
+    rocksdb::Status put_kv_without_lock(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
     int put_kv(const std::string& key, const std::string& value);
     int delete_kv(const std::string& key);
     
@@ -254,7 +267,19 @@ public:
         return _table_info->engine == pb::ROCKSDB_CSTORE;
     }
 
-    // 
+    void set_write_ttl_timestamp_us(int64_t write_ttl_timestamp_us) {
+        _write_ttl_timestamp_us = write_ttl_timestamp_us;
+    }
+    int64_t write_ttl_timestamp_us() const {
+        return _write_ttl_timestamp_us;
+    }
+    int64_t read_ttl_timestamp_us() const {
+        return _read_ttl_timestamp_us;
+    }
+    bool use_ttl() const {
+        return _use_ttl;
+    }
+
     static int get_full_primary_key(
             rocksdb::Slice  index_bytes, 
             rocksdb::Slice  pk_bytes,
@@ -350,13 +375,14 @@ private:
             bool            parse_key,
             bool            check_region);
     
-    void add_kvop_put(std::string& key, std::string& value) {
+    void add_kvop_put(std::string& key, std::string& value, int64_t ttl_timestamp_us) {
         //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,
         //           str_to_hex(key).c_str(), str_to_hex(value).c_str());
         pb::KvOp* kv_op = _store_req.add_kv_ops();
         kv_op->set_op_type(pb::OP_PUT_KV);
         kv_op->set_key(key);
         kv_op->set_value(value);
+        kv_op->set_ttl_timestamp_us(ttl_timestamp_us);
     }
     
     void add_kvop_delete(std::string& key) {
@@ -396,7 +422,10 @@ private:
     std::set<int32_t>               _pri_field_ids; // for cstore
 
     bthread_mutex_t                 _txn_mutex;
-    SmartDllTransactionState            _ddl_state = nullptr;
+    SmartDllTransactionState        _ddl_state = nullptr;
+    bool                            _use_ttl = false;
+    int64_t                         _read_ttl_timestamp_us = 0; //ttl读取时间
+    int64_t                         _write_ttl_timestamp_us = 0; //ttl写入时间
 };
 
 typedef std::shared_ptr<Transaction> SmartTransaction;

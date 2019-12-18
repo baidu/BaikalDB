@@ -551,7 +551,8 @@ int FetcherNode::open(RuntimeState* state) {
                         _error = ret;
                     }
                 };
-                Bthread bth(&BTHREAD_ATTR_SMALL);
+                // 怀疑栈溢出
+                Bthread bth;
                 bth.run(req_thread);
             }
             cond.wait(-FLAGS_single_store_concurrency);

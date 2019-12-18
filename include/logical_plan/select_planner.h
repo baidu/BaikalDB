@@ -34,6 +34,8 @@ public:
 private:
 
     // methods to create plan nodes
+    void create_dual_scan_node();
+
     int create_limit_node();
 
     int create_having_node();

@@ -620,6 +620,7 @@ struct ShowStmt : public DmlNode {
 
 struct ExplainStmt : public DmlNode {
     StmtNode* stmt = nullptr;
+    String format;
     ExplainStmt() {
         node_type = NT_EXPLAIN;
     }

@@ -10,8 +10,8 @@ curl -d '{
         "password" : "******",
         "namespace_name" : "TEST",
         "privilege_database" : [{
-                                    "database" : "TEST",
-                                    "database_rw" : 2                            
+                                    "database" : "DB",
+                                    "database_rw" : 1                            
                                 }],
         "bns":["preonline", "offline"],
         "ip":["127.0.0.1", "127.0.0.2"]

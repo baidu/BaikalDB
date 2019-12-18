@@ -83,7 +83,6 @@ ExprValue MemRow::get_value(int32_t tuple_id, int32_t slot_id) {
         } break;
         case FieldDescriptor::CPPTYPE_INT64: {
             ExprValue value(pb::INT64);
-            //value._u.int64_val = butil::fast_rand() % 10000;
             value._u.int64_val = _reflection->GetInt64(*tuple, field);
             return value;
         } break;

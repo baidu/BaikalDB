@@ -151,7 +151,7 @@ void AutoIncrStateMachine::update(const pb::MetaManagerRequest& request,
     auto& increment_info = request.auto_increment();
     int64_t table_id = increment_info.table_id();
     if (_auto_increment_map.find(table_id) == _auto_increment_map.end()) {
-        DB_WARNING("table id:%s has no auto_increment field", table_id);
+        DB_WARNING("table id:%ld has no auto_increment field", table_id);
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table has no auto increment");
         return;
     }

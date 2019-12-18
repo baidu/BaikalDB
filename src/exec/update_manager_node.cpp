@@ -34,7 +34,7 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
     _op_type = pb::OP_UPDATE;
     _table_id =  update_node->table_id();
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
-    if (!_table_info) {
+    if (_table_info == nullptr) {
         DB_WARNING("get table info failed, table_id:%ld", _table_id);
         return -1;
     }
@@ -49,7 +49,7 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
     std::vector<int64_t> affected_indices;
     for (auto index_id : _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (!info_ptr) {
+        if (info_ptr == nullptr) {
             DB_WARNING("get index info failed, index_id:%ld", index_id);
             return -1;
         }
@@ -76,6 +76,10 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
     }
     for (auto index_id : _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", index_id);
+            return -1;
+        }
         if (info_ptr->is_global) {
             _affect_global_index = true;
             if (info_ptr->type == pb::I_UNIQ) {

@@ -24,7 +24,8 @@
 
 namespace baikaldb {
 DECLARE_int32(concurrency_num);
-DECLARE_int32(store_heart_beat_interval_us);
+DECLARE_int64(store_heart_beat_interval_us);
+DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(region_faulty_interval_times);
 DECLARE_int64(incremental_info_gc_time);
 //增加或者更新region信息
@@ -333,24 +334,19 @@ void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_
     //erase_region_info(drop_region_ids);
 }
 
-//void RegionManager::add_peer_for_dead_store(const std::string& instance, pb::Status status) {
-void RegionManager::delete_all_region_for_store(const std::string& instance, pb::Status status) {
-    DB_WARNING("delete all region for dead store start, dead_store:%s", instance.c_str());
+// default for MIGRATE
+void RegionManager::add_peer_for_store(const std::string& instance, 
+        InstanceStateInfo status) {
+    DB_WARNING("add peer all region for migrate store start, store:%s", instance.c_str());
     std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
-    //if (resource_tag == "e0-ct") {
-    //    return;
-            //}
     //实例上已经没有reigon了，直接删除该实例即可
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
     if (region_ids.size() == 0) {
-        {
-            BAIDU_SCOPED_LOCK(_resource_tag_mutex);
-            if (_resource_tag_delete_region_map[resource_tag] == instance) {
-                _resource_tag_delete_region_map[resource_tag] = "";
-            }
-        }
-        if (status == pb::DEAD) {
+        // DEAD状态直接删除，MIGRATE状态等待无心跳一段时间后删除(真正被迁移走了)
+        int64_t last_timestamp = status.timestamp;
+        if ((butil::gettimeofday_us() - last_timestamp) > 
+                FLAGS_store_heart_beat_interval_us * FLAGS_store_dead_interval_times) {
             pb::MetaManagerRequest request;
             request.set_op_type(pb::OP_DROP_INSTANCE);
             pb::InstanceInfo* instance_info = request.mutable_instance();
@@ -360,23 +356,74 @@ void RegionManager::delete_all_region_for_store(const std::string& instance, pb:
         }
         return;
     }
-    /*
     {
-        BAIDU_SCOPED_LOCK(_resource_tag_mutex);
-        if (_resource_tag_delete_region_map[resource_tag].empty()
-                || _resource_tag_delete_region_map[resource_tag] == instance) {
-            _resource_tag_delete_region_map[resource_tag] = instance;
-        } else {
-            DB_WARNING("resoruce_tag:%s, instance:%s has doing by other instance",
-                    resource_tag.c_str(), instance.c_str());
+        BAIDU_SCOPED_LOCK(_doing_mutex);
+        if (_doing_migrate.find(instance) != _doing_migrate.end()) {
+            DB_WARNING("instance: %s is doing migrating");
             return;
+        } else {
+            _doing_migrate.insert(instance);
         }
     }
-    */
+    auto asyn_add_peer = [this, instance, status] () {
+        std::unordered_map<std::string, std::vector<pb::AddPeer>> add_peer_requests;
+        pre_process_add_peer_for_store(instance, status.state, add_peer_requests);
+        ConcurrencyBthread concur_bth(add_peer_requests.size());
+        for (auto& add_peer_per_instance : add_peer_requests) {
+            auto add_peer_fun_per_instance = [this, add_peer_per_instance] ()  {
+                ConcurrencyBthread sub_bth(4);
+                std::string leader = add_peer_per_instance.first;
+                for (auto& add_peer_request : add_peer_per_instance.second) {
+                    auto add_peer_fun = [this, leader, add_peer_request] () {
+                        StoreInteract store_interact(leader.c_str());
+                        pb::StoreRes response; 
+                        auto ret = store_interact.send_request("add_peer", add_peer_request, response);
+                        DB_WARNING("send add peer leader: %s, request:%s, response:%s, ret: %d",
+                                leader.c_str(),
+                                add_peer_request.ShortDebugString().c_str(),
+                                response.ShortDebugString().c_str(), ret);
+                        bthread_usleep(5 * 1000 * 1000LL);
+                    };
+                    sub_bth.run(add_peer_fun);
+                }
+                sub_bth.join();
+            };
+            concur_bth.run(add_peer_fun_per_instance);
+        }
+        concur_bth.join();
+        BAIDU_SCOPED_LOCK(_doing_mutex);
+        _doing_migrate.erase(instance);
+        DB_WARNING("add all region for migrate store end, store:%s", instance.c_str());
+    };
+    Bthread bth;
+    bth.run(asyn_add_peer);
+}
+
+// default for DEAD
+void RegionManager::delete_all_region_for_store(const std::string& instance, 
+        InstanceStateInfo status) {
+    DB_WARNING("delete all region for dead store start, dead_store:%s", instance.c_str());
+    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
+    //实例上已经没有reigon了，直接删除该实例即可
+    std::vector<int64_t> region_ids;
+    get_region_ids(instance, region_ids);
+    if (region_ids.size() == 0) {
+        // DEAD状态直接删除，MIGRATE状态等待无心跳一段时间后删除(真正被迁移走了)
+        int64_t last_timestamp = status.timestamp;
+        if ((butil::gettimeofday_us() - last_timestamp) > 
+                FLAGS_store_heart_beat_interval_us * FLAGS_store_dead_interval_times) {
+            pb::MetaManagerRequest request;
+            request.set_op_type(pb::OP_DROP_INSTANCE);
+            pb::InstanceInfo* instance_info = request.mutable_instance();
+            instance_info->set_address(instance);
+            ClusterManager::get_instance()->process_cluster_info(NULL, &request, NULL, NULL);
+            DB_WARNING("dead instance has no region, drop instance:%s", instance.c_str());
+        }
+        return;
+    }
     std::vector<pb::RaftControlRequest> requests;
-    pre_process_remove_peer_for_store(instance, requests);
-    //BthreadCond concurrency_cond(-FLAGS_concurrency_num);
-    BthreadCond concurrency_cond(-2);
+    pre_process_remove_peer_for_store(instance, status.state, requests);
+    BthreadCond concurrency_cond(-FLAGS_concurrency_num);
     for (auto request : requests) {
         auto remove_peer_fun = [this, request, &concurrency_cond] () {
             StoreInteract store_interact(request.new_leader().c_str());
@@ -393,53 +440,12 @@ void RegionManager::delete_all_region_for_store(const std::string& instance, pb:
         bth.run(remove_peer_fun);
         bthread_usleep(1000 * 10);
     }
-    //concurrency_cond.wait(-FLAGS_concurrency_num);
-    concurrency_cond.wait(-2);
+    concurrency_cond.wait(-FLAGS_concurrency_num);
     DB_WARNING("delete all region for dead store end, dead_store:%s", instance.c_str());
-    //{
-    //    BAIDU_SCOPED_LOCK(_doing_mutex);
-    //    if (_doing_migrate.find(instance) != _doing_migrate.end()) {
-    //        DB_WARNING("instance: %s is doing migrating");
-    //        return;
-    //    } else {
-    //        _doing_migrate.insert(instance);
-    //    }
-    //}
-    //auto asyn_add_peer = [this, instance] () {
-    //    std::unordered_map<std::string, std::vector<pb::AddPeer>> add_peer_requests;
-    //    pre_process_add_peer_for_store(instance, add_peer_requests);
-    //    ConcurrencyBthread concur_bth(add_peer_requests.size());
-    //    for (auto& add_peer_per_instance : add_peer_requests) {
-    //        auto add_peer_fun_per_instance = [this, add_peer_per_instance] ()  {
-    //            ConcurrencyBthread sub_bth(4);
-    //            std::string leader = add_peer_per_instance.first;
-    //            for (auto& add_peer_request : add_peer_per_instance.second) {
-    //                auto add_peer_fun = [this, leader, add_peer_request] () {
-    //                    StoreInteract store_interact(leader.c_str());
-    //                    pb::StoreRes response; 
-    //                    auto ret = store_interact.send_request("add_peer", add_peer_request, response);
-    //                    DB_WARNING("send add peer leader: %s, request:%s, response:%s, ret: %d",
-    //                            leader.c_str(),
-    //                            add_peer_request.ShortDebugString().c_str(),
-    //                            response.ShortDebugString().c_str(), ret);
-    //                    bthread_usleep(5 * 1000 * 1000LL);
-    //                };
-    //                sub_bth.run(add_peer_fun);
-    //            }
-    //            sub_bth.join();
-    //        };
-    //        concur_bth.run(add_peer_fun_per_instance);
-    //    }
-    //    concur_bth.join();
-    //    BAIDU_SCOPED_LOCK(_doing_mutex);
-    //    _doing_migrate.erase(instance);
-    //    DB_WARNING("add all region for dead store end, dead_store:%s", instance.c_str());
-    //};
-    //Bthread bth;
-    //bth.run(asyn_add_peer);
 }
-void RegionManager::pre_process_remove_peer_for_store(const std::string& instance,
-                std::vector<pb::RaftControlRequest>& requests) {
+
+void RegionManager::pre_process_remove_peer_for_store(const std::string& instance, 
+        pb::Status status, std::vector<pb::RaftControlRequest>& requests) {
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
     std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
@@ -452,10 +458,26 @@ void RegionManager::pre_process_remove_peer_for_store(const std::string& instanc
         int64_t table_id = ptr_region->table_id();
         int64_t replica_num;
         auto ret = TableManager::get_instance()->get_replica_num(table_id, replica_num);
+        // MIGRATE 对于其他instance状态判断，如果有非正常状态则暂停迁移region
+        if (status == pb::MIGRATE) {
+            bool has_error = false;
+            for (auto& peer : ptr_region->peers()) {
+                if (peer != instance) {
+                    auto st = ClusterManager::get_instance()->get_instance_status(peer);
+                    if (st == pb::DEAD || st == pb::FAULTY) {
+                        has_error = true;
+                        break;
+                    }
+                }
+            }
+            if (has_error) {
+                continue;
+            }
+        }
         std::string leader = ptr_region->leader();
-        // TODO liguoqiang 尝试add_peer
+        // 尝试add_peer
         if (ret < 0 || ptr_region->peers_size() < replica_num) {
-            DB_WARNING("region_info: %s peers letter than replica_num, can not been remove, instance%s",
+            DB_WARNING("region_info: %s peers less than replica_num, can not been remove, instance%s",
                         ptr_region->ShortDebugString().c_str(), instance.c_str());
             std::string new_instance;
             std::set<std::string> peers;
@@ -497,7 +519,7 @@ void RegionManager::pre_process_remove_peer_for_store(const std::string& instanc
             bth.run(add_peer_fun);
             continue;
         }
-        pb::Status status;
+        pb::Status status = pb::NORMAL;
         ret = get_region_status(region_id, status);
         if (ret < 0 || status != pb::NORMAL) {
             DB_FATAL("region_id:%ld status:%s is not normal, can not been remove, instance:%s",
@@ -513,64 +535,79 @@ void RegionManager::pre_process_remove_peer_for_store(const std::string& instanc
                 request.add_new_peers(peer);
             }
         }
-        //// TODO 尝试切主
-        //if (leader == instance) {
-        //    leader = request.new_peers(0);
-        //}
         request.set_new_leader(leader);
         requests.push_back(request);
     }
 }
-//void RegionManager::pre_process_add_peer_for_store(const std::string& instance,
-//                std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests) {
-//    std::vector<int64_t> region_ids;
-//    get_region_ids(instance, region_ids);
-//    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
-//    std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
-//    for (auto& region_id : region_ids) {
-//        auto ptr_region = get_region_info(region_id);
-//        if (ptr_region == nullptr) {
-//            continue;
-//        }
-//        int64_t table_id = ptr_region->table_id();
-//        int64_t replica_num;
-//        auto ret = TableManager::get_instance()->get_replica_num(table_id, replica_num);
-//        if (ret < 0 || ptr_region->peers_size() > replica_num) {
-//            DB_WARNING("region_id: %ld has been added peer, region_info: %s",
-//                        region_id, ptr_region->ShortDebugString().c_str());
-//            continue;
-//        }
-//        std::string new_instance;
-//        std::set<std::string> peers;
-//        for (auto& peer : ptr_region->peers()) {
-//            peers.insert(peer);
-//        }
-//        std::string candicate_logical_room;
-//        if (TableManager::get_instance()->whether_replica_dists(table_id)) {
-//            candicate_logical_room = logical_room;
-//        }
-//        // 故障需要尽快恢复，轮询最均匀
-//        ret = ClusterManager::get_instance()->select_instance_rolling(
-//                resource_tag,
-//                peers,
-//                candicate_logical_room,
-//                new_instance);
-//        if (ret < 0) {
-//            DB_FATAL("select store from cluster fail, region_id:%ld", region_id);
-//            continue;
-//        }
-//        pb::AddPeer add_peer;
-//        add_peer.set_region_id(region_id);
-//        for (auto& peer : ptr_region->peers()) {
-//            add_peer.add_old_peers(peer);
-//            add_peer.add_new_peers(peer);
-//        }
-//        add_peer.add_new_peers(new_instance);
-//        std::string leader = ptr_region->leader();
-//        add_peer_requests[leader].push_back(add_peer);
-//        DB_WARNING("add peer request: %s", add_peer.ShortDebugString().c_str());
-//    }
-//}
+void RegionManager::pre_process_add_peer_for_store(const std::string& instance, pb::Status status, 
+                std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests) {
+    std::vector<int64_t> region_ids;
+    get_region_ids(instance, region_ids);
+    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
+    std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
+    for (auto& region_id : region_ids) {
+        auto ptr_region = get_region_info(region_id);
+        if (ptr_region == nullptr) {
+            continue;
+        }
+        int64_t table_id = ptr_region->table_id();
+        int64_t replica_num;
+        auto ret = TableManager::get_instance()->get_replica_num(table_id, replica_num);
+        if (ret < 0 || ptr_region->peers_size() > replica_num) {
+            DB_WARNING("region_id: %ld has been added peer, region_info: %s",
+                        region_id, ptr_region->ShortDebugString().c_str());
+            continue;
+        }
+
+        // MIGRATE 对于其他instance状态判断，如果有非正常状态则暂停迁移region
+        if (status == pb::MIGRATE) {
+            bool has_error = false;
+            for (auto& peer : ptr_region->peers()) {
+                if (peer != instance) {
+                    auto st = ClusterManager::get_instance()->get_instance_status(peer);
+                    if (st == pb::DEAD || st == pb::FAULTY) {
+                        has_error = true;
+                        break;
+                    }
+                }
+            }
+            if (has_error) {
+                continue;
+            }
+        }
+
+        std::string new_instance;
+        std::set<std::string> peers;
+        for (auto& peer : ptr_region->peers()) {
+            peers.insert(peer);
+        }
+        std::string candicate_logical_room;
+        if (TableManager::get_instance()->whether_replica_dists(table_id)) {
+            candicate_logical_room = logical_room;
+        }
+        // 故障需要尽快恢复，轮询最均匀
+        ret = ClusterManager::get_instance()->select_instance_rolling(
+                resource_tag,
+                peers,
+                candicate_logical_room,
+                new_instance);
+        if (ret < 0) {
+            DB_FATAL("select store from cluster fail, region_id:%ld", region_id);
+            continue;
+        }
+        pb::AddPeer add_peer;
+        add_peer.set_region_id(region_id);
+        for (auto& peer : ptr_region->peers()) {
+            add_peer.add_old_peers(peer);
+            add_peer.add_new_peers(peer);
+        }
+        add_peer.add_new_peers(new_instance);
+        std::string leader = ptr_region->leader();
+        add_peer_requests[leader].push_back(add_peer);
+        DB_WARNING("add peer request: %s", add_peer.ShortDebugString().c_str());
+    }
+}
+
 void RegionManager::check_update_region(const pb::BaikalHeartBeatRequest* request,
             pb::BaikalHeartBeatResponse* response) {
     for (auto& schema_heart_beat : request->schema_infos()) { 
@@ -688,6 +725,10 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
         for (auto& peer : leader_region.region().peers()) {
             if (peer == instance) {
                 continue;
+            }
+            auto st = ClusterManager::get_instance()->get_instance_status(peer);
+            if (st != pb::NORMAL) {
+                break;
             }
             int64_t leader_count = get_leader_count(peer, table_id);
             if (leader_count < average_leader_counts[table_id]
@@ -909,7 +950,7 @@ bool RegionManager::add_region_is_exist(int64_t table_id, const std::string& sta
             if (pre_region_info != nullptr) {
                 if (!pre_region_info->end_key().empty() && pre_region_info->end_key() <= start_key) {
                     return true;
-                }
+                } 
             }
         }
     }
@@ -1004,8 +1045,7 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
                         response);
         peer_count_cost = sub_step_time_cost.get_time();
     }
-    //回收临时map
-    TableManager::get_instance()->recycle_update_region();
+
     int64_t check_leader_time = step_time_cost.get_time();
     DB_NOTICE("store: %s leader heartbeat for region, pre_time_cost: %ld, check_leader_time: %ld, "
                 "get_region_cost: %ld, update_region_cost: %ld, peer_count_cost: %ld",
@@ -1209,22 +1249,30 @@ void RegionManager::check_peer_count(int64_t region_id,
         remove_peer_request.set_region_id(region_id);
         std::string remove_peer;
         std::set<std::string> candicate_remove_peers = peers_in_heart;
-        //先判断这些peer中是否有peer所在的实例状态是dead 或者migrate的
         for (auto& candicate_remove_peer : candicate_remove_peers) {
             pb::Status status = ClusterManager::get_instance()->get_instance_status(candicate_remove_peer);
-            if (status == pb::MIGRATE || status == pb::DEAD) {
+            //先判断这些peer中是否有peer所在的实例状态不是NORMAL
+            if (status != pb::NORMAL) {
                 remove_peer = candicate_remove_peer;
-                DB_WARNING("remove peer: %s because of status is: %s, region_info: %s",
-                            remove_peer.c_str(), pb::Status_Name(status).c_str(),
+                DB_WARNING("remove peer: %s because of peers_size:%lu status is: %s, region_info: %s",
+                            remove_peer.c_str(), 
+                            leader_region_info.peers_size(),
+                            pb::Status_Name(status).c_str(),
                             leader_region_info.ShortDebugString().c_str());
                 break;
             }
-            if (peer_resource_tags[candicate_remove_peer] != table_resource_tag) {
-                remove_peer = candicate_remove_peer;
-                DB_WARNING("remove peer: %s because of resource tag is: %s, table_resource_tag: %s",
-                            remove_peer.c_str(), peer_resource_tags[candicate_remove_peer].c_str(), 
+        }
+        if (remove_peer.empty()) {
+            for (auto& candicate_remove_peer : candicate_remove_peers) {
+                if (peer_resource_tags[candicate_remove_peer] != table_resource_tag) {
+                    remove_peer = candicate_remove_peer;
+                    DB_WARNING("remove peer: %s because of peers_size:%lu resource tag is: %s, table_resource_tag: %s",
+                            remove_peer.c_str(), 
+                            leader_region_info.peers_size(),
+                            peer_resource_tags[candicate_remove_peer].c_str(), 
                             table_resource_tag.c_str());
-                break;
+                    break;
+                }
             }
         }
         if (remove_peer.empty()) {
@@ -1258,9 +1306,10 @@ void RegionManager::check_peer_count(int64_t region_id,
                 } 
             }
             for (auto& peer : candicate_remove_peers) {
+                /*
                 if (peer == leader_region_info.leader()) {
                     continue;
-                }
+                }*/
                 int64_t peer_count = ClusterManager::get_instance()->get_peer_count(peer, table_id);
                 DB_WARNING("cadidate remove peer, peer_count: %ld, instance: %s, table_id: %ld", 
                             peer_count, peer.c_str(), table_id);
@@ -1295,7 +1344,21 @@ void RegionManager::check_whether_illegal_peer(const pb::StoreHeartBeatRequest* 
         auto master_region_info = get_region_info(region_id);
         if (master_region_info == nullptr) {
             //这种情况在以下场景中会出现
-            //新创建的region_id，该region的leader还没上报心跳，follower先上报了
+            //1.新创建的region_id，该region的leader还没上报心跳，follower先上报了
+            //2.空region merge过程中region 区间已经置空但是还未删除store上的region，此时meta重启此region不会再次读入内存
+            if (peer_info.has_start_key() 
+                    && peer_info.has_end_key() 
+                    && !peer_info.start_key().empty()
+                    && !peer_info.end_key().empty()) {
+                if (peer_info.start_key() == peer_info.end_key()) {
+                    DB_WARNING("region_id:%ld is none peer, "
+                            " master_peer_info: null, peer_info:%s, peer_address:%s should be delete",
+                            region_id,
+                            peer_info.ShortDebugString().c_str(),
+                            instance.c_str());
+                    response->add_delete_region_ids(region_id);
+                }
+            }
             continue;
         }
         int64_t table_id = master_region_info->table_id();

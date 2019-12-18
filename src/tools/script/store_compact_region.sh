@@ -4,7 +4,8 @@
 echo -e "compact_region\n"
 echo 'param: address'
 curl -d '{
-    "compact_raft_log": false
+    "compact_raft_log": false,
+    "region_id":[2261048]
 }' http://$1/StoreService/compact_region
 echo -e "\n" 
 

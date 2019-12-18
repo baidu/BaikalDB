@@ -39,7 +39,7 @@ int KillPlanner::plan() {
     DB_WARNING("kill %d", k->conn_id);
     for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
         SmartSocket sock = epoll_info->get_fd_mapping(idx);
-        if (sock == NULL || sock->in_pool == true || sock->fd == 0 || sock->ip == "") {
+        if (sock == NULL || sock->is_free || sock->fd == -1 || sock->ip == "") {
             continue;
         }
         if (sock->conn_id == k->conn_id) {

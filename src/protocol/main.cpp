@@ -27,7 +27,6 @@ namespace baikaldb {
 
 // Signal handlers.
 void handle_exit_signal() {
-    DB_NOTICE("Server shutdown gracefully.");
     NetworkServer::get_instance()->graceful_shutdown();
 }
 } // namespace baikaldb
@@ -74,6 +73,7 @@ int main(int argc, char **argv) {
     if (!server->start()) {
         DB_FATAL("Failed to start server.");
     }
+    DB_NOTICE("Server shutdown gracefully.");
 
     // Stop server.
     server->stop();

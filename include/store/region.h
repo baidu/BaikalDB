@@ -138,7 +138,6 @@ public:
                 _node(groupId, peerId),
                 _is_leader(false),
                 _shutdown(false),
-                _init_success(false),
                 _num_table_lines(0),
                 _num_delete_lines(0),
                 _region_control(this, region_id),
@@ -147,7 +146,8 @@ public:
         bthread_mutex_init(&_commit_meta_mutex, NULL);
         _region_control.store_status(_region_info.status());
         _is_global_index = _region_info.has_main_table_id() && 
-                    region_info.table_id() != _region_info.main_table_id();
+            _region_info.main_table_id() != 0 && 
+            region_info.table_id() != _region_info.main_table_id();
     }
 
     int init(bool new_region, int32_t snapshot_times);
@@ -167,7 +167,7 @@ public:
     void dml(const pb::StoreReq& request, 
             pb::StoreRes& response,
             int64_t applied_index, 
-            int64_t term);
+            int64_t term, bool need_txn_limit);
 
     void dml_2pc(const pb::StoreReq& request, 
             pb::OpType op_type, 
@@ -176,7 +176,7 @@ public:
             pb::StoreRes& response,
             int64_t applied_index, 
             int64_t term,
-            int seq_id);
+            int seq_id, bool need_txn_limit);
 
     void dml_1pc(const pb::StoreReq& request, 
             pb::OpType op_type, 
@@ -253,6 +253,8 @@ public:
     int ingest_sst(const std::string& data_sst_file, const std::string& meta_sst_file); 
     // other thread
     void reverse_merge();
+    // other thread
+    void ttl_remove_expired_data();
 
     // dump the the tuples in this region in format {{k1:v1},{k2:v2},{k3,v3}...}
     // used for debug
@@ -354,17 +356,13 @@ public:
     void set_used_size(int64_t used_size) {
         _region_info.set_used_size(used_size);
     }
-    void get_region_info(pb::RegionInfo& region_info) {
-        region_info = _region_info;
-    }    
     std::string get_start_key() {
+        std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.start_key();
     }
     std::string get_end_key() {
+        std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.end_key();
-    }
-    pb::RegionInfo* get_region_info() {
-        return &_region_info;
     }
     int64_t get_log_index() const {
         return _applied_index;
@@ -389,6 +387,12 @@ public:
         return _region_info.used_size();
     }
     int64_t get_table_id() {
+        if (_is_global_index) {
+            return _region_info.main_table_id();
+        }
+        return _region_info.table_id();
+    }
+    int64_t get_global_index_id() {
         return _region_info.table_id();
     }
     bool is_leader() {
@@ -428,11 +432,11 @@ public:
     }
 
     bool is_tail() {
-        return  (!_region_info.has_end_key() || _region_info.end_key() == "");
+        return  (!_region_info.has_end_key() || _region_info.end_key().empty());
     }
     
     bool is_head() {
-        return (!_region_info.has_start_key() || _region_info.start_key() == "");
+        return (!_region_info.has_start_key() || _region_info.start_key().empty());
     }
     
     bool empty() {
@@ -638,6 +642,9 @@ private:
         _region_ddl_info.CopyFrom(region_ddl_info);
     }
 
+    // if seek_table_lines != nullptr, seek all sst for seek_table_lines
+    bool has_sst_data(int64_t* seek_table_lines);
+
 private:
     //Singleton
     RocksWrapper*       _rocksdb;
@@ -666,7 +673,6 @@ private:
     SplitParam _split_param;
     DllParam _ddl_param;
 
-
     std::mutex _legal_mutex;
     bool       _legal_region = true;
 
@@ -679,6 +685,8 @@ private:
     bool                                _restart = false;
     //计算存储分离开关，在store定时任务中更新，避免每次dml都访问schema factory
     bool                                _storage_compute_separate = false;
+    bool                                _use_ttl = false; //init时更新，表的ttl后续不会改变
+    bool                                _reverse_remove_range = false; //split的数据，把拉链过滤一遍
     //raft node
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;
@@ -689,9 +697,11 @@ private:
     bool                                _report_peer_info = false;
     std::atomic<bool>                   _shutdown;
     bool                                _init_success = false;
+    bool                                _can_heartbeat = false;
 
     BthreadCond                         _multi_thread_cond;
     // region stat variables
+    // TODO:num_table_lines维护太麻烦，后续要考虑使用预估的方式获取
     std::atomic<int64_t>                _num_table_lines;  //total number of pk record in this region
     std::atomic<int64_t>                _num_delete_lines;  //total number of delete rows after last compact
     int64_t                             _snapshot_num_table_lines = 0;  //last snapshot number

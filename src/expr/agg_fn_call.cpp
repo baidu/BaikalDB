@@ -26,11 +26,11 @@ int AggFnCall::init(const pb::ExprNode& node) {
     static std::unordered_map<std::string, AggType> name_type_map = {
         {"count_star", COUNT_STAR},
         {"count", COUNT},
-        {"count_distinct", COUNT_DISTINCT},
+        {"count_distinct", COUNT},
         {"sum", SUM},
-        {"sum_distinct", SUM_DISTINCT},
+        {"sum_distinct", SUM},
         {"avg", AVG},
-        {"avg_distinct", AVG_DISTINCT},
+        {"avg_distinct", AVG},
         {"min", MIN},
         {"max", MAX},
         {"hll_add_agg", HLL_ADD_AGG},
@@ -48,6 +48,11 @@ int AggFnCall::init(const pb::ExprNode& node) {
         _agg_type = OTHER;
         return -1;
     }
+    if (_fn.name() == "count_distinct" ||
+            _fn.name() == "sum_distinct" ||
+            _fn.name() == "avg_distinct") {
+        _is_distinct = true;
+    }
     return 0;
 }
 int AggFnCall::type_inferer() {
@@ -60,15 +65,12 @@ int AggFnCall::type_inferer() {
     switch (_agg_type) {
         case COUNT_STAR:
         case COUNT:
-        case COUNT_DISTINCT:
             _col_type = pb::INT64;
             return 0;
         case AVG: 
-        case AVG_DISTINCT:
             _col_type = pb::DOUBLE;
             return 0;
         case SUM:
-        case SUM_DISTINCT:
             if (_children.size() == 0) {
                 return -1;
             }
@@ -140,11 +142,8 @@ int AggFnCall::open() {
     }
     switch (_agg_type) {
         case COUNT:
-        case COUNT_DISTINCT:
         case AVG: 
-        case AVG_DISTINCT:
         case SUM:
-        case SUM_DISTINCT:
         case MIN:
         case MAX:
         case HLL_ADD_AGG:
@@ -176,16 +175,13 @@ int AggFnCall::initialize(MemRow* dst) {
     }
     switch (_agg_type) {
         case COUNT_STAR:
-        case COUNT_DISTINCT:
         case COUNT:
             dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
             return 0;
         case SUM:
-        case SUM_DISTINCT:
             dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
             return 0;
-        case AVG:
-        case AVG_DISTINCT: {
+        case AVG: {
             ExprValue value(pb::STRING);
             AvgIntermediate avg;
             value.str_val.assign((char*)&avg, sizeof(avg));
@@ -214,7 +210,6 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
             dst->set_value(_tuple_id, _intermediate_slot_id, result);
             return 0;
         }
-        case COUNT_DISTINCT:
         case COUNT: {
             for (auto child : _children) {
                 if (child->get_value(src).is_null()) {
@@ -292,7 +287,7 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
     }
 }
 int AggFnCall::merge(MemRow* src, MemRow* dst) {
-    if (is_distinct()) {
+    if (_is_distinct) {
         //distinct agg, 无merge概念
         //普通agg与distinct agg一起出现时，普通agg需要多计算一次，因此需要merge
         return update(src, dst);
@@ -303,7 +298,6 @@ int AggFnCall::merge(MemRow* src, MemRow* dst) {
     }
     switch (_agg_type) {
         case COUNT_STAR:
-        case COUNT_DISTINCT:
         case COUNT:
         case SUM: {
             ExprValue value = src->get_value(_tuple_id, _intermediate_slot_id);

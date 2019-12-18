@@ -52,7 +52,7 @@ public:
      */
     int analyze(QueryContext* ctx);
     
-    void index_selector(const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
+    int index_selector(const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
                         QueryContext* ctx,
                         ScanNode* scan_node,
                         FilterNode* filter_node,

@@ -206,6 +206,5 @@ public:
 
 private:
     Message* _message = nullptr;
-
 };
 }

@@ -45,8 +45,9 @@ int IndexSelector::analyze(QueryContext* ctx) {
         auto get_slot_id = [ctx](int32_t tuple_id, int32_t field_id)-> 
                 int32_t {return ctx->get_slot_id(tuple_id, field_id);};
         //有join节点暂时不考虑sort索引优化
+        int ret = 0;
         if (join_node != NULL || agg_node != NULL) {
-            index_selector(get_slot_id, 
+            ret =index_selector(get_slot_id,
                             ctx,
                             static_cast<ScanNode*>(scan_node_ptr), 
                             filter_node, 
@@ -54,13 +55,16 @@ int IndexSelector::analyze(QueryContext* ctx) {
                             join_node,
                             &ctx->has_recommend);
         } else {
-            index_selector(get_slot_id,
+            ret = index_selector(get_slot_id,
                            ctx,
                            static_cast<ScanNode*>(scan_node_ptr), 
                            filter_node, 
                            sort_node,
                            join_node,
                            &ctx->has_recommend);
+        }
+        if (ret < 0) {
+            return ret;
         }
         pb::ScanNode* pb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->mutable_pb_node()->
             mutable_derive_node()->mutable_scan_node();
@@ -74,7 +78,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
     return 0;
 }
 
-void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)>& get_slot_id, 
+int IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
                                     QueryContext* ctx,
                                     ScanNode* scan_node, 
                                     FilterNode* filter_node, 
@@ -94,7 +98,12 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         }
     }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
-    std::vector<int64_t> index_ids = schema_factory->get_table_info_ptr(table_id)->indices;
+    auto table_info = schema_factory->get_table_info_ptr(table_id);
+    if (table_info == nullptr) {
+        DB_WARNING("table info not found", table_id);
+        return -1;
+    }
+    std::vector<int64_t> index_ids = table_info->indices;
     if (pb_scan_node->use_indexes_size() != 0) {
         index_ids.clear();
         for (auto& index_id : pb_scan_node->use_indexes()) {
@@ -339,7 +348,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
                         if (ctx != nullptr) {
                             ctx->return_empty = true;
                         }
-                        return;
+                        return 0;
                     }
                 }
                 if (expr_break) {
@@ -449,6 +458,7 @@ void IndexSelector::index_selector(const std::function<int32_t(int32_t, int32_t)
         }
     }
     //DB_WARNING("pb_scan_node: %s", pb_scan_node->DebugString().c_str());
+    return 0;
 }
 
 bool IndexSelector::check_sort_use_index(const std::function<int32_t(int32_t, int32_t)>& get_slot_id, 

@@ -131,7 +131,43 @@ uint64_t str_to_datetime(const char* str_time) {
     }
     if (day > 31) {
         return 0;
-    } 
+    }
+    if (hour > 23 || minute > 59 || second > 59) {
+        return 0;
+    }
+
+    //datetime中间计算时会转化成int64, 最高位必须为0
+    uint64_t datetime = 0;
+    uint64_t year_month = year * 13 + month;
+    datetime |= (year_month << 46);
+    datetime |= (day << 41);
+    datetime |= (hour << 36);
+    datetime |= (minute << 30);
+    datetime |= (second << 24);
+    datetime |= macrosec;
+    return datetime;
+}
+
+uint64_t bin_date_to_datetime(DateTime time_struct) {
+    uint64_t year = time_struct.year;
+    uint64_t month = time_struct.month;
+    uint64_t day = time_struct.day;
+    uint64_t hour = time_struct.hour;
+    uint64_t minute = time_struct.minute;
+    uint64_t second = time_struct.second;
+    uint64_t macrosec = time_struct.macrosec;
+
+    if (year > 70 && year < 100) {
+        year += 1900;
+    } else if (year < 70) {
+        year += 2000;
+    }
+    if (month == 0 || month > 12) {
+        return 0;
+    }
+    if (day > 31) {
+        return 0;
+    }
     if (hour > 23 || minute > 59 || second > 59) {
         return 0;
     }
@@ -183,6 +219,46 @@ uint64_t timestamp_to_datetime(time_t timestamp) {
     datetime |= (min << 30);
     datetime |= (sec << 24);
     return datetime;
+}
+
+void datetime_to_time_struct(uint64_t datetime, DateTime& time_struct, uint8_t type) {
+    if (type == MYSQL_TYPE_TIME) {
+        int32_t time = (int32_t)datetime;
+        if (time < 0) {
+            time_struct.is_negative = 1;
+            time = -time;
+        }
+        time_struct.hour = (time >> 12) & 0x3FF;
+        time_struct.day = time_struct.hour / 24;
+        time_struct.hour = time_struct.hour % 24;
+        time_struct.minute = (time >> 6) & 0x3F;
+        time_struct.second = time & 0x3F;
+    } else if (type == MYSQL_TYPE_TIMESTAMP) {
+        struct tm tm;
+        time_t timestamp = (time_t)datetime;
+        localtime_r(&timestamp, &tm);
+        // 夏令时影响
+        if (tm.tm_isdst == 1) {
+            timestamp = timestamp - 3600;
+            localtime_r(&timestamp, &tm);
+        }
+        time_struct.year = tm.tm_year + 1900;
+        time_struct.month = tm.tm_mon++;
+        time_struct.day = tm.tm_mday;
+        time_struct.hour = tm.tm_hour;
+        time_struct.minute = tm.tm_min;
+        time_struct.second = tm.tm_sec;
+        time_struct.macrosec =0;
+    } else if (type == MYSQL_TYPE_DATETIME) {
+        int year_month = ((datetime >> 46) & 0x1FFFF);
+        time_struct.year = year_month / 13;
+        time_struct.month = year_month % 13;
+        time_struct.day = ((datetime >> 41) & 0x1F);
+        time_struct.hour = ((datetime >> 36) & 0x1F);
+        time_struct.minute = ((datetime >> 30) & 0x3F);
+        time_struct.second = ((datetime >> 24) & 0x3F);
+        //time_struct.macrosec = (datetime & 0xFFFFFF);
+    }
 }
 
 int32_t datetime_to_time(uint64_t datetime) {
@@ -303,6 +379,26 @@ int32_t str_to_time(const char* str_time) {
     }
     return time;
 }
+
+int32_t bin_time_to_datetime(DateTime time_struct) {
+    int day = time_struct.day;
+    int hour = time_struct.hour;
+    int minute = time_struct.minute;
+    int second = time_struct.second;
+    int32_t time = 0;
+    if (day < 0 || hour < 0 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return 0;
+    }
+    hour += day * 24;
+    time |= second;
+    time |= (minute << 6);
+    time |= (hour << 12);
+    if (time_struct.is_negative) {
+        time = -time;
+    }
+    return time;
+}
+
 int32_t seconds_to_time(int32_t seconds) {
     bool minus = false;
     if (seconds < 0) {

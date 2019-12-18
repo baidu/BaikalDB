@@ -65,8 +65,12 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     _pri_info    = range.pri_info;
     _region_info = range.region_info;
     _region      = range.region_info->region_id();
-    _txn         = txn ? txn->get_txn() : nullptr;
     _fields      = fields;
+    if (txn != nullptr) {
+        _use_ttl = txn->use_ttl();
+        _read_ttl_timestamp_us = txn->read_ttl_timestamp_us();
+        _txn = txn->get_txn();
+    }
     bool like_prefix = range.like_prefix;
 
     int64_t index_id = _index_info->id;
@@ -259,9 +263,9 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     }
 
 
-    if (_txn != nullptr) {
+    if (txn != nullptr) {
         read_options.snapshot = txn->get_snapshot();
-        _iter = _txn->GetIterator(read_options, _data_cf);
+        _iter = txn->get_txn()->GetIterator(read_options, _data_cf);
     } else {
         _iter = _db->new_iterator(read_options, RocksWrapper::DATA_CF);
     }
@@ -382,8 +386,13 @@ bool Iterator::_fits_region() {
         return true;
     }
     //check range end_key
-    rocksdb::Slice key(_iter->key().data() + _prefix_len, _iter->key().size() - _prefix_len);
-    bool ret = Transaction::fits_region_range(key, _iter->value(), nullptr, 
+    rocksdb::Slice key = _iter->key();
+    rocksdb::Slice value = _iter->value();
+    key.remove_prefix(_prefix_len);
+    if (_use_ttl) {
+        value.remove_prefix(sizeof(uint64_t));
+    }
+    bool ret = Transaction::fits_region_range(key, value, nullptr, 
         &_region_info->end_key(), *_pri_info, *_index_info);
     return ret;
 }
@@ -440,13 +449,28 @@ int TableIterator::get_next(SmartRecord record) {
         _valid = false;
         return -1;
     }
+    rocksdb::Slice value_slice = _iter->value();
+    if (_use_ttl && _read_ttl_timestamp_us > 0) {
+        int64_t row_ttl_timestamp_us = ttl_decode(value_slice);
+        if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+            //expired
+            if (_forward) {
+                _iter->Next();
+            } else {
+                _iter->Prev();
+            }
+            _valid = _valid && _iter->Valid();
+            return -4;
+        }
+        value_slice.remove_prefix(sizeof(uint64_t));
+    }
     //create a record and parse key and value
     if (VAL_ONLY == _mode || KEY_VAL == _mode) {
         if (!is_cstore()) {
-            TupleRecord tuple_record(_iter->value());
+            TupleRecord tuple_record(value_slice);
             // only decode the required field (field_ids stored in fields)
             if (0 != tuple_record.decode_fields(_fields, record)) {
-                DB_WARNING("decode value failed: %ld", _index_info->id);
+                DB_WARNING("decode value failed: %ld, _use_ttl:%d", _index_info->id, _use_ttl);
                 _valid = false;
                 return -1;
             }
@@ -473,9 +497,9 @@ int TableIterator::get_next(SmartRecord record) {
     } else {
         _iter->Prev();
     }
+    _valid = _valid && _iter->Valid();
     
     //DB_WARNING("parse:%ld add_batch:%ld nexttime:%ld", parse, add_batch,next_time);
-    _valid = _valid && _iter->Valid();
     return 0;
 }
 
@@ -539,7 +563,7 @@ int TableIterator::get_next_columns(SmartRecord record) {
         if (_forward && cmp >= 0) {
             iter->Next();
         }
-        if(!_forward && cmp <= 0)  {
+        if (!_forward && cmp <= 0)  {
             iter->Prev();
         }
     }
@@ -565,6 +589,19 @@ int IndexIterator::get_next(SmartRecord index) {
             //    _region, index->debug_string().c_str());
             continue;
         }
+        if (_use_ttl && _read_ttl_timestamp_us > 0) {
+            int64_t row_ttl_timestamp_us = ttl_decode(_iter->value());
+            if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+                //expired
+                if (_forward) {
+                    _iter->Next();
+                } else {
+                    _iter->Prev();
+                }
+                _valid = _valid && _iter->Valid();
+                continue;
+            }
+        }
         //DB_WARNING("get next, in range, region_id: %ld, ke: %s",
         //    _region, _iter->key().ToString(true).c_str());
         TableKey key(_iter->key(), true);
@@ -579,7 +616,11 @@ int IndexIterator::get_next(SmartRecord index) {
             return -1;
         }
         if (_idx_type == pb::I_UNIQ) {
-            TableKey pkey(_iter->value(), true);
+            rocksdb::Slice value = _iter->value();
+            if (_use_ttl) {
+                value.remove_prefix(sizeof(uint64_t));
+            }
+            TableKey pkey(value, true);
             pos = 0;
             if (0 != index->decode_primary_key(*_index_info, pkey, pos)) {
                 DB_WARNING("decode primary index failed: %ld", _index_info->pk);

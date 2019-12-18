@@ -35,8 +35,8 @@
 #include "query_region_manager.h"
 
 namespace baikaldb {
+DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(healthy_check_interval_times);
-DECLARE_int32(store_heart_beat_interval_us);
 DECLARE_int32(balance_periodicity);
 
 void MetaStateMachine::store_heartbeat(google::protobuf::RpcController* controller,

@@ -112,6 +112,8 @@ protected:
     std::map<int64_t, std::vector<SmartRecord>> _delete_records_by_region;
     std::map<int32_t, FieldInfo*> _field_ids;
     std::set<int32_t> _pri_field_ids;
+    int64_t _row_ttl_duration = 0; //insert语句可以带上ttl用来覆盖表的配置
+    int64_t _ttl_timestamp_us = 0; //ttl写入时间，0表示无ttl
 };
 }
 

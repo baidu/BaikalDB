@@ -33,7 +33,7 @@ public:
     virtual ~ReverseIndexBase() {
     }
     //倒排表的1、2、3级倒排链表merge函数
-    virtual int reverse_merge_func(pb::RegionInfo info) = 0;
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third) = 0;
     //新加正排 创建倒排索引
     virtual int insert_reverse(
                        rocksdb::Transaction* txn,
@@ -204,7 +204,7 @@ public:
     }
     ~ReverseIndex(){}
 
-    virtual int reverse_merge_func(pb::RegionInfo info);
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third);
     //0:success    -1:fail
     virtual int insert_reverse(
                         rocksdb::Transaction* txn,
@@ -288,6 +288,8 @@ private:
     //level取值0、1、2或3, 0和1属于一级 2是2级 3是3级
     //key = tableid_regionid_level
     int _create_reverse_key_prefix(uint8_t level, std::string& key);
+    //remove out of range keys when split
+    int _reverse_remove_range_for_third_level(uint8_t prefix);
     //first(0/1) level merge to second(2) level
     int _reverse_merge_to_second_level(std::unique_ptr<rocksdb::Iterator>&, uint8_t);
     //get some level list
@@ -313,6 +315,7 @@ private:
 private:
     int64_t             _region_id;
     int64_t             _index_id;
+    uint8_t             _merge_prefix = 0;
     uint8_t             _reverse_prefix = 1;
     std::atomic<long>    _sync_prefix_0;
     std::atomic<long>    _sync_prefix_1;
@@ -320,6 +323,8 @@ private:
     RocksWrapper*       _rocksdb;
     KeyRange            _key_range;
     bool                _prefix_0_succ = false;
+    bool                _merge_success_flag = true;
+    int64_t             _level_1_scan_count = 0;
     // todo: replace thread_local because bthread will switch thread
     static thread_local SchemaBase<ReverseNode, ReverseList>* _schema;
     Cache<std::string, std::shared_ptr<google::protobuf::Message>> _cache;

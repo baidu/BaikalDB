@@ -91,6 +91,13 @@ public:
     void set_parent(ExecNode* parent_node) {
         _parent = parent_node;
     }
+    void create_trace();
+    void set_trace(pb::TraceNode* trace) {
+        _trace = trace;
+    }
+    pb::TraceNode* get_trace() {
+        return _trace;
+    }
     void add_child(ExecNode* exec_node) {
         _children.push_back(exec_node);
         exec_node->set_parent(this);
@@ -179,13 +186,16 @@ protected:
     ExecNode* _parent = nullptr;
     pb::PlanNode _pb_node;
     std::map<int64_t, pb::RegionInfo> _region_infos;
+    pb::TraceNode* _trace = nullptr;
     
     //返回给baikaldb的结果
     std::map<int64_t, std::vector<SmartRecord>> _return_records;
 private:
-    static int create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, ExecNode** root);
+    static int create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, 
+                           ExecNode** root);
     static int create_exec_node(const pb::PlanNode& node, ExecNode** exec_node);
 };
+typedef std::shared_ptr<pb::TraceNode> SmartTrace;
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

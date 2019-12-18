@@ -33,7 +33,7 @@ int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
     for (int i = 0; i < node.derive_node().scan_node().indexes_size(); i++) {
         auto& pos_index = node.derive_node().scan_node().indexes(i);
         int64_t index_id = pos_index.index_id();
-        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        auto info_ptr = _factory->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
             continue;
         }
@@ -113,9 +113,6 @@ int RocksdbScanNode::select_index(std::vector<int>& multi_reverse_index) {
 }
 
 int RocksdbScanNode::choose_index(RuntimeState* state) {
-    _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
-    _pri_info = SchemaFactory::get_instance()->get_index_info_ptr(_table_id);
-
     // 做完logical plan还没有索引
     if (_pb_node.derive_node().scan_node().indexes_size() == 0) {
         DB_FATAL_STATE(state, "no index");
@@ -129,7 +126,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
     const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(idx);
     _index_id = pos_index.index_id();
-    _index_info = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
+    _index_info = _factory->get_index_info_ptr(_index_id);
     if (_index_info == nullptr || _index_info->id == -1) {
         DB_WARNING_STATE(state, "no index_info found for index id: %ld", _index_id);
         return -1;
@@ -140,7 +137,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         for (auto id : multi_reverse_index) {
             const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(id);
             auto index_id = pos_index.index_id();
-            auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+            auto index_info = _factory->get_index_info_ptr(index_id);
             if (index_info == nullptr|| index_info->id == -1) {
                 DB_WARNING_STATE(state, "no index_info found for index id: %ld", index_id);
                 return -1;
@@ -232,6 +229,17 @@ int RocksdbScanNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _factory = SchemaFactory::get_instance();
+    _table_info = _factory->get_table_info_ptr(_table_id);
+    _pri_info = _factory->get_index_info_ptr(_table_id);
+
+    if (_table_info == nullptr) {
+        DB_WARNING("table info not found _table_id:%ld", _table_id);
+        return -1;
+    }
+    if (_pri_info == nullptr) {
+        DB_WARNING("pri info not found _table_id:%ld", _table_id);
+        return -1;
+    }
     return 0;
 }
 
@@ -325,6 +333,16 @@ int RocksdbScanNode::index_condition_pushdown() {
 }
 
 int RocksdbScanNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, ([this](TraceLocalNode& local_node) {
+        if (_table_info != nullptr) {
+            local_node.append_description() << "table_name:" << _table_info->short_name;
+        }
+        if (_index_info != nullptr) {
+            local_node.append_description() << " index_name:" << _index_info->short_name;
+        }
+        local_node.append_description() << " index_id:" << _index_id;
+    }));
+ 
     int ret = 0;
     ret = ScanNode::open(state);
     if (ret < 0) {
@@ -357,9 +375,13 @@ int RocksdbScanNode::open(RuntimeState* state) {
     for (auto& slot : _tuple_desc->slots()) {
         if (pri_field_ids.count(slot.field_id()) == 0) {
             auto field = _table_info->get_field_ptr(slot.field_id());
+            if (field == nullptr) {
+                DB_WARNING("field not found id:%d", slot.field_id());
+                return -1;
+            }
             // 这两个倒排的特殊字段
             if (field->short_name != "__weight" && field->short_name != "__pic_scores") {
-                _field_ids[slot.field_id()] = _table_info->get_field_ptr(slot.field_id());
+                _field_ids[slot.field_id()] = field;
             }
         }
     }
@@ -464,7 +486,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
     return 0;
 }
 
-int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {  
     if (_is_explain) {
         // 生成一条临时数据跑通所有流程
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
@@ -477,6 +499,9 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         *eos = true;
         return 0;
     }
+    ON_SCOPE_EXIT(([this, state]() {
+        state->set_num_scan_rows(_scan_rows);
+    }));
     if (_index_id == _table_id) {
         if (_use_get) {
             return get_next_by_table_get(state, batch, eos);
@@ -501,11 +526,15 @@ void RocksdbScanNode::close(RuntimeState* state) {
 }
 
 int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
     auto txn = state->txn();
     if (txn == nullptr) {
         DB_WARNING_STATE(state, "txn is nullptr");
         return -1;
     }
+    state->set_num_scan_rows(_num_rows_returned);
     SmartRecord record;
     while (1) {
         if (state->is_cancelled()) {
@@ -526,10 +555,9 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
         } else {
             record = _left_records[_idx++];
         }
+        ++_scan_rows;
         int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, true);
         if (ret < 0) {
-            //DB_WARNING_STATE(state, "get primary:%ld fail, not exist, ret:%d, record: %s", 
-            //        _table_id, ret, record->to_string().c_str());
             continue;
         }
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
@@ -544,6 +572,12 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
 }
 
 int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos) {
+    int64_t get_primary_cnt = 0;
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this, &get_primary_cnt](TraceLocalNode& local_node) {
+        local_node.add_get_primary_rows(get_primary_cnt);
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+
     bool is_global_index = false;
     if (_region_info->has_main_table_id() 
         && _region_info->main_table_id() != _region_info->table_id()) {
@@ -570,6 +604,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
             record = _left_records[_idx++];
         }
         auto txn = state->txn();
+        ++_scan_rows;
         int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, record, GET_ONLY, true);
         if (ret < 0) {
             //DB_WARNING_STATE(state, "get index:%ld fail, not exist, ret:%d, record: %s", 
@@ -577,6 +612,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
             continue;
         }
         if (!_is_covering_index && !is_global_index) {
+            ++get_primary_cnt;
             ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
             if (ret < 0) {
                 DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s", 
@@ -597,6 +633,9 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
 }
 
 int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
     SmartRecord record = _factory->new_record(_table_id);
     int64_t time = 0;
     while (1) {
@@ -641,10 +680,12 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             }
         }
         record->clear();
+        ++_scan_rows;
         int ret = _table_iter->get_next(record);
         if (ret < 0) {
             continue;
         }
+        //DB_NOTICE("seek row:%s", record->debug_string().c_str());
         TimeCost cost;
         //DB_WARNING_STATE(state, "get_next:%lu", cost.get_time());
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
@@ -660,6 +701,15 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
 }
 
 int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
+    int64_t index_conjuncts_filter_cnt = 0;
+    int64_t get_primary_cnt = 0;
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this, &index_conjuncts_filter_cnt, &get_primary_cnt]
+        (TraceLocalNode& local_node) {
+        local_node.add_index_conjuncts_filter_rows(index_conjuncts_filter_cnt);
+        local_node.add_get_primary_rows(get_primary_cnt);
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+
     bool is_global_index = false;
     if (_region_info->has_main_table_id() 
         && _region_info->main_table_id() != _region_info->table_id()) {
@@ -718,6 +768,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             }
         }
         //TimeCost cost;
+        ++_scan_rows;
         record->clear();
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
         if (_reverse_indexes.size() > 0) {
@@ -749,11 +800,13 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         }
         //DB_NOTICE("record_before:%s", record->debug_string().c_str());
         if (!need_copy(row.get(), _index_conjuncts)) {
+            ++index_conjuncts_filter_cnt;
             continue;
         }
         //DB_NOTICE("get index: %ld", cost.get_time());
         //cost.reset();
         if (!_is_covering_index && !is_global_index) {
+            ++get_primary_cnt;
             auto txn = state->txn();
             ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
             if (ret < 0) {

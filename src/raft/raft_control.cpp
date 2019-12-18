@@ -15,7 +15,13 @@
 #include "raft_control.h"
 #include <algorithm>
 #include "update_region_status.h"
-
+#ifdef BAIDU_INTERNAL
+namespace raft {
+#else
+namespace braft {
+#endif
+DECLARE_int32(raft_election_heartbeat_factor);
+}
 namespace baikaldb {
 class RaftControlDone : public braft::Closure {
 public:
@@ -284,9 +290,40 @@ void _set_peer(google::protobuf::RpcController* controller,
         }
     } else if (old_peers.size() == new_peers.size() + 1) {
         if (0 == _diff_peers(old_peers, new_peers, &peer)) {
-            RaftControlDone* set_peer_done =
-                new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
-            node->remove_peer(peer, set_peer_done);
+            bool self_faulty = false;
+            bool other_faulty = false;
+            braft::NodeStatus status;
+            node->get_status(&status);
+            for (auto iter : status.stable_followers) {
+                if (iter.first == peer) {
+                    if (iter.second.consecutive_error_times > braft::FLAGS_raft_election_heartbeat_factor) {
+                        self_faulty = true;
+                        break;
+                    }
+                } else {
+                    if (iter.second.consecutive_error_times > braft::FLAGS_raft_election_heartbeat_factor) {
+                        DB_WARNING("node:%s %s peer:%s is faulty,log_id:%lu",
+                            node->node_id().group_id.c_str(),
+                            node->node_id().peer_id.to_string().c_str(),
+                            iter.first.to_string().c_str(),
+                            log_id);
+                        other_faulty = true;
+                    }
+                }
+            }
+            if (self_faulty || (!self_faulty && !other_faulty)) {
+                RaftControlDone* set_peer_done =
+                    new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
+                node->remove_peer(peer, set_peer_done);
+            } else {
+                response->set_errcode(pb::INPUT_PARAM_ERROR);
+                response->set_errmsg("other peer is faulty");
+                DB_FATAL("node:%s %s set peer fail,log_id:%lu",
+                            node->node_id().group_id.c_str(),
+                            node->node_id().peer_id.to_string().c_str(),
+                            log_id);
+                return;
+            }
         } else {
             response->set_errcode(pb::INPUT_PARAM_ERROR);
             response->set_errmsg("diff peer fail when remove peer");
@@ -375,5 +412,4 @@ int _diff_peers(const std::vector<braft::PeerId>& old_peers,
 }
 
 }//namespace
-
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

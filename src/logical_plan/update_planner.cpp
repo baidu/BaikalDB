@@ -69,7 +69,10 @@ int UpdatePlanner::plan() {
     }
     auto iter = _table_tuple_mapping.begin();
     int64_t table_id = iter->first;
-    set_dml_txn_state(table_id);
+    _ctx->prepared_table_id = table_id;
+    if (!_ctx->is_prepared) {
+        set_dml_txn_state(table_id);
+    }
     return 0;
 }
 
