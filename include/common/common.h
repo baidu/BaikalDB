@@ -41,7 +41,6 @@
 #endif
 #include <bthread/execution_queue.h>
 #include <gflags/gflags.h>
-#include <rocksdb/slice.h>
 #include "log.h"
 #include "proto/common.pb.h"
 
@@ -584,7 +583,6 @@ extern SerializeStatus to_string(uint64_t number, char *buf, size_t size, size_t
 extern std::string remove_quote(const char* str, char quote);
 extern std::string str_to_hex(const std::string& str);
 void stripslashes(std::string& str);
-extern int end_key_compare(rocksdb::Slice key1, rocksdb::Slice key2);
 
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
@@ -598,18 +596,6 @@ extern std::string url_encode(const std::string& str);
 extern std::vector<std::string> string_split(const std::string &s, char delim);
 extern std::string string_trim(std::string& str);
 
-inline int end_key_compare(rocksdb::Slice key1, rocksdb::Slice key2) {
-    if (key1 == key2) {
-        return 0;
-    }
-    if (key1.empty()) {
-        return 1;
-    }
-    if (key2.empty()) {
-        return -1;
-    }
-    return key1.compare(key2);
-}
 
 inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
