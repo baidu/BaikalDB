@@ -122,7 +122,7 @@ bind(
 git_repository(
     name = "com_github_brpc_braft",
     remote = "https://github.com/brpc/braft.git",
-    tag = "v1.0.1",
+    branch = "master",
 )
 
 bind(
