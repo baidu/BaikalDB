@@ -757,21 +757,21 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
         } break;
         case pb::FLOAT: {
             float val = _reflection->GetFloat(*_message, field);
-            if (!field_info.default_expr_value.is_null()) {
-                if (val == field_info.default_expr_value._u.float_val) {
-                    return -3;
-                }
-            }
+            //if (!field_info.default_expr_value.is_null()) {
+            //    if (val == field_info.default_expr_value._u.float_val) {
+            //        return -3;
+            //    }
+            //}
             uint32_t encode = KeyEncoder::to_little_endian_u32(*reinterpret_cast<uint32_t*>(&val));
             out.append((char*)&encode, sizeof(uint32_t));
         } break;
         case pb::DOUBLE: {
            double val = _reflection->GetDouble(*_message, field);
-           if (!field_info.default_expr_value.is_null()) {
-               if (val == field_info.default_expr_value._u.double_val) {
-                   return -3;
-               }
-           }
+           //if (!field_info.default_expr_value.is_null()) {
+           //    if (val == field_info.default_expr_value._u.double_val) {
+           //        return -3;
+           //    }
+           //}
            uint64_t encode = KeyEncoder::to_little_endian_u64(*reinterpret_cast<uint64_t*>(&val));
            out.append((char*)&encode, sizeof(uint64_t));
         } break;

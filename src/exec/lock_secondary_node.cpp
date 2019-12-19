@@ -161,6 +161,15 @@ int LockSecondaryNode::open(RuntimeState* state) {
         }
     }
     state->set_num_increase_rows(_num_increase_rows);
+    if (state->need_txn_limit) {
+        int row_count = put_records.size() + delete_records.size();
+        bool is_limit = TxnLimitMap::get_instance()->check_txn_limit(state->txn_id, row_count);
+        if (is_limit) {
+            DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%d", 
+                state->region_id(), state->txn_id, row_count);
+            return -1;
+        }
+    }
     return num_affected_rows; 
 }
 int LockSecondaryNode::insert_global_index(RuntimeState* state, SmartRecord record) {

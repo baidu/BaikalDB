@@ -114,6 +114,7 @@ public:
     void start_db_statistics();
 
     void reverse_merge_thread();
+    void ttl_remove_thread();
 
     void flush_region_thread();
     void snapshot_thread();
@@ -143,9 +144,6 @@ public:
         return _compact_queue;
     }
     
-    bool get_is_running() {
-        return _is_running;
-    }
     void sub_split_num() {
         --_split_num;
     }
@@ -186,20 +184,28 @@ public:
         });
         DB_WARNING("all region was join");
     }
+    bool is_shutdown() const {
+        return _shutdown;
+    }
     void close() {
         _add_peer_queue.stop();
+        _remove_region_queue.stop();
         _compact_queue.stop();
-        _is_running = false;
+        _shutdown = true;
         _heart_beat_bth.join();
         DB_WARNING("heart beat bth join");
         _add_peer_queue.join();
         DB_WARNING("_add_peer_queue join");
+        _remove_region_queue.join();
+        DB_WARNING("_remove_region_queue join");
         _compact_queue.join();
         DB_WARNING("_compact_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
         _merge_bth.join();
         DB_WARNING("merge bth check bth join");
+        _ttl_bth.join();
+        DB_WARNING("ttl bth check bth join");
         _flush_bth.join();
         DB_WARNING("flush check bth join");
         _snapshot_bth.join();
@@ -246,14 +252,14 @@ private:
     //metaServer交互类
     MetaServerInteract _meta_server_interact;
     
-    bool _is_running = true;
-
     //发送心跳的线程
     Bthread _heart_beat_bth;
     //判断是否需要分裂的线程
     Bthread _split_check_bth;
     //全文索引定时merge线程
     Bthread _merge_bth;
+    //TTL定期删除过期数据
+    Bthread _ttl_bth;
 
     //定时flush region meta信息，确保rocksdb的wal正常删除
     Bthread _flush_bth;
@@ -270,6 +276,7 @@ private:
     std::vector<rocksdb::Transaction*> _recovered_txns;
     ExecutionQueue _add_peer_queue;
     ExecutionQueue _compact_queue;
+    ExecutionQueue _remove_region_queue;
 
     bool _has_prepared_tran = true;
 public:

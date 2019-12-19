@@ -55,8 +55,6 @@ int LimitNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             DB_WARNING("offset_expr type_inferer fail:%d", ret);
             return ret;
         }
-        //常量表达式计算
-        _offset_expr->const_pre_calc();
         if (_offset_expr->is_constant()) {
             ret = _offset_expr->open();
             if (ret < 0) {

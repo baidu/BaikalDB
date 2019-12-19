@@ -441,20 +441,18 @@ int InsertManagerNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_des
         return ret;
     }
     for (auto expr : _update_exprs) {
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        expr->const_pre_calc();
     }
     for (auto expr : _insert_values) {
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        expr->const_pre_calc();
         if (!expr->is_constant()) {
             DB_WARNING("insert expr must be constant");
             return -1;

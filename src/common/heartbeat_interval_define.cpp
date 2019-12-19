@@ -16,7 +16,7 @@
 #include <gflags/gflags.h>
 
 namespace baikaldb{
-DEFINE_int32(store_heart_beat_interval_us, 30 * 1000 * 1000, "store heart interval (30 s)");
+DEFINE_int64(store_heart_beat_interval_us, 30 * 1000 * 1000, "store heart interval (30 s)");
 DEFINE_int32(balance_periodicity, 60, "times of store heart beat"); 
 DEFINE_int32(region_faulty_interval_times, 3, "region faulty interval times of heart beat interval");
 DEFINE_int32(store_faulty_interval_times, 3, "store faulty interval times of heart beat");

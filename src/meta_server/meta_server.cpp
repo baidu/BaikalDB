@@ -33,6 +33,8 @@ namespace baikaldb {
 DEFINE_int32(meta_port, 8010, "Meta port");
 DEFINE_int32(meta_replica_number, 3, "Meta replica num");
 DEFINE_int32(concurrency_num, 40, "concurrency num, default: 40");
+DEFINE_int64(region_apply_raft_interval_ms, 1000LL,
+            "region apply raft interval, defalut(1s)");
 #ifdef BAIDU_INTERNAL
 // for migrate
 DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
@@ -109,9 +111,16 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     _meta_interact_map["dmp"] = new MetaServerInteract;
     _meta_interact_map["dmp"]->init_internal(FLAGS_dmp_meta_bns);
 #endif
-    
+    _apply_region_bth.run([this]() {apply_region_thread();});
     _init_success = true;
     return 0;
+}
+
+void MetaServer::apply_region_thread() {
+    while (!_shutdown) {
+        TableManager::get_instance()->get_update_regions_apply_raft();
+        bthread_usleep_fast_shutdown(FLAGS_region_apply_raft_interval_ms * 1000, _shutdown);
+    }
 }
 
 //该方法主要做请求分发
@@ -564,6 +573,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
 }
 
 void MetaServer::shutdown_raft() {
+    _shutdown = true;
     if (_meta_state_machine != nullptr) {
         _meta_state_machine->shutdown_raft();
     }   

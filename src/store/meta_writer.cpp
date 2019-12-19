@@ -346,7 +346,7 @@ int MetaWriter::parse_txn_infos(int64_t region_id, std::map<int64_t, std::string
     std::string prefix = transcation_pb_key_prefix(region_id) ;
     for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
         if (!iter->key().starts_with(prefix)) {
-            DB_WARNING("read wrong info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());
+            DB_WARNING("read end info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());
             break;
         }
         int64_t log_index = 0;
@@ -373,7 +373,7 @@ int MetaWriter::parse_txn_log_indexs(int64_t region_id, std::unordered_map<uint6
     std::string prefix = log_index_key_prefix(region_id);
     for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
         if (!iter->key().starts_with(prefix)) {
-            DB_WARNING("read wrong info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());
+            DB_WARNING("read end info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());
             break;
         }
         TableKey log_index(iter->value());
@@ -447,8 +447,7 @@ int MetaWriter::read_region_ddl_info(int64_t region_id, pb::StoreRegionDdlInfo& 
     rocksdb::ReadOptions options;
     auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(region_ddl_info_key(region_id)), &value);
     if (!status.ok()) {
-        DB_WARNING("Error while read ddl info, Error %s, region_id: %ld",
-                    status.ToString().c_str(), region_id);
+        DB_NOTICE("DDL_LOG region_id: %ld have no ddlwork.", region_id);
         return -1; 
     }
     if (!region_ddl_info.ParseFromString(value)) {

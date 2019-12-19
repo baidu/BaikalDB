@@ -23,8 +23,9 @@ DEFINE_int32(transaction_clear_delay_ms, 3600 * 1000,
 DEFINE_int64(clean_finished_txn_interval_us, 600 * 1000 * 1000LL, 
         "clean_finished_txn_interval_us");
 
-int TransactionPool::init(int64_t region_id) {
+int TransactionPool::init(int64_t region_id, bool use_ttl) {
     _region_id = region_id;
+    _use_ttl = use_ttl;
     return 0;
 }
 
@@ -37,7 +38,7 @@ int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn) {
         DB_FATAL("txn already exists, txn_id: %lu", txn_id);
         return -1;
     }
-    txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, this));
+    txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, this, _use_ttl));
     if (txn == nullptr) {
         DB_FATAL("new txn failed, txn_id: %lu", txn_id);
         return -1;
@@ -156,8 +157,8 @@ int TransactionPool::on_shutdown_recovery(
             iter++;
             continue;
         }
-        uint64_t txn_id = strtoll(txn_name.substr(txn_name.find('_') + 1).c_str(), nullptr, 0);
-        auto txn = new (std::nothrow)Transaction(txn_id, this);
+        uint64_t txn_id = strtoull(txn_name.substr(txn_name.find('_') + 1).c_str(), nullptr, 0);
+        SmartTransaction txn(new (std::nothrow)Transaction(txn_id, this, _use_ttl));
         if (txn == nullptr) {
             DB_FATAL("TransactionError: new txn failed, txn_id: %lu", txn_id);
             return -1;
@@ -165,7 +166,6 @@ int TransactionPool::on_shutdown_recovery(
         int ret = txn->begin(*iter);
         if (ret != 0) {
             DB_FATAL("TransactionError: begin txn failed, txn_id: %lu", txn_id);
-            delete txn;
             return -1;
         }
         auto txn_iter = prepared_txn.find(txn_id);
@@ -180,7 +180,7 @@ int TransactionPool::on_shutdown_recovery(
         for (auto& plan : txn_info.cache_plans()) {
             txn->cache_plan_map().insert({plan.seq_id(), plan});
         }
-        _txn_map.insert(std::make_pair(txn_id, SmartTransaction(txn)));
+        _txn_map.insert(std::make_pair(txn_id, txn));
         _txn_count++;
         iter = recovered_txns.erase(iter);
         DB_WARNING("region_id: %ld, txn_id: %lu, txn_name: %s, num_rows: %ld, seq_id: %d, txn recovered", 

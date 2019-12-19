@@ -297,8 +297,9 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
 
     if (_last_log_index.load() + 1 != entries.front()->id.index) {
         DB_FATAL("There's gap betwenn appending entries and _last_log_index,"
-                " last_log_index: %ld, entry_log_index: %ld region_id: %ld",
-                _last_log_index.load(), entries.front()->id.index, _region_id);
+                " last_log_index: %ld, entry_log_index: %ld, term:%ld region_id: %ld",
+                _last_log_index.load(), entries.front()->id.index, 
+                entries.front()->id.term, _region_id);
         return -1;
     }
     Concurrency::get_instance()->raft_write_concurrency.increase_wait();

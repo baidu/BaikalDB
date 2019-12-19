@@ -21,7 +21,6 @@
 namespace baikaldb {
 typedef std::shared_ptr<pb::RegionInfo> SmartRegionInfo;
 DECLARE_int32(balance_periodicity);
-DECLARE_int32(store_heart_beat_interval_us);
 class SchemaManager {
 public:
     static const std::string MAX_NAMESPACE_ID_KEY;

@@ -18,7 +18,7 @@
 #include "network_socket.h"
 
 namespace baikaldb {
-
+DEFINE_int32(per_txn_max_num_locks, 1000000, "max num locks per txn default 100w");
 RuntimeState::~RuntimeState() {}
 
 int RuntimeState::init(const pb::StoreReq& req,
@@ -67,6 +67,7 @@ int RuntimeState::init(const pb::StoreReq& req,
     _log_id = req.log_id();
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
+    use_ttl = _txn_pool->use_ttl();
     if (_txn != nullptr) {
         _txn->set_region_info(&(_resource->region_info));
         _txn->set_ddl_state(_resource->ddl_param_ptr);

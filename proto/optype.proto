@@ -2,8 +2,10 @@ syntax="proto2";
 package baikaldb.pb;
 //option cc_enable_arenas = true;
 
-// 1-11是store上的操作
+// 1-100是预留给store的操作
+// 100+是meta上的操作
 enum OpType {
+    // for store
     OP_NONE                                 = 0;
     OP_INSERT                               = 1;
     OP_DELETE                               = 2;
@@ -23,11 +25,12 @@ enum OpType {
     OP_ADJUSTKEY_AND_ADD_VERSION            = 16;
     OP_START_DDL                            = 17; //store开始ddlwork。
     OP_START_DDL_FOR_DROP_INDEX             = 18;
-    OP_UPDATE_STORE_DDLWORK                       = 19; //更新store ddl状态
+    OP_UPDATE_STORE_DDLWORK                 = 19; //更新store ddl状态
     OP_KV_BATCH                             = 20;
     OP_PUT_KV                               = 21;  
     OP_DELETE_KV                            = 22;
     OP_KV_BATCH_SPLIT                       = 23;
+    // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
     OP_ADD_PHYSICAL                         = 115; //建物理机房
     OP_ADD_INSTANCE                         = 116; //建实例, 实例通过上报心跳创建，此借口暂时无用

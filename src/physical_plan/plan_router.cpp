@@ -174,7 +174,15 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     //先判断是否是covering_index
     std::map<int32_t, int32_t> index_slot_field_map;
     auto pri_info = schema_factory->get_index_info_ptr(main_table_id);
+    if (pri_info == nullptr) {
+        DB_WARNING("pri index info not found main_table_id:%ld", main_table_id);
+        return -1;
+    }
     auto index_info = schema_factory->get_index_info_ptr(index_id);
+    if (index_info == nullptr) {
+        DB_WARNING("index info not found index_id:%ld", index_id);
+        return -1;
+    }
     for (auto& f : pri_info->fields) {
         auto slot_id = get_slot_id(scan_node->tuple_id(), f.id);
         if (slot_id > 0) {

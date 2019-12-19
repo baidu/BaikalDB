@@ -15,31 +15,21 @@
 #pragma once
 
 #include "exec_node.h"
-#include "fetcher_store.h"
+#include "runtime_state.h"
 
 namespace baikaldb {
-class FullExportNode : public ExecNode {
+class DualScanNode : public ExecNode {
 public:
-    FullExportNode() {
+    DualScanNode() {
     }
-    virtual ~FullExportNode() {
+    virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+        std::unique_ptr<MemRow> row = state->mem_row_desc()->fetch_mem_row();
+        batch->move_row(std::move(row));
+        ++_num_rows_returned;
+        *eos = true;
+        return 0;
     }
-
-    virtual int init(const pb::PlanNode& node);
-    virtual int open(RuntimeState* state);
-    virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
-    virtual void close(RuntimeState* state) {}
-    bool get_batch(RowBatch* batch);
-
-private:
-    FetcherStore _fetcher_store;
-    std::vector<int64_t> _send_region_ids;
-    std::vector<int64_t> _sent_region_ids;
-    std::map<std::string, int64_t> _start_key_sort;
-    ErrorType _error = E_OK;
-    pb::OpType _op_type;
 };
-
-} // namespace baikaldb
+}
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

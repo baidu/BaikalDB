@@ -38,6 +38,16 @@ struct MetaServerClosure : public braft::Closure {
     TimeCost time_cost;
 };
 
+struct ApplyraftClosure : public google::protobuf::Closure {
+    virtual void Run() {
+        cond.decrease_signal();
+        delete this;
+    }
+
+    ApplyraftClosure(BthreadCond& cond) : cond(cond) {}
+    BthreadCond& cond;
+};
+
 class CommonStateMachine : public braft::StateMachine {
 public:
 

@@ -68,14 +68,11 @@ int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         return ret;
     }
     for (auto expr : _group_exprs) {
-        //类型推导
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        //常量表达式计算
-        expr->const_pre_calc();
     }
     if (_agg_tuple_id < 0) {
         return 0;
@@ -100,6 +97,7 @@ int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 }
 
 int AggNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, nullptr);
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -151,6 +149,8 @@ int AggNode::open(RuntimeState* state) {
             //}
         } while (!eos);
     }
+    LOCAL_TRACE_DESC << "agg time cost:" << agg_time << 
+        " scan time cost:" << scan_time << " rows:" << row_cnt;
     DB_WARNING_STATE(state, "region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
         state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
     // select count(*) from t; 无数据时返回0
@@ -204,6 +204,10 @@ void AggNode::process_row_batch(RowBatch& batch) {
 }
 
 int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");

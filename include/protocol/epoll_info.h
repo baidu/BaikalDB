@@ -16,8 +16,6 @@
 
 #include <sys/epoll.h>
 #include <sys/types.h>
-#include <sys/select.h>
-#include <boost/thread.hpp>
 #include "common.h" 
 
 namespace baikaldb {

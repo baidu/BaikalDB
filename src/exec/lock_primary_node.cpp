@@ -186,6 +186,15 @@ int LockPrimaryNode::open(RuntimeState* state) {
         }
     }
     state->set_num_increase_rows(_num_increase_rows);
+    if (state->need_txn_limit) {
+        int row_count = put_records.size() + delete_records.size();
+        bool is_limit = TxnLimitMap::get_instance()->check_txn_limit(state->txn_id, row_count);
+        if (is_limit) {
+            DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%d", 
+                state->region_id(), state->txn_id, row_count);
+            return -1;
+        }
+    }
     return num_affected_rows;
 }
 
@@ -206,6 +215,10 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
     for (auto& index_id: _affected_index_ids) {
         //因为这边查到的值可能会被修改，后边锁二级索引还要用到输入的record, 所以要复制出来
         auto index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (index_ptr == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", index_id);
+            return -1;
+        }
         if (index_ptr->id == _table_id) {
             continue;
         }
@@ -239,7 +252,7 @@ int LockPrimaryNode::put_row(RuntimeState* state, SmartRecord record) {
     }
     for (auto& index_id : _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (!info_ptr) {
+        if (info_ptr == nullptr) {
             DB_WARNING_STATE(state, "index info is null, index:%ld", index_id);
             return -1;
         }

@@ -98,7 +98,6 @@ struct IndexRange {
 class Iterator {
 public:
     Iterator(bool need_check_region, bool forward) : 
-        _valid(true), 
         _need_check_region(need_check_region),
         _forward(forward) {}
 
@@ -150,18 +149,18 @@ protected:
     int                     _lower_suffix = 0;
     int                     _upper_sufix = 0;
 
-    bool                    _valid;
-    //int64_t               _index;
-    //int64_t               _pk_index;
+    bool                    _valid = true;
+    bool                    _use_ttl = false;
+    int64_t                 _read_ttl_timestamp_us = 0;
     int64_t                 _region;
-    pb::RegionInfo*          _region_info;
-    IndexInfo*               _index_info;
-    IndexInfo*               _pri_info;
+    pb::RegionInfo*         _region_info;
+    IndexInfo*              _index_info;
+    IndexInfo*              _pri_info;
     pb::IndexType           _idx_type;
     rocksdb::Iterator*      _iter = nullptr;
     RocksWrapper*           _db;
     SchemaFactory*          _schema;
-    rocksdb::Transaction*   _txn;
+    rocksdb::Transaction*   _txn = nullptr;
     bool                    _need_check_region;
     bool                    _forward;
     rocksdb::ColumnFamilyHandle* _data_cf;

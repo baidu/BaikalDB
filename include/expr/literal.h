@@ -23,8 +23,7 @@ public:
         _is_constant = true;
     }
 
-    Literal(ExprValue value) : _value(value) {
-        _is_constant = true;
+    void value_to_node_type() {
         _col_type = _value.type;
         if (_value.is_timestamp()) {
             _node_type = pb::TIMESTAMP_LITERAL;
@@ -47,6 +46,11 @@ public:
         } else {
             _node_type = pb::NULL_LITERAL;
         }
+    }
+
+    Literal(ExprValue value) : _value(value) {
+        _is_constant = true;
+        value_to_node_type();
     }
 
     virtual ~Literal() {
@@ -161,6 +165,11 @@ public:
         }
         _node_type = literal_type;
         _col_type = _value.type;
+    }
+
+    void cast_to_col_type(pb::PrimitiveType type) {
+        _value.cast_to(type);
+        value_to_node_type();
     }
 
     virtual ExprValue get_value(MemRow* row) {

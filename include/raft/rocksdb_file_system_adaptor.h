@@ -128,7 +128,8 @@ private:
     RocksdbFileSystemAdaptor* _rs = nullptr;
     SnapshotContextPtr _context = nullptr;
     bool _is_meta_reader = false;
-    bool _closed;
+    bool _closed = true;
+    size_t _num_lines = 0;
 };
 
 class SstWriterAdaptor : public braft::FileAdaptor {
@@ -198,9 +199,10 @@ private:
         return 0;
     }
     int64_t _region_id;
-    bool _closed;
     std::string _path;
-    size_t _count;
+    size_t _count = 0;
+    bool _closed = true;
+    bool _is_meta = false;
     std::unique_ptr<SstFileWriter> _writer;
 };
 

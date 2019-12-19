@@ -148,6 +148,7 @@ int main(int argc, char **argv) {
     }
     DB_WARNING("recevie kill signal, begin to quit"); 
     meta_server->shutdown_raft();
+    meta_server->close();
     baikaldb::RocksWrapper::get_instance()->close();
     DB_WARNING("raft shut down, rocksdb close");
     server.Stop(0);

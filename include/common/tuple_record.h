@@ -87,7 +87,7 @@ public:
             wired_type = field_key & 0x07;
 
             if (_offset >= _size) {
-                DB_WARNING("error: %lu, %lu", _offset,_size);
+                DB_WARNING("error: %lu, %lu", _offset, _size);
                 return -1;
             }
 
@@ -95,7 +95,7 @@ public:
                 //add default value
                 auto field = record->get_field_by_tag(iter->first);
                 if (field == nullptr) {
-                    DB_WARNING("invalid field: %d", iter->first);
+                    DB_FATAL("invalid field: %d", iter->first);
                     return -1;
                 }
                 record->set_value(field, iter->second->default_expr_value);
@@ -116,70 +116,78 @@ public:
                 } else if (wired_type == 5) {
                     skip_fixed<float>();
                 } else {
-                    DB_WARNING("invalid wired_type: %d", wired_type);
+                    DB_FATAL("invalid wired_type: %d, offset: %lu,%lu", wired_type, _offset, _size);
                     return -1;
                 }
             } else if (field_num == static_cast<uint64_t>(iter->first)) {
                 auto field = record->get_field_by_tag(iter->first);
                 if (field == nullptr) {
-                    DB_WARNING("invalid field: %d", iter->first);
+                    DB_FATAL("invalid field: %d, offset: %lu,%lu", iter->first, _offset, _size);
                     return -1;
                 }
-                switch (field->cpp_type()) {
-                case FieldDescriptor::CPPTYPE_INT32: {
-                    if (field->type() == FieldDescriptor::TYPE_INT32 ||
-                        field->type() == FieldDescriptor::TYPE_SINT32 ) {
-                        uint32_t raw_val = get_varint<uint32_t>();
-                        int32_t value = 0;
-                        if (raw_val & 0x1) {
-                            value = (raw_val << 31) | ~(raw_val >> 1);
-                        } else {
-                            value = (raw_val >> 1);
-                        }
-                        record->set_int32(field, value);
-                        //DB_WARNING("value: %d", value);
+                switch (field->type()) {
+                case FieldDescriptor::TYPE_SINT32: {
+                    //zigzag
+                    int32_t value = 0;
+                    uint32_t raw_val = get_varint<uint32_t>();
+                    if (raw_val & 0x1) {
+                        value = (raw_val << 31) | ~(raw_val >> 1);
                     } else {
-                        record->set_int32(field, get_fixed<uint32_t>());
+                        value = (raw_val >> 1);
                     }
+                    record->set_int32(field, value);
                 } break;
-                case FieldDescriptor::CPPTYPE_UINT32: {
-                    if (field->type() == FieldDescriptor::TYPE_UINT32) {
-                        record->set_uint32(field, get_varint<uint32_t>());
-                    } else {
-                        record->set_uint32(field, get_fixed<uint32_t>());
-                    }
-                } break;
-                case FieldDescriptor::CPPTYPE_INT64: {
-                    uint64_t raw_val = get_varint<uint64_t>();
+                case FieldDescriptor::TYPE_SINT64: {
+                    //zigzag
                     int64_t value = 0;
+                    uint64_t raw_val = get_varint<uint64_t>();
                     if (raw_val & 0x1) {
                         value = (raw_val << 63) | ~(raw_val >> 1);
                     } else {
                         value = (raw_val >> 1);
                     }
-                    //DB_WARNING("value: %ld, %lu", value, raw_val);
                     record->set_int64(field, value);
                 } break;
-                case FieldDescriptor::CPPTYPE_UINT64: {
-                    if (field->type() == FieldDescriptor::TYPE_UINT64) {
-                        record->set_uint64(field, get_varint<uint64_t>());
-                    } else {
-                        record->set_uint64(field, get_fixed<uint64_t>());
-                    }
+                case FieldDescriptor::TYPE_INT32: {
+                    record->set_int32(field, get_varint<int32_t>());
                 } break;
-                case FieldDescriptor::CPPTYPE_FLOAT: {
+                case FieldDescriptor::TYPE_INT64: {
+                    record->set_int64(field, get_varint<int64_t>());
+                } break;
+                case FieldDescriptor::TYPE_SFIXED32: {
+                    record->set_int32(field, get_fixed<int32_t>()); 
+                } break;
+                case FieldDescriptor::TYPE_SFIXED64: {
+                    record->set_int64(field, get_fixed<int64_t>()); 
+                } break;
+                case FieldDescriptor::TYPE_UINT32: {
+                    record->set_uint32(field, get_varint<uint32_t>());
+                } break;
+                case FieldDescriptor::TYPE_UINT64: {
+                    record->set_uint64(field, get_varint<uint64_t>());
+                } break;
+                case FieldDescriptor::TYPE_FIXED32: {
+                    record->set_uint32(field, get_fixed<uint32_t>());
+                } break;
+                case FieldDescriptor::TYPE_FIXED64: {
+                    record->set_uint64(field, get_fixed<uint64_t>());
+                } break;
+                case FieldDescriptor::TYPE_FLOAT: {
                     record->set_float(field, get_fixed<float>());
                 } break;
-                case FieldDescriptor::CPPTYPE_DOUBLE: {
+                case FieldDescriptor::TYPE_DOUBLE: {
                     record->set_double(field, get_fixed<double>());
                 } break;
-                case FieldDescriptor::CPPTYPE_BOOL: {
+                case FieldDescriptor::TYPE_BOOL: {
                     record->set_boolean(field, get_varint<uint32_t>());
                 } break;
-                case FieldDescriptor::CPPTYPE_STRING: {
+                case FieldDescriptor::TYPE_STRING: 
+                case FieldDescriptor::TYPE_BYTES: {
                     record->set_string(field, get_string());
                 } break;
                 default: {
+                    DB_FATAL("invalid TYPE: %d, offset: %lu,%lu",
+                            field->type(), iter->first, _offset, _size);
                     return -1;
                 } break;
                 }

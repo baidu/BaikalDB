@@ -120,14 +120,14 @@ bind(
 )
 
 git_repository(
-    name = "com_github_brpc_braft",
-    remote = "https://github.com/brpc/braft.git",
-    commit = "a4fd1239631b37a6b08449137f1e1a8fdcd5820d",
+    name = "com_github_baidu_braft",
+    remote = "https://github.com/baidu/braft.git",
+    tag = "v1.0.2",
 )
 
 bind(
     name = "braft",
-    actual = "@com_github_brpc_braft//:braft",
+    actual = "@com_github_baidu_braft//:braft",
 )
 
 git_repository(

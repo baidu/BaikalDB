@@ -18,6 +18,18 @@
 #include "rocksdb/slice.h"
 
 namespace baikaldb {
+inline int end_key_compare(rocksdb::Slice key1, rocksdb::Slice key2) {
+    if (key1 == key2) {
+        return 0;
+    }
+    if (key1.empty()) {
+        return 1;
+    }
+    if (key2.empty()) {
+        return -1;
+    }
+    return key1.compare(key2);
+}
 class TableRecord;
 class MutTableKey;
 class IndexInfo;

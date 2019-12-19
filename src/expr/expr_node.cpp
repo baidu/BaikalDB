@@ -51,7 +51,11 @@ void ExprNode::const_pre_calc() {
         if (c->is_literal()) {
             continue;
         }
-        //替换
+        //替换,常量表达式优先类型推导
+        ret = c->type_inferer();
+        if (ret < 0) {
+            return;
+        }
         ret = c->open();
         if (ret < 0) {
             return;
@@ -66,6 +70,7 @@ void ExprNode::const_pre_calc() {
     //把agg expr替换成slot ref
     for (auto& c : _children) {
         if (c->node_type() == pb::AGG_EXPR) {
+            c->type_inferer();
             ExprNode* slot = static_cast<AggFnCall*>(c)->create_slot_ref();
             delete c;
             c = slot;

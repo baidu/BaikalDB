@@ -27,7 +27,7 @@ DEFINE_int32(error_judge_percent, 10, "error judge percen. default:10");
 DEFINE_int32(error_judge_number, 3, "error judge number. default:3");
 DEFINE_int32(disk_used_percent, 80, "disk used percent. default:80%");
 
-DECLARE_int32(store_heart_beat_interval_us);
+DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(store_faulty_interval_times);
 DECLARE_string(default_logical_room);
@@ -715,9 +715,9 @@ void ClusterManager::store_healthy_check_function() {
     std::unordered_map<std::string, int64_t> total_store_num;
     std::unordered_map<std::string, int64_t> faulty_store_num;
     std::unordered_map<std::string, int64_t> dead_store_num;
-    std::unordered_map<std::string, std::vector<std::string>> dead_stores;
-    std::unordered_map<std::string, std::vector<std::string>> full_stores;
-    std::unordered_map<std::string, std::vector<std::string>> migrate_stores;
+    std::unordered_map<std::string, std::vector<Instance>> dead_stores;
+    std::unordered_map<std::string, std::vector<Instance>> full_stores;
+    std::unordered_map<std::string, std::vector<Instance>> migrate_stores;
     {
         BAIDU_SCOPED_LOCK(_instance_mutex);
         for (auto& instance_pair : _instance_info) {
@@ -725,14 +725,14 @@ void ClusterManager::store_healthy_check_function() {
             std::string resource_tag = instance_pair.second.resource_tag;
             total_store_num[resource_tag]++;
             if (status.state == pb::MIGRATE) {
-                migrate_stores[resource_tag].push_back(instance_pair.first);
+                migrate_stores[resource_tag].push_back(instance_pair.second);
                 continue;
             }
             int64_t last_timestamp = status.timestamp;
             if ((butil::gettimeofday_us() - last_timestamp) > 
                     FLAGS_store_heart_beat_interval_us * FLAGS_store_dead_interval_times) {
                 status.state = pb::DEAD;
-                dead_stores[resource_tag].push_back(instance_pair.first);
+                dead_stores[resource_tag].push_back(instance_pair.second);
                 DB_WARNING("instance:%s is dead, resource_tag: %s", instance_pair.first.c_str(), resource_tag.c_str());
                 std::vector<int64_t> region_ids;
                 RegionManager::get_instance()->get_region_ids(instance_pair.first, region_ids);
@@ -757,7 +757,7 @@ void ClusterManager::store_healthy_check_function() {
             //if (instance.used_size * 100 / instance.capacity >= 
             //        FLAGS_migrate_percent) {
             //    DB_WARNING("instance:%s is full", instance_pair.first.c_str()); 
-            //    full_stores.push_back(instance_pair.first);   
+            //    full_stores.push_back(instance_pair.second);   
             //}
         }
     }
@@ -773,7 +773,7 @@ void ClusterManager::store_healthy_check_function() {
                 && (dead_store_num[resource_tag] + faulty_store_num[resource_tag]) >= FLAGS_error_judge_number) {
             DB_FATAL("has too much dead and faulty instance, may be error judge, resource_tag: %s", resource_tag.c_str());
             for (auto& dead_store : dead_store_pair.second) {
-                RegionManager::get_instance()->print_region_ids(dead_store);
+                RegionManager::get_instance()->print_region_ids(dead_store.address);
             }
             dead_stores[resource_tag].clear();
             migrate_stores[resource_tag].clear();
@@ -784,20 +784,20 @@ void ClusterManager::store_healthy_check_function() {
     for (auto& store_pair : dead_stores) {
         for (auto& store : store_pair.second) {
             DB_WARNING("store:%s is dead, resource_tag: %s", 
-                    store.c_str(), store_pair.first.c_str());
+                    store.address.c_str(), store_pair.first.c_str());
             if (_meta_state_machine->get_migrate(store_pair.first)) {
-                //RegionManager::get_instance()->add_peer_for_dead_store(store, pb::DEAD);
-                RegionManager::get_instance()->delete_all_region_for_store(store, pb::DEAD);
+                RegionManager::get_instance()->delete_all_region_for_store(store.address,
+                        store.instance_status);
             }
         }
     }
     for (auto& store_pair : migrate_stores) {
         for (auto& store : store_pair.second) {
             DB_WARNING("store:%s is migrating, resource_tag: %s", 
-                    store.c_str(), store_pair.first.c_str());
+                    store.address.c_str(), store_pair.first.c_str());
             if (_meta_state_machine->get_migrate(store_pair.first)) {
-                //RegionManager::get_instance()->add_peer_for_dead_store(store, pb::MIGRATE);
-                RegionManager::get_instance()->delete_all_region_for_store(store, pb::MIGRATE);
+                RegionManager::get_instance()->add_peer_for_store(store.address,
+                        store.instance_status);
             }
         }
     }

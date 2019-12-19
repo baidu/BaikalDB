@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <cstdlib>
 #include <cctype>
+#include <sstream>
 
 #ifdef BAIDU_INTERNAL
 #include <pb_to_json.h>
@@ -443,6 +444,25 @@ std::string url_decode(const std::string& str) {
         else strTemp += str[i];  
     }  
     return strTemp;  
+}
+
+std::vector<std::string> string_split(const std::string &s, char delim) {
+  std::stringstream ss(s);
+  std::string item;
+  std::vector<std::string> elems;
+  while (std::getline(ss, item, delim)) {
+    elems.push_back(item);
+    // elems.push_back(std::move(item));
+  }
+  return elems;
+}
+
+std::string string_trim(std::string& str) {
+    size_t first = str.find_first_not_of(' ');
+    if (first == std::string::npos)
+        return "";
+    size_t last = str.find_last_not_of(' ');
+    return str.substr(first, (last-first+1));
 }
 
 std::string url_encode(const std::string& str) {

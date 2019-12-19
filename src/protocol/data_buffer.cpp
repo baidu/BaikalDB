@@ -151,11 +151,71 @@ bool DataBuffer::append_text_value(const ExprValue& value) {
     } while (true);
 }
 
+void DataBuffer::datetime_to_buf(uint64_t datetime, uint8_t* buf, int& length, uint8_t type) {
+    if (type == MYSQL_TYPE_DATE) {
+        uint32_t date = (uint32_t)datetime;
+        int year_month = ((date >> 5) & 0x1FFFF);
+        int year = year_month / 13;
+        int month = year_month % 13;
+        int day = (date & 0x1F);
+        buf[0] = year & 0xFF;
+        buf[1] = (year >> 8) & 0xFF;
+        buf[2] = month;
+        buf[3] = day;
+        length = 4;
+    } else if (type == MYSQL_TYPE_TIMESTAMP || type == MYSQL_TYPE_DATETIME) {
+        DateTime time_struct;
+        datetime_to_time_struct(datetime, time_struct, type);
+        length = time_struct.datetype_length();
+        if (length == 11 || length == 7 || length == 4) {
+            buf[0] = time_struct.year & 0xFF;
+            buf[1] = (time_struct.year >> 8) & 0xFF;
+            buf[2] = time_struct.month;
+            buf[3] = time_struct.day;
+            if (length == 11 || length == 7) {
+                buf[4] = time_struct.hour;
+                buf[5] = time_struct.minute;
+                buf[6] = time_struct.second;
+                if (length == 11) {
+                    buf[7] = time_struct.macrosec & 0xFF;
+                    buf[8] = (time_struct.macrosec >> 8) & 0xFF;
+                    buf[9] = (time_struct.macrosec >> 16) & 0xFF;
+                    buf[10] = (time_struct.macrosec >> 24) & 0xFF;
+                }
+            }
+        }
+    } else if (type == MYSQL_TYPE_TIME) {
+        DateTime time_struct;
+        datetime_to_time_struct(datetime, time_struct, type);
+        length = time_struct.timetype_length();
+        if (length == 8 || length == 12) {
+            if (time_struct.is_negative) {
+                buf[0] = 1;
+            } else {
+                buf[0] = 0;
+            }
+            buf[1] = time_struct.day & 0xFF;
+            buf[2] = (time_struct.day >> 8) & 0xFF;
+            buf[3] = (time_struct.day >> 16) & 0xFF;
+            buf[4] = (time_struct.day >> 24) & 0xFF;
+            buf[5] = time_struct.hour;
+            buf[6] = time_struct.minute;
+            buf[7] = time_struct.second;
+            if (length == 12) {
+                buf[8]  = time_struct.macrosec & 0xFF;
+                buf[9]  = (time_struct.macrosec >> 8) & 0xFF;
+                buf[10] = (time_struct.macrosec >> 16) & 0xFF;
+                buf[11] = (time_struct.macrosec >> 24) & 0xFF;
+            }
+        }
+    }
+}
+
 // https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 // https://dev.mysql.com/doc/internals/en/null-bitmap.html
 // TODO: support other mysql types
 bool DataBuffer::append_binary_value(const ExprValue& value, uint8_t type, uint8_t* null_map, int field_idx, int null_offset) {
-    // DB_WARNING("result value is: %s", value.get_string().c_str());
+    // DB_WARNING("result value is: %s type: %d", value.get_string().c_str(), type);
     if (value.is_null()) {
         int byte = ((field_idx + null_offset) / 8);
         int bit  = ((field_idx + null_offset) % 8);
@@ -169,8 +229,14 @@ bool DataBuffer::append_binary_value(const ExprValue& value, uint8_t type, uint8
     if (type == MYSQL_TYPE_LONGLONG) {
         uint64_t val = value.get_numberic<uint64_t>();
         return byte_array_append_len((uint8_t*)&val, 8);
+    } else if (type == MYSQL_TYPE_DOUBLE) {
+        double val = value.get_numberic<double>();
+        return byte_array_append_len((uint8_t*)&val, 8);
     } else if (type == MYSQL_TYPE_LONG || type == MYSQL_TYPE_INT24) {
         uint32_t val = value.get_numberic<uint32_t>();
+        return byte_array_append_len((uint8_t*)&val, 4);
+    } else if (type == MYSQL_TYPE_FLOAT) {
+        float val = value.get_numberic<float>();
         return byte_array_append_len((uint8_t*)&val, 4);
     } else if (type == MYSQL_TYPE_SHORT) {
         uint16_t val = value.get_numberic<uint16_t>();
@@ -178,6 +244,18 @@ bool DataBuffer::append_binary_value(const ExprValue& value, uint8_t type, uint8
     } else if (type == MYSQL_TYPE_TINY) {
         uint8_t val = value.get_numberic<uint8_t>();
         return byte_array_append_len((uint8_t*)&val, 1);
+    } else if (type == MYSQL_TYPE_DATE || type == MYSQL_TYPE_TIMESTAMP
+              || type == MYSQL_TYPE_DATETIME || type == MYSQL_TYPE_TIME) {
+        uint8_t buf[12] = {0};
+        uint64_t val = value.get_numberic<uint64_t>();
+        int length = 0;
+        datetime_to_buf(val, buf, length, type);
+        if (!byte_array_append_len((uint8_t*)&length, 1)) {
+            return false;
+        }
+        if (length > 0) {
+            return byte_array_append_len(buf, length);
+        }
     } else {
         DB_WARNING("unsupported binary type: %u", type);
         return false;

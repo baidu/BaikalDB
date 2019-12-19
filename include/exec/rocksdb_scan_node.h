@@ -117,6 +117,8 @@ private:
     std::vector<bool> _left_opens;
     std::vector<bool> _right_opens;
     std::vector<bool> _like_prefixs;
+    // trace使用
+    int _scan_rows = 0;
     size_t _idx = 0;
     //后续做下推用
     std::vector<ExprNode*> _index_conjuncts;

@@ -27,6 +27,12 @@ enum ErrorType {
     E_FATAL,
     E_BIG_SQL
 };
+
+struct TraceDesc {
+    int64_t region_id;
+    std::shared_ptr<pb::TraceNode> trace_node = nullptr;
+};
+
 class FetcherStore {
 public:
     FetcherStore() {
@@ -40,6 +46,7 @@ public:
     ErrorType send_request(RuntimeState* state,
                             ExecNode* store_request, 
                             pb::RegionInfo& info, 
+                            pb::TraceNode* trace_node,
                             int64_t old_region_id, 
                             int64_t region_id, 
                             uint64_t log_id, 
@@ -47,6 +54,19 @@ public:
                             int start_seq_id,
                             int current_seq_id,
                             pb::OpType op_type);
+    ErrorType send_request(RuntimeState* state,
+                           ExecNode* store_request, 
+                           pb::RegionInfo& info, 
+                           int64_t old_region_id, 
+                           int64_t region_id, 
+                           uint64_t log_id, 
+                           int retry_times, 
+                           int start_seq_id,
+                           int current_seq_id,
+                           pb::OpType op_type) {
+        return send_request(state, store_request, info, nullptr, old_region_id, region_id,
+                     log_id, retry_times, start_seq_id, current_seq_id, op_type);
+    }
 
     int run(RuntimeState* state, 
             std::map<int64_t, pb::RegionInfo>& region_infos,
@@ -72,6 +92,7 @@ public:
     // 因为split会导致多region出来,加锁保护公共资源
     int64_t row_cnt = 0;
     std::atomic<int> affected_rows;
+    std::atomic<int> scan_rows;
 };
 }
 

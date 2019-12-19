@@ -87,7 +87,7 @@ int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     int idx = 0;
     for (auto expr : _order_exprs) {
         //类型推导
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             return ret;
         }
@@ -103,13 +103,11 @@ int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
                 DB_WARNING("slot_idx:%d < slot_size:%d", slot_idx, tuple_desc->slots_size());
             }
         }
-        //常量表达式计算
-        expr->const_pre_calc();
         idx++;
     }
     for (auto expr : _slot_order_exprs) {
         if (expr->node_type() == pb::AGG_EXPR) {
-            ret = expr->type_inferer();
+            ret = expr->expr_optimize();
             if (ret < 0) {
                 return ret;
             }
@@ -119,6 +117,7 @@ int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 }
 
 int SortNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, nullptr);
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -170,11 +169,17 @@ int SortNode::open(RuntimeState* state) {
         _sorter->add_batch(batch);
     } while (!eos);
     //DB_WARNING_STATE(state, "sort_size:%d", count);
+    TimeCost sort_time;
     _sorter->sort();
+    LOCAL_TRACE_DESC <<  "sort time cost:" << sort_time.get_time() << " rows:" << count;  
     return 0;
 }
 
 int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+    
     if (state->is_cancelled()) {
         DB_WARNING_STATE(state, "cancelled");
         *eos = true;

@@ -120,7 +120,7 @@ public:
         _start = butil::gettimeofday_us();
     }
 
-    int64_t get_time() {
+    int64_t get_time() const {
         return butil::gettimeofday_us() - _start;
     }
 
@@ -155,6 +155,22 @@ private:
     }
     bthread::ExecutionQueueId<std::function<void()>> _queue_id = {0};
 };
+// return when timeout or shutdown
+inline void bthread_usleep_fast_shutdown(int64_t interval_us, const bool& shutdown) {
+    if (interval_us < 10000) {
+        bthread_usleep(interval_us);
+        return;
+    }
+    int64_t sleep_time_count = interval_us / 10000; //10ms为单位
+    int time = 0;
+    while (time < sleep_time_count) {
+        if (shutdown) {
+            return;
+        }
+        bthread_usleep(10000);
+        ++time;
+    }
+}
 
 class BthreadCond {
 public:
@@ -316,6 +332,7 @@ public:
     void join() {
         _cond.wait();
     }
+
 private:
     int _concurrency = 10;
     BthreadCond _cond;
@@ -430,6 +447,43 @@ public:
             _map[i].clear();
         } 
     }
+
+    template<typename... Args>
+    void init_if_not_exist_else_update(const KEY& key, 
+        const std::function<void(VALUE& value)>& call, Args&&... args) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        auto iter = _map[idx].find(key);
+        if (iter == _map[idx].end()) {
+            _map[idx].insert(std::make_pair(key, VALUE(std::forward<Args>(args)...)));
+        } else {
+            //字段存在，才执行回调
+            call(iter->second);
+        }
+    }
+
+    void update(const KEY& key, const std::function<void(VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        auto iter = _map[idx].find(key);
+        if (iter != _map[idx].end()) {
+            call(iter->second);
+        }
+    }
+
+    //返回值：true表示执行了全部遍历，false表示遍历中途退出
+    bool traverse_with_early_return(const std::function<bool(VALUE& value)>& call) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
+            BAIDU_SCOPED_LOCK(_mutex[i]);
+            for (auto& pair : _map[i]) {
+                if (!call(pair.second)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
 private:
     uint32_t map_idx(KEY key) {
         if (std::is_integral<KEY>::value) {
@@ -464,24 +518,31 @@ private:
 struct BvarMap {
     struct SumCount {
         SumCount() {}
-        SumCount(int64_t sum, int64_t count) : sum(sum), count(count) {}
+        SumCount(int64_t sum, int64_t count, int64_t affected_rows, int64_t scan_rows) 
+            : sum(sum), count(count), affected_rows(affected_rows), scan_rows(scan_rows) {}
         SumCount& operator+=(const SumCount& other) {
             sum += other.sum;
             count += other.count;
+            affected_rows += other.affected_rows;
+            scan_rows += other.scan_rows;
             return *this;
         }
         SumCount& operator-=(const SumCount& other) {
             sum -= other.sum;
             count -= other.count;
+            affected_rows -= other.affected_rows;
+            scan_rows -= other.scan_rows;
             return *this;
         }
         int64_t sum = 0;
         int64_t count = 0;
+        int64_t affected_rows = 0;
+        int64_t scan_rows = 0;
     };
 public:
     BvarMap() {}
-    BvarMap(const std::string& key, int64_t cost) {
-        internal_map[key] = SumCount(cost, 1);
+    BvarMap(const std::string& key, int64_t cost, int64_t affected_rows, int64_t scan_rows) {
+        internal_map[key] = SumCount(cost, 1, affected_rows, scan_rows);
     }
     BvarMap& operator+=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
@@ -522,7 +583,6 @@ extern SerializeStatus to_string(uint64_t number, char *buf, size_t size, size_t
 extern std::string remove_quote(const char* str, char quote);
 extern std::string str_to_hex(const std::string& str);
 void stripslashes(std::string& str);
-extern int end_key_compare(const std::string& key1, const std::string& key2);
 
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
@@ -533,19 +593,9 @@ extern int get_instance_from_bns(int* ret,
 extern bool is_digits(const std::string& str);
 extern std::string url_decode(const std::string& str);
 extern std::string url_encode(const std::string& str);
+extern std::vector<std::string> string_split(const std::string &s, char delim);
+extern std::string string_trim(std::string& str);
 
-inline int end_key_compare(const std::string& key1, const std::string& key2) {
-    if (key1 == key2) {
-        return 0;
-    }
-    if (key1.empty()) {
-        return 1;
-    }
-    if (key2.empty()) {
-        return -1;
-    }
-    return key1.compare(key2);
-}
 
 inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
