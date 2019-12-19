@@ -15,6 +15,8 @@
 #include "network_server.h"
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "physical_planner.h"
 #include "transaction_manager_node.h"
 #include "log.h"
