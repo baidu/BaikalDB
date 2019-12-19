@@ -122,7 +122,7 @@ bind(
 git_repository(
     name = "com_github_baidu_braft",
     remote = "https://github.com/baidu/braft.git",
-    commit = "d0277bf2aea66908d1fd7376d191bd098371966e",
+    tag = "v1.0.2",
 )
 
 bind(
