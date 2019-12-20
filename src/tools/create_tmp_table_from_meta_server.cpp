@@ -95,6 +95,9 @@ int create_table(const std::string& namespace_name,
 
     create_table_request.mutable_table_info()->set_byte_size_per_record(schema_info.byte_size_per_record());
     create_table_request.mutable_table_info()->set_region_split_lines(schema_info.region_split_lines());
+
+    //create_table_request.mutable_table_info()->set_ttl_duration(172800);
+
     for (auto& field_info : schema_info.fields()) {
         /*
         if (
@@ -148,15 +151,17 @@ int create_table(const std::string& namespace_name,
             index_split_keys[index_name].insert(region_info.start_key());
         }
     }
-    //std::sort(split_keys.begin(), split_keys.end());
-    //int n = 0;
+
     for (auto& split_keys : index_split_keys) {
         std::string index_name = split_keys.first;
         auto pb_split_keys = create_table_request.mutable_table_info()->add_split_keys();
         pb_split_keys->set_index_name(index_name);
-        int n=0;
+        int n = 0;
         for (auto& split_key : split_keys.second) {
+           // if (n++%10==0) {
             pb_split_keys->add_split_keys(split_key);
+            //}
+
         }
     }
 

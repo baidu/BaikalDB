@@ -20,6 +20,7 @@
 #include <set>
 #include <unordered_set>
 #include <unordered_map>
+#include <functional>
 #include <bthread/butex.h>
 #include <bvar/bvar.h>
 #ifdef BAIDU_INTERNAL
@@ -364,12 +365,12 @@ template <typename KEY, typename VALUE, uint32_t MAP_COUNT = 23>
 class ThreadSafeMap {
 public:
     ThreadSafeMap() {
-        for (int i = 0; i < MAP_COUNT; i++) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
             bthread_mutex_init(&_mutex[i], NULL);
         }
     }
     ~ThreadSafeMap() {
-        for (int i = 0; i < MAP_COUNT; i++) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
             bthread_mutex_destroy(&_mutex[i]);
         }
     }
@@ -380,11 +381,9 @@ public:
     }
     uint32_t size() {
         uint32_t size = 0;
-        for (int i = 0; i < MAP_COUNT; i++) {
-            {
-                BAIDU_SCOPED_LOCK(_mutex[i]);
-                size += _map[i].size();
-            }
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
+            BAIDU_SCOPED_LOCK(_mutex[i]);
+            size += _map[i].size();
         }
         return size;
     }

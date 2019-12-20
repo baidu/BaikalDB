@@ -14,10 +14,8 @@
 
 #pragma once
 
-#include <boost/thread.hpp>
-#include <boost/bind.hpp>
-#include <boost/thread/mutex.hpp>
 #include <atomic>
+#include <mutex>
 #include "common.h"
 #include "network_socket.h"
 #include "epoll_info.h"
@@ -31,7 +29,7 @@ class MachineDriver;
 
 // pair<thread_id, last active timestamp of the thread>
 typedef std::pair<pid_t, time_t> ThreadTimeStamp;
-typedef boost::shared_ptr<DriverTask> SmartDriverTask;
+typedef std::shared_ptr<DriverTask> SmartDriverTask;
 
 // 将ExecutorUnit封装成可以执行的任务
 struct DriverTask {
@@ -95,7 +93,7 @@ public:
 public:
     // map from tid(sys allocated) to thread index (0 to n-1) 
     //int32_t                         _thread_idx_mapping[PID_MAX];
-    boost::mutex                    _mutex;
+    std::mutex                      _mutex;
     std::vector<ThreadTimeStamp>*   _time_stamp;
     std::atomic<int>*               _max_idx;
     uint32_t                        _thread_num;

@@ -389,6 +389,7 @@ int hll_add(std::string& hll, uint64_t hash_value) {
         }
     } else {
         DB_WARNING("wrong hll object");
+        return -1;
     }
 }
 
