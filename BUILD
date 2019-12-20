@@ -25,7 +25,7 @@ genrule(
         "cat sql_parse.yacc.cc > $(location include/sqlparser/sql_parse.yacc.cc)",
     ]),
 )
-i
+
 COPTS  = [
     "-Iproto",
     "-Iinclude/sqlparser",
