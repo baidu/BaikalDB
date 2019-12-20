@@ -334,7 +334,7 @@ int PacketNode::pack_vector_row(const std::vector<std::string>& row) {
             return -1;
         }
     }
-    int packet_body_len = _send_buf->_size - start_pos - 4;
+    uint32_t packet_body_len = _send_buf->_size - start_pos - 4;
     _send_buf->_data[start_pos] = packet_body_len & 0xff;
     _send_buf->_data[start_pos + 1] = (packet_body_len >> 8) & 0xff;
     _send_buf->_data[start_pos + 2] = (packet_body_len >> 16) & 0xff;
@@ -360,7 +360,7 @@ int PacketNode::pack_text_row(MemRow* row) {
             return -1;
         }
     }
-    int packet_body_len = _send_buf->_size - start_pos - 4;
+    uint32_t packet_body_len = _send_buf->_size - start_pos - 4;
     while (packet_body_len >= PACKET_LEN_MAX) {
         _send_buf->_data[start_pos] = PACKET_LEN_MAX & 0xff;
         _send_buf->_data[start_pos + 1] = (PACKET_LEN_MAX >> 8) & 0xff;
@@ -429,7 +429,7 @@ int PacketNode::pack_binary_row(MemRow* row) {
     for (int idx = 0; idx < null_bitmap_len; ++idx) {
         _send_buf->_data[null_map_pos + idx] = null_map[idx];
     }
-    int packet_body_len = _send_buf->_size - start_pos - 4;
+    uint32_t packet_body_len = _send_buf->_size - start_pos - 4;
     while (packet_body_len >= PACKET_LEN_MAX) {
         _send_buf->_data[start_pos] = PACKET_LEN_MAX & 0xff;
         _send_buf->_data[start_pos + 1] = (PACKET_LEN_MAX >> 8) & 0xff;

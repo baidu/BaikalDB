@@ -25,7 +25,7 @@ genrule(
         "cat sql_parse.yacc.cc > $(location include/sqlparser/sql_parse.yacc.cc)",
     ]),
 )
-
+i
 COPTS  = [
     "-Iproto",
     "-Iinclude/sqlparser",
@@ -57,6 +57,9 @@ COPTS  = [
     "-g", 
     "-fno-omit-frame-pointer", 
     "-Wno-strict-aliasing",
+    "-Wno-unused-parameter",
+    "-Wno-parentheses",
+    "-Wno-deprecated-declarations",
     "-UNDEBUG",
 ]
 

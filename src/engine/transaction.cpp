@@ -206,7 +206,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
     } else if (index_info.type == pb::I_KEY) {
         if (pk_index.length > 0 && index_info.length > 0 && index_info.overlap) {
             rocksdb::Slice _value(key);
-            if (_value.size() < index_info.length) {
+            if ((int)_value.size() < index_info.length) {
                 DB_FATAL("index:%ld value_size:%d len:%d", index_info.id, _value.size(), index_info.length);
                 return false;
             }

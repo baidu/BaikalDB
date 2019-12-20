@@ -183,7 +183,7 @@ int Tokenizer::simple_seg_gbk(std::string word, uint32_t word_count, std::map<st
     } else {
         fast_pos = i;
         std::string term = word.substr(slow_pos, fast_pos - slow_pos);
-        if (!_punctuation_blank.count(term) == 1) {
+        if (_punctuation_blank.count(term) == 0) {
             term_map[term] = 0;
         }
     }

@@ -1630,6 +1630,7 @@ int TableManager::erase_region(int64_t table_id, int64_t region_id, std::string 
     startkey_regiondesc_map.erase(start_key);
     DB_WARNING("table_id:%ld erase region_id:%ld",
                table_id, region_id);
+    return 0;
 }
 
 int64_t TableManager::get_next_region_id(int64_t table_id, std::string start_key, 

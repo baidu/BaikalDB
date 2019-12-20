@@ -335,6 +335,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     }
     if (table.has_ttl_duration()) {
         tbl_info.ttl_duration = table.ttl_duration();
+        DB_DEBUG("table:%s ttl_duration:%ld", tbl_info.name.c_str(), tbl_info.ttl_duration);
     }
     for (auto& dist : table.dists()) {
         DistInfo dist_info;

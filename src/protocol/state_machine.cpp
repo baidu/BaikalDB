@@ -1476,6 +1476,10 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
     oss << " COMMENT='{\"resource_tag\":\"" << info.resource_tag << "\"";
     oss << ", \"replica_num\":" << info.replica_num;
     oss << ", \"region_split_lines\":" << info.region_split_lines;
+    if (info.ttl_duration > 0) {
+        oss << ", \"ttl_duration\":" << info.ttl_duration;
+    }
+    oss << ", \"region_split_lines\":" << info.region_split_lines;
     if (info.dists.size() > 0) {
         oss << ", \"dists\": [";
         for (size_t i = 0; i < info.dists.size(); ++i) {

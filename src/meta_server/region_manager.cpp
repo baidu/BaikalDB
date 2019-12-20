@@ -241,7 +241,7 @@ void RegionManager::drop_region(const pb::MetaManagerRequest& request,
                       result_table_ids, result_start_keys, result_end_keys);
     erase_region_state(drop_region_ids);
     std::vector<pb::RegionInfo> region_infos;
-    for (auto i = 0; i < result_region_ids.size(); i++) {
+    for (uint32_t i = 0; i < result_region_ids.size(); i++) {
         pb::RegionInfo region_info;
         region_info.set_region_id(result_region_ids[i]);
         region_info.set_deleted(true);
