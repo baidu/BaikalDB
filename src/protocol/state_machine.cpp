@@ -743,7 +743,7 @@ int StateMachine::_query_read(SmartSocket sock) {
                 DB_FATAL_CLIENT(sock, "protocol_get_sql_string ret=%d", ret);
                 return ret;
             }
-            // DB_WARNING("sql is %d, %s", command, sock->query_ctx->sql.c_str());
+            DB_WARNING("sql is %d, %s", command, sock->query_ctx->sql.c_str());
         } else {
             DB_FATAL_CLIENT(sock, "server is read_only, so it can not "
                     "execute stmt_close statement, command:[%d]", command);
@@ -979,6 +979,8 @@ bool StateMachine::_query_process(SmartSocket client) {
             ret = _handle_client_query_show_socket(client);
         } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_PROCESSLIST)) {
             ret = _handle_client_query_show_processlist(client);
+        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SELECT_VARIABLE)) {
+            ret = _handle_client_query_select_variable(client);
         } else if (type == SQL_SHOW_NUM
                     && boost::algorithm::istarts_with(
                             client->query_ctx->sql, SQL_SHOW_VARIABLES)) {
@@ -2338,6 +2340,182 @@ bool StateMachine::_handle_client_query_show_variables(SmartSocket client) {
     rows.push_back(row);
     } while (0);
 
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool StateMachine::_handle_client_query_select_variable(SmartSocket client) {
+    if (client == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+    // Find variable
+    std::string sql = client->query_ctx->sql;
+    std::string variable = boost::algorithm::ireplace_first_copy(sql, SQL_SELECT_VARIABLE, "");
+    boost::to_lower(variable);
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    do {
+        ResultField field;
+        field.name = "Variable_name";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+    do {
+        ResultField field;
+        field.name = "Value";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    if (variable == "character_set_client") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("character_set_client");
+        row.push_back(client->charset_name);
+        rows.push_back(row);
+        } while (0);
+    }
+    if (variable == "character_set_connection") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("character_set_connection");
+        row.push_back(client->charset_name);
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "character_set_results") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("character_set_results");
+        row.push_back(client->charset_name);
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "character_set_server") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("character_set_server");
+        row.push_back(client->charset_name);
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "init_connect") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("init_connect");
+        row.push_back(" ");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "interactive_timeout") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("interactive_timeout");
+        row.push_back("28800");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "language") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("language");
+        row.push_back("/home/mysql/mysql/share/mysql/english/");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "lower_case_table_names") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("lower_case_table_names");
+        row.push_back("0");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "max_allowed_packet") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("max_allowed_packet");
+        row.push_back("268435456");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "net_buffer_length") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("net_buffer_length");
+        row.push_back("16384");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "net_write_timeout") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("net_write_timeout");
+        row.push_back("60");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "query_cache_size") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("query_cache_size");
+        row.push_back("335544320");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "query_cache_type") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("query_cache_type");
+        row.push_back("OFF");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "sql_mode") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("sql_mode");
+        row.push_back(" ");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "system_time_zone") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("system_time_zone");
+        row.push_back("CST");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "time_zone") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("time_zone");
+        row.push_back("SYSTEM");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "tx_isolation") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("tx_isolation");
+        row.push_back("REPEATABLE-READ");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "wait_timeout") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("wait_timeout");
+        row.push_back("28800");
+        rows.push_back(row);
+        } while (0);
+    } else if (variable == "auto_increment_increment") {
+        do {
+        std::vector<std::string> row;
+        row.push_back("auto_increment_increment");
+        row.push_back("1");
+        rows.push_back(row);
+        } while (0);
+    }
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {
         DB_FATAL_CLIENT(client, "Failed to make result packet.");
