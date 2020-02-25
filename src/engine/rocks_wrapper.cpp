@@ -32,6 +32,12 @@ DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
 DEFINE_bool(rocks_data_dynamic_level_bytes, true, 
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
 
+DEFINE_int32(max_background_flushes, 4, "max_background_flushes");
+DEFINE_int32(max_background_compactions, 24, "max_background_flushes");
+DEFINE_int32(max_write_buffer_number, 12, "max_write_buffer_number");
+DEFINE_int32(write_buffer_size, 256 * 1024 * 1024, "write_buffer_size");
+DEFINE_int32(min_write_buffer_number_to_merge, 2, "min_write_buffer_number_to_merge");
+
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::DATA_CF = "data";
 const std::string RocksWrapper::METAINFO_CF = "meta_info";
@@ -53,7 +59,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
-    db_options.max_background_compactions = 20;
+//    db_options.max_background_compactions = 20;
     //db_options.max_subcompactions = 5;
     db_options.statistics = rocksdb::CreateDBStatistics();
     //db_options.max_background_flushes = 1;
@@ -62,6 +68,9 @@ int32_t RocksWrapper::init(const std::string& path) {
     DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
     txn_db_options.default_lock_timeout = FLAGS_rocks_default_lock_timeout_ms;
+
+    db_options.max_background_flushes = FLAGS_max_background_flushes;
+    db_options.max_background_compactions = FLAGS_max_background_compactions;
 
     //txn_db_options.IncreaseParallelism();
     //txn_db_options.create_if_missing = true;
@@ -75,12 +84,17 @@ int32_t RocksWrapper::init(const std::string& path) {
     //log_cf_option.compression = rocksdb::kLZ4Compression;
     _log_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _log_cf_option.level0_file_num_compaction_trigger = 5;
-    _log_cf_option.level0_slowdown_writes_trigger = 10;
+    _log_cf_option.level0_slowdown_writes_trigger = 16;
     _log_cf_option.level0_stop_writes_trigger = 20;
-    _log_cf_option.write_buffer_size = 128 * 1024 * 1024;
+//    _log_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _log_cf_option.target_file_size_base = 128 * 1024 * 1024;
     _log_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;
     _log_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
+
+    _log_cf_option.max_write_buffer_number = FLAGS_max_write_buffer_number;
+    _log_cf_option.write_buffer_size = FLAGS_write_buffer_size;
+    _log_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
+
     //todo
     // prefix length: regionid(8 Bytes) tableid(8 Bytes)
     _data_cf_option.prefix_extractor.reset(
@@ -92,12 +106,16 @@ int32_t RocksWrapper::init(const std::string& path) {
     //data_cf_option.compression = rocksdb::kLZ4Compression;
     _data_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _data_cf_option.level0_file_num_compaction_trigger = 5;
-    _data_cf_option.level0_slowdown_writes_trigger = 10;
+    _data_cf_option.level0_slowdown_writes_trigger = FLAGS_stop_write_sst_cnt - 4;
     _data_cf_option.level0_stop_writes_trigger = FLAGS_stop_write_sst_cnt;
-    _data_cf_option.write_buffer_size = 128 * 1024 * 1024;
+//    _data_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _data_cf_option.target_file_size_base = 128 * 1024 * 1024;
     _data_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;
     _data_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
+
+    _data_cf_option.max_write_buffer_number = FLAGS_max_write_buffer_number;
+    _data_cf_option.write_buffer_size = FLAGS_write_buffer_size;
+    _data_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
 
     //todo
     //prefix: 0x01-0xFF,分别用来存储不同的meta信息
