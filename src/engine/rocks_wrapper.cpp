@@ -32,10 +32,11 @@ DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
 DEFINE_bool(rocks_data_dynamic_level_bytes, true, 
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
 
-DEFINE_int32(max_background_flushes, 4, "max_background_flushes");
-DEFINE_int32(max_background_compactions, 24, "max_background_flushes");
+DEFINE_int32(max_background_jobs, 24, "max_background_jobs");
 DEFINE_int32(max_write_buffer_number, 12, "max_write_buffer_number");
-DEFINE_int32(write_buffer_size, 256 * 1024 * 1024, "write_buffer_size");
+DEFINE_int32(max_background_flushes, 12, "max_background_flushes");
+DEFINE_int32(max_background_compactions, 20, "max_background_flushes");
+DEFINE_int32(write_buffer_size, 128 * 1024 * 1024, "write_buffer_size");
 DEFINE_int32(min_write_buffer_number_to_merge, 2, "min_write_buffer_number_to_merge");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
@@ -54,7 +55,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, true));
     _cache = table_options.block_cache.get();
     rocksdb::Options db_options;
-    db_options.IncreaseParallelism();
+    db_options.IncreaseParallelism(FLAGS_max_background_jobs);
     db_options.create_if_missing = true;
     db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.WAL_ttl_seconds = 10 * 60;
