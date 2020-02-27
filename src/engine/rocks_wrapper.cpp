@@ -124,6 +124,10 @@ int32_t RocksWrapper::init(const std::string& path) {
             rocksdb::NewFixedPrefixTransform(1));
     _meta_info_option.OptimizeLevelStyleCompaction();
     _meta_info_option.compaction_pri = rocksdb::kOldestSmallestSeqFirst;
+
+    _meta_info_option.max_write_buffer_number = FLAGS_max_write_buffer_number;
+    _meta_info_option.write_buffer_size = FLAGS_write_buffer_size;
+    _meta_info_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
     _db_path = path;
     // List Column Family
     std::vector<std::string> column_family_names;

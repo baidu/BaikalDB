@@ -201,7 +201,7 @@ inline int init_log(const char* bin_name) {
     FLAGS_alsologtostderr = false;
     FLAGS_log_dir = "";
     ::google::SetLogDestination(google::GLOG_INFO, "log/task_info_log.");
-    ::google::SetLogDestination(google::GLOG_WARNING, "log/task_warning_log.");
+//    ::google::SetLogDestination(google::GLOG_WARNING, "log/task_warning_log.");
     return 0;
 #endif
 }
