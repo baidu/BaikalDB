@@ -823,31 +823,64 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
         return -1;
     }
     int64_t max_region_count = INT_FAST64_MAX;
-    std::vector<std::string> candicate_instances; 
+    std::vector<std::string> candicate_instances;
+
+    std::vector<std::string> ip_uniq_candicate_instances;
+    int64_t ip_uniq_max_region_count = INT_FAST64_MAX;
+
     for (auto& instance_count : _instance_regions_count_map) {
         std::string instance = instance_count.first;
         if (false == whether_legal_for_select_instance(instance, resource_tag, exclude_stores, logical_room)) {
             continue;
         }
+        bool ip_uniq = true;
+        std::string ip = get_ip(instance);
+        for (auto& exclude_store : exclude_stores) {
+            if (ip == get_ip(exclude_store)) {
+                ip_uniq = false;
+                break;
+            }
+        }
         if (instance_count.second.find(table_id) == instance_count.second.end()) {
             if (average_count == 0) {
-                selected_instance = instance;
-                break;
+                if (ip_uniq) {
+                    selected_instance = instance;
+                    break;
+                } else {
+                    if (selected_instance.empty()) {
+                        selected_instance = instance;
+                        continue;
+                    }
+                }
             } else {
                 candicate_instances.push_back(instance);
+                if (ip_uniq) {
+                    ip_uniq_candicate_instances.push_back(instance);
+                }
                 continue;
             }
         }
         if (average_count != 0 && instance_count.second[table_id] < average_count) {
             candicate_instances.push_back(instance);
+            if (ip_uniq) {
+                ip_uniq_candicate_instances.push_back(instance);
+            }
         }
-        if (instance_count.second[table_id] < max_region_count) {
+        if (instance_count.second[table_id] < max_region_count &&
+                ip_uniq_max_region_count != INT_FAST64_MAX) {
             selected_instance = instance;
             max_region_count = instance_count.second[table_id];
         }
+        if (ip_uniq && instance_count.second[table_id] < ip_uniq_max_region_count) {
+            selected_instance = instance;
+            ip_uniq_max_region_count = instance_count.second[table_id];
+        }
     }
     //从小于平均peer数量的实例中随机选择一个
-    if (candicate_instances.size() != 0) {
+    if (ip_uniq_candicate_instances.size() != 0) {
+        size_t random_index = butil::fast_rand() % ip_uniq_candicate_instances.size();
+        selected_instance = ip_uniq_candicate_instances[random_index];
+    } else if (candicate_instances.size() != 0) {
         size_t random_index = butil::fast_rand() % candicate_instances.size(); 
         selected_instance = candicate_instances[random_index];
     }
@@ -888,11 +921,27 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
         if (false == whether_legal_for_select_instance(iter->first, resource_tag, exclude_stores, logical_room)) {
             continue;
         }
-        //选择该实例
-        selected_instance = iter->first;
-        //更新last_rolling_instance
-        _last_rolling_instance = selected_instance;
-        break;
+        bool ip_uniq = true;
+        std::string ip = get_ip(iter->first);
+        for (auto& exclude_store : exclude_stores) {
+          if (ip == get_ip(exclude_store)) {
+              ip_uniq = false;
+              break;
+          }
+        }
+        if (ip_uniq) {
+            //选择该实例
+            selected_instance = iter->first;
+            //更新last_rolling_instance
+            _last_rolling_instance = selected_instance;
+            break;
+        } else if (selected_instance.empty()) {
+            //选择该实例
+            selected_instance = iter->first;
+            //更新last_rolling_instance
+            _last_rolling_instance = selected_instance;
+            continue;
+        }
     }
     if (selected_instance.empty()) {
         DB_FATAL("select instance fail, has no legal store, resource_tag:%s", resource_tag.c_str());
