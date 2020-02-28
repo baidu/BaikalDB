@@ -1326,8 +1326,8 @@ void RegionManager::check_peer_count(int64_t region_id,
             }
             if (max_peer_size > 1) {
                 candicate_remove_peers = ip_peers[max_peer_size_ip];
-                DB_WARNING("candicate remove peer ip is : %s, peer size: %ld",
-                           max_peer_size_ip, max_peer_size);
+                DB_WARNING("candicate remove peer ip is : %s, peer size: %d",
+                           max_peer_size_ip.c_str(), max_peer_size);
             }
             for (auto& peer : candicate_remove_peers) {
                 /*
