@@ -33,6 +33,18 @@ DECLARE_int32(store_faulty_interval_times);
 DECLARE_string(default_logical_room);
 DECLARE_string(default_physical_room);
 
+// add peer时选择策略，按ip区分可以保证peers落在不同IP上，避免单机多实例主机故障的多副本丢失
+// 但在机器数较少时会造成peer分配不均，甚至无法选出足够的peers的问题。
+// 假设机器数=host_num，每机器部署store实例数=n，store_max_peer = region_num / n
+// 集群总peer数为 region_num * replica_num, store_avg_peer = region_num * replica_num / (host_num * n)
+// store_max_peer >= store_avg_peer， 即host_num >= replica_num时能同时满足host与store均衡，总结：
+// host_num >= replica_num时： 应选by_ip，能同时满足host与store均衡
+// store_num >= replica_num > host_num时：by_ip，则会失败，应该扩容机器；by_ip_port，则只能满足peer均衡，不能IP均衡
+// replica_num > store_num时： 会失败，应该扩容store
+// 若单机单实例：by_ip 效果等价于 by_ip_port
+// 若单机多实例：则 host_num >= replica_num时， 应选择by_ip，否则应选择by_ip_port
+DEFINE_bool(peer_balance_by_ip, false, "default by ip:port");
+
 void ClusterManager::process_cluster_info(google::protobuf::RpcController* controller, 
                                           const pb::MetaManagerRequest* request, 
                                           pb::MetaManagerResponse* response, 
@@ -823,64 +835,31 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
         return -1;
     }
     int64_t max_region_count = INT_FAST64_MAX;
-    std::vector<std::string> candicate_instances;
-
-    std::vector<std::string> ip_uniq_candicate_instances;
-    int64_t ip_uniq_max_region_count = INT_FAST64_MAX;
-
+    std::vector<std::string> candicate_instances; 
     for (auto& instance_count : _instance_regions_count_map) {
         std::string instance = instance_count.first;
         if (false == whether_legal_for_select_instance(instance, resource_tag, exclude_stores, logical_room)) {
             continue;
         }
-        bool ip_uniq = true;
-        std::string ip = get_ip(instance);
-        for (auto& exclude_store : exclude_stores) {
-            if (ip == get_ip(exclude_store)) {
-                ip_uniq = false;
-                break;
-            }
-        }
         if (instance_count.second.find(table_id) == instance_count.second.end()) {
             if (average_count == 0) {
-                if (ip_uniq) {
-                    selected_instance = instance;
-                    break;
-                } else {
-                    if (selected_instance.empty()) {
-                        selected_instance = instance;
-                        continue;
-                    }
-                }
+                selected_instance = instance;
+                break;
             } else {
                 candicate_instances.push_back(instance);
-                if (ip_uniq) {
-                    ip_uniq_candicate_instances.push_back(instance);
-                }
                 continue;
             }
         }
         if (average_count != 0 && instance_count.second[table_id] < average_count) {
             candicate_instances.push_back(instance);
-            if (ip_uniq) {
-                ip_uniq_candicate_instances.push_back(instance);
-            }
         }
-        if (instance_count.second[table_id] < max_region_count &&
-                ip_uniq_max_region_count != INT_FAST64_MAX) {
+        if (instance_count.second[table_id] < max_region_count) {
             selected_instance = instance;
             max_region_count = instance_count.second[table_id];
         }
-        if (ip_uniq && instance_count.second[table_id] < ip_uniq_max_region_count) {
-            selected_instance = instance;
-            ip_uniq_max_region_count = instance_count.second[table_id];
-        }
     }
     //从小于平均peer数量的实例中随机选择一个
-    if (ip_uniq_candicate_instances.size() != 0) {
-        size_t random_index = butil::fast_rand() % ip_uniq_candicate_instances.size();
-        selected_instance = ip_uniq_candicate_instances[random_index];
-    } else if (candicate_instances.size() != 0) {
+    if (candicate_instances.size() != 0) {
         size_t random_index = butil::fast_rand() % candicate_instances.size(); 
         selected_instance = candicate_instances[random_index];
     }
@@ -921,27 +900,11 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
         if (false == whether_legal_for_select_instance(iter->first, resource_tag, exclude_stores, logical_room)) {
             continue;
         }
-        bool ip_uniq = true;
-        std::string ip = get_ip(iter->first);
-        for (auto& exclude_store : exclude_stores) {
-          if (ip == get_ip(exclude_store)) {
-              ip_uniq = false;
-              break;
-          }
-        }
-        if (ip_uniq) {
-            //选择该实例
-            selected_instance = iter->first;
-            //更新last_rolling_instance
-            _last_rolling_instance = selected_instance;
-            break;
-        } else if (selected_instance.empty()) {
-            //选择该实例
-            selected_instance = iter->first;
-            //更新last_rolling_instance
-            _last_rolling_instance = selected_instance;
-            continue;
-        }
+        //选择该实例
+        selected_instance = iter->first;
+        //更新last_rolling_instance
+        _last_rolling_instance = selected_instance;
+        break;
     }
     if (selected_instance.empty()) {
         DB_FATAL("select instance fail, has no legal store, resource_tag:%s", resource_tag.c_str());
@@ -1020,8 +983,17 @@ bool ClusterManager::whether_legal_for_select_instance(
             || _instance_info[candicate_instance].capacity == 0) {
         return false;
     }
-    if (exclude_stores.count(candicate_instance) != 0) {
-        return false;
+    if (false == FLAGS_peer_balance_by_ip) {
+        if (exclude_stores.count(candicate_instance) != 0) {
+            return false;
+        }
+    } else {
+        std::string candicate_instance_ip = get_ip(candicate_instance);
+        for (auto& exclude_store : exclude_stores) {
+           if (candicate_instance_ip == get_ip(exclude_store)) {
+               return false;
+           }
+        }
     }
     if ((_instance_info[candicate_instance].used_size  * 100 / _instance_info[candicate_instance].capacity)  > 
                 FLAGS_disk_used_percent) {

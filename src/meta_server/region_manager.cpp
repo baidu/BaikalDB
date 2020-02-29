@@ -1305,30 +1305,6 @@ void RegionManager::check_peer_count(int64_t region_id,
                     }
                 } 
             }
-
-            // 优先筛选同一IP的peer数最多的peers，若每IP的peer数都为1，则全部进入候选peers
-            std::unordered_map<std::string, std::set<std::string>> ip_peers;
-            int max_peer_size = 1;
-            std::string max_peer_size_ip = "";
-            for (auto& peer : candicate_remove_peers) {
-               std::string ip = ClusterManager::get_ip(peer);
-               if (ip_peers.find(ip) == ip_peers.end()) {
-                   std::set<std::string> same_ip_peers;
-                   same_ip_peers.insert(peer);
-                   ip_peers[ip] = same_ip_peers;
-               } else {
-                   ip_peers[ip].insert(peer);
-                   if (ip_peers[ip].size() > max_peer_size) {
-                       max_peer_size = ip_peers[ip].size();
-                       max_peer_size_ip = ip;
-                   }
-               }
-            }
-            if (max_peer_size > 1) {
-                candicate_remove_peers = ip_peers[max_peer_size_ip];
-                DB_WARNING("candicate remove peer ip is : %s, peer size: %d",
-                           max_peer_size_ip.c_str(), max_peer_size);
-            }
             for (auto& peer : candicate_remove_peers) {
                 /*
                 if (peer == leader_region_info.leader()) {
