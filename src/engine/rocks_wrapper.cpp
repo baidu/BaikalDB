@@ -33,9 +33,7 @@ DEFINE_bool(rocks_data_dynamic_level_bytes, true,
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
 
 DEFINE_int32(max_background_jobs, 24, "max_background_jobs");
-DEFINE_int32(max_write_buffer_number, 12, "max_write_buffer_number");
-DEFINE_int32(max_background_flushes, 12, "max_background_flushes");
-DEFINE_int32(max_background_compactions, 20, "max_background_flushes");
+DEFINE_int32(max_write_buffer_number, 6, "max_write_buffer_number");
 DEFINE_int32(write_buffer_size, 128 * 1024 * 1024, "write_buffer_size");
 DEFINE_int32(min_write_buffer_number_to_merge, 2, "min_write_buffer_number_to_merge");
 
@@ -70,9 +68,6 @@ int32_t RocksWrapper::init(const std::string& path) {
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
     txn_db_options.default_lock_timeout = FLAGS_rocks_default_lock_timeout_ms;
 
-    db_options.max_background_flushes = FLAGS_max_background_flushes;
-    db_options.max_background_compactions = FLAGS_max_background_compactions;
-
     //txn_db_options.IncreaseParallelism();
     //txn_db_options.create_if_missing = true;
     //todo 
@@ -85,7 +80,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     //log_cf_option.compression = rocksdb::kLZ4Compression;
     _log_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _log_cf_option.level0_file_num_compaction_trigger = 5;
-    _log_cf_option.level0_slowdown_writes_trigger = 16;
+    _log_cf_option.level0_slowdown_writes_trigger = 10;
     _log_cf_option.level0_stop_writes_trigger = 20;
 //    _log_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _log_cf_option.target_file_size_base = 128 * 1024 * 1024;
@@ -107,7 +102,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     //data_cf_option.compression = rocksdb::kLZ4Compression;
     _data_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _data_cf_option.level0_file_num_compaction_trigger = 5;
-    _data_cf_option.level0_slowdown_writes_trigger = FLAGS_stop_write_sst_cnt - 4;
+    _data_cf_option.level0_slowdown_writes_trigger = 10;
     _data_cf_option.level0_stop_writes_trigger = FLAGS_stop_write_sst_cnt;
 //    _data_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _data_cf_option.target_file_size_base = 128 * 1024 * 1024;
@@ -124,10 +119,6 @@ int32_t RocksWrapper::init(const std::string& path) {
             rocksdb::NewFixedPrefixTransform(1));
     _meta_info_option.OptimizeLevelStyleCompaction();
     _meta_info_option.compaction_pri = rocksdb::kOldestSmallestSeqFirst;
-
-    _meta_info_option.max_write_buffer_number = FLAGS_max_write_buffer_number;
-    _meta_info_option.write_buffer_size = FLAGS_write_buffer_size;
-    _meta_info_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
     _db_path = path;
     // List Column Family
     std::vector<std::string> column_family_names;

@@ -53,7 +53,6 @@ const std::string SQL_SHOW_WARNINGS              = "show warnings";
 const std::string SQL_SHOW_REGION                = "show region";
 const std::string SQL_SHOW_SOCKET                = "show socket";
 const std::string SQL_SHOW_PROCESSLIST           = "show processlist";
-const std::string SQL_SELECT_VARIABLE            = "select @@";
 
 enum QUERY_TYPE {
     SQL_UNKNOWN_NUM                         = 0,
@@ -147,7 +146,6 @@ private:
     bool _handle_client_query_show_collation(SmartSocket client);
     bool _handle_client_query_show_warnings(SmartSocket client);
     bool _handle_client_query_show_variables(SmartSocket client);
-    bool _handle_client_query_select_variable(SmartSocket client);
     bool _handle_client_query_desc_table(SmartSocket client);
     bool _handle_client_query_template(SmartSocket client,
         const std::string& field_name, int32_t data_type, const std::string& value);

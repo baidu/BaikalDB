@@ -983,16 +983,16 @@ bool ClusterManager::whether_legal_for_select_instance(
             || _instance_info[candicate_instance].capacity == 0) {
         return false;
     }
-    if (false == FLAGS_peer_balance_by_ip) {
-        if (exclude_stores.count(candicate_instance) != 0) {
-            return false;
-        }
-    } else {
+    if (FLAGS_peer_balance_by_ip) {
         std::string candicate_instance_ip = get_ip(candicate_instance);
         for (auto& exclude_store : exclude_stores) {
            if (candicate_instance_ip == get_ip(exclude_store)) {
                return false;
            }
+        }
+    } else {
+        if (exclude_stores.count(candicate_instance) != 0) {
+            return false;
         }
     }
     if ((_instance_info[candicate_instance].used_size  * 100 / _instance_info[candicate_instance].capacity)  > 
