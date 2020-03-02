@@ -319,6 +319,15 @@ public:
         DB_FATAL("instance: %s not exist", instance.c_str());
         return "";
     }
+    static std::string get_ip(const std::string& instance) {
+        std::string ip = "";
+        std::string::size_type position = instance.find_first_of(":");
+        if (position != instance.npos) {
+            return instance.substr(0, position);
+        }
+        DB_FATAL("find instance: %s ip error", instance.c_str());
+        return "";
+    }
 private:
     ClusterManager() {
         bthread_mutex_init(&_physical_mutex, NULL);

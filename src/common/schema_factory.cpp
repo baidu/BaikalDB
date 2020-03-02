@@ -113,7 +113,7 @@ void SchemaFactory::update_idc_double_buffer(bthread::TaskIterator<pb::IdcInfo>&
 
 int SchemaFactory::update_idc_internal(IdcMapping& ida_mapping, const pb::IdcInfo& idc_info) {
     //double buffer根据该函数返回值确定是否更新ida_mapping。0：不更新，非0：更新
-    DB_NOTICE("update_idc idc_info[%s]", idc_info.ShortDebugString().c_str());
+    SELF_TRACE("update_idc idc_info[%s]", idc_info.ShortDebugString().c_str());
     ida_mapping.instance_logical_mapping.clear();
     ida_mapping.physical_logical_mapping.clear();
     for (auto& logical_physical : idc_info.logical_physical_map()) {
@@ -654,7 +654,7 @@ int SchemaFactory::update_regions_double_buffer(
     SchemaFactory* factory = (SchemaFactory*)meta;
     TimeCost cost;
     factory->update_regions_double_buffer(iter);
-    DB_NOTICE("update_regions_double_buffer time:%ld", cost.get_time());
+    SELF_TRACE("update_regions_double_buffer time:%ld", cost.get_time());
     return 0;
 }
 // 心跳更新时，如果region有分裂，需要保证分裂出来的region与源region同时更新

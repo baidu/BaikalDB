@@ -33,6 +33,18 @@ DECLARE_int32(store_faulty_interval_times);
 DECLARE_string(default_logical_room);
 DECLARE_string(default_physical_room);
 
+// add peer时选择策略，按ip区分可以保证peers落在不同IP上，避免单机多实例主机故障的多副本丢失
+// 但在机器数较少时会造成peer分配不均，甚至无法选出足够的peers的问题。
+// 假设机器数=host_num，每机器部署store实例数=n，store_max_peer = region_num / n
+// 集群总peer数为 region_num * replica_num, store_avg_peer = region_num * replica_num / (host_num * n)
+// store_max_peer >= store_avg_peer， 即host_num >= replica_num时能同时满足host与store均衡，总结：
+// host_num >= replica_num时： 应选by_ip，能同时满足host与store均衡
+// store_num >= replica_num > host_num时：by_ip，则会失败，应该扩容机器；by_ip_port，则只能满足peer均衡，不能IP均衡
+// replica_num > store_num时： 会失败，应该扩容store
+// 若单机单实例：by_ip 效果等价于 by_ip_port
+// 若单机多实例：则 host_num >= replica_num时， 应选择by_ip，否则应选择by_ip_port
+DEFINE_bool(peer_balance_by_ip, false, "default by ip:port");
+
 void ClusterManager::process_cluster_info(google::protobuf::RpcController* controller, 
                                           const pb::MetaManagerRequest* request, 
                                           pb::MetaManagerResponse* response, 
@@ -971,8 +983,17 @@ bool ClusterManager::whether_legal_for_select_instance(
             || _instance_info[candicate_instance].capacity == 0) {
         return false;
     }
-    if (exclude_stores.count(candicate_instance) != 0) {
-        return false;
+    if (FLAGS_peer_balance_by_ip) {
+        std::string candicate_instance_ip = get_ip(candicate_instance);
+        for (auto& exclude_store : exclude_stores) {
+           if (candicate_instance_ip == get_ip(exclude_store)) {
+               return false;
+           }
+        }
+    } else {
+        if (exclude_stores.count(candicate_instance) != 0) {
+            return false;
+        }
     }
     if ((_instance_info[candicate_instance].used_size  * 100 / _instance_info[candicate_instance].capacity)  > 
                 FLAGS_disk_used_percent) {
