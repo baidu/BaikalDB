@@ -743,7 +743,7 @@ int StateMachine::_query_read(SmartSocket sock) {
                 DB_FATAL_CLIENT(sock, "protocol_get_sql_string ret=%d", ret);
                 return ret;
             }
-            // DB_WARNING("sql is %d, %s", command, sock->query_ctx->sql.c_str());
+             DB_DEBUG("sql is %d, %s", command, sock->query_ctx->sql.c_str());
         } else {
             DB_FATAL_CLIENT(sock, "server is read_only, so it can not "
                     "execute stmt_close statement, command:[%d]", command);

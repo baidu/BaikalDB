@@ -155,6 +155,11 @@ int PacketNode::open(RuntimeState* state) {
         return 0;
     }
 
+    if (_children.size() == 0) {
+        pack_eof();
+        return 0;
+    }
+
     bool eos = false;
     int64_t pack_time = 0;
     do {

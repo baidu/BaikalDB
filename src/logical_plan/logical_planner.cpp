@@ -30,6 +30,7 @@
 #include "predicate.h"
 #include "network_socket.h"
 #include "parser.h"
+#include "mysql_err_code.h"
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
