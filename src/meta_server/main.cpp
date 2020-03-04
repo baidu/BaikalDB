@@ -35,7 +35,9 @@ DECLARE_int32(meta_replica_number);
 }
 
 int main(int argc, char **argv) {
+#ifdef BAIKALDB_REVISION
     google::SetVersionString(BAIKALDB_REVISION);
+#endif
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     boost::filesystem::path remove_path("init.success");

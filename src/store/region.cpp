@@ -5230,7 +5230,7 @@ int Region::upload_sst_info(brpc::Controller* cntl, BackupInfo& backup_info) {
             return -1;
         }
 
-        base::IOBuf out_io;
+        butil::IOBuf out_io;
         if (request_attachment.cutn(&out_io, fi.size) != fi.size) {
             DB_WARNING("upload region_%lld sst not enough data.", _region_id);
             return -1;
