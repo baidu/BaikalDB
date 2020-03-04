@@ -91,6 +91,12 @@ void AddPeerClosure::Run() {
 }
 
 void MergeClosure::Run() {
+
+    if (response) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
+    }
+
     if (is_dst_region) {
         if (!status().ok()) {
             if (response) {

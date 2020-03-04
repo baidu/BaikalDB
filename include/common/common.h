@@ -17,6 +17,7 @@
 #include <functional>
 #include <execinfo.h>
 #include <type_traits>
+#include <cmath>
 #include <set>
 #include <unordered_set>
 #include <unordered_map>
@@ -31,6 +32,7 @@
 #include <base/endpoint.h>
 #include <base/base64.h>
 #include <webfoot_naming.h>
+#include <base/fast_rand.h>
 #include "naming.pb.h"
 #else
 #include <bthread/bthread.h>
@@ -39,6 +41,7 @@
 #include <butil/containers/doubly_buffered_data.h>
 #include <butil/endpoint.h>
 #include <butil/base64.h>
+#include <butil/fast_rand.h>
 #endif
 #include <bthread/execution_queue.h>
 #include <gflags/gflags.h>
@@ -605,6 +608,10 @@ inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
     butil::MurmurHash3_x64_128(key.c_str(), key.size(), 1234, out);
     return out[0];
+}
+
+inline bool float_equal(double value, double compare, double epsilon = 1e-9) {
+    return std::fabs(value - compare) < epsilon;
 }
 
 //set double buffer

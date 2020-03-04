@@ -1918,6 +1918,13 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
+    | MOD '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "mod";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;
+    }
     ;
 FunctionCallKeyword:
     VALUES '(' ColumnName ')' {
@@ -2296,6 +2303,7 @@ AllIdent:
     | VARIANCE
     | VAR_POP
     | VAR_SAMP
+    | MOD
     ;
 
 NumLiteral:

@@ -727,9 +727,14 @@ int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
         return -1;
     }
     if (request->table_info().main_logical_room().size() == 0) {
-        request->mutable_table_info()->set_main_logical_room(
-                request->table_info().dists(0).logical_room()); 
+        for (auto& dist : request->table_info().dists()) {
+            if (dist.count() > 0) {
+                request->mutable_table_info()->set_main_logical_room(dist.logical_room());
+                break;
+            }
+        }
     }
+    
     if (total_count != request->table_info().replica_num()) {
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                 "replica num not match", request->op_type(), log_id);

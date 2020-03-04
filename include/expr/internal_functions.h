@@ -22,6 +22,24 @@ namespace baikaldb {
 ExprValue round(const std::vector<ExprValue>& input);
 ExprValue floor(const std::vector<ExprValue>& input);
 ExprValue ceil(const std::vector<ExprValue>& input);
+ExprValue abs(const std::vector<ExprValue>& input);
+ExprValue sqrt(const std::vector<ExprValue>& input);
+ExprValue mod(const std::vector<ExprValue>& input);
+ExprValue rand(const std::vector<ExprValue>& input);
+ExprValue sign(const std::vector<ExprValue>& input);
+ExprValue sin(const std::vector<ExprValue>& input);
+ExprValue asin(const std::vector<ExprValue>& input);
+ExprValue cos(const std::vector<ExprValue>& input);
+ExprValue acos(const std::vector<ExprValue>& input);
+ExprValue tan(const std::vector<ExprValue>& input);
+ExprValue cot(const std::vector<ExprValue>& input);
+ExprValue atan(const std::vector<ExprValue>& input);
+ExprValue ln(const std::vector<ExprValue>& input);
+ExprValue log(const std::vector<ExprValue>& input);
+ExprValue pi(const std::vector<ExprValue>& input);
+ExprValue greatest(const std::vector<ExprValue>& input);
+ExprValue least(const std::vector<ExprValue>& input);
+ExprValue pow(const std::vector<ExprValue>& input);
 //string functions
 ExprValue length(const std::vector<ExprValue>& input);
 ExprValue lower(const std::vector<ExprValue>& input);
