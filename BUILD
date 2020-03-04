@@ -46,7 +46,6 @@ COPTS  = [
     "-Iinclude/store",
     "-Iinclude/session",
     "-Iinclude/mem_row",
-    "-DBAIKALDB_REVISION=\"vers\"",
     "-mpclmul",
     "-ggdb",
     "-pipe",

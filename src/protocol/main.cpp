@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, (sighandler_t)baikaldb::handle_exit_signal);
     signal(SIGTERM, (sighandler_t)baikaldb::handle_exit_signal);
-#indef BAIKALDB_REVISION
+#ifdef BAIKALDB_REVISION
     google::SetVersionString(BAIKALDB_REVISION);
 #endif
     google::ParseCommandLineFlags(&argc, &argv, true);
