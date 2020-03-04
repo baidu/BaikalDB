@@ -28,7 +28,6 @@ void DMLClosure::Run() {
     if (cntl->has_log_id()) { 
         log_id = cntl->log_id();
     }
-    //const char* remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
     if (!status().ok()) {
         response->set_errcode(pb::NOT_LEADER);
         response->set_leader(butil::endpoint2str(leader).c_str());

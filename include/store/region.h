@@ -62,6 +62,16 @@ DECLARE_int64(disable_write_wait_timeout_us);
 DECLARE_int32(prepare_slow_down_wait);
 
 static const int32_t RECV_QUEUE_SIZE = 128;
+struct FileInfo {
+    std::string path {""};
+    int64_t size {0};
+};
+
+struct BackupInfo {
+    FileInfo meta_info;
+    FileInfo data_info;
+};
+
 struct StatisticsInfo {
     int64_t time_cost_sum;
     int64_t end_time_us;
@@ -216,7 +226,9 @@ public:
 
     void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance, 
         std::set<int64_t>& ddl_wait_doing_table_ids); 
-    
+
+    void construct_peers_status(pb::LeaderHeartBeat* leader_heart);
+  
     void set_can_add_peer();
     
     //leader收到从metaServer心跳包中的解析出来的add_peer请求
@@ -305,6 +317,7 @@ public:
     void complete_split();
     
     //从split开始之后所有的entry数据作为分裂的增量部分
+    // 1说明还有数据，0说明到头了
     int get_log_entry_for_split(const int64_t start_index, 
             const int64_t expected_term,
             std::vector<pb::StoreReq>& requests, 
@@ -312,7 +325,7 @@ public:
     
     int get_split_key(std::string& split_key);
     
-    int64_t get_region_id() {
+    int64_t get_region_id() const {
         return _region_id;
     }
 
@@ -372,15 +385,16 @@ public:
     }
     void reset_log_index_lastcycle() {
         _applied_index_lastcycle = _applied_index;
-    }    
+        _lastcycle_time_cost.reset();
+    } 
+    int64_t get_lastcycle_timecost() {
+        return _lastcycle_time_cost.get_time();
+    }   
     rocksdb::ColumnFamilyHandle* get_data_cf() const {
         return _data_cf;
     }
     butil::EndPoint get_leader() {
         return _node.leader_id().addr;    
-    }
-    void shutdown_raft() {
-        _node.shutdown(NULL);
     }
     
     int64_t get_used_size() {
@@ -462,8 +476,16 @@ public:
         _num_table_lines.store(table_line);
         DB_WARNING("region_id: %ld, table_line:%ld", _region_id, _num_table_lines.load());
     }
+    bool removed() const {
+        return _removed;
+    }
     void set_removed(bool removed) {
         _removed = removed;
+        _removed_time_cost.reset();
+    }
+
+    int64_t removed_time_cost() const {
+        return _removed_time_cost.get_time();
     }
 
     int64_t get_split_wait_time() {
@@ -472,7 +494,7 @@ public:
             wait_time = _split_param.split_slow_down_cost * 10;
         }
         if (wait_time > 30 * 1000 * 1000LL) {
-            DB_WARNING("split wait time exceed 30s, region_id: %ld", _region_id);
+            //DB_WARNING("split wait time exceed 30s, region_id: %ld", _region_id);
             wait_time = 30 * 1000 * 1000LL;
         }
         return wait_time;
@@ -567,6 +589,18 @@ public:
         is_success = false;
     }
 
+    void process_download_sst(brpc::Controller* controller, 
+        std::vector<std::string>& req_vec, SstBackupType type);
+    void process_upload_sst(brpc::Controller* controller, 
+        std::vector<std::string>& req_vec, SstBackupType type);
+
+    void backup_datainfo(brpc::Controller* controller);
+    int backup_datainfo_to_file(std::string path, int64_t& file_size);
+    int backup_metainfo_to_file(std::string path, int64_t& file_size);
+    int upload_sst_info(brpc::Controller* controller, BackupInfo& backup_info);
+
+    int send_file(brpc::Controller* controller, BackupInfo& backup_info);
+    int dump_sst_file(BackupInfo& backup_info);
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -644,6 +678,8 @@ private:
 
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
     bool has_sst_data(int64_t* seek_table_lines);
+    bool ingest_has_sst_data();
+
 
 private:
     //Singleton
@@ -693,6 +729,8 @@ private:
     int64_t                             _applied_index = 0;  //current log index
     // bthread cycle: set _applied_index_lastcycle = _applied_index when _num_table_lines == 0
     int64_t                             _applied_index_lastcycle = 0;  
+    TimeCost                            _lastcycle_time_cost; //定时线程上次循环的时间，更新_applied_index_lastcycle时更新
+
 
     bool                                _report_peer_info = false;
     std::atomic<bool>                   _shutdown;
@@ -708,6 +746,7 @@ private:
     TimeCost                            _snapshot_time_cost;
     int64_t                             _snapshot_index = 0; //last snapshot log index
     bool                                _removed = false;
+    TimeCost                            _removed_time_cost;
     TransactionPool                     _txn_pool;
     RuntimeStatePool                    _state_pool;
 
@@ -723,6 +762,7 @@ private:
     pb::StoreRegionDdlInfo     _region_ddl_info;
     bool                                     _is_global_index = false; //是否是全局索引的region
     std::mutex       _reverse_index_map_lock;
+    std::mutex       _backup_lock;
 };
 
 } // end of namespace

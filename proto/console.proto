@@ -65,6 +65,7 @@ message QueryParam {
     optional string      interval_days      = 21;
     optional string      crud_database      = 22;
     optional string      platform           = 23;
+    optional string      meta_server_bns    = 24;
 };
 
 message OverViewInfo {
@@ -167,6 +168,15 @@ message WatchImportTask {
     optional string    status               = 7;
 }
 
+message WatchSSTTask {
+    optional string    database             = 1;
+    optional string    table_name           = 2;
+    optional string    table_id             = 3;
+    optional string    start_time           = 4;
+    optional string    end_time             = 5;
+    optional string    status               = 6;
+}
+
 message WatchTaskList {
     optional string    table_info           = 1;
     optional string    cluster_name         = 2;
@@ -203,6 +213,7 @@ message ConsoleResponse {
     repeated WatchImportTask    import_task         = 13;
     repeated WatchTaskList      task_list           = 14;
     optional WatchPlatForm      plat_forms          = 15;
+    repeated WatchSSTTask       sst_backup_task     = 16;
 };
 
 service ConsoleService {

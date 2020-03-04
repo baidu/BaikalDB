@@ -94,6 +94,8 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_CREATE_TABLE:
     case pb::OP_RENAME_TABLE:
     case pb::OP_DROP_TABLE: 
+    case pb::OP_DROP_TABLE_TOMBSTONE: 
+    case pb::OP_RESTORE_TABLE: 
     case pb::OP_ADD_FIELD:
     case pb::OP_DROP_FIELD:
     case pb::OP_MODIFY_FIELD:

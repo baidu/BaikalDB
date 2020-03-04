@@ -30,6 +30,7 @@ DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M")
 DEFINE_int64(incremental_info_gc_time, 600*1000*1000, "time interval to clear incremental info");
 DEFINE_int32(ddl_update_time, 300 * 1000 * 1000, "time interval to update ddl");
 DEFINE_int32(ddl_update_process_per_thread_size, 500, "ddl common update process ddlwork size per thread");
+DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 2, "time interval to clear table_tombstone. default(2d)");
 
 void TableManager::update_index_status(const pb::DdlWorkInfo& ddl_work) {
     BAIDU_SCOPED_LOCK(_table_mutex);
@@ -386,19 +387,38 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
 }
 
 void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
-    int64_t namespace_id;
-    int64_t database_id;
-    int64_t drop_table_id;
+    int64_t namespace_id = 0;
+    int64_t database_id = 0;
+    int64_t drop_table_id = 0;
     auto ret = check_table_exist(request.table_info(), namespace_id, database_id, drop_table_id);
     if (ret < 0) {
         DB_WARNING("input table not exit, request: %s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
         return;
     }
+    if (check_table_has_ddlwork(drop_table_id)) {
+        DB_WARNING("table is doing ddl, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
+        return;
+    }
     std::vector<std::string> delete_rocksdb_keys;
     std::vector<std::string> write_rocksdb_keys;
     std::vector<std::string> write_rocksdb_values;
-    delete_rocksdb_keys.push_back(construct_table_key(drop_table_id));
+    pb::SchemaInfo schema_info = _table_info_map[drop_table_id].schema_pb;
+    schema_info.set_deleted(true);
+    schema_info.set_timestamp(time(NULL));
+    std::string drop_table_value;
+    if (!schema_info.SerializeToString(&drop_table_value)) {
+        DB_WARNING("request serializeToArray fail, request:%s", 
+                request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+        return ;
+    }
+    //delete_rocksdb_keys.push_back(construct_table_key(drop_table_id));
+    // 删表后保留一个墓碑，帮助region上报时的gc工作
+    // TODO 如果后续墓碑残留太多，应该有相应的清理线程
+    write_rocksdb_keys.push_back(construct_table_key(drop_table_id));
+    write_rocksdb_values.push_back(drop_table_value);
    
     std::vector<int64_t> drop_index_ids;
     drop_index_ids.push_back(drop_table_id);
@@ -459,12 +479,6 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
         schema_infos.push_back(top_schema_pb);
     }
     erase_table_info(drop_table_id);
-    pb::SchemaInfo schema_info;
-    schema_info.set_table_id(drop_table_id);
-    schema_info.set_deleted(true);
-    schema_info.set_table_name("deleted");
-    schema_info.set_database("deleted");
-    schema_info.set_namespace_name("deleted");
     schema_infos.push_back(schema_info);
     put_incremental_schemainfo(apply_index, schema_infos);
     DatabaseManager::get_instance()->delete_table_id(database_id, drop_table_id);
@@ -476,15 +490,140 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
                 RegionManager::get_instance()->send_remove_region_request(drop_region_ids);
             };
         bth_remove_region.run(remove_function);
+    }
+}
+
+void TableManager::drop_table_tombstone(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
+    TableMem table_mem;
+    int ret = find_table_tombstone(request.table_info(), &table_mem);
+    if (ret < 0) {
+        DB_WARNING("input table not exit in tombstone, request: %s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist in tombstone");
+        return;
+    }
+    std::vector<std::string> delete_rocksdb_keys;
+    pb::SchemaInfo& schema_info = table_mem.schema_pb;
+    int64_t table_id = schema_info.table_id();
+    // 删除rocksdb
+    delete_rocksdb_keys.push_back(construct_table_key(table_id));
+   
+    ret = MetaRocksdb::get_instance()->delete_meta_info(delete_rocksdb_keys);
+    if (ret < 0) {
+        DB_WARNING("restore table fail, request：%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    erase_table_tombstone(table_id);
+    std::string database_name = request.table_info().namespace_name() + "\001" + request.table_info().database();
+    int64_t database_id = DatabaseManager::get_instance()->get_database_id(database_name);
+    if (database_id == 0) {
+        DB_WARNING("request database:%s not exist", database_name.c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "database not exist");
+        return;
+    }
+    DatabaseManager::get_instance()->delete_table_id(database_id, table_id);
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("drop table tombstone success,table_id:%ld, request:%s", 
+            table_id, request.ShortDebugString().c_str());
+    if (done) {
         Bthread bth_drop_auto(&BTHREAD_ATTR_SMALL);
-        auto drop_function = [this, drop_table_id]() {
+        auto drop_function = [this, table_id]() {
             pb::MetaManagerRequest request;
             request.set_op_type(pb::OP_DROP_ID_FOR_AUTO_INCREMENT);
             pb::AutoIncrementRequest* auto_incr = request.mutable_auto_increment();
-            auto_incr->set_table_id(drop_table_id);
+            auto_incr->set_table_id(table_id);
             send_auto_increment_request(request);
         };
         bth_drop_auto.run(drop_function);
+    }
+}
+
+void TableManager::drop_table_tombstone_gc_check() {
+    time_t now = time(nullptr);
+    BAIDU_SCOPED_LOCK(_table_mutex);
+    for (auto& pair : _table_tombstone_map) {
+        auto& schema_pb = pair.second.schema_pb;
+        if (now - schema_pb.timestamp() > FLAGS_table_tombstone_gc_time_s) {
+            Bthread bth;
+            bth.run([schema_pb]() {
+                pb::MetaManagerRequest request;
+                request.set_op_type(pb::OP_DROP_TABLE_TOMBSTONE);
+                pb::SchemaInfo *table = request.mutable_table_info();
+                *table = schema_pb;
+                pb::MetaManagerResponse response;
+                MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+                DB_WARNING("send table tombstone gc,table_id:%ld schema_pb:%s",
+                    schema_pb.table_id(), schema_pb.ShortDebugString().c_str());
+            });
+            break;
+        }
+    }
+}
+
+void TableManager::restore_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
+    TableMem table_mem;
+    int ret = find_table_tombstone(request.table_info(), &table_mem);
+    if (ret < 0) {
+        DB_WARNING("input table not exit in tombstone, request: %s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist in tombstone");
+        return;
+    }
+    std::vector<std::string> delete_rocksdb_keys;
+    std::vector<std::string> write_rocksdb_keys;
+    std::vector<std::string> write_rocksdb_values;
+    pb::SchemaInfo& schema_info = table_mem.schema_pb;
+    int64_t table_id = schema_info.table_id();
+    schema_info.set_deleted(false);
+    schema_info.set_timestamp(time(nullptr));
+    schema_info.set_version(schema_info.version() + 1);
+    std::string table_value;
+    if (!schema_info.SerializeToString(&table_value)) {
+        DB_WARNING("request serializeToArray fail, request:%s", 
+                request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+        return ;
+    }
+    // 恢复rocksdb
+    write_rocksdb_keys.push_back(construct_table_key(table_id));
+    write_rocksdb_values.push_back(table_value);
+   
+    ret = MetaRocksdb::get_instance()->write_meta_info(write_rocksdb_keys, 
+                                                       write_rocksdb_values, 
+                                                       delete_rocksdb_keys);
+    if (ret < 0) {
+        DB_WARNING("restore table fail, request：%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    std::vector<pb::SchemaInfo> schema_infos;
+    set_table_info(table_mem);
+    schema_infos.push_back(schema_info);
+    put_incremental_schemainfo(apply_index, schema_infos);
+    std::string database_name = request.table_info().namespace_name() + "\001" + request.table_info().database();
+    int64_t database_id = DatabaseManager::get_instance()->get_database_id(database_name);
+    if (database_id == 0) {
+        DB_WARNING("request database:%s not exist", database_name.c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "database not exist");
+        return;
+    }
+    DatabaseManager::get_instance()->add_table_id(database_id, table_id);
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("restore table success, request:%s", request.ShortDebugString().c_str());
+    if (done) {
+        Bthread bth_restore_region(&BTHREAD_ATTR_SMALL);
+        std::string resource_tag = schema_info.resource_tag();
+        std::function<void()> restore_function = [table_id, resource_tag]() {
+                std::set<std::string> instances;
+                ClusterManager::get_instance()->get_instances(resource_tag, instances);
+                for (auto& instance : instances) {
+                    pb::RegionIds request;
+                    request.set_table_id(table_id);
+                    pb::StoreRes response; 
+                    StoreInteract store_interact(instance);
+                    store_interact.send_request("restore_region", request, response);
+                }
+            };
+        bth_restore_region.run(restore_function);
     }
 }
 
@@ -495,6 +634,12 @@ void TableManager::rename_table(const pb::MetaManagerRequest& request,
     if (check_table_exist(request.table_info(), table_id) != 0) {
         DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
+        return;
+    }
+    
+    if (check_table_has_ddlwork(table_id)) {
+        DB_WARNING("table is doing ddl, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
     }
     std::string namespace_name = request.table_info().namespace_name();
@@ -1068,8 +1213,13 @@ int TableManager::load_table_snapshot(const std::string& value) {
     for (auto& index : table_pb.indexs()) {
         table_mem.index_id_map[index.index_name()] = index.index_id();
     }
-    set_table_info(table_mem); 
-    DatabaseManager::get_instance()->add_table_id(table_pb.database_id(), table_pb.table_id());
+    if (table_pb.deleted()) {
+        //on_snapshot_load中不用加锁
+        _table_tombstone_map[table_pb.table_id()] = table_mem;
+    } else {
+        set_table_info(table_mem); 
+        DatabaseManager::get_instance()->add_table_id(table_pb.database_id(), table_pb.table_id());
+    }
     return 0;
 }
 
@@ -1409,13 +1559,25 @@ void TableManager::send_drop_table_request(const std::string& namespace_name,
 }
 void TableManager::check_table_exist_for_peer(const pb::StoreHeartBeatRequest* request,
             pb::StoreHeartBeatResponse* response) {
+    // TODO:加这么大的锁是否有性能问题
     BAIDU_SCOPED_LOCK(_table_mutex);
     for (auto& peer_info : request->peer_infos()) {
-        if (_table_info_map.find(peer_info.table_id()) != _table_info_map.end()) {
+        int64_t global_index_id = peer_info.table_id();
+        int64_t main_table_id = peer_info.main_table_id() == 0 ? 
+            peer_info.table_id() : peer_info.main_table_id();
+        // 通过墓碑来安全gc已删表的region
+        if (_table_tombstone_map.find(main_table_id) != _table_tombstone_map.end()) {
+            DB_WARNING("table id:%ld has be deleted, drop region_id:%ld not exit, store_address:%s",
+                    main_table_id, peer_info.region_id(),
+                    request->instance_info().address().c_str());
+            response->add_delete_region_ids(peer_info.region_id());
+            continue;
+        } else if (_table_info_map.find(main_table_id) != _table_info_map.end()) {
             continue;
         }
+        // 老逻辑，使用墓碑删除，后续可以删掉这段逻辑
         DB_WARNING("table id:%ld according to region_id:%ld not exit, drop region_id, store_address:%s",
-                peer_info.table_id(), peer_info.region_id(),
+                main_table_id, peer_info.region_id(),
                 request->instance_info().address().c_str());
         //为了安全暂时关掉这个删除region的功能，后续稳定再打开，目前先报fatal(todo)
         if (SchemaManager::get_instance()->get_unsafe_decision()) {
@@ -1612,7 +1774,7 @@ int64_t TableManager::get_startkey_regionid(int64_t table_id,
 int TableManager::erase_region(int64_t table_id, int64_t region_id, std::string start_key) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("table_id: %ld not exist", table_id);
+        DB_WARNING("table_id: %ld not exist", table_id);
         return -1;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
@@ -2898,7 +3060,7 @@ int TableManager::load_ddl_snapshot(const std::string& value) {
     if (get_index_state(ddl_mem_ptr->table_id, work_info_pb.index_id(), current_state) != 0) {
         DB_FATAL("ddl index not ready. table_id[%lld] index_id[%lld]", 
             ddl_mem_ptr->table_id, work_info_pb.index_id());
-        return -1;
+        return 0;
     } else {
         work_info_pb.set_job_state(current_state);
     }

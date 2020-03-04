@@ -28,7 +28,11 @@ namespace baikaldb {
 struct RegionStateInfo { 
     int64_t timestamp; //上次收到该实例心跳的时间戳
     pb::Status status; //实例状态
-}; 
+};
+struct RegionPeerState {
+    std::map<std::string, pb::PeerStateInfo> legal_peers_state;  // peer in raft-group
+    std::map<std::string, pb::PeerStateInfo> ilegal_peers_state; // peer not in raft-group
+};
 typedef std::shared_ptr<RegionStateInfo> SmartRegionStateInfo;
 class RegionManager {
 public:
@@ -113,6 +117,7 @@ public:
     void clear() {
         _region_info_map.clear();
         _region_state_map.clear();
+        _region_peer_state_map.clear();
         _instance_region_map.clear();
         _instance_leader_count.clear();
         RegionIncrementalMap* background = _incremental_regioninfo_map.read_background();
@@ -167,6 +172,16 @@ public:
         status = region_state.status;
         return 0;
     }
+
+    void recovery_single_region_by_set_peer(const int64_t region_id,
+                                const std::set<std::string>& resource_tags,
+                                std::set<std::string> peers,
+                                std::map<std::string, std::set<int64_t>>& not_alive_regions,
+                                std::vector<pb::PeerStateInfo>& recover_region_way);
+    void recovery_single_region_by_init_region(const std::set<int64_t> region_ids,
+                    std::vector<std::string>& instances,
+                    std::vector<pb::PeerStateInfo>& recover_region_way);
+    void recovery_all_region(const pb::MetaManagerRequest& request, pb::MetaManagerResponse* response);
 
     void whether_add_instance(const std::map<std::string, int64_t>& uniq_instance) {
         std::map<std::string, int64_t> add_instances;
@@ -305,6 +320,9 @@ public:
     void traverse_copy_region_map(const std::function<void(SmartRegionInfo& region)>& call) {
         _region_info_map.traverse_copy(call);
     }
+    ThreadSafeMap<int64_t, RegionPeerState>&  region_peer_state_map() {
+        return _region_peer_state_map;
+    }
     void put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos);
     bool check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index); 
@@ -327,6 +345,7 @@ private:
     std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_region_map;
 
     ThreadSafeMap<int64_t, RegionStateInfo>        _region_state_map;
+    ThreadSafeMap<int64_t, RegionPeerState>        _region_peer_state_map;
     //该信息只在meta_server的leader中内存保存, 该map可以单用一个锁
     bthread_mutex_t                                     _count_mutex;
     std::unordered_map<std::string, std::unordered_map<int64_t, int64_t>> _instance_leader_count;

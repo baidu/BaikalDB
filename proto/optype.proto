@@ -86,4 +86,7 @@ enum OpType {
     OP_UPDATE_INDEX_STATUS                  = 166; //更新索引状态
     OP_DELETE_DDLWORK                       = 167; //删除ddlwork
     OP_UPDATE_SCHEMA_CONF                   = 168; //update schema conf
+    OP_RESTORE_TABLE                        = 169; //恢复store误删的table
+    OP_DROP_TABLE_TOMBSTONE                 = 170; //清理TABLE的残留墓碑
+    OP_RECOVERY_ALL_REGION                  = 171; //恢复region状态
 };

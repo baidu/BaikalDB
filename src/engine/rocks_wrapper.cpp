@@ -31,6 +31,8 @@ DEFINE_int32(rocks_max_open_files, 1024, "rocksdb max_open_files, default: 1024"
 DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
 DEFINE_bool(rocks_data_dynamic_level_bytes, true, 
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
+DEFINE_int64(flush_memtable_interval_us, 10 * 60 * 1000 * 1000LL, 
+            "flush memtable interval, defalut(10 min)");
 
 DEFINE_int32(max_background_jobs, 24, "max_background_jobs");
 DEFINE_int32(max_write_buffer_number, 6, "max_write_buffer_number");

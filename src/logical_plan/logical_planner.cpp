@@ -219,6 +219,7 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     case parser::NT_CREATE_TABLE:
     case parser::NT_CREATE_DATABASE:
     case parser::NT_DROP_TABLE:
+    case parser::NT_RESTORE_TABLE:
     case parser::NT_DROP_DATABASE:
     case parser::NT_ALTER_TABLE:
         planner.reset(new DDLPlanner(ctx));

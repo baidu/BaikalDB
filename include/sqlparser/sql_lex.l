@@ -320,6 +320,7 @@ QUERY { un_reserved_keyword(yylval, yyscanner, parser); return QUERY; }
 QUERIES { un_reserved_keyword(yylval, yyscanner, parser); return QUERIES; }
 QUICK { un_reserved_keyword(yylval, yyscanner, parser); return QUICK; }
 RECOVER { un_reserved_keyword(yylval, yyscanner, parser); return RECOVER; }
+RESTORE { un_reserved_keyword(yylval, yyscanner, parser); return RESTORE; }
 REDUNDANT { un_reserved_keyword(yylval, yyscanner, parser); return REDUNDANT; }
 RELOAD { un_reserved_keyword(yylval, yyscanner, parser); return RELOAD; }
 REPEATABLE { un_reserved_keyword(yylval, yyscanner, parser); return REPEATABLE; }

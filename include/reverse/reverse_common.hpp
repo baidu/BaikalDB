@@ -77,17 +77,17 @@ int FirstLevelMSIterator<ReverseNode>::next(std::string& key, bool& res) {
             return 0;
         }
         res = true;
-        //rocksdb::Status s;
-        //rocksdb::ReadOptions read_opt;
-        //rocksdb::PinnableSlice pin_slice;
+        rocksdb::Status s;
+        rocksdb::ReadOptions read_opt;
+        rocksdb::PinnableSlice pin_slice;
         auto data_cf = _rocksdb->get_data_handle();
-        //s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &pin_slice);
-        //if (!s.ok()) {
-        //    DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
-        //              term.c_str(), _iter->key().ToString(true).c_str());
-        //    return -1;
-        //}
-        rocksdb::Slice pin_slice = _iter->value();
+        s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &pin_slice);
+        if (!s.ok()) {
+           DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
+                     term.c_str(), _iter->key().ToString(true).c_str());
+           return -1;
+        }
+        //rocksdb::Slice pin_slice = _iter->value();
         
         if (!_curr_node.ParseFromArray(pin_slice.data(), pin_slice.size())) {
             DB_FATAL("parse first level from pb failed");

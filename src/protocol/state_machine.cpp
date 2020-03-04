@@ -916,7 +916,7 @@ int StateMachine::_query_read_stmt_execute(SmartSocket sock) {
 
 bool StateMachine::_query_process(SmartSocket client) {
     TimeCost cost;
-    gettimeofday(&(client->query_ctx->stat_info.start_stamp), 0);
+    gettimeofday(&(client->query_ctx->stat_info.start_stamp), NULL);
 
     bool ret = true;
     auto command = client->query_ctx->mysql_cmd;

@@ -52,6 +52,21 @@ struct TableMem {
     bool is_global_index = false;
     int64_t global_index_id = 0;
     int64_t main_table_id = 0;
+    bool exist_global_index(int64_t global_index_id) {
+        for (auto& index : schema_pb.indexs()) {
+            if (index.is_global() && index.index_id() == global_index_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+    void clear_regions() {
+        partition_regions.clear();
+        startkey_regiondesc_map.clear();
+        startkey_newregion_map.clear();
+        id_noneregion_map.clear();
+        id_keyregion_map.clear();
+    }
     void print() {
         /*
         DB_WARNING("whether_level_table: %d, schema_pb: %s, is_global_index: %d, main_table_id:%ld, global_index_id: %ld",
@@ -133,6 +148,9 @@ public:
     std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb)> update_callback);
     void create_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void drop_table_tombstone(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void drop_table_tombstone_gc_check();
+    void restore_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void rename_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_byte_size(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_split_lines(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -261,9 +279,13 @@ public:
         std::string table_name = table_mem.schema_pb.namespace_name()
                                     + "\001" + table_mem.schema_pb.database()
                                     + "\001" + table_mem.schema_pb.table_name();
-        _table_info_map[table_mem.schema_pb.table_id()] = table_mem;
-        _table_id_map[table_name] = table_mem.schema_pb.table_id();
-        _table_info_map[table_mem.schema_pb.table_id()].print();
+        int64_t table_id = table_mem.schema_pb.table_id();
+        _table_info_map[table_id] = table_mem;
+        _table_id_map[table_name] = table_id;
+        _table_info_map[table_id].print();
+        if (_table_tombstone_map.count(table_id) == 1) {
+            _table_tombstone_map.erase(table_id);
+        }
         //全局二级索引有region信息，所以需要独立为一项
         for (auto& index_info : table_mem.schema_pb.indexs()) {
             if (!is_global_index(index_info)) {
@@ -272,7 +294,7 @@ public:
             std::string index_table_name = table_name + "\001" + index_info.index_name();
             _table_info_map[index_info.index_id()] = table_mem;
             _table_info_map[index_info.index_id()].is_global_index = true;
-            _table_info_map[index_info.index_id()].main_table_id = table_mem.schema_pb.table_id();
+            _table_info_map[index_info.index_id()].main_table_id = table_id;
             _table_info_map[index_info.index_id()].global_index_id = index_info.index_id();
             _table_id_map[index_table_name] = index_info.index_id();
             _table_info_map[index_info.index_id()].print();
@@ -295,8 +317,35 @@ public:
             _table_info_map.erase(index_info.index_id());
             _table_id_map.erase(index_table_name);  
         }
+        _table_tombstone_map[table_id] = _table_info_map[table_id];
+        _table_tombstone_map[table_id].schema_pb.set_deleted(true);
+        _table_tombstone_map[table_id].schema_pb.set_timestamp(time(NULL));
+        // region相关信息清理，只保留表元信息
+        _table_tombstone_map[table_id].clear_regions();
         _table_id_map.erase(table_name);
         _table_info_map.erase(table_id);
+    }
+    int find_table_tombstone(const pb::SchemaInfo& table_info, TableMem* table_mem) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        const std::string& namespace_name = table_info.namespace_name();
+        const std::string& database = table_info.database();
+        const std::string& table_name = table_info.table_name();
+        for (auto& pair : _table_tombstone_map) {
+            auto& schema_pb = pair.second.schema_pb;
+            if (schema_pb.namespace_name() == namespace_name && 
+                schema_pb.database() == database &&
+                schema_pb.table_name() == table_name) {
+                *table_mem = pair.second;
+                return 0;
+            }
+        }
+        return -1;
+    }
+    void erase_table_tombstone(int64_t table_id) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_tombstone_map.count(table_id) == 1) {
+            _table_tombstone_map.erase(table_id);
+        }
     }
     void swap_table_name(const std::string& old_table_name, const std::string new_table_name) {
         BAIDU_SCOPED_LOCK(_table_mutex);
@@ -811,15 +860,16 @@ private:
 
     void collect_ddlwork_info(DdlWorkMem& meta_work);
 private:
-    //std::mutex                                          _table_mutex;
-    bthread_mutex_t                                          _table_mutex;
-    bthread_mutex_t                                          _table_ddlinfo_mutex;
-    bthread_mutex_t                                          _all_table_ddlinfo_mutex;
+    bthread_mutex_t                                     _table_mutex;
+    bthread_mutex_t                                     _table_ddlinfo_mutex;
+    bthread_mutex_t                                     _all_table_ddlinfo_mutex;
     bthread_mutex_t                                     _log_entry_mutex;
     int64_t                                             _max_table_id;
     //table_name 与op映射关系， name: namespace\001\database\001\table_name
     std::unordered_map<std::string, int64_t>            _table_id_map;
     std::unordered_map<int64_t, TableMem>               _table_info_map;
+    // table_id => TableMem 
+    std::unordered_map<int64_t, TableMem>               _table_tombstone_map;
 
     std::unordered_map<int64_t, DdlWorkMemPtr> _table_ddlinfo_map;
     std::atomic<int64_t> _last_ddl_update_timestamp {0};

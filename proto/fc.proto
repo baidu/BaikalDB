@@ -1,0 +1,517 @@
+// required类型的字段为删除和非删除类型共有字段
+// optional类型的字段只有非删除类型具有
+// 凤巢数据流
+
+// level 0 为das心跳增量
+message level0 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 flow_id = 5;
+    required uint32 usr_id = 6;
+    required uint64 timestamp = 7;
+}
+
+message level1 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 usr_id = 5;
+    optional uint32 usr_stat = 6;
+    optional uint32 budget_stat = 7;
+    optional bytes black_ip = 8;
+    optional bytes region = 9;
+    optional bytes budget = 10;
+    optional bytes showratio = 11;
+    optional bytes state = 12;
+    optional bytes region_state = 13;
+    optional uint32 match_region_status = 14;
+    optional bytes city_region = 15;
+    optional uint32 idea_user_status = 16;
+    optional bytes  idea_param = 17;
+    optional uint32 external_flow_strategy = 18;
+    optional uint32 external_flow_ratio = 19;
+    optional bytes  policy_black_ip = 20;
+    optional bytes provpricefactor = 21;
+    optional bytes citypricefactor = 22;
+    optional uint32 advanced_match_status = 23;
+    optional bytes white_ip = 24;
+    optional bytes policy_black_customer = 25;
+    optional bytes stat_param = 26;
+    optional uint32 same_stage_status = 27;
+    optional uint32 productstatus = 28;
+    optional bytes lbtpricefactor = 29;
+    optional bytes lbtpricefactor_point_radius = 30;
+    optional bytes cpatype = 31;
+    optional bytes cpabid = 32;
+    optional uint32 bgt_type = 33;
+    optional uint32 bgt_level = 34;
+    optional bytes at_budget = 35;
+    optional bytes product_flow_ratio = 36;
+    optional bytes brand_list = 37;
+    optional bytes fanpinpai_negative = 38;
+    optional uint32 jingxiu_flowstatus = 39;
+    optional uint32 night_roitype = 40;
+    optional bytes short_monitor_sublink = 41;
+    optional bytes long_monitor_sublink = 42;
+    optional uint32 ecpa_bid = 43;
+    optional uint32 is_ocpc_ad = 44;
+    optional bytes ocpc_roi_type_list = 45;
+    optional uint32 adopt_ecpa_bid = 46;
+    optional uint32 ocpc_data_flow = 47;
+}
+
+message level2 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 plan_id = 5;
+    required uint32 usr_id = 6;
+    optional uint32 plan_stat = 7;
+    optional uint32 show_prob = 8;
+    optional uint32 show_rate = 9;
+    optional bytes show_factor = 10;
+    optional bytes plan_mode = 11;
+    optional bytes black_ip = 12;
+    optional bytes neg_word = 13;
+    optional bytes cyc_time = 14;
+    optional bytes region = 15;
+    optional bytes budget = 16;
+    optional bytes cproprice = 17;
+    optional bytes cprostat1 = 18;
+    optional bytes cprostat2 = 19;
+    optional bytes showratio = 20;
+    optional bytes exact_neg_words = 21;
+
+    optional bytes state = 22;
+    optional bytes region_state = 23;
+    optional uint32 device_prefer = 24;
+
+    optional bytes phone_nums = 25;
+    optional uint32 device_cfg_stat = 26;
+    optional bytes city_region = 27;
+    optional uint32 idea_type = 28;
+    optional uint32 im_channel = 29;
+    optional uint32 m_price_factor = 30;
+
+    optional uint32 idea_plan_status = 31;
+    optional bytes  idea_negative_url = 32;
+    optional bytes  idea_negative_word = 33;
+    optional uint32 remarketing_stat = 34; 
+    optional bytes remarketing_inpeople = 35;
+    optional bytes remarketing_outpeople = 36;
+    optional uint32 adtype = 37;
+    optional uint32 lbtstatus = 38;
+    optional bytes lbtpricefactor = 39;
+    optional bytes wirelesscrowd = 40;
+    optional bytes cycpricefactors = 41;
+    optional bytes provpricefactor = 42;
+    optional bytes citypricefactor = 43;
+    optional bytes lbtpricefactor_region = 44;
+    optional bytes lbtpricefactor_point_radius = 45;
+    optional bytes remarketing_pricefactor = 46;
+    optional uint32 productstatus = 47;
+    optional bytes interestoriented = 48;
+
+    optional uint32 hct_convert_type = 200;
+    optional uint32 hct_status = 201;
+    optional uint32 hct_device = 202;
+    optional uint32 hct_convert_cost = 203;
+    optional bytes external_flow = 204;
+    optional bytes region_poi = 205;
+    optional bytes region_district = 206;
+    optional bytes crowd_auto_bid = 207;
+    optional bytes ztc_wregion_provids = 208;
+    optional bytes ztc_wregion_cityids = 209;
+    optional bytes atbid = 210;
+    optional bytes atbudget = 211;
+    optional bytes brand = 212;
+    optional bytes cpatype = 213;
+    optional bytes cpabid = 214;
+    optional bytes cmpcbid = 215;
+    optional bytes cmwisebid = 216;
+    optional uint32 cmstatus = 217;
+    optional uint32 bid_prefer = 218;
+    optional uint32 pc_price_factor = 219;
+    optional bytes product_flow_ratio = 220;
+    optional uint32 chosenstat = 221;
+    optional uint32 atflowstatus = 222;
+    optional bytes crowd_id = 223;
+
+    optional uint32 ecpa_bid = 224;
+    optional uint32 is_ocpc_ad = 225;
+    optional bytes ocpc_roi_type_list = 226;
+    optional uint64 ocpc_exception_time = 227;
+    optional uint32 ocpc_max_bid = 228;
+    optional uint32 use_budget_control = 229;
+    optional uint32 adopt_ecpa_bid = 230;
+    optional bytes crowdid_priceratio = 231; 
+}
+
+message level3 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 unit_id = 5;
+    required uint32 plan_id = 6;
+    required uint32 usr_id = 7;
+    optional uint32 unit_bid = 8;
+    optional bytes neg_word = 9;
+    optional bytes exact_neg_words = 10;
+    optional uint32 mc_id = 11;
+    optional uint32 app_device_type = 12;
+    optional uint32 app_status = 13;
+    optional bytes  unit_mprice_factor = 14;
+    optional uint32 unit_match_widetype = 15;
+    optional uint32 unit_match_prefer = 16;
+    optional bytes  match_pricefactor = 17;
+    optional uint32 adtype = 18;
+    optional bytes multi_appdevice = 19;
+    optional int32 producstatus = 20;
+    optional bytes atbid = 21;
+    optional bytes pc_price_factor = 22;
+    optional bytes jingxiu_price_factor = 23;
+}
+
+
+message level4 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 winfo_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint64 word_id = 9;
+    required bytes bid_word = 10;
+    optional bytes bid = 11;
+    optional uint32 min_bid = 12;
+    optional uint32 min_price = 13;
+    optional uint32 owmatch = 14;
+    optional uint32 stat = 15;
+    optional bytes show_factor = 16;
+    optional bytes target_url = 17;
+    optional bytes wctrl = 18;
+    optional bytes mtarget_url = 19;
+    optional uint32 wmatchprefer = 20;
+    optional uint32 new_wmatch = 21;
+    optional uint64 strategy_id = 22;
+    optional uint32 up_bid_rate = 23;
+    optional uint32 pc_max_bid = 24;
+    optional uint32 m_max_bid = 25;
+    optional uint32 target_rank = 26;
+    optional uint32 temperature = 27;
+    optional uint32 adtype = 28;
+    optional bytes pc_materialscore = 29;
+    optional bytes wise_materialscore = 30;
+    optional uint32 version = 31;
+    optional int32 mversion = 32;
+    optional uint32 addfrom = 33;
+    optional uint32 bidrate = 34;
+    optional bytes strategy_targeturl = 35;
+    optional uint32 strategy_type = 36;
+    optional uint32 strategy_bidtype = 37;
+    optional uint32 sub_tag = 38;
+    optional bytes medical_url = 39;
+}
+
+message level5 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 idea_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    optional bytes title = 9;
+    optional bytes desc1 = 10;
+    optional bytes desc2 = 11;
+    optional bytes target_url = 12;
+    optional bytes show_url = 13;
+    optional bytes mtarget_url = 14;
+    optional bytes mshow_url = 15;
+    optional uint32 device_prefer = 16;
+    optional uint32 temperature = 17;
+    optional uint32 adtype = 18;
+    optional uint32 idea_tag = 19;
+    optional bytes pc_materialscore = 20;
+    optional bytes wise_materialscore = 21;
+    optional uint32 version = 22;
+    optional int32 mversion = 23;
+    optional uint32 add_from= 24;
+    optional uint32 mod_from = 25;
+    optional bytes crowd_id = 26;
+    optional bytes mini_program_url = 27;
+    optional bytes medical_url = 28;
+}
+
+message level6 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 reject_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint64 winfo_id = 9;
+    required uint64 idea_id = 10;
+    optional uint32 adtype = 11;
+}
+
+message level8 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 minbid_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required bytes minbid_list = 9;
+    optional bytes exp_minbid_list = 10;
+    optional uint32 adtype = 11;
+}
+
+message level10 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 idea_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint32 idea_type = 9;
+    optional bytes merchant_name = 10;
+    optional bytes business_hours = 11;
+    optional bytes merchant_addr = 12;
+    optional bytes avg_cost = 13;
+    optional bytes product_service = 14;
+    optional bytes promotion_info = 15;
+    optional bytes phone = 16;
+    optional bytes target_url = 17;
+    optional bytes specialty = 18;
+    optional bytes map_uid = 19;
+    optional bytes map_point = 20;
+}
+
+message level11 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 winfo_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint32 bid = 9;
+    optional uint32 adtype = 10;
+   
+}
+
+message level12 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 ctv_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint32 mt_id = 9;
+    required uint32 mc_id = 10;
+    required uint32 state = 11;
+    optional bytes mt_content = 12;
+    optional uint32 adtype = 13;
+    optional uint32 isbind = 14;
+}
+
+
+message level13 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 sid = 5;
+    optional bytes name = 6;
+    optional uint32 platform = 7;
+    optional bytes download_url = 8;
+    optional bytes details_url = 9;
+    optional bytes icon_url = 10;
+    optional bytes version = 11;
+    optional int32  size = 12;
+    optional bytes summary = 13;
+    optional bytes system_required = 14;
+    optional int32  fee = 15;
+    optional int32  app_type = 16;
+    optional bytes mod_time = 17;
+    optional bytes screen_shot1 = 18;
+    optional bytes screen_shot2 = 19;
+    optional bytes screen_shot3 = 20;
+    optional bytes screen_shot4 = 21;
+    optional bytes screen_shot5 = 22;
+    optional bytes screen_shot6 = 23;
+    optional uint64 app_id = 24;
+    optional uint64 version_id = 25;
+    optional bytes packagename = 26;
+    optional uint64 docid = 27;
+}
+
+message level14 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 labwinfo_id = 5;
+    required uint64 winfo_id = 6;
+    required uint32 lab_id = 7;
+    required uint32 unit_id = 8;
+    required uint32 plan_id = 9;
+    required uint32 usr_id = 10;
+    optional uint32 ratio = 11;
+    optional bytes  bid =12;
+    optional bytes  target_url =13;
+    optional uint32 owmatch = 14;
+}
+
+message level15 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 usr_id = 5;
+    required bytes  ip_blacklist = 6;
+}
+
+message level16 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 usr_id = 5;
+    required bytes  visitor_blacklist =6;
+}
+
+message level17 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 daid = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    optional uint32 bindtype = 9;
+    optional bytes  da_title = 10;
+    optional bytes  da_url = 11;
+    optional bytes  da_murl = 12;
+    optional uint32 temperature = 13;
+    optional uint32 adtype = 14;
+}
+
+message level18 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 usr_id = 5;
+    required uint32 status = 6;
+    required bytes url = 7;
+}
+
+message level19 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 urlinfo_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint64 url_id = 9;
+    required bytes  url = 10;
+    optional bytes  bid = 11;
+    optional uint32 adtype = 12;
+    optional bytes targeturl = 13;
+    optional bytes mtargeturl = 14;
+}
+
+message level20 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 at_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    optional bytes wurl = 9;
+    optional bytes mwurl = 10;
+    optional uint32 adtype = 11;
+}
+
+message level21 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 dsainfo_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint64 dsa_id = 9;
+    required bytes dsa_url = 10;
+    optional bytes bid = 11;
+    optional uint32 device_prefer = 12;
+    optional bytes target_url =13;
+    optional uint32 adtype = 14;
+}
+
+message level22 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 crowd_id = 5;
+    required uint32 usr_id = 6;
+    required uint32 sex = 7;
+    required uint32 age = 8;
+    required bytes in_people = 9;
+    required bytes search_word = 10;
+    required bytes browse_url = 11;
+    required uint32 has_search = 12;
+    required uint32 has_browse = 13;
+    required bytes crowd_pricefactor = 14;
+    required uint32 ext_status = 15;
+    required bytes id_pack = 16;
+}
+
+message level23 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint32 usr_id = 5;
+    required bytes tagid_list = 6;
+}
+
+message level24 {
+    required uint64 event_id = 1;
+    required uint32 op_type = 2;
+    required uint32 level = 3;
+    required uint32 attr_id = 4;
+    required uint64 unit_app_id = 5;
+    required uint32 unit_id = 6;
+    required uint32 plan_id = 7;
+    required uint32 usr_id = 8;
+    required uint64 sid = 9;
+    optional uint32 platform = 10;
+    optional bytes unit_mts = 11;
+}

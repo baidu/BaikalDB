@@ -16,6 +16,7 @@
 
 #include <sys/epoll.h>
 #include <sys/types.h>
+#include <mutex>
 #include "common.h" 
 
 namespace baikaldb {
@@ -44,7 +45,7 @@ public:
 
 private:
     SmartSocket         _fd_mapping[CONFIG_MPL_EPOLL_MAX_SIZE]; // fd -> NetworkSocket.
-    int                 _max_fd;
+    std::mutex          _mutex; // 保护_fd_mapping里的shared_ptr
     int                 _epfd;
     struct epoll_event  _events[CONFIG_MPL_EPOLL_MAX_SIZE];
     size_t              _event_size;

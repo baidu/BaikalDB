@@ -76,6 +76,12 @@ enum SerializeStatus {
     STMPS_NEED_RESIZE
 };
 
+enum SstBackupType {
+    UNKNOWN_BACKUP,
+    META_BACKUP,
+    DATA_BACKUP
+};
+
 enum MysqlCommand : uint8_t {
     // cmd name             cmd no    Associated client function
     COM_SLEEP               = 0x00,   // (default, e.g. SHOW PROCESSLIST)
@@ -594,7 +600,6 @@ extern std::string url_decode(const std::string& str);
 extern std::string url_encode(const std::string& str);
 extern std::vector<std::string> string_split(const std::string &s, char delim);
 extern std::string string_trim(std::string& str);
-
 
 inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];

@@ -37,6 +37,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, (sighandler_t)baikaldb::handle_exit_signal);
     signal(SIGTERM, (sighandler_t)baikaldb::handle_exit_signal);
 
+    google::SetVersionString(BAIKALDB_REVISION);
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     // Initail log

@@ -29,8 +29,8 @@ public:
     rocksdb::Status put(const rocksdb::Slice& key, const rocksdb::Slice& value) {
         return _sst_writer.Put(key, value);
     }
-    rocksdb::Status finish() {
-        return _sst_writer.Finish();
+    rocksdb::Status finish(rocksdb::ExternalSstFileInfo* file_info = nullptr) {
+        return _sst_writer.Finish(file_info);
     }
     virtual ~SstFileWriter() {}
 private:
