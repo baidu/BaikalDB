@@ -94,9 +94,10 @@ SerializeStatus to_string (int32_t number, char *buf, size_t size, size_t& len) 
         return STMPS_SUCCESS;
     }
     len = 0;
+    bool negtive = false;
     if (number < 0) {
         number = -number;
-        buf[0] = '-';
+        negtive = true;
         len++;
     }
 
@@ -107,6 +108,9 @@ SerializeStatus to_string (int32_t number, char *buf, size_t size, size_t& len) 
     }
     if (len > size) {
         return STMPS_NEED_RESIZE;
+    }
+    if (negtive) {
+        buf[0] = '-';
     }
     int length = len;
     while (number > 0) {
@@ -188,9 +192,10 @@ SerializeStatus to_string (int64_t number, char *buf, size_t size, size_t& len) 
         return STMPS_SUCCESS;
     }
     len = 0;
+    bool negtive = false;
     if (number < 0) {
         number = -number;
-        buf[0] = '-';
+        negtive = true;
         len++;
     }
 
@@ -201,6 +206,9 @@ SerializeStatus to_string (int64_t number, char *buf, size_t size, size_t& len) 
     }
     if (len > size) {
         return STMPS_NEED_RESIZE;
+    }
+    if (negtive) {
+        buf[0] = '-';
     }
     int length = len;
     while (number > 0) {

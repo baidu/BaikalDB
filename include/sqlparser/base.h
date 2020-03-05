@@ -68,6 +68,7 @@ enum NodeType {
     NT_TYPE_OPT,     // TypeOption (unsigned, zerofill) 
     NT_FIELD_TYPE,   // TypeOption (unsigned, zerofill) 
     NT_DROP_TABLE,
+    NT_RESTORE_TABLE,
     NT_DATABASE_OPT,
     NT_CREATE_DATABASE,
     NT_DROP_DATABASE,

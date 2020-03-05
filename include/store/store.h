@@ -81,6 +81,11 @@ public:
                                const pb::RemoveRegion* request,
                                pb::StoreRes* response,
                                google::protobuf::Closure* done);
+    //恢复延迟删除的region
+    virtual void restore_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
 
     virtual void add_peer(google::protobuf::RpcController* controller,
                             const pb::AddPeer* request,
@@ -106,6 +111,11 @@ public:
                                         const pb::RegionIds* request,
                                         pb::StoreRes* response,
                                         google::protobuf::Closure* done);
+
+    virtual void backup_region(google::protobuf::RpcController* controller,
+                                const pb::BackUpReq* request,
+                                pb::BackUpRes* response,
+                                google::protobuf::Closure* done);
     //上报心跳
     void heart_beat_thread();
 
@@ -115,8 +125,9 @@ public:
 
     void reverse_merge_thread();
     void ttl_remove_thread();
+    void delay_remove_region_thread();
 
-    void flush_region_thread();
+    void flush_memtable_thread();
     void snapshot_thread();
     void txn_clear_thread();
     
@@ -206,6 +217,8 @@ public:
         DB_WARNING("merge bth check bth join");
         _ttl_bth.join();
         DB_WARNING("ttl bth check bth join");
+        _delay_remove_region_bth.join();
+        DB_WARNING("delay_remove_region_bth bth check bth join");
         _flush_bth.join();
         DB_WARNING("flush check bth join");
         _snapshot_bth.join();
@@ -223,7 +236,7 @@ private:
              dml_time_cost("dml_time_cost"),
              select_time_cost("select_time_cost") {}
     
-    int drop_region_from_store(int64_t drop_region_id);
+    int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
     void update_schema_info(const pb::SchemaInfo& request);
 
@@ -260,6 +273,8 @@ private:
     Bthread _merge_bth;
     //TTL定期删除过期数据
     Bthread _ttl_bth;
+    //延迟删除region
+    Bthread _delay_remove_region_bth;
 
     //定时flush region meta信息，确保rocksdb的wal正常删除
     Bthread _flush_bth;

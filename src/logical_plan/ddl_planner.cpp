@@ -39,6 +39,13 @@ int DDLPlanner::plan() {
             DB_WARNING("parser drop table command failed");
             return -1;
         }
+    } else if (_ctx->stmt_type == parser::NT_RESTORE_TABLE) {
+        request.set_op_type(pb::OP_RESTORE_TABLE);
+        pb::SchemaInfo *table = request.mutable_table_info();
+        if (0 != parse_restore_table(*table)) {
+            DB_WARNING("parser restore table command failed");
+            return -1;
+        }
     } else if (_ctx->stmt_type == parser::NT_CREATE_DATABASE) {
         request.set_op_type(pb::OP_CREATE_DATABASE);
         pb::DataBaseInfo *database = request.mutable_database_info();
@@ -165,14 +172,14 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         }
     }
 
-    bool have_global_index = false;
+    bool can_support_ttl = true;
     int constraint_len = stmt->constraints.size();
     for (int idx = 0; idx < constraint_len; ++idx) {
         parser::Constraint* constraint = stmt->constraints[idx];
         pb::IndexInfo* index = table.add_indexs();
         if (constraint->global == true) {
             index->set_is_global(true);
-            have_global_index = true;
+            can_support_ttl = false;
         }
         if (constraint->type == parser::CONSTRAINT_PRIMARY) {
             index->set_index_type(pb::I_PRIMARY);
@@ -182,6 +189,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             index->set_index_type(pb::I_UNIQ);
         } else if (constraint->type == parser::CONSTRAINT_FULLTEXT) {
             index->set_index_type(pb::I_FULLTEXT);
+            can_support_ttl = false;
         } else {
             DB_WARNING("unsupported constraint_type: %d", constraint->type);
             return -1;
@@ -232,8 +240,10 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             table.set_engine(pb::ROCKSDB);
             if (boost::algorithm::iequals(str_val, "redis")) {
                 table.set_engine(pb::REDIS);
+                can_support_ttl = false;
             } else if (boost::algorithm::iequals(str_val, "rocksdb_cstore")) {
                 table.set_engine(pb::ROCKSDB_CSTORE);
+                can_support_ttl = false;
             }
         } else if (option->type == parser::TABLE_OPT_CHARSET) {
             std::string str_val(option->str_value.value);
@@ -291,12 +301,8 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 }
                 json_iter = root.FindMember("ttl_duration");
                 if (json_iter != root.MemberEnd()) {
-                    if (table.engine() != pb::ROCKSDB) {
-                        DB_FATAL("only ROCKSDB engine support ttl table");
-                        return -1;
-                    }
-                    if (have_global_index) {
-                        DB_FATAL("global index can not create ttl table");
+                    if (!can_support_ttl) {
+                        DB_FATAL("global index/fulltext/engine!=rocksdb can not create ttl table");
                         return -1;
                     }
                     int64_t ttl_duration = json_iter->value.GetInt64();
@@ -359,6 +365,34 @@ int DDLPlanner::parse_drop_table(pb::SchemaInfo& table) {
     table.set_table_name(table_name->table.value);
     table.set_namespace_name(_ctx->user_info->namespace_);
     DB_WARNING("drop table: %s.%s.%s", 
+        table.namespace_name().c_str(), table.database().c_str(), table.table_name().c_str());
+    return 0;
+}
+
+int DDLPlanner::parse_restore_table(pb::SchemaInfo& table) {
+    parser::RestoreTableStmt* stmt = (parser::RestoreTableStmt*)(_ctx->stmt);
+    if (stmt->table_names.size() > 1) {
+        DB_WARNING("restore multiple tables is not supported.");
+        return -1;
+    }
+    parser::TableName* table_name = stmt->table_names[0];
+    if (table_name == nullptr) {
+        DB_WARNING("error: no table name specified");
+        return -1;
+    }
+    if (table_name->db.empty()) {
+        if (_ctx->cur_db.empty()) {
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "No database selected";
+            return -1;
+        }
+        table.set_database(_ctx->cur_db);
+    } else {
+        table.set_database(table_name->db.value);
+    }
+    table.set_table_name(table_name->table.value);
+    table.set_namespace_name(_ctx->user_info->namespace_);
+    DB_WARNING("restore table: %s.%s.%s", 
         table.namespace_name().c_str(), table.database().c_str(), table.table_name().c_str());
     return 0;
 }

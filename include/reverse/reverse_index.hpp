@@ -23,24 +23,26 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
     int8_t status = 0;
     TimeCost timer;
 
-    if (_merge_success_flag) {
-        std::swap(_merge_prefix, _reverse_prefix);
-    }
-    _merge_success_flag = false;
+    // if (_merge_success_flag) {
+    //     std::swap(_merge_prefix, _reverse_prefix);
+    // }
+    // _merge_success_flag = false;
+
     //reverse_prefix 和sync_prefix_*没有加锁同步，极端情况下，会有不一致
     //等待一段时间，确保sync_prefix_*加1成功
     usleep(200);
     //wait all of the _merge_prefix key put in rocksdb and
     //all read merge_prefix over
-    if (_merge_prefix == 0) { 
-        while (_sync_prefix_0 != 0) {
-            bthread_usleep(200);
-        }
-    } else { 
-        while (_sync_prefix_1 != 0) {
-                bthread_usleep(200);
-            }
-    }
+
+    // if (_merge_prefix == 0) { 
+    //     while (_sync_prefix_0 != 0) {
+    //         bthread_usleep(200);
+    //     }
+    // } else { 
+    //     while (_sync_prefix_1 != 0) {
+    //             bthread_usleep(200);
+    //         }
+    // }
 
 
     _level_1_scan_count = 0;
@@ -49,9 +51,9 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
     //                    _region_id, _index_id, _reverse_prefix, timer.get_time());
     uint8_t prefix = 0;
     prefix = _merge_prefix;
-    //if (_prefix_0_succ) {
-    //    prefix = _reverse_prefix;
-    //} 
+    if (_prefix_0_succ) {
+       prefix = _reverse_prefix;
+    } 
     
     //1. create prefix key (regionid+tableid+_reverse_prefix)
     std::string key;

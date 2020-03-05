@@ -72,7 +72,6 @@ public:
             expr->find_place_holder(placeholders);
         }
     }
-    virtual int select_index(std::vector<int>& multi_reverse_index); 
     void add_index_id(int64_t index_id) {
         _index_ids.push_back(index_id);
     }

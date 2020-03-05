@@ -253,7 +253,7 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
             return 0;
         }
         case MAX: {
-            ExprValue value = _children[0]->get_value(src).cast_to(_col_type).cast_to(_col_type);
+            ExprValue value = _children[0]->get_value(src).cast_to(_col_type);
             if (!value.is_null()) {
                 ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id).cast_to(_col_type);
                 if (result.is_null() || result.compare(value) < 0) {
@@ -336,7 +336,6 @@ int AggFnCall::merge(MemRow* src, MemRow* dst) {
                 ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
                 if (result.is_null() || result.compare(value) < 0) {
                     dst->set_value(_tuple_id, _intermediate_slot_id, value);
-                    ExprValue res = dst->get_value(_tuple_id, _intermediate_slot_id);
                 }
             }
             return 0;

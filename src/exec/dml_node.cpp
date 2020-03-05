@@ -39,7 +39,6 @@ int DMLNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 int DMLNode::init_schema_info(RuntimeState* state) {
     _region_id = state->region_id();
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id); 
-
     if (_table_info == nullptr) {
         DB_WARNING("get table info failed table_id: %ld", _table_id);
         return -1;

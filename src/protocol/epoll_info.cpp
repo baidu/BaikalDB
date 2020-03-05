@@ -17,7 +17,7 @@
 
 namespace baikaldb {
 
-EpollInfo::EpollInfo(): _max_fd(-1), _epfd(-1), _event_size(0) {}
+EpollInfo::EpollInfo(): _epfd(-1), _event_size(0) {}
 
 EpollInfo::~EpollInfo() {
     if (_epfd > 0) {
@@ -44,6 +44,7 @@ bool EpollInfo::set_fd_mapping(int fd, SmartSocket sock) {
         DB_FATAL("Wrong fd[%d]", fd);
         return false;
     }
+    std::unique_lock<std::mutex> lock(_mutex);
     _fd_mapping[fd] = sock;
     return true;
 }
@@ -53,6 +54,7 @@ SmartSocket EpollInfo::get_fd_mapping(int fd) {
         DB_FATAL("Wrong fd[%d]", fd);
         return SmartSocket();
     }
+    std::unique_lock<std::mutex> lock(_mutex);
     return _fd_mapping[fd];
 }
 
@@ -60,6 +62,7 @@ void EpollInfo::delete_fd_mapping(int fd) {
     if (fd < 0 || fd >= CONFIG_MPL_EPOLL_MAX_SIZE) {
         return;
     }
+    std::unique_lock<std::mutex> lock(_mutex);
     _fd_mapping[fd] = SmartSocket();
     return;
 }
@@ -114,9 +117,6 @@ bool EpollInfo::poll_events_add(SmartSocket sock, unsigned int events) {
         return false;
     }
 
-    if (_max_fd < sock->fd) {
-        _max_fd = sock->fd;
-    }
     return true;
 }
 
@@ -131,19 +131,6 @@ bool EpollInfo::poll_events_delete(SmartSocket sock) {
         return false;
     }
 
-    if (sock->fd >= _max_fd) {
-        int f = 0;
-        for (int i = sock->fd - 1; i >= 0; i--) {
-            if (NULL !=  _fd_mapping[i]) {
-                _max_fd = i;
-                f = 1;
-                break;
-            }
-        }
-        if (f == 0) {
-            _max_fd = -1;
-        }
-    }
     return true;
 }
 

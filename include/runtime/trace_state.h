@@ -83,6 +83,12 @@ public:
             _local_node->set_affect_rows(affect_rows);
         }
     }
+
+    void set_scan_rows(int64_t scan_rows) {
+        if (_trace_node != nullptr) {
+            _local_node->set_scan_rows(scan_rows);
+        }
+    }
     
     void add_index_conjuncts_filter_rows(int64_t rows) {
         if (_trace_node != nullptr) {

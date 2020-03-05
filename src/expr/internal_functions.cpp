@@ -21,7 +21,7 @@
 namespace baikaldb {
 static const int32_t DATE_FORMAT_LENGTH = 128;
 ExprValue round(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::INT64);
@@ -30,7 +30,7 @@ ExprValue round(const std::vector<ExprValue>& input) {
 }
 
 ExprValue floor(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::INT64);
@@ -39,7 +39,7 @@ ExprValue floor(const std::vector<ExprValue>& input) {
 }
 
 ExprValue ceil(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::INT64);
@@ -47,8 +47,235 @@ ExprValue ceil(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue abs(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = ::abs(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue sqrt(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    double val = input[0].get_numberic<double>();
+    if (val < 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::sqrt(val);
+    return tmp;
+}
+
+ExprValue mod(const std::vector<ExprValue>& input) {
+    if (input.size() < 2 || input[0].is_null() || input[1].is_null()) {
+        return ExprValue::Null();
+    }
+    double rhs = input[1].get_numberic<double>();
+    if (float_equal(rhs, 0)) {
+        return ExprValue::Null();
+    }
+    double lhs = input[0].get_numberic<double>();
+    
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::fmod(lhs, rhs);
+    return tmp;
+}
+
+ExprValue rand(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = butil::fast_rand_double();
+    return tmp;
+}
+
+ExprValue sign(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::INT64);
+    double val = input[0].get_numberic<double>();
+    tmp._u.int64_val = val > 0 ? 1 : (val < 0 ? -1 : 0);
+    return tmp;
+}
+
+ExprValue sin(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::sin(input[0].get_numberic<double>());
+    return tmp;
+}
+ExprValue asin(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    double  val = input[0].get_numberic<double>();
+    if (val < -1 || val > 1) {
+        return ExprValue::Null();
+    }
+    tmp._u.double_val = std::asin(val);
+    return tmp;
+}
+
+ExprValue cos(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::cos(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue acos(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    double  val = input[0].get_numberic<double>();
+    if (val < -1 || val > 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::acos(val);
+    return tmp;
+}
+
+ExprValue tan(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::tan(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue cot(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    double val = input[0].get_numberic<double>();
+    double sin_val = std::sin(val);
+    double cos_val = std::cos(val);
+    if (float_equal(sin_val, 0)) {
+        return ExprValue::Null();
+    }
+    tmp._u.double_val = cos_val/sin_val;
+    return tmp;
+}
+
+ExprValue atan(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::atan(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue ln(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    double val = input[0].get_numberic<double>();
+    if (val <= 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::log(input[0].get_numberic<double>());
+    return tmp;
+}
+
+ExprValue log(const std::vector<ExprValue>& input) {
+    if (input.size() < 2 || input[0].is_null() || input[1].is_null()) {
+        return ExprValue::Null();
+    }
+    double base = input[0].get_numberic<double>();
+    double val = input[1].get_numberic<double>();
+    if (base <= 0 || val <= 0 || base == 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::log(val) / std::log(base);
+    return tmp;
+}
+
+ExprValue pow(const std::vector<ExprValue>& input) {
+    if (input.size() < 2 || input[0].is_null() || input[1].is_null()) {
+        return ExprValue::Null();
+    }
+    double base = input[0].get_numberic<double>();
+    double exp = input[1].get_numberic<double>();
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = std::pow(base, exp);
+    return tmp;
+}
+
+ExprValue pi(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::DOUBLE);
+    tmp._u.double_val = M_PI;
+    return tmp;
+}
+
+ExprValue greatest(const std::vector<ExprValue>& input) {
+    bool find_flag = false;
+    double ret = std::numeric_limits<double>::lowest();
+    for (const auto& item : input) {
+        if (item.is_null()) {
+            return ExprValue::Null();
+        } else {
+            double val = item.get_numberic<double>();
+            if (!find_flag) {
+                find_flag = true;
+                ret = val;
+            } else {
+                if (val > ret) {
+                    ret = val;
+                }
+            }
+        }
+    }
+    if (find_flag) {
+        ExprValue tmp(pb::DOUBLE);
+        tmp._u.double_val = ret;
+        return tmp;
+    } else {
+        return ExprValue::Null();
+    }
+}
+
+ExprValue least(const std::vector<ExprValue>& input) {
+    bool find_flag = false;
+    double ret = std::numeric_limits<double>::max();
+    for (const auto& item : input) {
+        if (item.is_null()) {
+            return ExprValue::Null();
+        } else {
+            double val = item.get_numberic<double>();
+            if (!find_flag) {
+                find_flag = true;
+                ret = val;
+            } else {
+                if (val < ret) {
+                    ret = val;
+                }
+            }
+        }
+    }
+    if (find_flag) {
+        ExprValue tmp(pb::DOUBLE);
+        tmp._u.double_val = ret;
+        return tmp;
+    } else {
+        return ExprValue::Null();
+    }
+}
+
 ExprValue length(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::UINT32);
@@ -57,7 +284,7 @@ ExprValue length(const std::vector<ExprValue>& input) {
 }
 
 ExprValue lower(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::STRING);
@@ -67,7 +294,7 @@ ExprValue lower(const std::vector<ExprValue>& input) {
 }
 
 ExprValue lower_gbk(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::STRING);
@@ -86,7 +313,7 @@ ExprValue lower_gbk(const std::vector<ExprValue>& input) {
 }
 
 ExprValue upper(const std::vector<ExprValue>& input) {
-    if (input[0].is_null()) {
+    if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::STRING);
@@ -107,6 +334,9 @@ ExprValue concat(const std::vector<ExprValue>& input) {
 }
 
 ExprValue substr(const std::vector<ExprValue>& input) {
+    if (input.size() < 2) {
+        return ExprValue::Null();
+    }
     for (auto& s : input) {
         if (s.is_null()) {
             return ExprValue::Null();
@@ -140,6 +370,9 @@ ExprValue substr(const std::vector<ExprValue>& input) {
 }
 
 ExprValue left(const std::vector<ExprValue>& input) {
+    if (input.size() < 2) {
+        return ExprValue::Null();
+    }
     for (auto& s : input) {
         if (s.is_null()) {
             return ExprValue::Null();
@@ -156,6 +389,9 @@ ExprValue left(const std::vector<ExprValue>& input) {
 }
 
 ExprValue right(const std::vector<ExprValue>& input) {
+    if (input.size() < 2) {
+        return ExprValue::Null();
+    }
     for (auto& s : input) {
         if (s.is_null()) {
             return ExprValue::Null();
@@ -191,6 +427,9 @@ ExprValue unix_timestamp(const std::vector<ExprValue>& input) {
 }
 
 ExprValue from_unixtime(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
     ExprValue tmp(pb::TIMESTAMP);
     if (input[0].is_null()) {
         return ExprValue::Null();
@@ -203,6 +442,9 @@ ExprValue now(const std::vector<ExprValue>& input) {
     return ExprValue::Now();
 }
 ExprValue date_format(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
     for (auto& s : input) {
         if (s.is_null()) {
             return ExprValue::Null();
@@ -360,6 +602,9 @@ ExprValue if_(const std::vector<ExprValue>& input) {
 }
 
 ExprValue murmur_hash(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
     ExprValue tmp(pb::UINT64);
     if (input.size() == 0) {
         tmp._u.uint64_val = 0;

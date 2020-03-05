@@ -105,31 +105,18 @@ int RegionControl::remove_meta(int64_t drop_region_id) {
 
 int RegionControl::remove_log_entry(int64_t drop_region_id) {
     TimeCost cost;
-    MutTableKey log_meta_key;
-    log_meta_key.append_i64(drop_region_id).append_u8((uint8_t)MyRaftLogStorage::LOG_META_IDENTIFY);
     rocksdb::WriteOptions options;
-    auto rocksdb = RocksWrapper::get_instance();
-    auto status = rocksdb->remove(options,
-                                   rocksdb->get_raft_log_handle(),
-                                   log_meta_key.data());
-    if (!status.ok()) {
-        DB_WARNING("remove log meta key error: code=%d, msg=%s, region_id: %ld",
-            status.code(), status.ToString().c_str(), drop_region_id);
-        return -1;
-    }
-    MutTableKey log_data_key_start;
-    MutTableKey log_data_key_end;
-    log_data_key_start.append_i64(drop_region_id);
-    log_data_key_start.append_u8((uint8_t)MyRaftLogStorage::LOG_DATA_IDENTIFY);
-    log_data_key_start.append_i64(0);
+    MutTableKey start_key;
+    MutTableKey end_key;
+    start_key.append_i64(drop_region_id);
 
-    log_data_key_end.append_i64(drop_region_id);
-    log_data_key_end.append_u8((uint8_t)MyRaftLogStorage::LOG_DATA_IDENTIFY);
-    log_data_key_end.append_u64(0xFFFFFFFFFFFFFFFF);
-    status = rocksdb->remove_range(options,
+    end_key.append_i64(drop_region_id);
+    end_key.append_u64(0xFFFFFFFFFFFFFFFF);
+    auto rocksdb = RocksWrapper::get_instance();
+    auto status = rocksdb->remove_range(options,
                                     rocksdb->get_raft_log_handle(),
-                                    log_data_key_start.data(),
-                                    log_data_key_end.data());
+                                    start_key.data(),
+                                    end_key.data());
     if (!status.ok()) {
         DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
             status.code(), status.ToString().c_str(), drop_region_id);

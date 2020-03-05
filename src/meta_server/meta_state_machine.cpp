@@ -284,6 +284,14 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->drop_table(request, iter.index(), done);
             break;
         }
+        case pb::OP_DROP_TABLE_TOMBSTONE: {
+            TableManager::get_instance()->drop_table_tombstone(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_RESTORE_TABLE: {
+            TableManager::get_instance()->restore_table(request, iter.index(), done);
+            break;
+        }
         case pb::OP_RENAME_TABLE: {
             TableManager::get_instance()->rename_table(request, iter.index(), done);
             break;
@@ -543,12 +551,14 @@ void MetaStateMachine::healthy_check_function() {
             bthread_usleep(1000);                                                         
             ++time;                                                                       
         }
-        SELF_TRACE("start healthy check(region and store), count: %ld", count);
+        DB_WARNING("start healthy check(region and store), count: %ld", count);
         ++count;
         //store的相关信息目前存在cluster中
         ClusterManager::get_instance()->store_healthy_check_function();
         //region多久没上报心跳了
         RegionManager::get_instance()->region_healthy_check_function();
+        //gc删除很久的表
+        TableManager::get_instance()->drop_table_tombstone_gc_check();
     }
     return;
 }

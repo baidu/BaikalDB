@@ -366,6 +366,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     QUERIES
     QUICK
     RECOVER
+    RESTORE 
     REDUNDANT
     RELOAD
     REPEATABLE
@@ -586,6 +587,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %type <stmt> 
     CreateTableStmt
     DropTableStmt
+    RestoreTableStmt
     CreateDatabaseStmt
     DropDatabaseStmt
     StartTransactionStmt
@@ -684,6 +686,7 @@ Statement:
     | CreateTableStmt
     | SelectStmt
     | DropTableStmt
+    | RestoreTableStmt
     | CreateDatabaseStmt
     | DropDatabaseStmt
     | StartTransactionStmt
@@ -1915,6 +1918,13 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
+    | MOD '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "mod";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;
+    }
     ;
 FunctionCallKeyword:
     VALUES '(' ColumnName ')' {
@@ -2208,6 +2218,7 @@ AllIdent:
     | QUERIES
     | QUICK
     | RECOVER
+    | RESTORE
     | REDUNDANT
     | RELOAD
     | REPEATABLE
@@ -2292,6 +2303,7 @@ AllIdent:
     | VARIANCE
     | VAR_POP
     | VAR_SAMP
+    | MOD
     ;
 
 NumLiteral:
@@ -3591,6 +3603,18 @@ RestrictOrCascadeOpt:
     {}
     | RESTRICT
     | CASCADE
+    ;
+
+// Restore Table(s) Statement
+RestoreTableStmt:
+    RESTORE TableOrTables TableNameList 
+    {
+        RestoreTableStmt* stmt = new_node(RestoreTableStmt);
+        for (int i = 0; i < $3->children.size(); i++) {
+            stmt->table_names.push_back((TableName*)$3->children[i], parser->arena);
+        }
+        $$ = stmt;
+    }
     ;
 
 // Create Database Statement

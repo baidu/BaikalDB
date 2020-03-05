@@ -126,6 +126,15 @@ public:
         return false;
     }
 public:
+    void get_instances(const std::string& resource_tag, 
+                        std::set<std::string>& instances) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& instance_info : _instance_info) {
+            if (instance_info.second.resource_tag == resource_tag) {
+                instances.insert(instance_info.second.address);
+            }
+        }
+    }
     int64_t get_instance_count(const std::string& resource_tag, const std::string& logical_room) {
         int64_t count = 0; 
         BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -231,6 +240,12 @@ public:
             return Instance();
         }
         return _instance_info[instance];
+    }
+    void get_instance_by_resource_tags(std::map<std::string, std::vector<std::string>>& instances) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& iter : _instance_info) {
+            instances[iter.second.resource_tag].push_back(iter.first);
+        }
     }
     std::string get_resource_tag(const std::string& instance) {
         BAIDU_SCOPED_LOCK(_instance_mutex);

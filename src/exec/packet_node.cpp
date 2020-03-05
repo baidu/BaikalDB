@@ -155,14 +155,12 @@ int PacketNode::open(RuntimeState* state) {
         return 0;
     }
 
-    if (_children.size() == 0) {
-        pack_eof();
-        return 0;
-    }
-
     bool eos = false;
     int64_t pack_time = 0;
     do {
+        if (_children.empty()) {
+            break;
+        }
         RowBatch batch;
         ret = _children[0]->get_next(state, &batch, &eos);
         if (ret < 0) {

@@ -207,6 +207,11 @@ SstWriterAdaptor::SstWriterAdaptor(int64_t region_id, const std::string& path, c
         , _writer(new SstFileWriter(option)) {}
 
 int SstWriterAdaptor::open() {
+    _region_ptr = Store::get_instance()->get_region(_region_id);
+    if (_region_ptr == nullptr) {
+        DB_FATAL("open sst file path: %s failed, region not exist", _path.c_str());
+        return -1;
+    }
     _is_meta = _path.find("meta") != std::string::npos;
     auto s = _writer->open(_path);
     if (!s.ok()) {
@@ -233,6 +238,8 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
                 _path.c_str(), data.size(), _region_id);
         return -1;
     }
+    // 大region addpeer中重置time_cost，防止version=0超时删除
+    _region_ptr->reset_timecost();
     for (size_t i = 0; i < keys.size(); ++i) {
         // debug meta region_info
         if (_is_meta) {

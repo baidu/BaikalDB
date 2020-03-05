@@ -358,6 +358,12 @@ message MetaManagerResponse {
     optional uint64 start_id                    = 6;
     optional uint64 end_id                      = 7;
     optional RegionMergeResponse merge_response = 8;
+    optional RegionRecoverResponse recover_response = 9;
+};
+
+message RegionRecoverResponse {
+    repeated PeerStateInfo    set_peer_regions  = 1;
+    repeated PeerStateInfo    inited_regions    = 2;
 };
 
 message SchemaHeartBeat {
@@ -365,10 +371,29 @@ message SchemaHeartBeat {
     required int64 version     = 2;
 };
 
+enum PeerStatus {
+    STATUS_NORMAL             = 0;
+    STATUS_UNSTABLE           = 1; // add_peer
+    STATUS_ERROR              = 3;
+    STATUS_ILLEGAL_PEER       = 4;
+    STATUS_NOT_HEARTBEAT      = 5;
+    STATUS_NO_LEADER          = 6;
+    STATUS_SET_PEER           = 7;
+    STATUS_INITED             = 8;
+};
+
+message PeerStateInfo {
+    optional string      peer_id     = 1;
+    optional PeerStatus  peer_status = 2;
+    optional int64       table_id    = 3;
+    optional int64       timestamp   = 4;
+    optional int64       region_id   = 5;
+}
+
 message LeaderHeartBeat {
-    required RegionInfo region      = 1;
-    //required int64 used_size  = 2;
-    optional RegionStatus status    = 2;
+    required RegionInfo     region       = 1;
+    optional RegionStatus   status       = 2;
+    repeated PeerStateInfo  peers_status = 3;
 };
 
 message PeerHeartBeat {
@@ -378,6 +403,9 @@ message PeerHeartBeat {
     required int64 log_index    = 3;
     optional bytes start_key    = 4;
     optional bytes end_key      = 5;
+    //如果是全局二级索引的region保存主表的table_id
+    optional int64 main_table_id = 6;
+    optional bool  exist_leader  = 7;
 };
 
 message AddPeer {
@@ -475,6 +503,7 @@ enum QueryOpType {
     QUERY_DIFF_REGION_IDS                         = 301;
     QUERY_REGION_IDS                              = 302;
     QUERY_DDLWORK                                 = 303;
+    QUERY_REGION_PEER_STATUS                      = 304;
 };
 
 message PhysicalInstance {
@@ -523,6 +552,7 @@ message QueryResponse {
     repeated int64              region_ids          = 18;
     repeated DdlWorkInfo ddlwork_infos              = 19;
     repeated QueryDdlInfo query_ddl_infos           = 20;
+    repeated PeerStateInfo      peer_status_infos   = 21;
 };
 
 message DdlPeerInfo {

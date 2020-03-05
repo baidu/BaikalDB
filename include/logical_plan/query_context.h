@@ -86,12 +86,9 @@ struct QueryStat {
         partition_key       = 0;
         sql_length          = 0;
         hit_cache           = false;
-        start_stamp.tv_sec  = 0;
-        start_stamp.tv_usec = 0;
-        send_stamp.tv_sec   = 0;
-        send_stamp.tv_usec  = 0;
-        end_stamp.tv_sec    = 0;
-        end_stamp.tv_usec   = 0;
+        gettimeofday(&(start_stamp), NULL);
+        gettimeofday(&(send_stamp), NULL);
+        gettimeofday(&(end_stamp), NULL);
         //traceid.clear();
         family.clear();
         table.clear();

@@ -24,6 +24,89 @@
 #include "redis_scan_node.h"
 
 namespace baikaldb {
+int ScanNode::select_index(const pb::ScanNode& node, std::vector<int>& multi_reverse_index) {
+    std::multimap<uint32_t, int> prefix_ratio_id_mapping;
+    std::set<int32_t> primary_fields;
+    for (int i = 0; i < node.indexes_size(); i++) {
+        auto& pos_index = node.indexes(i);
+        int64_t index_id = pos_index.index_id();
+        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
+            continue;
+        }
+        IndexInfo& info = *info_ptr;
+        auto index_state = info.state;
+        if (index_state != pb::IS_PUBLIC) {
+            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+                index_id, pb::IndexState_Name(index_state).c_str());
+            continue;
+        }
+
+        int field_count = 0;
+        for (auto& range : pos_index.ranges()) {
+            if (range.has_left_field_cnt() && range.left_field_cnt() > 0) {
+                field_count = std::max(field_count, range.left_field_cnt());
+            }
+            if (range.has_right_field_cnt() && range.right_field_cnt() > 0) {
+                field_count = std::max(field_count, range.right_field_cnt());
+            }
+        }
+        uint16_t prefix_ratio_round = field_count * 100 / info.fields.size();
+        uint16_t index_priority = 0;
+        if (info.type == pb::I_PRIMARY) {
+            for (int j = 0; j < field_count; j++) {
+                primary_fields.insert(info.fields[j].id);
+            }
+            index_priority = 300;
+        } else if (info.type == pb::I_UNIQ) {
+            index_priority = 200;
+        } else if (info.type == pb::I_KEY) {
+            index_priority = 100 + field_count;
+        } else {
+            index_priority = 0;
+        }
+        // 普通索引如果都包含在主键里，则不选
+        if (info.type == pb::I_UNIQ || info.type == pb::I_KEY) {
+            bool contain_by_primary = true;
+            for (int j = 0; j < field_count; j++) {
+                if (primary_fields.count(info.fields[j].id) == 0) {
+                    contain_by_primary = false;
+                    break;
+                }
+            }
+            if (contain_by_primary) {
+                continue;
+            }
+        }
+        // sort index 权重调整到全命中unique或primary索引之后
+        if (pos_index.has_sort_index() && field_count > 0) {
+            prefix_ratio_round = 100;
+            index_priority = 190;
+        }
+        uint32_t prefix_ratio_index_score = (prefix_ratio_round << 16) | index_priority;
+        //DB_WARNING("scan node insert prefix_ratio_index_score:%u, i: %d", prefix_ratio_index_score, i);
+        prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, i));
+
+        // 优先选倒排，没有就取第一个
+        switch (info.type) {
+            case pb::I_FULLTEXT:
+                multi_reverse_index.push_back(i);
+                break;
+            case pb::I_RECOMMEND:
+                return i;
+            default:
+                break;
+        }
+    }
+    // ratio * 10(=0...9)相同的possible index中，按照PRIMARY, UNIQUE, KEY的优先级选择
+    //DB_WARNING("prefix_ratio_id_mapping.size: %d", prefix_ratio_id_mapping.size());
+    for (auto iter = prefix_ratio_id_mapping.crbegin(); iter != prefix_ratio_id_mapping.crend(); ++iter) {
+        //DB_WARNING("prefix_ratio_index_score:%u, i: %d", iter->first, iter->second);
+        return iter->second;
+    }
+    return 0;
+}
+
 int ScanNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -80,7 +163,7 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         }
         explain_info["possible_keys"].pop_back();
         std::vector<int> tmp;
-        int idx = select_index(tmp);
+        int idx = select_index(_pb_node.derive_node().scan_node(), tmp);
         if (tmp.size() >= 1) {
             idx = tmp[0];
         }

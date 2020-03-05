@@ -31,6 +31,8 @@ const std::string SNAPSHOT_DATA_FILE_WITH_SLASH = "/" + SNAPSHOT_DATA_FILE;
 const std::string SNAPSHOT_META_FILE_WITH_SLASH = "/" + SNAPSHOT_META_FILE;
 
 class RocksdbFileSystemAdaptor;
+class Region;
+typedef std::shared_ptr<Region> SmartRegion;
 
 struct IteratorContext {
     bool reading = false;
@@ -199,6 +201,7 @@ private:
         return 0;
     }
     int64_t _region_id;
+    SmartRegion _region_ptr;
     std::string _path;
     size_t _count = 0;
     bool _closed = true;

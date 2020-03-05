@@ -22,6 +22,10 @@
 
 namespace baikaldb {
 
+DECLARE_int64(store_heart_beat_interval_us);
+DECLARE_int32(store_dead_interval_times);
+DECLARE_int32(region_faulty_interval_times);
+
 void QueryRegionManager::construct_query_region(const pb::RegionInfo* region_info, 
                      pb::QueryRegion* query_region_info) {
     int64_t table_id = region_info->table_id();
@@ -275,6 +279,41 @@ void QueryRegionManager::get_peer_ids_per_instance(
         for (auto& region_id : table_region_ids.second) {
             peer_ids.insert(region_id);
         } 
+    }
+}
+
+void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request, pb::QueryResponse* response) {
+    RegionManager* manager = RegionManager::get_instance();
+    std::vector<pb::PeerStateInfo> region_peer_status_vec;
+    auto func = [&region_peer_status_vec](const int64_t region_id, RegionPeerState& region_state) {
+        bool heathly = true;
+        for (auto& pair : region_state.legal_peers_state) {
+            if (pair.second.peer_status() == pb::STATUS_NORMAL 
+                && (butil::gettimeofday_us() - pair.second.timestamp() >
+                FLAGS_store_heart_beat_interval_us * FLAGS_region_faulty_interval_times)) {
+                pair.second.set_peer_status(pb::STATUS_NOT_HEARTBEAT);
+                heathly = false;
+            } else if (pair.second.peer_status() != pb::STATUS_NORMAL) {
+                heathly = false;
+            }
+        }
+        if (!heathly) {
+            for (auto& pair : region_state.legal_peers_state) {
+                pair.second.set_region_id(region_id);
+                pair.second.set_peer_id(pair.first);
+                region_peer_status_vec.push_back(pair.second);
+            }  
+        }
+        for (auto& pair : region_state.ilegal_peers_state) {
+            pair.second.set_peer_id(pair.first);
+            pair.second.set_region_id(region_id);
+            region_peer_status_vec.push_back(pair.second);
+        }
+    };
+    manager->region_peer_state_map().traverse_with_key_value(func);
+    for (auto peer_status : region_peer_status_vec) {
+        pb::PeerStateInfo* info = response->add_peer_status_infos();
+        *info = peer_status;
     }
 }
 

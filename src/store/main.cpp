@@ -34,6 +34,9 @@ DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
 } // namespace baikaldb
 
 int main(int argc, char **argv) {
+#ifdef BAIKALDB_REVISION
+    google::SetVersionString(BAIKALDB_REVISION);
+#endif
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     srand((unsigned)time(NULL));

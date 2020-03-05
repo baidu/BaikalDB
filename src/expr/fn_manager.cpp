@@ -102,6 +102,25 @@ void FunctionManager::register_operators() {
     // num funcs
     register_object_ret("round", round, pb::INT64);
     register_object_ret("floor", floor, pb::INT64);
+    register_object_ret("abs", abs, pb::DOUBLE);
+    register_object_ret("sqrt", sqrt, pb::DOUBLE);
+    register_object_ret("mod", mod, pb::DOUBLE);
+    register_object_ret("rand", rand, pb::DOUBLE);
+    register_object_ret("sign", sign, pb::INT64);
+    register_object_ret("sin", sin, pb::DOUBLE);
+    register_object_ret("asin", asin, pb::DOUBLE);
+    register_object_ret("cos", cos, pb::DOUBLE);
+    register_object_ret("acos", acos, pb::DOUBLE);
+    register_object_ret("tan", tan, pb::DOUBLE);
+    register_object_ret("cot", cot, pb::DOUBLE);
+    register_object_ret("atan", atan, pb::DOUBLE);
+    register_object_ret("ln", ln, pb::DOUBLE);
+    register_object_ret("log", log, pb::DOUBLE);
+    register_object_ret("pi", pi, pb::DOUBLE);
+    register_object_ret("pow", pow, pb::DOUBLE);
+    register_object_ret("power", pow, pb::DOUBLE);
+    register_object_ret("greatest", greatest, pb::DOUBLE);
+    register_object_ret("least", least, pb::DOUBLE);
     register_object_ret("ceil", ceil, pb::INT64);
     register_object_ret("ceiling", ceil, pb::INT64);
 

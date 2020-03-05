@@ -46,7 +46,6 @@ COPTS  = [
     "-Iinclude/store",
     "-Iinclude/session",
     "-Iinclude/mem_row",
-    "-DNEW_PARSER",
     "-mpclmul",
     "-ggdb",
     "-pipe",

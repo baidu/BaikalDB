@@ -306,6 +306,11 @@ void NetworkServer::connection_timeout_check() {
                 if (sock->mutex.try_lock() == false) {
                     continue;
                 }
+                if (sock->is_free || sock->fd == -1) {
+                    DB_WARNING("sock is already free.");
+                    sock->mutex.unlock();
+                    continue;
+                }
                 DB_WARNING("close un_authed connection [fd=%d][ip=%s][port=%d].",
                         sock->fd, sock->ip.c_str(), sock->port);
                 sock->shutdown = true;
@@ -334,6 +339,11 @@ void NetworkServer::connection_timeout_check() {
             }
             // 待现有工作处理完成，需要获取锁
             if (sock->mutex.try_lock() == false) {
+                continue;
+            }
+            if (sock->is_free || sock->fd == -1) {
+                DB_WARNING("sock is already free.");
+                sock->mutex.unlock();
                 continue;
             }
             DB_NOTICE("close idle connection [fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s]",

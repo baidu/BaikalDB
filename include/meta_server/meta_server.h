@@ -92,11 +92,13 @@ public:
             pb::MigrateResponse* response,
             google::protobuf::Closure* done);
 
+    void flush_memtable_thread();
     void apply_region_thread();
 
     void shutdown_raft();
     bool have_data();
     void close() {
+        _flush_bth.join();
         _apply_region_bth.join();
     }
 
@@ -112,6 +114,7 @@ private:
     MetaStateMachine* _meta_state_machine = NULL;
     AutoIncrStateMachine* _auto_incr_state_machine = NULL;
     std::map<std::string, MetaServerInteract*> _meta_interact_map;
+    Bthread _flush_bth;
     //region区间修改等信息应用raft
     Bthread _apply_region_bth;
     bool _init_success = false;

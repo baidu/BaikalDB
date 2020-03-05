@@ -19,7 +19,9 @@
 
 namespace baikaldb {
 int SelectManagerNode::open(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, ([state](TraceLocalNode& local_node) {
+        local_node.set_scan_rows(state->num_scan_rows());
+    }));
     int ret = 0;
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {

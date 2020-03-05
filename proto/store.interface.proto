@@ -111,12 +111,21 @@ message GetAppliedIndex {
 message RemoveRegion {
     required int64  region_id       = 1;
     optional bool   force           = 2;
+    optional bool   need_delay_drop = 3;
 };
 
 message RegionIds {
     repeated int64  region_ids      = 1; // if size = 0, it will compact the entire db
     optional bool compact_raft_log  = 2; // if true, compact raft log
+    optional int64  table_id        = 3; // use for restore region
 };
+
+message BackUpReq {
+};
+
+message BackUpRes {
+};
+
 service StoreService {
     //1、创建table时master调用，region及raft同步创建成功后才返回给metaServer,
     //   创建表时raft node地址初始化为一个节点
@@ -147,7 +156,11 @@ service StoreService {
 
     rpc snapshot_region(RegionIds) returns(StoreRes);
 
+    rpc restore_region(RegionIds) returns(StoreRes);
+
     rpc query_region(RegionIds) returns (StoreRes);
     
     rpc query_illegal_region(RegionIds) returns (StoreRes);
+
+    rpc backup_region(BackUpReq) returns (BackUpRes);
 };

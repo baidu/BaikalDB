@@ -131,7 +131,7 @@ public:
 };
 class XbsNodeCmp {
 public:
-    bool operator()(const pb::XbsReverseNode& l, const pb::XbsReverseNode& r) {
+    bool operator()(const pb::XbsReverseNode& l, const pb::XbsReverseNode& r) const {
         return l.weight() > r.weight();
     }
 };

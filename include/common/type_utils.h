@@ -308,5 +308,72 @@ inline uint8_t to_mysql_type(pb::PrimitiveType type) {
     }
 }
 
+inline bool is_signed(pb::PrimitiveType type) {
+    switch (type) {
+        case pb::INT8:
+        case pb::INT16:
+        case pb::INT32:
+        case pb::INT64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::PrimitiveType& merged_type) {
+    if (types.size() == 0) {
+        return false;
+    }
+
+    bool is_all_equal = true;
+    bool is_all_num = true;
+    bool is_all_time = true;
+    bool has_double = false;
+    bool has_uint64 = false;
+    bool has_signed = false;
+    auto first_type = *types.begin();
+
+    for (auto type : types) {
+        if (is_all_equal && type != first_type) {
+            is_all_equal = false;
+        }
+        if (is_all_num && !(is_double(type) || is_int(type) || type == pb::BOOL)) {
+            is_all_num = false;
+        }
+        if (is_all_time && !is_datetime_specic(type)) {
+            is_all_time = false;
+        }
+        if (is_double(type)) {
+            has_double = true;
+        }
+        if (type == pb::UINT64) {
+            has_uint64 = true;
+        }
+        if (is_signed(type)) {
+            has_signed = true;
+        }
+    }
+
+    if (is_all_equal) {
+       merged_type = first_type; 
+    } else if (is_all_num) {
+        if (has_double) {
+            merged_type = pb::DOUBLE;
+        } else if (has_uint64) {
+            if (has_signed) {
+                merged_type = pb::DOUBLE;
+            } else {
+                merged_type = pb::UINT64;
+            }
+        } else {
+            merged_type = pb::INT64;
+        }
+    } else if (is_all_time) {
+        merged_type = pb::DATETIME;
+    } else {
+        merged_type = pb::STRING;
+    }
+    return true;
+}
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

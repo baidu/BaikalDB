@@ -32,6 +32,7 @@ public:
 private:
     int parse_create_table(pb::SchemaInfo& table);
     int parse_drop_table(pb::SchemaInfo& table);
+    int parse_restore_table(pb::SchemaInfo& table);
     int parse_create_database(pb::DataBaseInfo& database);
     int parse_drop_database(pb::DataBaseInfo& database);
     int parse_alter_table(pb::MetaManagerRequest& alter_request);

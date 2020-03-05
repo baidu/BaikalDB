@@ -15,6 +15,7 @@
 #pragma once
  
 #include <memory>
+#include <stack>
 #include "common.h"
 #include "ddl_common.h"
 #include "schema_factory.h"
@@ -32,9 +33,9 @@ DECLARE_bool(disable_wal);
 typedef std::map<int, pb::CachePlan> CachePlanMap;
 
 struct DllTransactionState {
-    DllParam* ddl_ptr;
+    DllParam* ddl_ptr {nullptr};
     pb::IndexState index_state;
-    bool is_ok;
+    bool is_ok {false};
 };
 
 using SmartDllTransactionState = std::shared_ptr<DllTransactionState>;
@@ -62,7 +63,6 @@ public:
     }
 
     virtual ~Transaction() {
-        bthread_mutex_destroy(&_txn_mutex);
         if (!_is_finished) {
             rollback();
         }
@@ -70,7 +70,7 @@ public:
             _db->relase_snapshot(_snapshot);
         }
         if (_ddl_state != nullptr && _ddl_state->is_ok) {
-            DB_NOTICE("txn_id: %lu Transaction atomic index[%s] --", 
+            DB_DEBUG("txn_id: %lu Transaction atomic index[%s] --", 
                    _txn_id, pb::IndexState_Name(_ddl_state->index_state).c_str());
             switch (_ddl_state->index_state) {
                 case pb::IS_NONE:
@@ -98,6 +98,7 @@ public:
         delete _txn;
         _txn = nullptr;
         _ddl_state = nullptr;
+        bthread_mutex_destroy(&_txn_mutex);
     }
 
     // Begin a new transaction
@@ -333,7 +334,7 @@ public:
             _ddl_state->is_ok = !ret;
             if (_ddl_state->is_ok) {
                 _ddl_state->index_state = state;
-                DB_NOTICE("region_%lld, txn_id: %lu Transaction atomic index[%s] ++", 
+                DB_DEBUG("region_%lld, txn_id: %lu Transaction atomic index[%s] ++", 
                        _region_info->region_id(), _txn_id, pb::IndexState_Name(state).c_str());
                 switch (state) {
                     case pb::IS_NONE:
