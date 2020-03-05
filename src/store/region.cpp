@@ -52,7 +52,8 @@ DEFINE_int32(election_timeout_ms, 1000, "raft election timeout(ms)");
 DEFINE_int32(skew, 5, "split skew, default : 45% - 55%");
 DEFINE_int32(reverse_level2_len, 5000, "reverse index level2 length, default : 5000");
 DEFINE_string(log_uri, "myraftlog://my_raft_log?id=", "raft log uri");
-DEFINE_string(stable_uri, "local://./raft_data/stable", "raft stable path");
+//不兼容配置，默认用写到rocksdb的信息; raft自带的local://./raft_data/stable/region_
+DEFINE_string(stable_uri, "myraftmeta://my_raft_meta?id=", "raft stable path");
 DEFINE_string(snapshot_uri, "local://./raft_data/snapshot", "raft snapshot path");
 DEFINE_int64(disable_write_wait_timeout_us, 1000 * 1000, 
         "disable write wait timeout(us) default 1s");
