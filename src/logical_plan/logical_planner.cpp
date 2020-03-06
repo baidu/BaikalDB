@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <boost/algorithm/string.hpp>
+#include "logical_planner.h"
 #include <memory>
 #include <algorithm>
 #include <iterator>
-#include "logical_planner.h"
+#include <boost/algorithm/string.hpp>
 #include "common.h"
 #include "select_planner.h"
 #include "insert_planner.h"
