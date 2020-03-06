@@ -5214,6 +5214,11 @@ int Region::send_file(brpc::Controller* cntl, BackupInfo& backup_info) {
 int Region::upload_sst_info(brpc::Controller* cntl, BackupInfo& backup_info) {
     DB_NOTICE("upload datainfo region_id[%lld]", _region_id);
     auto& request_attachment = cntl->request_attachment();
+    int64_t log_index;
+    if (request_attachment.cutn(&log_index, sizeof(int64_t)) != sizeof(int64_t)) {
+            DB_WARNING("upload region_%lld sst not enough data for log index", _region_id);
+            return -1;
+    }
     int8_t file_num;
     if (request_attachment.cutn(&file_num, sizeof(int8_t)) != sizeof(int8_t)) {
             DB_WARNING("upload region_%lld sst not enough data.", _region_id);
