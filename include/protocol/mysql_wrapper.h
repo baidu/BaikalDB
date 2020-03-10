@@ -19,7 +19,6 @@
 #include "mysql_err_handler.h"
 #include "network_socket.h"
 #include "mysql_err_code.h"
-#include "query_context.h"
 
 namespace baikaldb {
 

@@ -242,6 +242,7 @@ int FunctionManager::complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType
             return 0;
         case parser::FT_COMMON:
             fn.set_return_type(return_type_map[fn.name()]);
+            complete_common_fn(fn, types);
             return 0;
         default:
             //un-support
@@ -300,6 +301,42 @@ void FunctionManager::complete_fn(pb::Function& fn, int num_args,
     fn.set_return_type(ret_type);
 }
 
+void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::PrimitiveType>& types) {
+    if (fn.name() == "case_when" || fn.name() == "case_expr_when") {
+        size_t index = 0;
+        size_t remainder = 1;
+        std::vector<pb::PrimitiveType> target_types;
+        pb::PrimitiveType ret_type = pb::STRING;
+        if (fn.name() == "case_expr_when") {
+            remainder = 0;
+        }
+        for (auto& c : types) {
+            //case_when then子句index为奇数，else子句index为最后一位
+            //case_when_expr then子句index为除第0位的偶数，else子句为最后一位
+            if (index != 0 && (index % 2 == remainder || index + 1 == types.size())) {
+                DB_DEBUG("push col_type : [%s]", pb::PrimitiveType_Name(types[index]).c_str());
+                target_types.push_back(types[index]);
+            }
+            ++index;
+        }
+        if (!has_merged_type(target_types, ret_type)) {
+            DB_WARNING("no merged type.");
+        }
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        fn.set_return_type(ret_type);
+
+    } else if (fn.name() == "if") {
+        std::vector<pb::PrimitiveType> target_types;
+        pb::PrimitiveType ret_type = pb::STRING;
+        if (types.size() == 3) {
+            target_types.push_back(types[1]);
+            target_types.push_back(types[2]);
+            has_merged_type(target_types, ret_type);
+        }
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        fn.set_return_type(ret_type);
+    }
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -108,8 +108,6 @@ private:
         return ExprValue::True();
     }
 
-    void type_merge_infer();
-
 protected:
     pb::Function _fn;
     bool _is_row_expr = false;
