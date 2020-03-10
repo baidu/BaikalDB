@@ -67,7 +67,6 @@ int ScalarFnCall::type_inferer() {
         types.push_back(c->col_type());
     }
     ret = FunctionManager::complete_fn(_fn, types);
-    type_merge_infer();
 
     if (_col_type == pb::INVALID_TYPE) {
         _col_type = _fn.return_type();
@@ -178,41 +177,6 @@ ExprValue ScalarFnCall::get_value(MemRow* row) {
         args[i].cast_to(_fn.arg_types(i));
     }
     return _fn_call(args);
-}
-
-void ScalarFnCall::type_merge_infer() {
-
-    std::vector<pb::PrimitiveType> types;
-    pb::PrimitiveType ret_type = pb::STRING;
-    if (_fn.name() == "case_when" || _fn.name() == "case_expr_when") {
-        auto index = 0;
-        for (auto& c : _children) {
-            if (index % 2 == 1 || index + 1 == _children.size()) {
-                DB_DEBUG("push col_type : [%s]", pb::PrimitiveType_Name(c->col_type()).c_str());
-                types.push_back(c->col_type());
-            }
-            ++index;
-        }
-        if (!has_merged_type(types, ret_type)) {
-            DB_WARNING("no merged type.");
-        }
-
-    } else if (_fn.name() == "if") {
-        auto index = 0; 
-        for (auto& c : _children) {
-            if (index == 1 || index == 2) {
-                types.push_back(c->col_type());
-            }
-            ++index;
-        }
-        if (types.size() == 2) {
-            has_merged_type(types, ret_type);
-        } else {
-            DB_WARNING("number args of if function error.");
-        }
-    }
-    DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
-    _fn.set_return_type(ret_type);
 }
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -27,7 +27,7 @@ public:
     int init();
     bool swap_op(pb::Function& fn);
     static int complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType> types);
-
+    static void complete_common_fn(pb::Function& fn, std::vector<pb::PrimitiveType>& types);
 private:
     void register_operators();
     static void complete_fn_simple(pb::Function& fn, int num_args, 
