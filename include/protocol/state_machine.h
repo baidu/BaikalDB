@@ -112,7 +112,8 @@ public:
     void client_free(SmartSocket socket, EpollInfo* epoll_info);
 
 private:
-    StateMachine() {
+    StateMachine(): dml_time_cost("dml_time_cost"),
+                    select_time_cost("select_time_cost") {
         _wrapper = MysqlWrapper::get_instance();
     }
 
@@ -168,6 +169,9 @@ private:
     std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_minute;
     std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_hour;
     std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_day;
+
+    bvar::LatencyRecorder dml_time_cost;
+    bvar::LatencyRecorder select_time_cost;
 
     MysqlWrapper*   _wrapper = nullptr;
 

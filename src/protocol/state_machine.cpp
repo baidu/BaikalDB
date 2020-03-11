@@ -346,6 +346,16 @@ void StateMachine::_print_query_time(SmartSocket client) {
     boost::replace_all(ctx->sql, "\n", " ");
     sql_agg_cost << BvarMap(stat_info->sample_sql.str(), stat_info->total_time, 
                             rows, stat_info->num_scan_rows);
+
+    if (ctx->mysql_cmd == COM_QUERY
+                || ctx->mysql_cmd == COM_STMT_EXECUTE) {
+        if (root != nullptr && root->op_type() == pb::OP_SELECT) {
+            select_time_cost << stat_info->total_time;
+        } else {
+            dml_time_cost << stat_info->total_time;
+        }
+    }
+
     if (ctx->mysql_cmd == COM_QUERY 
             || ctx->mysql_cmd == COM_STMT_PREPARE 
             || ctx->mysql_cmd == COM_STMT_EXECUTE
