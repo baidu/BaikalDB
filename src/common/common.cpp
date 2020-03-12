@@ -43,6 +43,7 @@ DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
 DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
+DEFINE_bool(servitysinglelog, true, "diff servity message in seperate logfile");
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
         + (_end.tv_usec-_start.tv_usec); //macro second
