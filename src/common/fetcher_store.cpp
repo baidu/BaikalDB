@@ -224,8 +224,14 @@ ErrorType FetcherStore::send_request(
                 butil::endpoint2str(cntl.remote_side()).c_str());
     }
     if (cntl.Failed()) {
-        DB_WARNING("call failed region_id: %ld, error:%s, log_id:%lu", 
-                region_id, cntl.ErrorText().c_str(), log_id);
+        DB_WARNING("call failed region_id: %ld, errcode:%d, error:%s, log_id:%lu", 
+                region_id, cntl.ErrorCode(), cntl.ErrorText().c_str(), log_id);
+        // 只有网络相关错误码才重试
+        if (cntl.ErrorCode() != ETIMEDOUT && 
+                cntl.ErrorCode() != ECONNREFUSED &&
+                cntl.ErrorCode() != EHOSTDOWN) {
+            return E_FATAL;
+        }
         other_peer_to_leader_func(info);
         //schema_factory->update_leader(info);
         bthread_usleep(retry_times * FLAGS_retry_interval_us);
