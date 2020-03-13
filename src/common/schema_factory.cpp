@@ -1391,6 +1391,7 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
     auto record_template = TableRecord::new_record(main_table_id);
     int range_size = primary->ranges_size();
     for (const auto& range : primary->ranges()) {
+        bool like_prefix = range.like_prefix();
         SmartRecord left;
         SmartRecord right;
         if (range.left_pb_record() != "") {
@@ -1406,7 +1407,7 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
         MutTableKey  _start;
         MutTableKey  _end;
         if (left != nullptr) {
-            if (0 != _start.append_index(index, left.get(), range.left_field_cnt(), false)) {
+            if (0 != left->encode_key(index, _start, range.left_field_cnt(), false, like_prefix)) {
                 DB_FATAL("Fail to encode_key, table:%ld", index.id);
                 return -1;
             }
@@ -1415,7 +1416,7 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
         }
 
         if (right != nullptr) {
-            if (0 != _end.append_index(index, right.get(), range.right_field_cnt(), false)) {
+            if (0 != right->encode_key(index, _end, range.right_field_cnt(), false, like_prefix)) {
                 DB_FATAL("Fail to encode_key, table:%ld", index.id);
                 return -1;
             }
