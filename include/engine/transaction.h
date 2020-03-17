@@ -253,7 +253,7 @@ public:
         }
         // _is_global_index
         if (_region_info->has_main_table_id() && _region_info->main_table_id() != 0 &&
-                    region_info->table_id() != _region_info->main_table_id()) {
+                    _region_info->table_id() != _region_info->main_table_id()) {
             return;
         }
         _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_region_info->table_id());
@@ -267,6 +267,11 @@ public:
     }
     bool is_cstore() {
         if (_table_info.get() == nullptr) {
+            // _is_global_index
+            if (_region_info->has_main_table_id() && _region_info->main_table_id() != 0 &&
+                        _region_info->table_id() != _region_info->main_table_id()) {
+                return false;
+            }
             DB_FATAL("error: no table_info");
             return false;
         }
