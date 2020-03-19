@@ -731,7 +731,7 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
             return -1;
         }
         // for cstore only, remove_columns
-        if (is_cstore() && index.type == pb::I_PRIMARY) {
+        if (index.type == pb::I_PRIMARY && is_cstore()) {
             return remove_columns(_key);
         }
     }
@@ -758,7 +758,7 @@ int Transaction::remove(int64_t region, IndexInfo& index, const TableKey& key) {
             return -1;
         }
         // for cstore only, remove_columns
-        if (is_cstore() && index.type == pb::I_PRIMARY) {
+        if (index.type == pb::I_PRIMARY && is_cstore()) {
             return remove_columns(_key);
         }
     }
