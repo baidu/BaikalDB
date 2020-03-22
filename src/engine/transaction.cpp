@@ -279,7 +279,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
 //TODO: finer return status
 //return -3 when region not match
 int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record,
-                             bool delete_before_put_primary) {
+                             std::set<int32_t>* update_fields) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
     MutTableKey key;
@@ -310,7 +310,7 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         }
         // cstore, put non-pk columns values to db
         if (is_cstore()) {
-            return put_primary_columns(key, record, delete_before_put_primary);
+            return put_primary_columns(key, record, update_fields);
         }
     }
     //DB_WARNING("put primary, region_id: %ld, index_id: %ld, put_key: %s, put_value: %s",
@@ -871,7 +871,7 @@ void Transaction::rollback_to_point(int seq_id) {
 }
 // for cstore only, only put column which HasField in record
 int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord record,
-                                     bool delete_before_put_primary) {
+                                     std::set<int32_t>* update_fields) {
     if (_table_info.get() == nullptr) {
         DB_WARNING("no table_info");
         return -1;
@@ -883,18 +883,25 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
         if (_pri_field_ids.count(field_id) != 0) {
             continue;
         }
+        // skip non reference fields when update
+        if (update_fields != nullptr // an old row
+                && update_fields->count(field_id) == 0) { // no need to update
+            continue;
+        }
         std::string value;
         bool update_by_delete_old = false;
-        // if the field value is null or default_value
         int ret = record->encode_field(field_info, value);
+        // if the field value is null or default_value
         if (ret != 0) {
-            if (delete_before_put_primary && ret == -3) { // delete old when update default
+            if (update_fields != nullptr) { // delete when update or replace
                 update_by_delete_old = true;
-            } else { // skip null or default_value fields when insert
-                DB_DEBUG("no value for field=%d", field_id);
+                DB_DEBUG("update_by_delete_old field=%d, value=%s", field_id,
+                         field_info.default_expr_value.get_string().c_str());
+            } else { // skip when insert
+                DB_DEBUG("skip insert field=%d, value=%s", field_id,
+                         field_info.default_expr_value.get_string().c_str());
                 continue;
             }
-
         }
         MutTableKey key(primary_key);
         key.replace_i32(table_id, sizeof(int64_t));

@@ -323,10 +323,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             return ret;
         }
     }
-    // 列存为节省空间, 插入默认值时不会put, 因此不会覆盖未被删除的旧值
-    // 更新时, _affect_primary=false时旧值会保留, 需要删除旧值
-    // 替换时, _affect_primary=true且旧行已存在时, 需要删除旧值
-    ret = _txn->put_primary(_region_id, *_pri_info, record, delete_before_put_primary);
+    // 列存为节省空间, 插入默认值或空值时不会put
+    // delete_before_put_primary为true时表示更新前旧值尚未被删除
+    ret = _txn->put_primary(_region_id, *_pri_info, record,
+                            delete_before_put_primary ? &_update_field_ids : nullptr);
     if (ret < 0) {
         DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;
