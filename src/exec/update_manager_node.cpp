@@ -102,6 +102,9 @@ int UpdateManagerNode::open(RuntimeState* state) {
         DB_WARNING("connection is nullptr sxn_id:%lu", state->txn_id);
         return -1;
     }
+    if (state->tuple_descs().size() > 0) {
+        _tuple_desc = const_cast<pb::TupleDescriptor*> (&(state->tuple_descs()[0]));
+    }
     _update_row = state->mem_row_desc()->fetch_mem_row();
     for (auto expr : _update_exprs) {
         ret = expr->open();
@@ -143,10 +146,12 @@ int UpdateManagerNode::open(RuntimeState* state) {
 void UpdateManagerNode::update_record(SmartRecord record) {
     _update_row->clear();
     MemRow* row = _update_row.get();
-    for (auto slot : _update_slots) {
-        auto field = record->get_field_by_tag(slot.field_id());
-        row->set_value(slot.tuple_id(), slot.slot_id(),
-                        record->get_value(field));
+    if (_tuple_desc != nullptr) {
+        for (auto& slot : _tuple_desc->slots()) {
+            auto field = record->get_field_by_tag(slot.field_id());
+            row->set_value(slot.tuple_id(), slot.slot_id(),
+                           record->get_value(field));
+        }
     }
     for (size_t i = 0; i < _update_exprs.size(); i++) {
         auto& slot = _update_slots[i];
@@ -155,6 +160,5 @@ void UpdateManagerNode::update_record(SmartRecord record) {
             expr->get_value(row).cast_to(slot.slot_type()));
     }
 }
-
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

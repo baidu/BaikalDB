@@ -88,6 +88,15 @@ int LockPrimaryNode::open(RuntimeState* state) {
             _field_ids[field_info.id] = &field_info;
         }
     }
+    // cstore下只更新涉及列，暂时全部涉及，原因同_field_ids
+    if (_table_info->engine == pb::ROCKSDB_CSTORE) {
+        for (auto& field_info : _table_info->fields) {
+            if (_pri_field_ids.count(field_info.id) == 0 &&
+                    _update_field_ids.count(field_info.id) == 0) {
+                _update_field_ids.insert(field_info.id);
+            }
+        }
+    }
     auto txn = state->txn();
     if (txn == nullptr) {
         DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
