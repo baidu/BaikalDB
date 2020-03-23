@@ -99,6 +99,7 @@ protected:
     std::vector<pb::SlotDescriptor> _primary_slots;
     std::vector<pb::SlotDescriptor> _update_slots;
     std::vector<ExprNode*> _update_exprs;
+    std::set<int32_t> _update_field_ids;
 
     SmartTransaction         _txn = nullptr; 
     SmartTable               _table_info;

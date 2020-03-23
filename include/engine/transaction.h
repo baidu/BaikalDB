@@ -127,12 +127,13 @@ public:
     // Value is null if engine = rocksdb_cstore;
     // First encode key with @record, and then erase the key fields from @record;
     int put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record,
-                    bool delete_before_put_primary = false);
+                    std::set<int32_t>* update_fields = nullptr);
 
     // Key format: region_id(8 bytes) + table_id(4 bytes) + field_id(4 bytes) + primary_key_fields;
     // Value format: non-primary key fields encode value;
+    // update_fields: null for new row, not null for old row
     int put_primary_columns(const TableKey& primary_key, SmartRecord record,
-                            bool delete_before_put_primary);
+                            std::set<int32_t>* update_fields);
 
     // UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields, primary_key>
     // NON-UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields + primary_key, NULL>

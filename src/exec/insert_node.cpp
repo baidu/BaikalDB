@@ -91,6 +91,15 @@ int InsertNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
+    // cstore下只更新涉及列
+    if (_is_replace && _table_info->engine == pb::ROCKSDB_CSTORE) {
+        for (auto& field_info : _table_info->fields) {
+            if (_pri_field_ids.count(field_info.id) == 0 &&
+                    _update_field_ids.count(field_info.id) == 0) {
+                _update_field_ids.insert(field_info.id);
+            }
+        }
+    }
     int cnt = 0;
     for (auto& pb_record : _pb_node.derive_node().insert_node().records()) {
         SmartRecord record = _factory->new_record(*_table_info);

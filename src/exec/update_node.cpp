@@ -104,30 +104,23 @@ int UpdateNode::open(RuntimeState* state) {
         _affected_index_ids.swap(affected_indices);
         // cstore下只更新涉及列
         if (_table_info->engine == pb::ROCKSDB_CSTORE) {
-            _field_ids.clear();
             for (size_t i = 0; i < _update_slots.size(); i++) {
                 auto field_id = _update_slots[i].field_id();
                 if (_pri_field_ids.count(field_id) == 0 &&
-                        _field_ids.count(field_id == 0)) {
-                    _field_ids[field_id] = _table_info->get_field_ptr(field_id);
+                        _update_field_ids.count(field_id) == 0) {
+                    _update_field_ids.insert(field_id);
                 }
             }
-            for (size_t i = 0; i < _update_exprs.size(); i++) {
-                std::unordered_set<int32_t> slot_ids;
-                _update_exprs[i]->get_all_slot_ids(slot_ids);
-                for (auto field_id : slot_ids) {
-                    if (_pri_field_ids.count(field_id) == 0 &&
-                            _field_ids.count(field_id == 0)) {
-                        _field_ids[field_id] = _table_info->get_field_ptr(field_id);
-                    }
-                }
-            }
+            _field_ids.clear();
             for (auto index_id : _affected_index_ids) {
-                auto info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-                for (auto& field : info->fields) {
-                    if (_pri_field_ids.count(field.id) == 0 &&
-                            _field_ids.count(field.id == 0)) {
-                        _field_ids[field.id] = &field;
+                auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+                if (index_info == nullptr) {
+                    DB_WARNING("get index info failed index_id: %ld", index_id);
+                    return -1;
+                }
+                for (auto& field_info : index_info->fields) {
+                    if (_pri_field_ids.count(field_info.id) == 0) {
+                        _field_ids[field_info.id] = &field_info;
                     }
                 }
             }
