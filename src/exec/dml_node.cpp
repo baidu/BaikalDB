@@ -111,7 +111,9 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     //DB_WARNING_STATE(state, "insert record: %s", record->debug_string().c_str());
     int ret = 0;
     int affected_rows = 0;
-    bool delete_before_put_primary = !_affect_primary && is_update;
+    // LOCK_PRIMARY_NODE目前无法区分update与insert，暂用update兼容
+    bool delete_before_put_primary = !_affect_primary &&
+            (is_update || _node_type == pb::LOCK_PRIMARY_NODE);
     bool need_increase = true;
     auto& reverse_index_map = state->reverse_index_map();
     if (_on_dup_key_update) {
