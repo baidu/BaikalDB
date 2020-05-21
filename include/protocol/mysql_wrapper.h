@@ -28,26 +28,6 @@ const uint32_t PACKET_HEADER_LEN                 = 4;
 const uint32_t MAX_ERR_MSG_LEN                   = 2048;
 const uint32_t MAX_WRITE_QUERY_RESULT_PACKET_LEN = 1048576;
 
-// Package mysql result field.
-// This struct is same as mysql protocal.
-// https://dev.mysql.com/doc/internals/en/com-query-response.html#column-definition
-typedef struct result_field_t {
-    result_field_t() {}
-    ~result_field_t() {}
-
-    std::string     catalog = "def";
-    std::string     db;
-    std::string     table;
-    std::string     org_table;
-    std::string     name;       // Name of column
-    std::string     org_name;
-    uint16_t        charsetnr = 0;  // Character set.
-    uint32_t        length = 0;     // Width of column (create length).
-    uint8_t         type = 0;       // Type of field. See mysql_com.h for types.
-    uint16_t        flags = 1;      // Div flags.
-    uint8_t         decimals = 0;   // Number of decimals in field.
-} ResultField;
-
 class MysqlWrapper {
 public:
     ~MysqlWrapper() {}
