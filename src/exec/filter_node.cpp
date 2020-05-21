@@ -342,27 +342,8 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
     auto filter_node = pb_node->mutable_derive_node()->mutable_filter_node();
     filter_node->clear_conjuncts();
-    for (auto expr : _conjuncts) {
+    for (auto expr : _pruned_conjuncts) {
         ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
-    }
-}
-
-void FilterNode::remove_primary_conjunct(int64_t index_id) {
-    auto filter_node = _pb_node.mutable_derive_node()->mutable_filter_node();
-    filter_node->clear_conjuncts();
-    auto iter = _conjuncts.begin();
-    std::vector<int64_t> remove_index;
-    remove_index.push_back(index_id);
-    while (iter != _conjuncts.end()) {
-        auto expr = *iter;
-        if (expr->contained_by_index(remove_index)) {
-            ExprNode::destroy_tree(expr);
-            iter = _conjuncts.erase(iter);
-            continue;
-        }
-        // transfer_pb还会构建，后面删掉试试
-        ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
-        ++iter;
     }
 }
 
@@ -430,7 +411,7 @@ void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& o
         return;
     }
     if (!_pruned_conjuncts.empty()) {
-        output.back()["Extra"] += "Using where";
+        output.back()["Extra"] += "Using where; ";
     }
 }
 }

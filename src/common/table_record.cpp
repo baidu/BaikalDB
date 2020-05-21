@@ -490,7 +490,7 @@ int TableRecord::decode_field(const Reflection* _reflection,
     return 0;
 }
 
-int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, bool clear, bool like_prefx) {
+int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, bool clear, bool like_prefix) {
     uint8_t null_flag = 0;
     int pos = (int)key.size();
     if (index.type == pb::I_NONE) {
@@ -509,7 +509,7 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
     const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
     for (uint32_t idx = 0; idx < col_cnt; ++idx) {
-        bool last_field_like_prefx = like_prefx && idx == (col_cnt - 1);
+        bool last_field_like_prefix = like_prefix && idx == (col_cnt - 1);
         auto& info = index.fields[idx];
         const FieldDescriptor* field = _descriptor->FindFieldByNumber(info.id);
         if (field == nullptr) {
@@ -522,19 +522,19 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
                 DB_WARNING("missing pk field: %d", field->number());
                 return -2;
             }
-            res = encode_field(_reflection, field, info, key, clear, last_field_like_prefx);
+            res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
         } else if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
             if (!_reflection->HasField(*_message, field)) {
                 // this field is null
                 //DB_DEBUG("missing index field: %u, set null-flag", idx);
                 if (!info.can_null) {
                     //DB_WARNING("encode not_null field");
-                    res = encode_field(_reflection, field, info, key, clear, last_field_like_prefx);
+                    res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
                 } else {
                     null_flag |= (0x01 << (7 - idx));
                 }
             } else {
-                res = encode_field(_reflection, field, info, key, clear, last_field_like_prefx);
+                res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
             }
         } else {
             DB_WARNING("invalid index type: %u", index.type);

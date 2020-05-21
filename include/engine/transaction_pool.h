@@ -20,7 +20,8 @@
 
 namespace baikaldb {
 DECLARE_int32(transaction_clear_delay_ms);
-//class Region;
+
+class Region;
 
 // TODO: remove locking for thread-safe codes
 class TransactionPool {
@@ -88,6 +89,8 @@ public:
     void clear_transactions(int32_t clear_delay_ms = FLAGS_transaction_clear_delay_ms);
 
     void on_leader_stop_rollback();
+
+    void on_leader_start_rollback(Region* region);
 
     void on_leader_stop_rollback(uint64_t txn_id);
 

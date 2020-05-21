@@ -10,7 +10,7 @@ curl -d '{
         "database": "TEST",
         "namespace_name": "TEST",
         "schema_conf":{
-            "need_merge": false
+            "need_merge": true
         }
     }
 }' http://$1/MetaService/meta_manager

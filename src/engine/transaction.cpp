@@ -290,6 +290,7 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         DB_FATAL("Fail to append_index, reg=%ld, tab=%ld", region, pk_index.id);
         return -1;
     }
+    //DB_WARNING("region_id:%ld txn:%lu table_id:%ld record:%s", region, _txn_id, pk_index.id, record->debug_string().c_str());
     std::string value;
     if (!is_cstore()) {
         ret = record->encode(value);
@@ -335,6 +336,7 @@ int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord rec
         DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", region, index.id);
         return -1;
     }
+    //DB_WARNING("region_id:%ld txn:%lu table_id:%ld record:%s", region, _txn_id, index.id, record->debug_string().c_str());
     rocksdb::Status res;
     MutTableKey pk;
     if (index.type == pb::I_KEY) {

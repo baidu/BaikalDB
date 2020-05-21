@@ -117,7 +117,13 @@ enum MysqlCommand : uint8_t {
     COM_SET_OPTION          = 0x1b,
     COM_STMT_FETCH          = 0x1c
 };
-
+enum ExplainType {
+    EXPLAIN_NULL            = 0,
+    ANALYZE_STATISTICS      = 1,
+    SHOW_HISTOGRAM          = 2,
+    SHOW_CMSKETCH           = 3,
+    SHOW_PLAN               = 4,
+};
 class TimeCost {
 public:
     TimeCost() {
@@ -523,6 +529,96 @@ private:
     int _index = 0;
 };
 
+DECLARE_int64(incremental_info_gc_time);
+template <typename T>
+class IncrementalUpdate {
+public:
+    IncrementalUpdate() {
+        bthread_mutex_init(&_mutex, NULL);
+    }
+
+    ~IncrementalUpdate() {
+        bthread_mutex_destroy(&_mutex);
+    }
+
+    void put_incremental_info(const int64_t apply_index, T& infos) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        (*background)[apply_index] = infos;
+        if (FLAGS_incremental_info_gc_time < _gc_time_cost.get_time()) {
+            frontground->clear();
+            _buf.swap();
+            _gc_time_cost.reset();
+        }  
+    }
+
+    // 返回值 true:需要全量更新外部处理 false:增量更新，通过update_incremental处理增量
+    bool check_and_update_incremental(std::function<void(const T&)> update_incremental, int64_t& last_updated_index, const int64_t applied_index) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        if (frontground->size() == 0 && background->size() == 0) {
+            if (last_updated_index < applied_index) {
+                return true;
+            }
+            return false;
+        } else if (frontground->size() == 0 && background->size() > 0) {
+            if (last_updated_index < background->begin()->first) {              
+                return true;
+            } else {
+                auto iter = background->upper_bound(last_updated_index);
+                while (iter != background->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                return false;
+            }
+        } else if (frontground->size() > 0) {
+            if (last_updated_index < frontground->begin()->first) {
+                return true;
+            } else {
+                auto iter = frontground->upper_bound(last_updated_index);
+                while (iter != frontground->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                iter = background->upper_bound(last_updated_index);
+                while (iter != background->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                return false;         
+            }
+        }
+        return false;
+    }
+
+    void clear() {
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        background->clear();
+        frontground->clear();
+    }
+
+private:
+    DoubleBuffer<std::map<int64_t, T>> _buf;
+    bthread_mutex_t                    _mutex;
+    TimeCost                    _gc_time_cost;
+};
+
 struct BvarMap {
     struct SumCount {
         SumCount() {}
@@ -591,7 +687,7 @@ extern SerializeStatus to_string(uint64_t number, char *buf, size_t size, size_t
 extern std::string remove_quote(const char* str, char quote);
 extern std::string str_to_hex(const std::string& str);
 void stripslashes(std::string& str);
-
+extern void update_schema_conf_common(const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 extern int get_instance_from_bns(int* ret,

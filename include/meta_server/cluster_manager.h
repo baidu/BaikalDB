@@ -252,7 +252,7 @@ public:
         if (_instance_info.find(instance) != _instance_info.end()) {
             return _instance_info[instance].resource_tag;
         }
-        DB_FATAL("instance: %s not exist", instance.c_str());
+        DB_WARNING("instance: %s not exist", instance.c_str());
         return "";
     }
     void get_resource_tag(const std::set<std::string>& related_peers,
@@ -261,6 +261,8 @@ public:
         for (auto& peer : related_peers) {
             if (_instance_info.find(peer) != _instance_info.end()) {
                 peer_resource_tags[peer] = _instance_info[peer].resource_tag;
+            } else {
+                DB_WARNING("instance: %s not exist", peer.c_str());
             }
         }
     }
@@ -290,7 +292,11 @@ public:
         _instance_info[instance].resource_tag = instance_info.resource_tag();
         _instance_info[instance].instance_status.timestamp = butil::gettimeofday_us();
         if (_instance_info[instance].instance_status.state != pb::MIGRATE) {
-            _instance_info[instance].instance_status.state = pb::NORMAL;
+            if (_instance_info[instance].instance_status.state != pb::NORMAL) {
+                DB_WARNING("instance:%s status return NORMAL, resource_tag: %s",
+                    instance.c_str(), _instance_info[instance].resource_tag.c_str());
+                _instance_info[instance].instance_status.state = pb::NORMAL;
+            }
         }
         return 0;
     }
@@ -331,7 +337,7 @@ public:
         if (_instance_info.find(instance) != _instance_info.end()) {
             return _instance_info[instance].logical_room;
         }
-        DB_FATAL("instance: %s not exist", instance.c_str());
+        DB_WARNING("instance: %s not exist", instance.c_str());
         return "";
     }
     static std::string get_ip(const std::string& instance) {

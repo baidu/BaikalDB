@@ -41,19 +41,32 @@ void LockSecondaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     lock_secondary_node->set_table_id(_table_id);
     lock_secondary_node->set_lock_type(_lock_type);
     lock_secondary_node->clear_put_records();
-    if (_insert_records_by_region.count(region_id) != 0) {
-        for (auto& record : _insert_records_by_region[region_id]) {
+
+    for (auto& records_by_region : _insert_records_by_region) {
+        for (auto& record : records_by_region.second) {
             std::string* str = lock_secondary_node->add_put_records();
             record->encode(*str);
         }
     }
+    /*if (_insert_records_by_region.count(region_id) != 0) {
+        for (auto& record : _insert_records_by_region[region_id]) {
+            std::string* str = lock_secondary_node->add_put_records();
+            record->encode(*str);
+        }
+    }*/
     lock_secondary_node->clear_delete_records();
-    if (_delete_records_by_region.count(region_id) != 0) {
-        for (auto& record : _delete_records_by_region[region_id]) {
+    for (auto& records_by_region : _delete_records_by_region) {
+        for (auto& record : records_by_region.second) {
             std::string* str = lock_secondary_node->add_delete_records();
             record->encode(*str);
         }
     }
+    /*if (_delete_records_by_region.count(region_id) != 0) {
+        for (auto& record : _delete_records_by_region[region_id]) {
+            std::string* str = lock_secondary_node->add_delete_records();
+            record->encode(*str);
+        }
+    }*/
 }
 
 int LockSecondaryNode::open(RuntimeState* state) {

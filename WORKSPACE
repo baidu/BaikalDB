@@ -76,9 +76,8 @@ bind(
 new_git_repository(
     name = "com_github_facebook_rocksdb",
     remote = "https://github.com/facebook/rocksdb.git",
-    #sha256 = "6e8d0844adc37da331844ac4b21ae33ba1f5265d8914c745760d9209a57e9cc9",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
-    tag = "v5.12.4"
+    tag = "v6.8.1"
 )
 
 bind(

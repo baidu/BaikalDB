@@ -53,6 +53,7 @@
 #include "meta_writer.h"
 #include "rpc_sender.h"
 #include "ddl_common.h"
+#include "exec_node.h"
 
 using google::protobuf::Message;
 using google::protobuf::RepeatedPtrField;
@@ -118,6 +119,7 @@ public:
         bool expected_status = false;
         if (_shutdown.compare_exchange_strong(expected_status, true)) {
             _node.shutdown(NULL);
+            _init_success = false;
             DB_WARNING("raft node was shutdown, region_id: %ld", _region_id);
         }
     }
@@ -127,6 +129,7 @@ public:
         DB_WARNING("raft node join completely, region_id: %ld", _region_id);
         _multi_thread_cond.wait();
         DB_WARNING("_multi_thread_cond wait success, region_id: %ld", _region_id);
+        _txn_pool.close();
     }
 
     Region(RocksWrapper* rocksdb, 
@@ -161,6 +164,12 @@ public:
     }
 
     int init(bool new_region, int32_t snapshot_times);
+    void wait_table_info() {
+        while (!SchemaFactory::get_instance()->exist_tableid(get_table_id())) {
+            DB_WARNING("region_id: %ld wait for table_info: %ld", _region_id, get_table_id());
+            bthread_usleep(1000 * 1000);
+        }
+    }
 
     void raft_control(google::protobuf::RpcController* controller,
             const pb::RaftControlRequest* request,
@@ -201,7 +210,8 @@ public:
             const pb::Plan& plan,
             const RepeatedPtrField<pb::TupleDescriptor>& tuples,
             pb::StoreRes& response);
-
+    int select_normal(RuntimeState& state, ExecNode* root, pb::StoreRes& response);
+    int select_sample(RuntimeState& state, ExecNode* root, const pb::AnalyzeInfo& analyze_info, pb::StoreRes& response); 
     virtual void on_apply(braft::Iterator& iter);
    
     virtual void on_shutdown();
@@ -277,7 +287,7 @@ public:
     void start_split_for_tail(braft::Closure* done, int64_t applied_index, int64_t term);
     void validate_and_add_version(const pb::StoreReq& request, braft::Closure* done, int64_t applied_index, int64_t term);
     void add_version_for_split_region(const pb::StoreReq& request, braft::Closure* done, int64_t applied_index, int64_t term);
-    void apply_txn_request(const pb::StoreReq& request, braft::Closure* done, int64_t index, int64_t term);
+    void apply_txn_request(const pb::StoreReq& request, braft::Closure* done, int64_t index, int64_t term, bool need_write_meta);
     void adjustkey_and_add_version(const pb::StoreReq& request, 
                                            braft::Closure* done, 
                                            int64_t applied_index, 
@@ -377,6 +387,13 @@ public:
         std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.end_key();
     }
+    bool is_merged() {
+        std::lock_guard<std::mutex> lock(_region_lock);
+        if (!_region_info.start_key().empty()) {
+            return _region_info.start_key() == _region_info.end_key();
+        }
+        return false;
+    }
     int64_t get_log_index() const {
         return _applied_index;
     }
@@ -412,6 +429,12 @@ public:
     bool is_leader() {
         return _is_leader.load();
     }
+
+    void leader_start() {
+        _is_leader.store(true);
+        DB_WARNING("leader real start, region_id: %ld", _region_id);
+    }
+
     int64_t get_version() {
         return _region_info.version();
     }
@@ -524,6 +547,8 @@ public:
     void clear_transactions() {
         _txn_pool.clear_transactions();
     }
+
+    void rollback_when_leader_start(std::map<uint64_t, SmartTransaction> rollback_txns);
 
     TransactionPool& get_txn_pool() {
         return _txn_pool;

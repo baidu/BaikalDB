@@ -2,6 +2,7 @@ syntax="proto2";
 import "common.proto";
 import "optype.proto";
 import "raft.proto";
+import "statistics.proto";
 package baikaldb.pb;
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
@@ -63,10 +64,6 @@ message SplitKey {
     repeated bytes split_keys               = 2;
 };
 
-message SchemaConf {
-    optional bool need_merge                = 1;
-    optional bool storage_compute_separate  = 2; 
-};
 message SchemaInfo {
     optional int64 table_id                 = 1;
     required string table_name              = 2;
@@ -347,6 +344,7 @@ message MetaManagerRequest {
     repeated RegionInfo          region_infos           = 19; //add and update
     optional DdlWorkInfo ddlwork_info                   = 20; //更新ddl work
     optional bool                add_delete_region      = 21; //添加被删除的region
+    optional Statistics          statistics             = 22;
 };
 
 message MetaManagerResponse {
@@ -457,6 +455,7 @@ message BaikalSchemaHeartBeat {
     required int64 table_id             = 1;
     required int64 version              = 2;
     repeated RegionHeartBeat regions    = 3;
+    optional int64 statis_version       = 4;
 };
 
 message BaikalHeartBeatRequest {
@@ -482,6 +481,7 @@ message BaikalHeartBeatResponse {
     optional IdcInfo    idc_info                  = 7;
     repeated DataBaseInfo db_info                 = 8; //全部同步
     optional int64        last_updated_index      = 9;
+    repeated Statistics   statistics              = 10;
 };
 
 enum QueryOpType {

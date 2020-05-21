@@ -170,7 +170,7 @@ public:
     bool                is_explain = false;
     bool                is_full_export = false;
     bool                is_trace = false;
-    bool                is_print_plan = false;
+    ExplainType         explain_type = EXPLAIN_NULL;
 
     uint8_t             mysql_cmd;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.

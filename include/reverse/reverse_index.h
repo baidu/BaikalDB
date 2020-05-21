@@ -54,6 +54,7 @@ public:
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
+                       pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast = false) = 0;
     virtual bool valid() = 0;
@@ -74,6 +75,7 @@ public:
                     const IndexInfo& index_info,
                     const TableInfo& table_info,
                     const std::string& search_data,
+                    pb::MatchMode mode,
                     std::vector<ExprNode*> conjuncts, 
                     BooleanExecutorBase*& exe,
                     bool is_fast = false) = 0;
@@ -153,7 +155,8 @@ public:
     void set_table_info(const TableInfo& table_info) {
         _table_info = table_info;
     }
-    virtual int create_executor(const std::string& search_data, pb::SegmentType segment_type) = 0;
+    virtual int create_executor(const std::string& search_data, 
+            pb::MatchMode mode, pb::SegmentType segment_type) = 0;
     virtual int next(SmartRecord record) = 0;
 
 protected:
@@ -224,6 +227,7 @@ public:
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
+                       pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast = false); 
     virtual bool valid() {
@@ -250,6 +254,7 @@ public:
                     const IndexInfo& index_info,
                     const TableInfo& table_info,
                     const std::string& search_data,
+                    pb::MatchMode mode,
                     std::vector<ExprNode*> conjuncts, 
                     BooleanExecutorBase*& exe,
                     bool is_fast = false);
@@ -359,6 +364,7 @@ public:
             const TableInfo& table_info,
             const std::vector<ReverseIndexBase*>& reverse_indexes,
             const std::vector<std::string>& search_datas,
+            const std::vector<pb::MatchMode>& modes,
             bool is_fast, bool bool_or); 
     bool valid() {
         if (_exe != NULL) {

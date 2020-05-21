@@ -67,6 +67,9 @@ TEST(test_parser, case_insert) {
         ASSERT_TRUE(assign1->name->db.empty());
         ASSERT_TRUE(std::string(assign1->name->table.value) == "table_b");
         ASSERT_TRUE(std::string(assign1->name->name.value) == "field_b");
+        insert_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << insert_stmt->to_string() << std::endl;
     }
     {
         parser::SqlParser parser;
@@ -197,7 +200,7 @@ TEST(test_parser, case_insert) {
             " on duplicate key update db.table_a.field_a := 1,"
             " table_b.field_b := values(field_a) + 10 ";
         parser.parse(sql_insert4);
-
+        std::cout << sql_insert4 << "\n" << parser.syntax_err_str << "\n";
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
         ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::InsertStmt));
@@ -378,6 +381,9 @@ TEST(test_parser, case_replace) {
         parser::RowExpr* row_expr2 = insert_stmt->lists[2];
         ASSERT_EQ(2, row_expr2->children.size());
         ASSERT_EQ(0, insert_stmt->on_duplicate.size());
+        insert_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << insert_stmt->to_string() << std::endl;
     }
 }
 
@@ -443,6 +449,9 @@ TEST(test_parser, case_delete) {
         parser::TableName* from_table = (parser::TableName*)delete_stmt->from_table;
         ASSERT_EQ(std::string(from_table->db.value), "db"); 
         ASSERT_EQ(std::string(from_table->table.value), "table_a"); 
+        delete_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << delete_stmt->to_string() << std::endl;
     }
     {
         parser::SqlParser parser;
@@ -525,6 +534,9 @@ TEST(test_parser, case_delete) {
         ASSERT_EQ(update_stmt->priority, parser::PE_LOW_PRIORITY);
         
         ASSERT_TRUE(typeid(*(update_stmt->table_refs)) == typeid(parser::TableSource));
+        update_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << update_stmt->to_string() << std::endl;
     }
     {
         parser::SqlParser parser;

@@ -18,7 +18,7 @@
 #include "mut_table_key.h"
 
 namespace baikaldb {
-DEFINE_string(old_stable_path, "/home/work/shared/data/raft_data/stable", "old stable path");
+//DEFINE_string(old_stable_path, "/home/work/shared/data/raft_data/stable", "old stable path");
 
 static int parse_my_raft_meta_uri(const std::string& uri, std::string& id){
     size_t pos = uri.find("id=");

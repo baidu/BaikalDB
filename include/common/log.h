@@ -27,40 +27,6 @@ DECLARE_bool(enable_debug);
 DECLARE_bool(enable_self_trace);
 DECLARE_bool(servitysinglelog);
 
-class SingleLogFileObject : public google::base::Logger {
-  public:
-    const char* LogSeverityNames[4] = {
-          "INFO", "WARNING", "ERROR", "FATAL"
-    };
-    SingleLogFileObject(google::base::Logger* fileobject, google::LogSeverity severity)
-        : fileobject_(fileobject), severity_(severity) {
-    }
-    virtual void Write(bool force_flush, // Should we force a flush here?
-                       time_t timestamp,  // Timestamp for this entry
-                       const char* message,
-                       int message_len) {
-        if (message_len == 0) {
-            return;
-        }
-        if (message[0] != LogSeverityNames[severity_][0]) {
-            return;
-        }
-        fileobject_->Write(force_flush, timestamp, message, message_len);
-    }
-    // Normal flushing routine
-    virtual void Flush() {
-        fileobject_->Flush();
-    }
-    // It is the actual file length for the system loggers,
-    // i.e., INFO, ERROR, etc.
-    virtual uint32_t LogSize() {
-        return fileobject_->LogSize();
-    }
-  private:
-    google::base::Logger* fileobject_;
-    google::LogSeverity severity_;
-};
-
 #ifdef BAIDU_INTERNAL
 #ifndef NDEBUG
 #define DB_DEBUG(_fmt_, args...) \
@@ -110,6 +76,40 @@ class SingleLogFileObject : public google::base::Logger {
     } while (0);
 
 #else 
+
+class SingleLogFileObject : public google::base::Logger {
+  public:
+    const char* LogSeverityNames[4] = {
+          "INFO", "WARNING", "ERROR", "FATAL"
+    };
+    SingleLogFileObject(google::base::Logger* fileobject, google::LogSeverity severity)
+        : fileobject_(fileobject), severity_(severity) {
+    }
+    virtual void Write(bool force_flush, // Should we force a flush here?
+                       time_t timestamp,  // Timestamp for this entry
+                       const char* message,
+                       int message_len) {
+        if (message_len == 0) {
+            return;
+        }
+        if (message[0] != LogSeverityNames[severity_][0]) {
+            return;
+        }
+        fileobject_->Write(force_flush, timestamp, message, message_len);
+    }
+    // Normal flushing routine
+    virtual void Flush() {
+        fileobject_->Flush();
+    }
+    // It is the actual file length for the system loggers,
+    // i.e., INFO, ERROR, etc.
+    virtual uint32_t LogSize() {
+        return fileobject_->LogSize();
+    }
+  private:
+    google::base::Logger* fileobject_;
+    google::LogSeverity severity_;
+};
 
 const int MAX_LOG_LEN = 2048;
 inline void glog_info_writelog(const char* fmt, ...) {

@@ -29,7 +29,7 @@ class PhysicalPlanner {
 public:
     PhysicalPlanner() {}
     static int analyze(QueryContext* ctx);
-
+    static int64_t get_table_rows(QueryContext* ctx); 
     static int execute(QueryContext* ctx, DataBuffer* send_buf);
     static int full_export_start(QueryContext* ctx, DataBuffer* send_buf);
     static int full_export_next(QueryContext* ctx, DataBuffer* send_buf, bool shutdown);

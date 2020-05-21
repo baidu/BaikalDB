@@ -88,14 +88,23 @@ int CommonSchema::segment(
     return 0;
 }
 
-int CommonSchema::create_executor(const std::string& search_data, pb::SegmentType segment_type) {
+int CommonSchema::create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type) {
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
     //segment
     TimeCost timer;
     std::vector<std::string> or_search;
     // 先用规则支持 or 操作
     // TODO 用bison来支持mysql bool查询
-    Tokenizer::get_instance()->split_str_gbk(search_data, or_search, '|');
+
+    if (mode == pb::M_NARUTAL_LANGUAGE) {
+        or_search.push_back(search_data);
+    } else if (mode == pb::M_BOOLEAN) {
+        // mysql boolean模式，空格表示'或'
+        Tokenizer::get_instance()->split_str_gbk(search_data, or_search, ' ');
+    } else {
+        // 报告需求，like语法用|表示'或'
+        Tokenizer::get_instance()->split_str_gbk(search_data, or_search, '|');
+    }
     LogicalQuery<CommonSchema> logical_query(this);
     ExecutorNode<CommonSchema>* parent = nullptr;
     ExecutorNode<CommonSchema>* root = &logical_query._root;
@@ -103,8 +112,15 @@ int CommonSchema::create_executor(const std::string& search_data, pb::SegmentTyp
         _exe = NULL;
         return 0;
     } else if (or_search.size() == 1) {
-        root->_type = AND;
-        root->_merge_func = CommonSchema::merge_and;
+        // 兼容mysql ngram Parser，自然语言是or，boolean是and
+        // https://dev.mysql.com/doc/refman/8.0/en/fulltext-search-ngram.html
+        if (mode == pb::M_NARUTAL_LANGUAGE) {
+            root->_type = OR;
+            root->_merge_func = CommonSchema::merge_or;
+        } else {
+            root->_type = AND;
+            root->_merge_func = CommonSchema::merge_and;
+        }
     } else {
         root->_type = OR;
         root->_merge_func = CommonSchema::merge_or;
@@ -153,6 +169,8 @@ int CommonSchema::create_executor(const std::string& search_data, pb::SegmentTyp
         ExecutorNode<CommonSchema>* and_node = nullptr;
         if (parent != nullptr) {
             and_node = new ExecutorNode<CommonSchema>();
+            and_node->_type = AND;
+            and_node->_merge_func = CommonSchema::merge_and;
         } else {
             and_node = root;
         }
@@ -160,8 +178,6 @@ int CommonSchema::create_executor(const std::string& search_data, pb::SegmentTyp
             and_node->_type = TERM;
             and_node->_term = term_map.begin()->first;
         } else {
-            and_node->_type = AND;
-            and_node->_merge_func = CommonSchema::merge_and;
             for (auto& pair : term_map) {
                 auto sub_node = new ExecutorNode<CommonSchema>();
                 sub_node->_type = TERM;
@@ -443,7 +459,7 @@ static int init_filter_set(std::vector<ExprNode*> exprs, int32_t field_id, std::
     return 0;
 }
 
-int XbsSchema::create_executor(const std::string& search_data, pb::SegmentType segment_type) {
+int XbsSchema::create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type) {
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
     _pic_scores_field_id = get_field_id_by_name(_table_info.fields, "__pic_scores");
     _userid_field_id = get_field_id_by_name(_table_info.fields, "userid");

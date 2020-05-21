@@ -1,0 +1,43 @@
+syntax="proto2";
+import "common.proto";
+package baikaldb.pb;
+
+message BucketInfo {
+    required int32 distinct_cnt      = 1;
+    required int32 bucket_size       = 2;
+    required ExprValue start         = 3;
+    required ExprValue end           = 4;
+};
+message ColumnInfo {
+    required PrimitiveType col_type  = 1;
+    required int32         field_id  = 2;
+    required int32         distinct_cnt  = 3;
+    required int32         null_value_cnt = 4;
+    repeated BucketInfo    bucket_infos     = 5;
+};
+message Histogram {
+    required int64         sample_rows   = 1;
+    required int64         total_rows   = 2;
+    repeated ColumnInfo    column_infos = 3;
+};
+message CMsketchItem {
+    required int32         depth        = 1;
+    required int32         width        = 2;
+    required int32         value        = 3;
+};
+message CMsketchColumn {
+    required int32         field_id     = 1;
+    repeated CMsketchItem  cmitems      = 2;
+};
+message CMsketch {
+    required int32         depth        = 1;
+    required int32         width        = 2;
+    repeated CMsketchColumn cmcolumns   = 3;
+};
+message Statistics {
+    required int64         table_id     = 1;
+    optional int64         version      = 2;
+    required Histogram     histogram    = 3;
+    required CMsketch      cmsketch     = 4;
+};
+

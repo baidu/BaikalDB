@@ -89,4 +89,5 @@ enum OpType {
     OP_RESTORE_TABLE                        = 169; //恢复store误删的table
     OP_DROP_TABLE_TOMBSTONE                 = 170; //清理TABLE的残留墓碑
     OP_RECOVERY_ALL_REGION                  = 171; //恢复region状态
+    OP_UPDATE_STATISTICS                    = 172; //update statistics
 };

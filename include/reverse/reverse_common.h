@@ -228,7 +228,6 @@ public:
     }
 };
 //test api
-void print_reverse_list_test(pb::ReverseList& list);
 void print_reverse_list_common(pb::CommonReverseList& list);
 void print_reverse_list_xbs(pb::XbsReverseList& list);
 

@@ -187,11 +187,19 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         if (format == "trace") {
             ctx->is_trace = true;
         } else if (format == "plan") {
-            ctx->is_print_plan = true;
+            ctx->explain_type = SHOW_PLAN;
+        } else if (format == "analyze") { 
+            ctx->explain_type = ANALYZE_STATISTICS;
+        } else if (format == "histogram") {
+            ctx->explain_type = SHOW_HISTOGRAM;
+            ctx->is_explain = true;
+        } else if (format == "cmsketch") {
+            ctx->explain_type = SHOW_CMSKETCH;
+            ctx->is_explain = true;
         } else {
             ctx->is_explain = true;
         }
-        DB_WARNING("stmt format:%s", format.c_str());
+        //DB_WARNING("stmt format:%s", format.c_str());
     } else {
         ctx->stmt = parser.result[0];
     }
@@ -1031,6 +1039,7 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr) {
             case parser::FT_GE:
             case parser::FT_LT:
             case parser::FT_LE:
+            case parser::FT_MATCH_AGAINST:
             case parser::FT_COMMON:
                 return create_scala_func_expr(func, expr, func->func_type);
             // todo:support
@@ -1146,6 +1155,7 @@ pb::SlotDescriptor& LogicalPlanner::get_scan_ref_slot(int64_t table,
     auto inner_iter = inner_map.find(field);
     if (inner_iter != inner_map.end()) {
         slot_desc = &(inner_iter->second);
+        slot_desc->set_ref_cnt(slot_desc->ref_cnt() + 1);
     } else {
         slot_desc = &inner_map[field];
         slot_desc->set_slot_id(tuple_info->slot_cnt++);
@@ -1153,6 +1163,7 @@ pb::SlotDescriptor& LogicalPlanner::get_scan_ref_slot(int64_t table,
         slot_desc->set_tuple_id(tuple_info->tuple_id);
         slot_desc->set_field_id(field);
         slot_desc->set_table_id(table);
+        slot_desc->set_ref_cnt(1);
     }
     return *slot_desc;
 }
@@ -1282,6 +1293,7 @@ int LogicalPlanner::create_term_slot_ref_node(
     node->set_num_children(0);
     node->mutable_derive_node()->set_tuple_id(slot.tuple_id()); //TODO
     node->mutable_derive_node()->set_slot_id(slot.slot_id());
+    node->mutable_derive_node()->set_field_id(slot.field_id());
     return 0;
 }
 

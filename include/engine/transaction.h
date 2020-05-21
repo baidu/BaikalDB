@@ -217,12 +217,24 @@ public:
         return _is_rolledback;
     }
 
+    bool is_finished() {
+        return _is_finished;
+    }
+
     bool prepare_apply() {
         return _prepare_apply;
     }
 
     void set_prepare_apply() {
         _prepare_apply = true;
+    }
+
+    bool write_begin_index() {
+        return _write_begin_index;
+    }
+
+    void set_write_begin_index(bool flag) {
+        _write_begin_index = flag;
     }
 
     int64_t prepare_time_us() {
@@ -411,6 +423,7 @@ private:
     bool                            _is_finished = false;
     bool                            _is_rolledback = false;
     bool                            _prepare_apply = false;
+    bool                            _write_begin_index = true;
     int64_t                         _prepare_time_us = 0;
     std::stack<int>                 _save_point_seq;
     std::stack<int64_t>             _save_point_increase_rows;

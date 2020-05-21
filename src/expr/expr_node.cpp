@@ -129,6 +129,15 @@ void ExprNode::get_all_slot_ids(std::unordered_set<int32_t>& slot_ids) {
     }
 }
 
+void ExprNode::get_all_field_ids(std::unordered_set<int32_t>& field_ids) {
+    if (_node_type == pb::SLOT_REF) {
+        field_ids.insert(static_cast<SlotRef*>(this)->field_id());
+    }
+    for (auto& child : _children) {
+        child->get_all_field_ids(field_ids);
+    }
+}
+
 
 void ExprNode::transfer_pb(pb::ExprNode* pb_node) {
     pb_node->set_node_type(_node_type);

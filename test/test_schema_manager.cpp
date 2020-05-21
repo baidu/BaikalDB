@@ -15,6 +15,9 @@
 #include "gtest/gtest.h"
 #include "schema_manager.h"
 #include "cluster_manager.h"
+namespace baikaldb {
+    DECLARE_string(db_path);
+}
 
 class SchemaManagerTest : public testing::Test {
 public:
@@ -59,11 +62,11 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     request_update_region_fc.mutable_region_info()->set_status(baikaldb::pb::IDLE);
     request_update_region_fc.mutable_region_info()->set_used_size(1024);
     request_update_region_fc.mutable_region_info()->set_log_index(1);
-    _schema_manager->update_region(request_update_region_fc, NULL);
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    _schema_manager->update_region(request_update_region_fc, 1, NULL);
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -84,10 +87,10 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
         }
     }
     _schema_manager->load_snapshot();
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -153,11 +156,11 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     request_update_region_fc.mutable_region_info()->set_status(baikaldb::pb::IDLE);
     request_update_region_fc.mutable_region_info()->set_used_size(1024);
     request_update_region_fc.mutable_region_info()->set_log_index(1);
-    _schema_manager->update_region(request_update_region_fc, NULL);
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    _schema_manager->update_region(request_update_region_fc, 2, NULL);
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -169,10 +172,10 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
                 table_info.first, table_info.second.schema_pb.ShortDebugString().c_str());
     }
     _schema_manager->load_snapshot();
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -196,11 +199,11 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     request_update_region_fc.mutable_region_info()->set_status(baikaldb::pb::IDLE);
     request_update_region_fc.mutable_region_info()->set_used_size(102);
     request_update_region_fc.mutable_region_info()->set_log_index(1);
-    _schema_manager->update_region(request_update_region_fc, NULL);
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    _schema_manager->update_region(request_update_region_fc, 3, NULL);
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -212,10 +215,10 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
                 table_info.first, table_info.second.schema_pb.ShortDebugString().c_str());
     }
     _schema_manager->load_snapshot();
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -244,7 +247,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     request_drop_level_table_fc.mutable_table_info()->set_table_name("planinfo");
     request_drop_level_table_fc.mutable_table_info()->set_database("FC_Word");
     request_drop_level_table_fc.mutable_table_info()->set_namespace_name("FengChao");
-    _schema_manager->drop_table(request_drop_level_table_fc, NULL);
+    _schema_manager->drop_table(request_drop_level_table_fc, 4, NULL);
     ASSERT_EQ(2, _schema_manager->_max_namespace_id);
     ASSERT_EQ(3, _schema_manager->_max_database_id);
     ASSERT_EQ(4, _schema_manager->_max_table_id);
@@ -258,10 +261,10 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     ASSERT_EQ(3, _schema_manager->_database_id_map.size());
     ASSERT_EQ(1, _schema_manager->_table_info_map.size());
     ASSERT_EQ(2, _schema_manager->_region_info_map.size());
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -296,10 +299,10 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     ASSERT_EQ(3, _schema_manager->_database_id_map.size());
     ASSERT_EQ(1, _schema_manager->_table_info_map.size());
     ASSERT_EQ(2, _schema_manager->_region_info_map.size());
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -324,7 +327,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     request_drop_level_table_fc.mutable_table_info()->set_table_name("userinfo");
     request_drop_level_table_fc.mutable_table_info()->set_database("FC_Word");
     request_drop_level_table_fc.mutable_table_info()->set_namespace_name("FengChao");
-    _schema_manager->drop_table(request_drop_level_table_fc, NULL);
+    _schema_manager->drop_table(request_drop_level_table_fc, 5, NULL);
     ASSERT_EQ(2, _schema_manager->_max_namespace_id);
     ASSERT_EQ(3, _schema_manager->_max_database_id);
     ASSERT_EQ(4, _schema_manager->_max_table_id);
@@ -430,7 +433,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("username");
     index->add_field_names("type");
-    _schema_manager->create_table(request_create_table_feed, NULL);
+    _schema_manager->create_table(request_create_table_feed, 6, NULL);
     //验证正确性
     ASSERT_EQ(2, _schema_manager->_max_namespace_id);
     ASSERT_EQ(3, _schema_manager->_max_database_id);
@@ -466,9 +469,9 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
     }
-    for (auto& region :  _schema_manager->_region_info_map) {
-        DB_WARNING("database_id:%ld, pb:%s", region.first, region.second.ShortDebugString().c_str());
-    }
+    //for (auto& region :  _schema_manager->_region_info_map) {
+    //    DB_WARNING("database_id:%ld, pb:%s", region.first, region.second.ShortDebugString().c_str());
+    //}
     //做snapshot, 验证snapshot的正确性
     _schema_manager->load_snapshot();
     //验证正确性
@@ -520,11 +523,11 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     request_update_region_feed.mutable_region_info()->set_status(baikaldb::pb::IDLE);
     request_update_region_feed.mutable_region_info()->set_used_size(1024);
     request_update_region_feed.mutable_region_info()->set_log_index(1);
-    _schema_manager->update_region(request_update_region_feed, NULL);
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    _schema_manager->update_region(request_update_region_feed, 7, NULL);
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -539,10 +542,10 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
     }
     _schema_manager->load_snapshot();
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -576,11 +579,11 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     request_update_region_feed.mutable_region_info()->set_status(baikaldb::pb::IDLE);
     request_update_region_feed.mutable_region_info()->set_used_size(1034);
     request_update_region_feed.mutable_region_info()->set_log_index(1);
-    _schema_manager->update_region(request_update_region_feed, NULL);
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    _schema_manager->update_region(request_update_region_feed, 8, NULL);
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -595,10 +598,10 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
     }
     _schema_manager->load_snapshot();
-    for (auto& region_info : _schema_manager->_region_info_map) {
-        DB_WARNING("region_id:%ld, region_info:%s", 
-                region_info.first, region_info.second.ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _schema_manager->_region_info_map) {
+    //    DB_WARNING("region_id:%ld, region_info:%s", 
+    //            region_info.first, region_info.second.ShortDebugString().c_str());
+    //}
     for (auto& instance  : _schema_manager->_instance_region_map) {
         DB_WARNING("instance:%s", instance.first.c_str());
         for (auto& region_id : instance.second) {
@@ -619,7 +622,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     rename_table_request.mutable_table_info()->set_new_table_name("new_userinfo");
     rename_table_request.mutable_table_info()->set_database("FC_Word");
     rename_table_request.mutable_table_info()->set_namespace_name("Feed");
-    _schema_manager->rename_table(rename_table_request, NULL);
+    _schema_manager->rename_table(rename_table_request, 9, NULL);
     for (auto& table_id : _schema_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
@@ -644,7 +647,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     add_field_request.mutable_table_info()->set_table_name("new_userinfo");
     add_field_request.mutable_table_info()->set_database("FC_Word");
     add_field_request.mutable_table_info()->set_namespace_name("Feed");
-    _schema_manager->add_field(add_field_request, NULL);
+    _schema_manager->add_field(add_field_request, 10, NULL);
     for (auto& table_id : _schema_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
@@ -680,7 +683,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     drop_field_request.mutable_table_info()->set_table_name("new_userinfo");
     drop_field_request.mutable_table_info()->set_database("FC_Word");
     drop_field_request.mutable_table_info()->set_namespace_name("Feed");
-    _schema_manager->drop_field(drop_field_request, NULL);
+    _schema_manager->drop_field(drop_field_request, 11, NULL);
     for (auto& table_id : _schema_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
@@ -718,7 +721,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     rename_field_request.mutable_table_info()->set_table_name("new_userinfo");
     rename_field_request.mutable_table_info()->set_database("FC_Word");
     rename_field_request.mutable_table_info()->set_namespace_name("Feed");
-    _schema_manager->rename_field(rename_field_request, NULL);
+    _schema_manager->rename_field(rename_field_request, 12, NULL);
     for (auto& table_id : _schema_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
@@ -749,6 +752,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     
 } // TEST_F
 int main(int argc, char** argv) {
+    baikaldb::FLAGS_db_path = "schema_manager_db";
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

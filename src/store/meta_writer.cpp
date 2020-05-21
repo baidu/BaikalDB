@@ -175,6 +175,19 @@ int MetaWriter::write_meta_before_prepared(int64_t region_id, int64_t log_index,
     batch.Put(_meta_cf, transcation_log_index_key(region_id, txn_id), encode_transcation_log_index_value(log_index));
     return write_batch(&batch, region_id);
 }
+
+int MetaWriter::get_meta_before_prepared(int64_t region_id, uint64_t txn_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(transcation_log_index_key(region_id, txn_id)), &value);
+    if (!status.ok()) {
+        //DB_WARNING("region_id: %ld  txn_id: %lu before_prepared not found", region_id, txn_id);
+        return -1;
+    }
+    //DB_WARNING("region_id: %ld txn_id: %lu read before_prepared tag success", region_id, txn_id);
+    return 0;
+}
+
 int MetaWriter::ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id) {
     rocksdb::IngestExternalFileOptions ifo;
     auto res = _rocksdb->ingest_external_file(_meta_cf, {meta_sst_file}, ifo);

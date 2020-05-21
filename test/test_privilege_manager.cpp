@@ -21,7 +21,10 @@
 #include "database_manager.h"
 #include "table_manager.h"
 #include "region_manager.h"
-
+#include <gflags/gflags.h>
+namespace baikaldb {
+    DECLARE_string(db_path);
+}
 class PrivilegeManagerTest : public testing::Test {
 public:
     ~PrivilegeManagerTest() {}
@@ -217,7 +220,7 @@ TEST_F(PrivilegeManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("username");
     index->add_field_names("type");
-    _table_manager->create_table(request_create_table_fc, NULL);
+    _table_manager->create_table(request_create_table_fc, 1, NULL);
     
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
@@ -333,7 +336,7 @@ TEST_F(PrivilegeManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("planname");
     index->add_field_names("type");
-    _table_manager->create_table(request_create_table_fc_level, NULL);
+    _table_manager->create_table(request_create_table_fc_level, 2, NULL);
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
     ASSERT_EQ(4, _table_manager->_max_table_id);
@@ -547,6 +550,7 @@ TEST_F(PrivilegeManagerTest, test_create_drop_modify) {
 
 } // TEST_F
 int main(int argc, char** argv) {
+    baikaldb::FLAGS_db_path = "privilege_manager_db";
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

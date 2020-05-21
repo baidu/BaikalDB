@@ -25,6 +25,7 @@
 #include "row_batch.h"
 #include "mysql_err_code.h"
 #include "trace_state.h"
+#include "statistics.h"
 //#include "region_resource.h"
 
 using google::protobuf::RepeatedPtrField;
@@ -292,6 +293,8 @@ public:
     bool              is_fail = false;
     bool              need_txn_limit = false;
     std::string       raft_error_msg;
+    ExplainType       explain_type = EXPLAIN_NULL;
+    std::shared_ptr<CMsketch> cmsketch = nullptr;
 
 private:
     bool _is_cancelled = false;

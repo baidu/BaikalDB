@@ -64,6 +64,11 @@ enum LockCmdType {
     LOCK_GET_DML = 4;
     LOCK_NO  = 5; //不加锁的操作
 };
+enum MatchMode {
+    M_NONE = 0;
+    M_NARUTAL_LANGUAGE = 1;
+    M_BOOLEAN = 2;
+};
 message PossibleIndex {
     message Range {
         optional bytes left_pb_record = 3;
@@ -73,6 +78,7 @@ message PossibleIndex {
         optional bool left_open = 7;
         optional bool right_open = 8;
         optional bool like_prefix = 9;
+        optional MatchMode match_mode = 10;
     };
 
     message SortIndex {
@@ -87,6 +93,7 @@ message PossibleIndex {
     repeated Expr index_conjuncts = 3;
     optional SortIndex sort_index = 4;
     optional bool bool_and = 5;
+    optional bool is_covering_index = 6;
 };
 
 message ScanNode {

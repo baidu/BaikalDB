@@ -126,6 +126,7 @@ void FunctionManager::register_operators() {
 
     // str funcs
     register_object_ret("length", length, pb::INT64);
+    register_object_ret("bit_length", bit_length, pb::INT64);
     register_object_ret("upper", upper, pb::STRING);
     register_object_ret("lower", lower, pb::STRING);
     register_object_ret("lower_gbk", lower_gbk, pb::STRING);
@@ -133,10 +134,23 @@ void FunctionManager::register_operators() {
     register_object_ret("substr", substr, pb::STRING);
     register_object_ret("left", left, pb::STRING);
     register_object_ret("right", right, pb::STRING);
+    register_object_ret("trim", trim, pb::STRING);
+    register_object_ret("ltrim", ltrim, pb::STRING);
+    register_object_ret("rtrim", rtrim, pb::STRING);
+    register_object_ret("concat_ws", concat_ws, pb::STRING);
+    register_object_ret("ascii", ascii, pb::INT32);
+    register_object_ret("strcmp", strcmp, pb::INT32);
+    register_object_ret("insert", insert, pb::STRING);
+    register_object_ret("replace", replace, pb::STRING);
+    register_object_ret("repeat", repeat, pb::STRING);
+    register_object_ret("reverse", reverse, pb::STRING);
+    register_object_ret("locate", locate, pb::INT32);
+
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::UINT32);
     register_object_ret("from_unixtime", from_unixtime, pb::TIMESTAMP);
     register_object_ret("now", now, pb::DATETIME);
+    register_object_ret("sysdate", now, pb::DATETIME);
     register_object_ret("date_format", date_format, pb::STRING);
     register_object_ret("timediff", timediff, pb::TIME);
     register_object_ret("timestampdiff", timestampdiff, pb::INT64);

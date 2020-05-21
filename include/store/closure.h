@@ -20,6 +20,8 @@
 namespace baikaldb {
 
 struct DMLClosure : public braft::Closure {
+    DMLClosure() : leader_start_opt_cond(nullptr) {};
+    DMLClosure(BthreadCond* cond) : leader_start_opt_cond(cond) {};
     virtual void Run();
 
     brpc::Controller* cntl = nullptr;
@@ -30,6 +32,8 @@ struct DMLClosure : public braft::Closure {
     SmartTransaction transaction = nullptr;
     TimeCost cost;
     std::string remote_side;
+    BthreadCond* leader_start_opt_cond;
+    bool is_leader_start = false;
 };
 
 struct AddPeerClosure : public braft::Closure {

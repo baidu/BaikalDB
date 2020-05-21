@@ -68,6 +68,7 @@ enum FuncType {
     FT_IN,
     FT_LIKE,
     FT_EXACT_LIKE,
+    FT_MATCH_AGAINST,
     FT_BETWEEN,
     /* use in on dup key update */
     FT_VALUES
@@ -194,7 +195,11 @@ struct LiteralExpr : public ExprNode {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_STRING;
         // trim ' "
-        lit->_u.str_val.strdup(str + 1, strlen(str) - 2, arena);
+        if (str[0] == '"' || str[0] == '\'') {
+            lit->_u.str_val.strdup(str + 1, strlen(str) - 2, arena);
+        } else {
+            lit->_u.str_val.strdup(str, strlen(str), arena);
+        }
         return lit;
     }
     static LiteralExpr* make_string(String value, butil::Arena& arena) {

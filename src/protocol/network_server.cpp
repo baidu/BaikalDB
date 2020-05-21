@@ -171,15 +171,15 @@ void NetworkServer::print_agg_sql() {
     while (!_shutdown) {
         BvarMap sample = StateMachine::get_instance()->sql_agg_cost.reset();
         time_t timep;
-        struct tm *p;
+        struct tm tm;
         time(&timep);
-        p = localtime(&timep);
+        localtime_r(&timep, &tm);
         for (auto& pair : sample.internal_map) {
             if (!pair.first.empty()) {
                 uint64_t out[2];
                 butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
                 SQL_TRACE("date=[%04d-%02d-%02d\t%02d\t%02d] stat=[%ld\t%ld\t%ld\t%ld\t%ld] sign=[%llu] hostname=[%s] sql_agg: %s", 
-                        1900 + p->tm_year, 1 + p->tm_mon, p->tm_mday, p->tm_hour, p->tm_min,
+                        1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
                         pair.second.sum, pair.second.count,
                         pair.second.count == 0 ? 0 : pair.second.sum / pair.second.count,
                         pair.second.affected_rows, pair.second.scan_rows, 
@@ -193,6 +193,7 @@ void NetworkServer::print_agg_sql() {
 void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
+        auto& table_statistics_mapping = schema.table_statistics_mapping;
         for (auto& info_pair : schema.table_info_mapping) {
             if (info_pair.second->engine != pb::ROCKSDB &&
                     info_pair.second->engine != pb::ROCKSDB_CSTORE) {
@@ -200,11 +201,11 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
             }
             //主键索引和全局二级索引都需要传递region信息
             for (auto& index_id : info_pair.second->indices) {
-                auto& _index_info_mapping = schema.index_info_mapping;
-                if (_index_info_mapping.count(index_id) == 0) {
+                auto& index_info_mapping = schema.index_info_mapping;
+                if (index_info_mapping.count(index_id) == 0) {
                     continue;
                 }
-                IndexInfo index = *_index_info_mapping.at(index_id);
+                IndexInfo index = *index_info_mapping.at(index_id);
                 //主键索引
                 if (index.type != pb::I_PRIMARY && !index.is_global) {
                     continue;
@@ -212,6 +213,13 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
                 auto req_info = request.add_schema_infos();
                 req_info->set_table_id(index_id);
                 req_info->set_version(1);
+                int64_t version = 0;
+                auto iter = table_statistics_mapping.find(index_id);
+                if (iter != table_statistics_mapping.end()) {
+                    version = iter->second->version();
+                }
+                req_info->set_statis_version(version);
+
                 if (index_id == info_pair.second->id) {
                     req_info->set_version(info_pair.second->version);
                 } 
@@ -240,9 +248,7 @@ void NetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatRespons
     for (auto& info : response.schema_change_info()) {
         factory->update_table(info);
     }
-
     factory->update_regions(response.region_change_info());
-
     if (response.has_idc_info()) {
         factory->update_idc(response.idc_info());
     }
@@ -250,7 +256,9 @@ void NetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatRespons
         factory->update_user(info);
     }
     factory->update_show_db(response.db_info());
-
+    if (response.statistics().size() > 0) {
+        factory->update_statistics(response.statistics());
+    }
     if (response.has_last_updated_index() && 
         response.last_updated_index() > factory->last_updated_index()) {
         factory->set_last_updated_index(response.last_updated_index());
@@ -269,6 +277,9 @@ void NetworkServer::process_heart_beat_response_sync(const pb::BaikalHeartBeatRe
         factory->update_user(info);
     }
     factory->update_show_db(response.db_info());
+    if (response.statistics().size() > 0) {
+        factory->update_statistics(response.statistics());
+    }
 
     factory->update_regions_double_buffer_sync(response.region_change_info());
     if (response.has_last_updated_index() && 

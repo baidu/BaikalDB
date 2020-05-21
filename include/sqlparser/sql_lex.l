@@ -135,6 +135,7 @@ LOCK { return LOCK; }
 LONGBLOB { return LONGBLOB; }
 LONGTEXT { return LONGTEXT; }
 LOW_PRIORITY { return LOW_PRIORITY; }
+MATCH {return MATCH; }
 MAXVALUE { return MAXVALUE; }
 MEDIUMBLOB { return MEDIUMBLOB; }
 MEDIUMINT { return MEDIUMINT; }
@@ -217,6 +218,7 @@ NATURAL { return NATURAL; }
 
 ACTION { un_reserved_keyword(yylval, yyscanner, parser); return ACTION; /* The following tokens belong to UnReservedKeyword. */}
 AFTER { un_reserved_keyword(yylval, yyscanner, parser); return AFTER; }
+AGAINST {un_reserved_keyword(yylval, yyscanner, parser); return AGAINST; }
 ALWAYS { un_reserved_keyword(yylval, yyscanner, parser); return ALWAYS; }
 ALGORITHM { un_reserved_keyword(yylval, yyscanner, parser); return ALGORITHM; }
 ANY { un_reserved_keyword(yylval, yyscanner, parser); return ANY; }
@@ -285,6 +287,7 @@ INDEXES { un_reserved_keyword(yylval, yyscanner, parser); return INDEXES; }
 INVOKER { un_reserved_keyword(yylval, yyscanner, parser); return INVOKER; }
 JSON { un_reserved_keyword(yylval, yyscanner, parser); return JSON; }
 KEY_BLOCK_SIZE { un_reserved_keyword(yylval, yyscanner, parser); return KEY_BLOCK_SIZE; }
+LANGUAGE { un_reserved_keyword(yylval, yyscanner, parser); return LANGUAGE; }
 LOCAL { un_reserved_keyword(yylval, yyscanner, parser); return LOCAL; }
 LESS { un_reserved_keyword(yylval, yyscanner, parser); return LESS; }
 LEVEL { un_reserved_keyword(yylval, yyscanner, parser); return LEVEL; }

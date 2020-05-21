@@ -40,6 +40,7 @@ DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:
 DEFINE_int32(service_lock_concurrency, 40, "service_write concurrency, default:40");
 DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
 DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
+DEFINE_int64(incremental_info_gc_time, 600 * 1000 * 1000, "time interval to clear incremental info");
 DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
@@ -332,6 +333,39 @@ void stripslashes(std::string& str) {
         }
     }
     str.resize(slow);
+}
+
+void update_schema_conf_common(const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf) {
+        const google::protobuf::Reflection* src_reflection = schema_conf.GetReflection();
+        const google::protobuf::Descriptor* src_descriptor = schema_conf.GetDescriptor();
+        const google::protobuf::Reflection* dst_reflection = p_conf->GetReflection();
+        const google::protobuf::Descriptor* dst_descriptor = p_conf->GetDescriptor();
+        const google::protobuf::FieldDescriptor* src_field = nullptr;
+        const google::protobuf::FieldDescriptor* dst_field = nullptr;
+
+        std::vector<const google::protobuf::FieldDescriptor*> src_field_list;
+        src_reflection->ListFields(schema_conf, &src_field_list);
+        for (int i = 0; i < src_field_list.size(); ++i) {
+            src_field = src_field_list[i];
+            if (src_field == nullptr) {
+                continue;
+            }
+            dst_field = dst_descriptor->FindFieldByName(src_field->name());
+            if (dst_field == nullptr) {
+                continue;
+            }
+            bool src_bool_value = src_reflection->GetBool(schema_conf, src_field);
+            bool dst_bool_value = false;
+            bool has_dst_field = dst_reflection->HasField(*p_conf, dst_field);
+            if (has_dst_field) {
+                dst_bool_value = dst_reflection->GetBool(*p_conf, dst_field);
+            }
+
+            if (src_bool_value != dst_bool_value) {
+                DB_WARNING("schema conf name:%s changed %d => %d", src_field->name().c_str(), dst_bool_value, src_bool_value);
+            }
+            dst_reflection->SetBool(p_conf, dst_field, src_bool_value);
+        }
 }
 
 int primitive_to_proto_type(pb::PrimitiveType type) {
