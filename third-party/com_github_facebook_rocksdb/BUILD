@@ -183,7 +183,6 @@ cc_library(
 	"tools/trace_analyzer_tool.cc",
 	"trace_replay/trace_replay.cc",
 	"trace_replay/block_cache_tracer.cc",
-	"util/build_version.cc",
 	"util/coding.cc",
 	"util/compaction_job_stats_impl.cc",
 	"util/comparator.cc",
