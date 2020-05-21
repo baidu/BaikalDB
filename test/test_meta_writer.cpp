@@ -63,6 +63,17 @@ TEST_F(MetaWriterTest, test_encode) {
     int64_t num_table_lines = _writer->read_num_table_lines(region_id);
     ASSERT_EQ(0, num_table_lines);
 
+    //write_doing_snapshot
+    ret = _writer->write_doing_snapshot(region_id);
+    ASSERT_EQ(0, ret);
+
+    ret = _writer->read_doing_snapshot(region_id);
+    ASSERT_EQ(0, ret);
+    //
+    std::set<int64_t> region_ids;
+    ret = _writer->parse_doing_snapshot(region_ids);
+    ASSERT_EQ(1, region_ids.size());
+
     //update_region_info
     region_info.set_version(2);
     ret = _writer->update_region_info(region_info);
@@ -118,7 +129,8 @@ TEST_F(MetaWriterTest, test_encode) {
         ASSERT_EQ(ret, 0);
     }
     //parse_txn_log_indexs
-    std::set<int64_t> log_indexs;
+    //std::set<int64_t> log_indexs;
+    std::unordered_map<uint64_t, int64_t> log_indexs;
     ret = _writer->parse_txn_log_indexs(region_id, log_indexs);
     ASSERT_EQ(ret, 0);
     ASSERT_EQ(2, log_indexs.size());
@@ -128,9 +140,9 @@ TEST_F(MetaWriterTest, test_encode) {
         baikaldb::pb::StoreReq txn;
         txn.set_op_type(baikaldb::pb::OP_PREPARE);
         txn.set_region_id(region_id);
-        txn.set_region_version(log_index);
+        txn.set_region_version(log_index.second);
         batch.Put(_writer->get_handle(), 
-                _writer->transcation_pb_key(region_id, 1, log_index), 
+                _writer->transcation_pb_key(region_id, 1, log_index.second), 
                 _writer->encode_transcation_pb_value(txn));
     }    
     ret = _writer->write_batch(&batch, region_id);
@@ -154,7 +166,7 @@ TEST_F(MetaWriterTest, test_encode) {
 
     log_indexs.clear();
     prepared_txn_infos.clear();
-    ret = _writer->parse_txn_log_indexs(region_id, log_indexs);
+    //ret = _writer->parse_txn_log_indexs(region_id, log_indexs);
     ASSERT_EQ(ret, 0);
     ASSERT_EQ(0, log_indexs.size());
 

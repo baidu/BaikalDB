@@ -43,8 +43,9 @@ public:
     }
     virtual int init(const pb::PlanNode& node);
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
+    // TODO 索引条件下推后续也不需要做
     bool need_pushdown(ExprNode* expr);
-    virtual int index_condition_pushdown();
+    int index_condition_pushdown();
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
@@ -78,18 +79,13 @@ public:
     const std::vector<int64_t>& index_ids() {
         return _index_ids;
     }
-    void set_covering_index(bool covering_index) {
-        _is_covering_index = covering_index;
-    }
-    bool covering_index() {
-        return _is_covering_index;
-    }
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos);
     int choose_index(RuntimeState* state);
+    int select_index_for_store();
 
 private:
     std::map<int32_t, FieldInfo*> _field_ids;
@@ -98,7 +94,6 @@ private:
     SchemaFactory* _factory = nullptr;
     int64_t _index_id = -1;
     int64_t _region_id;
-    bool _is_covering_index = true;
     bool _use_get = false;
 
     //record all used indices here (LIKE & MATCH may use multiple indices)
@@ -131,6 +126,7 @@ private:
     pb::RegionInfo*  _region_info;
     std::vector<IndexInfo> _reverse_infos;
     std::vector<std::string> _query_words;
+    std::vector<pb::MatchMode> _match_modes;
     std::vector<ReverseIndexBase*> _reverse_indexes;
     MutilReverseIndex<CommonSchema> _m_index;
     bool _bool_and = false;

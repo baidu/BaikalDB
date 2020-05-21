@@ -926,7 +926,7 @@ int StateMachine::_query_read_stmt_execute(SmartSocket sock) {
 
 bool StateMachine::_query_process(SmartSocket client) {
     TimeCost cost;
-    gettimeofday(&(client->query_ctx->stat_info.start_stamp), NULL);
+    //gettimeofday(&(client->query_ctx->stat_info.start_stamp), NULL);
 
     bool ret = true;
     auto command = client->query_ctx->mysql_cmd;
@@ -1489,7 +1489,6 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
     if (info.ttl_duration > 0) {
         oss << ", \"ttl_duration\":" << info.ttl_duration;
     }
-    oss << ", \"region_split_lines\":" << info.region_split_lines;
     if (info.dists.size() > 0) {
         oss << ", \"dists\": [";
         for (size_t i = 0; i < info.dists.size(); ++i) {
@@ -2821,7 +2820,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         return false;
     }
     client->query_ctx->stat_info.query_plan_time = cost.get_time();
-    if (client->query_ctx->is_print_plan) {
+    if (client->query_ctx->explain_type == SHOW_PLAN) {
         client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
         pb::Plan plan;
         ExecNode::create_pb_plan(0, &plan, client->query_ctx->root);

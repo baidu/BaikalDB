@@ -273,10 +273,22 @@ extern void hll_add(std::string* hll, uint64_t hash_value);
 extern uint64_t hll_estimate(const std::string& hll, bool* invalid);
 extern uint64_t hll_estimate(const ExprValue& hll);
 extern uint64_t hll_estimate(const std::string& hll);
-extern int hll_merge(uint8_t *max, std::string& hll);
+extern int hll_merge_agg(std::string& hll1, std::string& hll2);
+inline ExprValue& hll_merge_agg(ExprValue& hll1, ExprValue& hll2) {
+    hll_merge_agg(hll1.str_val, hll2.str_val);
+    return hll1;
+}
+inline int hll_merge_agg(std::string* hll1, std::string* hll2) {
+    return hll_merge_agg(*hll1, *hll2);
+}
 extern int hll_merge(std::string& hll1, std::string& hll2);
-extern ExprValue& hll_merge(ExprValue& hll1, ExprValue& hll2);
-extern void hll_merge(std::string* hll1, std::string* hll2);
+inline ExprValue& hll_merge(ExprValue& hll1, ExprValue& hll2) {
+    hll_merge(hll1.str_val, hll2.str_val);
+    return hll1;
+}
+inline int hll_merge(std::string* hll1, std::string* hll2) {
+    return hll_merge(*hll1, *hll2);
+}
 extern ExprValue hll_init();
 
 } // namespace hll

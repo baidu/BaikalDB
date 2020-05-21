@@ -49,7 +49,12 @@ public:
             expr->find_place_holder(placeholders);
         }
     }
-    void remove_primary_conjunct(int64_t index_id);
+    void modifiy_pruned_conjuncts_by_index(const std::unordered_set<ExprNode*>& other_condition) {
+        // 先清理，后续transfer pb会填充 _pruned_conjuncts
+        mutable_pb_node()->mutable_derive_node()->mutable_filter_node()->clear_conjuncts();
+        _pruned_conjuncts.clear();
+        _pruned_conjuncts.insert(_pruned_conjuncts.end(), other_condition.begin(), other_condition.end());
+    }
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 private:
     bool need_copy(MemRow* row);

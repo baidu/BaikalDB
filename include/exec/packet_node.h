@@ -18,6 +18,8 @@
 #include "mysql_wrapper.h"
 #include "exec_node.h"
 #include "data_buffer.h"
+#include "sorter.h"
+#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
 class PacketNode : public ExecNode {
@@ -52,6 +54,10 @@ public:
     }
 
 private:
+    int open_histogram(RuntimeState* state);
+    int open_cmsketch(RuntimeState* state);
+    int open_analyze(RuntimeState* state);
+    int open_trace(RuntimeState* state);
     int handle_trace(RuntimeState* state);
     int handle_explain(RuntimeState* state);
     int pack_ok(int num_affected_rows, NetworkSocket* client);

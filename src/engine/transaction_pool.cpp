@@ -15,6 +15,7 @@
 #include "transaction_pool.h"
 #include <gflags/gflags.h>
 #include <boost/algorithm/string.hpp>
+#include "region.h"
 
 namespace baikaldb {
 //DECLARE_int32(rocks_transaction_expiration_ms);
@@ -64,7 +65,9 @@ void TransactionPool::remove_txn(uint64_t txn_id) {
     if (_txn_map.count(txn_id) == 0) {
         return;
     }
-    (*_finished_txn_map.read())[txn_id] = _txn_map[txn_id]->dml_num_affected_rows;
+    if (!_txn_map[txn_id]->is_rolledback()) {
+        (*_finished_txn_map.read())[txn_id] = _txn_map[txn_id]->dml_num_affected_rows;
+    }
     //DB_WARNING("txn_removed: %p, %lu", txn, txn->GetName().c_str());
     _txn_map.erase(txn_id);
     _txn_count--;
@@ -105,6 +108,33 @@ void TransactionPool::clear_transactions(int32_t clear_delay_ms) {
         }
     }
     return;
+}
+
+void TransactionPool::on_leader_start_rollback(Region* region) {
+    std::unique_lock<std::mutex> lock(_map_mutex);
+    std::map<uint64_t, SmartTransaction> rollback_txns;
+    for (auto iter : _txn_map) {
+        auto& txn = iter.second;
+        if (txn->is_finished()) {
+            continue;
+        }
+        if (!txn->is_prepared() && !txn->prepare_apply()) {
+            DB_WARNING("TransactionNote: txn %s need rollback due to leader transfer seq_id:%d",
+                txn->get_txn()->GetName().c_str(), txn->seq_id());
+            rollback_txns[txn->txn_id()] = txn;
+        }
+    }
+    if (rollback_txns.size() > 0) {
+        // 异步执行,释放raft线程
+        auto replay_last_log_fun = [region, rollback_txns] {
+            region->rollback_when_leader_start(rollback_txns);
+            region->leader_start();
+        };
+        Bthread bth;
+        bth.run(replay_last_log_fun);
+    } else {
+        region->leader_start();
+    }
 }
 
 // rollback ALL un-prepared transactions when raft on_leader_stop callback is called

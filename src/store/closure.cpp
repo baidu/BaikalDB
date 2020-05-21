@@ -25,7 +25,7 @@ void DMLClosure::Run() {
         leader = region->get_leader();
     }
     uint64_t log_id = 0;
-    if (cntl->has_log_id()) { 
+    if (cntl != nullptr && cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
     if (!status().ok()) {
@@ -44,7 +44,12 @@ void DMLClosure::Run() {
                     butil::endpoint2str(leader).c_str(), 
                     log_id);
     }
-    done->Run();
+    if (is_leader_start) {
+        leader_start_opt_cond->decrease_signal();
+    }
+    if (done) {
+        done->Run();
+    }
     if (region != nullptr && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
         region->update_average_cost(cost.get_time());
     }

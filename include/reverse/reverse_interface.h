@@ -93,7 +93,7 @@ public:
                     ReverseNode& to, 
                     const ReverseNode& from, 
                     BoolArg* arg) {
-        to.set_weight(std::max(to.weight(), from.weight()));
+        to.set_weight(to.weight() + from.weight());
         return 0;
     }
     static int merge_weight(
@@ -104,7 +104,7 @@ public:
     }
     //search_data 字符串格式
     //"hello world"
-    int create_executor(const std::string& search_data, pb::SegmentType segment_type);
+    int create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type);
     int next(SmartRecord record);
     bool_executor_type executor_type = NODE_NOT_COPY;
     void set_term(const std::string& term, Parser* parse) {
@@ -162,7 +162,7 @@ public:
     //              {"and" : ["term1", "term2"], "weight" : ["term1", "term3"]}
     //          ]
     //  }
-    int create_executor(const std::string& search_data, pb::SegmentType segment_type);
+    int create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type);
     bool valid();
     int next(SmartRecord record);
     bool_executor_type executor_type = NODE_COPY;

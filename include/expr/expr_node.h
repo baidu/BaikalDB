@@ -171,6 +171,16 @@ public:
         return false;
     }
 
+    void flatten_or_expr(std::vector<ExprNode*>* or_exprs) {
+        if (node_type() != pb::OR_PREDICATE) {
+            or_exprs->push_back(this);
+            return;
+        }
+        for (auto c : _children) {
+            c->flatten_or_expr(or_exprs);
+        }
+    }
+
     virtual void transfer_pb(pb::ExprNode* pb_node);
     static void create_pb_expr(pb::Expr* expr, ExprNode* root);
     static int create_tree(const pb::Expr& expr, ExprNode** root);
@@ -179,6 +189,7 @@ public:
     }
     void get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids);
     void get_all_slot_ids(std::unordered_set<int32_t>& slot_ids);
+    void get_all_field_ids(std::unordered_set<int32_t>& field_ids);
 protected:
     pb::ExprNodeType _node_type;
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;

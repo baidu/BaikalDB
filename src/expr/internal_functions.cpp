@@ -283,6 +283,15 @@ ExprValue length(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue bit_length(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::UINT32);
+    tmp._u.uint32_val = input[0].get_string().size() * 8;
+    return tmp;
+}
+
 ExprValue lower(const std::vector<ExprValue>& input) {
     if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
@@ -408,6 +417,236 @@ ExprValue right(const std::vector<ExprValue>& input) {
     }
     tmp.str_val = input[0].str_val;
     tmp.str_val = tmp.str_val.substr(pos);
+    return tmp;
+}
+
+ExprValue trim(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = input[0].str_val;
+    tmp.str_val.erase(0, tmp.str_val.find_first_not_of(" "));
+    tmp.str_val.erase(tmp.str_val.find_last_not_of(" ") + 1); 
+
+    return tmp;
+}
+
+ExprValue ltrim(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = input[0].str_val;
+    tmp.str_val.erase(0, tmp.str_val.find_first_not_of(" "));
+
+    return tmp;
+}
+
+ExprValue rtrim(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = input[0].str_val;
+    tmp.str_val.erase(tmp.str_val.find_last_not_of(" ") + 1); 
+
+    return tmp;
+}
+
+ExprValue concat_ws(const std::vector<ExprValue>& input) {
+    if (input.size() < 2) {
+        return ExprValue::Null();
+    }
+
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+
+    ExprValue tmp(pb::STRING);
+
+    bool first_push = false;
+    for (int i = 1; i < input.size(); i++) {
+        if (!input[i].is_null()) {
+            if (!first_push) {
+                first_push = true;
+                tmp.str_val = input[i].get_string();
+            } else {
+                tmp.str_val += input[0].get_string() + input[i].get_string();
+            }
+        }
+    }
+
+    if (!first_push) {
+        return ExprValue::Null();
+    }
+
+    return tmp;
+}
+
+ExprValue ascii(const std::vector<ExprValue>& input) {
+    if (input.size() < 1) {
+        return ExprValue::Null();
+    }
+
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+
+    ExprValue tmp(pb::INT32);
+
+    if (input[0].str_val.empty()) {
+        tmp._u.int32_val = 0;
+    } else {
+        tmp._u.int32_val = static_cast<int32_t>(input[0].str_val[0]);
+    }
+
+    return tmp;
+}
+
+ExprValue strcmp(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+
+    ExprValue tmp(pb::INT32);
+    
+    int64_t ret = input[0].compare(input[1]);
+    if (ret < 0) {
+        tmp._u.int32_val = -1;
+    } else if (ret > 0) {
+        tmp._u.int32_val = 1;
+    } else {
+        tmp._u.int32_val = 0;
+    }
+
+    return tmp;
+}
+
+ExprValue insert(const std::vector<ExprValue>& input) {
+    if (input.size() != 4) {
+        return ExprValue::Null();
+    }
+
+    for (auto s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+
+    int pos = input[1].get_numberic<int>();
+    if (pos < 0) {
+        return input[0];
+    }
+
+    int len = input[2].get_numberic<int>();
+    if (len <= 0) {
+        return input[0];
+    }
+
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = input[0].str_val;
+    tmp.str_val.replace(pos, len, input[2].str_val);
+    
+    return tmp;
+}
+
+ExprValue replace(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+
+    if (input[1].str_val.empty()) {
+        return input[0];
+    }
+
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = input[0].str_val;
+
+    for (auto pos = 0; pos != std::string::npos; pos += input[2].str_val.length()) {
+        pos = tmp.str_val.find(input[1].str_val, pos);
+        if (pos != std::string::npos) {
+            tmp.str_val.replace(pos, input[1].str_val.length(), input[2].str_val);
+        } else {
+            break;
+        }
+    }
+
+    return tmp;
+}
+
+ExprValue repeat(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+
+    int len = input[1].get_numberic<int>();
+    if (len <= 0) {
+        return ExprValue::Null();
+    }
+
+    std::string val = input[0].get_string();
+    ExprValue tmp(pb::STRING);
+    tmp.str_val.reserve(val.size() * len);
+
+    for (int i = 0; i < len; i++) {
+        tmp.str_val += val;
+    }
+
+    return tmp;
+}
+
+ExprValue reverse(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+
+    if (input[0].is_null()) {
+        return ExprValue::Null();
+    }
+
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = input[0].get_string();
+    std::reverse(tmp.str_val.begin(), tmp.str_val.end());
+
+    return tmp;
+}
+
+ExprValue locate(const std::vector<ExprValue>& input) {
+    if (input.size() < 2 || input.size() > 3) {
+        return ExprValue::Null();
+    }
+
+    for (auto s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+
+    int begin_pos = 0;
+    if (input.size() == 3) {
+        begin_pos = input[2].get_numberic<int>();
+    }
+    
+    ExprValue tmp(pb::INT32);
+    auto pos = input[1].str_val.find(input[0].str_val, begin_pos);
+    if (pos != std::string::npos) {
+        tmp._u.int32_val = pos;
+    } else {
+        tmp._u.int32_val = 0;
+    }
+
     return tmp;
 }
 
@@ -549,6 +788,7 @@ ExprValue hll_merge(const std::vector<ExprValue>& input) {
     }
     return input[0];
 }
+
 ExprValue hll_estimate(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();

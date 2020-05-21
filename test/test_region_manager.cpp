@@ -19,7 +19,10 @@
 #include "namespace_manager.h"
 #include "database_manager.h"
 #include "meta_rocksdb.h"
-
+#include <gflags/gflags.h>
+namespace baikaldb {
+    DECLARE_string(db_path);
+}
 class TestManagerTest : public testing::Test {
 public:
     ~TestManagerTest() {}
@@ -211,7 +214,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("username");
     index->add_field_names("type");
-    _table_manager->create_table(request_create_table_fc, NULL);
+    _table_manager->create_table(request_create_table_fc, 1, NULL);
     
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
@@ -327,7 +330,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("planname");
     index->add_field_names("type");
-    _table_manager->create_table(request_create_table_fc_level, NULL);
+    _table_manager->create_table(request_create_table_fc_level, 2, NULL);
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
     ASSERT_EQ(4, _table_manager->_max_table_id);
@@ -418,21 +421,22 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     //add region
     baikaldb::pb::MetaManagerRequest request_update_region_feed;
     request_update_region_feed.set_op_type(baikaldb::pb::OP_UPDATE_REGION);
-    request_update_region_feed.mutable_region_info()->set_region_id(1);
-    request_update_region_feed.mutable_region_info()->set_table_id(1);
-    request_update_region_feed.mutable_region_info()->set_table_name("userinfo");
-    request_update_region_feed.mutable_region_info()->set_partition_id(0);
-    request_update_region_feed.mutable_region_info()->set_replica_num(3);
-    request_update_region_feed.mutable_region_info()->set_version(1);
-    request_update_region_feed.mutable_region_info()->set_conf_version(1);
-    request_update_region_feed.mutable_region_info()->add_peers("127.0.0.1:8010");
-    request_update_region_feed.mutable_region_info()->add_peers("127.0.0.1:8011");
-    request_update_region_feed.mutable_region_info()->add_peers("127.0.0.1:8012");
-    request_update_region_feed.mutable_region_info()->set_leader("127.0.0.1:8010");
-    request_update_region_feed.mutable_region_info()->set_status(baikaldb::pb::IDLE);
-    request_update_region_feed.mutable_region_info()->set_used_size(1024);
-    request_update_region_feed.mutable_region_info()->set_log_index(1);
-    _region_manager->update_region(request_update_region_feed, NULL);
+    auto region_info = request_update_region_feed.add_region_infos();
+    region_info->set_region_id(1);
+    region_info->set_table_id(1);
+    region_info->set_table_name("userinfo");
+    region_info->set_partition_id(0);
+    region_info->set_replica_num(3);
+    region_info->set_version(1);
+    region_info->set_conf_version(1);
+    region_info->add_peers("127.0.0.1:8010");
+    region_info->add_peers("127.0.0.1:8011");
+    region_info->add_peers("127.0.0.1:8012");
+    region_info->set_leader("127.0.0.1:8010");
+    region_info->set_status(baikaldb::pb::IDLE);
+    region_info->set_used_size(1024);
+    region_info->set_log_index(1);
+    _region_manager->update_region(request_update_region_feed, 3, NULL);
     ASSERT_EQ(1, _region_manager->_region_info_map.size());
     ASSERT_EQ(3, _region_manager->_instance_region_map.size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8010"].size());
@@ -442,16 +446,16 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8011"][1].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8012"][1].size());
     ASSERT_EQ(1, _region_manager->_region_info_map[1]->conf_version());
-    for (auto& region_info : _region_manager->_region_info_map) {
-        DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _region_manager->_region_info_map) {
+    //    DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
+    //}
     ASSERT_EQ(1, _table_manager->_table_info_map[1].partition_regions[0].size());
     //update region
-    request_update_region_feed.mutable_region_info()->clear_peers();
-    request_update_region_feed.mutable_region_info()->add_peers("127.0.0.1:8020");
-    request_update_region_feed.mutable_region_info()->add_peers("127.0.0.1:8021");
-    request_update_region_feed.mutable_region_info()->add_peers("127.0.0.1:8022");
-    _region_manager->update_region(request_update_region_feed, NULL);
+    region_info->clear_peers();
+    region_info->add_peers("127.0.0.1:8020");
+    region_info->add_peers("127.0.0.1:8021");
+    region_info->add_peers("127.0.0.1:8022");
+    _region_manager->update_region(request_update_region_feed, 4, NULL);
     ASSERT_EQ(1, _region_manager->_region_info_map.size());
     ASSERT_EQ(6, _region_manager->_instance_region_map.size());
     ASSERT_EQ(0, _region_manager->_instance_region_map["127.0.0.1:8010"].size());
@@ -467,9 +471,9 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8021"][1].size());
     ASSERT_EQ(1, _region_manager->_instance_region_map["127.0.0.1:8022"][1].size());
     ASSERT_EQ(2, _region_manager->_region_info_map[1]->conf_version());
-    for (auto& region_info : _region_manager->_region_info_map) {
-        DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _region_manager->_region_info_map) {
+    //    DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
+    //}
     _schema_manager->load_snapshot();
     for (auto& table_mem : _table_manager->_table_info_map) {
         DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
@@ -487,9 +491,9 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
             }   
         }
     }
-    for (auto& region_info : _region_manager->_region_info_map) {
-        DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _region_manager->_region_info_map) {
+    //    DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
+    //}
     //split_region
     baikaldb::pb::MetaManagerRequest split_region_request;
     split_region_request.set_op_type(baikaldb::pb::OP_SPLIT_REGION);
@@ -503,7 +507,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     baikaldb::pb::MetaManagerRequest drop_region_request;
     drop_region_request.set_op_type(baikaldb::pb::OP_DROP_REGION);
     drop_region_request.add_drop_region_ids(1);
-    _region_manager->drop_region(drop_region_request, NULL);
+    _region_manager->drop_region(drop_region_request, 5, NULL);
     ASSERT_EQ(0, _region_manager->_region_info_map.size());
     ASSERT_EQ(0, _region_manager->_region_state_map.size());
     ASSERT_EQ(0, _region_manager->_instance_region_map.size());
@@ -525,11 +529,12 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
             }   
         }
     }
-    for (auto& region_info : _region_manager->_region_info_map) {
-        DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
-    }
+    //for (auto& region_info : _region_manager->_region_info_map) {
+    //    DB_WARNING("region_id: %ld", region_info.first, region_info.second->ShortDebugString().c_str());
+    //}
 } // TEST_F
 int main(int argc, char** argv) {
+    baikaldb::FLAGS_db_path = "region_manager_db";
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

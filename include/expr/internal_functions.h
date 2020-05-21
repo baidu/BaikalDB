@@ -42,6 +42,7 @@ ExprValue least(const std::vector<ExprValue>& input);
 ExprValue pow(const std::vector<ExprValue>& input);
 //string functions
 ExprValue length(const std::vector<ExprValue>& input);
+ExprValue bit_length(const std::vector<ExprValue>& input);
 ExprValue lower(const std::vector<ExprValue>& input);
 ExprValue lower_gbk(const std::vector<ExprValue>& input);
 ExprValue upper(const std::vector<ExprValue>& input);
@@ -49,6 +50,18 @@ ExprValue concat(const std::vector<ExprValue>& input);
 ExprValue substr(const std::vector<ExprValue>& input);
 ExprValue left(const std::vector<ExprValue>& input);
 ExprValue right(const std::vector<ExprValue>& input);
+ExprValue trim(const std::vector<ExprValue>& input);
+ExprValue ltrim(const std::vector<ExprValue>& input);
+ExprValue rtrim(const std::vector<ExprValue>& input);
+ExprValue concat_ws(const std::vector<ExprValue>& input);
+ExprValue ascii(const std::vector<ExprValue>& input);
+ExprValue strcmp(const std::vector<ExprValue>& input);
+ExprValue insert(const std::vector<ExprValue>& input);
+ExprValue replace(const std::vector<ExprValue>& input);
+ExprValue repeat(const std::vector<ExprValue>& input);
+ExprValue reverse(const std::vector<ExprValue>& input);
+ExprValue locate(const std::vector<ExprValue>& input);
+
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);
 ExprValue from_unixtime(const std::vector<ExprValue>& input);

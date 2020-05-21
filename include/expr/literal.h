@@ -173,7 +173,7 @@ public:
     }
 
     virtual ExprValue get_value(MemRow* row) {
-        return _value;
+        return _value.cast_to(_col_type);
     }
 
 private:

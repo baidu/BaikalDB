@@ -119,6 +119,10 @@ int SelectPlanner::plan() {
 }
 
 bool SelectPlanner::is_full_export() {
+    //代价信息统计时不走full export流程
+    if (_ctx->explain_type != EXPLAIN_NULL) {
+        return false;
+    }
     if (_select->where != nullptr) {
         return false;
     } 
@@ -281,6 +285,7 @@ void SelectPlanner::add_single_table_columns(TableInfo* table_info) {
         node->set_num_children(0);
         node->mutable_derive_node()->set_tuple_id(slot.tuple_id()); //TODO
         node->mutable_derive_node()->set_slot_id(slot.slot_id());
+        node->mutable_derive_node()->set_field_id(slot.field_id());
 
         std::string& select_name = items[items.size() - 1];
         _select_exprs.push_back(select_expr);

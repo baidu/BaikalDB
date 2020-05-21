@@ -199,11 +199,12 @@ int ReverseIndex<Schema>::search(
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
+                       pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast) {
     BooleanExecutorBase* exe = nullptr;
     TimeCost time;
-    int ret = create_executor(txn, index_info, table_info, search_data, conjuncts, exe, is_fast);
+    int ret = create_executor(txn, index_info, table_info, search_data, mode, conjuncts, exe, is_fast);
     if (ret < 0) {
         return -1;
     }
@@ -290,6 +291,7 @@ int ReverseIndex<Schema>::create_executor(
                             const IndexInfo& index_info,
                             const TableInfo& table_info,
                             const std::string& search_data, 
+                            pb::MatchMode mode,
                             std::vector<ExprNode*> conjuncts, 
                             BooleanExecutorBase*& exe,
                             bool is_fast) {
@@ -299,7 +301,7 @@ int ReverseIndex<Schema>::create_executor(
     timer.reset();
     _schema->set_index_info(index_info);
     _schema->set_table_info(table_info);
-    int ret = _schema->create_executor(search_data, _segment_type);
+    int ret = _schema->create_executor(search_data, mode, _segment_type);
     _schema->statistic().bool_engine_time += timer.get_time();
     if (ret < 0) {
         DB_WARNING("create_executor fail, region:%ld, index:%ld", _region_id, _index_id);
@@ -704,6 +706,7 @@ int MutilReverseIndex<Schema>::search(
                        const TableInfo& table_info,
                        const std::vector<ReverseIndexBase*>& reverse_indexes,
                        const std::vector<std::string>& search_datas,
+                       const std::vector<pb::MatchMode>& modes,
                        bool is_fast, bool bool_or) {
     uint32_t son_size = reverse_indexes.size();
     if (son_size == 0) {
@@ -718,7 +721,7 @@ int MutilReverseIndex<Schema>::search(
     _son_exe_vec.resize(son_size);
     bool type_init = false; 
     for (int i = 0; i < son_size; ++i) {
-        reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i],
+        reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i], modes[i],
         std::vector<ExprNode*>(), _son_exe_vec[i], is_fast);
         if (!type_init && _son_exe_vec[i]) {
             type = ((BooleanExecutor<Schema>*)_son_exe_vec[i])->get_type();

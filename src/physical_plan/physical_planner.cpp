@@ -15,6 +15,9 @@
 #include "physical_planner.h"
 
 namespace baikaldb {
+DEFINE_int32(cmsketch_depth, 20, "cmsketch_depth");
+DEFINE_int32(cmsketch_width, 50, "cmsketch_width");
+DEFINE_int32(sample_rows, 1000000, "sample rows 100w");
 int PhysicalPlanner::analyze(QueryContext* ctx) {
     int ret = 0;
     auto return_empty_func = [ctx]() {
@@ -95,6 +98,31 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     return 0;
 }
 
+int64_t PhysicalPlanner::get_table_rows(QueryContext* ctx) {
+    int64_t table_id = 0;
+    if (ctx->get_tuple_desc(0)->has_table_id()) {
+        table_id = ctx->get_tuple_desc(0)->table_id();
+    } else {
+        return -1;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    TableInfo info = factory->get_table_info(table_id);
+    pb::QueryRequest req;
+    req.set_op_type(pb::QUERY_TABLE_FLATTEN);
+    req.set_namespace_name(info.namespace_);
+    req.set_database(ctx->cur_db);
+    req.set_table_name(info.short_name);
+    pb::QueryResponse res;
+    MetaServerInteract::get_instance()->send_request("query", req, res);
+    int64_t row_count = -1;
+    if (res.flatten_tables_size() == 1) {
+        row_count = res.flatten_tables(0).row_count();
+    }
+    DB_WARNING("table_id:%ld, namespace:%s, db:%s, table:%s, row_count:%ld", 
+        table_id, info.namespace_.c_str(), ctx->cur_db.c_str(), info.short_name.c_str(), row_count);
+    return row_count;
+}
+
 int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     int ret = 0;
     RuntimeState& state = ctx->runtime_state;
@@ -105,6 +133,18 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
          ctx->stat_info.error_code = state.error_code;
         return ret;
     }
+    state.explain_type = ctx->explain_type;
+    if (state.explain_type == ANALYZE_STATISTICS) {
+        //如果为analyze模式需要初始化cmsketch
+        state.cmsketch = std::make_shared<CMsketch>(FLAGS_cmsketch_depth, FLAGS_cmsketch_width);
+        state.cmsketch->set_sample_rows(FLAGS_sample_rows);
+        //为了获取准确的行数，给meta发请求
+        int64_t table_rows = get_table_rows(ctx);
+        if (table_rows < 0) {
+            return -1;
+        }
+        state.cmsketch->set_table_rows(table_rows);
+    }
     if (ctx->is_trace) {
         ctx->trace_node.set_node_type(ctx->root->node_type());
         ctx->root->set_trace(&ctx->trace_node);
@@ -113,7 +153,7 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     
     ret = ctx->root->open(&state);
     if (ctx->root->get_trace() != nullptr) {
-        DB_WARNING("execute:%s", ctx->root->get_trace()->DebugString().c_str());
+        DB_WARNING("execute:%s", ctx->root->get_trace()->ShortDebugString().c_str());
     }
     ctx->root->close(&state);
     if (ret < 0) {

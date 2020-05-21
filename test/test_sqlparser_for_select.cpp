@@ -86,6 +86,81 @@ TEST(test_parser, case_option) {
     {
         parser::SqlParser parser;
         //select distict
+        std::string sql_case = "select match (a,b) against ('x') ;";
+        parser.parse(sql_case);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("match_against"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select match (a,b) against ('x' in natural language mode) ;";
+        parser.parse(sql_case);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("match_against"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select match (a,b) against ('x' in boolean mode) ;";
+        parser.parse(sql_case);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("match_against"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
         std::string sql_case = "select case adgroup_id when 1378428934 "
                 "then 'true' else 'false' end from ideacontent limit 10";
         parser.parse(sql_case);
@@ -106,6 +181,9 @@ TEST(test_parser, case_option) {
         }
         ASSERT_TRUE(func_expr->children.size() == 4);
         std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     }
     {
         parser::SqlParser parser;
@@ -128,6 +206,9 @@ TEST(test_parser, case_option) {
             std::cout << func_expr->children[i]->to_string() << std::endl;
         }
         std::cout << select_stmt->to_string() << std::endl;
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     } 
     {
         parser::SqlParser parser;
@@ -149,6 +230,9 @@ TEST(test_parser, case_option) {
         for (auto i = 0; i < func_expr->children.size(); ++i) {
             std::cout << func_expr->children[i]->to_string() << std::endl;
         }
+        std::cout << select_stmt->to_string() << std::endl;
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
         std::cout << select_stmt->to_string() << std::endl;
     } 
     {
@@ -777,6 +861,9 @@ TEST(test_parser, case_where) {
         ASSERT_TRUE(select_stmt->limit != nullptr);
         ASSERT_TRUE(select_stmt->lock == parser::SL_IN_SHARE);
         ASSERT_TRUE(select_stmt->where != nullptr);
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     }
 }
 TEST(test_parser, case_group) {
@@ -2202,6 +2289,9 @@ TEST(test_parser, case_table_refs) {
         ASSERT_TRUE(std::string(right_join_node_left->table_name->table.value) == "table_b");
         ASSERT_TRUE(right_join_node_left->as_name.value == nullptr);
         ASSERT_TRUE(right_join_node_left->index_hints.size() == 0);
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     }
     {
         parser::SqlParser parser;

@@ -4,6 +4,7 @@ import "common.proto";
 import "raft.proto";
 import "plan.proto";
 import "optype.proto";
+import "statistics.proto";
 import "meta.interface.proto";
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
@@ -40,6 +41,13 @@ message KvOp {
     optional int64     ttl_timestamp_us = 4;
 };
 
+message AnalyzeInfo {
+    required int32     depth   = 1;
+    required int32     width   = 2;
+    required int32     sample_rows = 3;
+    required int64     table_rows  = 4;     
+};
+
 message StoreReq {
     required OpType op_type         = 1;  //对表的操作类型
     repeated TupleDescriptor tuples = 2;
@@ -63,6 +71,7 @@ message StoreReq {
     optional int64   num_increase_rows = 20;
     repeated KvOp          kv_ops   = 21; //kv op
     optional bool  is_trace         = 22;
+    optional AnalyzeInfo   analyze_info = 23;
 };
 
 message RowValue {
@@ -95,8 +104,8 @@ message StoreRes {
     optional bool  is_merge        = 14;//fetch node use it when error code is VERSION_OLD
     repeated IndexRecords  records        = 15;
     optional int64  scan_rows     = 16;
+    optional CMsketch cmsketch    = 17;
 };
-
 message InitRegion {
     required RegionInfo region_info     = 1;
     optional SchemaInfo schema_info     = 2;
@@ -118,6 +127,7 @@ message RegionIds {
     repeated int64  region_ids      = 1; // if size = 0, it will compact the entire db
     optional bool compact_raft_log  = 2; // if true, compact raft log
     optional int64  table_id        = 3; // use for restore region
+    optional int32  compact_type    = 4; //  1:data_cf 2:meta_cf 3:raft_log_cf
 };
 
 message BackUpReq {

@@ -6,11 +6,11 @@ echo -e "\n"
 curl -d '{
     "op_type":"OP_UPDATE_SCHEMA_CONF",
     "table_info": {
-        "table_name": "region_merge_not_sep",
-        "database": "TEST",
-        "namespace_name": "TEST",
+        "table_name": "recognized_clicker",
+        "database": "FC_Ganyu",
+        "namespace_name": "FENGCHAO",
         "schema_conf":{
-            "need_merge": false
+            "need_merge": true
         }
     }
 }' http://$1/MetaService/meta_manager

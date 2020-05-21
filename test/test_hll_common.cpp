@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <vector>
 #ifdef BAIDU_INTERNAL
 #include <pb_to_json.h>
 #else
@@ -51,11 +52,11 @@ TEST(test_hll, case_all) {
         for (int i = last; i < cnt; ++i) {
             ExprValue tmp(pb::INT64);
             tmp._u.int64_val = i;
-            hll_add(hll, tmp.hash(0x1111110));
+            hll_add(hll, tmp.hash());
         }
         last = cnt;
-        int64_t tmp = hll_estimate(hll);
-        //std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << tmp * 1.0 / cnt << std::endl;
+        uint64_t tmp = hll_estimate(hll);
+        std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << tmp * 1.0 / cnt << std::endl;
         if (fabs(1-tmp * 1.0 / cnt) > max) {
             max = fabs(1-tmp * 1.0 / cnt);
         }
@@ -64,15 +65,37 @@ TEST(test_hll, case_all) {
         }
     }
     std::cout << "max:" << max << std::endl;
-    //stripslashes(str);
-    //std::cout << "new:" << str << std::endl;
-    //EXPECT_STREQ(str.c_str(), "\\%a\t");
+}
 
-    //std::string str2 = "abc";
-    //std::cout << "orgin:" << str2 << std::endl;
-    //stripslashes(str2);
-    //std::cout << "new:" << str2 << std::endl;
-    //EXPECT_STREQ(str2.c_str(), "abc");
+TEST(test_hll_performace, case_all) {
+    std::vector<ExprValue> vec;
+    for (int i = 0; i < 5; i++) {
+        ExprValue hll = hll_init();
+        for (int cnt = 0; cnt < 1000; cnt++) {
+            ExprValue tmp(pb::INT64);
+            tmp._u.int64_val = butil::fast_rand();
+            hll_add(hll, tmp.hash());
+        }
+        vec.push_back(hll);
+    }
+    {
+        ExprValue merge_hll = hll_init();
+        std::cout << "old:" << std::endl;
+        TimeCost cost;
+        for (int i = 0; i < vec.size(); i++) {
+            hll_merge(merge_hll, vec[i]);
+        }
+        std::cout << hll_estimate(merge_hll) << "cost:" << cost.get_time() << std::endl;
+    }
+    {
+        ExprValue merge_hll = hll_init();
+        std::cout << "new:" << std::endl;
+        TimeCost cost;
+        for (int i = 0; i < vec.size(); i++) {
+            hll_merge_agg(merge_hll, vec[i]);
+        }
+        std::cout << hll_estimate(merge_hll) << "cost:" << cost.get_time() << std::endl;
+    }
 }
 
 }

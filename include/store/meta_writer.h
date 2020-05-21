@@ -55,6 +55,7 @@ public:
     int write_batch(rocksdb::WriteBatch* updates, int64_t region_id);
     int write_meta_after_commit(int64_t region_id, int64_t num_table_lines, int64_t applied_index, uint64_t txn_id);
     int write_meta_before_prepared(int64_t region_id, int64_t log_index, uint64_t txn_id);
+    int get_meta_before_prepared(int64_t region_id, uint64_t txn_id);
 
     int ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id);
     

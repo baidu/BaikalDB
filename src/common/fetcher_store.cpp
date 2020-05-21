@@ -52,6 +52,16 @@ ErrorType FetcherStore::send_request(
     if (trace_node != nullptr) {
         req.set_is_trace(true);
     }
+    
+    if (state->explain_type == ANALYZE_STATISTICS) {
+        if (state->cmsketch != nullptr) {
+            pb::AnalyzeInfo* info = req.mutable_analyze_info();
+            info->set_depth(state->cmsketch->get_depth());
+            info->set_width(state->cmsketch->get_width());
+            info->set_sample_rows(state->cmsketch->get_sample_rows());
+            info->set_table_rows(state->cmsketch->get_table_rows());
+        }
+    }
     ScopeGuard auto_update_trace([&]() {
         if (trace_node != nullptr) {
             std::string desc = "baikalDB FetcherStore send_request " 
@@ -105,13 +115,13 @@ ErrorType FetcherStore::send_request(
     };
     // for exec next_statement_after_begin, begin must be added
     if (current_seq_id == 2 && state->single_sql_autocommit() == false) {
-        DB_WARNING("start seq id is reset to 1, region_id: %ld", region_id);
+        //DB_WARNING("start seq id is reset to 1, region_id: %ld", region_id);
         start_seq_id = 1;
     }
     {
         BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
         if (state->client_conn()->region_infos.count(region_id) == 0) {
-            //DB_WARNING("start seq id is reset to 1, region_id: %ld", region_id);
+            //DB_WARNING("start seq id is reset to 1, region_id: %ld log_id:%lu", region_id, log_id);
             start_seq_id = 1;    
         }
     }
@@ -153,7 +163,7 @@ ErrorType FetcherStore::send_request(
         for (auto& pair : client_conn->cache_plans) {
             //DB_WARNING("op_type: %d, pair.first:%d, start_seq_id:%d", op_type, pair.first, start_seq_id);
             auto& plan_item = pair.second;
-            if (pair.first < start_seq_id || pair.first >= current_seq_id) {
+            if (pair.first != 1 && (pair.first < start_seq_id || pair.first >= current_seq_id)) {
                 continue;
             }
             if (op_type == pb::OP_PREPARE && plan_item.op_type == pb::OP_PREPARE) {
@@ -162,9 +172,9 @@ ErrorType FetcherStore::send_request(
             if (plan_item.tuple_descs.size() > 0 && 
                 static_cast<DMLNode*>(plan_item.root)->global_index_id() != info.table_id()
                 && plan_item.op_type != pb::OP_BEGIN) {
-                DB_WARNING("TransactionNote: cache_item table_id mismatch,"
+                /*DB_WARNING("TransactionNote: cache_item table_id mismatch,"
                     " cache global_index_id: %ld, region_info index_id : %ld",
-                    static_cast<DMLNode*>(plan_item.root)->global_index_id(), info.table_id());
+                    static_cast<DMLNode*>(plan_item.root)->global_index_id(), info.table_id());*/
                 continue;
             }
             pb::CachePlan* pb_cache_plan = txn_info->add_cache_plans();
@@ -259,8 +269,8 @@ ErrorType FetcherStore::send_request(
     }
     if (res.errcode() == pb::TXN_FOLLOW_UP) {
         int last_seq_id = res.has_last_seq_id()? res.last_seq_id() : 0;
-        DB_WARNING("TXN_FOLLOW_UP, region_id: %ld, retry:%d, log_id:%lu, op:%d, last_seq_id:%d", 
-                region_id, retry_times, log_id, op_type, last_seq_id + 1);
+        DB_WARNING("TXN_FOLLOW_UP, region_id: %ld, retry:%d, log_id:%lu, op:%d, last_seq_id:%d txn_id: %lu:%d", 
+                region_id, retry_times, log_id, op_type, last_seq_id + 1, state->txn_id, state->seq_id);
         //对于commit，store返回TXN_FOLLOW_UP不能重发缓存命令，需要手工处理
         //对于rollback, 直接忽略返回成功
         //其他命令需要重发缓存
@@ -276,8 +286,8 @@ ErrorType FetcherStore::send_request(
     }
     //todo 需要处理分裂情况
     if (res.errcode() == pb::VERSION_OLD) {
-        DB_WARNING("VERSION_OLD, region_id: %ld, retry:%d, now:%s, log_id:%lu", 
-                region_id, retry_times, info.ShortDebugString().c_str(), log_id);
+        DB_WARNING("VERSION_OLD, region_id: %ld, retry:%d, now:%s, log_id:%lu txn_id: %lu:%d", 
+                region_id, retry_times, info.ShortDebugString().c_str(), log_id, state->txn_id, state->seq_id);
         if (res.regions_size() >= 2) {
             auto regions = res.regions();
             regions.Clear();
@@ -326,7 +336,7 @@ ErrorType FetcherStore::send_request(
                         r.set_leader(res.leader());
                     }
                     BAIDU_SCOPED_LOCK(client_conn->region_lock);
-                    client_conn->region_infos[region_id].set_end_key(r.start_key());
+                    client_conn->region_infos[region_id].set_start_key(r.start_key());
                     client_conn->region_infos[region_id].set_end_key(r.end_key());
                     client_conn->region_infos[region_id].set_version(r.version());
                     if (r.leader() != "0.0.0.0:0") {
@@ -338,7 +348,7 @@ ErrorType FetcherStore::send_request(
             for (auto& r : regions) {
                 ErrorType ret;
                 ret = send_request(state, store_request, r, trace_node, old_region_id, r.region_id(), 
-                         log_id, retry_times + 1, last_seq_id, current_seq_id, op_type);
+                         log_id, retry_times + 1, last_seq_id + 1, current_seq_id, op_type);
                 if (ret != E_OK) {
                     DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu", 
                             r.region_id(), log_id, state->txn_id);
@@ -377,7 +387,7 @@ ErrorType FetcherStore::send_request(
                     }
                 }
                 ret = send_request(state, store_request, r_copy, trace_node, old_region_id, r_copy.region_id(), 
-                                   log_id, retry_times + 1, last_seq_id, current_seq_id, op_type);
+                                   log_id, retry_times + 1, last_seq_id + 1, current_seq_id, op_type);
                 if (ret != E_OK) {
                     DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu", 
                                r_copy.region_id(), log_id, state->txn_id);
@@ -462,6 +472,10 @@ ErrorType FetcherStore::send_request(
             row->from_string(tuple_id, pb_row.tuple_values(i));
         }
         batch->move_row(std::move(row));
+    }
+    if (res.has_cmsketch() && state->cmsketch != nullptr) {
+        state->cmsketch->add_proto(res.cmsketch());
+        DB_WARNING("region_id:%ld, cmsketch:%s", region_id, res.cmsketch().ShortDebugString().c_str());
     }
     int64_t lock_tm = 0;
     {

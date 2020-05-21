@@ -60,6 +60,7 @@ const std::string MetaServer::TABLE_SCHEMA_IDENTIFY(1, 0x04);
 const std::string MetaServer::REGION_SCHEMA_IDENTIFY(1, 0x05);
 
 const std::string MetaServer::DDLWORK_IDENTIFY(1, 0x06);
+const std::string MetaServer::STATISTICS_IDENTIFY(1, 0x07);
 const std::string MetaServer::MAX_IDENTIFY(1, 0xFF);
 
 MetaServer::~MetaServer() {}
@@ -204,6 +205,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_SPLIT_LINES
             || request->op_type() == pb::OP_UPDATE_SCHEMA_CONF
             || request->op_type() == pb::OP_UPDATE_DISTS
+            || request->op_type() == pb::OP_UPDATE_STATISTICS
             || request->op_type() == pb::OP_MODIFY_RESOURCE_TAG
             || request->op_type() == pb::OP_ADD_INDEX
             || request->op_type() == pb::OP_DROP_INDEX

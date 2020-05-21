@@ -166,6 +166,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LONGBLOB
     LONGTEXT
     LOW_PRIORITY
+    MATCH
     MAXVALUE
     MEDIUMBLOB
     MEDIUMINT
@@ -263,6 +264,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     /* The following tokens belong to UnReservedKeyword. */
     ACTION
     AFTER
+    AGAINST
     ALWAYS
     ALGORITHM
     ANY
@@ -331,6 +333,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     INVOKER
     JSON
     KEY_BLOCK_SIZE
+    LANGUAGE
     LOCAL
     LESS
     LEVEL
@@ -509,6 +512,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TrimDirection
     DefaultValue
     ShowLikeOrWhereOpt
+    FulltextSearchModifierOpt
 
 %type <item> 
     ColumnNameListOpt 
@@ -2183,6 +2187,7 @@ AllIdent:
     | INVOKER
     | JSON
     | KEY_BLOCK_SIZE
+    | LANGUAGE
     | LOCAL
     | LESS
     | LEVEL
@@ -2352,6 +2357,14 @@ SimpleExpr:
     | NOT_OP SimpleExpr {
         $$ = FuncExpr::new_unary_op_node(FT_LOGIC_NOT, $2, parser->arena);
     }
+    | MATCH '(' ColumnNameList ')' AGAINST '(' SimpleExpr FulltextSearchModifierOpt ')' {
+        RowExpr* row = new_node(RowExpr);
+        row->children.reserve($3->children.size(), parser->arena);
+        for (int i = 0; i < $3->children.size(); i++) {
+            row->children.push_back($3->children[i], parser->arena);
+        }
+        $$ = FuncExpr::new_ternary_op_node(FT_MATCH_AGAINST, row, $7, $8, parser->arena);
+    }
     | '~' SimpleExpr {
         $$ = FuncExpr::new_unary_op_node(FT_BIT_NOT, $2, parser->arena);
     }
@@ -2380,6 +2393,18 @@ SimpleExpr:
             fun->children.push_back($3, parser->arena);
         }
         $$ = fun;
+    }
+    ;
+
+FulltextSearchModifierOpt:
+    {
+        $$ = LiteralExpr::make_string("IN NATURAL LANGUAGE MODE", parser->arena);
+    }
+    | IN NATURAL LANGUAGE MODE {
+        $$ = LiteralExpr::make_string("IN NATURAL LANGUAGE MODE", parser->arena);
+    }
+    | IN BOOLEAN MODE {
+        $$ = LiteralExpr::make_string("IN BOOLEAN MODE", parser->arena);
     }
     ;
 

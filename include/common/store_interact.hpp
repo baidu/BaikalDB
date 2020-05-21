@@ -64,7 +64,7 @@ public:
         cntl.set_log_id(log_id);
         _store_channel.CallMethod(method, &cntl, &request, &response, NULL);
         if (cntl.Failed()) {
-            DB_FATAL("connect with store fail. send request fail, error:%s, log_id:%lu",
+            DB_WARNING("connect with store fail. send request fail, error:%s, log_id:%lu",
                         cntl.ErrorText().c_str(), cntl.log_id());
             response.set_errcode(pb::EXEC_FAIL);
             return -1;
