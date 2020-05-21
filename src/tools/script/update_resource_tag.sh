@@ -9,9 +9,9 @@ curl -d '{
     "op_type":"OP_MODIFY_RESOURCE_TAG",
     "table_info": {
         "table_name": "'$2'",
-        "database": "fcbiz_lemon",
-        "namespace_name": "FENGCHAO",
-        "resource_tag" : "cip-nj"
+        "database": "test",
+        "namespace_name": "TEST",
+        "resource_tag" : "qa"
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

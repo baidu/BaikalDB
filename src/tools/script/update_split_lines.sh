@@ -7,9 +7,9 @@ echo -e "\n"
 curl -d '{
     "op_type":"OP_UPDATE_SPLIT_LINES",
     "table_info": {
-        "table_name": "ideamaterial",
-        "database": "Feed_Material",
-        "namespace_name": "FENGCHAO",
+        "table_name": "test",
+        "database": "test",
+        "namespace_name": "TEST",
         "region_split_lines": 500000
     }
 }' http://$1/MetaService/meta_manager
