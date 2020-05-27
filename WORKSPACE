@@ -15,8 +15,8 @@ bind(
 
 http_archive(
     name = "com_google_protobuf",
-    strip_prefix = "protobuf-3.12.2",
-    url = "https://github.com/protocolbuffers/protobuf/archive/v3.12.2.tar.gz",
+    strip_prefix = "protobuf-ab8edf1dbe2237b4717869eaab11a2998541ad8d",
+    url = "https://github.com/google/protobuf/archive/ab8edf1dbe2237b4717869eaab11a2998541ad8d.tar.gz",
 )
 
 bind(
