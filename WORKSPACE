@@ -1,3 +1,7 @@
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+
 http_archive(
   name = "com_google_googletest",
   strip_prefix = "googletest-0fe96607d85cf3a25ac40da369db62bbee2939a5",
@@ -20,7 +24,7 @@ bind(
     actual = "@com_google_protobuf//:protobuf",
 )
 
-new_http_archive(
+http_archive(
     name = "com_github_apache_arrow",
     build_file = "third-party/com_githup_apache_arrow/BUILD",
     strip_prefix = "arrow-apache-arrow-0.17.1",
@@ -43,7 +47,7 @@ bind(
     actual = "@com_github_gflags_gflags//:gflags",
 )
 
-new_http_archive(
+http_archive(
   name = "com_github_google_glog",
   build_file = "third-party/glog.BUILD",
   strip_prefix = "glog-a6a166db069520dbbd653c97c2e5b12e08a8bb26",
@@ -55,7 +59,7 @@ bind(
     actual = "@com_github_google_glog//:glog",
 )
 
-new_http_archive(
+http_archive(
   name = "com_github_google_leveldb",
   build_file = "third-party/leveldb.BUILD",
   strip_prefix = "leveldb-a53934a3ae1244679f812d998a4f16f2c7f309a6",
@@ -73,7 +77,7 @@ load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
 boost_deps()
 
 # from https://github.com/envoyproxy/envoy/blob/master/bazel/repositories.bzl
-new_git_repository(
+git_repository(
     name = "com_github_tencent_rapidjson",
     remote= "https://github.com/Tencent/rapidjson.git",
     build_file = "third-party/rapidjson.BUILD",
@@ -85,7 +89,7 @@ bind(
     actual = "@com_github_tencent_rapidjson//:rapidjson",
 )
 
-new_git_repository(
+git_repository(
     name = "com_github_facebook_rocksdb",
     remote = "https://github.com/facebook/rocksdb.git",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
@@ -98,7 +102,7 @@ bind(
 )
 
 # snappy
-new_http_archive(
+http_archive(
     name = "com_github_google_snappy",
     url = "https://github.com/google/snappy/archive/ed3b7b2.tar.gz",
     strip_prefix = "snappy-ed3b7b242bd24de2ca6750c73f64bee5b7505944",
@@ -107,7 +111,7 @@ new_http_archive(
 )
 
 # zlib
-new_git_repository(
+git_repository(
     name = "com_github_madler_zlib",
     remote = "https://github.com/madler/zlib.git",
     tag = "v1.2.11",
@@ -173,7 +177,7 @@ bind(
 )
 
 # gperftools
-new_http_archive(
+http_archive(
     name = "com_github_gperftools_gperftools",
     url = "https://github.com/gperftools/gperftools/archive/gperftools-2.7.tar.gz",
     strip_prefix = "gperftools-gperftools-2.7",
