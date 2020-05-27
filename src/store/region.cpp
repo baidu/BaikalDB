@@ -2327,7 +2327,7 @@ void Region::apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done,
         // rollback if not commit succ
         if (!commit_succ) {
             txn->rollback();
-            if (is_out_txn) {
+            if (is_out_txn && done) {
                 ((Dml1pcClosure*)done)->state->is_fail = true;
                 ((Dml1pcClosure*)done)->state->raft_error_msg = "commit fail";
             }
@@ -3050,9 +3050,15 @@ void Region::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* don
     }
     DB_WARNING("region_id: %ld shnapshot save complete, time_cost: %ld", 
                 _region_id, time_cost.get_time());
-    _snapshot_num_table_lines = _num_table_lines.load();
-    _snapshot_index = _applied_index;
-    _snapshot_time_cost.reset();
+    reset_snapshot_status();
+}
+
+void Region::reset_snapshot_status() {
+    if (_snapshot_time_cost.get_time() > FLAGS_snapshot_interval_s * 1000 * 1000) {
+        _snapshot_num_table_lines = _num_table_lines.load();
+        _snapshot_index = _applied_index;
+        _snapshot_time_cost.reset();
+    }
 }
 void Region::snapshot(braft::Closure* done) {
     brpc::ClosureGuard done_guard(done);

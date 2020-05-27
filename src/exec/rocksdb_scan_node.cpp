@@ -415,6 +415,10 @@ int RocksdbScanNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "calc index fail:%d", ret);
         return ret;
     }
+    if (_table_info == nullptr) {
+        DB_WARNING_STATE(state, "table null:%d", ret);
+        return -1;
+    }
     if (_index_info == nullptr) {
         DB_WARNING_STATE(state, "index null:%d", ret);
         return -1;
@@ -429,7 +433,10 @@ int RocksdbScanNode::open(RuntimeState* state) {
     for (auto& field_info : _pri_info->fields) {
         pri_field_ids.insert(field_info.id);
     }
+    // 用数组映射slot，提升性能
+    _field_slot.resize(_table_info->fields.back().id + 1);
     for (auto& slot : _tuple_desc->slots()) {
+        _field_slot[slot.field_id()] = slot.slot_id();
         if (pri_field_ids.count(slot.field_id()) == 0) {
             auto field = _table_info->get_field_ptr(slot.field_id());
             if (field == nullptr) {
@@ -551,6 +558,12 @@ void RocksdbScanNode::close(RuntimeState* state) {
     for (auto expr : _index_conjuncts) {
         expr->close();
     }
+    _index_ids.clear();
+    _idx = 0;
+    _reverse_infos.clear();
+    _query_words.clear();
+    _match_modes.clear();
+    _reverse_indexes.clear();
 }
 
 int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos) {
@@ -665,8 +678,6 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
         local_node.add_index_filter_rows(index_filter_cnt);
         local_node.set_scan_rows(_scan_rows);
     }));
-    SmartRecord record = _factory->new_record(_table_id);
-    int64_t time = 0;
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -696,7 +707,8 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                         _right_opens[_idx],
                         _like_prefixs[_idx]);
                 delete _table_iter;
-                _table_iter = Iterator::scan_primary(state->txn(), range, _field_ids, true, _scan_forward);
+                _table_iter = Iterator::scan_primary(
+                        state->txn(), range, _field_ids, _field_slot, true, _scan_forward);
                 if (_table_iter == nullptr) {
                     DB_WARNING_STATE(state, "open TableIterator fail, table_id:%ld", _index_id);
                     return -1;
@@ -708,20 +720,11 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
         }
-        record->clear();
         ++_scan_rows;
-        int ret = _table_iter->get_next(record);
+        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+        int ret = _table_iter->get_next(_tuple_id, row);
         if (ret < 0) {
             continue;
-        }
-        //DB_NOTICE("seek row:%s", record->debug_string().c_str());
-        TimeCost cost;
-        //DB_WARNING_STATE(state, "get_next:%lu", cost.get_time());
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        for (auto slot : _tuple_desc->slots()) {
-            auto field = record->get_field_by_tag(slot.field_id());
-            row->set_value(slot.tuple_id(), slot.slot_id(),
-                    record->get_value(field));
         }
         if (!need_copy(row.get(), _index_conjuncts)) {
             state->inc_num_filter_rows();
@@ -730,7 +733,6 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
         }
         batch->move_row(std::move(row));
         ++_num_rows_returned;
-        time += cost.get_time();
     }
 }
 
@@ -791,7 +793,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                             _right_opens[_idx],
                             _like_prefixs[_idx]);
                     delete _index_iter;
-                    _index_iter = Iterator::scan_secondary(state->txn(), range, true, _scan_forward);
+                    _index_iter = Iterator::scan_secondary(state->txn(), range, _field_slot, true, _scan_forward);
                     if (_index_iter == nullptr) {
                         DB_WARNING_STATE(state, "open IndexIterator fail, index_id:%ld", _index_id);
                         return -1;
@@ -803,7 +805,9 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         }
         //TimeCost cost;
         ++_scan_rows;
-        record->clear();
+        if (!_is_covering_index && !is_global_index) {
+            record->clear();
+        }
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
         if (_reverse_indexes.size() > 0) {
             ret = multi_get_next(_storage_type, record);
@@ -818,7 +822,11 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
         } else {
-            ret = _index_iter->get_next(record);
+            if (!_is_covering_index && !is_global_index) {
+                ret = _index_iter->get_next(record);
+            } else {
+                ret = _index_iter->get_next(_tuple_id, row);
+            }
             //DB_DEBUG("rocksdb_scan region_%lld record[%s]", _region_id, record->to_string().c_str());
             if (ret < 0) {
                 //DB_WARNING_STATE(state, "get index fail, maybe reach end");
@@ -828,9 +836,11 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         // 倒排索引直接下推到了布尔引擎，但是主键条件未下推，因此也需要再次过滤
         // toto: 后续可以再次优化，把userid和source的条件干掉
         // 索引谓词过滤
-        for (auto& pair : _index_slot_field_map) {
-            auto field = record->get_field_by_tag(pair.second);
-            row->set_value(_tuple_id, pair.first, record->get_value(field));
+        if (!_is_covering_index && !is_global_index) {
+            for (auto& pair : _index_slot_field_map) {
+                auto field = record->get_field_by_tag(pair.second);
+                row->set_value(_tuple_id, pair.first, record->get_value(field));
+            }
         }
         //DB_NOTICE("record_before:%s", record->debug_string().c_str());
         if (!need_copy(row.get(), _index_conjuncts)) {
@@ -851,14 +861,11 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 }
                 continue;
             }
-        }
-        //DB_NOTICE("record:%s", record->debug_string().c_str());
-        //cost.reset();
-        //row->set_tuple(_tuple_id, _mem_row_desc);
-        for (auto slot : _tuple_desc->slots()) {
-            auto field = record->get_field_by_tag(slot.field_id());
-            row->set_value(slot.tuple_id(), slot.slot_id(),
-                    record->get_value(field));
+            for (auto slot : _tuple_desc->slots()) {
+                auto field = record->get_field_by_tag(slot.field_id());
+                row->set_value(slot.tuple_id(), slot.slot_id(),
+                        record->get_value(field));
+            }
         }
         batch->move_row(std::move(row));
         ++_num_rows_returned;

@@ -218,6 +218,7 @@ void SortNode::close(RuntimeState* state) {
     for (auto expr : _slot_order_exprs) {
         expr->close();
     }
+    _sorter = nullptr;
 }
 
 int SortNode::fill_tuple(RowBatch* batch) {

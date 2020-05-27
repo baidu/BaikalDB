@@ -348,6 +348,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     //1. create temp DescriptorProto using the input schema
     int field_cnt = table.fields_size();
     std::ostringstream new_fields_sign;
+    int pb_idx = 0;
     for (int idx = 0; idx < field_cnt; ++idx) {
         const pb::FieldInfo& field = table.fields(idx);
         if (field.deleted()) {
@@ -382,6 +383,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
 
         FieldInfo field_info;
         field_info.id = field.field_id();
+        field_info.pb_idx = pb_idx++;
         field_info.table_id = table_id;
         field_info.name = tbl_info.name + "." + field.field_name();
         field_info.short_name = field.field_name();
@@ -414,17 +416,33 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             tbl_info.fields_sign.c_str(), new_fields_sign.str().c_str(), table.ShortDebugString().c_str());
     tbl_info.fields_sign = new_fields_sign.str();
 
-    const FileDescriptor *db_desc = tmp_pool->BuildFile(*tbl_info.file_proto);
-    if (!db_desc) {
-        DB_FATAL("build proto_file [%ld] failed, %s", database_id, tbl_info.file_proto->DebugString().c_str());
-        return -1;
+
+    if (pb_need_update) {
+        const FileDescriptor* db_desc = tmp_pool->BuildFile(*tbl_info.file_proto);
+        if (db_desc == nullptr) {
+            DB_FATAL("build proto_file [%ld] failed, %s", database_id, tbl_info.file_proto->DebugString().c_str());
+            return -1;
+        }
+        const Descriptor* descriptor = db_desc->FindMessageTypeByName(table_name);
+        if (descriptor == nullptr) {
+            DB_FATAL("FindMessageTypeByName [%ld] failed.", table_id);
+            return -1;
+        }
+        auto del_pool = tbl_info.pool;
+        auto del_factory = tbl_info.factory;
+        tbl_info.pool = tmp_pool.release();
+        tbl_info.factory = tmp_factory.release();
+        tbl_info.tbl_desc = descriptor;
+        tbl_info.msg_proto = tbl_info.factory->GetPrototype(tbl_info.tbl_desc);
+
+        Bthread bth;
+        bth.run([table_id, del_pool, del_factory]() {
+                // 延迟删除
+                bthread_usleep(3600 * 1000 * 1000L);
+                delete del_factory;
+                delete del_pool; 
+                });
     }
-    const Descriptor *descriptor = db_desc->FindMessageTypeByName(table_name);
-    if (!descriptor) {
-        DB_FATAL("FindMessageTypeByName [%ld] failed.", table_id);
-        return -1;
-    }
-    tbl_info.tbl_desc = descriptor;
 
     // create name => id mapping
     db_name_id_mapping[_namespace + "." + _db_name] = database_id;
@@ -481,21 +499,6 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         }
     }
     
-    if (pb_need_update) {
-        auto del_pool = tbl_info.pool;
-        auto del_factory = tbl_info.factory;
-        tbl_info.pool = tmp_pool.release();
-        tbl_info.factory = tmp_factory.release();
-        tbl_info.msg_proto = tbl_info.factory->GetPrototype(tbl_info.tbl_desc);
-
-        Bthread bth;
-        bth.run([table_id, del_pool, del_factory]() {
-                // 延迟删除
-                bthread_usleep(3600 * 1000 * 1000L);
-                delete del_factory;
-                delete del_pool; 
-                });
-    }
 
     db_info_mapping[database_id] = db_info;
     table_info_mapping[table_id] = tbl_info_ptr;

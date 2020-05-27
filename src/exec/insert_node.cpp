@@ -101,6 +101,7 @@ int InsertNode::open(RuntimeState* state) {
         }
     }
     int cnt = 0;
+    // TODO init阶段？
     for (auto& pb_record : _pb_node.derive_node().insert_node().records()) {
         SmartRecord record = _factory->new_record(*_table_info);
         record->decode(pb_record);
@@ -243,10 +244,12 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
         //DB_WARNING("DEBUG row: %s", row->to_string().c_str());
         insert_records.push_back(row);
     }
+    /*
     for (auto expr : _insert_values) {
         ExprNode::destroy_tree(expr);
     }
     _insert_values.clear();
+    */
     return 0;
 }
 

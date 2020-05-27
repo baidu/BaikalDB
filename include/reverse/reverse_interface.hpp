@@ -388,8 +388,8 @@ int NewSchema<Node, List>::next(SmartRecord record) {
         return -1;
     }
     if (_weight_field_id > 0) {
-        record->set_float(record->get_field_by_tag(_weight_field_id), 
-            reverse_node.weight());
+        MessageHelper::set_float(record->get_field_by_tag(_weight_field_id),
+                record->get_raw_message(), reverse_node.weight());
     }
 
     return 0;

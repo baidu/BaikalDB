@@ -133,7 +133,7 @@ int64_t PhysicalPlanner::get_table_rows(QueryContext* ctx) {
 
 int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     int ret = 0;
-    RuntimeState& state = ctx->runtime_state;
+    RuntimeState& state = *ctx->get_runtime_state();
     //DB_WARNING("state.client_conn(): %ld ,seq_id: %d", state.client_conn(), state.client_conn()->seq_id);
     ret = state.init(ctx, send_buf);
     if (ret < 0) {
@@ -181,7 +181,7 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
 
 int PhysicalPlanner::full_export_start(QueryContext* ctx, DataBuffer* send_buf) {
     int ret = 0;
-    RuntimeState& state = ctx->runtime_state;
+    RuntimeState& state = *ctx->get_runtime_state();
     
     ret = state.init(ctx, send_buf);
     if (ret < 0) {
@@ -204,7 +204,7 @@ int PhysicalPlanner::full_export_start(QueryContext* ctx, DataBuffer* send_buf) 
 
 int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, bool shutdown) {
     int ret = 0;
-    RuntimeState& state = ctx->runtime_state;
+    RuntimeState& state = *ctx->get_runtime_state();
     PacketNode* root = (PacketNode*)(ctx->root);
     ret = root->get_next(&state);
     if (ret < 0) {
@@ -225,10 +225,10 @@ int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, b
     }
     return 0;            
 }
-
+/*
 int PhysicalPlanner::execute_recovered_commit(NetworkSocket* client, const pb::CachePlan& commit_plan) {
     int ret = 0;
-    RuntimeState& state = client->query_ctx->runtime_state;
+    RuntimeState& state = *client->query_ctx->get_runtime_state();
     state.set_client_conn(client);
     ret = state.init(commit_plan);
     if (ret < 0) {
@@ -251,7 +251,7 @@ int PhysicalPlanner::execute_recovered_commit(NetworkSocket* client, const pb::C
     }
     root->close(&state);
     return 0;
-}
+}*/
 // insert user variables to record for prepared stmt
 int PhysicalPlanner::insert_values_to_record(QueryContext* ctx) {
     if (ctx->stmt_type != parser::NT_INSERT || ctx->exec_prepared == false) {

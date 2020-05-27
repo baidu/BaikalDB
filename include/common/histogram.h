@@ -15,7 +15,6 @@
 #pragma once
 #include "common.h"
 #include "proto/meta.interface.pb.h"
-#include "exec_node.h"
 #include "data_buffer.h"
 #include "sorter.h"
 

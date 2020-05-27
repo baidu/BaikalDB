@@ -90,7 +90,7 @@ void AccessPath::calc_normal(Property& sort_property) {
     SmartRecord right_record = record_template->clone(false);
     std::vector<SmartRecord> in_records;
     int field_cnt = 0;
-    for (auto field : index_info_ptr->fields) {
+    for (auto& field : index_info_ptr->fields) {
         bool field_break = false;
         auto iter = field_range_map.find(field.id);
         if (iter == field_range_map.end()) {

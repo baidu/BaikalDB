@@ -106,6 +106,7 @@ private:
 
 private:
     std::map<int32_t, FieldInfo*> _field_ids;
+    std::vector<int32_t> _field_slot;
     MemRowDescriptor* _mem_row_desc;
     SelectManagerNode* _related_manager_node = NULL;
     SchemaFactory* _factory = nullptr;

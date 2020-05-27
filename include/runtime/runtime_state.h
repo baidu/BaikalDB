@@ -85,7 +85,7 @@ public:
     int init(QueryContext* ctx, DataBuffer* send_buf);
 
     // for prepared txn recovery in BaikalDB
-    int init(const pb::CachePlan& commit_plan);
+    //int init(const pb::CachePlan& commit_plan);
 
     void set_reverse_index_map(const std::map<int64_t, ReverseIndexBase*>& reverse_index_map) {
         _reverse_index_map = reverse_index_map;
@@ -319,6 +319,7 @@ public:
     std::shared_ptr<CMsketch> cmsketch = nullptr;
 
 private:
+    bool _is_inited    = false;
     bool _is_cancelled = false;
     bool _eos          = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;

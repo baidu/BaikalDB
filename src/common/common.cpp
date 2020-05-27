@@ -343,7 +343,7 @@ void update_op_version(pb::SchemaConf* p_conf, const std::string& desc) {
 
 void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf) {
         const google::protobuf::Reflection* src_reflection = schema_conf.GetReflection();
-        const google::protobuf::Descriptor* src_descriptor = schema_conf.GetDescriptor();
+        //const google::protobuf::Descriptor* src_descriptor = schema_conf.GetDescriptor();
         const google::protobuf::Reflection* dst_reflection = p_conf->GetReflection();
         const google::protobuf::Descriptor* dst_descriptor = p_conf->GetDescriptor();
         const google::protobuf::FieldDescriptor* src_field = nullptr;
@@ -351,7 +351,7 @@ void update_schema_conf_common(const std::string& table_name, const pb::SchemaCo
 
         std::vector<const google::protobuf::FieldDescriptor*> src_field_list;
         src_reflection->ListFields(schema_conf, &src_field_list);
-        for (int i = 0; i < src_field_list.size(); ++i) {
+        for (int i = 0; i < (int)src_field_list.size(); ++i) {
             src_field = src_field_list[i];
             if (src_field == nullptr) {
                 continue;

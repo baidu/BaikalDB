@@ -120,6 +120,7 @@ struct FieldInfo {
     int32_t             id;
     int32_t             size = -1;// STRING类型的size为-1，表示变长
     int64_t             table_id;
+    int                 pb_idx = 0; 
     std::string         name;   // db.table.field
     std::string         short_name; // field
     std::string         default_value;
@@ -130,7 +131,6 @@ struct FieldInfo {
     bool                can_null = false;
     bool                auto_inc = false;
     bool                deleted = false;
-    //const FieldDescriptor* field;
 };
 
 struct DistInfo {
@@ -173,7 +173,7 @@ struct TableInfo {
     //>0表示配置有ttl，单位s
     int64_t                 ttl_duration = 0;
 
-    const Descriptor*       tbl_desc;
+    const Descriptor*       tbl_desc = nullptr;
     DescriptorProto*        tbl_proto = nullptr;
     FileDescriptorProto*    file_proto = nullptr;
     DynamicMessageFactory*  factory = nullptr;

@@ -257,6 +257,8 @@ public:
     void reset_region_status () {
         _region_control.reset_region_status();
     }
+
+    void reset_snapshot_status();
     
     pb::RegionStatus get_status() const {
         return _region_control.get_status();

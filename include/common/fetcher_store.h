@@ -42,6 +42,18 @@ public:
     virtual ~FetcherStore() {
         bthread_mutex_destroy(&region_lock);
     }
+    
+    void clear() {
+        region_batch.clear();
+        index_records.clear();
+        start_key_sort.clear();
+        error = E_OK;
+        skip_region_set.clear();
+        affected_rows = 0;
+        scan_rows = 0;
+        filter_rows = 0;
+        row_cnt = 0;
+    }
 
     // send (cached) cmds with seq_id >= start_seq_id
     ErrorType send_request(RuntimeState* state,

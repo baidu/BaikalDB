@@ -577,7 +577,6 @@ void TransactionPool::update_txn_num_rows_after_split(const pb::TransactionInfo&
 }
 void TransactionPool::clear() {
     std::unique_lock<std::mutex> lock(_map_mutex);
-    auto iter = _txn_map.begin();
     for (auto& txn : _txn_map) {
         DB_WARNING("TransactionNote: txn %s is rollback due to leader stop", 
             txn.second->get_txn()->GetName().c_str());

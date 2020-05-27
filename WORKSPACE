@@ -9,10 +9,10 @@ bind(
     actual = "@com_google_googletest//:gtest",
 )
 
-http_archive(
-  name = "com_google_protobuf",
-  strip_prefix = "protobuf-ab8edf1dbe2237b4717869eaab11a2998541ad8d",
-  url = "https://github.com/google/protobuf/archive/ab8edf1dbe2237b4717869eaab11a2998541ad8d.tar.gz",
+git_repository(
+    name = "com_google_protobuf",
+    remote = "https://github.com/protocolbuffers/protobuf.git",
+    tag = "v3.11.4",
 )
 
 bind(
@@ -76,9 +76,8 @@ bind(
 new_git_repository(
     name = "com_github_facebook_rocksdb",
     remote = "https://github.com/facebook/rocksdb.git",
-    #sha256 = "6e8d0844adc37da331844ac4b21ae33ba1f5265d8914c745760d9209a57e9cc9",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
-    tag = "v5.12.4"
+    tag = "v6.8.1"
 )
 
 bind(

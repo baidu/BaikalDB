@@ -153,7 +153,8 @@ int AggNode::open(RuntimeState* state) {
         " scan time cost:" << scan_time << " rows:" << row_cnt;
     DB_WARNING_STATE(state, "region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
         state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
-    // select count(*) from t; 无数据时返回0
+
+    // 兼容mysql: select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
         AggFnCall::initialize_all(_agg_fn_calls, row.get());
@@ -192,6 +193,14 @@ void AggNode::process_row_batch(RowBatch& batch) {
         if (agg_row == nullptr) { //不存在则新建
             cur_row = row.release();
             agg_row = &cur_row;
+            // fix bug: 多个store agg，有无数据会造条空数据(L157)
+            // merge多个store时，去除这种造的数据
+            // 以便于 select id,count(*) from t where id>1;这种sql时id不会时造出来的null
+            if (_is_merger && _group_exprs.size() == 0) {
+                if (AggFnCall::all_is_initialize(_agg_fn_calls, *agg_row)) {
+                    continue;
+                }
+            }
             AggFnCall::initialize_all(_agg_fn_calls, *agg_row);
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);

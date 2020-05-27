@@ -9,13 +9,21 @@ curl -d '{
     "op_type":"OP_UPDATE_DISTS",
     "table_info": {
         "table_name": "'$2'",
-        "database": "fcbiz_lemon",
-        "namespace_name": "FENGCHAO",
+        "database": "testdb",
+        "namespace_name": "TEST",
         "replica_num": 3,
          "dists": [
             {
+                "logical_room": "bj",
+                "count" : 0
+            },
+            {
                 "logical_room": "nj",
                 "count" : 3
+            },
+            {
+                "logical_room": "gz",
+                "count" : 0
             }
          ]
     }

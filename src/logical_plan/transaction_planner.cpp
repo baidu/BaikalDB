@@ -17,7 +17,7 @@
 
 namespace baikaldb {
 int TransactionPlanner::plan() {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     if (_ctx->stmt_type == parser::NT_START_TRANSACTION) {
         if (client->txn_id == 0) {
             plan_begin_txn();
@@ -43,7 +43,7 @@ int TransactionPlanner::plan() {
         DB_WARNING("unsupported Trasanction command: %d", _ctx->stmt_type);
         return -1;
     }
-    _ctx->runtime_state.set_single_sql_autocommit(false);
+    _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     return 0;
 }
 

@@ -27,7 +27,8 @@ DEFINE_int32(rocks_transaction_lock_timeout_ms, 30000, "rocksdb transaction_lock
 DEFINE_int32(rocks_default_lock_timeout_ms, 30000, "rocksdb default_lock_timeout(ms)");
 
 DEFINE_int32(rocks_block_size, 64 * 1024, "rocksdb block_cache size, default: 64KB");
-DEFINE_int32(rocks_max_open_files, 1024, "rocksdb max_open_files, default: 1024");
+DEFINE_int64(rocks_block_cache_size_mb, 8 * 1024, "rocksdb block_cache_size_mb, default: 8G");
+DEFINE_int32(rocks_max_open_files, -1, "rocksdb max_open_files, default: -1");
 DEFINE_int32(rocks_max_subcompactions, 4, "rocks_max_subcompactions");
 DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
 DEFINE_bool(rocks_kSkipAnyCorruptedRecords, false, 
@@ -52,9 +53,21 @@ int32_t RocksWrapper::init(const std::string& path) {
         return 0;
     }
     rocksdb::BlockBasedTableOptions table_options;
-    table_options.index_type = rocksdb::BlockBasedTableOptions::kHashSearch;
+    // use Partitioned Index Filters
+    // https://github.com/facebook/rocksdb/wiki/Partitioned-Index-Filters
+    
+    table_options.index_type = rocksdb::BlockBasedTableOptions::kTwoLevelIndexSearch;
+    table_options.partition_filters = true;
+    table_options.metadata_block_size = 4096;
+    table_options.cache_index_and_filter_blocks = true;
+    table_options.pin_top_level_index_and_filter = true;
+    table_options.cache_index_and_filter_blocks_with_high_priority = true;
+    table_options.pin_l0_filter_and_index_blocks_in_cache= true;
+    table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
+    table_options.format_version = 4;
+    
+    table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024, 8);
     table_options.block_size = FLAGS_rocks_block_size;
-    table_options.block_cache = rocksdb::NewLRUCache(64 * 1024 * 1024, 8);
     table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, true));
     _cache = table_options.block_cache.get();
     rocksdb::Options db_options;

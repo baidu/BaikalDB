@@ -171,6 +171,36 @@ struct AvgIntermediate {
     AvgIntermediate() : sum(0.0), count(0) {
     }
 };
+
+bool AggFnCall::is_initialize(MemRow* dst) {
+    if (dst->get_value(_tuple_id, _intermediate_slot_id).is_null()) {
+        return true;
+    }
+    switch (_agg_type) {
+        case COUNT_STAR:
+        case COUNT: {
+            if (dst->get_value(_tuple_id, _intermediate_slot_id).get_numberic<int64_t>() == 0) {
+                return true;
+            } else {
+                return false;
+            }
+        }
+        case AVG: {
+            ExprValue value(pb::STRING);
+            AvgIntermediate avg;
+            value.str_val.assign((char*)&avg, sizeof(avg));
+            if (dst->get_value(_tuple_id, _intermediate_slot_id).compare(value) == 0) {
+                return true;
+            } else {
+                return false;
+            }
+        }
+        default:
+            break;
+    }
+    return false;
+}
+
 // 聚合函数逻辑
 int AggFnCall::initialize(MemRow* dst) {
     if (!dst->get_value(_tuple_id, _intermediate_slot_id).is_null()) {
@@ -182,14 +212,14 @@ int AggFnCall::initialize(MemRow* dst) {
             dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
             return 0;
         case SUM:
-            dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
+            dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
             return 0;
         case AVG: {
             ExprValue value(pb::STRING);
             AvgIntermediate avg;
             value.str_val.assign((char*)&avg, sizeof(avg));
             dst->set_value(_tuple_id, _intermediate_slot_id, value);
-            dst->set_value(_tuple_id, _final_slot_id, ExprValue(pb::DOUBLE));
+            dst->set_value(_tuple_id, _final_slot_id, ExprValue::Null());
             return 0;
         }
         case MIN:

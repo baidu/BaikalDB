@@ -98,7 +98,7 @@ struct ExprValue {
             return 0;
         }
         int min_len = str_val.size();
-        if (min_len > other.str_val.size()) {
+        if (min_len > (int)other.str_val.size()) {
             min_len = other.str_val.size();
         }
         for (int i = 0; i < min_len; i++) {
@@ -139,11 +139,11 @@ struct ExprValue {
             case pb::DOUBLE:
                 return static_cast<float>(_u.double_val);
             case pb::STRING:
-                if (prefix_len >= str_val.size()) {
+                if (prefix_len >= (int)str_val.size()) {
                     return 0.0;
                 }
                 for (int i = prefix_len; i < prefix_len + 8; i++) {
-                    if (i < str_val.size()) {
+                    if (i < (int)str_val.size()) {
                         val += (val << 8) + uint8_t(str_val[i]);
                     } else {
                         val += val << 8;

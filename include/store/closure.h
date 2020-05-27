@@ -81,6 +81,11 @@ struct SnapshotClosure : public braft::Closure {
             DB_WARNING("region_id: %ld  status:%s, snapshot failed.",
                         region->get_region_id(), status().error_cstr());
         }
+        // 遇到部分请求报has no applied logs since last snapshot
+        // 不调用on_snapshot_save导致不更新_snapshot_time_cost等信息
+        if (region != nullptr) {
+            region->reset_snapshot_status();
+        }
         cond.decrease_signal();
         delete this;
     }

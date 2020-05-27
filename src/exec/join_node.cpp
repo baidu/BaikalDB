@@ -727,15 +727,24 @@ int JoinNode:: _construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_r
 
 void JoinNode::close(RuntimeState* state) {
     ExecNode::close(state);
+    _have_removed.clear();
+    _outer_join_values.clear();
     for (auto expr : _conditions) {
         expr->close();
     }
     for (auto& mem_row : _outer_tuple_data) {
         delete mem_row;
     }
+    _outer_tuple_data.clear();
     for (auto& mem_row : _inner_tuple_data) {
         delete mem_row;
     }
+    _inner_tuple_data.clear();
+    _hash_map.clear();
+    _hash_mapped_index = 0;
+    _outer_table_is_null = false;
+    _inner_row_batch.clear();
+    _child_eos = false;
 }
 
 void JoinNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {

@@ -26,7 +26,6 @@
 #include "slot_ref.h"
 
 namespace baikaldb {
-
 //--xbs interface
 const char delim_term = ';';
 const char delim_score = ':';
@@ -393,14 +392,16 @@ int XbsSchema::next(SmartRecord record) {
         return -1;
     }
     if (_weight_field_id > 0) {
-        record->set_float(record->get_field_by_tag(_weight_field_id), 
-            reverse_node.weight());
+        MessageHelper::set_float(record->get_field_by_tag(_weight_field_id),
+                record->get_raw_message(), reverse_node.weight());
     }
     if (_userid_field_id > 0) {
-        record->set_uint32(record->get_field_by_tag(_userid_field_id), reverse_node.userid());
+        MessageHelper::set_uint32(record->get_field_by_tag(_userid_field_id),
+                record->get_raw_message(), reverse_node.userid());
     }
     if (_source_field_id > 0) {
-        record->set_uint32(record->get_field_by_tag(_source_field_id), reverse_node.source());
+        MessageHelper::set_uint32(record->get_field_by_tag(_source_field_id),
+                record->get_raw_message(), reverse_node.source());
     }
     //int64_t decode_key_cost = cost.get_time();
     //cost.reset();

@@ -13,9 +13,16 @@
 // limitations under the License.
 
 #include "mem_row_descriptor.h"
+#include "table_key.h"
+#include "mut_table_key.h"
+#include "schema_factory.h"
 #include "mem_row.h"
 
 namespace baikaldb {
+using google::protobuf::FieldDescriptor;
+using google::protobuf::Descriptor;
+using google::protobuf::Message;
+using google::protobuf::Reflection;
 
 void MemRow::set_tuple(int32_t tuple_id, MemRowDescriptor* desc) {
     if (_tuples[tuple_id] == nullptr) {
@@ -41,121 +48,90 @@ std::string* MemRow::mutable_string(int32_t tuple_id, int32_t slot_id) {
     if (tuple == nullptr) {
         return nullptr;
     }
-    const google::protobuf::Reflection* _reflection = tuple->GetReflection();
-    const google::protobuf::Descriptor* _descriptor = tuple->GetDescriptor();
-    auto field = _descriptor->FindFieldByNumber(slot_id);
+    const google::protobuf::Reflection* reflection = tuple->GetReflection();
+    const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
+    auto field = descriptor->field(slot_id - 1);
     if (field == nullptr) {
         return nullptr;
     }
-    if (!_reflection->HasField(*tuple, field)) {
+    if (!reflection->HasField(*tuple, field)) {
         return nullptr;
     }
     std::string tmp;
-    return (std::string*)&_reflection->GetStringReference(*tuple, field, &tmp);
+    return (std::string*)&reflection->GetStringReference(*tuple, field, &tmp);
 }
 
-// slot start with 1
-ExprValue MemRow::get_value(int32_t tuple_id, int32_t slot_id) {
-    auto tuple = _tuples[tuple_id];
-    if (tuple == nullptr) {
-        return ExprValue::Null();
-    }
-    const google::protobuf::Reflection* _reflection = tuple->GetReflection();
-    const google::protobuf::Descriptor* _descriptor = tuple->GetDescriptor();
-    auto field = _descriptor->FindFieldByNumber(slot_id);
-    if (field == nullptr) {
-        return ExprValue::Null();
-    }
-    if (!_reflection->HasField(*tuple, field)) {
-        return ExprValue::Null();
-    }
-    auto type = field->cpp_type();
-    switch (type) {
-        case FieldDescriptor::CPPTYPE_INT32: {
-            ExprValue value(pb::INT32);
-            value._u.int32_val = _reflection->GetInt32(*tuple, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT32: {
-            ExprValue value(pb::UINT32);
-            value._u.uint32_val = _reflection->GetUInt32(*tuple, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_INT64: {
-            ExprValue value(pb::INT64);
-            value._u.int64_val = _reflection->GetInt64(*tuple, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT64: {
-            ExprValue value(pb::UINT64);
-            value._u.uint64_val = _reflection->GetUInt64(*tuple, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_FLOAT: {
-            ExprValue value(pb::FLOAT);
-            value._u.float_val = _reflection->GetFloat(*tuple, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_DOUBLE: {
-            ExprValue value(pb::DOUBLE);
-            value._u.double_val = _reflection->GetDouble(*tuple, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_BOOL: {
-            ExprValue value(pb::BOOL);
-            value._u.bool_val = _reflection->GetBool(*tuple, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_STRING: {
-            ExprValue value(pb::STRING);
-            value.str_val = _reflection->GetString(*tuple, field);
-            return value;
-        } default: {
-            return ExprValue::Null();
-        }
-    }
-    return ExprValue::Null();
-}
-int MemRow::set_value(int32_t tuple_id, int32_t slot_id, const ExprValue& value) {
-    auto tuple = _tuples[tuple_id];
-    if (tuple == nullptr) {
+int MemRow::decode_key(int32_t tuple_id, IndexInfo& index, 
+        std::vector<int32_t>& field_slot, const TableKey& key, int& pos) {
+    if (index.type == pb::I_NONE) {
+        DB_WARNING("unknown table index type: %ld", index.id);
         return -1;
     }
-    const google::protobuf::Reflection* _reflection = tuple->GetReflection();
-    const google::protobuf::Descriptor* _descriptor = tuple->GetDescriptor();
-    auto field = _descriptor->FindFieldByNumber(slot_id);
-    if (value.is_null()) {
-        _reflection->ClearField(tuple, field);
-        return 0;
+    auto tuple = _tuples[tuple_id];
+    if (tuple == nullptr) {
+        DB_FATAL("unknown tuple: %d", tuple_id);
+        return -1;
     }
+    uint8_t null_flag = 0;
+    const Descriptor* descriptor = tuple->GetDescriptor();
+    const Reflection* reflection = tuple->GetReflection();
+    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
+        null_flag = key.extract_u8(pos);
+        pos += sizeof(uint8_t);
+    }
+    for (uint32_t idx = 0; idx < index.fields.size(); ++idx) {
+        int32_t slot = field_slot[index.fields[idx].id];
+        //说明不需要解析
+        if (slot == 0) {
+            continue;
+        }
+        const FieldDescriptor* field = descriptor->field(slot - 1);
+        if (field == nullptr) {
+            DB_WARNING("invalid field: %d slot: %d", index.fields[idx].id, slot);
+            return -1;
+        }
+        // DB_WARNING("null_flag: %ld, %u, %d, %d, %s", 
+        //     index.id, null_flag, pos, index.fields[idx].can_null, 
+        //     key.data().ToString(true).c_str());
+        if (((null_flag >> (7 - idx)) & 0x01) && index.fields[idx].can_null) {
+            //DB_DEBUG("field is null: %d", idx);
+            continue;
+        }
+        if (0 != key.decode_field(tuple, reflection, field, index.fields[idx], pos)) {
+            DB_WARNING("decode index field error");
+            return -1;
+        }
+    }
+    return 0;
+}
 
-    auto type = field->cpp_type();
-    switch (type) {
-        case FieldDescriptor::CPPTYPE_INT32: {
-            _reflection->SetInt32(tuple, field, value.get_numberic<int32_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT32: {
-            _reflection->SetUInt32(tuple, field, value.get_numberic<uint32_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_INT64: {
-            _reflection->SetInt64(tuple, field, value.get_numberic<int64_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT64: {
-            _reflection->SetUInt64(tuple, field, value.get_numberic<uint64_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_FLOAT: {
-            _reflection->SetFloat(tuple, field, value.get_numberic<float>());
-        } break;
-        case FieldDescriptor::CPPTYPE_DOUBLE: {
-            _reflection->SetDouble(tuple, field, value.get_numberic<double>());
-        } break;
-        case FieldDescriptor::CPPTYPE_BOOL: {
-            _reflection->SetBool(tuple, field, value.get_numberic<bool>());
-        } break;
-        case FieldDescriptor::CPPTYPE_STRING: {
-            _reflection->SetString(tuple, field, value.get_string());
-        } break;
-        default: {
+int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<int32_t>& field_slot, 
+        const TableKey& key, int& pos) {
+    if (index.type != pb::I_KEY && index.type != pb::I_UNIQ) {
+        DB_WARNING("invalid secondary index type: %ld", index.id);
+        return -1;
+    }
+    auto tuple = _tuples[tuple_id];
+    if (tuple == nullptr) {
+        DB_FATAL("unknown tuple: %d", tuple_id);
+        return -1;
+    }
+    const Descriptor* descriptor = tuple->GetDescriptor();
+    const Reflection* reflection = tuple->GetReflection();
+    for (uint32_t idx = 0; idx < index.pk_fields.size(); ++idx) {
+        int32_t slot = field_slot[index.pk_fields[idx].id];
+        //说明不需要解析
+        if (slot == 0) {
+            continue;
+        }
+        const FieldDescriptor* field = descriptor->field(slot - 1);
+        if (field == nullptr) {
+            DB_WARNING("invalid field: %d slot: %d", index.fields[idx].id, slot);
+            return -1;
+        }
+        if (0 != key.decode_field(tuple, reflection, field, index.pk_fields[idx], pos)) {
+            DB_WARNING("decode index field error: field_id: %d, type: %d", 
+                index.pk_fields[idx].id, index.pk_fields[idx].type);
             return -1;
         }
     }

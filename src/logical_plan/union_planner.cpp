@@ -30,7 +30,7 @@ int UnionPlanner::plan() {
         DB_WARNING("parse select sql failed");
         return -1;
     }
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     if (0 != gen_select_stmts_plan()) {
         return -1;
     }
@@ -54,15 +54,15 @@ int UnionPlanner::plan() {
     create_union_node();
 
     if (client->txn_id == 0) {
-        _ctx->runtime_state.set_single_sql_autocommit(true);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
-        _ctx->runtime_state.set_single_sql_autocommit(false);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
     return 0;
 }
 
 int UnionPlanner::gen_select_stmts_plan() {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     int  _number_for_columns = 0; // union的每个select的column个数必须一样
     _is_distinct = _union_stmt->distinct;
     for (int stmt_idx = 0; stmt_idx < _union_stmt->select_stmts.size(); stmt_idx++) {
@@ -77,7 +77,7 @@ int UnionPlanner::gen_select_stmts_plan() {
         select_ctx->cur_db = _ctx->cur_db;
         select_ctx->user_info = _ctx->user_info;
         select_ctx->row_ttl_duration = _ctx->row_ttl_duration;
-        select_ctx->runtime_state.set_client_conn(client);
+        select_ctx->get_runtime_state()->set_client_conn(client);
         select_ctx->sql = select->to_string();
         std::unique_ptr<LogicalPlanner> planner;
         planner.reset(new SelectPlanner(select_ctx.get()));
@@ -90,7 +90,7 @@ int UnionPlanner::gen_select_stmts_plan() {
             _first_select_exprs = planner->select_exprs();
             _select_alias_mapping = planner->select_alias_mapping();
         }
-        select_ctx->runtime_state.init(select_ctx.get(), nullptr);
+        select_ctx->get_runtime_state()->init(select_ctx.get(), nullptr);
         select_ctx->is_full_export = false;
         int ret = select_ctx->create_plan_tree();
         if (ret < 0) {

@@ -28,7 +28,13 @@ public:
     virtual int init(const pb::PlanNode& node);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
-    virtual void close(RuntimeState* state) {}
+    virtual void close(RuntimeState* state) {
+        ExecNode::close(state);
+        _send_region_ids.clear();
+        _sent_region_ids.clear();
+        _start_key_sort.clear();
+        _error = E_OK;
+    }
     bool get_batch(RowBatch* batch);
 
 private:

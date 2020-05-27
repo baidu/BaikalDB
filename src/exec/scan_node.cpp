@@ -137,6 +137,8 @@ int ScanNode::open(RuntimeState* state) {
 
 void ScanNode::close(RuntimeState* state) {
     ExecNode::close(state);
+    clear_possible_indexes();
+    _multi_reverse_index.clear();
 }
 void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
     std::map<std::string, std::string> explain_info = {

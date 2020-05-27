@@ -65,7 +65,8 @@ int LimitNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             _offset_expr->close();
             if (value.is_int()) {
                 _offset = value.get_numberic<int64_t>();
-            } else if (!value.is_place_holder()) {
+                // place holder 没替换前不做expr_optimize
+            } else {
                 DB_WARNING("invalid offset_expr type: %d", _offset_expr->node_type());
                 return -1;
             }
@@ -93,7 +94,7 @@ int LimitNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             _count_expr->close();
             if (value.is_int()) {
                 _limit = value.get_numberic<int64_t>();
-            } else if (!value.is_place_holder()) {
+            } else {
                 DB_WARNING("invalid count_expr type: %d", _count_expr->node_type());
                 return -1;
             }

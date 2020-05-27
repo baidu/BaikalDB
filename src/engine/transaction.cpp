@@ -230,7 +230,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
             }
         } else {
             if (index_info.length > 0) {
-                if (key.size() < index_info.length) {
+                if ((int)key.size() < index_info.length) {
                     DB_FATAL("index:%ld value_size:%d len:%d", index_info.id, key.size(), index_info.length);
                     return false;
                 }
@@ -254,7 +254,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
                         pos += index_info.fields[idx].size;
                     }
                 }
-                if (key.size() < pos) {
+                if ((int)key.size() < pos) {
                     DB_FATAL("index:%ld value_size:%d pos:%d", index_info.id, key.size(), pos);
                     return false;
                 }
@@ -995,7 +995,7 @@ int Transaction::get_update_primary_columns(
         }
         rocksdb::Status res = _txn->Get(read_opt, _data_cf, key.data(), &value);
         if (res.ok()){
-            const FieldDescriptor* field = val->get_field_by_tag(field_id);
+            //const FieldDescriptor* field = val->get_field_by_tag(field_id);
             if (0 != val->decode_field(field_info, value)) {
                 DB_WARNING("decode value failed: %d", field_id);
                 return -1;

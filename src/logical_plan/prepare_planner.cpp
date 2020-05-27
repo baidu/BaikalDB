@@ -26,7 +26,7 @@
 namespace baikaldb {
 
 int PreparePlanner::plan() {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     if (_ctx->stmt_type == parser::NT_NEW_PREPARE) {
         std::string stmt_name;
         std::string stmt_sql;
@@ -115,12 +115,11 @@ int PreparePlanner::plan() {
 }
 
 int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string& stmt_sql) {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     // If a prepared statement with the given name already exists, 
     // it is deallocated implicitly before the new statement is prepared. 
     auto iter = client->prepared_plans.find(stmt_name);
     if (iter != client->prepared_plans.end()) {
-        delete iter->second;
         client->prepared_plans.erase(iter);
     }
     //DB_WARNING("stmt_name:%s stmt_sql:%s", stmt_name.c_str(), stmt_sql.c_str());
@@ -146,7 +145,7 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     }
 
     // create commit fetcher node
-    std::unique_ptr<QueryContext> prepare_ctx(new (std::nothrow)QueryContext());
+    std::shared_ptr<QueryContext> prepare_ctx(new (std::nothrow)QueryContext());
     if (prepare_ctx.get() == nullptr) {
         DB_WARNING("create prepare context failed");
         return -1;
@@ -158,7 +157,8 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     prepare_ctx->cur_db = _ctx->cur_db;
     prepare_ctx->user_info = _ctx->user_info;
     prepare_ctx->row_ttl_duration = _ctx->row_ttl_duration;
-    prepare_ctx->runtime_state.set_client_conn(client);
+    prepare_ctx->client_conn = client;
+    prepare_ctx->get_runtime_state()->set_client_conn(client);
     prepare_ctx->sql = stmt_sql;
 
     std::unique_ptr<LogicalPlanner> planner;
@@ -190,19 +190,21 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
         return -1;
     }
     prepare_ctx->root->find_place_holder(prepare_ctx->placeholders);
+    /*
     // 包括类型推导与常量表达式计算
     ret = ExprOptimize().analyze(prepare_ctx.get());
     if (ret < 0) {
         DB_WARNING("ExprOptimize failed");
         return ret;
     }
-    client->prepared_plans[stmt_name] = prepare_ctx.release();
+    */
+    client->prepared_plans[stmt_name] = prepare_ctx;
     return 0;
 }
 
 // TODO, transaction ID, insert records, update records
 int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::ExprNode>& params) {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
 
     auto iter = client->prepared_plans.find(stmt_name);
     if (iter == client->prepared_plans.end()) {
@@ -212,7 +214,7 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
         return -1;
     }
 
-    QueryContext* prepare_ctx = iter->second;
+    std::shared_ptr<QueryContext> prepare_ctx = iter->second;
     if (params.size() != prepare_ctx->placeholders.size()) {
         _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
         _ctx->stat_info.error_msg << "Incorrect arguments to EXECUTE: " 
@@ -220,7 +222,6 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
                                   << prepare_ctx->placeholders.size();
         return -1;
     }
-    _ctx->plan.CopyFrom(prepare_ctx->plan);
     auto& tuple_descs = prepare_ctx->tuple_descs();
     // enable_2pc=true or table has global index need generate txn_id
     if (!prepare_ctx->is_select) {
@@ -230,12 +231,21 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     DB_DEBUG("row_ttl_duration %ld", prepare_ctx->row_ttl_duration);
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
     _ctx->mutable_tuple_descs()->assign(tuple_descs.begin(), tuple_descs.end());
-    int ret = _ctx->create_plan_tree();
-    if (ret < 0) {
-        DB_WARNING("Failed to pb_plan to execnode");
-        return -1;
+    // TODO dml的plan复用
+    if (!prepare_ctx->is_select) {
+        _ctx->plan.CopyFrom(prepare_ctx->plan);
+        int ret = _ctx->create_plan_tree();
+        if (ret < 0) {
+            DB_WARNING("Failed to pb_plan to execnode");
+            return -1;
+        }
+        _ctx->root->find_place_holder(_ctx->placeholders);
+    } else {
+        // select prepare plan复用
+        _ctx->runtime_state = prepare_ctx->runtime_state;
+        _ctx->root = prepare_ctx->root;
+        _ctx->placeholders = prepare_ctx->placeholders;
     }
-    _ctx->root->find_place_holder(_ctx->placeholders);
 
     for (size_t idx = 0; idx < params.size(); ++idx) {
         auto place_holder_iter = _ctx->placeholders.find(idx);
@@ -253,11 +263,10 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
 }
 
 int PreparePlanner::stmt_close(const std::string& stmt_name) {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     auto iter = client->prepared_plans.find(stmt_name);
     if (iter != client->prepared_plans.end()) {
         client->query_ctx->sql = iter->second->sql;
-        delete iter->second;
         client->prepared_plans.erase(iter);
     }
     return 0;

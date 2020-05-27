@@ -325,6 +325,7 @@ int FilterNode::open(RuntimeState* state) {
     std::vector<int64_t>& scan_indices = state->scan_indices();
     for (auto conjunct : _conjuncts) {
         //如果该条件已经被扫描使用的index包含，则不需要再过滤该条件
+        // TODO 后续baikaldb直接过滤掉条件，不需要这个了
         if (conjunct->contained_by_index(scan_indices)) {
             continue;
         }
@@ -409,6 +410,10 @@ void FilterNode::close(RuntimeState* state) {
     for (auto conjunct : _conjuncts) {
         conjunct->close();
     }
+    _pruned_conjuncts.clear();
+    _child_row_batch.clear();
+    _child_row_idx = 0;
+    _child_eos = false;
 }
 void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
     ExecNode::show_explain(output);

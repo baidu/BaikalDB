@@ -17,7 +17,6 @@
 #include "proto/meta.interface.pb.h"
 #include "cmsketch.h"
 #include "histogram.h"
-#include "mysql_wrapper.h"
 
 namespace baikaldb {
 class Statistics {

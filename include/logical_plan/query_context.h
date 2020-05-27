@@ -156,6 +156,12 @@ public:
         }
         return -1;
     }
+    SmartState get_runtime_state() {
+        if (runtime_state == nullptr) {
+            runtime_state.reset(new RuntimeState);
+        }
+        return runtime_state;
+    }
     pb::PlanNode* add_plan_node() {
         return plan.add_nodes();
     }
@@ -188,7 +194,8 @@ public:
     std::string         prepare_stmt_name;
     std::vector<pb::ExprNode> param_values;
 
-    RuntimeState        runtime_state;  // baikaldb side runtime state
+    SmartState          runtime_state;  // baikaldb side runtime state
+    NetworkSocket*      client_conn = nullptr; // used for baikaldb
     // the insertion records, not grouped by region yet
     std::vector<SmartRecord>            insert_records;
     bool                has_recommend = false;
@@ -199,8 +206,9 @@ public:
     bool                new_prepared = false;  // flag for stmt_prepare
     bool                exec_prepared = false; // flag for stmt_execute
     bool                is_prepared = false;   // flag for stmt_execute
-    int64_t             prepared_table_id = -1;
     bool                is_select = false;
+    bool                need_destroy_tree = false;
+    int64_t             prepared_table_id = -1;
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 

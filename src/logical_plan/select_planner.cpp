@@ -109,11 +109,11 @@ int SelectPlanner::plan() {
     if (0 != create_join_and_scan_nodes(_join_root)) {
         return -1;
     }
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     if (client->txn_id == 0) {
-        _ctx->runtime_state.set_single_sql_autocommit(true);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
-        _ctx->runtime_state.set_single_sql_autocommit(false);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
     return 0;
 }

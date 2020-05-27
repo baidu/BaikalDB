@@ -93,15 +93,6 @@ enum QUERY_TYPE {
 class StateMachine {
 public:
     ~StateMachine() {
-        for (auto& minute_pair : database_request_count_minute) {
-            delete minute_pair.second;
-        }
-        for (auto& hour_pair : database_request_count_hour) {
-            delete hour_pair.second;
-        }
-        for (auto& day_pair : database_request_count_day) {
-            delete day_pair.second;
-        }
     }
 
     static StateMachine* get_instance() {
@@ -165,12 +156,6 @@ private:
     int _send_result_to_client_and_reset_status(EpollInfo* epoll_info, SmartSocket client);
     int _reset_network_socket_client_resource(SmartSocket client);
     void _print_query_time(SmartSocket client);
-
-    std::mutex                                        bvar_mutex;
-    std::unordered_map<std::string, bvar::Adder<int>> database_request_count;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_minute;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_hour;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_day;
 
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;

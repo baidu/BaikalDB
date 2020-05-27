@@ -121,7 +121,7 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     int64_t main_table_id = scan_node->table_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance(); 
 
-    pb::PossibleIndex* primary = scan_node->router_index();
+    pb::PossibleIndex* router_index = scan_node->router_index();
     int64_t router_index_id = scan_node->router_index_id();
 
     auto index_ptr = schema_factory->get_index_info_ptr(router_index_id);
@@ -129,20 +129,20 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
         DB_WARNING("invalid index info: %ld", router_index_id);
         return -1;
     }
-    if (primary != nullptr) {
-        DB_DEBUG("index:%ld router_index_id:%ld", primary->index_id(), router_index_id);
+    if (router_index != nullptr) {
+        DB_DEBUG("index:%ld router_index_id:%ld", router_index->index_id(), router_index_id);
     }
 
     auto ret = schema_factory->get_region_by_key(main_table_id, 
-            *index_ptr, primary,
+            *index_ptr, router_index,
             scan_node->region_infos(),
             scan_node->mutable_region_primary());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
     }
-    if (primary != nullptr && scan_node->mutable_region_primary()->size() > 0) {
-        primary->mutable_ranges()->Clear();
+    if (router_index != nullptr && scan_node->mutable_region_primary()->size() > 0) {
+        router_index->mutable_ranges()->Clear();
     }
     //如果该表没有全局二级索引
     if (!schema_factory->has_global_index(main_table_id)) {

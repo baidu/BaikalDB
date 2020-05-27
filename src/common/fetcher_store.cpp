@@ -155,8 +155,9 @@ ErrorType FetcherStore::send_request(
                 continue;
             }
             if (plan_item.tuple_descs.size() > 0 && 
+                plan_item.op_type != pb::OP_BEGIN &&
                 static_cast<DMLNode*>(plan_item.root)->global_index_id() != info.table_id()
-                && plan_item.op_type != pb::OP_BEGIN) {
+                ) {
                 /*DB_WARNING("TransactionNote: cache_item table_id mismatch,"
                     " cache global_index_id: %ld, region_info index_id : %ld",
                     static_cast<DMLNode*>(plan_item.root)->global_index_id(), info.table_id());
@@ -606,10 +607,12 @@ int FetcherStore::run(RuntimeState* state,
 
     // 构造并发送请求
     std::map<std::string, std::set<std::shared_ptr<TraceDesc>>> send_region_ids_map; // leader ip => region_ids
+    int send_region_count = 0;
     for (auto& pair : region_infos) {
         if (skip_region_set.count(pair.first) > 0) {
             continue;
         }
+        ++send_region_count;
         std::shared_ptr<TraceDesc> trace = std::make_shared<TraceDesc>();
         trace->region_id = pair.first;
         if (store_request->get_trace() != nullptr) {
@@ -618,13 +621,27 @@ int FetcherStore::run(RuntimeState* state,
         }
         send_region_ids_map[pair.second.leader()].insert(trace);
     }
-    BthreadCond store_cond; // 不同store并发
-    for (auto& pair : send_region_ids_map) {
-        store_cond.increase();
-        auto store_thread = [this, state, store_request, pair, log_id, start_seq_id, current_seq_id,
-                              &region_infos, &store_cond, op_type]() {
-            ON_SCOPE_EXIT([&store_cond]{store_cond.decrease_signal();});
-            BthreadCond cond(-FLAGS_single_store_concurrency); // 单store内并发数
+    if (send_region_count == 1) {
+        auto& trace = *send_region_ids_map.begin()->second.begin();
+        int64_t region_id = trace->region_id;
+        // 这两个资源后续不会分配新的，因此不需要加锁
+        pb::RegionInfo* info = nullptr;
+        if (region_infos.count(region_id) != 0) {
+            info = &region_infos[region_id];
+        } else if (state->txn_id != 0) {
+            BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
+            info = &(state->client_conn()->region_infos[region_id]);
+        }
+        auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
+                0, start_seq_id, current_seq_id, op_type);
+        if (ret != E_OK) {
+            DB_WARNING("rpc error, region_id:%ld, log_id:%lu op_type:%s",
+                    region_id, log_id, pb::OpType_Name(op_type).c_str());
+            error = ret;
+        }
+    } else if (send_region_count <= FLAGS_single_store_concurrency) {
+        ConcurrencyBthread con_bth(send_region_count, &BTHREAD_ATTR_SMALL);
+        for (auto& pair : send_region_ids_map) {
             for (auto& trace : pair.second) {
                 int64_t region_id = trace->region_id;
                 // 这两个资源后续不会分配新的，因此不需要加锁
@@ -635,31 +652,65 @@ int FetcherStore::run(RuntimeState* state,
                     BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
                     info = &(state->client_conn()->region_infos[region_id]);
                 }
-                cond.increase();
-                cond.wait();
-                auto req_thread = [this, state, store_request, info, trace, region_id, log_id, current_seq_id,
-                          start_seq_id, &cond, op_type]() {
-                    ON_SCOPE_EXIT([&cond]{cond.decrease_signal();});
-                    auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
-                           0, start_seq_id, current_seq_id, op_type);
-                    if (ret != E_OK) {
-                        DB_WARNING("rpc error, region_id:%ld, log_id:%lu op_type:%s",
-                            region_id, log_id, pb::OpType_Name(op_type).c_str());
-                        error = ret;
-                    }
-                };
-                // 怀疑栈溢出
-                Bthread bth;
-                bth.run(req_thread);
-            }
-            cond.wait(-FLAGS_single_store_concurrency);
-        };
-        Bthread bth(&BTHREAD_ATTR_SMALL);
-        bth.run(store_thread);
-    }
 
-    // commit/rollback请求后续可以考虑异步执行，不等待
-    store_cond.wait();
+                auto req_thread = [this, state, store_request, info, trace, region_id, log_id, current_seq_id,
+                     start_seq_id, op_type]() {
+                         auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
+                                 0, start_seq_id, current_seq_id, op_type);
+                         if (ret != E_OK) {
+                             DB_WARNING("rpc error, region_id:%ld, log_id:%lu op_type:%s",
+                                     region_id, log_id, pb::OpType_Name(op_type).c_str());
+                             error = ret;
+                         }
+                     };
+                con_bth.run(req_thread);
+            }
+        }
+        con_bth.join();
+    } else {
+        BthreadCond store_cond; // 不同store并发
+        for (auto& pair : send_region_ids_map) {
+            store_cond.increase();
+            auto store_thread = [this, state, store_request, pair, log_id, start_seq_id, current_seq_id,
+                 &region_infos, &store_cond, op_type]() {
+                     ON_SCOPE_EXIT([&store_cond]{store_cond.decrease_signal();});
+                     BthreadCond cond(-FLAGS_single_store_concurrency); // 单store内并发数
+                     for (auto& trace : pair.second) {
+                         int64_t region_id = trace->region_id;
+                         // 这两个资源后续不会分配新的，因此不需要加锁
+                         pb::RegionInfo* info = nullptr;
+                         if (region_infos.count(region_id) != 0) {
+                             info = &region_infos[region_id];
+                         } else if (state->txn_id != 0) {
+                             BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
+                             info = &(state->client_conn()->region_infos[region_id]);
+                         }
+                         cond.increase();
+                         cond.wait();
+                         auto req_thread = [this, state, store_request, info, trace, region_id, log_id, current_seq_id,
+                              start_seq_id, &cond, op_type]() {
+                                  ON_SCOPE_EXIT([&cond]{cond.decrease_signal();});
+                                  auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
+                                          0, start_seq_id, current_seq_id, op_type);
+                                  if (ret != E_OK) {
+                                      DB_WARNING("rpc error, region_id:%ld, log_id:%lu op_type:%s",
+                                              region_id, log_id, pb::OpType_Name(op_type).c_str());
+                                      error = ret;
+                                  }
+                              };
+                         // 怀疑栈溢出
+                         Bthread bth(&BTHREAD_ATTR_SMALL);
+                         bth.run(req_thread);
+                     }
+                     cond.wait(-FLAGS_single_store_concurrency);
+                 };
+            Bthread bth(&BTHREAD_ATTR_SMALL);
+            bth.run(store_thread);
+        }
+
+        // commit/rollback请求后续可以考虑异步执行，不等待
+        store_cond.wait();
+    }
     if (op_type == pb::OP_COMMIT || op_type == pb::OP_ROLLBACK) {
         // 清除primary region信息
         client->primary_region_id = -1;

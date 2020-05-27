@@ -19,7 +19,7 @@
 namespace baikaldb {
 class FilterNode : public ExecNode {
 public:
-    FilterNode() : _child_row_idx(0), _child_eos(false) {
+    FilterNode() {
     }
     virtual  ~FilterNode() {
         for (auto conjunct : _conjuncts) {
@@ -63,8 +63,8 @@ private:
     std::vector<ExprNode*> _conjuncts;
     std::vector<ExprNode*> _pruned_conjuncts;
     RowBatch _child_row_batch;
-    size_t  _child_row_idx;
-    bool    _child_eos;
+    size_t  _child_row_idx = 0;
+    bool    _child_eos = false;
 };
 }
 

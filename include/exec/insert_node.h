@@ -37,6 +37,8 @@ public:
         for (auto expr : _update_exprs) {
             expr->close();
         }
+        _records.clear();
+        _records_by_region.clear();
     }
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);

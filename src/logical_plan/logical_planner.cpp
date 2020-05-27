@@ -1245,24 +1245,21 @@ int LogicalPlanner::create_term_slot_ref_node(
     std::string origin_name = ss.str();
     std::unordered_map<std::string, pb::ExprNode>* vars = nullptr;
     std::string var_name;
+    auto client = _ctx->client_conn;
     if (boost::algorithm::istarts_with(origin_name, "@@global.")) {
         // TODO handle set global variable
         return -1;
     } else if (boost::algorithm::istarts_with(origin_name, "@@session.")) {
-        auto client = _ctx->runtime_state.client_conn();
         var_name = origin_name.substr(strlen("@@session."));
         vars = &client->session_vars;
     } else if (boost::algorithm::istarts_with(origin_name, "@@local.")) {
-        auto client = _ctx->runtime_state.client_conn();
         var_name = origin_name.substr(strlen("@@local."));
         vars = &client->session_vars;
     } else if (boost::algorithm::istarts_with(origin_name, "@@")) {
-        auto client = _ctx->runtime_state.client_conn();
         var_name = origin_name.substr(2);
         vars = &client->session_vars;
     } else if (boost::algorithm::istarts_with(origin_name, "@")) {
         // user variable term
-        auto client = _ctx->runtime_state.client_conn();
         var_name = origin_name.substr(1);
         vars = &client->user_vars;
     }
@@ -1607,7 +1604,7 @@ int LogicalPlanner::create_scan_nodes() {
 }
 
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     if (client->txn_id == 0) {
         if (_ctx->enable_2pc
             || _factory->has_global_index(table_id)) {
@@ -1618,16 +1615,16 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
             client->seq_id = 0;
         }
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
-        _ctx->runtime_state.set_single_sql_autocommit(true);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
-        _ctx->runtime_state.set_single_sql_autocommit(false);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
 }
 
 // TODO: instance_part may overflow and wrapped
 uint64_t LogicalPlanner::get_txn_id() {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     uint64_t instance_part = client->server_instance_id & 0x7FFFFF;
 
     uint64_t txn_id_part = _txn_id_counter.fetch_add(1);
@@ -1646,7 +1643,7 @@ void LogicalPlanner::plan_begin_txn() {
     
     txn_node->set_txn_cmd(pb::TXN_BEGIN);
 
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     uint64_t txn_id = get_txn_id();
     client->on_begin(txn_id);
     client->seq_id = 0;
@@ -1675,7 +1672,7 @@ void LogicalPlanner::plan_commit_and_begin_txn() {
     
     txn_node->set_txn_cmd(pb::TXN_COMMIT_BEGIN);
 
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     client->new_txn_id = get_txn_id();
     return;
 }
@@ -1703,7 +1700,7 @@ void LogicalPlanner::plan_rollback_and_begin_txn() {
     
     txn_node->set_txn_cmd(pb::TXN_ROLLBACK_BEGIN);
 
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     client->new_txn_id = get_txn_id();
 }
 } //namespace

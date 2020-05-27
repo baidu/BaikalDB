@@ -69,6 +69,7 @@ struct NetworkSocket {
     bool reset_when_err();
     void on_begin(uint64_t txn_id);
     void on_commit_rollback();
+    void update_old_txn_info();
     bool transaction_has_write();
     uint64_t get_global_conn_id();
 
@@ -132,7 +133,7 @@ struct NetworkSocket {
 
     // prepare releated members
     uint64_t         stmt_id = 0;  // The statement ID auto_inc in Mysql Client-Server Protocol
-    std::unordered_map<std::string, QueryContext*> prepared_plans;
+    std::unordered_map<std::string, std::shared_ptr<QueryContext>> prepared_plans;
 
     std::unordered_map<std::string, pb::ExprNode> session_vars;
     std::unordered_map<std::string, pb::ExprNode> user_vars;

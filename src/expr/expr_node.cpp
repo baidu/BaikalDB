@@ -51,6 +51,10 @@ void ExprNode::const_pre_calc() {
         if (c->is_literal()) {
             continue;
         }
+        // place holder被替换会导致下一次exec参数对不上
+        if (c->has_place_holder()) {
+            continue;
+        }
         //替换,常量表达式优先类型推导
         ret = c->type_inferer();
         if (ret < 0) {

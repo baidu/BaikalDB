@@ -57,6 +57,20 @@ public:
         }
         return false;
     }
+    bool has_place_holder() {
+        if (is_place_holder()) {
+            return true;
+        }
+        for (auto c : _children) {
+            if (c->has_place_holder()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    virtual bool is_place_holder() {
+        return false;
+    }
     bool is_slot_ref() {
         return _node_type == pb::SLOT_REF;
     }
