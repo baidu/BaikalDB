@@ -20,7 +20,7 @@ bind(
     actual = "@com_google_protobuf//:protobuf",
 )
 
-http_archive(
+new_http_archive(
     name = "com_github_apache_arrow",
     url = "https://github.com/apache/arrow/archive/apache-arrow-0.17.1.tar.gz",
     strip_prefix = "arrow-apache-arrow-0.17.1",
