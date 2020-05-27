@@ -69,8 +69,9 @@ http_archive(
 # from https://github.com/nelhage/rules_boost
 git_repository(
     name = "com_github_nelhage_rules_boost",
-    commit = "96ba810e48f4a28b85ee9c922f0b375274a97f98",
+    commit = "0cc5bf5513c067917b5e083cee22a8dcdf2e0266",
     remote = "https://github.com/nelhage/rules_boost",
+    shallow_since = "1570056263 -0700",
 )
 
 load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
