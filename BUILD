@@ -713,6 +713,7 @@ cc_library(
         "@boost//:lexical_cast",
         "//external:bthread",
         "//external:rocksdb",
+        "//external:arrow",
         "//external:rapidjson",
     ],
     visibility = ["//visibility:public"],

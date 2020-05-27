@@ -9,15 +9,27 @@ bind(
     actual = "@com_google_googletest//:gtest",
 )
 
-git_repository(
+http_archive(
     name = "com_google_protobuf",
-    remote = "https://github.com/protocolbuffers/protobuf.git",
-    tag = "v3.11.4",
+    url = "https://github.com/protocolbuffers/protobuf/archive/v3.11.4.tar.gz",
+    strip_prefix = "protobuf-3.11.4",
 )
 
 bind(
     name = "protobuf",
     actual = "@com_google_protobuf//:protobuf",
+)
+
+http_archive(
+    name = "com_github_apache_arrow",
+    url = "https://github.com/apache/arrow/archive/apache-arrow-0.17.1.tar.gz",
+    strip_prefix = "arrow-apache-arrow-0.17.1",
+    build_file = "third-party/com_githup_apache_arrow/BUILD",
+)
+
+bind(
+    name = "arrow",
+    actual = "@com_github_apache_arrow//:arrow",
 )
 
 http_archive(
