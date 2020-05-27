@@ -78,7 +78,7 @@ load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
 boost_deps()
 
 # from https://github.com/envoyproxy/envoy/blob/master/bazel/repositories.bzl
-git_repository(
+new_git_repository(
     name = "com_github_tencent_rapidjson",
     remote= "https://github.com/Tencent/rapidjson.git",
     build_file = "third-party/rapidjson.BUILD",
@@ -90,7 +90,7 @@ bind(
     actual = "@com_github_tencent_rapidjson//:rapidjson",
 )
 
-git_repository(
+new_git_repository(
     name = "com_github_facebook_rocksdb",
     remote = "https://github.com/facebook/rocksdb.git",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
@@ -112,7 +112,7 @@ http_archive(
 )
 
 # zlib
-git_repository(
+new_git_repository(
     name = "com_github_madler_zlib",
     remote = "https://github.com/madler/zlib.git",
     tag = "v1.2.11",
