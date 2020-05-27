@@ -643,9 +643,9 @@ int InsertManagerNode::process_records_before_send(RuntimeState* state) {
                     set_err_message(info, record, state);
                     return -1;
                 }
-            }            
+            }
         }
-        id++;      
+        id++;
     }
     for (auto id : need_remove_ids) {
         for (auto index_key_pair : _index_keys_record_map) {

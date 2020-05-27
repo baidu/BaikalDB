@@ -7,25 +7,6 @@ enum ReverseNodeType {
     REVERSE_NODE_DELETE = 1;
 };
 
-//--test
-message common_reverse_extra {
-    optional int32 rank          = 1;
-    optional float weight        = 2;
-};
-message ReverseNode
-{
-    // 主表的主键构成的字节序列
-    optional bytes key = 1;
-    // 节点的状态 
-    required ReverseNodeType flag = 2;
-    //附加信息 由表的用户构造
-    optional bytes extra_info = 3;
-};
-message ReverseList
-{
-    repeated ReverseNode reverse_nodes = 1;
-};
-
 //--common
 message CommonReverseNode
 {

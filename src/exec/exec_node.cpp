@@ -15,7 +15,6 @@
 #include "exec_node.h"
 #include "agg_node.h"
 #include "filter_node.h"
-#include "fetcher_node.h"
 #include "insert_node.h"
 #include "update_node.h"
 #include "delete_node.h"
@@ -35,6 +34,7 @@
 #include "lock_primary_node.h"
 #include "lock_secondary_node.h"
 #include "full_export_node.h"
+#include "union_node.h"
 #include "runtime_state.h"
 
 namespace baikaldb {
@@ -120,7 +120,8 @@ bool ExecNode::need_seperate() {
         case pb::TRANSACTION_NODE:
         case pb::BEGIN_MANAGER_NODE:
         case pb::COMMIT_MANAGER_NODE:
-            case pb::ROLLBACK_MANAGER_NODE:
+        case pb::UNION_NODE:
+        case pb::ROLLBACK_MANAGER_NODE:
             return true;
         case pb::SCAN_NODE:
             //DB_NOTICE("engine:%d", static_cast<ScanNode*>(this)->engine());
@@ -251,9 +252,6 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
         case pb::HAVING_FILTER_NODE:
             *exec_node = new FilterNode;
             return (*exec_node)->init(node);
-        case pb::FETCHER_NODE:
-            *exec_node = new FetcherNode;
-            return (*exec_node)->init(node);
         case pb::UPDATE_NODE:
             *exec_node = new UpdateNode;
             return (*exec_node)->init(node);
@@ -304,6 +302,9 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
             return (*exec_node)->init(node);
         case pb::DUAL_SCAN_NODE:
             *exec_node = new DualScanNode;
+            return (*exec_node)->init(node);
+        case pb::UNION_NODE:
+            *exec_node = new UnionNode;
             return (*exec_node)->init(node);
         default:
             DB_FATAL("create_exec_node failed: %s", node.DebugString().c_str());

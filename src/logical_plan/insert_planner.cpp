@@ -123,7 +123,7 @@ int InsertPlanner::parse_kv_list() {
         _update_slots.push_back(slot);
 
         pb::Expr value_expr;
-        if (0 != create_expr_tree(_insert_stmt->on_duplicate[i]->expr, value_expr)) {
+        if (0 != create_expr_tree(_insert_stmt->on_duplicate[i]->expr, value_expr, false)) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
@@ -186,7 +186,7 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
         if (_ctx->new_prepared) {
             for (size_t idx = 0; idx < (size_t)row_expr->children.size(); ++idx) {
                 pb::Expr* expr = node->add_insert_values();
-                if (0 != create_expr_tree(row_expr->children[idx], *expr)) {
+                if (0 != create_expr_tree(row_expr->children[idx], *expr, false)) {
                     DB_WARNING("create insertion value expr failed");
                     return -1;
                 }
@@ -232,7 +232,7 @@ int InsertPlanner::fill_default_value(SmartRecord record, FieldInfo& field) {
 
 int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartRecord record, FieldInfo& field) {
     pb::Expr value_expr;
-    if (0 != create_expr_tree(parser_expr, value_expr)) {
+    if (0 != create_expr_tree(parser_expr, value_expr, false)) {
         DB_WARNING("create insertion value expr failed");
         return -1;
     }

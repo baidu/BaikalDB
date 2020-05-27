@@ -97,7 +97,7 @@ int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 }
 
 int AggNode::open(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -188,6 +188,7 @@ void AggNode::process_row_batch(RowBatch& batch) {
         MemRow* cur_row = row.get();
         encode_agg_key(cur_row, key);
         MemRow** agg_row = _hash_map.seek(key.data());
+        
         if (agg_row == nullptr) { //不存在则新建
             cur_row = row.release();
             agg_row = &cur_row;
@@ -204,7 +205,7 @@ void AggNode::process_row_batch(RowBatch& batch) {
 }
 
 int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
-    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
         local_node.set_affect_rows(_num_rows_returned);
     }));
 

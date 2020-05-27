@@ -192,7 +192,7 @@ private:
             if ((data.size() - pos) < value_size) {
                 DB_FATAL("read value from iobuf fail, region_id: %ld, value_size: %ld", 
                         _region_id, value_size);
-                return 1;
+                return -1;
             }
             data.copy_to(&value, value_size, pos);
             pos += value_size;

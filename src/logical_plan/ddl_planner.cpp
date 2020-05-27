@@ -173,6 +173,8 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
     }
 
     bool can_support_ttl = true;
+    bool has_arrow_fulltext = false;
+    bool has_pb_fulltext = false;
     int constraint_len = stmt->constraints.size();
     for (int idx = 0; idx < constraint_len; ++idx) {
         parser::Constraint* constraint = stmt->constraints[idx];
@@ -221,6 +223,17 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     SegmentType_Parse(segment_type, &pb_segment_type);
                     index->set_segment_type(pb_segment_type);
                 }
+                auto storage_type_iter = root.FindMember("storage_type");
+                pb::StorageType pb_storage_type = pb::ST_PROTOBUF;
+                if (storage_type_iter != root.MemberEnd()) {
+                    std::string storage_type = storage_type_iter->value.GetString();
+                    StorageType_Parse(storage_type, &pb_storage_type);
+                }
+                if (!is_fulltext_type_constraint(pb_storage_type, has_arrow_fulltext, has_pb_fulltext)) {
+                    DB_WARNING("fulltext has two types : pb&arrow"); 
+                    return -1;
+                }
+                index->set_storage_type(pb_storage_type);
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", value);
                 return -1;
@@ -680,6 +693,14 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
                 SegmentType_Parse(segment_type, &pb_segment_type);
                 index->set_segment_type(pb_segment_type);
             }
+            
+            auto storage_type_iter = root.FindMember("storage_type");
+            pb::StorageType pb_storage_type = pb::ST_PROTOBUF;
+            if (storage_type_iter != root.MemberEnd()) {
+                std::string storage_type = storage_type_iter->value.GetString();
+                StorageType_Parse(storage_type, &pb_storage_type);
+            }
+            index->set_storage_type(pb_storage_type);
         } catch (...) {
             DB_WARNING("parse create table json comments error [%s]", value);
             return -1;
@@ -687,4 +708,25 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
     }
     return 0;
 }
+
+bool DDLPlanner::is_fulltext_type_constraint(pb::StorageType pb_storage_type, bool& has_arrow_fulltext, bool& has_pb_fulltext) const {
+    if (pb_storage_type == pb::ST_PROTOBUF) {
+        has_pb_fulltext = true;
+        if (has_arrow_fulltext) {
+            DB_WARNING("fulltext has two types : pb&arrow"); 
+            return false;
+        }
+        return true;
+    } else if (pb_storage_type == pb::ST_ARROW) {
+        has_arrow_fulltext = true;
+        if (has_pb_fulltext) {
+            DB_WARNING("fulltext has two types : pb&arrow"); 
+            return false;
+        }
+        return true;
+    }
+    DB_WARNING("unknown storage_type");
+    return false;
+}
+
 } // end of namespace baikaldb

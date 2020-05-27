@@ -39,7 +39,6 @@ public:
     ~RegionManager() {
         bthread_mutex_destroy(&_instance_region_mutex);
         bthread_mutex_destroy(&_count_mutex);
-        bthread_mutex_destroy(&_log_entry_mutex);
         bthread_mutex_destroy(&_doing_mutex);
     }
     static RegionManager* get_instance() {
@@ -83,7 +82,6 @@ public:
                                      const std::set<std::string>& peers_in_master);
     //是否有超过replica_num数量的region, 这种region需要删掉多余的peer
     void check_peer_count(int64_t region_id,
-                        const std::string& resource_tag,
                         const pb::LeaderHeartBeat& leader_region,
                         const std::set<std::string>& peers_in_heart,
                         const std::set<std::string>& peers_in_master,
@@ -120,11 +118,13 @@ public:
         _region_peer_state_map.clear();
         _instance_region_map.clear();
         _instance_leader_count.clear();
-        RegionIncrementalMap* background = _incremental_regioninfo_map.read_background();
-        background->clear();
-        RegionIncrementalMap* frontground = _incremental_regioninfo_map.read();
-        frontground->clear();
+        _incremental_region_info.clear();
     }
+
+    void clear_region_peer_state_map() {
+        _region_peer_state_map.clear();
+    }
+
 public:
     void set_max_region_id(int64_t max_region_id) {
         _max_region_id = max_region_id;
@@ -331,7 +331,6 @@ private:
     RegionManager(): _max_region_id(0) {
         bthread_mutex_init(&_instance_region_mutex, NULL);
         bthread_mutex_init(&_count_mutex, NULL);
-        bthread_mutex_init(&_log_entry_mutex, NULL);
         bthread_mutex_init(&_doing_mutex, NULL);
     }
 private:
@@ -352,10 +351,7 @@ private:
 
     bthread_mutex_t                                     _doing_mutex;
     std::set<std::string>                               _doing_migrate; 
-    bthread_mutex_t                                      _log_entry_mutex;
-    typedef std::map<int64_t, std::vector<pb::RegionInfo>> RegionIncrementalMap;
-    DoubleBuffer<RegionIncrementalMap>                   _incremental_regioninfo_map;
-    TimeCost                                             _gc_time_cost;
+    IncrementalUpdate<std::vector<pb::RegionInfo>> _incremental_region_info;
 }; //class
 
 }//namespace

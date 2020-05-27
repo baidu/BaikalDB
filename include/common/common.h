@@ -17,6 +17,7 @@
 #include <functional>
 #include <execinfo.h>
 #include <type_traits>
+#include <fstream>
 #include <cmath>
 #include <set>
 #include <unordered_set>
@@ -27,6 +28,7 @@
 #ifdef BAIDU_INTERNAL
 #include <bthread.h>
 #include <base/time.h>
+#include <baidu/rpc/stream.h>
 #include <base/third_party/murmurhash3/murmurhash3.h>
 #include <base/containers/doubly_buffered_data.h>
 #include <base/endpoint.h>
@@ -41,12 +43,14 @@
 #include <butil/containers/doubly_buffered_data.h>
 #include <butil/endpoint.h>
 #include <butil/base64.h>
+#include <brpc/stream.h>
 #include <butil/fast_rand.h>
 #endif
 #include <bthread/execution_queue.h>
 #include <gflags/gflags.h>
 #include "log.h"
 #include "proto/common.pb.h"
+#include "proto/meta.interface.pb.h"
 
 #ifdef BAIDU_INTERNAL
 namespace baidu {
@@ -117,6 +121,19 @@ enum MysqlCommand : uint8_t {
     COM_SET_OPTION          = 0x1b,
     COM_STMT_FETCH          = 0x1c
 };
+enum ExplainType {
+    EXPLAIN_NULL            = 0,
+    ANALYZE_STATISTICS      = 1,
+    SHOW_HISTOGRAM          = 2,
+    SHOW_CMSKETCH           = 3,
+    SHOW_PLAN               = 4,
+    SHOW_TRACE              = 5,
+    SHOW_TRACE2             = 6,
+};
+
+inline bool explain_is_trace(ExplainType& type) {
+    return type == SHOW_TRACE || type == SHOW_TRACE2;
+}
 
 class TimeCost {
 public:
@@ -523,16 +540,110 @@ private:
     int _index = 0;
 };
 
+DECLARE_int64(incremental_info_gc_time);
+template <typename T>
+class IncrementalUpdate {
+public:
+    IncrementalUpdate() {
+        bthread_mutex_init(&_mutex, NULL);
+    }
+
+    ~IncrementalUpdate() {
+        bthread_mutex_destroy(&_mutex);
+    }
+
+    void put_incremental_info(const int64_t apply_index, T& infos) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        (*background)[apply_index] = infos;
+        if (FLAGS_incremental_info_gc_time < _gc_time_cost.get_time()) {
+            frontground->clear();
+            _buf.swap();
+            _gc_time_cost.reset();
+        }  
+    }
+
+    // 返回值 true:需要全量更新外部处理 false:增量更新，通过update_incremental处理增量
+    bool check_and_update_incremental(std::function<void(const T&)> update_incremental, int64_t& last_updated_index, const int64_t applied_index) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        if (frontground->size() == 0 && background->size() == 0) {
+            if (last_updated_index < applied_index) {
+                return true;
+            }
+            return false;
+        } else if (frontground->size() == 0 && background->size() > 0) {
+            if (last_updated_index < background->begin()->first) {              
+                return true;
+            } else {
+                auto iter = background->upper_bound(last_updated_index);
+                while (iter != background->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                return false;
+            }
+        } else if (frontground->size() > 0) {
+            if (last_updated_index < frontground->begin()->first) {
+                return true;
+            } else {
+                auto iter = frontground->upper_bound(last_updated_index);
+                while (iter != frontground->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                iter = background->upper_bound(last_updated_index);
+                while (iter != background->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                return false;         
+            }
+        }
+        return false;
+    }
+
+    void clear() {
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        background->clear();
+        frontground->clear();
+    }
+
+private:
+    DoubleBuffer<std::map<int64_t, T>> _buf;
+    bthread_mutex_t                    _mutex;
+    TimeCost                    _gc_time_cost;
+};
+
 struct BvarMap {
     struct SumCount {
         SumCount() {}
-        SumCount(int64_t sum, int64_t count, int64_t affected_rows, int64_t scan_rows) 
-            : sum(sum), count(count), affected_rows(affected_rows), scan_rows(scan_rows) {}
+        SumCount(int64_t table_id, int64_t sum, int64_t count, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows) 
+            : table_id(table_id), sum(sum), count(count), affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows) {}
         SumCount& operator+=(const SumCount& other) {
+            if (other.table_id > 0) {
+                table_id = other.table_id;
+            }
             sum += other.sum;
             count += other.count;
             affected_rows += other.affected_rows;
             scan_rows += other.scan_rows;
+            filter_rows += other.filter_rows;
             return *this;
         }
         SumCount& operator-=(const SumCount& other) {
@@ -540,37 +651,46 @@ struct BvarMap {
             count -= other.count;
             affected_rows -= other.affected_rows;
             scan_rows -= other.scan_rows;
+            filter_rows -= other.filter_rows;
             return *this;
         }
+        int64_t table_id = 0;
         int64_t sum = 0;
         int64_t count = 0;
         int64_t affected_rows = 0;
         int64_t scan_rows = 0;
+        int64_t filter_rows = 0;
     };
 public:
     BvarMap() {}
-    BvarMap(const std::string& key, int64_t cost, int64_t affected_rows, int64_t scan_rows) {
-        internal_map[key] = SumCount(cost, 1, affected_rows, scan_rows);
+    BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows) {
+        internal_map[key][index_id] = SumCount(table_id, cost, 1, affected_rows, scan_rows, filter_rows);
     }
     BvarMap& operator+=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
-            internal_map[pair.first] += pair.second;
+            for (auto& pair2 : pair.second) {
+                internal_map[pair.first][pair2.first] += pair2.second;
+            }
         }
         return *this;
     }
     BvarMap& operator-=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
-            internal_map[pair.first] -= pair.second;
+            for (auto& pair2 : pair.second) {
+                internal_map[pair.first][pair2.first] -= pair2.second;
+            }
         }
         return *this;
     }
 public:
-    std::map<std::string, SumCount> internal_map;
+    std::map<std::string, std::map<int64_t, SumCount>> internal_map;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const BvarMap& bm) {
     for (auto& pair : bm.internal_map) {
-        os << pair.first << " : " << pair.second.sum << "," << pair.second.count << std::endl;
+        for (auto& pair2 : pair.second) {
+            os << pair.first << " : " << pair2.first << " : " << pair2.second.sum << "," << pair2.second.count << std::endl;
+        }
     }
     return os;
 }
@@ -591,7 +711,8 @@ extern SerializeStatus to_string(uint64_t number, char *buf, size_t size, size_t
 extern std::string remove_quote(const char* str, char quote);
 extern std::string str_to_hex(const std::string& str);
 void stripslashes(std::string& str);
-
+extern void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf);
+extern void update_op_version(pb::SchemaConf* p_conf, const std::string& desc);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 extern int get_instance_from_bns(int* ret,
@@ -603,6 +724,8 @@ extern std::string url_decode(const std::string& str);
 extern std::string url_encode(const std::string& str);
 extern std::vector<std::string> string_split(const std::string &s, char delim);
 extern std::string string_trim(std::string& str);
+extern const std::string& rand_peer(pb::RegionInfo& info);
+extern void other_peer_to_leader(pb::RegionInfo& info);
 
 inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
@@ -627,5 +750,110 @@ inline int set_insert(std::unordered_set<std::string>& set, const std::string& i
 //map double buffer
 template<typename Key, typename Val>
 using DoubleBufferMap = butil::DoublyBufferedData<std::unordered_map<Key, Val>>;
+
+//backup
+struct FileInfo {
+    std::string path {""};
+    int64_t size {0};
+};
+
+struct BackupInfo {
+    FileInfo meta_info;
+    FileInfo data_info;
+};
+
+class CommonStreamReceiver : public brpc::StreamInputHandler {
+public:
+    enum class ReceiverState : int8_t {
+        RS_LOG_INDEX,
+        RS_FILE_NUM,
+        RS_META_FILE_SIZE,
+        RS_META_FILE,
+        RS_DATA_FILE_SIZE,
+        RS_DATA_FILE
+    };
+
+    enum class StreamState : int8_t {
+        SS_INIT,
+        SS_PROCESSING,
+        SS_SUCCESS,
+        SS_FAIL
+    };
+
+    virtual int on_received_messages(brpc::StreamId id, 
+        base::IOBuf *const messages[], 
+        size_t size) {
+        return 0;
+    }
+
+    virtual void on_closed(brpc::StreamId id) override {
+        DB_NOTICE("id[%lu] closed.", id);
+        _cond.decrease_signal();
+    }
+
+    virtual void on_idle_timeout(brpc::StreamId id) {
+        DB_WARNING("idle timeout %lu", id);
+        _status = StreamState::SS_FAIL;
+    }
+
+    void wait() {
+        _cond.wait();
+    }
+
+    StreamState get_status() const {
+        return _status;
+    }
+    
+protected:
+    void multi_iobuf_action(brpc::StreamId id, base::IOBuf *const messages[], size_t all_size, size_t* index_ptr, 
+        std::function<size_t(base::IOBuf *const message, size_t size)> read_action, size_t* action_size_ptr) {
+        size_t& index = *index_ptr;
+        size_t& action_size = *action_size_ptr;
+        DB_DEBUG("stream_%lu to read size %zu", id, action_size);
+        for (; index < all_size; ++index) {
+            DB_DEBUG("stream_%lu all_size[%zu] index[%zu]", id, all_size, index);
+            size_t complete_size = read_action(messages[index], action_size);
+            action_size -= complete_size;
+            if (action_size == 0) {
+                DB_DEBUG("stream_%lu read size %zu", id, complete_size);
+                return;
+            }
+            DB_DEBUG("stream_%lu read size %zu", id, complete_size);
+        }
+        DB_DEBUG("stream_%lu remain size %zu", id, action_size);
+    }
+protected:
+    BthreadCond _cond {1};
+    StreamState _status {StreamState::SS_INIT};
+};
+
+class StreamReceiver : public CommonStreamReceiver {
+public:
+    bool set_info(const BackupInfo& backup_info) {
+        _meta_file_streaming.open(backup_info.meta_info.path, 
+            std::ios::out | std::ios::binary | std::ios::trunc);
+        _data_file_streaming.open(backup_info.data_info.path, 
+            std::ios::out | std::ios::binary | std::ios::trunc);
+        auto ret = _meta_file_streaming.is_open() && _data_file_streaming.is_open();
+        if (!ret) {
+            _status = StreamState::SS_FAIL;
+        }
+        return ret;
+    }
+
+    virtual int on_received_messages(brpc::StreamId id, 
+        base::IOBuf *const messages[],
+        size_t size) override;
+
+private:
+    int8_t _file_num {0};
+    int64_t _meta_file_size {0};
+    int64_t _data_file_size {0};
+    std::ofstream _meta_file_streaming {};
+    std::ofstream _data_file_streaming {};
+    size_t _to_process_size {sizeof(int64_t)};
+    ReceiverState _state {ReceiverState::RS_LOG_INDEX};
+};
+
 } // namespace baikaldb
 

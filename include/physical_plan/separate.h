@@ -43,6 +43,7 @@ public:
     int analyze(QueryContext* ctx);
 
 private:
+    int separate_union(QueryContext* ctx);
     int separate_insert(QueryContext* ctx);
     int separate_update(QueryContext* ctx);
     int separate_delete(QueryContext* ctx);

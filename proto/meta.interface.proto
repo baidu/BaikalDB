@@ -2,6 +2,7 @@ syntax="proto2";
 import "common.proto";
 import "optype.proto";
 import "raft.proto";
+import "statistics.proto";
 package baikaldb.pb;
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
@@ -63,10 +64,6 @@ message SplitKey {
     repeated bytes split_keys               = 2;
 };
 
-message SchemaConf {
-    optional bool need_merge                = 1;
-    optional bool storage_compute_separate  = 2; 
-};
 message SchemaInfo {
     optional int64 table_id                 = 1;
     required string table_name              = 2;
@@ -147,6 +144,12 @@ enum SegmentType {
     S_WORDRANK_Q2B_ICASE = 7;// 转小写，全角转半角后wordrank切词
 };  
 
+enum StorageType {
+    ST_PROTOBUF = 0;
+    ST_ARROW = 1;
+    ST_UNKNOWN = 2;
+};
+
 message IndexInfo {
     required string index_name          = 1;
     optional string new_index_name      = 2;
@@ -157,6 +160,7 @@ message IndexInfo {
     optional int64 index_id             = 7; //primary_key的主键id是table_id
     optional SegmentType segment_type   = 8; //FULLTEXT use for segment
     optional IndexState state           = 9;
+    optional StorageType storage_type   = 10;
 };
 
 //address format: ip:port
@@ -347,6 +351,7 @@ message MetaManagerRequest {
     repeated RegionInfo          region_infos           = 19; //add and update
     optional DdlWorkInfo ddlwork_info                   = 20; //更新ddl work
     optional bool                add_delete_region      = 21; //添加被删除的region
+    optional Statistics          statistics             = 22;
 };
 
 message MetaManagerResponse {
@@ -388,6 +393,14 @@ message PeerStateInfo {
     optional int64       table_id    = 3;
     optional int64       timestamp   = 4;
     optional int64       region_id   = 5;
+}
+
+message RegionStateInfo {
+    optional int64          table_id           = 1;
+    optional int64          region_id          = 2;
+    optional bool           is_healthy         = 3;
+    optional string         table_name         = 4;
+    repeated PeerStateInfo  peer_status_infos  = 5;
 }
 
 message LeaderHeartBeat {
@@ -457,6 +470,7 @@ message BaikalSchemaHeartBeat {
     required int64 table_id             = 1;
     required int64 version              = 2;
     repeated RegionHeartBeat regions    = 3;
+    optional int64 statis_version       = 4;
 };
 
 message BaikalHeartBeatRequest {
@@ -482,6 +496,7 @@ message BaikalHeartBeatResponse {
     optional IdcInfo    idc_info                  = 7;
     repeated DataBaseInfo db_info                 = 8; //全部同步
     optional int64        last_updated_index      = 9;
+    repeated Statistics   statistics              = 10;
 };
 
 enum QueryOpType {
@@ -552,7 +567,7 @@ message QueryResponse {
     repeated int64              region_ids          = 18;
     repeated DdlWorkInfo ddlwork_infos              = 19;
     repeated QueryDdlInfo query_ddl_infos           = 20;
-    repeated PeerStateInfo      peer_status_infos   = 21;
+    repeated RegionStateInfo    region_status_infos = 21;
 };
 
 message DdlPeerInfo {

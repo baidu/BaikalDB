@@ -51,6 +51,7 @@ enum NodeType {
     NT_UPDATE,
     NT_DELETE,
     NT_SELECT,
+    NT_UNION,
     NT_TRUNCATE,
     NT_SHOW,
     NT_EXPLAIN,

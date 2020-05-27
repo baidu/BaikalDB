@@ -116,6 +116,8 @@ struct NetworkSocket {
     int64_t         conn_id = -1;            // The client connection ID in Mysql Client-Server Protocol
 
     // Transaction related members
+    int64_t         primary_region_id = -1;  // used for txn like Percolator
+    bool            primary_region_exec_failed = false;
     bool            autocommit = true;       // The autocommit flag set by SET AUTOCOMMIT=0/1
     uint64_t        txn_id = 0;              // ID of the current transaction, 0 means out-transaction query
     uint64_t        new_txn_id = 0;          // For implicit commit commands (i.e. BEGIN after another BEGIN)

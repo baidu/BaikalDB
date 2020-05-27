@@ -42,6 +42,7 @@ int AggFnCall::init(const pb::ExprNode& node) {
     _tuple_id = node.derive_node().tuple_id();
     _final_slot_id = node.derive_node().slot_id();
     _intermediate_slot_id = node.derive_node().intermediate_slot_id();
+    _slot_id = _intermediate_slot_id;
     if (name_type_map.count(_fn.name())) {
         _agg_type = name_type_map[_fn.name()];
     } else {
@@ -156,8 +157,10 @@ int AggFnCall::open() {
         default:
             return 0;
     }
-    if (_agg_type == COUNT && _children[0]->is_constant()) {
-        _agg_type = COUNT_STAR;
+    if (_agg_type == COUNT && _children[0]->is_literal()) {
+        if (!_children[0]->get_value(nullptr).is_null()) {
+            _agg_type = COUNT_STAR;
+        }
     }
     return 0;
 }
@@ -277,7 +280,7 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
             if (!value.is_null()) {
                 std::string* hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
                 if (hll != NULL) {
-                    hll::hll_merge(hll, &value.str_val);
+                    hll::hll_merge_agg(hll, &value.str_val);
                 }
             }
             return 0;
@@ -345,7 +348,7 @@ int AggFnCall::merge(MemRow* src, MemRow* dst) {
             std::string* src_hll = src->mutable_string(_tuple_id, _intermediate_slot_id);
             std::string* dst_hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
             if (src_hll != NULL && dst_hll != NULL) {
-                hll::hll_merge(dst_hll, src_hll);
+                hll::hll_merge_agg(dst_hll, src_hll);
             }
             return 0;
         }

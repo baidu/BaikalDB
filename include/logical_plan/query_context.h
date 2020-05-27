@@ -53,6 +53,7 @@ struct QueryStat {
     std::string table;
     std::string server_ip;
     std::ostringstream sample_sql;
+    int64_t     table_id = -1;
 
     MysqlErrCode error_code;
     std::ostringstream error_msg;
@@ -60,6 +61,7 @@ struct QueryStat {
     int         num_affected_rows = 0;
     int         num_returned_rows = 0;
     int         num_scan_rows     = 0;
+    int         num_filter_rows   = 0;
     uint64_t    log_id;
     uint64_t    old_txn_id;
     int         old_seq_id;
@@ -99,6 +101,8 @@ struct QueryStat {
         error_msg.str("");
         num_affected_rows   = 0;
         num_returned_rows   = 0;
+        num_scan_rows       = 0;
+        num_filter_rows     = 0;
         log_id              = butil::fast_rand();
         old_txn_id          = 0;
         old_seq_id          = 0;
@@ -169,8 +173,7 @@ public:
     parser::NodeType    stmt_type;
     bool                is_explain = false;
     bool                is_full_export = false;
-    bool                is_trace = false;
-    bool                is_print_plan = false;
+    ExplainType         explain_type = EXPLAIN_NULL;
 
     uint8_t             mysql_cmd;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
@@ -208,8 +211,10 @@ public:
     bool                enable_2pc = false;
     bool                is_cancelled = false;
     std::shared_ptr<QueryContext> kill_ctx;
+    std::vector<std::shared_ptr<QueryContext>> union_select_plans;
     std::unordered_map<uint64_t, std::string> long_data_vars;
     std::vector<SignedType> param_type;
+    std::set<int64_t> index_ids;
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

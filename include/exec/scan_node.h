@@ -15,6 +15,7 @@
 #pragma once
 
 #include "exec_node.h"
+#include "access_path.h"
 #include "table_record.h"
 
 namespace baikaldb {
@@ -30,14 +31,26 @@ public:
     virtual int init(const pb::PlanNode& node);
     virtual int open(RuntimeState* state);
     virtual void close(RuntimeState* state);
-    int64_t table_id() {
+    int64_t table_id() const {
         return _table_id;
     }
-    int32_t tuple_id() {
+    int32_t tuple_id() const {
         return _tuple_id;
     }
     void set_router_index_id(int64_t router_index_id) {
         _router_index_id = router_index_id;
+    }
+    int64_t router_index_id() const {
+        return _router_index_id;
+    }
+    void set_covering_index(bool covering_index) {
+        _is_covering_index = covering_index;
+    }
+    bool covering_index() const {
+        return _is_covering_index;
+    }
+    pb::PossibleIndex* router_index() const {
+        return _router_index;
     }
     pb::Engine engine() {
         return _engine;
@@ -59,6 +72,7 @@ public:
         return false;
     }
     void clear_possible_indexes() {
+        _paths.clear();
         _pb_node.mutable_derive_node()->mutable_scan_node()->clear_indexes();
     }
     bool need_copy(MemRow* row, std::vector<ExprNode*>& conjuncts) {
@@ -74,15 +88,30 @@ public:
         ExecNode::find_place_holder(placeholders);
     }
 
-    static int select_index(const pb::ScanNode& node, std::vector<int>& multi_reverse_index); 
+    int64_t select_index(); 
+    int64_t select_index_by_cost(); 
+    int64_t select_index_in_baikaldb();
+    int choose_arrow_pb_reverse_index();
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
+
+    void add_access_path(const SmartPath& access_path) {
+        _paths[access_path->index_id] = access_path;
+    }
+
+    size_t access_path_size() const {
+        return _paths.size();
+    }
     
 protected:
     pb::Engine _engine = pb::ROCKSDB;
     int32_t _tuple_id = 0;
     int64_t _table_id = -1;
     int64_t _router_index_id = -1;
+    std::map<int64_t, SmartPath> _paths;
+    std::vector<int64_t> _multi_reverse_index;
     pb::TupleDescriptor* _tuple_desc = nullptr;
+    pb::PossibleIndex* _router_index = nullptr;
+    bool _is_covering_index = true;
 };
 }
 

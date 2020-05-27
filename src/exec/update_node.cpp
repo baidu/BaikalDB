@@ -44,7 +44,7 @@ int UpdateNode::init(const pb::PlanNode& node) {
 }
 int UpdateNode::open(RuntimeState* state) { 
     int num_affected_rows = 0;
-    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, ([&num_affected_rows](TraceLocalNode& local_node) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([&num_affected_rows](TraceLocalNode& local_node) {
         local_node.set_affect_rows(num_affected_rows);
     }));
 

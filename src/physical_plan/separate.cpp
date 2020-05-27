@@ -21,7 +21,6 @@
 #include "join_node.h"
 #include "sort_node.h"
 #include "filter_node.h"
-#include "fetcher_node.h"
 #include "full_export_node.h"
 #include "insert_node.h"
 #include "transaction_node.h"
@@ -33,6 +32,7 @@
 #include "delete_manager_node.h"
 #include "common_manager_node.h"
 #include "select_manager_node.h"
+#include "union_node.h"
 #include "single_txn_manager_node.h"
 #include "lock_primary_node.h"
 #include "lock_secondary_node.h"
@@ -54,8 +54,8 @@ int Separate::analyze(QueryContext* ctx) {
     if (!plan->need_seperate()) {
         return 0;
     }
-    pb::OpType op_type = packet_node->op_type();
     int ret = 0;
+    pb::OpType op_type = packet_node->op_type();
     switch (op_type) {
     case pb::OP_SELECT: {
         ret = separate_select(ctx);
@@ -93,12 +93,31 @@ int Separate::analyze(QueryContext* ctx) {
         ret = separate_rollback(ctx);
         break;
     }
+    case pb::OP_UNION: {
+        ret = separate_union(ctx);
+        break;
+    }
     default: {
         DB_FATAL("invalid op_type, op_type: %s", pb::OpType_Name(op_type).c_str());
         return -1;
     }
     }
     return ret;
+}
+
+int Separate::separate_union(QueryContext* ctx) {
+    ExecNode* plan = ctx->root;
+    UnionNode* union_node = static_cast<UnionNode*>(plan->get_node(pb::UNION_NODE));
+    for (int i = 0; i < ctx->union_select_plans.size(); i++) {
+        auto select_ctx = ctx->union_select_plans[i];
+        ExecNode* select_plan = select_ctx->root;
+        PacketNode* packet_node = static_cast<PacketNode*>(select_plan->get_node(pb::PACKET_NODE));
+        union_node->steal_projections(packet_node->mutable_projections());
+        union_node->add_child(packet_node->children(0));
+        packet_node->clear_children();
+        union_node->mutable_select_runtime_states()->push_back(&select_ctx->runtime_state);
+    }
+    return 0;
 }
 
 int Separate::separate_select(QueryContext* ctx) {

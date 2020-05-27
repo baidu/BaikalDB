@@ -328,12 +328,20 @@ inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::Primitive
     bool is_all_equal = true;
     bool is_all_num = true;
     bool is_all_time = true;
+    bool is_all_null = true;
     bool has_double = false;
     bool has_uint64 = false;
     bool has_signed = false;
     auto first_type = *types.begin();
 
     for (auto type : types) {
+        if (type == pb::NULL_TYPE) {
+            continue;
+        }
+        if (is_all_null) {
+            first_type = type;
+            is_all_null = false;
+        }
         if (is_all_equal && type != first_type) {
             is_all_equal = false;
         }
@@ -353,8 +361,9 @@ inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::Primitive
             has_signed = true;
         }
     }
-
-    if (is_all_equal) {
+    if (is_all_null) {
+        merged_type = pb::NULL_TYPE;
+    } else if (is_all_equal) {
        merged_type = first_type; 
     } else if (is_all_num) {
         if (has_double) {

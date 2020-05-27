@@ -17,7 +17,6 @@
 #include "exec_node.h"
 #include "rocksdb_scan_node.h"
 #include "insert_node.h"
-#include "fetcher_node.h"
 #include "truncate_node.h"
 #include "kill_node.h"
 #include "query_context.h"

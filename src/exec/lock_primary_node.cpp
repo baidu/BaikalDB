@@ -213,7 +213,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
     SmartRecord primary_record = record->clone(true);
     auto ret = txn->get_update_primary(_region_id, *_pri_info, primary_record, _field_ids, GET_LOCK, true);
     if (ret == -1) {
-        DB_WARNING("get lock fail");
+        DB_WARNING("get lock fail txn_id: %lu", txn->txn_id());
         return -1;
     }
     //代表存在
@@ -237,7 +237,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
             continue;
         }
         if (ret == -1) {
-            DB_WARNING("get lock fail");
+            DB_WARNING("get lock fail txn_id: %lu", txn->txn_id());
             return -1;
         }
         _return_records[index_ptr->id].push_back(get_record);

@@ -80,7 +80,6 @@ public:
 private:
     AggType _agg_type;
     pb::Function _fn;
-    int32_t _tuple_id;
     int32_t _intermediate_slot_id;
     int32_t _final_slot_id;
     bool _is_distinct = false;

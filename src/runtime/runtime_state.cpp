@@ -26,7 +26,6 @@ int RuntimeState::init(const pb::StoreReq& req,
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool,
         bool store_compute_separate) {
-
     for (auto& tuple : tuples) {
         _tuple_descs.push_back(tuple);
     }
@@ -58,6 +57,9 @@ int RuntimeState::init(const pb::StoreReq& req,
         // if (txn_info.has_autocommit()) {
         //     _autocommit = txn_info.autocommit();
         // }
+        if (txn_info.has_primary_region_id()) {
+            set_primary_region_id(txn_info.primary_region_id());
+        }
     }
     if (pool == nullptr) {
         DB_WARNING("error: txn pool is null: %ld", _region_id);

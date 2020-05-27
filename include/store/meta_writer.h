@@ -17,6 +17,7 @@
 #include "common.h"
 #include "mut_table_key.h"
 #include "rocks_wrapper.h"
+#include "transaction.h"
 #include "proto/store.interface.pb.h"
 
 namespace baikaldb {
@@ -33,7 +34,8 @@ public:
     static const std::string REGION_INFO_IDENTIFY;
     static const std::string PRE_COMMIT_IDENTIFY;
     static const std::string DOING_SNAPSHOT_IDENTIFY; 
-    static const std::string REGION_DDL_INFO_IDENTIFY; 
+    static const std::string REGION_DDL_INFO_IDENTIFY;
+    static const std::string ROLLBACKED_TXN_IDENTIFY;
 
     virtual ~MetaWriter() {}
    
@@ -53,9 +55,11 @@ public:
     int write_pre_commit(int64_t region_id, uint64_t txn_id, int64_t num_table_lines, int64_t applied_index);
     int write_doing_snapshot(int64_t region_id);
     int write_batch(rocksdb::WriteBatch* updates, int64_t region_id);
-    int write_meta_after_commit(int64_t region_id, int64_t num_table_lines, int64_t applied_index, uint64_t txn_id);
-    int write_meta_before_prepared(int64_t region_id, int64_t log_index, uint64_t txn_id);
-
+    int write_meta_after_commit(int64_t region_id, int64_t num_table_lines,
+                                int64_t applied_index, uint64_t txn_id, bool need_write_rollback);
+    int write_meta_begin_index(int64_t region_id, int64_t log_index, uint64_t txn_id);
+    int write_meta_index_and_num_table_lines(int64_t region_id, int64_t log_index,
+                        int64_t num_table_lines, SmartTransaction txn);
     int ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id);
     
     int clear_meta_info(int64_t drop_region_id);
@@ -75,6 +79,7 @@ public:
     int read_region_info(int64_t region_id, pb::RegionInfo& region_info);
     int read_pre_commit_key(int64_t region_id, uint64_t txn_id, int64_t& num_table_lines, int64_t& applied_index);
     int read_doing_snapshot(int64_t region_id);
+    int read_transcation_rollbacked_tag(int64_t region_id, uint64_t txn_id) ;
 public:
     std::string region_info_key(int64_t region_id) const;
     std::string region_for_store_key(int64_t region_id) const;
@@ -92,13 +97,13 @@ public:
     std::string encode_region_info(const pb::RegionInfo& region_info) const;
     std::string encode_transcation_pb_value(const pb::StoreReq& txn) const;
     std::string encode_transcation_log_index_value(int64_t log_index) const;
+    std::string rollbacked_transcation_key(int64_t region_id, uint64_t txn_id) const;
     int64_t decode_log_index_value(const rocksdb::Slice& value);
     uint64_t decode_log_index_key(const rocksdb::Slice& key);
     uint64_t decode_pre_commit_key(const rocksdb::Slice& key);
     std::string region_ddl_info_key(int64_t region_id) const;
     int update_region_ddl_info(const pb::StoreRegionDdlInfo& region_ddl_info);
     int read_region_ddl_info(int64_t region_id, pb::StoreRegionDdlInfo& region_ddl_info);
-
     std::string meta_info_prefix(int64_t region_id);
     rocksdb::ColumnFamilyHandle* get_handle() {
         return _meta_cf;

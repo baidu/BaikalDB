@@ -31,7 +31,16 @@ public:
         _log_cf = log_cf;
     }
     int read_log_entry(int64_t region_id, int64_t log_index, std::string& log_entry); 
-
+    int read_log_entry(int64_t region_id, int64_t start_log_index, int64_t end_log_index,
+        std::set<uint64_t>& txn_ids, std::map<int64_t, std::string>& log_entrys);
+    int read_log_entry(int64_t region_id, int64_t start_log_index, int64_t end_log_index, uint64_t txn_id,
+        std::map<int64_t, std::string>& log_entrys) {
+        std::set<uint64_t> txn_ids;
+        txn_ids.insert(txn_id);
+        return read_log_entry(region_id, start_log_index, end_log_index, txn_ids, log_entrys);
+    }
+    int read_txn_last_log_entry(int64_t region_id, int64_t start_log_index, int64_t end_log_index,
+        std::set<uint64_t>& txn_ids, std::map<uint64_t, std::string>& log_entrys);
 private:
     LogEntryReader() {}
 

@@ -139,6 +139,7 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         return -1;
     }
     state->set_num_scan_rows(state->num_scan_rows() + _fetcher_store.scan_rows.load());
+    state->set_num_filter_rows(state->num_filter_rows() + _fetcher_store.filter_rows.load());
     return 0;
 }
 } 

@@ -16,6 +16,8 @@
 
 #include "exec_node.h"
 #include "packet_node.h"
+#include "agg_node.h"
+#include "sort_node.h"
 #include "query_context.h"
 
 namespace baikaldb {
@@ -30,6 +32,42 @@ public:
         PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
         if (packet_node == nullptr) {
             return -1;
+        }
+        if (packet_node->op_type() == pb::OP_UNION) {
+            std::vector<ExprNode*>& union_projections = packet_node->mutable_projections();
+            auto select_ctx = ctx->union_select_plans[0];
+            ExecNode* select_plan = select_ctx->root;
+            PacketNode* select_packet_node = static_cast<PacketNode*>(select_plan->get_node(pb::PACKET_NODE));
+            AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
+            std::vector<ExprNode*> group_exprs;
+            if (agg_node != nullptr) {
+                group_exprs = agg_node->group_exprs();
+            }
+            auto select_projections = select_packet_node->mutable_projections();
+            pb::TupleDescriptor* tuple_desc = ctx->get_tuple_desc(0);
+            for (int i = 0; i < union_projections.size(); i++) {
+                union_projections[i]->set_col_type(select_projections[i]->col_type());
+                auto slot = tuple_desc->mutable_slots(i);
+                slot->set_slot_type(select_projections[i]->col_type());
+                if (group_exprs.size()) {
+                    group_exprs[i]->set_col_type(select_projections[i]->col_type());
+                }
+            }
+            SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
+            if (sort_node != nullptr) {
+                std::vector<ExprNode*>& order_exprs = sort_node->order_exprs();
+                std::vector<ExprNode*>& slot_order_exprs = sort_node->slot_order_exprs();
+                for (int i = 0; i < order_exprs.size(); i++) {
+                    auto slot_id = order_exprs[i]->slot_id();
+                    for (auto slot : tuple_desc->slots()) {
+                        if (slot.slot_id() == slot_id) {
+                            order_exprs[i]->set_col_type(slot.slot_type());
+                            slot_order_exprs[i]->set_col_type(slot.slot_type());
+                        }
+                    }
+                }
+            }
+
         }
         int ret = plan->expr_optimize(ctx->mutable_tuple_descs());
         if (ret == -2) {

@@ -57,6 +57,7 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
     
     //1. create prefix key (regionid+tableid+_reverse_prefix)
     std::string key;
+    //prefix 0，第一层
     _create_reverse_key_prefix(prefix, key);
     //2. scan every term
     rocksdb::ReadOptions roptions;
@@ -91,6 +92,7 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
         return 0;
     }
     while (true) {
+        //第一层数据合并到第二层。
         status = _reverse_merge_to_second_level(iter, prefix);
         if (status == -1) {
             DB_WARNING("error merge dowith time:%ld, seek time:%ld, region_id:%ld, cache:%s, "
@@ -142,7 +144,6 @@ int ReverseIndex<Schema>::handle_reverse(
                                     const std::string& pk,
                                     SmartRecord record) {
     if (word.empty()) {
-        //DB_WARNING("word is empty");
         return 0;
     }
     int8_t status;
@@ -199,16 +200,15 @@ int ReverseIndex<Schema>::search(
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
+                       pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast) {
-    BooleanExecutorBase* exe = nullptr;
     TimeCost time;
-    int ret = create_executor(txn, index_info, table_info, search_data, conjuncts, exe, is_fast);
+    int ret = create_executor(txn, index_info, table_info, search_data, mode, conjuncts, is_fast);
     if (ret < 0) {
         return -1;
     }
     DB_NOTICE("bianli time : %lu", time.get_time());
-    _schema->exe() = exe;
     print_reverse_statistic_log();
     return 0;
 }
@@ -217,8 +217,8 @@ template <typename Schema>
 int ReverseIndex<Schema>::get_reverse_list_two(
                                     rocksdb::Transaction* txn,  
                                     const std::string& term, 
-                                    MessageSP& list_new_ptr,
-                                    MessageSP& list_old_ptr,
+                                    ReverseListSptr& list_new_ptr,
+                                    ReverseListSptr& list_old_ptr,
                                     bool is_fast) {
     rocksdb::ReadOptions roptions;
     roptions.prefix_same_as_start = true;
@@ -235,6 +235,7 @@ int ReverseIndex<Schema>::get_reverse_list_two(
     TimeCost timer_tmp;
     if (is_fast) {
         _get_level_reverse_list(txn, 2, term, list_new_ptr, true);
+
         item_statistic.is_fast = true;
         item_statistic.get_new += timer_tmp.get_time();
         timer_tmp.reset();
@@ -246,20 +247,20 @@ int ReverseIndex<Schema>::get_reverse_list_two(
         iter_first_new->Seek(key_first_new);
         item_statistic.seek_new += timer_tmp.get_time();
         timer_tmp.reset();
-        FirstLevelMSIterator<ReverseNode> iter_first(
+        FirstLevelMSIterator<ReverseNode, ReverseList> iter_first(
                                             iter_first_new, 
                                             _reverse_prefix, 
                                             _key_range, 
                                             term);
         
-        MessageSP second_list(new ReverseList()); 
+        ReverseListSptr second_list(new ReverseList()); 
         _get_level_reverse_list(txn, 2, term, second_list, true);
         SecondLevelMSIterator<ReverseNode, ReverseList> iter_second(
                                                             (ReverseList&)*second_list, 
                                                             _key_range);
         item_statistic.get_two += timer_tmp.get_time();
         timer_tmp.reset();
-        MessageSP tmp_ptr(new ReverseList());
+        ReverseListSptr tmp_ptr(new ReverseList());
         level_merge<ReverseNode, ReverseList>(
                             &iter_first, &iter_second, 
                             (ReverseList&)*tmp_ptr, false);
@@ -290,8 +291,8 @@ int ReverseIndex<Schema>::create_executor(
                             const IndexInfo& index_info,
                             const TableInfo& table_info,
                             const std::string& search_data, 
+                            pb::MatchMode mode,
                             std::vector<ExprNode*> conjuncts, 
-                            BooleanExecutorBase*& exe,
                             bool is_fast) {
     TimeCost timer;
     _schema = new Schema();
@@ -299,14 +300,13 @@ int ReverseIndex<Schema>::create_executor(
     timer.reset();
     _schema->set_index_info(index_info);
     _schema->set_table_info(table_info);
-    int ret = _schema->create_executor(search_data, _segment_type);
+    _schema->set_index_search(this);
+    int ret = _schema->create_executor(search_data, mode, _segment_type);
     _schema->statistic().bool_engine_time += timer.get_time();
     if (ret < 0) {
         DB_WARNING("create_executor fail, region:%ld, index:%ld", _region_id, _index_id);
         return -1;
     }
-    exe = _schema->exe();
-    _schema->exe() = nullptr;
     return 0;
 }
 
@@ -365,8 +365,8 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) 
         std::string merge_term(iter->key().data() + len, iter->key().size() - len);
 
         // 搞个空的level2，用来帮助merge
-        MessageSP second_level_list(new ReverseList());
-        MessageSP third_level_list(new ReverseList());
+        ReverseListSptr second_level_list(new ReverseList());
+        ReverseListSptr third_level_list(new ReverseList());
         //deserialize
         if (!third_level_list->ParseFromArray(iter->value().data(), iter->value().size())) {
             DB_FATAL("parse level %d list from pb failed, region_id: %ld, index_id: %ld",
@@ -458,7 +458,7 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
     txn->begin(txn_opt);
     //get merge term
     std::string merge_term = get_term_from_reverse_key(iterator->key());
-    FirstLevelMSIterator<ReverseNode> first_iter(iterator, prefix, 
+    FirstLevelMSIterator<ReverseNode, ReverseList> first_iter(iterator, prefix, 
                                         _key_range, merge_term, true, _rocksdb, txn->get_txn());
     //create second level key
     std::string second_level_key;
@@ -471,7 +471,7 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
         return -1;
     }
     std::string value;
-    MessageSP second_level_list(new ReverseList());
+    ReverseListSptr second_level_list(new ReverseList());
     status = _get_level_reverse_list(txn->get_txn(), 2, merge_term, second_level_list);
     if (status != 0) {
         DB_WARNING("get second level list failed");
@@ -507,10 +507,11 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
         return -1;
     }
     if (second_level_size >= _second_level_length) {
+        //DB_WARNING("merge 2 level to 3");
         // 2/3层合并单独开txn处理
         SmartTransaction txn_level2(new Transaction(0, nullptr, false));
         txn_level2->begin();
-        MessageSP third_level_list(new ReverseList());
+        ReverseListSptr third_level_list(new ReverseList());
         status = _get_level_reverse_list(txn_level2->get_txn(), 3, merge_term, third_level_list);
         if (status != 0) {
             return -1;
@@ -571,7 +572,7 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
                                     rocksdb::Transaction* txn, 
                                     uint8_t level, 
                                     const std::string& term, 
-                                    MessageSP& list_ptr,
+                                    ReverseListSptr& list_ptr,
                                     bool is_statistic,
                                     bool is_over_cache) {
     std::string key;
@@ -595,6 +596,7 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
         //cache key is same as db key
         if (is_over_cache) {
             if (_cache.find(key, &list_ptr) == 0) {
+                DB_WARNING("cached");
                 if (item_statistic) {
                     item_statistic->is_cache = true;
                 }
@@ -607,9 +609,9 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
     time.reset();
     if (get_res.ok()) {
         //deserialize
-        MessageSP tmp_ptr(new ReverseList());
+        ReverseListSptr tmp_ptr(new ReverseList());
         if (!tmp_ptr->ParseFromString(value)) {
-            DB_FATAL("parse second level list from pb failed");
+            DB_FATAL("parse second level list from pb/arrow failed");
             return -1;
         }
         if (item_statistic) {
@@ -661,6 +663,7 @@ int ReverseIndex<Schema>::_insert_one_reverse_node(
                                     const std::string& term,
                                     const ReverseNode* node) {
     // 1. create the first level key (regionid + tableid + reverse_prefix + term + \0 + pk)
+    //DB_WARNING("insert node term[%s]", term.c_str());
     std::string key;
     _create_reverse_key_prefix(_reverse_prefix, key);
     key.append(term);
@@ -683,7 +686,6 @@ int ReverseIndex<Schema>::_insert_one_reverse_node(
         kv_op->set_op_type(pb::OP_PUT_KV);
         kv_op->set_key(key);
         kv_op->set_value(value);
-        //DB_WARNING("put key:%s value:%s", str_to_hex(key).c_str(), str_to_hex(value).c_str());
     } else {
         auto put_res = txn->Put(data_cf, key, value);
         if (!put_res.ok()) {
@@ -702,8 +704,9 @@ int MutilReverseIndex<Schema>::search(
                        rocksdb::Transaction* txn,
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
-                       const std::vector<ReverseIndexBase*>& reverse_indexes,
+                       const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
                        const std::vector<std::string>& search_datas,
+                       const std::vector<pb::MatchMode>& modes,
                        bool is_fast, bool bool_or) {
     uint32_t son_size = reverse_indexes.size();
     if (son_size == 0) {
@@ -718,8 +721,9 @@ int MutilReverseIndex<Schema>::search(
     _son_exe_vec.resize(son_size);
     bool type_init = false; 
     for (int i = 0; i < son_size; ++i) {
-        reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i],
-        std::vector<ExprNode*>(), _son_exe_vec[i], is_fast);
+        reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i], modes[i],
+            std::vector<ExprNode*>(), is_fast);
+        _son_exe_vec[i] = reverse_indexes[i]->get_executor();
         if (!type_init && _son_exe_vec[i]) {
             type = ((BooleanExecutor<Schema>*)_son_exe_vec[i])->get_type();
             type_init = true;

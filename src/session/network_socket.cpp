@@ -133,6 +133,7 @@ bool NetworkSocket::transaction_has_write() {
 
 void NetworkSocket::on_begin(uint64_t txn_id) {
     this->txn_id = txn_id;
+    this->primary_region_id = -1;
 }
 
 void NetworkSocket::on_commit_rollback() {

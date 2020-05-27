@@ -44,7 +44,7 @@ private:
 
 private:
     MemRowCompare* _comp;
-    std::vector<std::shared_ptr<RowBatch> > _min_heap;
+    std::vector<std::shared_ptr<RowBatch>> _min_heap;
     size_t _idx;
 };
 }

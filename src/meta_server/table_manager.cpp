@@ -27,7 +27,6 @@ namespace baikaldb {
 DECLARE_int32(concurrency_num);
 DEFINE_int32(region_replica_num, 3, "region replica num, default:3"); 
 DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M");
-DEFINE_int64(incremental_info_gc_time, 600*1000*1000, "time interval to clear incremental info");
 DEFINE_int32(ddl_update_time, 300 * 1000 * 1000, "time interval to update ddl");
 DEFINE_int32(ddl_update_process_per_thread_size, 500, "ddl common update process ddlwork size per thread");
 DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 2, "time interval to clear table_tombstone. default(2d)");
@@ -494,20 +493,12 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
 }
 
 void TableManager::drop_table_tombstone(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
-    TableMem table_mem;
-    int ret = find_table_tombstone(request.table_info(), &table_mem);
-    if (ret < 0) {
-        DB_WARNING("input table not exit in tombstone, request: %s", request.ShortDebugString().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist in tombstone");
-        return;
-    }
     std::vector<std::string> delete_rocksdb_keys;
-    pb::SchemaInfo& schema_info = table_mem.schema_pb;
-    int64_t table_id = schema_info.table_id();
+    int64_t table_id = request.table_info().table_id();
     // 删除rocksdb
     delete_rocksdb_keys.push_back(construct_table_key(table_id));
    
-    ret = MetaRocksdb::get_instance()->delete_meta_info(delete_rocksdb_keys);
+    int ret = MetaRocksdb::get_instance()->delete_meta_info(delete_rocksdb_keys);
     if (ret < 0) {
         DB_WARNING("restore table fail, request：%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
@@ -561,8 +552,14 @@ void TableManager::drop_table_tombstone_gc_check() {
 }
 
 void TableManager::restore_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
+    int64_t table_id = 0;
+    if (check_table_exist(request.table_info(), table_id) == 0) {
+        DB_WARNING("check table already exist, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table already exist");
+        return;
+    }
     TableMem table_mem;
-    int ret = find_table_tombstone(request.table_info(), &table_mem);
+    int ret = find_last_table_tombstone(request.table_info(), &table_mem);
     if (ret < 0) {
         DB_WARNING("input table not exit in tombstone, request: %s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist in tombstone");
@@ -572,7 +569,7 @@ void TableManager::restore_table(const pb::MetaManagerRequest& request, const in
     std::vector<std::string> write_rocksdb_keys;
     std::vector<std::string> write_rocksdb_values;
     pb::SchemaInfo& schema_info = table_mem.schema_pb;
-    int64_t table_id = schema_info.table_id();
+    table_id = schema_info.table_id();
     schema_info.set_deleted(false);
     schema_info.set_timestamp(time(nullptr));
     schema_info.set_version(schema_info.version() + 1);
@@ -677,82 +674,48 @@ void TableManager::rename_table(const pb::MetaManagerRequest& request,
 bool TableManager::check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index) {
     int64_t last_updated_index = request->last_updated_index();
-    BAIDU_SCOPED_LOCK(_log_entry_mutex);
-    SchemaIncrementalMap* background = _incremental_schemainfo_map.read_background();
-    SchemaIncrementalMap* frontground = _incremental_schemainfo_map.read();
-    if (frontground->size() == 0 && background->size() == 0) {
-        if (last_updated_index < applied_index) {
-            return true;
+    auto update_schema_func = [response](const std::vector<pb::SchemaInfo>& schema_infos) {
+        for (auto info : schema_infos) {
+            *(response->add_schema_change_info()) = info;
         }
-        DB_NOTICE("no schema info need update last_updated_index:%ld", last_updated_index);
+    };
+
+    bool need_upd = _incremental_schemainfo.check_and_update_incremental(update_schema_func, last_updated_index, applied_index);
+    if (need_upd) {
+        return true;
+    }
+
+    if (response->last_updated_index() < last_updated_index) {
+        response->set_last_updated_index(last_updated_index);
+    }
+
+    last_updated_index = request->last_updated_index();
+    auto update_st_func = [response](const std::vector<pb::Statistics>& st_infos) {
+        for (auto info : st_infos) {
+            *(response->add_statistics()) = info;
+            DB_WARNING("incremental update statistics, table_id:%ld, version:%ld", info.table_id(), info.version());
+        }
+    };
+
+    need_upd = _incremental_statistics_info.check_and_update_incremental(update_st_func, last_updated_index, applied_index);
+    if (need_upd) {
+        //全量更新统计信息
+        full_update_statistics(request, response);
+    } else {
         if (response->last_updated_index() < last_updated_index) {
             response->set_last_updated_index(last_updated_index);
         }
-        return false;
-    } else if (frontground->size() == 0 && background->size() > 0) {
-        if (last_updated_index < background->begin()->first) {              
-            return true;
-        } else {
-            auto iter = background->upper_bound(last_updated_index);
-            while (iter != background->end()) {
-                for (auto info : iter->second) {
-                    *(response->add_schema_change_info()) = info;
-                }
-                last_updated_index = iter->first;
-                ++iter;
-            }
-            if (response->last_updated_index() < last_updated_index) {
-                response->set_last_updated_index(last_updated_index);
-            }
-            return false;
-        }
-    } else if (frontground->size() > 0) {
-        if (last_updated_index < frontground->begin()->first) {
-            return true;
-        } else {
-            auto iter = frontground->upper_bound(last_updated_index);
-            while (iter != frontground->end()) {
-                for (auto info : iter->second) {
-                    *(response->add_schema_change_info()) = info;
-                }
-                last_updated_index = iter->first;
-                ++iter;
-            }
-            iter = background->upper_bound(last_updated_index);
-            while (iter != background->end()) {
-                for (auto info : iter->second) {
-                    *(response->add_schema_change_info()) = info;
-                }
-                last_updated_index = iter->first;
-                ++iter;
-            }
-            if (response->last_updated_index() < last_updated_index) {
-                response->set_last_updated_index(last_updated_index);
-            }
-            return false;         
-        }
     }
+
     return false;
 }
 
 void TableManager::put_incremental_schemainfo(const int64_t apply_index, std::vector<pb::SchemaInfo>& schema_infos) {
-    BAIDU_SCOPED_LOCK(_log_entry_mutex);
-    SchemaIncrementalMap* background = _incremental_schemainfo_map.read_background();
-    SchemaIncrementalMap* frontground = _incremental_schemainfo_map.read();
-    (*background)[apply_index] = schema_infos;
-    if (FLAGS_incremental_info_gc_time < _gc_time_cost.get_time()) {
-        if (background->size() < 100 && frontground->size() < 100) {
-            _gc_time_cost.reset();
-            return ;
-        }
-        if (frontground->size() > 0) {
-            DB_WARNING("clear schemainfo frontground size:%d start:%ld end:%ld", 
-                frontground->size(), frontground->begin()->first, frontground->rbegin()->first);
-        }
-        frontground->clear();
-        _incremental_schemainfo_map.swap();
-        _gc_time_cost.reset();
-    }  
+    _incremental_schemainfo.put_incremental_info(apply_index, schema_infos);
+}
+
+void TableManager::put_incremental_statistics_info(const int64_t apply_index, std::vector<pb::Statistics>& st_infos) {
+    _incremental_statistics_info.put_incremental_info(apply_index, st_infos);
 }
 
 void TableManager::update_byte_size(const pb::MetaManagerRequest& request,
@@ -782,15 +745,72 @@ void TableManager::update_schema_conf(const pb::MetaManagerRequest& request,
     [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
         const pb::SchemaConf& schema_conf = request.table_info().schema_conf();
         pb::SchemaConf* p_conf = mem_schema_pb.mutable_schema_conf();
-        if (schema_conf.has_need_merge()) {
-            p_conf->set_need_merge(schema_conf.need_merge());
+
+        update_schema_conf_common(request.table_info().table_name(), schema_conf, p_conf);
+        //代价开关操作，需要增加op_version
+        if (schema_conf.has_select_index_by_cost()) {
+            if (schema_conf.select_index_by_cost()) {
+                update_op_version(p_conf, "open cost switch");
+            } else {
+                update_op_version(p_conf, "close cost switch");
+            }
         }
-        if (schema_conf.has_storage_compute_separate()) {
-            p_conf->set_storage_compute_separate(schema_conf.storage_compute_separate());
-        }
-        
         mem_schema_pb.set_version(mem_schema_pb.version() + 1);
     });
+}
+
+void TableManager::update_statistics(const pb::MetaManagerRequest& request,
+                                       const int64_t apply_index,
+                                       braft::Closure* done) {
+    int64_t table_id = 0;
+    if (request.has_statistics() && request.statistics().has_table_id()) {
+        table_id = request.statistics().table_id();
+    } else {
+        DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
+        return;
+    }
+
+    int64_t version = 0;
+    {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map[table_id].statistics_pb.has_version()) {
+            version = _table_info_map[table_id].statistics_pb.version() + 1;
+        } else {
+            version = 1;
+        }
+    }
+
+    pb::Statistics stat_pb = request.statistics();
+    stat_pb.set_version(version);
+
+    auto ret = update_statistics_for_rocksdb(table_id, stat_pb, done);
+    if (ret < 0) {
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        _table_info_map[table_id].statistics_pb = stat_pb;
+    }
+    std::vector<pb::Statistics> st_infos{stat_pb};
+    put_incremental_statistics_info(apply_index, st_infos);
+
+    //增加op version
+    pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
+    update_op_version(mem_schema_pb.mutable_schema_conf(), "update cost statistics");
+    mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+    ret = update_schema_for_rocksdb(table_id, mem_schema_pb, done);
+    if (ret < 0) {
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    set_table_pb(mem_schema_pb);  
+    std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
+    put_incremental_schemainfo(apply_index, schema_infos);   
+
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("update table statistics success, request:%s", stat_pb.ShortDebugString().c_str());
 }
 
 void TableManager::update_resource_tag(const pb::MetaManagerRequest& request, 
@@ -1133,8 +1153,38 @@ void TableManager::check_update_or_drop_table(
         if (_table_info_map[table_id].schema_pb.version() > schema_heart_beat.version()) {
             *(response->add_schema_change_info()) = _table_info_map[table_id].schema_pb;
         }
+        //统计信息更新
+        if (_table_info_map[table_id].statistics_pb.has_version()) {
+            if (schema_heart_beat.has_statis_version() && 
+                _table_info_map[table_id].statistics_pb.version() > schema_heart_beat.statis_version()) {
+                *(response->add_statistics()) = _table_info_map[table_id].statistics_pb;
+                DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_pb.version());
+            }
+        }
     }
 }
+
+void TableManager::full_update_statistics(const pb::BaikalHeartBeatRequest* request,
+        pb::BaikalHeartBeatResponse* response) {
+    BAIDU_SCOPED_LOCK(_table_mutex);
+    for (auto& schema_heart_beat : request->schema_infos()) {
+        int64_t table_id = schema_heart_beat.table_id();
+        //表已经删除
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            continue;
+        }
+
+        //统计信息更新
+        if (_table_info_map[table_id].statistics_pb.has_version()) {
+            if (schema_heart_beat.has_statis_version() && 
+                _table_info_map[table_id].statistics_pb.version() > schema_heart_beat.statis_version()) {
+                *(response->add_statistics()) = _table_info_map[table_id].statistics_pb;
+                DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_pb.version());
+            }
+        }
+    }
+}
+
 void TableManager::check_add_table(std::set<int64_t>& report_table_ids, 
             std::vector<int64_t>& new_add_region_ids,
             pb::BaikalHeartBeatResponse* response) {
@@ -1147,6 +1197,10 @@ void TableManager::check_add_table(std::set<int64_t>& report_table_ids,
         if (!table_info_pair.second.is_global_index) {
             auto schema_info = response->add_schema_change_info();
             *schema_info = table_info_pair.second.schema_pb;
+            if (table_info_pair.second.statistics_pb.has_version()) {
+                auto stat_info = response->add_statistics();
+                *stat_info = table_info_pair.second.statistics_pb;
+            }
         }
         for (auto& partition_region : table_info_pair.second.partition_regions) {
             for (auto& region_id : partition_region.second) {
@@ -1219,6 +1273,24 @@ int TableManager::load_table_snapshot(const std::string& value) {
     } else {
         set_table_info(table_mem); 
         DatabaseManager::get_instance()->add_table_id(table_pb.database_id(), table_pb.table_id());
+    }
+    return 0;
+}
+
+int TableManager::load_statistics_snapshot(const std::string& value) {
+    pb::Statistics stat_pb;
+    if (!stat_pb.ParseFromString(value)) {
+        DB_FATAL("parse from pb fail when load statistics snapshot, key: %s", value.c_str());
+        return -1;
+    }
+    DB_WARNING("statistics snapshot, tbale_id:%ld, version:%ld", stat_pb.table_id(), stat_pb.version());
+    {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.count(stat_pb.table_id()) < 1) {
+            DB_FATAL("cant find table id:%ld", stat_pb.table_id());
+            return -1;
+        }
+        _table_info_map[stat_pb.table_id()].statistics_pb = stat_pb;
     }
     return 0;
 }
@@ -1535,6 +1607,27 @@ int TableManager::update_schema_for_rocksdb(int64_t table_id,
     return 0;
 }
 
+int TableManager::update_statistics_for_rocksdb(int64_t table_id,
+                                               const pb::Statistics& stat_info,
+                                               braft::Closure* done) {
+    
+    std::string stat_value;
+    if (!stat_info.SerializeToString(&stat_value)) {
+        DB_WARNING("request serializeToArray fail when update upper table, request:%s", 
+                    stat_info.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+        return -1;
+    }
+    int ret = MetaRocksdb::get_instance()->put_meta_info(construct_statistics_key(table_id), stat_value);    
+    if (ret < 0) {
+        DB_WARNING("update statistics info to rocksdb fail, request：%s", 
+                    stat_info.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return -1;
+    }    
+    return 0;
+}
+
 void TableManager::send_drop_table_request(const std::string& namespace_name,
                              const std::string& database,
                              const std::string& table_name) {
@@ -1721,12 +1814,12 @@ int64_t TableManager::get_pre_regionid(int64_t table_id,
                                             const std::string& start_key) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("table_id: %ld not exist", table_id);
+        DB_WARNING("table_id: %ld not exist", table_id);
         return -1;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
     if (startkey_regiondesc_map.size() <= 0) {
-        DB_FATAL("table_id:%ld map empty", table_id);
+        DB_WARNING("table_id:%ld map empty", table_id);
         return -1;
     }
     auto iter = startkey_regiondesc_map.lower_bound(start_key);
@@ -1734,7 +1827,7 @@ int64_t TableManager::get_pre_regionid(int64_t table_id,
         DB_WARNING("table_id:%ld can`t find region id start_key:%s",
                  table_id, str_to_hex(start_key).c_str()); 
     } else if (iter->first == start_key) {
-        DB_FATAL("table_id:%ld start_key:%s exist", table_id, str_to_hex(start_key).c_str());
+        DB_WARNING("table_id:%ld start_key:%s exist", table_id, str_to_hex(start_key).c_str());
         return -1;
     }
     
@@ -1752,17 +1845,17 @@ int64_t TableManager::get_startkey_regionid(int64_t table_id,
                                        const std::string& start_key) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("table_id: %ld not exist", table_id);
+        DB_WARNING("table_id: %ld not exist", table_id);
         return -1;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
     if (startkey_regiondesc_map.size() <= 0) {
-        DB_FATAL("table_id:%ld map empty", table_id);
+        DB_WARNING("table_id:%ld map empty", table_id);
         return -1;
     }
     auto iter = startkey_regiondesc_map.find(start_key);
     if (iter == startkey_regiondesc_map.end()) {
-        DB_FATAL("table_id:%ld can`t find region id start_key:%s",
+        DB_WARNING("table_id:%ld can`t find region id start_key:%s",
                  table_id, str_to_hex(start_key).c_str()); 
         return -1;
     } 
@@ -1780,12 +1873,12 @@ int TableManager::erase_region(int64_t table_id, int64_t region_id, std::string 
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
     auto iter = startkey_regiondesc_map.find(start_key);
     if (iter == startkey_regiondesc_map.end()) {
-        DB_FATAL("table_id:%ld can`t find region id start_key:%s",
+        DB_WARNING("table_id:%ld can`t find region id start_key:%s",
                  table_id, str_to_hex(start_key).c_str()); 
         return -1;
     }
     if (iter->second.region_id != region_id) {
-        DB_FATAL("table_id:%ld diff region_id(%ld, %ld)",
+        DB_WARNING("table_id:%ld diff region_id(%ld, %ld)",
                  table_id, iter->second.region_id, region_id); 
         return -1;
     }
@@ -1799,25 +1892,25 @@ int64_t TableManager::get_next_region_id(int64_t table_id, std::string start_key
                                         std::string end_key) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("table_id: %ld not exist", table_id);
+        DB_WARNING("table_id: %ld not exist", table_id);
         return -1;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
     auto iter = startkey_regiondesc_map.find(start_key);
     if (iter == startkey_regiondesc_map.end()) {
-        DB_FATAL("table_id:%ld can`t find region id start_key:%s",
+        DB_WARNING("table_id:%ld can`t find region id start_key:%s",
                  table_id, str_to_hex(start_key).c_str()); 
         return -1;
     }
     auto src_iter = iter;
     auto dst_iter = ++iter;
     if (dst_iter == startkey_regiondesc_map.end()) {
-        DB_FATAL("table_id:%ld can`t find region id start_key:%s",
+        DB_WARNING("table_id:%ld can`t find region id start_key:%s",
                  table_id, str_to_hex(end_key).c_str()); 
         return -1;
     }
     if (dst_iter->first != end_key) {
-        DB_FATAL("table_id:%ld start key nonsequence %s vs %s", table_id, 
+        DB_WARNING("table_id:%ld start key nonsequence %s vs %s", table_id, 
                  str_to_hex(dst_iter->first).c_str(), str_to_hex(end_key).c_str()); 
         return -1;
     }
@@ -1935,7 +2028,7 @@ bool TableManager::check_region_when_update(int64_t table_id,
                                     std::string max_end_key) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("table_id: %ld not exist", table_id);
+        DB_WARNING("table_id: %ld not exist", table_id);
         return false;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
@@ -1965,7 +2058,7 @@ void TableManager::update_startkey_regionid_map_old_pb(int64_t table_id,
                           std::map<std::string, int64_t>& key_id_map) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("table_id: %ld not exist", table_id);
+        DB_WARNING("table_id: %ld not exist", table_id);
         return;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
@@ -1984,7 +2077,7 @@ void TableManager::update_startkey_regionid_map(int64_t table_id, std::string mi
                                   std::map<std::string, int64_t>& key_id_map) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("table_id: %ld not exist", table_id);
+        DB_WARNING("table_id: %ld not exist", table_id);
         return;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
@@ -2252,7 +2345,7 @@ void TableManager::get_update_region_requests(int64_t table_id, TableMem& table_
         auto ptr_region = cur_iter->second;
         auto master_region = RegionManager::get_instance()->get_region_info(region_id); 
         if (master_region == nullptr) {
-            DB_FATAL("can`t find region_id:%ld in region info map", region_id);
+            DB_WARNING("can`t find region_id:%ld in region info map", region_id);
             continue;
         }
         DB_WARNING("table_id:%ld, region_id:%ld key has changed "
@@ -2316,7 +2409,7 @@ void TableManager::recycle_update_region() {
                 auto ptr_region = cur_iter->second;
                 auto master_region = RegionManager::get_instance()->get_region_info(region_id); 
                 if (master_region == nullptr) {
-                    DB_FATAL("can`t find region_id:%ld in region info map", region_id);
+                    DB_WARNING("can`t find region_id:%ld in region info map", region_id);
                     continue;
                 }
                 if (ptr_region->version() <= master_region->version()) {
@@ -2407,6 +2500,10 @@ void TableManager::check_update_region(const pb::LeaderHeartBeat& leader_region,
         add_update_region(leader_region_info, false);
     }
 }
+
+
+
+
 
 void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
     //检查参数有效性
@@ -2709,6 +2806,14 @@ bool TableManager::check_field_exist(const std::string &field_name,
 int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
                    const pb::SchemaInfo& schema_info, int64_t& index_id) {
     
+    /*
+    for (const auto& index_info : schema_info.indexs()) {
+        if (index_info.storage_type() != index_info_to_check.storage_type()) {
+            DB_WARNING("diff fulltext index type.");
+            return -1;
+        }
+    }
+    */
     auto same_index = [](const pb::IndexInfo& index_l, const pb::IndexInfo& index_r) -> bool{
         if (index_l.field_names_size() != index_r.field_names_size()) {
             return false;
@@ -2739,10 +2844,12 @@ int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
                 return -1;
             }
         } else {
+            /*
             if (same_index(index_info, index_info_to_check)) {
                DB_WARNING("DDL_LOG diff index name, same fields.");
                 return -1;
             }
+            */
         }
     }
     return 0;
@@ -2919,11 +3026,15 @@ void TableManager::update_index_status(const pb::MetaManagerRequest& request,
                         //删除索引
                         DB_NOTICE("DDL_LOG udpate_index_status delete index [%lld].", index_iter->index_id());
                         mem_schema_pb.mutable_indexs()->erase(index_iter);
+                        update_op_version(mem_schema_pb.mutable_schema_conf(), "drop index " + index_iter->index_name());
                     } else {
                         //改变索引状态
                         DB_NOTICE("DDL_LOG set state index state to [%s]", 
                             pb::IndexState_Name(request_index_info.job_state()).c_str());
                         index_iter->set_state(request_index_info.job_state());
+                        if (request_index_info.job_state() == pb::IS_PUBLIC) {
+                            update_op_version(mem_schema_pb.mutable_schema_conf(), "add index " + index_iter->index_name());
+                        }
                     }
                     break;
                 }

@@ -49,6 +49,9 @@ public:
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RowBatch& batch);
+    std::vector<ExprNode*>& group_exprs() {
+        return _group_exprs;
+    }
 private:
     //需要推导_group_tuple_id _agg_tuple_id内部slot的类型
     std::vector<ExprNode*> _group_exprs;

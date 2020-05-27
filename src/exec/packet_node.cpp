@@ -11,13 +11,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+#include "meta_server_interact.hpp"
 #include "packet_node.h"
 #include "full_export_node.h"
 #include "runtime_state.h"
 #include "network_socket.h"
 
 namespace baikaldb {
+DEFINE_int32(expect_bucket_count, 100, "expect_bucket_count");
 int PacketNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -45,11 +46,6 @@ int PacketNode::init(const pb::PlanNode& node) {
 }
 int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
-    if (ret < 0) {
-        DB_WARNING("ExecNode::optimize fail:%d", ret);
-        return ret;
-    }
     int i = 0;
     for (auto expr : _projections) {
         //类型推导
@@ -65,6 +61,11 @@ int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             _fields[i].flags |= 32;
         }
         ++i;
+    }
+    ret = ExecNode::expr_optimize(tuple_descs);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::optimize fail:%d", ret);
+        return ret;
     }
     return 0;
 }
@@ -116,6 +117,107 @@ int PacketNode::handle_trace(RuntimeState* state) {
     return 0;
 }
 
+void PacketNode::pack_trace2(std::vector<std::map<std::string, std::string>>& info, const pb::TraceNode& trace_node,
+    int64_t& total_scan_rows, int64_t& total_index_filter, int64_t& total_get_primary, int64_t& total_where_filter) {
+    
+    if (trace_node.has_instance() && trace_node.has_region_id()) {
+        std::map<std::string, std::string> sub_info;
+        sub_info["instance"] = trace_node.instance();
+        sub_info["region_id"] = std::to_string(trace_node.region_id());
+        if (trace_node.has_total_time()) {
+            sub_info["total_cost"] = std::to_string(trace_node.total_time());
+        }
+        info.push_back(sub_info);
+    } else if (trace_node.has_node_type() && trace_node.has_open_trace() && trace_node.has_get_next_trace()) {
+        if (info.size() > 0) {
+            if (trace_node.get_next_trace().has_scan_rows()) {
+                info.back()["scan_rows"] = std::to_string(trace_node.get_next_trace().scan_rows());
+                total_scan_rows += trace_node.get_next_trace().scan_rows();
+            }
+            if (trace_node.get_next_trace().has_index_filter_rows()) {
+                info.back()["index_filter"] = std::to_string(trace_node.get_next_trace().index_filter_rows());
+                total_index_filter += trace_node.get_next_trace().index_filter_rows();
+            }
+            if (trace_node.get_next_trace().has_get_primary_rows()) {
+                info.back()["get_primary"] = std::to_string(trace_node.get_next_trace().get_primary_rows());
+                total_get_primary += trace_node.get_next_trace().get_primary_rows();
+            }
+            if (trace_node.get_next_trace().has_where_filter_rows()) {
+                info.back()["where_filter"] = std::to_string(trace_node.get_next_trace().where_filter_rows());
+                total_where_filter += trace_node.get_next_trace().where_filter_rows();
+            }
+            if (trace_node.open_trace().has_index_name()) {
+                info.back()["index"] = trace_node.open_trace().index_name();
+            }
+            if (trace_node.node_type() == pb::SCAN_NODE && trace_node.get_next_trace().has_time_cost_us()) {
+                info.back()["scan_cost"] = std::to_string(trace_node.get_next_trace().time_cost_us());
+            }            
+        }
+    }
+
+    for (auto& c : trace_node.child_nodes()) {
+        pack_trace2(info, c, total_scan_rows, total_index_filter, total_get_primary, total_where_filter);
+    }
+}
+
+int PacketNode::handle_trace2(RuntimeState* state) {
+    _fields.clear();
+    std::vector<std::string> names = {
+        "region_id", "instance", "index", "scan_rows", "index_filter", "get_primary",
+        "where_filter", "scan_cost", "total_cost"
+    };
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.push_back(field);
+    }
+
+    std::vector<std::map<std::string, std::string>> info;
+    int64_t total_scan_rows = 0;
+    int64_t total_index_filter = 0;
+    int64_t total_get_primary = 0;
+    int64_t total_where_filter = 0;
+    pack_trace2(info, *_trace, total_scan_rows, total_index_filter, total_get_primary, total_where_filter);
+    
+    std::vector<std::vector<std::string>> rows;
+    for (auto& sub_info : info) {
+        std::vector<std::string> row;
+        for (auto& name : names) {
+            if (sub_info.count(name) == 0) {
+                row.push_back("NULL");
+            } else {
+                row.push_back(sub_info[name]);
+            }
+        }
+        rows.push_back(row);
+    }
+    std::vector<std::string> row;
+    for (auto& name : names) {
+        if (name == "scan_rows") {
+            row.push_back(std::to_string(total_scan_rows));
+        } else if (name == "index_filter") {
+            row.push_back(std::to_string(total_index_filter));
+        } else if (name == "get_primary") {
+            row.push_back(std::to_string(total_get_primary));
+        } else if (name == "where_filter") {
+            row.push_back(std::to_string(total_where_filter));
+        } else {
+            row.push_back("NULL");
+        }
+    }
+    rows.push_back(row);
+
+    pack_head();
+    pack_fields();
+    for (auto& row : rows) {
+        pack_vector_row(row);
+    }
+    
+    pack_eof();
+    return 0;
+}
+
 int PacketNode::open(RuntimeState* state) {
     _client = state->client_conn();
 
@@ -127,7 +229,7 @@ int PacketNode::open(RuntimeState* state) {
         DB_WARNING("ExecNode::open fail:%d", ret);
         return ret;
     }
-    if (_is_explain) {
+    if (_is_explain && state->explain_type == EXPLAIN_NULL) {
         handle_explain(state);
         if (state->is_full_export) {
             state->set_eos();
@@ -135,7 +237,7 @@ int PacketNode::open(RuntimeState* state) {
         return 0;
     }
     state->set_num_affected_rows(ret);
-    if (op_type() != pb::OP_SELECT) {
+    if (op_type() != pb::OP_SELECT && op_type() != pb::OP_UNION) {
         pack_ok(state->num_affected_rows(), _client);
         return 0;
     }
@@ -146,10 +248,21 @@ int PacketNode::open(RuntimeState* state) {
             return ret;
         }
     }
-    if (_trace == nullptr) {
-        pack_head();
-        pack_fields();
+
+    if (_trace != nullptr) {
+        return open_trace(state);
     }
+
+    if (state->explain_type == ANALYZE_STATISTICS) {
+        return open_analyze(state);
+    } else if (state->explain_type == SHOW_HISTOGRAM) {
+        return open_histogram(state);
+    } else if (state->explain_type == SHOW_CMSKETCH) {
+        return open_cmsketch(state);
+    }
+
+    pack_head();
+    pack_fields();
     
     if (state->is_full_export) {
         return 0;
@@ -169,12 +282,10 @@ int PacketNode::open(RuntimeState* state) {
         }
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             TimeCost cost;
-            if (_trace == nullptr) {
-                if (_binary_protocol) {
-                    ret = pack_binary_row(batch.get_row().get());
-                } else {
-                    ret = pack_text_row(batch.get_row().get());
-                }
+            if (_binary_protocol) {
+                ret = pack_binary_row(batch.get_row().get());
+            } else {
+                ret = pack_text_row(batch.get_row().get());
             }
 
             pack_time += cost.get_time();
@@ -187,11 +298,210 @@ int PacketNode::open(RuntimeState* state) {
         }
     } while (!eos);
     //DB_WARNING("txn_id: %lu, pack_time: %ld", state->txn_id, pack_time);
-    if (_trace == nullptr) {
-        pack_eof();
-    } else {
+    pack_eof();
+    return 0;
+}
+
+int PacketNode::open_trace(RuntimeState* state) {
+    bool eos = false;
+    int ret = 0;
+
+    do {
+        RowBatch batch;
+        ret = _children[0]->get_next(state, &batch, &eos);
+        if (ret < 0) {
+            DB_WARNING("children:get_next fail:%d", ret);
+            return ret;
+        }
+        state->inc_num_returned_rows(batch.size());
+    } while (!eos);
+
+    if (state->explain_type == SHOW_TRACE) {
         handle_trace(state);
+    } else {
+        handle_trace2(state);
     }
+    return 0;
+}
+
+int PacketNode::open_histogram(RuntimeState* state) {
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+    SmartStatistics stat_ptr = schema_factory->get_statistics_ptr(state->get_tuple_desc(0)->table_id());
+    if (stat_ptr == nullptr) {
+        DB_WARNING("can`t find statistics");
+        return -1;
+    }
+    std::vector<std::string> names;
+    std::vector<std::vector<std::string>> rows;
+    if (state->get_tuple_desc(0)->slots().size() > 1) {
+        names = {
+            "field_id", "field_name", "distinct_cnt", "null_value_cnt", "buckets_count"
+        };
+        stat_ptr->histogram_to_string(rows, _fields);
+    } else if (state->get_tuple_desc(0)->slots().size() == 1) {
+        names = {
+            "bucket_idx", "start_key", "end_key", "distinct_cnt", "bucket_size"
+        };
+        int i = 0;
+        int32_t field_id = state->get_tuple_desc(0)->slots(0).field_id();
+        auto histogram_ptr = stat_ptr->get_histogram_ptr(field_id);
+        auto& bucket_mapping = histogram_ptr->get_bucket_mapping();
+        for (auto iter = bucket_mapping.begin(); iter != bucket_mapping.end(); iter++) {
+            i++;
+            std::vector<std::string> row;
+            row.push_back(std::to_string(i));
+            row.push_back(iter->second->start.get_string());
+            row.push_back(iter->second->end.get_string());
+            row.push_back(std::to_string(iter->second->distinct_cnt));
+            row.push_back(std::to_string(iter->second->bucket_size));
+            rows.push_back(row);  
+        }
+    }
+    if (rows.size() <= 0) {
+        return -1;
+    }
+
+    _fields.clear();
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.push_back(field);
+    }
+    pack_head();
+    pack_fields();
+    for (auto& row : rows) {
+        pack_vector_row(row);
+    }
+    pack_eof();
+    return 0;
+}
+
+
+int PacketNode::open_cmsketch(RuntimeState* state) {
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+    int64_t table_id = state->get_tuple_desc(0)->table_id();
+    SmartStatistics stat_ptr = schema_factory->get_statistics_ptr(table_id);
+    if (stat_ptr == nullptr) {
+        DB_WARNING("can`t find statistics table_id:%ld", table_id);
+        return -1;
+    }
+    std::vector<std::string> names;
+    std::vector<std::vector<std::string>> rows;
+    int field_id = state->get_tuple_desc(0)->slots(0).field_id();
+    auto cmsketch_ptr = stat_ptr->get_cmsketchcolumn_ptr(field_id);
+    if (cmsketch_ptr == nullptr) {
+        DB_WARNING("can`t find cmsketch, table_id:%ld, field_id:%ld", table_id, field_id);
+        return -1;
+    }
+    names.push_back("field_id:" + std::to_string(field_id));
+    for (int width_idx = 0; width_idx < cmsketch_ptr->get_width(); width_idx++) {
+        names.push_back(std::to_string(width_idx + 1));
+    }
+    cmsketch_ptr->to_string(rows);
+
+    _fields.clear();
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.push_back(field);
+    }
+    pack_head();
+    pack_fields();
+    for (auto& row : rows) {
+        pack_vector_row(row);
+    }
+    pack_eof();
+    return 0;
+}
+
+int PacketNode::open_analyze(RuntimeState* state) {
+    bool eos = false;
+    int ret = 0;
+    TimeCost time;
+    int rows = 0;
+    std::vector<std::shared_ptr<RowBatch> > batch_vector;
+    do {
+        std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
+        ret = _children[0]->get_next(state, batch.get(), &eos);
+        if (ret < 0) {
+            DB_WARNING("children:get_next fail:%d", ret);
+            return ret;
+        }
+        state->inc_num_returned_rows(batch->size());
+        batch_vector.push_back(batch);
+    } while (!eos);
+
+    std::vector<ExprNode*> slot_order_exprs;
+    for (auto& slot : state->get_tuple_desc(0)->slots()) {
+        ExprNode* order_expr = nullptr;
+        pb::Expr slot_expr;
+        pb::ExprNode* node = slot_expr.add_nodes(); 
+        node->set_node_type(pb::SLOT_REF);
+        node->set_col_type(slot.slot_type());
+        node->set_num_children(0);
+        node->mutable_derive_node()->set_tuple_id(0);
+        node->mutable_derive_node()->set_slot_id(slot.slot_id());
+        ret = ExprNode::create_tree(slot_expr, &order_expr);
+        if (ret < 0) {
+            //如何释放资源
+            return ret;
+        }
+        slot_order_exprs.push_back(order_expr);
+    }
+
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_UPDATE_STATISTICS);
+    pb::Statistics* stat = request.mutable_statistics();
+    if (state->get_tuple_desc(0)->has_table_id()) {
+        stat->set_table_id(state->get_tuple_desc(0)->table_id());
+        stat->set_version(0);
+    } else {
+        DB_FATAL("can`t find table_id");
+        return -1;
+    }
+    pb::Histogram* histogram = stat->mutable_histogram();
+    PacketSample packet_sample(batch_vector, slot_order_exprs, state->get_tuple_desc(0));
+    histogram->set_sample_rows(state->num_returned_rows());
+    histogram->set_total_rows(state->num_scan_rows());
+    packet_sample.packet_sample(histogram);
+    if (state->cmsketch != nullptr) {
+        pb::CMsketch* cmsketch = stat->mutable_cmsketch();
+        state->cmsketch->to_proto(cmsketch);
+    }
+    
+    if (MetaServerInteract::get_instance()->send_request("meta_manager", 
+                                                          request, 
+                                                          response) != 0) {
+        DB_FATAL("update statistics from meta_server fail");
+        return -1;
+    }
+    if (response.errcode() != pb::SUCCESS) {
+        DB_WARNING("send_request fail");
+        return -1;
+    }
+
+    std::vector<std::string> names = {
+            "sample_rows", "scan_rows", "time_cost"
+    };
+    _fields.clear();
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.push_back(field);
+    }
+    std::vector<std::string> row;
+    row.push_back(std::to_string(state->num_returned_rows()));
+    row.push_back(std::to_string(state->num_scan_rows()));
+    row.push_back(std::to_string(time.get_time()));
+    pack_head();
+    pack_fields();
+    pack_vector_row(row);
+    pack_eof();
+
     return 0;
 }
 
@@ -200,6 +510,11 @@ int PacketNode::get_next(RuntimeState* state) {
     if (_is_explain) {
         return 0;
     } 
+    if (_children.empty()) {
+        state->set_eos();
+        pack_eof();
+        return 0;
+    }
     bool eos = false;
     int ret = 0;
     RowBatch batch;

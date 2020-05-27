@@ -50,6 +50,7 @@ message DeriveExprNode {
     optional bool bool_val = 6;
     //与slot_id相同，只有avg AGG_EXPR与slot_id不同
     optional int32 intermediate_slot_id = 7;
+    optional int32 field_id = 8;
 };
 
 message ExprNode {
@@ -66,3 +67,4 @@ message Expr {
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用
     repeated int64 index_ids = 2;
 };
+

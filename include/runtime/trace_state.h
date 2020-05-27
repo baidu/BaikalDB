@@ -33,17 +33,23 @@ enum {
     // TXN_COMMIT = 5
 };
 
+struct TraceTimeCost {
+    int64_t start;
+    int64_t other_cost;
+};
+
 class TraceLocalNode {
 public:
     TraceLocalNode(const char* desc, 
-                   pb::TraceNode* trace_node, int trace_type,
+                   pb::TraceNode* trace_node, std::vector<TraceTimeCost>* trace_cost_vec, int trace_type,
                    std::function<void(TraceLocalNode&)> exit_func) : 
                    _description(desc),
                    _trace_node(trace_node),
+                   _trace_cost_vec(trace_cost_vec),
                    _trace_type(trace_type),
                    _exit_func(exit_func) {
-        _start_time = butil::gettimeofday_us();
         if (_trace_node != nullptr) {
+            local_trace_cost_constructor();
             if (_trace_type == OPEN_TRACE) {
                 _local_node = _trace_node->mutable_open_trace();
             } else if (_trace_type == GET_NEXT_TRACE) {
@@ -58,8 +64,7 @@ public:
                 _exit_func(*this);
             }
             _local_node->set_time_cost_us(_local_node->time_cost_us() 
-                                          + (butil::gettimeofday_us() - _start_time));
-            _local_node->set_repeat_cnt(_local_node->repeat_cnt() + 1);
+                                          + local_trace_cost_destructor());
             std::string desc(_description);
             desc += " " + _append_description.str();
             _local_node->set_description(desc.c_str());
@@ -78,6 +83,12 @@ public:
         return _append_description;
     }
 
+    void set_index_name(const std::string& idx_name) {
+        if (_trace_node != nullptr) {
+            _local_node->set_index_name(idx_name);
+        }
+    }
+
     void set_affect_rows(int64_t affect_rows) {
         if (_trace_node != nullptr) {
             _local_node->set_affect_rows(affect_rows);
@@ -90,10 +101,17 @@ public:
         }
     }
     
-    void add_index_conjuncts_filter_rows(int64_t rows) {
+    void add_index_filter_rows(int64_t rows) {
         if (_trace_node != nullptr) {
-            _local_node->set_index_conjuncts_filter_rows(
-                _local_node->index_conjuncts_filter_rows() + rows);
+            _local_node->set_index_filter_rows(
+                _local_node->index_filter_rows() + rows);
+        }
+    }
+
+    void add_where_filter_rows(int64_t rows) {
+        if (_trace_node != nullptr) {
+            _local_node->set_where_filter_rows(
+                _local_node->where_filter_rows() + rows);
         }
     }
     
@@ -130,15 +148,45 @@ public:
     pb::TraceNode* get_trace() {
         return _trace_node;
     }
+
+private:
+    void local_trace_cost_constructor() {
+        if (_trace_cost_vec != nullptr) {
+            TraceTimeCost cost;
+            cost.start = butil::gettimeofday_us();
+            cost.other_cost = 0;
+            _trace_cost_vec->push_back(cost);
+        }
+        _start_time = butil::gettimeofday_us();
+    }
+
+    int64_t local_trace_cost_destructor () {
+        int64_t now = butil::gettimeofday_us();
+        if (_trace_cost_vec == nullptr) {
+            return now - _start_time;
+        }
+        if (_trace_cost_vec->size() == 0) {
+            return -1;
+        }
+        int64_t real_cost = now - _trace_cost_vec->back().start - _trace_cost_vec->back().other_cost;
+        int64_t total_cost = now - _trace_cost_vec->back().start;
+        _trace_cost_vec->pop_back();
+        if (_trace_cost_vec->size() != 0) {
+            _trace_cost_vec->back().other_cost += total_cost;
+        }
+
+        return real_cost;
+    }
 private:
     const char* _description;
     std::ostringstream _append_description;
     pb::TraceNode* _trace_node = nullptr;
+    std::vector<TraceTimeCost>* _trace_cost_vec = nullptr;
     int    _trace_type      = OPEN_TRACE;
     int    _is_successful   = 1;
-    int64_t _start_time     = 0;
     pb::LocalTraceNode* _local_node = nullptr;
     std::function<void(TraceLocalNode&)> _exit_func = nullptr;
+    int64_t _start_time = 0;
 };
 
 class TraceDescVoidify {
@@ -150,8 +198,8 @@ class TraceDescVoidify {
 };
 
 #define TRACE_LOCAL_NODE_NAME trace_local_node_statistics
-#define START_LOCAL_TRACE(trace, type, callback) \
-TraceLocalNode TRACE_LOCAL_NODE_NAME (__FUNCTION__, trace, type, callback)
+#define START_LOCAL_TRACE(trace, vec, type, callback) \
+TraceLocalNode TRACE_LOCAL_NODE_NAME (__FUNCTION__, trace, vec, type, callback)
 #define LOCAL_TRACE(condition) !(condition) ? void(0) : TraceDescVoidify() & TRACE_LOCAL_NODE_NAME.append_description()
 #define LOCAL_TRACE_DESC LOCAL_TRACE(TRACE_LOCAL_NODE_NAME.get_trace())
 

@@ -100,6 +100,7 @@ TEST(test_datetime_str_other, case_all) {
     EXPECT_EQ(datetime_to_str(str_to_datetime("19891203")), "1989-12-03 00:00:00");
     EXPECT_EQ(datetime_to_str(str_to_datetime("891203192844.111")), "1989-12-03 19:28:44.111000");
     EXPECT_EQ(datetime_to_str(str_to_datetime("19891203192844.111")), "1989-12-03 19:28:44.111000");
+    std::cout << "tm:" << str_to_datetime("20111303") << std::endl;
 }
 int32_t str_to_time2(const char* str_time) {
     int hour = 0;

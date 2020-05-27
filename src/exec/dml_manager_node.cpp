@@ -86,12 +86,15 @@ int DmlManagerNode::send_request(RuntimeState* state,
     //对每个索引表进行lock_delete操作
     ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, _op_type);
     if (ret < 0) {
-        DB_WARNING("fetcher store fail, txn_id: %lu log_id:%lu seq_id: %d", state->txn_id,
-            state->log_id(), client_conn->seq_id);
+        std::string seq_id_str = "[";
         for (auto seq_id : _seq_ids) {
             client_conn->need_rollback_seq.insert(seq_id);
+            seq_id_str += std::to_string(seq_id) + ",";
         }
         client_conn->need_rollback_seq.insert(client_conn->seq_id);
+        seq_id_str += "]";
+        DB_WARNING("fetcher store fail, txn_id: %lu log_id:%lu seq_id: %d need_rollback_seq:%s", state->txn_id, 
+             state->log_id(), client_conn->seq_id, seq_id_str.c_str());
         return -1;
     }
     push_cmd_to_cache(state, _op_type, dml_node);
@@ -164,9 +167,8 @@ int DmlManagerNode::send_request_concurrency(RuntimeState* state, size_t start_c
         for (int seq_id = prev_seq_id + 1; seq_id <= client_conn->seq_id; seq_id++) {
             client_conn->need_rollback_seq.insert(seq_id);
             seq_id_str += std::to_string(seq_id) + ",";
-        }        
-        auto seq_ids = this->seq_ids();
-        for (auto seq_id : seq_ids) {
+        }
+        for (auto seq_id : _seq_ids) {
             client_conn->need_rollback_seq.insert(seq_id);
             seq_id_str += std::to_string(seq_id) + ",";
         }

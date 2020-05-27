@@ -15,6 +15,7 @@
 #include "rpc_sender.h"
 
 namespace baikaldb {
+DECLARE_int64(print_time_us);
 int RpcSender::send_no_op_request(const std::string& instance,
                                int64_t recevie_region_id,
                                int64_t request_version) {
@@ -56,14 +57,26 @@ int RpcSender::send_query_method(const pb::StoreReq& request,
     pb::StoreRes response;
     auto ret = store_interact.send_request_for_leader(log_id, "query", request, response);
     if (ret == 0) {
-        DB_WARNING("send request to new region success,"
+        if (time_cost.get_time() > FLAGS_print_time_us) {
+            DB_WARNING("send request to new region success,"
                     " response:%s, receive_region_id: %ld, time_cost:%ld",
                     pb2json(response).c_str(),
                     receive_region_id,
                     time_cost.get_time());
+        }
         return 0;
     }
     return -1;
+}
+
+int RpcSender::send_query_method(const pb::StoreReq& request,
+                                 pb::StoreRes& response,
+                                 const std::string& instance,
+                                 int64_t receive_region_id) {
+    uint64_t log_id = butil::fast_rand();
+    TimeCost time_cost;
+    StoreInteract store_interact(instance);
+    return store_interact.send_request_for_leader(log_id, "query", request, response);
 }
 
 void RpcSender::send_remove_region_method(int64_t drop_region_id, const std::string& instance) {

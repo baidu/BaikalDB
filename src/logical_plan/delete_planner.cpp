@@ -195,7 +195,7 @@ int DeletePlanner::parse_where() {
     if (_delete_stmt->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_delete_stmt->where, _where_filters)) {
+    if (0 != flatten_filter(_delete_stmt->where, _where_filters, false)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }

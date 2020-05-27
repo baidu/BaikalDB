@@ -149,7 +149,7 @@ int UpdatePlanner::parse_kv_list() {
         update_field_ids.insert(field_info->id);
 
         pb::Expr value_expr;
-        if (0 != create_expr_tree(set_list[idx]->expr, value_expr)) {
+        if (0 != create_expr_tree(set_list[idx]->expr, value_expr, false)) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
@@ -187,7 +187,7 @@ int UpdatePlanner::parse_where() {
     if (_update->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_update->where, _where_filters)) {
+    if (0 != flatten_filter(_update->where, _where_filters, false)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }

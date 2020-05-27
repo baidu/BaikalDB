@@ -40,6 +40,7 @@ DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:
 DEFINE_int32(service_lock_concurrency, 40, "service_write concurrency, default:40");
 DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
 DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
+DEFINE_int64(incremental_info_gc_time, 600 * 1000 * 1000, "time interval to clear incremental info");
 DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
@@ -334,6 +335,80 @@ void stripslashes(std::string& str) {
     str.resize(slow);
 }
 
+void update_op_version(pb::SchemaConf* p_conf, const std::string& desc) {
+    auto version = p_conf->has_op_version() ? p_conf->op_version() : 0;
+    p_conf->set_op_version(version + 1);
+    p_conf->set_op_desc(desc);
+}
+
+void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf) {
+        const google::protobuf::Reflection* src_reflection = schema_conf.GetReflection();
+        const google::protobuf::Descriptor* src_descriptor = schema_conf.GetDescriptor();
+        const google::protobuf::Reflection* dst_reflection = p_conf->GetReflection();
+        const google::protobuf::Descriptor* dst_descriptor = p_conf->GetDescriptor();
+        const google::protobuf::FieldDescriptor* src_field = nullptr;
+        const google::protobuf::FieldDescriptor* dst_field = nullptr;
+
+        std::vector<const google::protobuf::FieldDescriptor*> src_field_list;
+        src_reflection->ListFields(schema_conf, &src_field_list);
+        for (int i = 0; i < src_field_list.size(); ++i) {
+            src_field = src_field_list[i];
+            if (src_field == nullptr) {
+                continue;
+            }
+
+            dst_field = dst_descriptor->FindFieldByName(src_field->name());
+            if (dst_field == nullptr) {
+                continue;
+            }
+
+            if (src_field->cpp_type() != dst_field->cpp_type()) {
+                continue;
+            }
+
+            auto type = src_field->cpp_type();
+            switch (type) {
+                case google::protobuf::FieldDescriptor::CPPTYPE_INT32: {
+                    auto src_value = src_reflection->GetInt32(schema_conf, src_field);
+                    dst_reflection->SetInt32(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_UINT32: {
+                    auto src_value = src_reflection->GetUInt32(schema_conf, src_field);
+                    dst_reflection->SetUInt32(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_INT64: {
+                    auto src_value = src_reflection->GetInt64(schema_conf, src_field);
+                    dst_reflection->SetInt64(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_UINT64: {
+                    auto src_value = src_reflection->GetUInt64(schema_conf, src_field);
+                    dst_reflection->SetUInt64(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT: {
+                    auto src_value = src_reflection->GetFloat(schema_conf, src_field);
+                    dst_reflection->SetFloat(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE: {
+                    auto src_value = src_reflection->GetDouble(schema_conf, src_field);
+                    dst_reflection->SetDouble(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_BOOL: {
+                    auto src_value = src_reflection->GetBool(schema_conf, src_field);
+                    dst_reflection->SetBool(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_STRING: {
+                    auto src_value = src_reflection->GetString(schema_conf, src_field);
+                    dst_reflection->SetString(p_conf, dst_field, src_value);
+                } break;
+                default: {
+                    break;
+                }
+            }
+
+        }
+        DB_WARNING("%s schema conf UPDATE TO : %s", table_name.c_str(), schema_conf.ShortDebugString().c_str());
+}
+
 int primitive_to_proto_type(pb::PrimitiveType type) {
     using google::protobuf::FieldDescriptorProto;
     static std::unordered_map<int32_t, int32_t> _mysql_pb_type_mapping = {
@@ -474,6 +549,28 @@ std::string string_trim(std::string& str) {
     return str.substr(first, (last-first+1));
 }
 
+const std::string& rand_peer(pb::RegionInfo& info) {
+    if (info.peers_size() == 0) {
+        return info.leader();
+    }
+    uint32_t i = butil::fast_rand() % info.peers_size();
+    return info.peers(i);
+}
+
+void other_peer_to_leader(pb::RegionInfo& info) {
+    auto peer = rand_peer(info);
+    if (peer != info.leader()) {
+        info.set_leader(peer);
+        return;
+    }
+    for (auto& peer : info.peers()) {
+        if (peer != info.leader()) {
+            info.set_leader(peer);
+            break;
+        }
+    }
+}
+
 std::string url_encode(const std::string& str) {
     std::string strTemp = "";  
     size_t length = str.length();  
@@ -493,5 +590,121 @@ std::string url_encode(const std::string& str) {
         }  
     }  
     return strTemp; 
+}
+
+int StreamReceiver::on_received_messages(brpc::StreamId id, 
+    base::IOBuf *const messages[],
+    size_t size) {
+    size_t current_index = 0;
+    switch (_state) {
+    case ReceiverState::RS_LOG_INDEX: {
+        DB_NOTICE("get rs_log_index id[%lu]", id);
+        multi_iobuf_action(id, messages, size, &current_index, 
+            [](base::IOBuf *const message, size_t size) -> size_t {
+                base::IOBuf buf;
+                return message->cutn(&buf, size);
+            }, &_to_process_size);
+
+        if (_to_process_size == 0) {
+            _state = ReceiverState::RS_FILE_NUM;
+            _to_process_size = sizeof(int8_t);
+        } else {
+            break;
+        }
+    }
+    case ReceiverState::RS_FILE_NUM: {
+        DB_NOTICE("get file num id[%lu]", id);
+        multi_iobuf_action(id, messages, size, &current_index,
+            [this](base::IOBuf *const message, size_t size) {
+                return message->cutn((char*)(&_file_num) + 
+                    (sizeof(int8_t) - _to_process_size), size);
+            }, &_to_process_size);
+
+        if (_to_process_size == 0) {
+            DB_NOTICE("id[%lu] file number %d", id, _file_num);
+            _state = ReceiverState::RS_META_FILE_SIZE;
+            _to_process_size = sizeof(int64_t);
+        } else {
+            break;
+        }
+    }
+    case ReceiverState::RS_META_FILE_SIZE: {
+        DB_NOTICE("get meta file size id[%lu]", id);
+        multi_iobuf_action(id, messages, size, &current_index, 
+            [this](base::IOBuf *const message, size_t size) -> size_t {
+                return message->cutn((char*)(&_meta_file_size) + 
+                    (sizeof(int64_t) - _to_process_size), size);
+            }, &_to_process_size);
+
+        if (_to_process_size == 0) {
+            DB_DEBUG("id[%lu] get meta file size %lld", id, _meta_file_size);
+            _state = ReceiverState::RS_META_FILE;
+            _to_process_size = _meta_file_size;
+        } else {
+            break;
+        }
+    }
+    case ReceiverState::RS_META_FILE: {
+        DB_NOTICE("get meta file id[%lu]", id);
+        multi_iobuf_action(id, messages, size, &current_index, 
+            [this](base::IOBuf *const message, size_t size) -> size_t {
+                base::IOBuf buf;
+                auto write_size = message->cutn(&buf, _to_process_size);
+                _meta_file_streaming << buf;
+                return write_size;
+            }, &_to_process_size);
+
+        if (_to_process_size == 0) {
+            DB_NOTICE("id[%lu] get meta file size %lld", id, _meta_file_size);
+            _state = ReceiverState::RS_DATA_FILE_SIZE;
+            _to_process_size = sizeof(int64_t);
+            if (_file_num == 1) {
+                _meta_file_streaming.flush();
+                _data_file_streaming.flush();
+                _status = (!_meta_file_streaming.bad() && !_data_file_streaming.bad()) ? 
+                    StreamState::SS_SUCCESS : StreamState::SS_FAIL;
+            }
+        } else {
+            break;
+        }
+    }
+    case ReceiverState::RS_DATA_FILE_SIZE: {
+        DB_NOTICE("get data file size id[%lu]", id);
+        multi_iobuf_action(id, messages, size, &current_index, 
+            [this](base::IOBuf *const message, size_t size) -> size_t {
+                return message->cutn((char*)(&_data_file_size) + 
+                    (sizeof(int64_t) - _to_process_size), size);
+            }, &_to_process_size);
+
+        if (_to_process_size == 0) {
+            _state = ReceiverState::RS_DATA_FILE;
+            DB_NOTICE("id[%lu] get data file size %lld", id, _data_file_size);
+            _to_process_size = _data_file_size;
+        } else {
+            break;
+        }
+    }
+    case ReceiverState::RS_DATA_FILE: {
+        DB_DEBUG("stream_%lu get data file, process size_%zu", id, _to_process_size);
+        multi_iobuf_action(id, messages, size, &current_index, 
+            [this](base::IOBuf *const message, size_t size) -> size_t {
+                base::IOBuf buf;
+                auto write_size = message->cutn(&buf, _to_process_size);
+                _data_file_streaming << buf << std::flush;
+                return write_size;
+            }, &_to_process_size);
+
+        if (_to_process_size == 0) {
+            DB_NOTICE("id[%lu] get data_size[%lld] all_size[%lld]", 
+                id, _data_file_size, _data_file_size + _meta_file_size + 25);
+            _meta_file_streaming.flush();
+            _data_file_streaming.flush();
+            _status = (!_meta_file_streaming.bad() && !_data_file_streaming.bad()) ?
+                StreamState::SS_SUCCESS : StreamState::SS_FAIL;
+        }
+        break;
+    }
+    }
+    return 0;
 }
 }  // baikaldb

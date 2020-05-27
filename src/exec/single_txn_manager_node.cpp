@@ -37,6 +37,7 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
     ExecNode* rollback_node = _children[4];
     //begin请求只需要放入cache中
     client_conn->seq_id++;
+    client_conn->primary_region_id = -1;
     ret = exec_begin_node(state, begin_node);
     if (ret < 0) {
         DB_WARNING("exec begin node fail, log_id: %lu, txn_id: %lu", log_id, state->txn_id);

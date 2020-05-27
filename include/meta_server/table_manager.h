@@ -67,6 +67,7 @@ struct TableMem {
         id_noneregion_map.clear();
         id_keyregion_map.clear();
     }
+    pb::Statistics statistics_pb;
     void print() {
         /*
         DB_WARNING("whether_level_table: %d, schema_pb: %s, is_global_index: %d, main_table_id:%ld, global_index_id: %ld",
@@ -137,7 +138,6 @@ public:
         bthread_mutex_destroy(&_table_mutex);
         bthread_mutex_destroy(&_table_ddlinfo_mutex);
         bthread_mutex_destroy(&_all_table_ddlinfo_mutex);
-        bthread_mutex_destroy(&_log_entry_mutex);
     }
     static TableManager* get_instance()  {
         static TableManager instance;
@@ -155,6 +155,7 @@ public:
     void update_byte_size(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_split_lines(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_schema_conf(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void update_statistics(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_dists(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_resource_tag(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
 
@@ -171,6 +172,9 @@ public:
     void process_schema_heartbeat_for_store(
                 std::unordered_map<int64_t, int64_t>& store_table_id_version,
                 pb::StoreHeartBeatResponse* response);
+
+    void full_update_statistics(const pb::BaikalHeartBeatRequest* request,
+        pb::BaikalHeartBeatResponse* response);
     void check_update_or_drop_table(const pb::BaikalHeartBeatRequest* request,
                 pb::BaikalHeartBeatResponse* response);
     void check_table_exist_for_peer(
@@ -185,6 +189,7 @@ public:
                         pb::BaikalHeartBeatResponse* response);
 
     int load_table_snapshot(const std::string& value);
+    int load_statistics_snapshot(const std::string& value);
     int erase_region(int64_t table_id, int64_t region_id, std::string start_key);
     int64_t get_next_region_id(int64_t table_id, std::string start_key, 
             std::string end_key);
@@ -325,17 +330,17 @@ public:
         _table_id_map.erase(table_name);
         _table_info_map.erase(table_id);
     }
-    int find_table_tombstone(const pb::SchemaInfo& table_info, TableMem* table_mem) {
+    int find_last_table_tombstone(const pb::SchemaInfo& table_info, TableMem* table_mem) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         const std::string& namespace_name = table_info.namespace_name();
         const std::string& database = table_info.database();
         const std::string& table_name = table_info.table_name();
-        for (auto& pair : _table_tombstone_map) {
-            auto& schema_pb = pair.second.schema_pb;
+        for (auto iter = _table_tombstone_map.rbegin(); iter != _table_tombstone_map.rend(); iter++) {
+            auto& schema_pb = iter->second.schema_pb;
             if (schema_pb.namespace_name() == namespace_name && 
                 schema_pb.database() == database &&
                 schema_pb.table_name() == table_name) {
-                *table_mem = pair.second;
+                *table_mem = iter->second;
                 return 0;
             }
         }
@@ -427,6 +432,18 @@ public:
         }
         resource_tag = _table_info_map[table_id].schema_pb.resource_tag();
         return 0;
+    }
+
+    //if resource_tag is "" return all tables
+    void get_table_by_resource_tag(const std::string& resource_tag, std::map<int64_t, std::string>& table_id_name_map) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        for (auto& pair : _table_info_map) {
+            if (pair.second.schema_pb.has_resource_tag() 
+                && (pair.second.schema_pb.resource_tag() == resource_tag || resource_tag == "")) {
+                std::string name = pair.second.schema_pb.database() + "." + pair.second.schema_pb.table_name();
+                table_id_name_map.insert(std::make_pair(pair.first, name));
+            }
+        }
     }
 
     void get_table_info(const std::set<int64_t> table_ids, 
@@ -560,10 +577,8 @@ public:
     void clear() {
         _table_id_map.clear();
         _table_info_map.clear();
-        SchemaIncrementalMap* background = _incremental_schemainfo_map.read_background();
-        background->clear();
-        SchemaIncrementalMap* frontground = _incremental_schemainfo_map.read();
-        frontground->clear();
+        _incremental_schemainfo.clear();
+        _incremental_statistics_info.clear();
     }
 
     int load_ddl_snapshot(const std::string& value);
@@ -629,7 +644,6 @@ private:
         bthread_mutex_init(&_table_mutex, NULL);
         bthread_mutex_init(&_table_ddlinfo_mutex, NULL);
         bthread_mutex_init(&_all_table_ddlinfo_mutex, NULL);
-        bthread_mutex_init(&_log_entry_mutex, NULL);
     }
     int write_schema_for_not_level(TableMem& table_mem,
                                     braft::Closure* done,
@@ -649,6 +663,9 @@ private:
                                 bool has_auto_increment);
     int update_schema_for_rocksdb(int64_t table_id, 
                                     const pb::SchemaInfo& schema_info, 
+                                    braft::Closure* done);
+    int update_statistics_for_rocksdb(int64_t table_id, 
+                                    const pb::Statistics& stat_info, 
                                     braft::Closure* done);
     
     void send_drop_table_request(const std::string& namespace_name,
@@ -689,6 +706,13 @@ private:
     std::string construct_table_key(int64_t table_id) {
         std::string table_key;
         table_key = MetaServer::SCHEMA_IDENTIFY + MetaServer::TABLE_SCHEMA_IDENTIFY;
+        table_key.append((char*)&table_id, sizeof(int64_t));
+        return table_key;
+    }
+
+    std::string construct_statistics_key(int64_t table_id) {
+        std::string table_key;
+        table_key = MetaServer::SCHEMA_IDENTIFY + MetaServer::STATISTICS_IDENTIFY;
         table_key.append((char*)&table_id, sizeof(int64_t));
         return table_key;
     }
@@ -746,7 +770,7 @@ private:
     void check_delete_ddl_region_info(DdlWorkMem& ddlwork);
 
     void put_incremental_schemainfo(const int64_t apply_index, std::vector<pb::SchemaInfo>& schema_infos);
-
+    void put_incremental_statistics_info(const int64_t apply_index, std::vector<pb::Statistics>& st_infos);
     DdlWorkMemPtr get_ddlwork_ptr(int64_t table_id) {
         DdlWorkMemPtr ddl_work_ptr {nullptr};
         BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
@@ -863,23 +887,20 @@ private:
     bthread_mutex_t                                     _table_mutex;
     bthread_mutex_t                                     _table_ddlinfo_mutex;
     bthread_mutex_t                                     _all_table_ddlinfo_mutex;
-    bthread_mutex_t                                     _log_entry_mutex;
     int64_t                                             _max_table_id;
     //table_name 与op映射关系， name: namespace\001\database\001\table_name
     std::unordered_map<std::string, int64_t>            _table_id_map;
     std::unordered_map<int64_t, TableMem>               _table_info_map;
     // table_id => TableMem 
-    std::unordered_map<int64_t, TableMem>               _table_tombstone_map;
+    std::map<int64_t, TableMem>               _table_tombstone_map;
 
     std::unordered_map<int64_t, DdlWorkMemPtr> _table_ddlinfo_map;
     std::atomic<int64_t> _last_ddl_update_timestamp {0};
     std::multimap<int64_t, DdlWorkMem> _all_table_ddlinfo_map;
     std::set<int64_t>                  _need_apply_raft_table_ids;
 
-    typedef std::map<int64_t, std::vector<pb::SchemaInfo>> SchemaIncrementalMap;
-    DoubleBuffer<SchemaIncrementalMap> _incremental_schemainfo_map;
-    TimeCost _gc_time_cost;
-    
+    IncrementalUpdate<std::vector<pb::SchemaInfo>> _incremental_schemainfo;
+    IncrementalUpdate<std::vector<pb::Statistics>> _incremental_statistics_info;
 }; //class
 
 }//namespace

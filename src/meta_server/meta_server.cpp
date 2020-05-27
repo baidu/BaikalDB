@@ -40,7 +40,7 @@ DECLARE_int64(flush_memtable_interval_us);
 // for migrate
 DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(e0_meta_bns, "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all", "");
-DEFINE_string(qa_meta_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "");
+DEFINE_string(holmes_meta_bns, "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all", "");
 DEFINE_string(dmp_meta_bns, "group.opera-online-baikalMeta-000-bj.DMP.all", "");
 #endif
 
@@ -60,6 +60,7 @@ const std::string MetaServer::TABLE_SCHEMA_IDENTIFY(1, 0x04);
 const std::string MetaServer::REGION_SCHEMA_IDENTIFY(1, 0x05);
 
 const std::string MetaServer::DDLWORK_IDENTIFY(1, 0x06);
+const std::string MetaServer::STATISTICS_IDENTIFY(1, 0x07);
 const std::string MetaServer::MAX_IDENTIFY(1, 0xFF);
 
 MetaServer::~MetaServer() {}
@@ -105,8 +106,8 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
 #ifdef BAIDU_INTERNAL
     _meta_interact_map["e0"] = new MetaServerInteract;
     _meta_interact_map["e0"]->init_internal(FLAGS_e0_meta_bns);
-    _meta_interact_map["qa"] = new MetaServerInteract;
-    _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
+    _meta_interact_map["holmes"] = new MetaServerInteract;
+    _meta_interact_map["holmes"]->init_internal(FLAGS_holmes_meta_bns);
     _meta_interact_map["ps"] = new MetaServerInteract;
     _meta_interact_map["ps"]->init_internal(FLAGS_ps_meta_bns);
     _meta_interact_map["dmp"] = new MetaServerInteract;
@@ -204,6 +205,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_SPLIT_LINES
             || request->op_type() == pb::OP_UPDATE_SCHEMA_CONF
             || request->op_type() == pb::OP_UPDATE_DISTS
+            || request->op_type() == pb::OP_UPDATE_STATISTICS
             || request->op_type() == pb::OP_MODIFY_RESOURCE_TAG
             || request->op_type() == pb::OP_ADD_INDEX
             || request->op_type() == pb::OP_DROP_INDEX
@@ -500,8 +502,7 @@ void MetaServer::console_heartbeat(google::protobuf::RpcController* controller,
 static std::string bns_to_plat(const std::string& bns) {
     static std::map<std::string, std::string> mapping = {
         {"e0", "e0"},
-        {"qa", "qa"},
-        {"qadisk", "qa"},
+        {"holmes", "holmes"},
     };
     std::vector<std::string> vec;
     boost::split(vec, bns, boost::is_any_of(".-"));

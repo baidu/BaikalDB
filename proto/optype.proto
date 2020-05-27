@@ -30,6 +30,11 @@ enum OpType {
     OP_PUT_KV                               = 21;  
     OP_DELETE_KV                            = 22;
     OP_KV_BATCH_SPLIT                       = 23;
+    OP_TXN_QUERY_PRIMARY_REGION             = 24; // Percolator反查primary region
+    OP_TXN_QUERY_STATE                      = 25; // 查询事务状态
+    OP_TXN_COMPLETE                         = 26; // 手动完成特定事务处理
+    // fake op
+    OP_UNION                                = 51;
     // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
     OP_ADD_PHYSICAL                         = 115; //建物理机房
@@ -89,4 +94,5 @@ enum OpType {
     OP_RESTORE_TABLE                        = 169; //恢复store误删的table
     OP_DROP_TABLE_TOMBSTONE                 = 170; //清理TABLE的残留墓碑
     OP_RECOVERY_ALL_REGION                  = 171; //恢复region状态
+    OP_UPDATE_STATISTICS                    = 172; //update statistics
 };

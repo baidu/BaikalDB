@@ -745,7 +745,8 @@ void ClusterManager::store_healthy_check_function() {
                     FLAGS_store_heart_beat_interval_us * FLAGS_store_dead_interval_times) {
                 status.state = pb::DEAD;
                 dead_stores[resource_tag].push_back(instance_pair.second);
-                DB_WARNING("instance:%s is dead, resource_tag: %s", instance_pair.first.c_str(), resource_tag.c_str());
+                DB_WARNING("instance:%s is dead DEAD, resource_tag: %s", 
+                        instance_pair.first.c_str(), resource_tag.c_str());
                 std::vector<int64_t> region_ids;
                 RegionManager::get_instance()->get_region_ids(instance_pair.first, region_ids);
                 if (region_ids.size() != 0) {
@@ -756,7 +757,8 @@ void ClusterManager::store_healthy_check_function() {
             if ((butil::gettimeofday_us() - last_timestamp) > 
                     FLAGS_store_heart_beat_interval_us * FLAGS_store_faulty_interval_times) {
                 status.state = pb::FAULTY;
-                DB_WARNING("instance:%s is faulty, resource_tag: %s", instance_pair.first.c_str(), resource_tag.c_str());
+                DB_WARNING("instance:%s is faulty FAULTY, resource_tag: %s", 
+                        instance_pair.first.c_str(), resource_tag.c_str());
                 faulty_store_num[resource_tag]++;
                 continue;
             }
