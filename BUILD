@@ -413,8 +413,10 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:lexical_cast",
         "//external:braft",
+        "//external:brpc",
         "//external:rocksdb",
-        "//external:rapidjson",
+        "//external:rapidjson"
+        ":common",
     ],
     visibility = ["//visibility:public"],
 )
@@ -694,6 +696,7 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:lexical_cast",
         "//external:bthread",
+        "//external:brpc",
         "//external:rocksdb",
     ],
     visibility = ["//visibility:public"],
