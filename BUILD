@@ -223,6 +223,7 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:regex",
         "@boost//:lexical_cast",
+        "//external:brpc",
         "//external:bthread",
     ],
     visibility = ["//visibility:public"],
@@ -711,6 +712,7 @@ cc_library(
     deps = [
         ":cc_baikaldb_internal_proto",
         "@boost//:lexical_cast",
+        "//external:brpc",
         "//external:bthread",
         "//external:rocksdb",
         "//external:arrow",
