@@ -169,7 +169,9 @@ cc_library(
     deps = [
         ":cc_baikaldb_internal_proto",
         "//external:bthread",
+        "//external:brpc",
         "@boost//:lexical_cast",
+        ":common",
     ],
     visibility = ["//visibility:public"],
 )
