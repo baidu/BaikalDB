@@ -137,7 +137,7 @@ bind(
 git_repository(
     name = "com_github_brpc_braft",
     remote = "https://github.com/baidu/braft.git",
-    tag = "v1.1.0",
+    tag = "v1.0.2",
 )
 
 bind(

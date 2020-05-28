@@ -117,6 +117,7 @@ int MyRaftMetaStorage::set_term_and_votedfor(const int64_t term, const braft::Pe
     }
 }
 
+#ifdef BAIDU_INTERNAL
 butil::Status MyRaftMetaStorage::init() {
     butil::Status status;
     if (_is_inited) {
@@ -153,6 +154,19 @@ butil::Status MyRaftMetaStorage::get_term_and_votedfor(int64_t* term, braft::Pee
     status.set_error(EINVAL, "MyRaftMetaStorage is error, region_id: %ld", _region_id);
     return status;
 }
+#else
+int MyRaftMetaStorage::init() {
+    if (_is_inited) {
+        return 0;
+    }
+
+    int ret = load();
+    if (ret == 0) {
+        _is_inited = true;
+    }
+    return ret;
+}
+#endif
 
 int MyRaftMetaStorage::load() {
     braft::StablePBMeta meta;

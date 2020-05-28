@@ -278,11 +278,18 @@ int64_t MyRaftLogStorage::get_term(const int64_t index) {
 int MyRaftLogStorage::append_entry(const braft::LogEntry* entry) {
     std::vector<braft::LogEntry*> entries;
     entries.push_back(const_cast<braft::LogEntry*>(entry));
+#ifdef BAIDU_INTERNAL
     return append_entries(entries, nullptr) == 1 ? 0 : -1;
+#else 
+    return append_entries(entries) == 1 ? 0 : -1;
+#endif
 }
 
 int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entries
-        , braft::IOMetric* metric) {
+#ifdef BAIDU_INTERNAL
+        , braft::IOMetric* metric
+#endif
+        ) {
     TimeCost time_cost;
     if (entries.empty()) {
         return 0;
