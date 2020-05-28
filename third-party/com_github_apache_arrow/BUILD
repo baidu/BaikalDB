@@ -1,8 +1,17 @@
 licenses(["notice"])
 
+genrule(
+    name = "build_version",
+    outs = [
+        "cpp/src/arrow/util/config.h",
+    ],
+    cmd = "echo '#define ARROW_VERSION_MAJOR 0' >> $(@) && echo '#define ARROW_VERSION_MINOR 17' >> $(@) && echo '#define ARROW_VERSION_PATCH 1' >> $(@) && echo '#define ARROW_VERSION ((ARROW_VERSION_MAJOR * 1000) + ARROW_VERSION_MINOR) * 1000 + ARROW_VERSION_PATCH' >> $(@)",
+)
+
 cc_library(
     name = "arrow",
     srcs = [
+        ":build_version",
         "cpp/src/arrow/array.cc",
         "cpp/src/arrow/builder.cc",
         "cpp/src/arrow/array/builder_adaptive.cc",
@@ -42,8 +51,6 @@ cc_library(
         "cpp/src/arrow/io/caching.cc",
         "cpp/src/arrow/io/compressed.cc",
         "cpp/src/arrow/io/file.cc",
-        "cpp/src/arrow/io/hdfs.cc",
-        "cpp/src/arrow/io/hdfs_internal.cc",
         "cpp/src/arrow/io/interfaces.cc",
         "cpp/src/arrow/io/memory.cc",
         "cpp/src/arrow/io/slow.cc",
@@ -85,6 +92,7 @@ cc_library(
     hdrs = glob([
         "cpp/src/arrow/**/*.h",
         "cpp/src/arrow/**/*.hpp",
+        "cpp/src/arrow/**/xxhash.c",
     ]),
     includes = [
         "cpp/src",
@@ -97,9 +105,7 @@ cc_library(
         "-msse",
         "-msse4.2",
         "-pthread",
-        "-Werror",
         "-Wsign-compare",
-        "-Wshadow",
         "-Wno-unused-parameter",
         "-Wno-unused-variable",
         "-Woverloaded-virtual",
