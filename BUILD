@@ -512,6 +512,7 @@ cc_library(
         "//external:rocksdb",
         "//external:rapidjson",
         ":engine",
+        ":common",
     ],
     visibility = ["//visibility:public"],
 )
@@ -724,6 +725,7 @@ cc_library(
         "//external:rocksdb",
         "//external:arrow",
         "//external:rapidjson",
+        ":common",
     ],
     visibility = ["//visibility:public"],
 )
