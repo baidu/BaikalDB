@@ -84,6 +84,7 @@ cc_library(
     ],
     hdrs = glob([
         "cpp/src/arrow/**/*.h",
+        "cpp/src/arrow/**/*.hpp",
     ]),
     includes = [
         "cpp/src",
