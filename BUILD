@@ -319,6 +319,7 @@ cc_library(
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
+        ":common",
         ":sqlparser",
     ],
     visibility = ["//visibility:public"],
