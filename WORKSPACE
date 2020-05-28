@@ -14,14 +14,11 @@ bind(
 )
 
 http_archive(
-    name = "com_google_protobuf",
-    strip_prefix = "protobuf-ab8edf1dbe2237b4717869eaab11a2998541ad8d",
-    url = "https://github.com/google/protobuf/archive/ab8edf1dbe2237b4717869eaab11a2998541ad8d.tar.gz",
-)
-
-bind(
-    name = "protobuf",
-    actual = "@com_google_protobuf//:protobuf",
+  name = "com_google_protobuf",
+  strip_prefix = "protobuf-3.6.1.3",
+  sha256 = "9510dd2afc29e7245e9e884336f848c8a6600a14ae726adb6befdb4f786f0be2",
+  type = "zip",
+  url = "https://github.com/protocolbuffers/protobuf/archive/v3.6.1.3.zip",
 )
 
 http_archive(
