@@ -415,7 +415,7 @@ cc_library(
         "//external:braft",
         "//external:brpc",
         "//external:rocksdb",
-        "//external:rapidjson"
+        "//external:rapidjson",
         ":common",
     ],
     visibility = ["//visibility:public"],
