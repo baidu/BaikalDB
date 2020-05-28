@@ -227,6 +227,7 @@ cc_library(
         "@boost//:lexical_cast",
         "//external:brpc",
         "//external:bthread",
+        "//external:rocksdb",
     ],
     visibility = ["//visibility:public"],
 )
@@ -345,6 +346,7 @@ cc_library(
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
+        "//external:arrow",
     ],
     visibility = ["//visibility:public"],
 )
@@ -369,6 +371,7 @@ cc_library(
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
+        "//external:arrow",
         ":exec2",
     ],
     visibility = ["//visibility:public"],
@@ -393,6 +396,7 @@ cc_library(
         "//external:braft",
         "//external:rocksdb",
         "//external:rapidjson",
+        "//external:arrow",
     ],
     visibility = ["//visibility:public"],
 )
