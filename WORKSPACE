@@ -26,7 +26,7 @@ bind(
 
 new_http_archive(
     name = "com_github_apache_arrow",
-    build_file = "third-party/com_githup_apache_arrow/BUILD",
+    build_file = "third-party/com_github_apache_arrow/BUILD",
     strip_prefix = "arrow-apache-arrow-0.17.1",
     url = "https://github.com/apache/arrow/archive/apache-arrow-0.17.1.tar.gz",
 )
