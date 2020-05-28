@@ -27,6 +27,7 @@
 #include <raft/raft.h>
 #include <raft/util.h>
 #include <raft/storage.h>
+#include <baidu/rpc/stream.h>
 #else
 #include <butil/iobuf.h>
 #include <butil/containers/bounded_queue.h>
@@ -34,6 +35,7 @@
 #include <braft/raft.h>
 #include <braft/util.h>
 #include <braft/storage.h>
+#include <brpc/stream.h>
 #endif
 #include "common.h"
 #include "schema_factory.h"
@@ -45,6 +47,110 @@
 #include "sst_file_writer.h"
 
 namespace baikaldb {
+//backup
+struct FileInfo {
+    std::string path {""};
+    int64_t size {0};
+};
+
+struct BackupInfo {
+    FileInfo meta_info;
+    FileInfo data_info;
+};
+
+class CommonStreamReceiver : public brpc::StreamInputHandler {
+public:
+    enum class ReceiverState : int8_t {
+        RS_LOG_INDEX,
+        RS_FILE_NUM,
+        RS_META_FILE_SIZE,
+        RS_META_FILE,
+        RS_DATA_FILE_SIZE,
+        RS_DATA_FILE
+    };
+
+    enum class StreamState : int8_t {
+        SS_INIT,
+        SS_PROCESSING,
+        SS_SUCCESS,
+        SS_FAIL
+    };
+
+    virtual int on_received_messages(brpc::StreamId id, 
+        base::IOBuf *const messages[], 
+        size_t size) {
+        return 0;
+    }
+
+    virtual void on_closed(brpc::StreamId id) override {
+        DB_NOTICE("id[%lu] closed.", id);
+        _cond.decrease_signal();
+    }
+
+    virtual void on_idle_timeout(brpc::StreamId id) {
+        DB_WARNING("idle timeout %lu", id);
+        _status = StreamState::SS_FAIL;
+    }
+
+    void wait() {
+        _cond.wait();
+    }
+
+    StreamState get_status() const {
+        return _status;
+    }
+    
+protected:
+    void multi_iobuf_action(brpc::StreamId id, base::IOBuf *const messages[], size_t all_size, size_t* index_ptr, 
+        std::function<size_t(base::IOBuf *const message, size_t size)> read_action, size_t* action_size_ptr) {
+        size_t& index = *index_ptr;
+        size_t& action_size = *action_size_ptr;
+        DB_DEBUG("stream_%lu to read size %zu", id, action_size);
+        for (; index < all_size; ++index) {
+            DB_DEBUG("stream_%lu all_size[%zu] index[%zu]", id, all_size, index);
+            size_t complete_size = read_action(messages[index], action_size);
+            action_size -= complete_size;
+            if (action_size == 0) {
+                DB_DEBUG("stream_%lu read size %zu", id, complete_size);
+                return;
+            }
+            DB_DEBUG("stream_%lu read size %zu", id, complete_size);
+        }
+        DB_DEBUG("stream_%lu remain size %zu", id, action_size);
+    }
+protected:
+    BthreadCond _cond {1};
+    StreamState _status {StreamState::SS_INIT};
+};
+
+class StreamReceiver : public CommonStreamReceiver {
+public:
+    bool set_info(const BackupInfo& backup_info) {
+        _meta_file_streaming.open(backup_info.meta_info.path, 
+            std::ios::out | std::ios::binary | std::ios::trunc);
+        _data_file_streaming.open(backup_info.data_info.path, 
+            std::ios::out | std::ios::binary | std::ios::trunc);
+        auto ret = _meta_file_streaming.is_open() && _data_file_streaming.is_open();
+        if (!ret) {
+            _status = StreamState::SS_FAIL;
+        }
+        return ret;
+    }
+
+    virtual int on_received_messages(brpc::StreamId id, 
+        base::IOBuf *const messages[],
+        size_t size) override;
+
+private:
+    int8_t _file_num {0};
+    int64_t _meta_file_size {0};
+    int64_t _data_file_size {0};
+    std::ofstream _meta_file_streaming {};
+    std::ofstream _data_file_streaming {};
+    size_t _to_process_size {sizeof(int64_t)};
+    ReceiverState _state {ReceiverState::RS_LOG_INDEX};
+};
+
 class Region;
 class Backup {
 public:
