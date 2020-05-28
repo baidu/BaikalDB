@@ -781,7 +781,7 @@ public:
     };
 
     virtual int on_received_messages(brpc::StreamId id, 
-        base::IOBuf *const messages[], 
+        butil::IOBuf *const messages[], 
         size_t size) {
         return 0;
     }
@@ -805,8 +805,8 @@ public:
     }
     
 protected:
-    void multi_iobuf_action(brpc::StreamId id, base::IOBuf *const messages[], size_t all_size, size_t* index_ptr, 
-        std::function<size_t(base::IOBuf *const message, size_t size)> read_action, size_t* action_size_ptr) {
+    void multi_iobuf_action(brpc::StreamId id, butil::IOBuf *const messages[], size_t all_size, size_t* index_ptr, 
+        std::function<size_t(butil::IOBuf *const message, size_t size)> read_action, size_t* action_size_ptr) {
         size_t& index = *index_ptr;
         size_t& action_size = *action_size_ptr;
         DB_DEBUG("stream_%lu to read size %zu", id, action_size);
@@ -842,7 +842,7 @@ public:
     }
 
     virtual int on_received_messages(brpc::StreamId id, 
-        base::IOBuf *const messages[],
+        butil::IOBuf *const messages[],
         size_t size) override;
 
 private:
