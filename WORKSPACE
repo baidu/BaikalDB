@@ -1,5 +1,5 @@
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_repository")
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+#load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_repository")
+#load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 
 http_archive(
@@ -14,14 +14,17 @@ bind(
 )
 
 http_archive(
-  name = "com_google_protobuf",
-  strip_prefix = "protobuf-3.6.1.3",
-  sha256 = "9510dd2afc29e7245e9e884336f848c8a6600a14ae726adb6befdb4f786f0be2",
-  type = "zip",
-  url = "https://github.com/protocolbuffers/protobuf/archive/v3.6.1.3.zip",
+    name = "com_google_protobuf",
+    strip_prefix = "protobuf-ab8edf1dbe2237b4717869eaab11a2998541ad8d",
+    url = "https://github.com/google/protobuf/archive/ab8edf1dbe2237b4717869eaab11a2998541ad8d.tar.gz",
 )
 
-http_archive(
+bind(
+    name = "protobuf",
+    actual = "@com_google_protobuf//:protobuf",
+)
+
+new_http_archive(
     name = "com_github_apache_arrow",
     build_file = "third-party/com_githup_apache_arrow/BUILD",
     strip_prefix = "arrow-apache-arrow-0.17.1",
@@ -44,7 +47,7 @@ bind(
     actual = "@com_github_gflags_gflags//:gflags",
 )
 
-http_archive(
+new_http_archive(
   name = "com_github_google_glog",
   build_file = "third-party/glog.BUILD",
   strip_prefix = "glog-a6a166db069520dbbd653c97c2e5b12e08a8bb26",
@@ -56,7 +59,7 @@ bind(
     actual = "@com_github_google_glog//:glog",
 )
 
-http_archive(
+new_http_archive(
   name = "com_github_google_leveldb",
   build_file = "third-party/leveldb.BUILD",
   strip_prefix = "leveldb-a53934a3ae1244679f812d998a4f16f2c7f309a6",
@@ -66,9 +69,8 @@ http_archive(
 # from https://github.com/nelhage/rules_boost
 git_repository(
     name = "com_github_nelhage_rules_boost",
-    commit = "0cc5bf5513c067917b5e083cee22a8dcdf2e0266",
+    commit = "96ba810e48f4a28b85ee9c922f0b375274a97f98",
     remote = "https://github.com/nelhage/rules_boost",
-    shallow_since = "1570056263 -0700",
 )
 
 load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
@@ -100,7 +102,7 @@ bind(
 )
 
 # snappy
-http_archive(
+new_http_archive(
     name = "com_github_google_snappy",
     url = "https://github.com/google/snappy/archive/ed3b7b2.tar.gz",
     strip_prefix = "snappy-ed3b7b242bd24de2ca6750c73f64bee5b7505944",
@@ -175,7 +177,7 @@ bind(
 )
 
 # gperftools
-http_archive(
+new_http_archive(
     name = "com_github_gperftools_gperftools",
     url = "https://github.com/gperftools/gperftools/archive/gperftools-2.7.tar.gz",
     strip_prefix = "gperftools-gperftools-2.7",
