@@ -84,7 +84,7 @@ private:
     struct StreamingWritePolicy {
         StreamingWritePolicy(brpc::StreamId sid) : sid(sid) {}
         int Write(const void* data, size_t n) {
-            base::IOBuf msg;
+            butil::IOBuf msg;
             msg.append(data, n);
             int err = brpc::StreamWrite(sid, msg);
             while (err == EAGAIN) {
@@ -109,10 +109,10 @@ private:
     int upload_sst_info(brpc::Controller* controller, BackupInfo& backup_info);
 
 
-    int backup_datainfo_streaming(baidu::rpc::StreamId sd, int64_t log_index);
+    int backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index);
 
     int upload_sst_info_streaming(
-        baidu::rpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
+        brpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
         bool ingest_store_latest_sst, const BackupInfo& backup_info);
 
     template<typename WritePolicy>

@@ -346,7 +346,7 @@ void Backup::process_download_sst_streaming(brpc::Controller* cntl,
 
 }
 
-int Backup::backup_datainfo_streaming(baidu::rpc::StreamId sd, int64_t log_index) {
+int Backup::backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index) {
     BackupInfo backup_info;
     backup_info.data_info.path = 
         std::string{"region_datainfo_backup_"} + std::to_string(_region_id) + ".sst";
