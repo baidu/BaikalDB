@@ -437,7 +437,9 @@ cc_library(
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
+        "//external:arrow",
         ":common",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
