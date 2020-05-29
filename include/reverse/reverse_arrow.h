@@ -21,15 +21,15 @@
 #include <vector>
 #include <memory>
 
-#include "common.h"
-#include "proto/reverse.pb.h"
-
 #include <arrow/api.h>
 #include <arrow/buffer.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
+
+#include "common.h"
+#include "proto/reverse.pb.h"
 
 namespace baikaldb {
 

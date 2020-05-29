@@ -749,6 +749,5 @@ inline int set_insert(std::unordered_set<std::string>& set, const std::string& i
 template<typename Key, typename Val>
 using DoubleBufferMap = butil::DoublyBufferedData<std::unordered_map<Key, Val>>;
 
-
 } // namespace baikaldb
 

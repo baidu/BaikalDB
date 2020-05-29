@@ -18,8 +18,8 @@
 #include <unordered_set>
 #include <sstream>
 #include <iomanip>
-#include "proto/reverse.pb.h"
 #include "reverse_arrow.h"
+#include "proto/reverse.pb.h"
 #include "rocks_wrapper.h"
 #include "key_encoder.h"
 #include "lru_cache.h"
