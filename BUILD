@@ -228,6 +228,7 @@ cc_library(
     deps = [
         ":cc_baikaldb_internal_proto",
         "@boost//:regex",
+        "@boost//:date_time",
         "@boost//:lexical_cast",
         "//external:brpc",
         "//external:bthread",
@@ -355,6 +356,7 @@ cc_library(
         "//external:brpc",
         "//external:rocksdb",
         "//external:arrow",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -381,6 +383,7 @@ cc_library(
         "//external:rocksdb",
         "//external:arrow",
         ":exec2",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -405,6 +408,7 @@ cc_library(
         "//external:rocksdb",
         "//external:rapidjson",
         "//external:arrow",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
