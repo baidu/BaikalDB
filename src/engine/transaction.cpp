@@ -1000,8 +1000,8 @@ int Transaction::get_update_primary_columns(
                 DB_WARNING("decode value failed: %d", field_id);
                 return -1;
             }
-            DB_DEBUG("get key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
-                     val->get_value(field).get_string().c_str(), res.ToString().c_str());
+            //DB_DEBUG("get key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
+            //         val->get_value(field).get_string().c_str(), res.ToString().c_str());
         } else if (res.IsNotFound()) {
             const FieldDescriptor* field = val->get_field_by_tag(field_id);
             val->set_value(field, field_info.default_expr_value);
