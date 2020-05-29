@@ -14,6 +14,12 @@
 
 #pragma once
 
+#ifdef SNAPPY
+#undef SNAPPY
+#endif
+#ifdef LZ4
+#undef LZ4
+#endif
 #include <arrow/ipc/writer.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/api.h>
