@@ -671,7 +671,9 @@ cc_library(
         "@boost//:asio",
         "//external:bthread",
         "//external:rocksdb",
+        "//external:arrow",
         ":common",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
