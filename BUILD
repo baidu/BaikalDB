@@ -204,11 +204,13 @@ cc_library(
         "//external:rocksdb",
         "//external:brpc",
         "//external:butil",
+        "//external:arrow",
         "@boost//:lexical_cast",
         "@boost//:filesystem",
         "@boost//:algorithm",
         "//external:braft",
         ":cc_baikaldb_internal_proto",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
