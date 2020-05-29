@@ -77,11 +77,11 @@ load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
 boost_deps()
 
 # from https://github.com/envoyproxy/envoy/blob/master/bazel/repositories.bzl
-new_git_repository(
+new_http_archive(
     name = "com_github_tencent_rapidjson",
-    remote= "https://github.com/Tencent/rapidjson.git",
+    url = "https://github.com/Tencent/rapidjson/archive/v1.1.0.tar.gz",
+    strip_prefix = "rapidjson-1.1.0",
     build_file = "third-party/rapidjson.BUILD",
-    tag = "v1.1.0",
 )
 
 bind(
@@ -89,11 +89,11 @@ bind(
     actual = "@com_github_tencent_rapidjson//:rapidjson",
 )
 
-new_git_repository(
+new_http_archive(
     name = "com_github_facebook_rocksdb",
-    remote = "https://github.com/facebook/rocksdb.git",
+    url = "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz",
+    strip_prefix = "rocksdb-6.8.1",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
-    tag = "v6.8.1"
 )
 
 bind(
