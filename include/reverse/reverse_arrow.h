@@ -14,19 +14,19 @@
 
 #pragma once
 
-#include <cstdint>
-#include <iostream>
-#include <sstream>
-#include <iomanip>
-#include <vector>
-#include <memory>
-
 #include <arrow/api.h>
 #include <arrow/buffer.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
+
+#include <cstdint>
+#include <iostream>
+#include <sstream>
+#include <iomanip>
+#include <vector>
+#include <memory>
 
 #include "common.h"
 #include "proto/reverse.pb.h"

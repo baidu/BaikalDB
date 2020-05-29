@@ -13,13 +13,13 @@
 // limitations under the License.
 
 #pragma once
+#include "reverse_common.h"
 #include "rocksdb/utilities/transaction.h"
 #include "key_encoder.h"
 #include "table_record.h"
 #include "rocks_wrapper.h"
 #include "transaction.h"
 #include "boolean_executor.h"
-#include "reverse_common.h"
 #include "schema_factory.h"
 #include "expr_node.h"
 #include <atomic>
