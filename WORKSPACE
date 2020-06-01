@@ -73,12 +73,11 @@ bind(
     actual = "@com_github_tencent_rapidjson//:rapidjson",
 )
 
-new_git_repository(
+new_http_archive(
     name = "com_github_facebook_rocksdb",
-    remote = "https://github.com/facebook/rocksdb.git",
-    #sha256 = "6e8d0844adc37da331844ac4b21ae33ba1f5265d8914c745760d9209a57e9cc9",
+    url = "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz",
+    strip_prefix = "rocksdb-6.8.1",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
-    tag = "v5.12.4"
 )
 
 bind(
