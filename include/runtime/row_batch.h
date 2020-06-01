@@ -77,6 +77,12 @@ public:
     void move_row(std::unique_ptr<MemRow> row) {
         _rows.push_back(std::move(row));
     }
+    void replace_row(std::unique_ptr<MemRow> row, size_t idx) {
+        if (size() < idx + 1) {
+            return;
+        }
+        _rows[idx] = std::move(row);
+    }
     std::unique_ptr<MemRow>& get_row() {
         return _rows[_idx];
     }

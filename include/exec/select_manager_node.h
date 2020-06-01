@@ -35,10 +35,12 @@ public:
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state) {
-        //ExecNode::close(state);
+        ExecNode::close(state);
         for (auto expr : _slot_order_exprs) {
             expr->close();
         }
+        _sorter = nullptr;
+        _fetcher_store.clear();
     }
     int init_sort_info(const pb::PlanNode& node) {
         for (auto& expr : node.derive_node().sort_node().slot_order_exprs()) {

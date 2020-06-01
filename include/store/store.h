@@ -47,6 +47,8 @@ inline int map_idx(int64_t region_id) {
     return region_id % max_region_map_count;
 }
 
+
+
 class Store : public pb::StoreService {
 public:
     virtual ~Store();
@@ -116,6 +118,12 @@ public:
                                 const pb::BackUpReq* request,
                                 pb::BackUpRes* response,
                                 google::protobuf::Closure* done);
+
+    virtual void backup(google::protobuf::RpcController* controller,
+        const pb::BackupRequest* request,
+        pb::BackupResponse* response,
+        google::protobuf::Closure* done); 
+
     //上报心跳
     void heart_beat_thread();
 
@@ -228,6 +236,9 @@ public:
 
         _rocksdb->close();
         DB_WARNING("rockdb close, quit success");
+    }
+    MetaServerInteract& get_meta_server_interact() {
+        return _meta_server_interact;
     }
 private:
     Store(): _split_num(0),

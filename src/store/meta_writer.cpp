@@ -36,6 +36,8 @@ const std::string MetaWriter::DOING_SNAPSHOT_IDENTIFY(1, 0x07);
 //key: META_IDENIFY + region_id + identify
 const std::string MetaWriter::REGION_DDL_INFO_IDENTIFY(1, 0x08);
 
+const std::string MetaWriter::ROLLBACKED_TXN_IDENTIFY(1, 0x09);
+
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
     std::vector<std::string> values;
@@ -126,7 +128,11 @@ int MetaWriter::update_apply_index(int64_t region_id, int64_t applied_index) {
     }
     return 0; 
 }
-int MetaWriter::write_pre_commit(int64_t region_id, uint64_t txn_id, int64_t num_table_lines, int64_t applied_index) {
+int MetaWriter::write_pre_commit(int64_t region_id, uint64_t txn_id, int64_t num_table_lines,
+                                 int64_t applied_index) {
+    if (applied_index == 0) {
+        return 0;
+    }
     MutTableKey line_value;
     line_value.append_i64(num_table_lines).append_i64(applied_index);
     auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
@@ -160,20 +166,49 @@ int MetaWriter::write_batch(rocksdb::WriteBatch* updates, int64_t region_id) {
     return 0; 
 }
 
-int MetaWriter::write_meta_after_commit(int64_t region_id, int64_t num_table_lines, 
-            int64_t applied_index, uint64_t txn_id) {
-     rocksdb::WriteBatch batch;
-     batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(applied_index));
-     batch.Put(_meta_cf, num_table_lines_key(region_id), encode_num_table_lines(num_table_lines));
-     batch.Delete(_meta_cf, pre_commit_key(region_id, txn_id));
-     batch.Delete(_meta_cf, transcation_log_index_key(region_id, txn_id));
-     return write_batch(&batch, region_id);
+int MetaWriter::read_transcation_rollbacked_tag(int64_t region_id, uint64_t txn_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(rollbacked_transcation_key(region_id, txn_id)), &value);
+    if (!status.ok()) {
+        return -1;
+    }
+    return 0;
 }
-int MetaWriter::write_meta_before_prepared(int64_t region_id, int64_t log_index, uint64_t txn_id) {
+
+int MetaWriter::write_meta_after_commit(int64_t region_id, int64_t num_table_lines, 
+            int64_t applied_index, uint64_t txn_id, bool need_write_rollback) {
+    if (applied_index == 0) {
+        return 0;
+    }
+    rocksdb::WriteBatch batch;
+    batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(applied_index));
+    batch.Put(_meta_cf, num_table_lines_key(region_id), encode_num_table_lines(num_table_lines));
+    if (need_write_rollback) {
+        // 这条记录会残留，考虑ttl解决
+        batch.Put(_meta_cf, rollbacked_transcation_key(region_id, txn_id), rocksdb::Slice(""));
+    }
+    batch.Delete(_meta_cf, pre_commit_key(region_id, txn_id));
+    batch.Delete(_meta_cf, transcation_log_index_key(region_id, txn_id));
+    return write_batch(&batch, region_id);
+}
+int MetaWriter::write_meta_begin_index(int64_t region_id, int64_t log_index, uint64_t txn_id) {
+    if (log_index == 0) {
+        return 0;
+    }
     rocksdb::WriteBatch batch;
     batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(log_index));
     batch.Put(_meta_cf, transcation_log_index_key(region_id, txn_id), encode_transcation_log_index_value(log_index));
     return write_batch(&batch, region_id);
+}
+int MetaWriter::write_meta_index_and_num_table_lines(int64_t region_id, int64_t log_index,
+                        int64_t num_table_lines, SmartTransaction txn) {
+    if (log_index == 0) {
+        return 0;
+    }
+    txn->put_meta_info(applied_index_key(region_id), encode_applied_index(log_index));
+    txn->put_meta_info(num_table_lines_key(region_id), encode_num_table_lines(num_table_lines));
+    return 0;
 }
 int MetaWriter::ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id) {
     rocksdb::IngestExternalFileOptions ifo;
@@ -537,6 +572,16 @@ std::string MetaWriter::transcation_pb_key(int64_t region_id, uint64_t txn_id, i
     key.append_i64(log_index);
     return key.data();
 }
+
+std::string MetaWriter::rollbacked_transcation_key(int64_t region_id, uint64_t txn_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::ROLLBACKED_TXN_IDENTIFY.c_str(), 1);
+    key.append_u64(txn_id);
+    return key.data();
+}
+
 std::string MetaWriter::transcation_pb_key_prefix(int64_t region_id) const {
     MutTableKey key;
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);

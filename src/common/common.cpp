@@ -40,6 +40,7 @@ DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:
 DEFINE_int32(service_lock_concurrency, 40, "service_write concurrency, default:40");
 DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
 DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
+DEFINE_int64(incremental_info_gc_time, 600 * 1000 * 1000, "time interval to clear incremental info");
 DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
@@ -334,6 +335,80 @@ void stripslashes(std::string& str) {
     str.resize(slow);
 }
 
+void update_op_version(pb::SchemaConf* p_conf, const std::string& desc) {
+    auto version = p_conf->has_op_version() ? p_conf->op_version() : 0;
+    p_conf->set_op_version(version + 1);
+    p_conf->set_op_desc(desc);
+}
+
+void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf) {
+        const google::protobuf::Reflection* src_reflection = schema_conf.GetReflection();
+        //const google::protobuf::Descriptor* src_descriptor = schema_conf.GetDescriptor();
+        const google::protobuf::Reflection* dst_reflection = p_conf->GetReflection();
+        const google::protobuf::Descriptor* dst_descriptor = p_conf->GetDescriptor();
+        const google::protobuf::FieldDescriptor* src_field = nullptr;
+        const google::protobuf::FieldDescriptor* dst_field = nullptr;
+
+        std::vector<const google::protobuf::FieldDescriptor*> src_field_list;
+        src_reflection->ListFields(schema_conf, &src_field_list);
+        for (int i = 0; i < (int)src_field_list.size(); ++i) {
+            src_field = src_field_list[i];
+            if (src_field == nullptr) {
+                continue;
+            }
+
+            dst_field = dst_descriptor->FindFieldByName(src_field->name());
+            if (dst_field == nullptr) {
+                continue;
+            }
+
+            if (src_field->cpp_type() != dst_field->cpp_type()) {
+                continue;
+            }
+
+            auto type = src_field->cpp_type();
+            switch (type) {
+                case google::protobuf::FieldDescriptor::CPPTYPE_INT32: {
+                    auto src_value = src_reflection->GetInt32(schema_conf, src_field);
+                    dst_reflection->SetInt32(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_UINT32: {
+                    auto src_value = src_reflection->GetUInt32(schema_conf, src_field);
+                    dst_reflection->SetUInt32(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_INT64: {
+                    auto src_value = src_reflection->GetInt64(schema_conf, src_field);
+                    dst_reflection->SetInt64(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_UINT64: {
+                    auto src_value = src_reflection->GetUInt64(schema_conf, src_field);
+                    dst_reflection->SetUInt64(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT: {
+                    auto src_value = src_reflection->GetFloat(schema_conf, src_field);
+                    dst_reflection->SetFloat(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE: {
+                    auto src_value = src_reflection->GetDouble(schema_conf, src_field);
+                    dst_reflection->SetDouble(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_BOOL: {
+                    auto src_value = src_reflection->GetBool(schema_conf, src_field);
+                    dst_reflection->SetBool(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_STRING: {
+                    auto src_value = src_reflection->GetString(schema_conf, src_field);
+                    dst_reflection->SetString(p_conf, dst_field, src_value);
+                } break;
+                default: {
+                    break;
+                }
+            }
+
+        }
+        DB_WARNING("%s schema conf UPDATE TO : %s", table_name.c_str(), schema_conf.ShortDebugString().c_str());
+}
+
 int primitive_to_proto_type(pb::PrimitiveType type) {
     using google::protobuf::FieldDescriptorProto;
     static std::unordered_map<int32_t, int32_t> _mysql_pb_type_mapping = {
@@ -472,6 +547,28 @@ std::string string_trim(std::string& str) {
         return "";
     size_t last = str.find_last_not_of(' ');
     return str.substr(first, (last-first+1));
+}
+
+const std::string& rand_peer(pb::RegionInfo& info) {
+    if (info.peers_size() == 0) {
+        return info.leader();
+    }
+    uint32_t i = butil::fast_rand() % info.peers_size();
+    return info.peers(i);
+}
+
+void other_peer_to_leader(pb::RegionInfo& info) {
+    auto peer = rand_peer(info);
+    if (peer != info.leader()) {
+        info.set_leader(peer);
+        return;
+    }
+    for (auto& peer : info.peers()) {
+        if (peer != info.leader()) {
+            info.set_leader(peer);
+            break;
+        }
+    }
 }
 
 std::string url_encode(const std::string& str) {

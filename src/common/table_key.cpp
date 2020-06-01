@@ -26,4 +26,122 @@ int TableKey::extract_index(IndexInfo& index, TableRecord* record, int& pos) {
     return record->decode_key(index, *this, pos);
 }
 
+//TODO: secondary key
+int TableKey::decode_field(Message* message,
+        const Reflection* reflection,
+        const FieldDescriptor* field, 
+        const FieldInfo& field_info,
+        int& pos) const {
+    switch (field_info.type) {
+        case pb::INT8: {
+            if (pos + sizeof(int8_t) > size()) {
+                DB_WARNING("int8_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetInt32(message, field, extract_i8(pos));
+            pos += sizeof(int8_t);
+        } break;
+        case pb::INT16: {
+            if (pos + sizeof(int16_t) > size()) {
+                DB_WARNING("int16_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetInt32(message, field, extract_i16(pos));
+            pos += sizeof(int16_t);
+        } break;
+        case pb::TIME:
+        case pb::INT32: {
+            if (pos + sizeof(int32_t) > size()) {
+                DB_WARNING("int32_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetInt32(message, field, extract_i32(pos));
+            pos += sizeof(int32_t);
+        } break;
+        case pb::INT64: {
+            if (pos + sizeof(int64_t) > size()) {
+                DB_WARNING("int64_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetInt64(message, field, extract_i64(pos));
+            pos += sizeof(int64_t);
+        } break;
+        case pb::UINT8: {
+            if (pos + sizeof(uint8_t) > size()) {
+                DB_WARNING("uint8_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetUInt32(message, field, extract_u8(pos));
+            pos += sizeof(uint8_t);
+        } break;
+        case pb::UINT16: {
+            if (pos + sizeof(uint16_t) > size()) {
+                DB_WARNING("uint16_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetUInt32(message, field, extract_u16(pos));
+            pos += sizeof(uint16_t);
+        } break;
+        case pb::TIMESTAMP:
+        case pb::DATE:
+        case pb::UINT32: {
+            if (pos + sizeof(uint32_t) > size()) {
+                DB_WARNING("uint32_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetUInt32(message, field, extract_u32(pos));
+            pos += sizeof(uint32_t);
+        } break;
+        case pb::DATETIME:
+        case pb::UINT64: {
+            if (pos + sizeof(uint64_t) > size()) {
+                DB_WARNING("uint64_t pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetUInt64(message, field, extract_u64(pos));
+            pos += sizeof(uint64_t);
+        } break;
+        case pb::FLOAT: {
+            if (pos + sizeof(float) > size()) {
+                DB_WARNING("float pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetFloat(message, field, extract_float(pos));
+            pos += sizeof(float);
+        } break;
+        case pb::DOUBLE: {
+            if (pos + sizeof(double) > size()) {
+                DB_WARNING("double pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetDouble(message, field, extract_double(pos));
+            pos += sizeof(double);
+        } break;
+        case pb::BOOL: {
+            if (pos + sizeof(uint8_t) > size()) {
+                DB_WARNING("bool pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            reflection->SetBool(message, field, extract_boolean(pos));
+            pos += sizeof(uint8_t);
+        } break;
+        case pb::STRING: {
+            //TODO no string pk-field is supported
+            if (pos >= (int)size()) {
+                DB_WARNING("string pos out of bound: %d %d %zu", field->number(), pos, size());
+                return -2;
+            }
+            std::string str;
+            extract_string(pos, str);
+            reflection->SetString(message, field, str);
+            pos += (str.size() + 1);
+        } break;
+        default: {
+            DB_WARNING("un-supported field type: %d, %d", field->number(), field_info.type);
+            return -1;
+        } break;
+    }
+    return 0;
+}
+
 } // end of namespace baikaldb

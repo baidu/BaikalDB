@@ -27,7 +27,7 @@ DECLARE_int32(concurrency_num);
 DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(region_faulty_interval_times);
-DECLARE_int64(incremental_info_gc_time);
+
 //增加或者更新region信息
 //如果是增加，则需要更新表信息, 只有leader的上报会调用该接口
 void RegionManager::update_region(const pb::MetaManagerRequest& request,
@@ -241,7 +241,10 @@ void RegionManager::drop_region(const pb::MetaManagerRequest& request,
                       result_table_ids, result_start_keys, result_end_keys);
     erase_region_state(drop_region_ids);
     std::vector<pb::RegionInfo> region_infos;
-    for (uint32_t i = 0; i < result_region_ids.size(); i++) {
+    for (uint32_t i = 0; i < result_region_ids.size() && 
+            i < result_table_ids.size() && 
+            i < result_start_keys.size() && 
+            i < result_end_keys.size(); i++) {
         pb::RegionInfo region_info;
         region_info.set_region_id(result_region_ids[i]);
         region_info.set_deleted(true);
@@ -296,6 +299,7 @@ void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_
     BthreadCond concurrency_cond(-FLAGS_concurrency_num);
     uint64_t log_id = butil::fast_rand();
     for (auto& drop_region_id : drop_region_ids) {
+        _region_peer_state_map.erase(drop_region_id);
         std::vector<std::string> peers;
         get_region_peers(drop_region_id, peers);
         for (auto& peer : peers) {
@@ -314,7 +318,7 @@ void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_
                     DB_FATAL("drop region fail, peer: %s, drop_region_id: %ld", peer.c_str(), drop_region_id);
                     return;
                 }
-                DB_NOTICE("send remove region request:%s, response:%s, peer_address:%s, region_id:%ld",
+                DB_WARNING("send remove region request:%s, response:%s, peer_address:%s, region_id:%ld",
                             request.ShortDebugString().c_str(),
                             response.ShortDebugString().c_str(),
                             peer.c_str(),
@@ -524,7 +528,7 @@ void RegionManager::pre_process_remove_peer_for_store(const std::string& instanc
         pb::Status status = pb::NORMAL;
         ret = get_region_status(region_id, status);
         if (ret < 0 || status != pb::NORMAL) {
-            DB_FATAL("region_id:%ld status:%s is not normal, can not been remove, instance:%s",
+            DB_WARNING("region_id:%ld status:%s is not normal, can not been remove, instance:%s",
                     region_id, pb::Status_Name(status).c_str(), instance.c_str());
             continue;
         }
@@ -773,6 +777,9 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
             continue;
         }
         size_t total_region_count = instance_regions[table_id].size();
+        if (total_region_count == 0) {
+            continue;
+        }
         size_t index = butil::fast_rand() % total_region_count;
         for (size_t i = 0; i < total_region_count; ++i, ++index) {
             int64_t candicate_region = instance_regions[table_id][index % total_region_count];
@@ -873,83 +880,27 @@ void RegionManager::update_leader_status(const pb::StoreHeartBeatRequest* reques
 }
 
 void RegionManager::put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos) {
-    BAIDU_SCOPED_LOCK(_log_entry_mutex);
-    RegionIncrementalMap* background = _incremental_regioninfo_map.read_background();
-    RegionIncrementalMap* frontground = _incremental_regioninfo_map.read();
-    (*background)[apply_index] = region_infos;
-    if (FLAGS_incremental_info_gc_time < _gc_time_cost.get_time()) {
-        if (background->size() < 100 && frontground->size() < 100) {
-            _gc_time_cost.reset();
-            return ;
-        }
-        if (frontground->size() > 0) {
-            DB_WARNING("clear regioninfo frontground size:%d start:%ld end:%ld", 
-                frontground->size(), frontground->begin()->first, frontground->rbegin()->first);
-        }
-        frontground->clear();
-        _incremental_regioninfo_map.swap();
-        _gc_time_cost.reset();
-    }
+    _incremental_region_info.put_incremental_info(apply_index, region_infos);
 }
 
 bool RegionManager::check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index) {
     int64_t last_updated_index = request->last_updated_index();
-    BAIDU_SCOPED_LOCK(_log_entry_mutex);
-    RegionIncrementalMap* background = _incremental_regioninfo_map.read_background();
-    RegionIncrementalMap* frontground = _incremental_regioninfo_map.read();
-    if (frontground->size() == 0 && background->size() == 0) {
-        if (last_updated_index < applied_index) {
-            return true;
+    auto update_func = [response](const std::vector<pb::RegionInfo>& region_infos) {
+        for (auto info : region_infos) {
+            *(response->add_region_change_info()) = info;
         }
-        DB_NOTICE("no region info need update last_updated_index:%ld", last_updated_index);
-        if (response->last_updated_index() < last_updated_index) {
-            response->set_last_updated_index(last_updated_index);
-        }
-        return false;
-    } else if (frontground->size() == 0 && background->size() > 0) {
-        if (last_updated_index < background->begin()->first) {              
-            return true;
-        } else {
-            auto iter = background->upper_bound(last_updated_index);
-            while (iter != background->end()) {
-                for (auto info : iter->second) {
-                    *(response->add_region_change_info()) = info;
-                }
-                last_updated_index = iter->first;
-                ++iter;
-            }
-            if (response->last_updated_index() < last_updated_index) {
-                response->set_last_updated_index(last_updated_index);
-            }
-            return false;
-        }
-    } else if (frontground->size() > 0) {
-        if (last_updated_index < frontground->begin()->first) {
-            return true;
-        } else {
-            auto iter = frontground->upper_bound(last_updated_index);
-            while (iter != frontground->end()) {
-                for (auto info : iter->second) {
-                    *(response->add_region_change_info()) = info;
-                }
-                last_updated_index = iter->first;
-                ++iter;
-            }
-            iter = background->upper_bound(last_updated_index);
-            while (iter != background->end()) {
-                for (auto info : iter->second) {
-                    *(response->add_region_change_info()) = info;
-                }
-                last_updated_index = iter->first;
-                ++iter;
-            }
-            if (response->last_updated_index() < last_updated_index) {
-                response->set_last_updated_index(last_updated_index);
-            }
-            return false;
-        }          
+    };
+
+    bool need_upd = _incremental_region_info.check_and_update_incremental(update_func, last_updated_index, applied_index);
+    if (need_upd) {
+        return true;
     }
+
+    if (response->last_updated_index() < last_updated_index) {
+        response->set_last_updated_index(last_updated_index);
+    }
+
     return false;
 }
 
@@ -979,7 +930,6 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
                                                 pb::StoreHeartBeatResponse* response) {
     TimeCost step_time_cost; 
     std::string instance = request->instance_info().address();
-    std::string instance_resource_tag = request->instance_info().resource_tag();
     std::vector<std::pair<std::string, pb::RaftControlRequest>> remove_peer_requests;
    
     std::set<int64_t> related_table_ids;
@@ -1051,7 +1001,6 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         update_region_cost += sub_step_time_cost.get_time();
         sub_step_time_cost.reset();
         check_peer_count(region_id, 
-                        instance_resource_tag, 
                         leader_region,
                         peers_in_heart,
                         peers_in_master,
@@ -1090,7 +1039,8 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
                         StoreInteract store_interact(request.first.c_str());
                         pb::StoreRes remove_region_response; 
                         ret = store_interact.send_request("remove_region", remove_region_request, remove_region_response);
-                        DB_WARNING("send remove region request: %s, resposne: %s, ret: %d",
+                        DB_WARNING("send remove region to store:%s request: %s, resposne: %s, ret: %d",
+                                    request.first.c_str(),
                                     remove_region_request.ShortDebugString().c_str(),
                                     remove_region_response.ShortDebugString().c_str(), ret);
                     }
@@ -1174,7 +1124,6 @@ void RegionManager::check_whether_update_region(int64_t region_id,
 }
 
 void RegionManager::check_peer_count(int64_t region_id,
-        const std::string& instance_resource_tag,
         const pb::LeaderHeartBeat& leader_region,
         const std::set<std::string>& peers_in_heart,
         const std::set<std::string>& peers_in_master,
@@ -1203,7 +1152,13 @@ void RegionManager::check_peer_count(int64_t region_id,
     std::string table_resource_tag = table_resource_tags[table_id];
     std::unordered_map<std::string, int> resource_tag_count;
     for (auto& peer : peers_in_heart) {
-        std::string peer_resource_tag = peer_resource_tags[peer];
+        auto iter = peer_resource_tags.find(peer);
+        // meta找不到peer，可以等下一轮上报
+        // 否则会导致resource_tag_count[table_resource_tag]不足
+        if (iter == peer_resource_tags.end()) {
+            return;
+        }
+        std::string peer_resource_tag = iter->second;
         resource_tag_count[peer_resource_tag]++;
     }
     std::string candicate_logical_room;
@@ -1212,6 +1167,7 @@ void RegionManager::check_peer_count(int64_t region_id,
     std::unordered_map<std::string, int64_t> current_logical_room_count_map;
     //如果用户修个了resource_tag, 先加后删
     if (resource_tag_count[table_resource_tag] < replica_num) {
+        DB_WARNING("resource_tag count:%d < replica_num:%d", resource_tag_count[table_resource_tag], replica_num);
         need_add_peer = true;
     }
     //没有指定机房分布的表，只按照replica_num计算
@@ -1230,6 +1186,7 @@ void RegionManager::check_peer_count(int64_t region_id,
             std::string logical_room = schema_count.first;
             if (schema_logical_room_count_map[logical_room] > current_logical_room_count_map[logical_room]) {
                 candicate_logical_room = logical_room;
+                DB_WARNING("candicate_logical_room:%s", candicate_logical_room.c_str());
                 need_add_peer = true;
                 break;
             }
@@ -1527,7 +1484,7 @@ void RegionManager::region_healthy_check_function() {
         if (region_info->start_key() == region_info->end_key() 
                 && !region_info->start_key().empty()) {
             //长时间没有收到空region的心跳，说明store已经删除，此时meta也可删除
-            DB_WARNING("region_id:%ld not recevie heartbeat for a long time, table_id: %ld leader:%s drop it", 
+            DB_WARNING("region_id:%ld, table_id: %ld leader:%s maybe erase", 
                        region_id, region_info->table_id(), region_info->leader().c_str());
             drop_region_ids.push_back(region_id);
             continue;

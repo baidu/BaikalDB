@@ -26,7 +26,6 @@ int RuntimeState::init(const pb::StoreReq& req,
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool,
         bool store_compute_separate) {
-
     for (auto& tuple : tuples) {
         _tuple_descs.push_back(tuple);
     }
@@ -58,6 +57,9 @@ int RuntimeState::init(const pb::StoreReq& req,
         // if (txn_info.has_autocommit()) {
         //     _autocommit = txn_info.autocommit();
         // }
+        if (txn_info.has_primary_region_id()) {
+            set_primary_region_id(txn_info.primary_region_id());
+        }
     }
     if (pool == nullptr) {
         DB_WARNING("error: txn pool is null: %ld", _region_id);
@@ -76,6 +78,21 @@ int RuntimeState::init(const pb::StoreReq& req,
 }
 
 int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
+    _num_increase_rows = 0; 
+    _num_affected_rows = 0; 
+    _num_returned_rows = 0; 
+    _num_scan_rows     = 0; 
+    _num_filter_rows   = 0; 
+    set_client_conn(ctx->client_conn);
+    if (_client_conn == nullptr) {
+        return -1;
+    }
+    txn_id = _client_conn->txn_id;
+    _log_id = ctx->stat_info.log_id;
+    // prepare 复用runtime
+    if (_is_inited) {
+        return 0;
+    }
     _send_buf = send_buf;
     _tuple_descs = ctx->tuple_descs();
     if (_tuple_descs.size() > 0) {
@@ -85,14 +102,10 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
             return -1;
         }
     }
-    if (_client_conn == nullptr) {
-        return -1;
-    }
-    txn_id = _client_conn->txn_id;
-    _log_id = ctx->stat_info.log_id;
+    _is_inited = true;
     return 0;
 }
-
+/*
 int RuntimeState::init(const pb::CachePlan& commit_plan) {
     txn_id = _client_conn->txn_id;
     seq_id = _client_conn->seq_id;
@@ -104,6 +117,7 @@ int RuntimeState::init(const pb::CachePlan& commit_plan) {
     }
     return 0;
 }
+*/
 void RuntimeState::conn_id_cancel(uint64_t db_conn_id) {
     if (_pool != nullptr) {
         auto s = _pool->get(db_conn_id);

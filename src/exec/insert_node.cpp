@@ -65,7 +65,7 @@ int InsertNode::init(const pb::PlanNode& node) {
 }
 int InsertNode::open(RuntimeState* state) {
     int num_affected_rows = 0;
-    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, ([this, &num_affected_rows](TraceLocalNode& local_node) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([this, &num_affected_rows](TraceLocalNode& local_node) {
         local_node.set_affect_rows(num_affected_rows);
         local_node.append_description() << " increase_rows:" + _num_increase_rows;
     }));
@@ -101,6 +101,7 @@ int InsertNode::open(RuntimeState* state) {
         }
     }
     int cnt = 0;
+    // TODO init阶段？
     for (auto& pb_record : _pb_node.derive_node().insert_node().records()) {
         SmartRecord record = _factory->new_record(*_table_info);
         record->decode(pb_record);
@@ -243,10 +244,12 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
         //DB_WARNING("DEBUG row: %s", row->to_string().c_str());
         insert_records.push_back(row);
     }
+    /*
     for (auto expr : _insert_values) {
         ExprNode::destroy_tree(expr);
     }
     _insert_values.clear();
+    */
     return 0;
 }
 

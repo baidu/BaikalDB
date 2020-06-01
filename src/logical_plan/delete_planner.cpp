@@ -21,7 +21,7 @@ namespace baikaldb {
 DEFINE_bool(delete_all_to_truncate, false,  "delete from xxx; treat as truncate");
 int DeletePlanner::plan() {
     if (_ctx->stmt_type == parser::NT_TRUNCATE) {
-        if (_ctx->runtime_state.client_conn()->txn_id != 0) {
+        if (_ctx->client_conn->txn_id != 0) {
             DB_FATAL("not allowed truncate table in txn connection");
             return -1;
         }
@@ -195,7 +195,7 @@ int DeletePlanner::parse_where() {
     if (_delete_stmt->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_delete_stmt->where, _where_filters)) {
+    if (0 != flatten_filter(_delete_stmt->where, _where_filters, false)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }

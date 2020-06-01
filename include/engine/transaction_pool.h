@@ -21,7 +21,8 @@
 namespace baikaldb {
 DECLARE_int32(transaction_clear_delay_ms);
 //class Region;
-
+class Region;
+class MetaWriter;
 // TODO: remove locking for thread-safe codes
 class TransactionPool {
 public:
@@ -41,7 +42,7 @@ public:
     int init(int64_t region_id, bool use_ttl);
 
     // -1 means insert error (already exists)
-    int begin_txn(uint64_t txn_id, SmartTransaction& txn);
+    int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id);
 
     void remove_txn(uint64_t txn_id);
 
@@ -85,11 +86,13 @@ public:
         return _use_ttl;
     }
 
-    void clear_transactions(int32_t clear_delay_ms = FLAGS_transaction_clear_delay_ms);
+    void clear_transactions(Region* region);
 
     void on_leader_stop_rollback();
 
     void on_leader_stop_rollback(uint64_t txn_id);
+
+    void on_leader_start_recovery(Region* region);
 
     int on_shutdown_recovery(
             std::vector<rocksdb::Transaction*>& recovered_txns,
@@ -106,7 +109,11 @@ public:
             bool graceful_shutdown);
 
     void update_txn_num_rows_after_split(const pb::TransactionInfo& txn_info);
-    
+
+    void txn_query_primary_region(SmartTransaction txn, Region* region, pb::RegionInfo& region_info);
+    void txn_commit_through_raft(SmartTransaction txn, pb::RegionInfo& region_info, pb::OpType op_type);
+    void get_txn_state(const pb::StoreReq* request, pb::StoreRes* response);
+    void read_only_txn_process(SmartTransaction txn, pb::OpType op_type, bool optimize_1pc);
     //清空所有的状态
     void clear();
 private:
@@ -122,5 +129,6 @@ private:
 
     BthreadCond  _num_prepared_txn;  // total number of prepared transactions
     std::atomic<int32_t> _txn_count;
+    MetaWriter*          _meta_writer = nullptr;
 };
 }

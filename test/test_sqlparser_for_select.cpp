@@ -86,6 +86,81 @@ TEST(test_parser, case_option) {
     {
         parser::SqlParser parser;
         //select distict
+        std::string sql_case = "select match (a,b) against ('x') ;";
+        parser.parse(sql_case);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("match_against"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select match (a,b) against ('x' in natural language mode) ;";
+        parser.parse(sql_case);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("match_against"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_case = "select match (a,b) against ('x' in boolean mode) ;";
+        parser.parse(sql_case);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("match_against"));
+        ASSERT_TRUE(func_expr->children.size() == 3);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
         std::string sql_case = "select case adgroup_id when 1378428934 "
                 "then 'true' else 'false' end from ideacontent limit 10";
         parser.parse(sql_case);
@@ -106,6 +181,9 @@ TEST(test_parser, case_option) {
         }
         ASSERT_TRUE(func_expr->children.size() == 4);
         std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     }
     {
         parser::SqlParser parser;
@@ -128,6 +206,9 @@ TEST(test_parser, case_option) {
             std::cout << func_expr->children[i]->to_string() << std::endl;
         }
         std::cout << select_stmt->to_string() << std::endl;
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     } 
     {
         parser::SqlParser parser;
@@ -149,6 +230,9 @@ TEST(test_parser, case_option) {
         for (auto i = 0; i < func_expr->children.size(); ++i) {
             std::cout << func_expr->children[i]->to_string() << std::endl;
         }
+        std::cout << select_stmt->to_string() << std::endl;
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
         std::cout << select_stmt->to_string() << std::endl;
     } 
     {
@@ -777,6 +861,9 @@ TEST(test_parser, case_where) {
         ASSERT_TRUE(select_stmt->limit != nullptr);
         ASSERT_TRUE(select_stmt->lock == parser::SL_IN_SHARE);
         ASSERT_TRUE(select_stmt->where != nullptr);
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     }
 }
 TEST(test_parser, case_group) {
@@ -2202,6 +2289,9 @@ TEST(test_parser, case_table_refs) {
         ASSERT_TRUE(std::string(right_join_node_left->table_name->table.value) == "table_b");
         ASSERT_TRUE(right_join_node_left->as_name.value == nullptr);
         ASSERT_TRUE(right_join_node_left->index_hints.size() == 0);
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
     }
     {
         parser::SqlParser parser;
@@ -2397,6 +2487,177 @@ TEST(test_parser, case_table_refs) {
         ASSERT_TRUE(left_right_right->table_name != nullptr);
         ASSERT_TRUE(std::string(left_right_right->table_name->db.value) == "db");
         ASSERT_TRUE(std::string(left_right_right->table_name->table.value) == "table_c");
+    }
+    {
+        parser::SqlParser parser;
+        const char first_half[] = "select * from db.table_a where query in ('";
+        std::string sql("select * from db.table_a where query in ('"
+            "\x00"
+            "test')", strlen(first_half) + 7);
+        parser.parse(sql);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_TRUE(select_stmt->where != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        ASSERT_TRUE(std::string("('')") == select_stmt->where->children[1]->to_string());
+    }
+    {
+        parser::SqlParser parser;
+        const char first_half[] = "select * from db.table_a where query in ('";
+        std::string sql("select * from db.table_a where query in ('"
+            "test\x00"
+            "test')", strlen(first_half) + 11);
+        parser.parse(sql);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_TRUE(select_stmt->where != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        ASSERT_TRUE(std::string("('test')") == select_stmt->where->children[1]->to_string());
+    }
+    {
+        parser::SqlParser parser;
+        const char first_half[] = "select * from db.table_a where query in ('";
+        std::string sql("select * from db.table_a where query in ('testtest')");
+        parser.parse(sql);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_TRUE(select_stmt->where != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        ASSERT_TRUE(std::string("('testtest')") == select_stmt->where->children[1]->to_string());
+    }
+}
+
+TEST(test_parser, case_union) {
+    //test union clause
+    {
+        parser::SqlParser parser;
+        std::string sql_union = "SELECT a FROM t1 WHERE a=10 AND B=1 ORDER BY a LIMIT 10"
+                               " UNION "
+                               "SELECT a FROM t2 WHERE a=11 AND B=2 ORDER BY a LIMIT 10;";
+        parser.parse(sql_union);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::UnionStmt));
+        parser::UnionStmt* union_stmt = (parser::UnionStmt*)parser.result[0];
+        std::cout << union_stmt->to_string() << std::endl;
+        ASSERT_EQ(2, union_stmt->select_stmts.size());
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[0])) == typeid(parser::SelectStmt));
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[1])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt1 = (parser::SelectStmt*)union_stmt->select_stmts[0];
+        parser::SelectStmt* select_stmt2 = (parser::SelectStmt*)union_stmt->select_stmts[1];
+        ASSERT_TRUE(select_stmt1->order != nullptr);
+        ASSERT_TRUE(select_stmt1->limit != nullptr);
+        ASSERT_TRUE(select_stmt2->order == nullptr);
+        ASSERT_TRUE(select_stmt2->limit == nullptr);
+        ASSERT_TRUE(union_stmt->limit != nullptr);
+        ASSERT_TRUE(union_stmt->order != nullptr);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_union = "(SELECT a FROM t1 WHERE a=10 AND B=1 ORDER BY a LIMIT 10)"
+                               " UNION "
+                               "(SELECT a FROM t2 WHERE a=11 AND B=2 ORDER BY a LIMIT 10);";
+        parser.parse(sql_union);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::UnionStmt));
+        parser::UnionStmt* union_stmt = (parser::UnionStmt*)parser.result[0];
+        std::cout << union_stmt->to_string() << std::endl;
+        ASSERT_EQ(2, union_stmt->select_stmts.size());
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[0])) == typeid(parser::SelectStmt));
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[1])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt1 = (parser::SelectStmt*)union_stmt->select_stmts[0];
+        parser::SelectStmt* select_stmt2 = (parser::SelectStmt*)union_stmt->select_stmts[1];
+        ASSERT_TRUE(select_stmt1->order != nullptr);
+        ASSERT_TRUE(select_stmt1->limit != nullptr);
+        ASSERT_TRUE(select_stmt2->order != nullptr);
+        ASSERT_TRUE(select_stmt2->limit != nullptr);
+        ASSERT_TRUE(union_stmt->limit == nullptr);
+        ASSERT_TRUE(union_stmt->order == nullptr);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_union = "(SELECT a FROM t1 WHERE a=10 AND B=1)"
+                                " UNION "
+                                "(SELECT a FROM t2 WHERE a=11 AND B=2)"
+                                " ORDER BY a LIMIT 10;";
+        parser.parse(sql_union);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::UnionStmt));
+        parser::UnionStmt* union_stmt = (parser::UnionStmt*)parser.result[0];
+        std::cout << union_stmt->to_string() << std::endl;
+        ASSERT_EQ(2, union_stmt->select_stmts.size());
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[0])) == typeid(parser::SelectStmt));
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[1])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt1 = (parser::SelectStmt*)union_stmt->select_stmts[0];
+        parser::SelectStmt* select_stmt2 = (parser::SelectStmt*)union_stmt->select_stmts[1];
+        ASSERT_TRUE(select_stmt1->order == nullptr);
+        ASSERT_TRUE(select_stmt1->limit == nullptr);
+        ASSERT_TRUE(select_stmt2->order == nullptr);
+        ASSERT_TRUE(select_stmt2->limit == nullptr);
+        ASSERT_TRUE(union_stmt->limit != nullptr);
+        parser::LimitClause* limit = union_stmt->limit;
+        std::cout << static_cast<LiteralExpr*>(limit->count)->_u.int64_val << "\n";
+        int64_t count = static_cast<LiteralExpr*>(limit->count)->_u.int64_val;
+        int64_t offset = static_cast<LiteralExpr*>(limit->offset)->_u.int64_val;
+        ASSERT_EQ(10, count);
+        ASSERT_EQ(0, offset);
+        ASSERT_TRUE(union_stmt->order != nullptr);
+        parser::OrderByClause* order_by = union_stmt->order;
+        ASSERT_EQ(1, order_by->items.size());
+        ASSERT_TRUE(order_by->node_type == parser::NT_ORDER_BY);
+        parser::ByItem* by_item = order_by->items[0];
+        ASSERT_TRUE(by_item->expr != nullptr);
+        ASSERT_TRUE(by_item->is_desc == false);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_union = "(SELECT a FROM t1 WHERE a=10 AND B=1 ORDER BY a LIMIT 10)"
+                               " UNION "
+                               "(SELECT a FROM t2 WHERE a=11 AND B=2 ORDER BY a LIMIT 10)"
+                               " UNION "
+                               "(SELECT a FROM t3) order by a;";
+        parser.parse(sql_union);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::UnionStmt));
+        parser::UnionStmt* union_stmt = (parser::UnionStmt*)parser.result[0];
+        std::cout << union_stmt->to_string() << std::endl;
+        ASSERT_EQ(3, union_stmt->select_stmts.size());
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[0])) == typeid(parser::SelectStmt));
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[1])) == typeid(parser::SelectStmt));
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[2])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt1 = (parser::SelectStmt*)union_stmt->select_stmts[0];
+        parser::SelectStmt* select_stmt2 = (parser::SelectStmt*)union_stmt->select_stmts[1];
+        parser::SelectStmt* select_stmt3 = (parser::SelectStmt*)union_stmt->select_stmts[2];
+        ASSERT_TRUE(select_stmt1->order != nullptr);
+        ASSERT_TRUE(select_stmt1->limit != nullptr);
+        ASSERT_TRUE(select_stmt2->order != nullptr);
+        ASSERT_TRUE(select_stmt2->limit != nullptr);
+        ASSERT_TRUE(select_stmt3->order == nullptr);
+        ASSERT_TRUE(select_stmt3->limit == nullptr);
+        ASSERT_TRUE(union_stmt->limit == nullptr);
+        ASSERT_TRUE(union_stmt->order != nullptr);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_union = "(select id from test1) union "
+                            "(select distinct id from test2) union all (select user_id from user);";
+        parser.parse(sql_union);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::UnionStmt));
+        parser::UnionStmt* union_stmt = (parser::UnionStmt*)parser.result[0];
+        std::cout << union_stmt->to_string() << std::endl;
+        ASSERT_EQ(3, union_stmt->select_stmts.size());
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[0])) == typeid(parser::SelectStmt));
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[1])) == typeid(parser::SelectStmt));
+        ASSERT_TRUE(typeid(*(union_stmt->select_stmts[2])) == typeid(parser::SelectStmt));
+        ASSERT_EQ(true, union_stmt->distinct);
     }
 }
 }  // namespace baikal

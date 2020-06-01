@@ -57,6 +57,20 @@ public:
         }
         return false;
     }
+    bool has_place_holder() {
+        if (is_place_holder()) {
+            return true;
+        }
+        for (auto c : _children) {
+            if (c->has_place_holder()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    virtual bool is_place_holder() {
+        return false;
+    }
     bool is_slot_ref() {
         return _node_type == pb::SLOT_REF;
     }
@@ -171,6 +185,16 @@ public:
         return false;
     }
 
+    void flatten_or_expr(std::vector<ExprNode*>* or_exprs) {
+        if (node_type() != pb::OR_PREDICATE) {
+            or_exprs->push_back(this);
+            return;
+        }
+        for (auto c : _children) {
+            c->flatten_or_expr(or_exprs);
+        }
+    }
+
     virtual void transfer_pb(pb::ExprNode* pb_node);
     static void create_pb_expr(pb::Expr* expr, ExprNode* root);
     static int create_tree(const pb::Expr& expr, ExprNode** root);
@@ -179,12 +203,20 @@ public:
     }
     void get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids);
     void get_all_slot_ids(std::unordered_set<int32_t>& slot_ids);
+    void get_all_field_ids(std::unordered_set<int32_t>& field_ids);
+    int32_t tuple_id() const {
+        return _tuple_id;
+    }
+    int32_t slot_id() const {
+        return _slot_id;
+    }
 protected:
     pb::ExprNodeType _node_type;
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
     bool     _is_constant = true;
-
+    int32_t _tuple_id = -1;
+    int32_t _slot_id = -1;
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用
     std::unordered_set<int64_t> _index_ids;
     

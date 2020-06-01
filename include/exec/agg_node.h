@@ -49,15 +49,15 @@ public:
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RowBatch& batch);
+    std::vector<ExprNode*>& group_exprs() {
+        return _group_exprs;
+    }
 private:
-    //需要推导_group_tuple_id _agg_tuple_id内部slot的类型
+    //需要推导_agg_tuple_id内部slot的类型
     std::vector<ExprNode*> _group_exprs;
-    //int32_t _group_tuple_id;
     int32_t _agg_tuple_id;
     pb::TupleDescriptor* _group_tuple_desc;
     std::vector<AggFnCall*> _agg_fn_calls;
-    //std::vector<int32_t> _intermediate_slot_ids;
-    //std::vector<int32_t> _final_slot_ids;
     bool _is_merger = false;
     MemRowDescriptor* _mem_row_desc;
     //用于分组和get_next的定位,用map可与mysql保持一致

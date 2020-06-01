@@ -17,6 +17,7 @@
 #include "exec_node.h"
 #include "sorter.h"
 #include "mem_row_compare.h"
+#include "property.h"
 
 namespace baikaldb {
 class SortNode : public ExecNode {
@@ -68,6 +69,14 @@ public:
         return _slot_order_exprs;
     }
 
+    Property sort_property() {
+        if (_monotonic) {
+            return Property{_slot_order_exprs, _is_asc, _limit};
+        } else {
+            return Property();
+        }
+    }
+
     std::vector<bool>& is_asc() {
         return _is_asc;
     }
@@ -84,6 +93,10 @@ public:
         if (output.back()["sort_index"] != "1") {
             output.back()["Extra"] += "Using filesort";
         }
+    }
+
+    std::vector<ExprNode*>& order_exprs() {
+        return _order_exprs;
     }
 
 private:

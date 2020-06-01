@@ -22,7 +22,7 @@ namespace baikaldb {
 
 int KillPlanner::plan() {
     create_packet_node(pb::OP_KILL);
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     parser::KillStmt* k = (parser::KillStmt*)_ctx->stmt;
     pb::PlanNode* kill_node = _ctx->add_plan_node();
     kill_node->set_node_type(pb::KILL_NODE);
@@ -45,7 +45,7 @@ int KillPlanner::plan() {
         if (sock->conn_id == k->conn_id) {
             DB_WARNING("conn_id equal %ld is_query:%d", k->conn_id, k->is_query);
             _ctx->kill_ctx = sock->query_ctx;
-            _ctx->kill_ctx->runtime_state.cancel();
+            _ctx->kill_ctx->get_runtime_state()->cancel();
             // kill xxx 复用client_free,会导致被kill的sock的DataBuffer被继续占用，导致下一次建立连接失败
             // 但是kill指令用的很少，后续再考虑优化
             // kill query xx没问题

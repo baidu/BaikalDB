@@ -25,6 +25,7 @@
 #include "row_batch.h"
 #include "mysql_err_code.h"
 #include "trace_state.h"
+#include "statistics.h"
 //#include "region_resource.h"
 
 using google::protobuf::RepeatedPtrField;
@@ -84,7 +85,7 @@ public:
     int init(QueryContext* ctx, DataBuffer* send_buf);
 
     // for prepared txn recovery in BaikalDB
-    int init(const pb::CachePlan& commit_plan);
+    //int init(const pb::CachePlan& commit_plan);
 
     void set_reverse_index_map(const std::map<int64_t, ReverseIndexBase*>& reverse_index_map) {
         _reverse_index_map = reverse_index_map;
@@ -193,6 +194,17 @@ public:
         return _num_scan_rows;
     }
 
+    void set_num_filter_rows(int num) {
+        _num_filter_rows = num;
+    }
+    void inc_num_filter_rows() {
+        _num_filter_rows++;
+    }
+
+    int num_filter_rows() {
+        return _num_filter_rows;
+    }
+
     void set_log_id(uint64_t logid) {
         _log_id = logid;
     }
@@ -278,6 +290,17 @@ public:
     void set_eos() {
         _eos = true;
     }
+    std::vector<TraceTimeCost>* get_trace_cost() {
+        return &_trace_cost_vec;
+    } 
+
+    void set_primary_region_id(int64_t region_id) {
+        _primary_region_id = region_id;
+    }
+
+    int64_t primary_region_id() const {
+        return _primary_region_id;
+    }
 
 public:
     uint64_t          txn_id = 0;
@@ -292,8 +315,11 @@ public:
     bool              is_fail = false;
     bool              need_txn_limit = false;
     std::string       raft_error_msg;
+    ExplainType       explain_type = EXPLAIN_NULL;
+    std::shared_ptr<CMsketch> cmsketch = nullptr;
 
 private:
+    bool _is_inited    = false;
     bool _is_cancelled = false;
     bool _eos          = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
@@ -310,6 +336,7 @@ private:
     int _num_affected_rows = 0; //存储baikaldb写影响的行数
     int _num_returned_rows = 0; //存储baikaldb读返回的行数
     int _num_scan_rows     = 0; //存储baikalStore扫描行数
+    int _num_filter_rows   = 0; //存储过滤行数
     int64_t _log_id = 0;
 
     bool              _single_sql_autocommit = true;     // used for baikaldb and store
@@ -319,6 +346,7 @@ private:
     TransactionPool*  _txn_pool = nullptr;    // used for store
     SmartTransaction  _txn = nullptr;         // used for store
     std::shared_ptr<RegionResource> _resource;// used for store
+    int64_t           _primary_region_id = -1;// used for store
 
     // 如果用了排序列做索引，就不需要排序了
     bool _sort_use_index = false;
@@ -326,6 +354,8 @@ private:
     size_t _row_batch_capacity = ROW_BATCH_CAPACITY;
     int _multiple = 1;
     RuntimeStatePool* _pool = nullptr;
+    //trace使用
+    std::vector<TraceTimeCost> _trace_cost_vec;
 };
 typedef std::shared_ptr<RuntimeState> SmartState;
 }

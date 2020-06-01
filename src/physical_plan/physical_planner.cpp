@@ -15,6 +15,9 @@
 #include "physical_planner.h"
 
 namespace baikaldb {
+DEFINE_int32(cmsketch_depth, 20, "cmsketch_depth");
+DEFINE_int32(cmsketch_width, 50, "cmsketch_width");
+DEFINE_int32(sample_rows, 1000000, "sample rows 100w");
 int PhysicalPlanner::analyze(QueryContext* ctx) {
     int ret = 0;
     auto return_empty_func = [ctx]() {
@@ -32,6 +35,14 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
         }
         node->mutable_children()->clear();
     };
+    if (ctx->stmt_type == parser::NT_UNION) {
+        for (auto select_ctx : ctx->union_select_plans) {
+            ret = analyze(select_ctx.get());
+            if (ret < 0) {
+                return ret;
+            }
+        }
+    }
     // 包括类型推导与常量表达式计算
     ret = ExprOptimize().analyze(ctx);
     if (ret < 0) {
@@ -95,9 +106,34 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     return 0;
 }
 
+int64_t PhysicalPlanner::get_table_rows(QueryContext* ctx) {
+    int64_t table_id = 0;
+    if (ctx->get_tuple_desc(0)->has_table_id()) {
+        table_id = ctx->get_tuple_desc(0)->table_id();
+    } else {
+        return -1;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    TableInfo info = factory->get_table_info(table_id);
+    pb::QueryRequest req;
+    req.set_op_type(pb::QUERY_TABLE_FLATTEN);
+    req.set_namespace_name(info.namespace_);
+    req.set_database(ctx->cur_db);
+    req.set_table_name(info.short_name);
+    pb::QueryResponse res;
+    MetaServerInteract::get_instance()->send_request("query", req, res);
+    int64_t row_count = -1;
+    if (res.flatten_tables_size() == 1) {
+        row_count = res.flatten_tables(0).row_count();
+    }
+    DB_WARNING("table_id:%ld, namespace:%s, db:%s, table:%s, row_count:%ld", 
+        table_id, info.namespace_.c_str(), ctx->cur_db.c_str(), info.short_name.c_str(), row_count);
+    return row_count;
+}
+
 int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     int ret = 0;
-    RuntimeState& state = ctx->runtime_state;
+    RuntimeState& state = *ctx->get_runtime_state();
     //DB_WARNING("state.client_conn(): %ld ,seq_id: %d", state.client_conn(), state.client_conn()->seq_id);
     ret = state.init(ctx, send_buf);
     if (ret < 0) {
@@ -105,7 +141,19 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
          ctx->stat_info.error_code = state.error_code;
         return ret;
     }
-    if (ctx->is_trace) {
+    state.explain_type = ctx->explain_type;
+    if (state.explain_type == ANALYZE_STATISTICS) {
+        //如果为analyze模式需要初始化cmsketch
+        state.cmsketch = std::make_shared<CMsketch>(FLAGS_cmsketch_depth, FLAGS_cmsketch_width);
+        state.cmsketch->set_sample_rows(FLAGS_sample_rows);
+        //为了获取准确的行数，给meta发请求
+        int64_t table_rows = get_table_rows(ctx);
+        if (table_rows < 0) {
+            return -1;
+        }
+        state.cmsketch->set_table_rows(table_rows);
+    }
+    if (explain_is_trace(ctx->explain_type)) {
         ctx->trace_node.set_node_type(ctx->root->node_type());
         ctx->root->set_trace(&ctx->trace_node);
         ctx->root->create_trace();
@@ -113,7 +161,7 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     
     ret = ctx->root->open(&state);
     if (ctx->root->get_trace() != nullptr) {
-        DB_WARNING("execute:%s", ctx->root->get_trace()->DebugString().c_str());
+        DB_WARNING("execute:%s", ctx->root->get_trace()->ShortDebugString().c_str());
     }
     ctx->root->close(&state);
     if (ret < 0) {
@@ -125,6 +173,7 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     ctx->stat_info.num_returned_rows = state.num_returned_rows();
     ctx->stat_info.num_affected_rows = state.num_affected_rows();
     ctx->stat_info.num_scan_rows = state.num_scan_rows();
+    ctx->stat_info.num_filter_rows = state.num_filter_rows();
     ctx->stat_info.error_code = state.error_code;
     
     return 0;
@@ -132,7 +181,7 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
 
 int PhysicalPlanner::full_export_start(QueryContext* ctx, DataBuffer* send_buf) {
     int ret = 0;
-    RuntimeState& state = ctx->runtime_state;
+    RuntimeState& state = *ctx->get_runtime_state();
     
     ret = state.init(ctx, send_buf);
     if (ret < 0) {
@@ -155,7 +204,7 @@ int PhysicalPlanner::full_export_start(QueryContext* ctx, DataBuffer* send_buf) 
 
 int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, bool shutdown) {
     int ret = 0;
-    RuntimeState& state = ctx->runtime_state;
+    RuntimeState& state = *ctx->get_runtime_state();
     PacketNode* root = (PacketNode*)(ctx->root);
     ret = root->get_next(&state);
     if (ret < 0) {
@@ -170,15 +219,16 @@ int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, b
         ctx->stat_info.num_returned_rows = state.num_returned_rows();
         ctx->stat_info.num_affected_rows = state.num_affected_rows();
         ctx->stat_info.num_scan_rows = state.num_scan_rows();
+        ctx->stat_info.num_filter_rows = state.num_filter_rows();
         ctx->stat_info.error_code = state.error_code;
         ctx->stat_info.error_msg.str(state.error_msg.str());
     }
     return 0;            
 }
-
+/*
 int PhysicalPlanner::execute_recovered_commit(NetworkSocket* client, const pb::CachePlan& commit_plan) {
     int ret = 0;
-    RuntimeState& state = client->query_ctx->runtime_state;
+    RuntimeState& state = *client->query_ctx->get_runtime_state();
     state.set_client_conn(client);
     ret = state.init(commit_plan);
     if (ret < 0) {
@@ -201,7 +251,7 @@ int PhysicalPlanner::execute_recovered_commit(NetworkSocket* client, const pb::C
     }
     root->close(&state);
     return 0;
-}
+}*/
 // insert user variables to record for prepared stmt
 int PhysicalPlanner::insert_values_to_record(QueryContext* ctx) {
     if (ctx->stmt_type != parser::NT_INSERT || ctx->exec_prepared == false) {

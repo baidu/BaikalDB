@@ -25,7 +25,8 @@ enum ErrorType {
     E_OK = 0,
     E_WARNING,
     E_FATAL,
-    E_BIG_SQL
+    E_BIG_SQL,
+    E_RETURN    // primary region已经rollback是使用
 };
 
 struct TraceDesc {
@@ -40,6 +41,18 @@ public:
     }
     virtual ~FetcherStore() {
         bthread_mutex_destroy(&region_lock);
+    }
+    
+    void clear() {
+        region_batch.clear();
+        index_records.clear();
+        start_key_sort.clear();
+        error = E_OK;
+        skip_region_set.clear();
+        affected_rows = 0;
+        scan_rows = 0;
+        filter_rows = 0;
+        row_cnt = 0;
     }
 
     // send (cached) cmds with seq_id >= start_seq_id
@@ -88,11 +101,13 @@ public:
 
     std::map<std::string, int64_t> start_key_sort;
     bthread_mutex_t region_lock;
+    std::set<int64_t> skip_region_set;
     ErrorType error = E_OK;
     // 因为split会导致多region出来,加锁保护公共资源
     int64_t row_cnt = 0;
     std::atomic<int> affected_rows;
     std::atomic<int> scan_rows;
+    std::atomic<int> filter_rows;
 };
 }
 

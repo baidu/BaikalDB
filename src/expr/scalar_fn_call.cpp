@@ -114,12 +114,20 @@ int ScalarFnCall::open() {
             _fn.fn_op() != parser::FT_GE &&
             _fn.fn_op() != parser::FT_GT &&
             _fn.fn_op() != parser::FT_LE &&
-            _fn.fn_op() != parser::FT_LT) {
+            _fn.fn_op() != parser::FT_LT && 
+            _fn.fn_op() != parser::FT_MATCH_AGAINST) {
             DB_FATAL("Operand should contain 1 column(s)");
             return -1;
         }
-        _is_row_expr = true;
         size_t col_size = children(0)->children_size();
+        if (_fn.fn_op() == parser::FT_MATCH_AGAINST) {
+            if (col_size > 1) {
+                DB_FATAL("MATCH_AGAINST column list support only 1, size:%lu", col_size);
+                return -1;
+            }
+            return 0;
+        }
+        _is_row_expr = true;
         for (size_t i = 1; i < children_size(); i++) {
             if (!children(i)->is_row_expr() ||
                 children(i)->children_size() != col_size) {
@@ -176,7 +184,7 @@ ExprValue ScalarFnCall::get_value(MemRow* row) {
     for (int i = 0; i < _fn.arg_types_size(); i++) {
         args[i].cast_to(_fn.arg_types(i));
     }
-    return _fn_call(args);
+    return _fn_call(args).cast_to(_col_type);
 }
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

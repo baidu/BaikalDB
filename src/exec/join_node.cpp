@@ -309,8 +309,7 @@ int JoinNode::open(RuntimeState* state) {
         
         scan_node->clear_possible_indexes();
         //索引选择
-        IndexSelector().index_selector(get_slot_id,
-                                        NULL,
+        IndexSelector().index_selector(state->tuple_descs(),
                                         scan_node, 
                                         filter_node,
                                         NULL,
@@ -430,6 +429,7 @@ int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs,
         //增加一个in
         pb::ExprNode* in_node = expr.add_nodes();
         in_node->set_node_type(pb::IN_PREDICATE);
+        in_node->set_col_type(pb::BOOL);
         pb::Function* func = in_node->mutable_fn();
         func->set_name("in");
         func->set_fn_op(parser::FT_IN);
@@ -441,6 +441,7 @@ int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs,
         slot_node->set_num_children(0);
         slot_node->mutable_derive_node()->set_tuple_id(static_cast<SlotRef*>(slot_refs[0])->tuple_id());
         slot_node->mutable_derive_node()->set_slot_id(static_cast<SlotRef*>(slot_refs[0])->slot_id());
+        slot_node->mutable_derive_node()->set_field_id(static_cast<SlotRef*>(slot_refs[0])->field_id());
         auto ret = ExprNode::create_tree(expr, &conjunct);
         if (ret < 0) {
             //如何释放资源
@@ -460,6 +461,7 @@ int JoinNode::_construct_in_condition(std::vector<ExprNode*>& slot_refs,
         //增加一个in
         pb::ExprNode* in_node = expr.add_nodes();
         in_node->set_node_type(pb::IN_PREDICATE);
+        in_node->set_col_type(pb::BOOL);
         pb::Function* func = in_node->mutable_fn();
         func->set_name("in");
         func->set_fn_op(parser::FT_IN);
@@ -725,15 +727,24 @@ int JoinNode:: _construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_r
 
 void JoinNode::close(RuntimeState* state) {
     ExecNode::close(state);
+    _have_removed.clear();
+    _outer_join_values.clear();
     for (auto expr : _conditions) {
         expr->close();
     }
     for (auto& mem_row : _outer_tuple_data) {
         delete mem_row;
     }
+    _outer_tuple_data.clear();
     for (auto& mem_row : _inner_tuple_data) {
         delete mem_row;
     }
+    _inner_tuple_data.clear();
+    _hash_map.clear();
+    _hash_mapped_index = 0;
+    _outer_table_is_null = false;
+    _inner_row_batch.clear();
+    _child_eos = false;
 }
 
 void JoinNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {

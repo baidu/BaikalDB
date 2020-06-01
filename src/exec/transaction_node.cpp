@@ -69,7 +69,7 @@ int TransactionNode::open(RuntimeState* state) {
         return ret;
     } else if (_txn_cmd == pb::TXN_BEGIN_STORE) {
         SmartTransaction txn;
-        int ret = txn_pool->begin_txn(state->txn_id, txn);
+        int ret = txn_pool->begin_txn(state->txn_id, txn, state->primary_region_id());
         if (ret != 0) {
             DB_WARNING_STATE(state, "create txn failed: %lu:%d", state->txn_id, state->seq_id);
             return -1;

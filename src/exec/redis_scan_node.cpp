@@ -148,6 +148,7 @@ int RedisScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
 
 void RedisScanNode::close(RuntimeState* state) {
     ScanNode::close(state);
+    _idx = 0;
 }
 
 }

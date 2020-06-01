@@ -39,6 +39,7 @@ private:
 
     int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column);
     int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint);
+    bool is_fulltext_type_constraint(pb::StorageType pb_storage_type, bool& has_arrow_type, bool& has_pb_type) const;
     pb::PrimitiveType to_baikal_type(parser::FieldType* field_type);
 };
 } //namespace baikal

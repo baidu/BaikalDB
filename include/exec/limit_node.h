@@ -25,6 +25,10 @@ public:
     }
     virtual int init(const pb::PlanNode& node);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
+    virtual void close(RuntimeState* state) {
+        ExecNode::close(state);
+        _num_rows_skipped = 0;
+    }
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);

@@ -360,6 +360,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->delete_ddlwork(request, done);
             break;
         }
+        case pb::OP_UPDATE_STATISTICS: {
+            TableManager::get_instance()->update_statistics(request, iter.index(), done);
+            break;
+        }
         default: {
             DB_FATAL("unsupport request type, type:%d", request.op_type());
             IF_DONE_SET_RESPONSE(done, pb::UNSUPPORT_REQ_TYPE, "unsupport request type");
@@ -573,6 +577,7 @@ void MetaStateMachine::on_leader_stop() {
         _healthy_check_start = false;
         DB_WARNING("healthy check bthread join");
     }
+    RegionManager::get_instance()->clear_region_peer_state_map();
     DB_WARNING("leader stop");
     CommonStateMachine::on_leader_stop();
 }

@@ -30,6 +30,17 @@ namespace baikaldb {
         }\
     }while (0);
 
+#define ERROR_SET_RESPONSE_WARN(response, errcode, err_message, op_type, log_id) \
+    do {\
+        DB_WARNING("request op_type:%d, %s ,log_id:%lu",\
+                op_type, err_message, log_id);\
+        if (response != NULL) {\
+            response->set_errcode(errcode);\
+            response->set_errmsg(err_message);\
+            response->set_op_type(op_type);\
+        }\
+    }while (0);
+
 #define IF_DONE_SET_RESPONSE(done, errcode, err_message) \
     do {\
         if (done && ((MetaServerClosure*)done)->response) {\

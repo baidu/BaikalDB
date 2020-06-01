@@ -149,8 +149,8 @@ int main(int argc, char** argv) {
         response.set_region_id(10);
         response.set_errcode(baikaldb::pb::SUCCESS);
         response.set_leader("10.0.0.1:8010");
-        base::IOBuf data;
-        base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
+        butil::IOBuf data;
+        butil::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
             delete entry;
@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
         std::cout << "log_entry index:" << read_entry->id.index << std::endl;
         std::cout << "log_entry term:" << read_entry->id.term << std::endl;
         response.Clear();
-        base::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
+        butil::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
         if (!response.ParseFromZeroCopyStream(&wrapper_read)) {
             std::cout << "rocksdb read entry fail" << std::endl;
         }
@@ -235,8 +235,8 @@ int main(int argc, char** argv) {
         response.set_errcode(baikaldb::pb::SUCCESS);
         response.set_region_id(10);
         response.set_leader("20.0.0.1:8010");
-        base::IOBuf data;
-        base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
+        butil::IOBuf data;
+        butil::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
             delete entry;
@@ -255,7 +255,7 @@ int main(int argc, char** argv) {
         std::cout << "log_entry index:" << read_entry->id.index << std::endl;
         std::cout << "log_entry term:" << read_entry->id.term << std::endl;
         response.Clear();
-        base::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
+        butil::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
         if (!response.ParseFromZeroCopyStream(&wrapper_read)) {
             std::cout << "rocksdb read entry fail" << std::endl;
         }
@@ -274,8 +274,8 @@ int main(int argc, char** argv) {
         response.set_errcode(baikaldb::pb::SUCCESS);
         response.set_region_id(10);
         response.set_leader("30.0.0.1:8010");
-        base::IOBuf data;
-        base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
+        butil::IOBuf data;
+        butil::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
             delete entry;
@@ -294,7 +294,7 @@ int main(int argc, char** argv) {
         std::cout << "log_entry index:" << read_entry->id.index << std::endl;
         std::cout << "log_entry term:" << read_entry->id.term << std::endl;
         response.Clear();
-        base::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
+        butil::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
         if (!response.ParseFromZeroCopyStream(&wrapper_read)) {
             std::cout << "rocksdb read entry fail" << std::endl;
         }
@@ -313,8 +313,8 @@ int main(int argc, char** argv) {
         response.set_errcode(baikaldb::pb::SUCCESS);
         response.set_region_id(10);
         response.set_leader("30.0.0.1:8010");
-        base::IOBuf data;
-        base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
+        butil::IOBuf data;
+        butil::IOBufAsZeroCopyOutputStream wrapper_write(&data);
         if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
             std::cout << "SerializeToZeroCopyStream fail" << std::endl; 
             delete entry;
@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
         std::cout << "log_entry index:" << read_entry->id.index << std::endl;
         std::cout << "log_entry term:" << read_entry->id.term << std::endl;
         response.Clear();
-        base::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
+        butil::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
         if (!response.ParseFromZeroCopyStream(&wrapper_read)) {
             std::cout << "rocksdb read entry fail" << std::endl;
         }
@@ -352,8 +352,8 @@ int main(int argc, char** argv) {
             response.set_errcode(baikaldb::pb::SUCCESS);
             response.set_region_id(10);
             response.set_leader("30.0.0.1:8010");
-            base::IOBuf data;
-            base::IOBufAsZeroCopyOutputStream wrapper_write(&data);
+            butil::IOBuf data;
+            butil::IOBufAsZeroCopyOutputStream wrapper_write(&data);
             if (!response.SerializeToZeroCopyStream(&wrapper_write)) {
                 std::cout << "SerializeToZeroCopyStream fail" << std::endl;
                 delete entry;
@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
             std::cout << "log_entry type: " << read_entry->type << std::endl;
             std::cout << "log_entry index:" << read_entry->id.index << std::endl;
             std::cout << "log_entry term:" << read_entry->id.term << std::endl;
-            base::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
+            butil::IOBufAsZeroCopyInputStream wrapper_read(read_entry->data);
             if (!response.ParseFromZeroCopyStream(&wrapper_read)) {
                 std::cout << "rocksdb read entry fail" << std::endl;
             }

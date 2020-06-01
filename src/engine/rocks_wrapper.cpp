@@ -27,8 +27,12 @@ DEFINE_int32(rocks_transaction_lock_timeout_ms, 30000, "rocksdb transaction_lock
 DEFINE_int32(rocks_default_lock_timeout_ms, 30000, "rocksdb default_lock_timeout(ms)");
 
 DEFINE_int32(rocks_block_size, 64 * 1024, "rocksdb block_cache size, default: 64KB");
-DEFINE_int32(rocks_max_open_files, 1024, "rocksdb max_open_files, default: 1024");
+DEFINE_int64(rocks_block_cache_size_mb, 8 * 1024, "rocksdb block_cache_size_mb, default: 8G");
+DEFINE_int32(rocks_max_open_files, -1, "rocksdb max_open_files, default: -1");
+DEFINE_int32(rocks_max_subcompactions, 4, "rocks_max_subcompactions");
 DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
+DEFINE_bool(rocks_kSkipAnyCorruptedRecords, false, 
+        "We ignore any corruption in the WAL and try to salvage as much data as possible");
 DEFINE_bool(rocks_data_dynamic_level_bytes, true, 
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
 DEFINE_int64(flush_memtable_interval_us, 10 * 60 * 1000 * 1000LL, 
@@ -49,9 +53,21 @@ int32_t RocksWrapper::init(const std::string& path) {
         return 0;
     }
     rocksdb::BlockBasedTableOptions table_options;
-    table_options.index_type = rocksdb::BlockBasedTableOptions::kHashSearch;
+    // use Partitioned Index Filters
+    // https://github.com/facebook/rocksdb/wiki/Partitioned-Index-Filters
+    
+    table_options.index_type = rocksdb::BlockBasedTableOptions::kTwoLevelIndexSearch;
+    table_options.partition_filters = true;
+    table_options.metadata_block_size = 4096;
+    table_options.cache_index_and_filter_blocks = true;
+    table_options.pin_top_level_index_and_filter = true;
+    table_options.cache_index_and_filter_blocks_with_high_priority = true;
+    table_options.pin_l0_filter_and_index_blocks_in_cache= true;
+    table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
+    table_options.format_version = 4;
+    
+    table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024, 8);
     table_options.block_size = FLAGS_rocks_block_size;
-    table_options.block_cache = rocksdb::NewLRUCache(64 * 1024 * 1024, 8);
     table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, true));
     _cache = table_options.block_cache.get();
     rocksdb::Options db_options;
@@ -60,31 +76,29 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
-//    db_options.max_background_compactions = 20;
-    //db_options.max_subcompactions = 5;
+    db_options.max_background_compactions = 20;
+    if (FLAGS_rocks_kSkipAnyCorruptedRecords) {
+        db_options.wal_recovery_mode = rocksdb::WALRecoveryMode::kSkipAnyCorruptedRecords;
+    }
     db_options.statistics = rocksdb::CreateDBStatistics();
-    //db_options.max_background_flushes = 1;
-    //db_options.memtable_prefix_bloom_bits = 1024 * 1024 * 8;
+    db_options.max_subcompactions = FLAGS_rocks_max_subcompactions;
+    db_options.max_background_flushes = 2;
+    db_options.env->SetBackgroundThreads(2, rocksdb::Env::HIGH);
     rocksdb::TransactionDBOptions txn_db_options;
     DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
     txn_db_options.default_lock_timeout = FLAGS_rocks_default_lock_timeout_ms;
 
-    //txn_db_options.IncreaseParallelism();
-    //txn_db_options.create_if_missing = true;
     //todo 
     _log_cf_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(sizeof(int64_t) + 1));
     _log_cf_option.OptimizeLevelStyleCompaction();
     _log_cf_option.compaction_pri = rocksdb::kOldestLargestSeqFirst;
-    //_log_cf_option.compaction_filter = RaftLogCompactionFilter::get_instance();
     _log_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
-    //log_cf_option.compression = rocksdb::kLZ4Compression;
     _log_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _log_cf_option.level0_file_num_compaction_trigger = 5;
     _log_cf_option.level0_slowdown_writes_trigger = 10;
     _log_cf_option.level0_stop_writes_trigger = 20;
-//    _log_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _log_cf_option.target_file_size_base = 128 * 1024 * 1024;
     _log_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;
     _log_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
@@ -101,12 +115,10 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.compaction_pri = rocksdb::kByCompensatedSize;
     _data_cf_option.compaction_filter = SplitCompactionFilter::get_instance();
     _data_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
-    //data_cf_option.compression = rocksdb::kLZ4Compression;
     _data_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _data_cf_option.level0_file_num_compaction_trigger = 5;
     _data_cf_option.level0_slowdown_writes_trigger = 10;
     _data_cf_option.level0_stop_writes_trigger = FLAGS_stop_write_sst_cnt;
-//    _data_cf_option.write_buffer_size = 128 * 1024 * 1024;
     _data_cf_option.target_file_size_base = 128 * 1024 * 1024;
     _data_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;
     _data_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
@@ -121,6 +133,7 @@ int32_t RocksWrapper::init(const std::string& path) {
             rocksdb::NewFixedPrefixTransform(1));
     _meta_info_option.OptimizeLevelStyleCompaction();
     _meta_info_option.compaction_pri = rocksdb::kOldestSmallestSeqFirst;
+    _meta_info_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
     _db_path = path;
     // List Column Family
     std::vector<std::string> column_family_names;

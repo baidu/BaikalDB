@@ -57,6 +57,26 @@ struct SignedType {
     bool        is_unsigned = false;
 };
 
+// Package mysql result field.
+// This struct is same as mysql protocal.
+// https://dev.mysql.com/doc/internals/en/com-query-response.html#column-definition
+struct ResultField {
+    ResultField() {}
+    ~ResultField() {}
+
+    std::string     catalog = "def";
+    std::string     db;
+    std::string     table;
+    std::string     org_table;
+    std::string     name;       // Name of column
+    std::string     org_name;
+    uint16_t        charsetnr = 0;  // Character set.
+    uint32_t        length = 0;     // Width of column (create length).
+    uint8_t         type = 0;       // Type of field. See mysql_com.h for types.
+    uint16_t        flags = 1;      // Div flags.
+    uint8_t         decimals = 0;   // Number of decimals in field.
+}; 
+
 struct DateTime {
     uint64_t year;
     uint64_t month;
@@ -328,12 +348,20 @@ inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::Primitive
     bool is_all_equal = true;
     bool is_all_num = true;
     bool is_all_time = true;
+    bool is_all_null = true;
     bool has_double = false;
     bool has_uint64 = false;
     bool has_signed = false;
     auto first_type = *types.begin();
 
     for (auto type : types) {
+        if (type == pb::NULL_TYPE) {
+            continue;
+        }
+        if (is_all_null) {
+            first_type = type;
+            is_all_null = false;
+        }
         if (is_all_equal && type != first_type) {
             is_all_equal = false;
         }
@@ -353,8 +381,9 @@ inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::Primitive
             has_signed = true;
         }
     }
-
-    if (is_all_equal) {
+    if (is_all_null) {
+        merged_type = pb::NULL_TYPE;
+    } else if (is_all_equal) {
        merged_type = first_type; 
     } else if (is_all_num) {
         if (has_double) {

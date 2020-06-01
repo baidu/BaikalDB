@@ -26,176 +26,6 @@
 #include "slot_ref.h"
 
 namespace baikaldb {
-//--common interface
-int CommonSchema::segment(
-                    const std::string& word, 
-                    const std::string& pk,
-                    SmartRecord record,
-                    pb::SegmentType segment_type,
-                    const std::map<std::string, int32_t>& name_field_id_map,
-                    pb::ReverseNodeType flag,
-                    std::map<std::string, ReverseNode>& res) {
-    // hit seg_cache, replace pk and flag
-    if (res.size() > 0) {
-        for (auto& pair : res) {
-            pair.second.set_key(pk);
-            pair.second.set_flag(flag);
-        }
-        return 0;
-    }
-    std::map<std::string, float> term_map;
-    int ret = 0;
-    switch (segment_type) {
-        case pb::S_NO_SEGMENT:
-            term_map[word] = 0;
-            break;
-        case pb::S_UNIGRAMS:
-            ret = Tokenizer::get_instance()->simple_seg_gbk(word, 1, term_map);
-            break;
-        case pb::S_BIGRAMS:
-            ret = Tokenizer::get_instance()->simple_seg_gbk(word, 2, term_map);
-            break;
-        case pb::S_ES_STANDARD:
-            ret = Tokenizer::get_instance()->es_standard_gbk(word, term_map);
-            break;
-#ifdef BAIDU_INTERNAL
-        case pb::S_WORDRANK: 
-            ret = Tokenizer::get_instance()->wordrank(word, term_map);
-            break;
-        case pb::S_WORDRANK_Q2B_ICASE: 
-            ret = Tokenizer::get_instance()->wordrank_q2b_icase(word, term_map);
-            break;
-        case pb::S_WORDSEG_BASIC: 
-            ret = Tokenizer::get_instance()->wordseg_basic(word, term_map);
-            break;
-#endif
-        default:
-            DB_WARNING("un-support segment:%d", segment_type);
-            ret = -1;
-            break;
-    }
-    if (ret < 0) {
-        DB_WARNING("[word:%s]segment error %d", word.c_str(), ret);
-        return -1;
-    }
-    for (auto& pair : term_map) {
-        ReverseNode node;
-        node.set_key(pk);
-        node.set_flag(flag);
-        node.set_weight(pair.second);
-        res[pair.first] = node;
-    }
-    return 0;
-}
-
-int CommonSchema::create_executor(const std::string& search_data, pb::SegmentType segment_type) {
-    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
-    //segment
-    TimeCost timer;
-    std::vector<std::string> or_search;
-    // 先用规则支持 or 操作
-    // TODO 用bison来支持mysql bool查询
-    Tokenizer::get_instance()->split_str_gbk(search_data, or_search, '|');
-    LogicalQuery<CommonSchema> logical_query(this);
-    ExecutorNode<CommonSchema>* parent = nullptr;
-    ExecutorNode<CommonSchema>* root = &logical_query._root;
-    if (or_search.size() == 0) {
-        _exe = NULL;
-        return 0;
-    } else if (or_search.size() == 1) {
-        root->_type = AND;
-        root->_merge_func = CommonSchema::merge_and;
-    } else {
-        root->_type = OR;
-        root->_merge_func = CommonSchema::merge_or;
-        parent = root;
-    }
-    for (auto& or_item : or_search) {
-        std::map<std::string, float> term_map;
-        std::vector<std::string> and_terms;
-        int ret = 0;
-        switch (segment_type) {
-            case pb::S_NO_SEGMENT:
-                term_map[or_item] = 0;
-                break;
-            case pb::S_UNIGRAMS:
-                ret = Tokenizer::get_instance()->simple_seg_gbk(or_item, 1, term_map);
-                break;
-            case pb::S_BIGRAMS:
-                ret = Tokenizer::get_instance()->simple_seg_gbk(or_item, 2, term_map);
-                break;
-            case pb::S_ES_STANDARD:
-                ret = Tokenizer::get_instance()->es_standard_gbk(or_item, term_map);
-                break;
-#ifdef BAIDU_INTERNAL
-            case pb::S_WORDRANK: 
-                ret = Tokenizer::get_instance()->wordrank(or_item, term_map);
-                break;
-            case pb::S_WORDRANK_Q2B_ICASE: 
-                ret = Tokenizer::get_instance()->wordrank_q2b_icase(or_item, term_map);
-                break;
-            case pb::S_WORDSEG_BASIC: 
-                ret = Tokenizer::get_instance()->wordseg_basic(or_item, term_map);
-                break;
-#endif
-            default:
-                DB_WARNING("un-support segment:%d", segment_type);
-                ret = -1;
-                break;
-        }
-        if (ret < 0) {
-            DB_WARNING("[word:%s]segment error %d", or_item.c_str(), ret);
-            return -1;
-        }
-        if (term_map.size() == 0) {
-            continue;
-        } 
-        ExecutorNode<CommonSchema>* and_node = nullptr;
-        if (parent != nullptr) {
-            and_node = new ExecutorNode<CommonSchema>();
-        } else {
-            and_node = root;
-        }
-        if (term_map.size() == 1) {
-            and_node->_type = TERM;
-            and_node->_term = term_map.begin()->first;
-        } else {
-            and_node->_type = AND;
-            and_node->_merge_func = CommonSchema::merge_and;
-            for (auto& pair : term_map) {
-                auto sub_node = new ExecutorNode<CommonSchema>();
-                sub_node->_type = TERM;
-                sub_node->_term = pair.first;
-                and_node->_sub_nodes.push_back(sub_node);
-            }
-        }
-        if (parent != nullptr) {
-            parent->_sub_nodes.push_back(and_node);
-        }
-    }
-    _statistic.segment_time += timer.get_time();
-    timer.reset();
-    _exe = logical_query.create_executor();
-    _statistic.create_exe_time += timer.get_time();
-    return 0;
-}
-
-int CommonSchema::next(SmartRecord record) {
-    if (!_cur_node) {
-        return -1;
-    }
-    const pb::CommonReverseNode& reverse_node = *_cur_node;
-    int ret = record->decode_key(_index_info, reverse_node.key());
-    if (ret < 0) {
-        return -1;
-    }
-    if (_weight_field_id > 0) {
-        record->set_float(record->get_field_by_tag(_weight_field_id), 
-            reverse_node.weight());
-    }
-    return 0;
-}
-
 //--xbs interface
 const char delim_term = ';';
 const char delim_score = ':';
@@ -443,7 +273,7 @@ static int init_filter_set(std::vector<ExprNode*> exprs, int32_t field_id, std::
     return 0;
 }
 
-int XbsSchema::create_executor(const std::string& search_data, pb::SegmentType segment_type) {
+int XbsSchema::create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type) {
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
     _pic_scores_field_id = get_field_id_by_name(_table_info.fields, "__pic_scores");
     _userid_field_id = get_field_id_by_name(_table_info.fields, "userid");
@@ -562,14 +392,16 @@ int XbsSchema::next(SmartRecord record) {
         return -1;
     }
     if (_weight_field_id > 0) {
-        record->set_float(record->get_field_by_tag(_weight_field_id), 
-            reverse_node.weight());
+        MessageHelper::set_float(record->get_field_by_tag(_weight_field_id),
+                record->get_raw_message(), reverse_node.weight());
     }
     if (_userid_field_id > 0) {
-        record->set_uint32(record->get_field_by_tag(_userid_field_id), reverse_node.userid());
+        MessageHelper::set_uint32(record->get_field_by_tag(_userid_field_id),
+                record->get_raw_message(), reverse_node.userid());
     }
     if (_source_field_id > 0) {
-        record->set_uint32(record->get_field_by_tag(_source_field_id), reverse_node.source());
+        MessageHelper::set_uint32(record->get_field_by_tag(_source_field_id),
+                record->get_raw_message(), reverse_node.source());
     }
     //int64_t decode_key_cost = cost.get_time();
     //cost.reset();

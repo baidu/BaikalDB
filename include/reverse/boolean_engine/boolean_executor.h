@@ -54,16 +54,17 @@ enum bool_executor_type {
 };
 
 // 基类，接口
+template<typename PostingNodeType>
 class BooleanExecutorBase {
 public:
-    virtual const google::protobuf::Message* next() = 0;
+    virtual const PostingNodeType* next() = 0;
     virtual ~BooleanExecutorBase() {}
 };
 
 // 布尔引擎的节点
 // 布尔引擎是一个树，遍历根节点获取最终结果
 template <typename Schema>
-class BooleanExecutor : public BooleanExecutorBase{
+class BooleanExecutor : public BooleanExecutorBase<typename Schema::PostingNodeT>{
 public:
     typedef typename Schema::PostingNodeT PostingNodeT;
     typedef typename Schema::PrimaryIdT PrimaryIdT;
@@ -78,6 +79,7 @@ public:
     bool_executor_type get_type() {
         return _type;
     }
+
 protected:
     bool _init_flag = true;
     bool_executor_type _type;   
@@ -146,6 +148,7 @@ public:
 
     void add(BooleanExecutor<Schema>* executor);
     void set_merge_func(MergeFuncT merge_func);
+
 protected:
     //子节点
     std::vector<BooleanExecutor<Schema>*> _sub_clauses;
@@ -196,6 +199,8 @@ public:
     virtual const PostingNodeT* advance(const PrimaryIdT& target_id);
 
 private:
+
+    BooleanExecutor<Schema>* _miter = nullptr;
     const PostingNodeT* find_next();
 };
 

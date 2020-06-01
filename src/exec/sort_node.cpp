@@ -117,7 +117,7 @@ int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 }
 
 int SortNode::open(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -176,7 +176,7 @@ int SortNode::open(RuntimeState* state) {
 }
 
 int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
-    START_LOCAL_TRACE(get_trace(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
         local_node.set_affect_rows(_num_rows_returned);
     }));
     
@@ -218,6 +218,7 @@ void SortNode::close(RuntimeState* state) {
     for (auto expr : _slot_order_exprs) {
         expr->close();
     }
+    _sorter = nullptr;
 }
 
 int SortNode::fill_tuple(RowBatch* batch) {

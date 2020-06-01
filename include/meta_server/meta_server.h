@@ -43,6 +43,7 @@ public:
     static const std::string TABLE_SCHEMA_IDENTIFY;
     static const std::string REGION_SCHEMA_IDENTIFY;
     static const std::string DDLWORK_IDENTIFY;
+    static const std::string STATISTICS_IDENTIFY;
     
     static const std::string MAX_IDENTIFY;
 

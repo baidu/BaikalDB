@@ -51,6 +51,10 @@ void ExprNode::const_pre_calc() {
         if (c->is_literal()) {
             continue;
         }
+        // place holder被替换会导致下一次exec参数对不上
+        if (c->has_place_holder()) {
+            continue;
+        }
         //替换,常量表达式优先类型推导
         ret = c->type_inferer();
         if (ret < 0) {
@@ -126,6 +130,15 @@ void ExprNode::get_all_slot_ids(std::unordered_set<int32_t>& slot_ids) {
     }
     for (auto& child : _children) {
         child->get_all_slot_ids(slot_ids);
+    }
+}
+
+void ExprNode::get_all_field_ids(std::unordered_set<int32_t>& field_ids) {
+    if (_node_type == pb::SLOT_REF) {
+        field_ids.insert(static_cast<SlotRef*>(this)->field_id());
+    }
+    for (auto& child : _children) {
+        child->get_all_field_ids(field_ids);
     }
 }
 

@@ -53,6 +53,8 @@
 #include "meta_writer.h"
 #include "rpc_sender.h"
 #include "ddl_common.h"
+#include "exec_node.h"
+#include "backup.h"
 
 using google::protobuf::Message;
 using google::protobuf::RepeatedPtrField;
@@ -62,16 +64,6 @@ DECLARE_int64(disable_write_wait_timeout_us);
 DECLARE_int32(prepare_slow_down_wait);
 
 static const int32_t RECV_QUEUE_SIZE = 128;
-struct FileInfo {
-    std::string path {""};
-    int64_t size {0};
-};
-
-struct BackupInfo {
-    FileInfo meta_info;
-    FileInfo data_info;
-};
-
 struct StatisticsInfo {
     int64_t time_cost_sum;
     int64_t end_time_us;
@@ -99,8 +91,9 @@ private:
 };
 class TransactionPool;
 typedef std::shared_ptr<Region> SmartRegion;
-class Region : public braft::StateMachine {
+class Region : public braft::StateMachine, public std::enable_shared_from_this<Region> {
 friend class RegionControl;
+friend class Backup;
 public:
     static const uint8_t PRIMARY_INDEX_FLAG;
     static const uint8_t SECOND_INDEX_FLAG;
@@ -118,6 +111,7 @@ public:
         bool expected_status = false;
         if (_shutdown.compare_exchange_strong(expected_status, true)) {
             _node.shutdown(NULL);
+            _init_success = false;
             DB_WARNING("raft node was shutdown, region_id: %ld", _region_id);
         }
     }
@@ -127,6 +121,7 @@ public:
         DB_WARNING("raft node join completely, region_id: %ld", _region_id);
         _multi_thread_cond.wait();
         DB_WARNING("_multi_thread_cond wait success, region_id: %ld", _region_id);
+        _txn_pool.close();
     }
 
     Region(RocksWrapper* rocksdb, 
@@ -151,7 +146,7 @@ public:
                 _num_table_lines(0),
                 _num_delete_lines(0),
                 _region_control(this, region_id),
-                _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)) {
+                _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)){
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
         bthread_mutex_init(&_commit_meta_mutex, NULL);
         _region_control.store_status(_region_info.status());
@@ -161,6 +156,12 @@ public:
     }
 
     int init(bool new_region, int32_t snapshot_times);
+    void wait_table_info() {
+        while (!SchemaFactory::get_instance()->exist_tableid(get_table_id())) {
+            DB_WARNING("region_id: %ld wait for table_info: %ld", _region_id, get_table_id());
+            bthread_usleep(1000 * 1000);
+        }
+    }
 
     void raft_control(google::protobuf::RpcController* controller,
             const pb::RaftControlRequest* request,
@@ -201,7 +202,8 @@ public:
             const pb::Plan& plan,
             const RepeatedPtrField<pb::TupleDescriptor>& tuples,
             pb::StoreRes& response);
-
+    int select_normal(RuntimeState& state, ExecNode* root, pb::StoreRes& response);
+    int select_sample(RuntimeState& state, ExecNode* root, const pb::AnalyzeInfo& analyze_info, pb::StoreRes& response); 
     virtual void on_apply(braft::Iterator& iter);
    
     virtual void on_shutdown();
@@ -255,6 +257,8 @@ public:
     void reset_region_status () {
         _region_control.reset_region_status();
     }
+
+    void reset_snapshot_status();
     
     pb::RegionStatus get_status() const {
         return _region_control.get_status();
@@ -356,6 +360,11 @@ public:
     void reset_allow_write() {
         _disable_write_cond.decrease_broadcast();
     }
+
+    void set_disable_write() {
+        _disable_write_cond.increase();
+    }
+
     int32_t num_prepared() {
         return _txn_pool.num_prepared();
     }
@@ -376,6 +385,13 @@ public:
     std::string get_end_key() {
         std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.end_key();
+    }
+    bool is_merged() {
+        std::lock_guard<std::mutex> lock(_region_lock);
+        if (!_region_info.start_key().empty()) {
+            return _region_info.start_key() == _region_info.end_key();
+        }
+        return false;
     }
     int64_t get_log_index() const {
         return _applied_index;
@@ -410,10 +426,17 @@ public:
         return _region_info.table_id();
     }
     bool is_leader() {
-        return _is_leader.load();
+        return (_is_leader.load() && _node.is_leader());
+    }
+    void leader_start() {
+        _is_leader.store(true);
+        DB_WARNING("leader real start, region_id: %ld", _region_id);
     }
     int64_t get_version() {
         return _region_info.version();
+    }
+    pb::RegionInfo& region_info() {
+        return _region_info;
     }
     bool check_region_legal_complete();
 
@@ -509,6 +532,21 @@ public:
             const pb::StoreReq* request, 
             pb::StoreRes* response, 
             google::protobuf::Closure* done);
+
+    void exec_txn_query_primary_region(google::protobuf::RpcController* controller,
+            const pb::StoreReq* request,
+            pb::StoreRes* response,
+            google::protobuf::Closure* done);
+
+    void exec_txn_complete(google::protobuf::RpcController* controller,
+            const pb::StoreReq* request,
+            pb::StoreRes* response,
+            google::protobuf::Closure* done);
+
+    void exec_txn_query_state(google::protobuf::RpcController* controller,
+            const pb::StoreReq* request,
+            pb::StoreRes* response,
+            google::protobuf::Closure* done);
     
     void exec_dml_out_txn_query(const pb::StoreReq* request, 
                                         pb::StoreRes* response, 
@@ -522,8 +560,14 @@ public:
             uint64_t log_id = 0);
 
     void clear_transactions() {
-        _txn_pool.clear_transactions();
+        if (_shutdown || !_init_success) {
+            return;
+        }
+        _multi_thread_cond.increase();
+        _txn_pool.clear_transactions(this);
+        _multi_thread_cond.decrease_signal();
     }
+    void recovery_when_leader_start(std::map<uint64_t, SmartTransaction> replay_txns);
 
     TransactionPool& get_txn_pool() {
         return _txn_pool;
@@ -591,16 +635,20 @@ public:
 
     void process_download_sst(brpc::Controller* controller, 
         std::vector<std::string>& req_vec, SstBackupType type);
-    void process_upload_sst(brpc::Controller* controller, 
-        std::vector<std::string>& req_vec, SstBackupType type);
+    void process_upload_sst(brpc::Controller* controller, bool is_ingest);
 
-    void backup_datainfo(brpc::Controller* controller);
-    int backup_datainfo_to_file(std::string path, int64_t& file_size);
-    int backup_metainfo_to_file(std::string path, int64_t& file_size);
-    int upload_sst_info(brpc::Controller* controller, BackupInfo& backup_info);
+    void process_download_sst_streaming(brpc::Controller* controller, 
+        const pb::BackupRequest* request,
+        pb::BackupResponse* response);
 
-    int send_file(brpc::Controller* controller, BackupInfo& backup_info);
-    int dump_sst_file(BackupInfo& backup_info);
+    void process_upload_sst_streaming(brpc::Controller* controller, bool is_ingest,
+        const pb::BackupRequest* request,
+        pb::BackupResponse* response);
+    
+    std::shared_ptr<Region> get_ptr() {
+        return shared_from_this();
+    }
+
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -636,7 +684,6 @@ private:
         bool tail_split = false;
         std::unordered_map<uint64_t, pb::TransactionInfo> prepared_txn;
     };
-
     void apply_kv_in_txn(const pb::StoreReq& request, braft::Closure* done, 
                          int64_t index, int64_t term);
 
@@ -679,8 +726,6 @@ private:
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
     bool has_sst_data(int64_t* seek_table_lines);
     bool ingest_has_sst_data();
-
-
 private:
     //Singleton
     RocksWrapper*       _rocksdb;
@@ -763,6 +808,7 @@ private:
     bool                                     _is_global_index = false; //是否是全局索引的region
     std::mutex       _reverse_index_map_lock;
     std::mutex       _backup_lock;
+    Backup          _backup;
 };
 
 } // end of namespace

@@ -97,7 +97,7 @@ int SetKVPlanner::set_autocommit(parser::ExprNode* expr) {
         DB_WARNING("invalid literal expr type: %d", literal->literal_type);
         return -1;
     }
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     pb::ExprNode int_node;
     int_node.set_node_type(pb::INT_LITERAL);
     int_node.set_col_type(pb::INT64);
@@ -114,7 +114,7 @@ int SetKVPlanner::set_autocommit(parser::ExprNode* expr) {
 }
 
 int SetKVPlanner::set_autocommit_0() {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     client->autocommit = false;
     if (client->txn_id == 0) {
         plan_begin_txn();
@@ -122,26 +122,26 @@ int SetKVPlanner::set_autocommit_0() {
         _ctx->succ_after_logical_plan = true;
         return 0;
     }
-    _ctx->runtime_state.set_single_sql_autocommit(false);
+    _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     return 0;
 }
 
 int SetKVPlanner::set_autocommit_1() {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     client->autocommit = true;
     if (client->txn_id == 0) {
         _ctx->succ_after_logical_plan = true;
         return 0;
     }
     plan_commit_txn();
-    _ctx->runtime_state.set_single_sql_autocommit(false); // autocommit status before set autocommit=1
+    _ctx->get_runtime_state()->set_single_sql_autocommit(false); // autocommit status before set autocommit=1
     return 0;
 }
 
 int SetKVPlanner::set_user_variable(const std::string& key, parser::ExprNode* expr) {
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     pb::Expr var_expr_pb;
-    if (0 != create_expr_tree(expr, var_expr_pb)) {
+    if (0 != create_expr_tree(expr, var_expr_pb, false)) {
         DB_WARNING("create var_expr_pb for user variable failed");
         return -1;
     }

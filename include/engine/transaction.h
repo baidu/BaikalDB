@@ -201,6 +201,10 @@ public:
         return _txn_id;
     }
 
+    uint64_t rocksdb_txn_id() {
+        return _txn->GetID();
+    }
+
     int seq_id() {
         return _seq_id;
     }
@@ -215,6 +219,10 @@ public:
 
     bool is_rolledback() {
         return _is_rolledback;
+    }
+
+    bool is_finished() {
+        return _is_finished;
     }
 
     bool prepare_apply() {
@@ -237,15 +245,54 @@ public:
         last_active_time = butil::gettimeofday_us();
     }
 
-    bool has_write() {
-        for (auto& pair : _cache_plan_map) {
-            pb::OpType type = pair.second.op_type();
-            if (type == pb::OP_INSERT || type == pb::OP_DELETE || type == pb::OP_UPDATE) {
-                return true;
-            }
+    void push_cmd_to_cache(int seq_id, pb::CachePlan plan_item) {
+        BAIDU_SCOPED_LOCK(_txn_mutex);
+        _seq_id = seq_id;
+        if (_cache_plan_map.count(seq_id) > 0) {
+            return;
         }
-        return false;
+        _cache_plan_map.insert(std::make_pair(seq_id, plan_item));
     }
+
+    bool has_write() {
+        return _has_write;
+    }
+
+    void set_has_write(bool flag) {
+        _has_write = flag;
+    }
+
+    bool write_begin_index() {
+        return _write_begin_index;
+    }
+
+    void set_write_begin_index(bool flag) {
+        _write_begin_index = flag;
+    }
+    // return -1表示没有cache plan
+    int get_cache_plan_infos(pb::TransactionInfo& txn_info) {
+        BAIDU_SCOPED_LOCK(_txn_mutex);
+        if (_cache_plan_map.size() == 0) {
+            return -1;
+        }
+        if (!_has_write) {
+            return -2;
+        }
+        txn_info.set_txn_id(_txn_id);
+        txn_info.set_seq_id(_seq_id);
+        txn_info.set_start_seq_id(1);
+        txn_info.set_optimize_1pc(false);
+        for (auto seq_id : _need_rollback_seq) {
+            txn_info.add_need_rollback_seq(seq_id);
+        }
+        for (auto& cache_plan : _cache_plan_map) {
+            txn_info.add_cache_plans()->CopyFrom(cache_plan.second);
+        }
+        txn_info.set_num_rows(num_increase_rows);
+        txn_info.set_primary_region_id(_primary_region_id);
+        return 0;
+    }
+
     void set_region_info(pb::RegionInfo* region_info) {
         _region_info = region_info;
         if (_region_info == nullptr) {
@@ -368,10 +415,55 @@ public:
         }
     }
 
+    void set_primary_region_id(int64_t region_id) {
+        _primary_region_id = region_id;
+    }
+
+    int64_t primary_region_id() const {
+        return _primary_region_id;
+    }
+
+    /* baikaldb执行insert/delete/update时才会设置primary_region_id
+       只读事务_primary_region_id == -1 */
+    bool primary_region_id_seted() {
+        if (_primary_region_id != -1) {
+            return true;
+        }
+        return false;
+    }
+
+    bool is_primary_region() {
+        if (!primary_region_id_seted()) {
+            return true;
+        }
+        if (_region_info != nullptr) {
+            return (_region_info->region_id() == _primary_region_id);
+        }
+        return false;
+    }
+
+    bool need_write_rollback(pb::OpType op_type) {
+        if (op_type == pb::OP_ROLLBACK && (_primary_region_id != -1)) {
+            return true;
+        }
+        return false;
+    }
+
+    void clear_current_req_point_seq() {
+        _current_req_point_seq.clear();
+    }
+
+    size_t save_point_seq_size() {
+        return _save_point_seq.size();
+    }
+
+    void rollback_current_request();
+
 public:
     bool        _is_separate = false; //是否存储计算分离
     int64_t     num_increase_rows = 0;
     int64_t     last_active_time = 0;
+    int64_t     begin_time = 0;
     int         dml_num_affected_rows = 0; //for autocommit dml return
     int64_t     batch_num_increase_rows = 0;//用于batch txn
     pb::ErrCode err_code = pb::SUCCESS;
@@ -411,11 +503,15 @@ private:
     bool                            _is_finished = false;
     bool                            _is_rolledback = false;
     bool                            _prepare_apply = false;
+    bool                            _has_write = false;
+    bool                            _write_begin_index = true;
     int64_t                         _prepare_time_us = 0;
     std::stack<int>                 _save_point_seq;
     std::stack<int64_t>             _save_point_increase_rows;
     pb::StoreReq                    _store_req;
-    
+    int64_t                         _primary_region_id = -1;
+    std::set<int>                   _current_req_point_seq;
+    std::set<int>                   _need_rollback_seq;
     // store the query cmd from BEGIN to PREPARE
     CachePlanMap                    _cache_plan_map;
 

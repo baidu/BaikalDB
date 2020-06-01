@@ -85,7 +85,7 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
         int64_t table_id = scan_node->table_id();
         int ret = schema_factory->get_region_info(table_id, ctx->debug_region_id, info);
         if (ret == 0) {
-            scan_node->add_index_id(table_id);
+            scan_node->set_router_index_id(table_id);
             (scan_node->region_infos())[ctx->debug_region_id] = info;
             return 0;
         }
@@ -98,7 +98,7 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
             ret = schema_factory->get_region_info(index_id, ctx->debug_region_id, info);
             if (ret == 0) {
                 (scan_node->region_infos())[ctx->debug_region_id] = info;
-                scan_node->add_index_id(index_id);
+                scan_node->set_router_index_id(index_id);
                 scan_node->set_covering_index(true);
                 return 0;
             }
@@ -120,89 +120,37 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     int64_t main_table_id = scan_node->table_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance(); 
-    //做一次索引选择，如果命中全局二局索引，需要做全局二级索引的路由选择
-    std::vector<int> multi_reverse_index;
-    int idx = ScanNode::select_index(*pb_scan_node, multi_reverse_index);
-    if (multi_reverse_index.size() != 0) {
-        idx = multi_reverse_index[0];
-    }
-    const pb::PossibleIndex& pos_index = pb_scan_node->indexes(idx);    
-    int64_t index_id = pos_index.index_id();
-    scan_node->add_index_id(index_id);
-    //DB_WARNING("main table_id: %ld, index_id: %ld", main_table_id, index_id);
-    int64_t router_index_id = main_table_id; 
-    //如果选中的索引是全局二级索引, 则路由的index_id 为索引id
-    if (multi_reverse_index.size() == 0 && schema_factory->is_global_index(index_id)) {
-        router_index_id = index_id;
-    }
-    scan_node->set_router_index_id(router_index_id);
-    //DB_WARNING("router index id %ld", router_index_id);
-    pb::PossibleIndex* primary = nullptr;
-    for (auto& pos_index : *pb_scan_node->mutable_indexes()) {
-        if (pos_index.index_id() == router_index_id) {
-            primary = &pos_index;
-            //DB_WARNING("possible index: %s", primary->DebugString().c_str());
-            break;
-        }
-    }
+
+    pb::PossibleIndex* router_index = scan_node->router_index();
+    int64_t router_index_id = scan_node->router_index_id();
+
     auto index_ptr = schema_factory->get_index_info_ptr(router_index_id);
     if (index_ptr == nullptr) {
         DB_WARNING("invalid index info: %ld", router_index_id);
         return -1;
     }
+    if (router_index != nullptr) {
+        DB_DEBUG("index:%ld router_index_id:%ld", router_index->index_id(), router_index_id);
+    }
+
     auto ret = schema_factory->get_region_by_key(main_table_id, 
-            *index_ptr, primary,
+            *index_ptr, router_index,
             scan_node->region_infos(),
             scan_node->mutable_region_primary());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
     }
-    if (primary != nullptr && scan_node->mutable_region_primary()->size() > 0) {
-        primary->mutable_ranges()->Clear();
+    if (router_index != nullptr && scan_node->mutable_region_primary()->size() > 0) {
+        router_index->mutable_ranges()->Clear();
     }
     //如果该表没有全局二级索引
     if (!schema_factory->has_global_index(main_table_id)) {
         return 0;
     }
     //或者命中的不是全局二级索引，并且不是join,直接结束 
-    if (!has_join && 
-        (multi_reverse_index.size() != 0 
-            || !schema_factory->is_global_index(index_id))) {
+    if (!has_join && !index_ptr->is_global) {
         return 0;
-    }
-    //先判断是否是covering_index
-    std::map<int32_t, int32_t> index_slot_field_map;
-    auto pri_info = schema_factory->get_index_info_ptr(main_table_id);
-    if (pri_info == nullptr) {
-        DB_WARNING("pri index info not found main_table_id:%ld", main_table_id);
-        return -1;
-    }
-    auto index_info = schema_factory->get_index_info_ptr(index_id);
-    if (index_info == nullptr) {
-        DB_WARNING("index info not found index_id:%ld", index_id);
-        return -1;
-    }
-    for (auto& f : pri_info->fields) {
-        auto slot_id = get_slot_id(scan_node->tuple_id(), f.id);
-        if (slot_id > 0) {
-            index_slot_field_map[slot_id] = f.id;
-        }
-    }
-    for (auto& f : index_info->fields) {
-        auto slot_id = get_slot_id(scan_node->tuple_id(), f.id);
-        if (slot_id > 0) {
-            index_slot_field_map[slot_id] = f.id;
-        }
-    }
-    int32_t max_slot_id = 0;
-    for (auto& slot : get_tuple_desc(scan_node->tuple_id())->slots()) {
-        if (slot.slot_id() > max_slot_id) {
-            max_slot_id = slot.slot_id();
-        }
-        if (index_slot_field_map.count(slot.slot_id()) == 0) {
-            scan_node->set_covering_index(false);
-        }
     }
     // 如果是索引覆盖，则不需要进行后续的操作
     // 如有涉及有全局二级索引的join表时，把主表的fields_id全部放到tuple里。
@@ -213,15 +161,21 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     }
     //如果不是覆盖索引，需要把主键的field_id全部加到slot_id
     pb::TupleDescriptor* tuple_desc = get_tuple_desc(scan_node->tuple_id());
+    int32_t max_slot_id = tuple_desc->slots_size();
+    auto pri_info = schema_factory->get_index_info_ptr(main_table_id);
+    if (pri_info == nullptr) {
+        DB_WARNING("pri index info not found main_table_id:%ld", main_table_id);
+        return -1;
+    }
     for (auto& f : pri_info->fields) {
         auto slot_id = get_slot_id(scan_node->tuple_id(), f.id);
         if (slot_id <=0) {
-            auto slot_ref = tuple_desc->add_slots();
-            slot_ref->set_slot_id(++max_slot_id);
-            slot_ref->set_tuple_id(scan_node->tuple_id());
-            slot_ref->set_table_id(scan_node->table_id());
-            slot_ref->set_field_id(f.id);
-            slot_ref->set_slot_type(f.type);
+            auto slot = tuple_desc->add_slots();
+            slot->set_slot_id(++max_slot_id);
+            slot->set_tuple_id(scan_node->tuple_id());
+            slot->set_table_id(scan_node->table_id());
+            slot->set_field_id(f.id);
+            slot->set_slot_type(f.type);
         }
     }
     return 0;

@@ -47,6 +47,7 @@ public:
         return row->get_value(_tuple_id, _final_slot_id);
     }
 
+    bool is_initialize(MemRow* dst);
     // 聚合函数逻辑
     // 初始化分配内存
     int initialize(MemRow* dst);
@@ -56,6 +57,15 @@ public:
     int merge(MemRow* src, MemRow* dst);
     // 对于avg这种，需要最终计算结果
     int finalize(MemRow* dst);
+
+    static bool all_is_initialize(std::vector<AggFnCall*>& agg_calls, MemRow* dst) {
+        for (auto call : agg_calls) {
+            if (!call->is_initialize(dst)) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     static void initialize_all(std::vector<AggFnCall*>& agg_calls, MemRow* dst) {
         for (auto call : agg_calls) {
@@ -80,7 +90,6 @@ public:
 private:
     AggType _agg_type;
     pb::Function _fn;
-    int32_t _tuple_id;
     int32_t _intermediate_slot_id;
     int32_t _final_slot_id;
     bool _is_distinct = false;

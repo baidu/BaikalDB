@@ -28,6 +28,7 @@
 #include "expr_value.h"
 #include "proto/meta.interface.pb.h"
 #include "proto/plan.pb.h"
+#include "statistics.h"
 
 using google::protobuf::FileDescriptorProto;
 using google::protobuf::DescriptorProto;
@@ -40,7 +41,12 @@ using google::protobuf::DescriptorPool;
 using google::protobuf::RepeatedPtrField;
 
 namespace baikaldb {
-
+static const std::string TABLE_SWITCH_MERGE    = "need_merge";                //是否开启merge功能
+static const std::string TABLE_SWITCH_SEPARATE = "storage_compute_separate";  //是否开启计算存储分离
+static const std::string TABLE_SWITCH_COST     = "select_index_by_cost";      //是否开启代价选择索引
+static const std::string TABLE_OP_VERSION      = "op_version";                //操作版本号
+static const std::string TABLE_OP_DESC         = "op_desc";                   //操作描述信息
+static const std::string TABLE_FILTER_RATIO    = "filter_ratio";              //过滤率
 struct UserInfo;
 class TableRecord;
 typedef std::shared_ptr<TableRecord> SmartRecord;
@@ -80,7 +86,7 @@ struct TableRegionInfo {
         } else {
             region_info_mapping[info.region_id()].region_info = info;
         }
-        DB_NOTICE("double_buffer_write region_id[%ld] region_info[%s]", 
+        DB_DEBUG("double_buffer_write region_id[%ld] region_info[%s]", 
             info.region_id(), info.ShortDebugString().c_str());
     }
 };
@@ -114,6 +120,7 @@ struct FieldInfo {
     int32_t             id;
     int32_t             size = -1;// STRING类型的size为-1，表示变长
     int64_t             table_id;
+    int                 pb_idx = 0; 
     std::string         name;   // db.table.field
     std::string         short_name; // field
     std::string         default_value;
@@ -124,7 +131,6 @@ struct FieldInfo {
     bool                can_null = false;
     bool                auto_inc = false;
     bool                deleted = false;
-    //const FieldDescriptor* field;
 };
 
 struct DistInfo {
@@ -167,12 +173,13 @@ struct TableInfo {
     //>0表示配置有ttl，单位s
     int64_t                 ttl_duration = 0;
 
-    const Descriptor*       tbl_desc;
+    const Descriptor*       tbl_desc = nullptr;
     DescriptorProto*        tbl_proto = nullptr;
     FileDescriptorProto*    file_proto = nullptr;
     DynamicMessageFactory*  factory = nullptr;
     DescriptorPool*         pool = nullptr;
     const Message*          msg_proto = nullptr;
+    bool                    have_statistics = false;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {
@@ -214,6 +221,7 @@ struct IndexInfo {
     std::string             comments;
     pb::IndexState           state;
     bool                    is_global = false;
+    pb::StorageType storage_type = pb::ST_PROTOBUF;
 };
 
 struct DatabaseInfo {
@@ -239,6 +247,8 @@ struct SchemaMapping {
     std::unordered_map<int64_t, SmartIndex> index_info_mapping;
     //全局二级索引与主表id的映射功能
     std::unordered_map<int64_t, int64_t> global_index_id_mapping;
+    //table_id => 代价统计信息
+    std::map<int64_t, SmartStatistics> table_statistics_mapping;
 };
 
 using DoubleBufferedTable = butil::DoublyBufferedData<SchemaMapping>;
@@ -256,6 +266,7 @@ class SchemaFactory {
 typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec; 
 typedef ::google::protobuf::RepeatedPtrField<pb::SchemaInfo> SchemaVec;
 typedef ::google::protobuf::RepeatedPtrField<pb::DataBaseInfo> DataBaseVec;
+typedef ::google::protobuf::RepeatedPtrField<pb::Statistics> StatisticsVec;
 public:
     virtual ~SchemaFactory() {
         bthread_mutex_destroy(&_update_user_mutex);
@@ -321,7 +332,14 @@ public:
     //TODO 不考虑删除
     void update_user(const pb::UserPrivilege& user);
     void update_show_db(const DataBaseVec& db_infos);
-
+    void update_statistics(const StatisticsVec& statistics);
+    int update_statistics_internal(SchemaMapping& background, const std::map<int64_t, SmartStatistics>& mapping);
+    int64_t get_statis_version(int64_t table_id);
+    // 从直方图中计算取值区间占比，如果计算小于某值的比率，则lower填null；如果计算大于某值的比率，则upper填null
+    double get_histogram_ratio(int64_t table_id, int field_id, const ExprValue& lower, const ExprValue& upper);
+    // 计算单个值占比
+    double get_cmsketch_ratio(int64_t table_id, int field_id, const ExprValue& value);
+    SmartStatistics get_statistics_ptr(int64_t table_id);
     void schema_info_scope_read(std::function<void(const SchemaMapping&)> callback) {
         DoubleBufferedTable::ScopedPtr table_ptr;
         if (_double_buffer_table.Read(&table_ptr) != 0) {
@@ -346,6 +364,8 @@ public:
 
     IndexInfo get_index_info(int64_t indexid);
     SmartIndex get_index_info_ptr(int64_t indexid);
+
+    std::string get_index_name(int64_t index_id);
 
     // functions for permission access
     std::shared_ptr<UserInfo> get_user_info(const std::string& user);
@@ -373,6 +393,11 @@ public:
     int get_region_capacity(int64_t global_index_id, int64_t& region_capacity);
     bool get_merge_switch(int64_t table_id);
     bool get_separate_switch(int64_t table_id);
+    bool is_switch_open(const int64_t table_id, const std::string& switch_name);
+    void get_schema_conf_op_info(const int64_t table_id, int64_t& op_version, std::string& op_desc);
+    template <class T>
+    int get_schema_conf_value(const int64_t table_id, const std::string& switch_name, T& value);
+    int get_schema_conf_str(const int64_t table_id, const std::string& switch_name, std::string& value);
     int64_t get_ttl_duration(int64_t table_id);
     
     int get_region_by_key(int64_t main_table_id, 
@@ -499,6 +524,26 @@ public:
         _last_updated_index = index;
     }
 
+    int get_index_storage_type(int64_t index_id, pb::StorageType& type) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return -1;
+        }
+        auto& index_info_mapping = table_ptr->index_info_mapping;
+        if (index_info_mapping.find(index_id) == index_info_mapping.end()) {
+            DB_WARNING("index_id: %ld not exist", index_id);
+            return -1;
+        }
+        auto index_info_ptr = index_info_mapping.at(index_id);
+        if (index_info_ptr->type == pb::I_FULLTEXT) {
+            type = index_info_ptr->storage_type;
+            return 0;
+        } else {
+            return -1;
+        }
+    }
+
 private:
     SchemaFactory() {
         _is_init = false;
@@ -523,6 +568,7 @@ private:
     //delete table和index
     void delete_table(const pb::SchemaInfo& table, SchemaMapping& background);
 
+    void delete_table_region_map(const pb::SchemaInfo& table);
     bool                    _is_init;
     bthread_mutex_t         _update_user_mutex;
     bthread_mutex_t         _update_show_db_mutex;

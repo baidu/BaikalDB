@@ -94,6 +94,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     std::string pre_commit_prefix = MetaWriter::get_instance()->pre_commit_key_prefix(_region_id);
     std::string region_info_key = MetaWriter::get_instance()->region_info_key(_region_id);
     std::string applied_index_key = MetaWriter::get_instance()->applied_index_key(_region_id);
+    int64_t applied_index = 0;
     while (count < size) {
         if (!iter_context->iter->Valid()
                 || !iter_context->iter->key().starts_with(iter_context->prefix)) {
@@ -110,8 +111,9 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
                     region_info.ShortDebugString().c_str());
         }
         if (iter_context->is_meta_sst && iter_context->iter->key().compare(applied_index_key) == 0) {
+            applied_index = TableKey(iter_context->iter->value()).extract_i64(0);
             DB_WARNING("region_id: %ld meta_sst applied_index:%ld", _region_id,
-                    TableKey(iter_context->iter->value()).extract_i64(0));
+                    applied_index);
         }
         //txn_info请求不发送，理论上leader上没有该类请求
         if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(txn_info_prefix)) {
@@ -127,11 +129,10 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         //如果是prepared事务的log_index记录需要解析出store_req
         int64_t read_size = 0;
         if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(log_index_prefix)) {
-            ++key_num;
             int64_t log_index = MetaWriter::get_instance()->decode_log_index_value(iter_context->iter->value());
             uint64_t txn_id = MetaWriter::get_instance()->decode_log_index_key(iter_context->iter->key());
-            std::string txn_info;
-            auto ret  = LogEntryReader::get_instance()->read_log_entry(_region_id, log_index, txn_info);
+            std::map<int64_t, std::string> txn_infos;
+            auto ret  = LogEntryReader::get_instance()->read_log_entry(_region_id, log_index, applied_index, txn_id, txn_infos);
             if (ret < 0) {
                 iter_context->done = true;
                 DB_FATAL("read txn info fail, may be has removed, region_id: %ld", _region_id);
@@ -139,13 +140,17 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
                 continue;
                 //return -1;
             }
-            if (iter_context->offset >= offset) {
-                read_size += serialize_to_iobuf(portal, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id,  log_index));
-                read_size += serialize_to_iobuf(portal, rocksdb::Slice(txn_info));
-            } else {
-                read_size += serialize_to_iobuf(nullptr, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id,  log_index));
-                read_size += serialize_to_iobuf(nullptr, rocksdb::Slice(txn_info));
+            for (auto& txn_info : txn_infos) {
+                ++key_num;
+                if (iter_context->offset >= offset) {
+                    read_size += serialize_to_iobuf(portal, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id, txn_info.first));
+                    read_size += serialize_to_iobuf(portal, rocksdb::Slice(txn_info.second));
+                } else {
+                    read_size += serialize_to_iobuf(nullptr, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id, txn_info.first));
+                    read_size += serialize_to_iobuf(nullptr, rocksdb::Slice(txn_info.second));
+                }
             }
+            
         } else {
             key_num++;
             if (iter_context->offset >= offset) {
@@ -161,14 +166,14 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         iter_context->offset += read_size;
         iter_context->iter->Next();
     }
-    DB_DEBUG("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld", 
+    DB_WARNING("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld", 
                 _region_id, count, key_num, time_cost.get_time());
     return count;
 }
 
 bool RocksdbReaderAdaptor::close() {
     if (_closed) {
-        DB_WARNING("file has been closed, region_id: %ld, num_lines: %ld, path: %s", 
+        DB_DEBUG("file has been closed, region_id: %ld, num_lines: %ld, path: %s", 
                 _region_id, _num_lines, _path.c_str());
         return true;
     }
@@ -226,7 +231,12 @@ int SstWriterAdaptor::open() {
 ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
     (void)offset;
     if (_closed) {
+        DB_FATAL("write sst file path: %s failed, file closed: %d data len: %d, region_id: %ld",
+                _path.c_str(), _closed, data.size(), _region_id);
         return -1;
+    }
+    if (data.size() == 0) {
+        DB_WARNING("write sst file path: %s data len = 0, region_id: %ld", _path.c_str(), _region_id);
     }
     std::string region_info_key = MetaWriter::get_instance()->region_info_key(_region_id);
     std::string applied_index_key = MetaWriter::get_instance()->applied_index_key(_region_id);

@@ -1,13 +1,13 @@
 sudo: required
-dist: trusty
+dist: xenial
 language: cpp
 
 compiler:
     - gcc
 
 install:
-    - wget --no-clobber https://github.com/bazelbuild/bazel/releases/download/0.8.1/bazel_0.8.1-linux-x86_64.deb
-    - sudo dpkg -i bazel_0.8.1-linux-x86_64.deb
+    - wget --no-clobber https://github.com/bazelbuild/bazel/releases/download/0.8.1/bazel-0.8.1-installer-linux-x86_64.sh
+    - sudo /bin/bash bazel-0.8.1-installer-linux-x86_64.sh
     - sudo apt-get install flex bison libssl-dev
     - sudo apt-get install g++
 

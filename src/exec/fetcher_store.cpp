@@ -25,10 +25,10 @@
 
 namespace baikaldb {
 
-DECLARE_int32(retry_interval_us);
-DECLARE_int32(single_store_concurrency);
-DECLARE_int64(max_select_rows);
-DECLARE_int64(print_time_us);
+DEFINE_int32(retry_interval_us, 50 * 1000, "retry interval ");
+DEFINE_int32(single_store_concurrency, 20, "max request for one store");
+DEFINE_int64(max_select_rows, 10000000, "query will be fail when select too much rows");
+DEFINE_int64(print_time_us, 10000, "print log when time_cost > print_time_us(us)");
 DEFINE_int32(fetcher_request_timeout, 100000,
                     "store as server request timeout, default:10000ms");
 DEFINE_int32(fetcher_connect_timeout, 1000,
@@ -51,6 +51,16 @@ ErrorType FetcherStore::send_request(
     TimeCost total_cost;
     if (trace_node != nullptr) {
         req.set_is_trace(true);
+    }
+    
+    if (state->explain_type == ANALYZE_STATISTICS) {
+        if (state->cmsketch != nullptr) {
+            pb::AnalyzeInfo* info = req.mutable_analyze_info();
+            info->set_depth(state->cmsketch->get_depth());
+            info->set_width(state->cmsketch->get_width());
+            info->set_sample_rows(state->cmsketch->get_sample_rows());
+            info->set_table_rows(state->cmsketch->get_table_rows());
+        }
     }
     ScopeGuard auto_update_trace([&]() {
         if (trace_node != nullptr) {
@@ -85,27 +95,9 @@ ErrorType FetcherStore::send_request(
             region_id, state->txn_id, log_id, retry_times);
         return E_FATAL;    
     }
-    auto rand_peer_func = [this](pb::RegionInfo& info) -> std::string {
-        uint32_t i = butil::fast_rand() % info.peers_size();
-        return info.peers(i);
-    };
-    auto other_peer_to_leader_func = [this, rand_peer_func](pb::RegionInfo& info) {
-        DB_WARNING("region_id:%ld choose rand old leader:%s", info.region_id(), info.leader().c_str());
-        auto peer = rand_peer_func(info);
-        if (peer != info.leader()) {
-            info.set_leader(peer);
-            return;
-        }
-        for (auto& peer : info.peers()) {
-            if (peer != info.leader()) {
-                info.set_leader(peer);
-                break;
-            }
-        }
-    };
     // for exec next_statement_after_begin, begin must be added
     if (current_seq_id == 2 && state->single_sql_autocommit() == false) {
-        DB_WARNING("start seq id is reset to 1, region_id: %ld", region_id);
+        //DB_WARNING("start seq id is reset to 1, region_id: %ld", region_id);
         start_seq_id = 1;
     }
     {
@@ -121,8 +113,7 @@ ErrorType FetcherStore::send_request(
     brpc::Controller cntl;
     cntl.set_log_id(log_id);
     if (info.leader() == "0.0.0.0:0" || info.leader() == "") {
-        info.set_leader(rand_peer_func(info));
-        //other_peer_to_leader_func(info);
+        info.set_leader(rand_peer(info));
     }
     req.set_db_conn_id(client_conn->get_global_conn_id());
     req.set_op_type(op_type);
@@ -132,7 +123,6 @@ ErrorType FetcherStore::send_request(
     for (auto& desc : state->tuple_descs()) {
         req.add_tuples()->CopyFrom(desc);
     }
-
     pb::TransactionInfo* txn_info = req.add_txn_infos();
     txn_info->set_txn_id(state->txn_id);
     txn_info->set_seq_id(current_seq_id);
@@ -142,6 +132,10 @@ ErrorType FetcherStore::send_request(
     }
     txn_info->set_start_seq_id(start_seq_id);
     txn_info->set_optimize_1pc(state->optimize_1pc());
+    if (state->txn_id != 0) {
+        txn_info->set_primary_region_id(client_conn->primary_region_id);
+    }
+
     int64_t entry_ms2 = butil::gettimeofday_ms() % 1000;
 
     // DB_WARNING("txn_id: %lu, start_seq_id: %d, autocommit:%d", _txn_id, start_seq_id, state->autocommit());
@@ -153,18 +147,21 @@ ErrorType FetcherStore::send_request(
         for (auto& pair : client_conn->cache_plans) {
             //DB_WARNING("op_type: %d, pair.first:%d, start_seq_id:%d", op_type, pair.first, start_seq_id);
             auto& plan_item = pair.second;
-            if (pair.first < start_seq_id || pair.first >= current_seq_id) {
+            if ((plan_item.op_type != pb::OP_BEGIN)
+                && (pair.first < start_seq_id || pair.first >= current_seq_id)) {
                 continue;
             }
             if (op_type == pb::OP_PREPARE && plan_item.op_type == pb::OP_PREPARE) {
                 continue;
             }
             if (plan_item.tuple_descs.size() > 0 && 
+                plan_item.op_type != pb::OP_BEGIN &&
                 static_cast<DMLNode*>(plan_item.root)->global_index_id() != info.table_id()
-                && plan_item.op_type != pb::OP_BEGIN) {
-                DB_WARNING("TransactionNote: cache_item table_id mismatch,"
+                ) {
+                /*DB_WARNING("TransactionNote: cache_item table_id mismatch,"
                     " cache global_index_id: %ld, region_info index_id : %ld",
                     static_cast<DMLNode*>(plan_item.root)->global_index_id(), info.table_id());
+                */
                 continue;
             }
             pb::CachePlan* pb_cache_plan = txn_info->add_cache_plans();
@@ -232,7 +229,7 @@ ErrorType FetcherStore::send_request(
                 cntl.ErrorCode() != EHOSTDOWN) {
             return E_FATAL;
         }
-        other_peer_to_leader_func(info);
+        other_peer_to_leader(info);
         //schema_factory->update_leader(info);
         bthread_usleep(retry_times * FLAGS_retry_interval_us);
         return send_request(state, store_request, info, trace_node, old_region_id, region_id, log_id,
@@ -240,8 +237,8 @@ ErrorType FetcherStore::send_request(
     }
     if (res.errcode() == pb::NOT_LEADER) {
         int last_seq_id = res.has_last_seq_id()? res.last_seq_id() : 0;
-        DB_WARNING("NOT_LEADER, region_id: %ld, retry:%d, new_leader:%s, log_id:%lu", 
-                region_id, retry_times, res.leader().c_str(), log_id);
+        DB_WARNING("NOT_LEADER, region_id: %ld, addr:%s retry:%d, new_leader:%s, log_id:%lu", 
+                region_id, addr.c_str(), retry_times, res.leader().c_str(), log_id);
 
         if (res.leader() != "0.0.0.0:0") {
             info.set_leader(res.leader());
@@ -251,7 +248,7 @@ ErrorType FetcherStore::send_request(
                 client_conn->region_infos[region_id].set_leader(res.leader());
             }
         } else {
-            other_peer_to_leader_func(info);
+            other_peer_to_leader(info);
         }
         bthread_usleep(retry_times * FLAGS_retry_interval_us);
         return send_request(state, store_request, info, trace_node, old_region_id, region_id, log_id,
@@ -259,8 +256,8 @@ ErrorType FetcherStore::send_request(
     }
     if (res.errcode() == pb::TXN_FOLLOW_UP) {
         int last_seq_id = res.has_last_seq_id()? res.last_seq_id() : 0;
-        DB_WARNING("TXN_FOLLOW_UP, region_id: %ld, retry:%d, log_id:%lu, op:%d, last_seq_id:%d", 
-                region_id, retry_times, log_id, op_type, last_seq_id + 1);
+        DB_WARNING("TXN_FOLLOW_UP, region_id: %ld, retry:%d, log_id:%lu, op:%d, start_seq_id:%d last_seq_id:%d", 
+                region_id, retry_times, log_id, op_type, start_seq_id, last_seq_id + 1);
         //对于commit，store返回TXN_FOLLOW_UP不能重发缓存命令，需要手工处理
         //对于rollback, 直接忽略返回成功
         //其他命令需要重发缓存
@@ -276,8 +273,8 @@ ErrorType FetcherStore::send_request(
     }
     //todo 需要处理分裂情况
     if (res.errcode() == pb::VERSION_OLD) {
-        DB_WARNING("VERSION_OLD, region_id: %ld, retry:%d, now:%s, log_id:%lu", 
-                region_id, retry_times, info.ShortDebugString().c_str(), log_id);
+        DB_WARNING("VERSION_OLD, region_id: %ld, start_seq_id:%d retry:%d, now:%s, log_id:%lu", 
+                region_id, start_seq_id, retry_times, info.ShortDebugString().c_str(), log_id);
         if (res.regions_size() >= 2) {
             auto regions = res.regions();
             regions.Clear();
@@ -320,6 +317,7 @@ ErrorType FetcherStore::send_request(
                 if (r.region_id() != region_id) {
                     BAIDU_SCOPED_LOCK(client_conn->region_lock);
                     client_conn->region_infos[r.region_id()] = r;
+                    skip_region_set.insert(r.region_id());
                 } else {
                     if (res.leader() != "0.0.0.0:0") {
                         DB_WARNING("region_id: %ld set new_leader: %s when old_version", region_id, r.leader().c_str());
@@ -338,7 +336,7 @@ ErrorType FetcherStore::send_request(
             for (auto& r : regions) {
                 ErrorType ret;
                 ret = send_request(state, store_request, r, trace_node, old_region_id, r.region_id(), 
-                         log_id, retry_times + 1, last_seq_id, current_seq_id, op_type);
+                         log_id, retry_times, last_seq_id, current_seq_id, op_type);
                 if (ret != E_OK) {
                     DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu", 
                             r.region_id(), log_id, state->txn_id);
@@ -388,10 +386,15 @@ ErrorType FetcherStore::send_request(
         }
         return E_FATAL;
     }
+    if (res.errcode() == pb::TXN_IS_ROLLBACK) {
+        DB_WARNING("TXN_IS_ROLLBACK, region_id:%ld, txn_id:%lu, new_leader:%s, log_id:%lu op_type:%s", 
+                region_id, state->txn_id, res.leader().c_str(), log_id, pb::OpType_Name(op_type).c_str());
+        return E_RETURN;
+    }
     if (res.errcode() == pb::REGION_NOT_EXIST || res.errcode() == pb::INTERNAL_ERROR) {
         DB_WARNING("REGION_NOT_EXIST, region_id:%ld, retry:%d, new_leader:%s, log_id:%lu", 
                 region_id, retry_times, res.leader().c_str(), log_id);
-        other_peer_to_leader_func(info);
+        other_peer_to_leader(info);
         //bthread_usleep(retry_times * FLAGS_retry_interval_us);
         return send_request(state, store_request, info, trace_node, old_region_id, region_id, log_id, 
                    retry_times + 1, start_seq_id, current_seq_id, op_type);
@@ -441,6 +444,9 @@ ErrorType FetcherStore::send_request(
     if (res.has_scan_rows()) {
         scan_rows += res.scan_rows();
     }
+    if (res.has_filter_rows()) {
+        filter_rows += res.filter_rows();
+    }
     if (op_type != pb::OP_SELECT) {
         affected_rows += res.affected_rows();
         return E_OK;
@@ -462,6 +468,10 @@ ErrorType FetcherStore::send_request(
             row->from_string(tuple_id, pb_row.tuple_values(i));
         }
         batch->move_row(std::move(row));
+    }
+    if (res.has_cmsketch() && state->cmsketch != nullptr) {
+        state->cmsketch->add_proto(res.cmsketch());
+        DB_WARNING("region_id:%ld, cmsketch:%s", region_id, res.cmsketch().ShortDebugString().c_str());
     }
     int64_t lock_tm = 0;
     {
@@ -507,9 +517,9 @@ void FetcherStore::choose_opt_instance(pb::RegionInfo& info, std::string& addr) 
     }
 }
 
-int FetcherStore::run(RuntimeState* state, 
-                    std::map<int64_t, pb::RegionInfo>& region_infos, 
-                    ExecNode* store_request, 
+int FetcherStore::run(RuntimeState* state,
+                    std::map<int64_t, pb::RegionInfo>& region_infos,
+                    ExecNode* store_request,
                     int start_seq_id,
                     int current_seq_id,
                     pb::OpType op_type) {
@@ -519,12 +529,90 @@ int FetcherStore::run(RuntimeState* state,
     index_records.clear();
     start_key_sort.clear();
     error = E_OK;
+    skip_region_set.clear();
     affected_rows = 0;
     scan_rows = 0;
+    filter_rows = 0;
     row_cnt = 0;
+    auto client = state->client_conn();
+    //TimeCost cost;
+    if (region_infos.size() == 0) {
+        DB_WARNING("region_infos size == 0, op_type:%s", pb::OpType_Name(op_type).c_str());
+        return E_OK;
+    } 
+    uint64_t log_id = state->log_id();
+    ErrorType ret = E_OK;
+    // 选择primary region同时保证第一次请求primary region成功
+    if ((state->txn_id != 0) && (client->primary_region_id == -1) && op_type != pb::OP_SELECT) {
+        auto info_iter = region_infos.begin();
+        client->primary_region_id = info_iter->first;
+        //DB_WARNING("select primary_region_id:%ld txn_id:%lu op_type:%s",
+        //       client->primary_region_id, state->txn_id, pb::OpType_Name(op_type).c_str());
+        ret = send_request(state, store_request, info_iter->second, info_iter->first, info_iter->first, log_id,
+                0, start_seq_id, current_seq_id, op_type);
+        if (ret == E_RETURN) {
+            DB_WARNING("primary_region_id:%ld rollbacked, log_id:%lu op_type:%s",
+                client->primary_region_id, log_id, pb::OpType_Name(op_type).c_str());
+            if (op_type == pb::OP_COMMIT || op_type == pb::OP_ROLLBACK) {
+                return E_OK;
+            } else {
+                return -1;
+            }
+        }
+        if (ret != E_OK) {
+            DB_WARNING("rpc error, primary_region_id:%ld, log_id:%lu op_type:%s",
+                            client->primary_region_id, log_id, pb::OpType_Name(op_type).c_str());
+            client->primary_region_exec_failed = true;
+            return -1;
+        }
+        skip_region_set.insert(info_iter->first);
+    }
+    // if (client->primary_region_exec_failed) {
+    //     DB_WARNING("primary_region_id:%ld, exec failed before, log_id:%lu op_type:%s",
+    //         client->primary_region_id, log_id, pb::OpType_Name(op_type).c_str());
+    //     return E_OK;
+    // }
+    
+    // 保证primary region执行commit/rollback成功,其他region请求异步执行(死循环FixMe)
+    if ((op_type == pb::OP_COMMIT || op_type == pb::OP_ROLLBACK)
+        && skip_region_set.count(client->primary_region_id) == 0) {
+        int64_t primary_region_id = client->primary_region_id;
+        auto iter = client->region_infos.find(primary_region_id);
+        if (iter == client->region_infos.end()) {
+            DB_FATAL("something wrong primary_region_id: %ld", primary_region_id);
+            return E_OK;
+        }
+        ErrorType ret = E_OK;
+        int retry_times = 0;
+        do {
+            ret = send_request(state, store_request, iter->second, primary_region_id, primary_region_id, log_id,
+                0, start_seq_id, current_seq_id, op_type);
+            if (ret == E_RETURN) {
+                DB_WARNING("primary_region_id:%ld rollbacked, log_id:%lu op_type:%s",
+                    client->primary_region_id, log_id, pb::OpType_Name(op_type).c_str());
+                return E_OK;
+            }
+            if (ret != E_OK) {
+                DB_FATAL("send optype:%s to region_id:%ld txn_id:%u failed, log_id:%lu ", pb::OpType_Name(op_type).c_str(),
+                    primary_region_id, state->txn_id, log_id);
+                if (retry_times < 5) {
+                    retry_times++;
+                }
+                // 每次多延迟5s重试，leader切换耗时评估后考虑去掉无限重试
+                bthread_usleep(retry_times * FLAGS_retry_interval_us * 100);
+            }
+        } while (ret != E_OK);
+        skip_region_set.insert(primary_region_id);
+    }
+
     // 构造并发送请求
     std::map<std::string, std::set<std::shared_ptr<TraceDesc>>> send_region_ids_map; // leader ip => region_ids
+    int send_region_count = 0;
     for (auto& pair : region_infos) {
+        if (skip_region_set.count(pair.first) > 0) {
+            continue;
+        }
+        ++send_region_count;
         std::shared_ptr<TraceDesc> trace = std::make_shared<TraceDesc>();
         trace->region_id = pair.first;
         if (store_request->get_trace() != nullptr) {
@@ -533,15 +621,27 @@ int FetcherStore::run(RuntimeState* state,
         }
         send_region_ids_map[pair.second.leader()].insert(trace);
     }
-    uint64_t log_id = state->log_id();
-    TimeCost cost;
-    BthreadCond store_cond; // 不同store发请全并发
-    for (auto& pair : send_region_ids_map) {
-        store_cond.increase();
-        auto store_thread = [this, state, store_request, pair, log_id, start_seq_id, current_seq_id,
-                              &region_infos, &store_cond, op_type]() {
-            ON_SCOPE_EXIT([&store_cond]{store_cond.decrease_signal();});
-            BthreadCond cond(-FLAGS_single_store_concurrency); // 单store内并发数
+    if (send_region_count == 1) {
+        auto& trace = *send_region_ids_map.begin()->second.begin();
+        int64_t region_id = trace->region_id;
+        // 这两个资源后续不会分配新的，因此不需要加锁
+        pb::RegionInfo* info = nullptr;
+        if (region_infos.count(region_id) != 0) {
+            info = &region_infos[region_id];
+        } else if (state->txn_id != 0) {
+            BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
+            info = &(state->client_conn()->region_infos[region_id]);
+        }
+        auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
+                0, start_seq_id, current_seq_id, op_type);
+        if (ret != E_OK) {
+            DB_WARNING("rpc error, region_id:%ld, log_id:%lu op_type:%s",
+                    region_id, log_id, pb::OpType_Name(op_type).c_str());
+            error = ret;
+        }
+    } else if (send_region_count <= FLAGS_single_store_concurrency) {
+        ConcurrencyBthread con_bth(send_region_count, &BTHREAD_ATTR_SMALL);
+        for (auto& pair : send_region_ids_map) {
             for (auto& trace : pair.second) {
                 int64_t region_id = trace->region_id;
                 // 这两个资源后续不会分配新的，因此不需要加锁
@@ -552,28 +652,70 @@ int FetcherStore::run(RuntimeState* state,
                     BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
                     info = &(state->client_conn()->region_infos[region_id]);
                 }
-                cond.increase();
-                cond.wait();
+
                 auto req_thread = [this, state, store_request, info, trace, region_id, log_id, current_seq_id,
-                          start_seq_id, &cond, op_type]() {
-                    ON_SCOPE_EXIT([&cond]{cond.decrease_signal();});
-                    auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
-                           0, start_seq_id, current_seq_id, op_type);
-                    if (ret != E_OK) {
-                        DB_WARNING("rpc error, region_id:%ld, log_id:%lu", region_id, log_id);
-                        error = ret;
-                    }
-                };
-                // 怀疑栈溢出
-                Bthread bth;
-                bth.run(req_thread);
+                     start_seq_id, op_type]() {
+                         auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
+                                 0, start_seq_id, current_seq_id, op_type);
+                         if (ret != E_OK) {
+                             DB_WARNING("rpc error, region_id:%ld, log_id:%lu op_type:%s",
+                                     region_id, log_id, pb::OpType_Name(op_type).c_str());
+                             error = ret;
+                         }
+                     };
+                con_bth.run(req_thread);
             }
-            cond.wait(-FLAGS_single_store_concurrency);
-        };
-        Bthread bth(&BTHREAD_ATTR_SMALL);
-        bth.run(store_thread);
+        }
+        con_bth.join();
+    } else {
+        BthreadCond store_cond; // 不同store并发
+        for (auto& pair : send_region_ids_map) {
+            store_cond.increase();
+            auto store_thread = [this, state, store_request, pair, log_id, start_seq_id, current_seq_id,
+                 &region_infos, &store_cond, op_type]() {
+                     ON_SCOPE_EXIT([&store_cond]{store_cond.decrease_signal();});
+                     BthreadCond cond(-FLAGS_single_store_concurrency); // 单store内并发数
+                     for (auto& trace : pair.second) {
+                         int64_t region_id = trace->region_id;
+                         // 这两个资源后续不会分配新的，因此不需要加锁
+                         pb::RegionInfo* info = nullptr;
+                         if (region_infos.count(region_id) != 0) {
+                             info = &region_infos[region_id];
+                         } else if (state->txn_id != 0) {
+                             BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
+                             info = &(state->client_conn()->region_infos[region_id]);
+                         }
+                         cond.increase();
+                         cond.wait();
+                         auto req_thread = [this, state, store_request, info, trace, region_id, log_id, current_seq_id,
+                              start_seq_id, &cond, op_type]() {
+                                  ON_SCOPE_EXIT([&cond]{cond.decrease_signal();});
+                                  auto ret = send_request(state, store_request, *info, trace->trace_node.get(), region_id, region_id, log_id,
+                                          0, start_seq_id, current_seq_id, op_type);
+                                  if (ret != E_OK) {
+                                      DB_WARNING("rpc error, region_id:%ld, log_id:%lu op_type:%s",
+                                              region_id, log_id, pb::OpType_Name(op_type).c_str());
+                                      error = ret;
+                                  }
+                              };
+                         // 怀疑栈溢出
+                         Bthread bth(&BTHREAD_ATTR_SMALL);
+                         bth.run(req_thread);
+                     }
+                     cond.wait(-FLAGS_single_store_concurrency);
+                 };
+            Bthread bth(&BTHREAD_ATTR_SMALL);
+            bth.run(store_thread);
+        }
+
+        // commit/rollback请求后续可以考虑异步执行，不等待
+        store_cond.wait();
     }
-    store_cond.wait();
+    if (op_type == pb::OP_COMMIT || op_type == pb::OP_ROLLBACK) {
+        // 清除primary region信息
+        client->primary_region_id = -1;
+        return E_OK;
+    }
     if (error != E_OK) {
         if (error == E_FATAL
                 || error == E_BIG_SQL) {
@@ -597,7 +739,7 @@ int FetcherStore::run(RuntimeState* state,
             }
         }
         int region_cnt = cost_trace_map.size();
-        if (region_cnt > 10) {
+        if (region_cnt > 10 && state->explain_type == SHOW_TRACE) {
             for (auto& pair : cost_trace_map) {
                 if (region_cnt > 10) {
                     pb::LocalTraceNode* local_node = store_request->get_trace()->mutable_store_agg();
@@ -605,7 +747,6 @@ int FetcherStore::run(RuntimeState* state,
                     int64_t affect_rows = pair.second->affect_rows();
                     local_node->set_scan_rows(scan_rows + local_node->scan_rows());
                     local_node->set_affect_rows(affect_rows + local_node->affect_rows());
-                    local_node->set_repeat_cnt(1 + local_node->repeat_cnt());
                 } else {
                     pb::TraceNode* trace = store_request->get_trace()->add_child_nodes();
                     (*trace) = (*pair.second);
@@ -620,6 +761,7 @@ int FetcherStore::run(RuntimeState* state,
         }
     }
     state->set_num_scan_rows(state->num_scan_rows() + scan_rows.load());
+    state->set_num_filter_rows(state->num_filter_rows() + filter_rows.load());
     //DB_WARNING("fetcher time:%ld, txn_id: %lu, log_id:%lu, batch_size:%lu", 
     //        cost.get_time(), state->txn_id, log_id, region_batch.size());
     return affected_rows.load();

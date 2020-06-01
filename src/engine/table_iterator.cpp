@@ -22,6 +22,7 @@ TableIterator* Iterator::scan_primary(
         SmartTransaction        txn,
         const IndexRange&       range, 
         std::map<int32_t, FieldInfo*>&   fields, 
+        std::vector<int32_t>& field_slot,
         bool                    check_region, 
         bool                    forward) {
     txn->reset_active_time();
@@ -29,7 +30,7 @@ TableIterator* Iterator::scan_primary(
     if (nullptr == iter) {
         return nullptr;
     }
-    if (0 != iter->open(range, fields, txn)) {
+    if (0 != iter->open(range, fields, field_slot, txn)) {
         DB_WARNING("open table iterator failed");
         delete iter;
         return nullptr;
@@ -40,6 +41,7 @@ TableIterator* Iterator::scan_primary(
 IndexIterator* Iterator::scan_secondary(
         SmartTransaction    txn,
         const IndexRange&   range, 
+        std::vector<int32_t>& field_slot,
         bool                check_region, 
         bool                forward) {
     txn->reset_active_time();
@@ -48,7 +50,7 @@ IndexIterator* Iterator::scan_secondary(
         return nullptr;
     }
     std::map<int32_t, FieldInfo*> dummy;
-    if (0 != iter->open(range, dummy, txn)) {
+    if (0 != iter->open(range, dummy, field_slot, txn)) {
         DB_WARNING("open index iterator failed");
         delete iter;
         return nullptr;
@@ -56,7 +58,8 @@ IndexIterator* Iterator::scan_secondary(
     return iter;
 }
 
-int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn) {
+int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& fields, 
+        std::vector<int32_t>& field_slot, SmartTransaction txn) {
     _left_open   = range.left_open;
     _right_open  = range.right_open;
     //_index       = range.index_info->id;
@@ -66,10 +69,12 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     _region_info = range.region_info;
     _region      = range.region_info->region_id();
     _fields      = fields;
+    _field_slot  = field_slot;
     if (txn != nullptr) {
         _use_ttl = txn->use_ttl();
         _read_ttl_timestamp_us = txn->read_ttl_timestamp_us();
         _txn = txn->get_txn();
+        _is_cstore = txn->is_cstore();
     }
     bool like_prefix = range.like_prefix;
 
@@ -281,7 +286,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
         DB_DEBUG("region:%ld, Seek cost:%ld", _region, cost.get_time());
         //skip left bound if _left_open
         if (_left_open) {
-            while (_iter->Valid() && !_fits_left_bound() && _fits_right_bound()) {
+            while (_iter->Valid() && !_fits_left_bound(_iter->key()) && _fits_right_bound(_iter->key())) {
                 //DB_WARNING("open, left bound filter, region_id: %ld", _region);
                 _iter->Next();
             }
@@ -290,13 +295,13 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
         TimeCost cost;
         _iter->SeekForPrev(_upper_bound.data());
         //DB_DEBUG("region:%ld, SeekForPrev cost:%ld", _region, cost.get_time());
-        while (_iter->Valid() && !_fits_right_bound() && _fits_left_bound()) {
+        while (_iter->Valid() && !_fits_right_bound(_iter->key()) && _fits_left_bound(_iter->key())) {
             _iter->Prev();
         }
     }
     _valid = _iter->Valid();
     // for cstore, open iters for non-pk fields
-    if (is_cstore() && _idx_type == pb::I_PRIMARY && _valid) {
+    if (_is_cstore && _idx_type == pb::I_PRIMARY && _valid) {
        if (0 != open_columns(fields, txn)) {
            DB_FATAL("create column iterators failed: %ld", index_id);
            return -1;
@@ -321,18 +326,10 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
     }
     const TableKey& primary_key = _iter->key();
     int64_t table_id = _pri_info->id;
-    for (auto& field_info : _schema->get_table_info_ptr(table_id)->fields) {
+    for (auto& pair : fields) {
         // primary key => primary column key. column key may be not exists.
         // replace field_id of format <regionid+tableid+fieldid> + pure_pk
-        int32_t field_id = field_info.id;
-        // skip pk fields
-        if (pri_field_ids.count(field_id) != 0) {
-            continue;
-        }
-        // skip no required field
-        if (fields.count(field_id) == 0) {
-            continue;
-        }
+        int32_t field_id = pair.first;
         MutTableKey key(primary_key);
         key.replace_i32(table_id, sizeof(int64_t));
         key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
@@ -357,16 +354,13 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
             DB_DEBUG("region:%ld, field:%d, SeekForPrev cost:%ld, valid=%d",
                      _region, field_id, cost.get_time(), iter->Valid());
         }
-//        _non_pk_fields.push_back(field_info.id);
-//        _non_pk_types.push_back(field_info.type);
-        _non_pk_fields.push_back(&field_info);
+        _non_pk_fields.push_back(pair.second);
         _column_iters.push_back(iter);
     }
     return 0;
 }
 
-bool Iterator::_fits_left_bound() {
-    rocksdb::Slice key = _iter->key();
+bool Iterator::_fits_left_bound(const rocksdb::Slice& key) {
     rocksdb::Slice lower(_lower_bound.data().c_str(), _lower_bound.size() - _lower_suffix);
     rocksdb::Slice left_key(_start.data());
 
@@ -381,25 +375,20 @@ bool Iterator::_fits_left_bound() {
 }
 
 //仅用于二级索引判断，主键region在open中判断
-bool Iterator::_fits_region() {
+//必须处理过ttl
+bool Iterator::_fits_region(rocksdb::Slice key, rocksdb::Slice value) {
     if (!_need_check_region) {
         return true;
     }
     //check range end_key
-    rocksdb::Slice key = _iter->key();
-    rocksdb::Slice value = _iter->value();
     key.remove_prefix(_prefix_len);
-    if (_use_ttl) {
-        value.remove_prefix(sizeof(uint64_t));
-    }
     bool ret = Transaction::fits_region_range(key, value, nullptr, 
         &_region_info->end_key(), *_pri_info, *_index_info);
     return ret;
 }
 
-bool Iterator::_fits_right_bound() {
+bool Iterator::_fits_right_bound(const rocksdb::Slice& key) {
     //check range end_key
-    rocksdb::Slice key = _iter->key();
     rocksdb::Slice upper(_upper_bound.data().c_str(), _upper_bound.size() - _upper_sufix);
     rocksdb::Slice right_key(_end.data());
     bool fits = false;
@@ -422,35 +411,28 @@ bool Iterator::_fits_right_bound() {
     //DB_WARNING("_fits_right_bound: %d", fits);
     return fits;
 }
-bool Iterator::_fits_prefix(rocksdb::Iterator* iter, int32_t field_id) {
-    MutTableKey  prefix_key;
+bool Iterator::_fits_prefix(const rocksdb::Slice& key, int32_t field_id) {
+    MutTableKey prefix_key;
     prefix_key.append_i64(_region);
-    if (field_id) {
-        prefix_key.append_i32(_index_info->id);
-        prefix_key.append_i32(field_id);
-    } else {
-        prefix_key.append_i64(_index_info->id);
-    }
-    return iter->key().starts_with(prefix_key.data());
-}
-bool Iterator::is_cstore() {
-    if (nullptr == _schema) {
-        DB_WARNING("get schema factory failed");
-        return false;
-     }
-    return _schema->get_table_engine(_pri_info->id) == pb::ROCKSDB_CSTORE;
+    prefix_key.append_i32(_index_info->id);
+    prefix_key.append_i32(field_id);
+    return key.starts_with(prefix_key.data());
 }
 
-int TableIterator::get_next(SmartRecord record) {
+int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row) {
     if (!_valid) {
         return -1;
     }
-    if ((_forward && !_fits_right_bound()) || (!_forward && !_fits_left_bound())) {
+    rocksdb::Slice iter_key = _iter->key();
+    if ((_forward && !_fits_right_bound(iter_key)) || (!_forward && !_fits_left_bound(iter_key))) {
         _valid = false;
         return -1;
     }
-    rocksdb::Slice value_slice = _iter->value();
-    if (_use_ttl && _read_ttl_timestamp_us > 0) {
+    rocksdb::Slice value_slice;
+    if (_use_ttl || _mode != KEY_ONLY) {
+        value_slice = _iter->value();
+    }
+    if (_use_ttl) {
         int64_t row_ttl_timestamp_us = ttl_decode(value_slice);
         if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
             //expired
@@ -466,17 +448,17 @@ int TableIterator::get_next(SmartRecord record) {
     }
     //create a record and parse key and value
     if (VAL_ONLY == _mode || KEY_VAL == _mode) {
-        if (!is_cstore()) {
+        if (!_is_cstore) {
             TupleRecord tuple_record(value_slice);
             // only decode the required field (field_ids stored in fields)
-            if (0 != tuple_record.decode_fields(_fields, record)) {
+            if (0 != tuple_record.decode_fields(_fields, &_field_slot, record, tuple_id, mem_row)) {
                 DB_WARNING("decode value failed: %ld, _use_ttl:%d", _index_info->id, _use_ttl);
                 _valid = false;
                 return -1;
             }
         } else {
             // for cstore, column value may be null.
-            if (0 != get_next_columns(record)) {
+            if (0 != get_next_columns(iter_key, record, tuple_id, mem_row)) {
                 DB_WARNING("get non-pk cloumn value failed table_id: %ld", _index_info->id);
                 _valid = false;
                 return -1;
@@ -485,11 +467,19 @@ int TableIterator::get_next(SmartRecord record) {
     }
     if (KEY_ONLY == _mode || KEY_VAL == _mode) {
         int pos = _prefix_len;
-        TableKey key(_iter->key(), true);
-        if (0 != record->decode_key(*_index_info, key, pos)) {
-            DB_WARNING("decode key failed: %ld", _index_info->id);
-            _valid = false;
-            return -1;
+        TableKey key(iter_key, true);
+        if (record != nullptr) {
+            if (0 != (*record)->decode_key(*_index_info, key, pos)) {
+                DB_WARNING("decode key failed: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            } 
+        } else {
+            if (0 != (*mem_row)->decode_key(tuple_id, *_index_info, _field_slot, key, pos)) {
+                DB_WARNING("decode key failed: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            }
         }
     }
     if (_forward) {
@@ -504,32 +494,39 @@ int TableIterator::get_next(SmartRecord record) {
 }
 
 // for cstore only
-int TableIterator::get_next_columns(SmartRecord record) {
-    if (!_fits_prefix(_iter)) {
-        DB_DEBUG("not match prefix, field_id=%d, key=%s",
-                 0, _iter->key().ToString(true).c_str());
-        return -1;
-    }
-    TableKey primary_key(_iter->key(), true);
-    rocksdb::Slice pk = _iter->key();
+int TableIterator::get_next_columns(const rocksdb::Slice& iter_key, SmartRecord* record, 
+        int32_t tuple_id, std::unique_ptr<MemRow>* mem_row) {
+    TableKey primary_key(iter_key, true);
+    rocksdb::Slice pk = iter_key;
     pk.remove_prefix(_prefix_len);
     int64_t table_id = _pri_info->id;
 
+
     for (size_t i = 0; i < _non_pk_fields.size(); i++) {
         int32_t field_id = _non_pk_fields[i]->id;
-        pb::PrimitiveType field_type = _non_pk_fields[i]->type;
+        int32_t slot_id = _field_slot[field_id];
+        if (slot_id == 0 && record == nullptr) {
+            return -1;
+        }
         rocksdb::Iterator* iter = _column_iters[i];
-        const FieldDescriptor* field = record->get_field_by_tag(field_id);
         // total valid is depend on pk's _iter, column iter's valid is not necessary
         if (!iter->Valid()) {
-            record->set_value(field, _non_pk_fields[i]->default_expr_value);
+            if (record != nullptr) {
+                (*record)->set_default_value(*_non_pk_fields[i]);
+            } else {
+                (*mem_row)->set_value(tuple_id, slot_id, _non_pk_fields[i]->default_expr_value);
+            }
             DB_DEBUG("iter not valid, field_id=%d, pk=%s, default_value=%s",
                      field_id, pk.ToString(true).c_str(),
                      _non_pk_fields[i]->default_value.c_str());
             continue;
         }
-        if (!_fits_prefix(iter, field_id)) {
-            record->set_value(field, _non_pk_fields[i]->default_expr_value);
+        if (!_fits_prefix(iter_key, field_id)) {
+            if (record != nullptr) {
+                (*record)->set_default_value(*_non_pk_fields[i]);
+            } else {
+                (*mem_row)->set_value(tuple_id, slot_id, _non_pk_fields[i]->default_expr_value);
+            }
             DB_DEBUG("not match prefix, field_id=%d, key=%s, default_value=%s",
                      field_id, iter->key().ToString(true).c_str(),
                      _non_pk_fields[i]->default_value.c_str());
@@ -543,15 +540,23 @@ int TableIterator::get_next_columns(SmartRecord record) {
         auto cmp = pk.compare(column_key);
         // when column pure key is equal to pk's pure key, get column value to record.
         if (cmp == 0) {
-            std::string value(iter->value().data_, iter->value().size_);
-            if (0 != record->decode_field(*_non_pk_fields[i], value)) {
-                DB_WARNING("decode value failed: %d", field_id);
-                return -1;
+            if (record != nullptr) {
+                if (0 != (*record)->decode_field(*_non_pk_fields[i], iter->value())) {
+                    DB_WARNING("decode value failed: %d", field_id);
+                    return -1;
+                }
+            } else {
+                if (0 != (*mem_row)->decode_field(tuple_id, slot_id, _non_pk_fields[i]->type, iter->value())) {
+                    DB_WARNING("decode value failed: %d", field_id);
+                    return -1;
+                }
             }
-            DB_DEBUG("key=%s,val=%s", iter->key().ToString(true).c_str(),
-                     record->get_value(field).get_string().c_str());
         } else {
-            record->set_value(field, _non_pk_fields[i]->default_expr_value);
+            if (record != nullptr) {
+                (*record)->set_default_value(*_non_pk_fields[i]);
+            } else {
+                (*mem_row)->set_value(tuple_id, slot_id, _non_pk_fields[i]->default_expr_value);
+            }
             DB_DEBUG("field_id=%d, pk=%s, key=%s, default_value=%s, cmp=%d", field_id,
                             pk.ToString(true).c_str(),
                             column_key.ToString(true).c_str(),
@@ -570,27 +575,22 @@ int TableIterator::get_next_columns(SmartRecord record) {
     return 0;
 }
 
-int IndexIterator::get_next(SmartRecord index) {
+int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row) {
     while (_valid) {
-        if ((_forward && !_fits_right_bound()) || (!_forward && !_fits_left_bound())) {
+        rocksdb::Slice iter_key = _iter->key();
+        if ((_forward && !_fits_right_bound(iter_key)) || (!_forward && !_fits_left_bound(iter_key))) {
             _valid = false;
-            //DB_WARNING("get next, right bound filter, region_id: %ld, index: %s", _region, 
-            //    index->debug_string().c_str());
+            //DB_WARNING("get next, right bound filter, region_id: %ld, record: %s", _region, 
+            //    record->debug_string().c_str());
             return -1;
         }
-        if (!_fits_region()) {
-            if (_forward) {
-                _iter->Next();
-            } else {
-                _iter->Prev();
-            }
-            _valid = _valid && _iter->Valid();
-            //DB_WARNING("get next, fits region filter, region_id: %ld, index: %s", 
-            //    _region, index->debug_string().c_str());
-            continue;
+        rocksdb::Slice iter_value;
+        if (_idx_type == pb::I_UNIQ || _use_ttl) {
+            iter_value = _iter->value();
         }
-        if (_use_ttl && _read_ttl_timestamp_us > 0) {
-            int64_t row_ttl_timestamp_us = ttl_decode(_iter->value());
+        if (_use_ttl) {
+            int64_t row_ttl_timestamp_us = ttl_decode(iter_value);
+            iter_value.remove_prefix(sizeof(uint64_t));
             if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
                 //expired
                 if (_forward) {
@@ -602,37 +602,69 @@ int IndexIterator::get_next(SmartRecord index) {
                 continue;
             }
         }
+        if (!_fits_region(iter_key, iter_value)) {
+            if (_forward) {
+                _iter->Next();
+            } else {
+                _iter->Prev();
+            }
+            _valid = _valid && _iter->Valid();
+            //DB_WARNING("get next, fits region filter, region_id: %ld, record: %s", 
+            //    _region, record->debug_string().c_str());
+            continue;
+        }
         //DB_WARNING("get next, in range, region_id: %ld, ke: %s",
         //    _region, _iter->key().ToString(true).c_str());
-        TableKey key(_iter->key(), true);
-        //create a record and parse index and primary key
-        //index.reset(TableRecord::new_record(_pk_table).get());
+        TableKey key(iter_key, true);
+        //create a record and parse record and primary key
+        //record.reset(TableRecord::new_record(_pk_table).get());
         int pos = 0;
         key.skip_region_prefix(pos);
         key.skip_table_prefix(pos);
-        if (0 != index->decode_key(*_index_info, key, pos)) {
-            DB_WARNING("decode secondary index failed: %ld", _index_info->id);
-            _valid = false;
-            return -1;
+        if (record != nullptr) {
+            if (0 != (*record)->decode_key(*_index_info, key, pos)) {
+                DB_WARNING("decode secondary record failed: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            }
+        } else {
+            if (0 != (*mem_row)->decode_key(tuple_id, *_index_info, _field_slot, key, pos)) {
+                DB_WARNING("decode secondary record failed: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            }
         }
         if (_idx_type == pb::I_UNIQ) {
-            rocksdb::Slice value = _iter->value();
-            if (_use_ttl) {
-                value.remove_prefix(sizeof(uint64_t));
-            }
-            TableKey pkey(value, true);
+            TableKey pkey(iter_value, true);
             pos = 0;
-            if (0 != index->decode_primary_key(*_index_info, pkey, pos)) {
-                DB_WARNING("decode primary index failed: %ld", _index_info->pk);
-                _valid = false;
-                return -1;
+            if (record != nullptr) {
+                if (0 != (*record)->decode_primary_key(*_index_info, pkey, pos)) {
+                    DB_WARNING("decode primary record failed: %ld", _index_info->pk);
+                    _valid = false;
+                    return -1;
+                }
+            } else {
+                if (0 != (*mem_row)->decode_primary_key(tuple_id, *_index_info, _field_slot, pkey, pos)) {
+                    DB_WARNING("decode primary record failed: %ld", _index_info->pk);
+                    _valid = false;
+                    return -1;
+                }
             }
         } else if (_idx_type == pb::I_KEY) {
-            if (0 != index->decode_primary_key(*_index_info, key, pos)) {
-                DB_WARNING("decode primary index failed: %ld, %d, %ld", 
-                    _index_info->pk, pos, _iter->key().size());
-                _valid = false;
-                return -1;
+            if (record != nullptr) {
+                if (0 != (*record)->decode_primary_key(*_index_info, key, pos)) {
+                    DB_WARNING("decode primary record failed: %ld, %d, %ld", 
+                            _index_info->pk, pos, iter_key.size());
+                    _valid = false;
+                    return -1;
+                }
+            } else {
+                if (0 != (*mem_row)->decode_primary_key(tuple_id, *_index_info, _field_slot, key, pos)) {
+                    DB_WARNING("decode primary record failed: %ld, %d, %ld", 
+                            _index_info->pk, pos, iter_key.size());
+                    _valid = false;
+                    return -1;
+                }
             }
         }
         if (_forward) {

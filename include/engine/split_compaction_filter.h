@@ -68,10 +68,6 @@ public:
         if (index_info == nullptr) {
             return false;
         }
-        auto pk_info = _factory->get_index_info_ptr(index_info->pk);
-        if (pk_info == nullptr) {
-            return false;
-        }
 
         //int ret1 = 0;
         int ret2 = 0;
@@ -83,6 +79,10 @@ public:
            //     key.ToString(true).c_str(), ret2);
             return (ret2 <= 0);
         } else if (index_info->type == pb::I_UNIQ || index_info->type == pb::I_KEY) {
+            auto pk_info = _factory->get_index_info_ptr(index_info->pk);
+            if (pk_info == nullptr) {
+                return false;
+            }
             rocksdb::Slice key_slice(key);
             key_slice.remove_prefix(sizeof(int64_t) * 2);
             return !Transaction::fits_region_range(key_slice, value, 

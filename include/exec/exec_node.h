@@ -15,12 +15,12 @@
 #pragma once
 
 #include <vector>
+#include "table_record.h"
 #include "expr_node.h"
 #include "row_batch.h"
 #include "proto/plan.pb.h"
 #include "proto/meta.interface.pb.h"
 #include "mem_row_descriptor.h"
-#include "table_record.h"
 
 namespace baikaldb { 
 #define DB_WARNING_STATE(state, _fmt_, args...) \
@@ -71,6 +71,7 @@ public:
         return 0;
     }
     virtual void close(RuntimeState* state) {
+        _num_rows_returned = 0;
         for (auto e : _children) {
             e->close(state);
         }

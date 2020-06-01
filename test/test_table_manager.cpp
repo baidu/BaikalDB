@@ -20,7 +20,9 @@
 #include "namespace_manager.h"
 #include "database_manager.h"
 #include "meta_rocksdb.h"
-
+namespace baikaldb {
+    DECLARE_string(db_path);
+}
 class TableManagerTest : public testing::Test {
 public:
     ~TableManagerTest() {}
@@ -214,7 +216,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("username");
     index->add_field_names("type");
-    _table_manager->create_table(request_create_table_fc, NULL);
+    _table_manager->create_table(request_create_table_fc, 1, NULL);
     
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
@@ -330,7 +332,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("planname");
     index->add_field_names("type");
-    _table_manager->create_table(request_create_table_fc_level, NULL);
+    _table_manager->create_table(request_create_table_fc_level, 2, NULL);
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
     ASSERT_EQ(4, _table_manager->_max_table_id);
@@ -455,7 +457,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     rename_table_request.mutable_table_info()->set_new_table_name("new_userinfo");
     rename_table_request.mutable_table_info()->set_database("FC_Word");
     rename_table_request.mutable_table_info()->set_namespace_name("FengChao");
-    _table_manager->rename_table(rename_table_request, NULL);
+    _table_manager->rename_table(rename_table_request, 3, NULL);
     ASSERT_EQ(3, _table_manager->_table_info_map[1].schema_pb.version()); 
     for (auto& table_id : _table_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
@@ -504,7 +506,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     update_byte_size_request.mutable_table_info()->set_database("FC_Word");
     update_byte_size_request.mutable_table_info()->set_namespace_name("FengChao");
     update_byte_size_request.mutable_table_info()->set_byte_size_per_record(1000);
-    _table_manager->update_byte_size(update_byte_size_request, NULL);
+    _table_manager->update_byte_size(update_byte_size_request, 4, NULL);
     ASSERT_EQ(4, _table_manager->_table_info_map[1].schema_pb.version());
     for (auto& table_id : _table_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
@@ -556,7 +558,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     add_field_request.mutable_table_info()->set_table_name("new_userinfo");
     add_field_request.mutable_table_info()->set_database("FC_Word");
     add_field_request.mutable_table_info()->set_namespace_name("FengChao");
-    _table_manager->add_field(add_field_request, NULL);
+    _table_manager->add_field(add_field_request, 5, NULL);
     ASSERT_EQ(5, _table_manager->_table_info_map[1].schema_pb.version());
     for (auto& table_id : _table_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
@@ -607,7 +609,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     drop_field_request.mutable_table_info()->set_table_name("new_userinfo");
     drop_field_request.mutable_table_info()->set_database("FC_Word");
     drop_field_request.mutable_table_info()->set_namespace_name("FengChao");
-    _table_manager->drop_field(drop_field_request, NULL);
+    _table_manager->drop_field(drop_field_request, 6, NULL);
     ASSERT_EQ(6, _table_manager->_table_info_map[1].schema_pb.version()); 
     for (auto& table_id : _table_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
@@ -659,7 +661,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     rename_field_request.mutable_table_info()->set_table_name("new_userinfo");
     rename_field_request.mutable_table_info()->set_database("FC_Word");
     rename_field_request.mutable_table_info()->set_namespace_name("FengChao");
-    _table_manager->rename_field(rename_field_request, NULL);
+    _table_manager->rename_field(rename_field_request, 7, NULL);
     ASSERT_EQ(7, _table_manager->_table_info_map[1].schema_pb.version());
     for (auto& table_id : _table_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
@@ -766,7 +768,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     request_drop_level_table_fc.mutable_table_info()->set_table_name("planinfo");
     request_drop_level_table_fc.mutable_table_info()->set_database("FC_Word");
     request_drop_level_table_fc.mutable_table_info()->set_namespace_name("FengChao");
-    _table_manager->drop_table(request_drop_level_table_fc, NULL);
+    _table_manager->drop_table(request_drop_level_table_fc, 8, NULL);
     ASSERT_EQ(8, _table_manager->_table_info_map[1].schema_pb.version());
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
@@ -826,7 +828,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     request_drop_level_table_fc.mutable_table_info()->set_table_name("new_userinfo");
     request_drop_level_table_fc.mutable_table_info()->set_database("FC_Word");
     request_drop_level_table_fc.mutable_table_info()->set_namespace_name("FengChao");
-    _table_manager->drop_table(request_drop_level_table_fc, NULL);
+    _table_manager->drop_table(request_drop_level_table_fc, 9, NULL);
     //测试点：删除database
     request_drop_database.set_op_type(baikaldb::pb::OP_DROP_DATABASE);
     request_drop_database.mutable_database_info()->set_database("FC_Word");
@@ -848,6 +850,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     _schema_manager->load_snapshot();
 } // TEST_F
 int main(int argc, char** argv) {
+    baikaldb::FLAGS_db_path = "table_manager_db";
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

@@ -21,7 +21,6 @@
 #include "join_node.h"
 #include "sort_node.h"
 #include "filter_node.h"
-#include "fetcher_node.h"
 #include "full_export_node.h"
 #include "insert_node.h"
 #include "transaction_node.h"
@@ -33,6 +32,7 @@
 #include "delete_manager_node.h"
 #include "common_manager_node.h"
 #include "select_manager_node.h"
+#include "union_node.h"
 #include "single_txn_manager_node.h"
 #include "lock_primary_node.h"
 #include "lock_secondary_node.h"
@@ -54,8 +54,8 @@ int Separate::analyze(QueryContext* ctx) {
     if (!plan->need_seperate()) {
         return 0;
     }
-    pb::OpType op_type = packet_node->op_type();
     int ret = 0;
+    pb::OpType op_type = packet_node->op_type();
     switch (op_type) {
     case pb::OP_SELECT: {
         ret = separate_select(ctx);
@@ -93,12 +93,31 @@ int Separate::analyze(QueryContext* ctx) {
         ret = separate_rollback(ctx);
         break;
     }
+    case pb::OP_UNION: {
+        ret = separate_union(ctx);
+        break;
+    }
     default: {
         DB_FATAL("invalid op_type, op_type: %s", pb::OpType_Name(op_type).c_str());
         return -1;
     }
     }
     return ret;
+}
+
+int Separate::separate_union(QueryContext* ctx) {
+    ExecNode* plan = ctx->root;
+    UnionNode* union_node = static_cast<UnionNode*>(plan->get_node(pb::UNION_NODE));
+    for (int i = 0; i < ctx->union_select_plans.size(); i++) {
+        auto select_ctx = ctx->union_select_plans[i];
+        ExecNode* select_plan = select_ctx->root;
+        PacketNode* packet_node = static_cast<PacketNode*>(select_plan->get_node(pb::PACKET_NODE));
+        union_node->steal_projections(packet_node->mutable_projections());
+        union_node->add_child(packet_node->children(0));
+        packet_node->clear_children();
+        union_node->mutable_select_runtime_states()->push_back(select_ctx->get_runtime_state().get());
+    }
+    return 0;
 }
 
 int Separate::separate_select(QueryContext* ctx) {
@@ -153,6 +172,14 @@ int Separate::separate_simple_select(QueryContext* ctx) {
     SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
+    SelectManagerNode* manager_node_inter = static_cast<SelectManagerNode*>(plan->get_node(pb::SELECT_MANAGER_NODE));
+    // 复用prepare的计划
+    if (manager_node_inter != nullptr) {
+        std::map<int64_t, pb::RegionInfo> region_infos =
+            static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
+        manager_node_inter->set_region_infos(region_infos);
+        return 0;
+    }
     pb::PlanNode pb_manager_node;
     pb_manager_node.set_node_type(pb::SELECT_MANAGER_NODE);
     pb_manager_node.set_limit(-1);
@@ -233,6 +260,13 @@ int Separate::separate_join(const std::vector<ExecNode*>& scan_nodes) {
                 return -1;
             }
         }
+        // 复用prepare的计划
+        if (manager_node_parent->node_type() == pb::SELECT_MANAGER_NODE) {
+            std::map<int64_t, pb::RegionInfo> region_infos =
+                static_cast<RocksdbScanNode*>(scan_node_ptr)->region_infos();
+            manager_node_parent->set_region_infos(region_infos);
+            continue;
+        }
         pb::PlanNode pb_manager_node;
         pb_manager_node.set_node_type(pb::SELECT_MANAGER_NODE);
         pb_manager_node.set_limit(-1);
@@ -252,6 +286,7 @@ int Separate::separate_insert(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
+    // TODO:复用prepare的计划
 
     pb::PlanNode pb_manager_node;
     pb_manager_node.set_node_type(pb::INSERT_MANAGER_NODE);
@@ -273,7 +308,7 @@ int Separate::separate_insert(QueryContext* ctx) {
     }
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
-    if (ctx->runtime_state.single_sql_autocommit() && 
+    if (ctx->get_runtime_state()->single_sql_autocommit() && 
         (ctx->enable_2pc 
             || SchemaFactory::get_instance()->has_global_index(main_table_id))) {
         separate_single_txn(packet_node);
@@ -305,6 +340,7 @@ int Separate::separate_global_insert(InsertManagerNode* manager_node, InsertNode
         // basic insert
         create_lock_node(table_id, pb::LOCK_DML, 0, manager_node);
     }
+    // 复用
     delete insert_node;
     return 0;
 }
@@ -426,7 +462,7 @@ int Separate::separate_update(QueryContext* ctx) {
     }
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
-    if (ctx->runtime_state.single_sql_autocommit() && 
+    if (ctx->get_runtime_state()->single_sql_autocommit() && 
         (ctx->enable_2pc || SchemaFactory::get_instance()->has_global_index(main_table_id))) {
         separate_single_txn(packet_node);
     }
@@ -458,7 +494,7 @@ int Separate::separate_delete(QueryContext* ctx) {
     }
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
-    if (ctx->runtime_state.single_sql_autocommit() &&
+    if (ctx->get_runtime_state()->single_sql_autocommit() &&
         (ctx->enable_2pc || SchemaFactory::get_instance()->has_global_index(main_table_id))) {
         separate_single_txn(packet_node);
     }

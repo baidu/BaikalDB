@@ -1,3 +1,7 @@
+#load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_repository")
+#load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+
 http_archive(
   name = "com_google_googletest",
   strip_prefix = "googletest-0fe96607d85cf3a25ac40da369db62bbee2939a5",
@@ -10,14 +14,26 @@ bind(
 )
 
 http_archive(
-  name = "com_google_protobuf",
-  strip_prefix = "protobuf-ab8edf1dbe2237b4717869eaab11a2998541ad8d",
-  url = "https://github.com/google/protobuf/archive/ab8edf1dbe2237b4717869eaab11a2998541ad8d.tar.gz",
+    name = "com_google_protobuf",
+    strip_prefix = "protobuf-ab8edf1dbe2237b4717869eaab11a2998541ad8d",
+    url = "https://github.com/google/protobuf/archive/ab8edf1dbe2237b4717869eaab11a2998541ad8d.tar.gz",
 )
 
 bind(
     name = "protobuf",
     actual = "@com_google_protobuf//:protobuf",
+)
+
+new_http_archive(
+    name = "com_github_apache_arrow",
+    build_file = "third-party/com_github_apache_arrow/BUILD",
+    strip_prefix = "arrow-apache-arrow-0.17.1",
+    url = "https://github.com/apache/arrow/archive/apache-arrow-0.17.1.tar.gz",
+)
+
+bind(
+    name = "arrow",
+    actual = "@com_github_apache_arrow//:arrow",
 )
 
 http_archive(
@@ -61,11 +77,11 @@ load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
 boost_deps()
 
 # from https://github.com/envoyproxy/envoy/blob/master/bazel/repositories.bzl
-new_git_repository(
+new_http_archive(
     name = "com_github_tencent_rapidjson",
-    remote= "https://github.com/Tencent/rapidjson.git",
+    url = "https://github.com/Tencent/rapidjson/archive/v1.1.0.tar.gz",
+    strip_prefix = "rapidjson-1.1.0",
     build_file = "third-party/rapidjson.BUILD",
-    tag = "v1.1.0",
 )
 
 bind(
@@ -73,12 +89,11 @@ bind(
     actual = "@com_github_tencent_rapidjson//:rapidjson",
 )
 
-new_git_repository(
+new_http_archive(
     name = "com_github_facebook_rocksdb",
-    remote = "https://github.com/facebook/rocksdb.git",
-    #sha256 = "6e8d0844adc37da331844ac4b21ae33ba1f5265d8914c745760d9209a57e9cc9",
+    url = "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz",
+    strip_prefix = "rocksdb-6.8.1",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
-    tag = "v5.12.4"
 )
 
 bind(
@@ -120,14 +135,14 @@ bind(
 )
 
 git_repository(
-    name = "com_github_baidu_braft",
+    name = "com_github_brpc_braft",
     remote = "https://github.com/baidu/braft.git",
     tag = "v1.0.2",
 )
 
 bind(
     name = "braft",
-    actual = "@com_github_baidu_braft//:braft",
+    actual = "@com_github_brpc_braft//:braft",
 )
 
 git_repository(

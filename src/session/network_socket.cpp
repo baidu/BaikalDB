@@ -111,9 +111,6 @@ NetworkSocket::~NetworkSocket() {
     for (auto& pair : cache_plans) {
         delete pair.second.root;
     }
-    for (auto& pair : prepared_plans) {
-        delete pair.second;
-    }
     bthread_mutex_destroy(&region_lock);
 }
 
@@ -133,9 +130,11 @@ bool NetworkSocket::transaction_has_write() {
 
 void NetworkSocket::on_begin(uint64_t txn_id) {
     this->txn_id = txn_id;
+    this->primary_region_id = -1;
 }
 
 void NetworkSocket::on_commit_rollback() {
+    update_old_txn_info();
     txn_id = 0;
     new_txn_id = 0;
     seq_id = 0;
@@ -146,6 +145,14 @@ void NetworkSocket::on_commit_rollback() {
     }
     cache_plans.clear();
     region_infos.clear();
+}
+
+void NetworkSocket::update_old_txn_info() {
+    // for print log
+    if (query_ctx->stat_info.old_txn_id == 0) {
+        query_ctx->stat_info.old_txn_id = txn_id;
+        query_ctx->stat_info.old_seq_id = seq_id;
+    }
 }
 
 bool NetworkSocket::reset_when_err() {
