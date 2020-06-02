@@ -155,6 +155,8 @@ public:
             const FieldInfo& field_info,
             int& pos) const;
 
+    int skip_field(const FieldInfo& field_info, int& pos) const;
+
 private:
     bool             _full;  //full key or just a prefix
     rocksdb::Slice   _data;

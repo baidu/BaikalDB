@@ -144,4 +144,60 @@ int TableKey::decode_field(Message* message,
     return 0;
 }
 
+//TODO: secondary key
+int TableKey::skip_field(const FieldInfo& field_info, int& pos) const {
+    switch (field_info.type) {
+        case pb::INT8: {
+            pos += sizeof(int8_t);
+        } break;
+        case pb::INT16: {
+            pos += sizeof(int16_t);
+        } break;
+        case pb::TIME:
+        case pb::INT32: {
+            pos += sizeof(int32_t);
+        } break;
+        case pb::INT64: {
+            pos += sizeof(int64_t);
+        } break;
+        case pb::UINT8: {
+            pos += sizeof(uint8_t);
+        } break;
+        case pb::UINT16: {
+            pos += sizeof(uint16_t);
+        } break;
+        case pb::TIMESTAMP:
+        case pb::DATE:
+        case pb::UINT32: {
+            pos += sizeof(uint32_t);
+        } break;
+        case pb::DATETIME:
+        case pb::UINT64: {
+            pos += sizeof(uint64_t);
+        } break;
+        case pb::FLOAT: {
+            pos += sizeof(float);
+        } break;
+        case pb::DOUBLE: {
+            pos += sizeof(double);
+        } break;
+        case pb::BOOL: {
+            pos += sizeof(uint8_t);
+        } break;
+        case pb::STRING: {
+            //TODO no string pk-field is supported
+            if (pos >= (int)size()) {
+                DB_WARNING("string pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
+            pos += (strlen(_data.data_) + 1);
+        } break;
+        default: {
+            DB_WARNING("un-supported field type: %d", field_info.type);
+            return -1;
+        } break;
+    }
+    return 0;
+}
+
 } // end of namespace baikaldb

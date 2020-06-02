@@ -173,6 +173,10 @@ struct AvgIntermediate {
 };
 
 bool AggFnCall::is_initialize(MemRow* dst) {
+    if (_is_distinct) {
+        return false;
+    }
+
     if (dst->get_value(_tuple_id, _intermediate_slot_id).is_null()) {
         return true;
     }

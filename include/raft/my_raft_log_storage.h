@@ -97,10 +97,7 @@ public:
 
     // append entries to log, return append success number
     int append_entries(const std::vector<braft::LogEntry*>& entries 
-#ifdef BAIDU_INTERNAL
-            , braft::IOMetric* metric
-#endif
-            ) override;
+            , braft::IOMetric* metric) override;
 
     // delete logs from storage's head, [first_log_index, first_index_kept) will be discarded
     int truncate_prefix(const int64_t first_index_kept) override;

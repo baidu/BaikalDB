@@ -66,7 +66,6 @@ public:
 
     // set term and peer_id
     virtual int set_term_and_votedfor(const int64_t term, const braft::PeerId& peer_id);
-#ifdef BAIDU_INTERNAL
     // init stable storage
     virtual butil::Status init();
     // set term and votedfor information
@@ -75,10 +74,6 @@ public:
     // get term and votedfor information
     virtual butil::Status get_term_and_votedfor(int64_t* term, braft::PeerId* peer_id, 
                                                    const braft::VersionedGroupId& group);
-#else
-    // init stable storage, check consistency and integrity
-    virtual int init();
-#endif
 
     RaftMetaStorage* new_instance(const std::string& uri) const override;
 

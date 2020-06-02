@@ -26,6 +26,7 @@ inline const google::protobuf::FieldDescriptor* get_field(
     } else {
         int32_t slot = (*field_slot)[field_info->id];
         if (slot == 0) {
+            DB_FATAL("field:%d, slot is 0, can't be here", field_info->id);
             return nullptr;
         }
         return (*mem_row)->get_field_by_slot(tuple_id, slot);
