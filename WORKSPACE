@@ -148,7 +148,7 @@ bind(
 git_repository(
     name = "com_github_brpc_brpc",
     remote= "https://github.com/apache/incubator-brpc.git",
-    tag = "0.9.7-rc01",
+    tag = "0.9.7",
 )
 
 bind(
