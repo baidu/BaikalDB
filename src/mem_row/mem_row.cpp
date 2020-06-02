@@ -80,22 +80,27 @@ int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
         pos += sizeof(uint8_t);
     }
     for (uint32_t idx = 0; idx < index.fields.size(); ++idx) {
-        int32_t slot = field_slot[index.fields[idx].id];
-        //说明不需要解析
-        if (slot == 0) {
-            continue;
-        }
-        const FieldDescriptor* field = descriptor->field(slot - 1);
-        if (field == nullptr) {
-            DB_WARNING("invalid field: %d slot: %d", index.fields[idx].id, slot);
-            return -1;
-        }
         // DB_WARNING("null_flag: %ld, %u, %d, %d, %s", 
         //     index.id, null_flag, pos, index.fields[idx].can_null, 
         //     key.data().ToString(true).c_str());
         if (((null_flag >> (7 - idx)) & 0x01) && index.fields[idx].can_null) {
             //DB_DEBUG("field is null: %d", idx);
             continue;
+        }
+        int32_t slot = field_slot[index.fields[idx].id];
+        //说明不需要解析
+        //pos需要更新，容易出bug
+        if (slot == 0) {
+            if (0 != key.skip_field(index.fields[idx], pos)) {
+                DB_WARNING("skip index field error");
+                return -1;
+            }
+            continue;
+        }
+        const FieldDescriptor* field = descriptor->field(slot - 1);
+        if (field == nullptr) {
+            DB_WARNING("invalid field: %d slot: %d", index.fields[idx].id, slot);
+            return -1;
         }
         if (0 != key.decode_field(tuple, reflection, field, index.fields[idx], pos)) {
             DB_WARNING("decode index field error");
@@ -121,7 +126,12 @@ int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<i
     for (uint32_t idx = 0; idx < index.pk_fields.size(); ++idx) {
         int32_t slot = field_slot[index.pk_fields[idx].id];
         //说明不需要解析
+        //pos需要更新，容易出bug
         if (slot == 0) {
+            if (0 != key.skip_field(index.fields[idx], pos)) {
+                DB_WARNING("skip index field error");
+                return -1;
+            }
             continue;
         }
         const FieldDescriptor* field = descriptor->field(slot - 1);
