@@ -42,7 +42,7 @@ int AggFnCall::init(const pb::ExprNode& node) {
     _tuple_id = node.derive_node().tuple_id();
     _final_slot_id = node.derive_node().slot_id();
     _intermediate_slot_id = node.derive_node().intermediate_slot_id();
-    _slot_id = _intermediate_slot_id;
+    _slot_id = _final_slot_id;
     if (name_type_map.count(_fn.name())) {
         _agg_type = name_type_map[_fn.name()];
     } else {

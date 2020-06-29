@@ -15,9 +15,9 @@
 #pragma once
 
 #include <set>
-#include <boost/regex.hpp>
 #include "expr_value.h"
 #include "scalar_fn_call.h"
+#include "re2/re2.h"
 
 namespace baikaldb {
 class NotPredicate : public ScalarFnCall {
@@ -134,7 +134,7 @@ public:
     virtual ExprValue get_value(MemRow* row);
 
 private:
-    boost::regex _regex;
+    std::unique_ptr<re2::RE2> _regex_ptr;
     std::string _regex_pattern;
     char _escape_char = '\\';
 };

@@ -144,10 +144,16 @@ enum SegmentType {
     S_WORDRANK_Q2B_ICASE = 7;// 转小写，全角转半角后wordrank切词
 };  
 
+// 普通索引，默认的格式是format1
+// 倒排索引，默认的格式protobuf
+// 为了兼容默认格式复用enum 0值
+// arrow格式倒排性能更好
+// format2格式普通索引为了解决索引字段有null不准确的问题
 enum StorageType {
-    ST_PROTOBUF = 0;
+    ST_PROTOBUF_OR_FORMAT1 = 0;
     ST_ARROW = 1;
-    ST_UNKNOWN = 2;
+    ST_FORMAT2 = 2;
+    ST_UNKNOWN = 3;
 };
 
 message IndexInfo {

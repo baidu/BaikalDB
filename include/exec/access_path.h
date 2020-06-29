@@ -89,6 +89,7 @@ enum IndexHint {
     
     double calc_field_selectivity(int32_t field_id, range::FieldRange& range);
 
+    double fields_to_selectivity(const std::unordered_set<int32_t>& field_ids);
     // TODO 后续做成index的统计信息，现在只是单列统计聚合
     void calc_cost();
 
@@ -101,8 +102,10 @@ enum IndexHint {
                 if (all_in_index(expr_field_ids, cover_field_ids) && index_type != pb::I_PRIMARY) {
                     index_other_condition.insert(expr);
                     ExprNode::create_pb_expr(pos_index.add_index_conjuncts(), expr);
+                    index_other_field_ids.insert(expr_field_ids.begin(), expr_field_ids.end());
                 } else {
                     other_condition.insert(expr);
+                    other_field_ids.insert(expr_field_ids.begin(), expr_field_ids.end());
                 }
             }
         }
@@ -128,7 +131,6 @@ enum IndexHint {
     
 public:
     //TODO 先mock一个，后面从schema读取
-    static const int64_t TOTAL_ROWS = 1000000;
     static const int64_t INDEX_SEEK_FACTOR = 1;
     static const int64_t TABLE_GET_FACTOR = 5;
     pb::IndexType index_type = pb::I_NONE;
@@ -141,6 +143,8 @@ public:
     std::unordered_set<int32_t> index_field_ids;
     std::unordered_set<int32_t> cover_field_ids;
     std::unordered_set<int32_t> hit_index_field_ids;
+    std::unordered_set<int32_t> index_other_field_ids;
+    std::unordered_set<int32_t> other_field_ids;
     // 不分配内存，只获取filter节点的指针
     // 这些set是互斥的
     std::unordered_set<ExprNode*> need_cut_index_range_condition;
@@ -148,7 +152,7 @@ public:
     std::unordered_set<ExprNode*> other_condition;
     std::map<int32_t, range::FieldRange> field_range_map;
     int64_t index_read_rows = 0;
-    int64_t table_read_rows = 0;
+    int64_t table_get_rows = 0;
     double cost = 0.0;
     pb::PossibleIndex pos_index;
     int  eq_count = 0;

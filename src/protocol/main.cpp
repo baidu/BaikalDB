@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string>
 #include <gflags/gflags.h>
+//#include <gperftools/malloc_extension.h>
 #include "common.h"
 #include "network_server.h"
 #include "fn_manager.h"
@@ -46,7 +47,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "log init failed.");
         return -1;
     }
-    DB_WARNING("log file load success");
+//    DB_WARNING("log file load success; GetMemoryReleaseRate:%f", 
+//            MallocExtension::instance()->GetMemoryReleaseRate());
 
     // init singleton
     baikaldb::FunctionManager::instance()->init();

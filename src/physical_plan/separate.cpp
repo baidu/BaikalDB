@@ -115,6 +115,7 @@ int Separate::separate_union(QueryContext* ctx) {
         union_node->steal_projections(packet_node->mutable_projections());
         union_node->add_child(packet_node->children(0));
         packet_node->clear_children();
+        select_ctx->get_runtime_state()->init(select_ctx.get(), nullptr);
         union_node->mutable_select_runtime_states()->push_back(select_ctx->get_runtime_state().get());
     }
     return 0;

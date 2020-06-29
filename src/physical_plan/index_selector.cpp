@@ -18,6 +18,7 @@
 #include "predicate.h"
 #include "join_node.h"
 #include "agg_node.h"
+#include "limit_node.h"
 #include "parser.h"
 
 namespace baikaldb {
@@ -29,9 +30,14 @@ int IndexSelector::analyze(QueryContext* ctx) {
     if (scan_nodes.size() == 0) {
         return 0;
     }
+    LimitNode* limit_node = static_cast<LimitNode*>(root->get_node(pb::LIMIT_NODE));
     AggNode* agg_node = static_cast<AggNode*>(root->get_node(pb::AGG_NODE));
     SortNode* sort_node = static_cast<SortNode*>(root->get_node(pb::SORT_NODE));
     JoinNode* join_node = static_cast<JoinNode*>(root->get_node(pb::JOIN_NODE));
+    // TODO sort可以增加topN
+    if (limit_node != nullptr && sort_node != nullptr) {
+        sort_node->set_limit(limit_node->other_limit());
+    }
     for (auto& scan_node_ptr : scan_nodes) {
         ExecNode* parent_node_ptr = scan_node_ptr->get_parent();
         if (parent_node_ptr == NULL) {

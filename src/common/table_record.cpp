@@ -153,7 +153,7 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
         key.append_u8(null_flag);
     }
     uint32_t col_cnt = (field_cnt == -1)? index.fields.size() : field_cnt;
-    if (col_cnt > index.fields.size() || col_cnt > 8) {
+    if (col_cnt > index.fields.size() || (index.has_nullable && col_cnt > 8)) {
         DB_WARNING("field_cnt out of bound: %ld, %d, %lu", 
             index.id, col_cnt, index.fields.size());
         return -1;
@@ -289,15 +289,15 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
         return -1;
     }
     const Reflection* _reflection = _message->GetReflection();
-    for (uint32_t idx = 0; idx < index.pk_fields.size(); ++idx) {
-        const FieldDescriptor* field = get_field_by_idx(index.pk_fields[idx].pb_idx);
+    for (auto& field_info : index.pk_fields) {
+        const FieldDescriptor* field = get_field_by_idx(field_info.pb_idx);
         if (field == nullptr) {
-            DB_WARNING("invalid field: %d", index.pk_fields[idx].id);
+            DB_WARNING("invalid field: %d", field_info.id);
             return -1;
         }
-        if (0 != key.decode_field(_message, _reflection, field, index.pk_fields[idx], pos)) {
+        if (0 != key.decode_field(_message, _reflection, field, field_info, pos)) {
             DB_WARNING("decode index field error: field_id: %d, type: %d", 
-                index.pk_fields[idx].id, index.pk_fields[idx].type);
+                field_info.id, field_info.type);
             return -1;
         }
     }

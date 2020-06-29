@@ -103,6 +103,15 @@ int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
                 DB_WARNING("slot_idx:%d < slot_size:%d", slot_idx, tuple_desc->slots_size());
             }
         }
+        if (tuple_desc != nullptr && expr->node_type() == pb::SLOT_REF) {
+            for (int i = 0; i < tuple_desc->slots_size(); i++) {
+                auto& slot = tuple_desc->slots(i);
+                if (slot.slot_id() == expr->slot_id()) {
+                    expr->set_col_type(slot.slot_type());
+                    _slot_order_exprs[idx]->set_col_type(expr->col_type());
+                }
+            }
+        }
         idx++;
     }
     for (auto expr : _slot_order_exprs) {

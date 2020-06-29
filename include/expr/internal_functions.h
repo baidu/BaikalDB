@@ -97,6 +97,10 @@ ExprValue case_expr_when(const std::vector<ExprValue>& input);
 ExprValue if_(const std::vector<ExprValue>& input);
 // MurmurHash sign
 ExprValue murmur_hash(const std::vector<ExprValue>& input);
+//  Encryption and Compression Functions
+ExprValue md5(const std::vector<ExprValue>& input);
+ExprValue sha1(const std::vector<ExprValue>& input);
+ExprValue sha(const std::vector<ExprValue>& input);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

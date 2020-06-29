@@ -118,20 +118,27 @@ int create_table(const std::string& namespace_name,
         add_field->clear_new_field_name();
         add_field->clear_field_id();
     }
+    auto add_index = create_table_request.mutable_table_info()->add_indexs();
+    add_index->set_index_name("PRIMARY");
+    add_index->set_index_type(pb::I_PRIMARY);
+    add_index->add_field_names("userid");
+    add_index->add_field_names("optlevel");
+    add_index->add_field_names("opttime");
+    add_index->add_field_names("id");
     std::map<int64_t, std::string> index_name_ids;
-    for (auto& index_info : schema_info.indexs()) {
-        index_name_ids[index_info.index_id()] = index_info.index_name(); 
-        auto add_index = create_table_request.mutable_table_info()->add_indexs();
-        *add_index = index_info;
-        add_index->clear_new_index_name();
-        add_index->clear_field_ids();
-        add_index->clear_index_id();
-        /*
-        if (add_index->index_type() == pb::I_FULLTEXT) {
-            add_index->set_segment_type(pb::S_UNIGRAMS);
-        }
-        */
-    }
+    //for (auto& index_info : schema_info.indexs()) {
+    //    index_name_ids[index_info.index_id()] = index_info.index_name(); 
+    //    auto add_index = create_table_request.mutable_table_info()->add_indexs();
+    //    *add_index = index_info;
+    //    add_index->clear_new_index_name();
+    //    add_index->clear_field_ids();
+    //    add_index->clear_index_id();
+    //    /*
+    //    if (add_index->index_type() == pb::I_FULLTEXT) {
+    //        add_index->set_segment_type(pb::S_UNIGRAMS);
+    //    }
+    //    */
+    //}
 
     for (auto& dist : schema_info.dists()) {
         auto add_dist = create_table_request.mutable_table_info()->add_dists();

@@ -64,10 +64,6 @@ public:
             pb_fetcher->add_is_null_first(is_null_first);
         }
     }
-    
-    std::vector<ExprNode*>& slot_order_exprs() {
-        return _slot_order_exprs;
-    }
 
     Property sort_property() {
         if (_monotonic) {
@@ -93,10 +89,6 @@ public:
         if (output.back()["sort_index"] != "1") {
             output.back()["Extra"] += "Using filesort";
         }
-    }
-
-    std::vector<ExprNode*>& order_exprs() {
-        return _order_exprs;
     }
 
 private:

@@ -307,6 +307,9 @@ int PacketNode::open_trace(RuntimeState* state) {
     int ret = 0;
 
     do {
+        if (_children.empty()) {
+            break;
+        }
         RowBatch batch;
         ret = _children[0]->get_next(state, &batch, &eos);
         if (ret < 0) {
@@ -423,6 +426,9 @@ int PacketNode::open_analyze(RuntimeState* state) {
     int rows = 0;
     std::vector<std::shared_ptr<RowBatch> > batch_vector;
     do {
+        if (_children.empty()) {
+            break;
+        }
         std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
         ret = _children[0]->get_next(state, batch.get(), &eos);
         if (ret < 0) {

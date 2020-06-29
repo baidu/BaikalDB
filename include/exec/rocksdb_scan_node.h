@@ -87,7 +87,7 @@ private:
     int select_index_for_store();
 
     int multi_get_next(pb::StorageType st, SmartRecord record) {
-        if (st == pb::ST_PROTOBUF) {
+        if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
             return _m_index.get_next(record);
         } else if (st == pb::ST_ARROW) {
             return _m_arrow_index.get_next(record);
@@ -95,7 +95,7 @@ private:
         return -1;
     }
     bool multi_valid(pb::StorageType st) {
-        if (st == pb::ST_PROTOBUF) {
+        if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
             return _m_index.valid();
         } else if (st == pb::ST_ARROW) {
             return _m_arrow_index.valid();

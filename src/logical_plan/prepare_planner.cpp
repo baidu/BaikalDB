@@ -223,16 +223,14 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
         return -1;
     }
     auto& tuple_descs = prepare_ctx->tuple_descs();
-    // enable_2pc=true or table has global index need generate txn_id
-    if (!prepare_ctx->is_select) {
-        set_dml_txn_state(prepare_ctx->prepared_table_id);
-    }
     // ttl沿用prepare的注释
     DB_DEBUG("row_ttl_duration %ld", prepare_ctx->row_ttl_duration);
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
     _ctx->mutable_tuple_descs()->assign(tuple_descs.begin(), tuple_descs.end());
     // TODO dml的plan复用
     if (!prepare_ctx->is_select) {
+        // enable_2pc=true or table has global index need generate txn_id
+        set_dml_txn_state(prepare_ctx->prepared_table_id);
         _ctx->plan.CopyFrom(prepare_ctx->plan);
         int ret = _ctx->create_plan_tree();
         if (ret < 0) {
@@ -241,6 +239,11 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
         }
         _ctx->root->find_place_holder(_ctx->placeholders);
     } else {
+        if (client->txn_id == 0) {
+            prepare_ctx->get_runtime_state()->set_single_sql_autocommit(true);
+        } else {
+            prepare_ctx->get_runtime_state()->set_single_sql_autocommit(false);
+        }
         // select prepare plan复用
         _ctx->runtime_state = prepare_ctx->runtime_state;
         _ctx->root = prepare_ctx->root;

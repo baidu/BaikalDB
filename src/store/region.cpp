@@ -163,7 +163,7 @@ int Region::init(bool new_region, int32_t snapshot_times) {
 #endif
                     }
 
-                    if (info.storage_type == pb::ST_PROTOBUF) {
+                    if (info.storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
                         DB_NOTICE("create pb schema.");
                         _reverse_index_map[index_id] = new ReverseIndex<CommonSchema>(
                             _region_id, 
@@ -642,8 +642,8 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
     //if (txn_info.start_seq_id() > last_seq + 1) {
     if (last_seq == 0 && txn_info.start_seq_id() > last_seq + 1) {
         char errmsg[100];
-        snprintf(errmsg, sizeof(errmsg), "region_id: %ld, txn_id: %lu, txn_last_seq: %d, request_start_seq: %d", 
-            _region_id, txn_id, last_seq, txn_info.start_seq_id());
+        snprintf(errmsg, sizeof(errmsg), "region_id: %ld, txn_id: %lu, txn_last_seq: %d, request_start_seq: %d remote_side: %s", 
+            _region_id, txn_id, last_seq, txn_info.start_seq_id(), remote_side);
         //DB_WARNING("%s", errmsg);
         response->set_errcode(pb::TXN_FOLLOW_UP);
         response->set_last_seq_id(last_seq);
@@ -668,7 +668,8 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
         ret = execute_cached_cmd(*request, *response, txn_id, txn, 0, 0, log_id);
         if (ret != 0) {
             apply_success = false;
-            DB_FATAL("execute cached failed, region_id: %ld, txn_id: %lu", _region_id, txn_id);
+            DB_FATAL("execute cached failed, region_id: %ld, txn_id: %lu log_id: %lu remote_side: %s",
+                _region_id, txn_id, log_id, remote_side);
             return;
         }
     }
@@ -700,8 +701,8 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
         case pb::OP_ROLLBACK:
         case pb::OP_COMMIT: {
             if (_split_param.split_slow_down) {
-                DB_WARNING("region is spliting, slow down time:%ld, region_id: %ld, log_id:%lu remote_side: %s",
-                            _split_param.split_slow_down_cost, _region_id, log_id, remote_side);
+                DB_WARNING("region is spliting, slow down time:%ld, region_id: %ld, txn_id: %lu:%d log_id:%lu remote_side: %s",
+                            _split_param.split_slow_down_cost, _region_id, txn_id, seq_id, log_id, remote_side);
                 bthread_usleep(_split_param.split_slow_down_cost);
             }
             //TODO
@@ -715,7 +716,8 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
                 apply_success = false;
                 response->set_errcode(pb::DISABLE_WRITE_TIMEOUT);
                 response->set_errmsg("_disable_write_cond wait timeout");
-                DB_FATAL("_disable_write_cond wait timeout, ret:%d, region_id: %ld", ret, _region_id);
+                DB_FATAL("_disable_write_cond wait timeout, ret:%d, region_id: %ld txn_id: %lu:%d log_id:%lu remote_side: %s",
+                    ret, _region_id, txn_id, seq_id, log_id, remote_side);
                 return;
             }
 
@@ -725,8 +727,8 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
                 response->set_errcode(pb::NOT_LEADER);
                 response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str());
                 response->set_errmsg("not leader");
-                DB_WARNING("not leader old version, leader:%s, region_id: %ld, log_id:%lu",
-                        butil::endpoint2str(_node.leader_id().addr).c_str(), _region_id, log_id);
+                DB_WARNING("not leader old version, leader:%s, region_id: %ld, txn_id: %lu:%d log_id:%lu remote_side: %s",
+                        butil::endpoint2str(_node.leader_id().addr).c_str(), _region_id, txn_id, seq_id, log_id, remote_side);
                 return;
             }
             if (validate_version(request, response) == false) {
@@ -740,7 +742,8 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
                 dml(*request, *response, (int64_t)0, (int64_t)0, true);
                 if (response->errcode() != pb::SUCCESS) {
                     apply_success = false;
-                    DB_FATAL("dml exec failed, region_id: %ld", _region_id);
+                    DB_WARNING("dml exec failed, region_id: %ld txn_id: %lu:%d log_id:%lu remote_side: %s",
+                        _region_id, txn_id, seq_id, log_id, remote_side);
                     return;
                 }
             }
@@ -860,13 +863,13 @@ void Region::exec_out_txn_query(google::protobuf::RpcController* controller,
                     return;
                 }
                 DMLClosure* c = new DMLClosure;
-                c->cost.reset();
                 c->op_type = op_type;
                 c->cntl = cntl;
                 c->response = response;
-                c->done = done_guard.release();
                 c->region = this;
                 c->remote_side = remote_side;
+                c->cost.reset();
+                c->done = done_guard.release();
                 braft::Task task;
                 task.data = &data;
                 task.done = c;
@@ -1542,12 +1545,12 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
             return;
         }
         // rollback if not commit succ
-        if (false == commit_succ) {
+        if (!commit_succ) {
             state.txn()->rollback();
         }
         // if txn in pool (new_txn == false), remove it from pool
         // else directly delete it
-        if (false == is_new_txn) {
+        if (!is_new_txn) {
             _txn_pool.remove_txn(state.txn_id);
         }
     });
@@ -1856,7 +1859,6 @@ void Region::select(const pb::StoreReq& request,
         BAIDU_SCOPED_LOCK(_reverse_index_map_lock);
         state.set_reverse_index_map(_reverse_index_map);
     }
-    MemRowDescriptor* mem_row_desc = state.mem_row_desc();
     ExecNode* root = nullptr; 
     ret = ExecNode::create_tree(plan, &root);
     if (ret < 0) {
@@ -2214,7 +2216,7 @@ void Region::on_apply(braft::Iterator& iter) {
                     break;
                 }
                 dml_1pc(request, request.op_type(), request.plan(), request.tuples(), 
-                    res, iter.index(), iter.term());
+                        res, iter.index(), iter.term());
                 if (done) {
                     ((DMLClosure*)done)->response->set_errcode(res.errcode());
                     if (res.has_errmsg()) {
@@ -4324,18 +4326,30 @@ void Region::send_log_entry_to_new_region_for_split() {
                 start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
                 return;
             }
-            
-            int ret = RpcSender::send_query_method(request,
-                                                  _split_param.instance, 
-                                                  _split_param.new_region_id);
-            if (ret < 0) {
-                DB_FATAL("new region request fail, send log entry fail before not allow write,"
-                         " region_id: %ld, new_region_id:%ld, instance:%s",
-                        _region_id, _split_param.new_region_id, 
-                        _split_param.instance.c_str());
-                start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
-                return;
-            }
+            int retry_time = 0;
+            do {
+                pb::StoreRes response;
+                int ret = RpcSender::send_query_method(request,
+                                                       response,
+                                                       _split_param.instance, 
+                                                       _split_param.new_region_id);
+                if (ret < 0) {
+                    ++retry_time;
+                    if (response.errcode() == pb::TXN_FOLLOW_UP) {
+                        pb::TransactionInfo* txn_info = request.mutable_txn_infos(0);
+                        txn_info->set_start_seq_id(1);
+                    } else {
+                        DB_FATAL("new region request fail, send log entry fail before not allow write,"
+                            " region_id: %ld, new_region_id:%ld, instance:%s",
+                            _region_id, _split_param.new_region_id, 
+                            _split_param.instance.c_str());
+                        start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
+                        return;
+                    }
+                } else {
+                    break;
+                }
+            } while (retry_time < 3);
         }
         int64_t tm = time_cost_one_pass.get_time();
         int64_t qps_send_log_entry = 1;
@@ -4391,6 +4405,7 @@ void Region::send_log_entry_to_new_region_for_split() {
         if (ret < 0) {
             DB_FATAL("get log split fail when region split, region_id: %ld, new_region_id: %ld",
                     _region_id, _split_param.new_region_id);
+            start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
             return;
         }
         if (ret == 0) {
@@ -4405,16 +4420,33 @@ void Region::send_log_entry_to_new_region_for_split() {
                         " region_id: %ld, new_region_id:%ld, instance:%s",
                         _region_id, _split_param.new_region_id,
                         _split_param.instance.c_str());
+                start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
                 return;
             }
-            int ret = RpcSender::send_query_method(request, 
-                    _split_param.instance,  
-                    _split_param.new_region_id);
-            if (ret < 0) {
-                DB_FATAL("new region request fail, send log entry fail, region_id: %ld, new_region_id:%ld, instance:%s",
-                        _region_id, _split_param.new_region_id, _split_param.instance.c_str());
-                return;
-            }
+            int retry_time = 0;
+            do {
+                pb::StoreRes response;
+                int ret = RpcSender::send_query_method(request,
+                                                       response,
+                                                       _split_param.instance, 
+                                                       _split_param.new_region_id);
+                if (ret < 0) {
+                    ++retry_time;
+                    if (response.errcode() == pb::TXN_FOLLOW_UP) {
+                        pb::TransactionInfo* txn_info = request.mutable_txn_infos(0);
+                        txn_info->set_start_seq_id(1);
+                    } else {
+                        DB_FATAL("new region request fail, send log entry fail before not allow write,"
+                            " region_id: %ld, new_region_id:%ld, instance:%s",
+                            _region_id, _split_param.new_region_id, 
+                            _split_param.instance.c_str());
+                        start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
+                        return;
+                    }
+                } else {
+                    break;
+                }
+            } while (retry_time < 3);
         }
         start_index = _split_param.split_end_index + 1;
         DB_WARNING("region split single when send second log entry to new region,"
@@ -4937,7 +4969,7 @@ int Region::add_reverse_index() {
 
         DB_NOTICE("region_%lld index[%lld] type[FULLTEXT] add reverse_index", _region_id, index_id);
         
-        if (index.storage_type == pb::ST_PROTOBUF) {
+        if (index.storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
             DB_WARNING("create pb schema region_%lld index[%lld]", _region_id, index_id);
             _reverse_index_map[index.id] = new ReverseIndex<CommonSchema>(
                     _region_id, 

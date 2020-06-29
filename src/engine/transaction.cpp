@@ -20,11 +20,14 @@
 
 namespace baikaldb {
 DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raft log");
+DECLARE_int32(rocks_transaction_lock_timeout_ms);
 // DEFINE_int32(rocks_transaction_expiration_ms, 600 * 1000, 
 //         "rocksdb transaction_expiration timeout(us)");
 
 int Transaction::begin() {
     rocksdb::TransactionOptions txn_opt;
+    txn_opt.lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms +
+        butil::fast_rand_less_than(FLAGS_rocks_transaction_lock_timeout_ms);
     return begin(txn_opt);
 }
 
@@ -41,6 +44,8 @@ int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
         DB_WARNING("get rocksdb data column family failed");
         return -1;
     }
+    txn_opt.lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms +
+        butil::fast_rand_less_than(FLAGS_rocks_transaction_lock_timeout_ms);
     _txn_opt = txn_opt;
     if (nullptr == (_txn = _db->begin_transaction(_write_opt, _txn_opt))) {
         DB_WARNING("start_trananction failed");
@@ -634,7 +639,6 @@ int Transaction::get_update_secondary(
         return -1;
     }
     last_active_time = butil::gettimeofday_us();
-    std::string& pk_val = pk.data();
     if (index.type != pb::I_UNIQ) {
         //DB_WARNING("invalid index type: %d", index.type);
         return -2;
@@ -653,18 +657,16 @@ int Transaction::get_update_secondary(
     //         return -1;
     //     }
     // }
-    std::string* val_ptr = nullptr;
-    if (mode == GET_ONLY || mode == GET_LOCK) {
-        val_ptr = &pk_val;
-    }
+    //std::string* val_ptr = nullptr;
+    rocksdb::PinnableSlice pin_slice;
     rocksdb::Status res;
     if (mode == GET_ONLY) {
         rocksdb::ReadOptions read_opt;
         read_opt.snapshot = _snapshot;
-        res = _txn->Get(read_opt, _data_cf, _key.data(), &pk_val);
+        res = _txn->Get(read_opt, _data_cf, _key.data(), &pin_slice);
     } else if (mode == LOCK_ONLY || mode == GET_LOCK) {
         rocksdb::ReadOptions read_opt;
-        res = _txn->GetForUpdate(read_opt, _data_cf, _key.data(), val_ptr);
+        res = _txn->GetForUpdate(read_opt, _data_cf, _key.data(), &pin_slice);
     } else {
         DB_WARNING("invalid GetMode: %d", mode);
         return -1;
@@ -685,18 +687,19 @@ int Transaction::get_update_secondary(
         return -1;
     }
 
+    rocksdb::Slice value(pin_slice);
+    if (_use_ttl && _read_ttl_timestamp_us > 0) {
+        int64_t row_ttl_timestamp_us = ttl_decode(value);
+        if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+            //expired
+            return -4;
+        }
+        value.remove_prefix(sizeof(uint64_t));
+    }
+    pk.data().assign(value.data(), value.size());
     if (/*_need_check_region &&*/check_region && (mode == GET_ONLY || mode == GET_LOCK)) {
         rocksdb::Slice pure_key(_key.data());
         pure_key.remove_prefix(2 * sizeof(int64_t));
-        rocksdb::Slice value(pk_val);
-        if (_use_ttl && _read_ttl_timestamp_us > 0) {
-            int64_t row_ttl_timestamp_us = ttl_decode(value);
-            if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
-                //expired
-                return -4;
-            }
-            value.remove_prefix(sizeof(uint64_t));
-        }
         if (!fits_region_range(pure_key, value,
             &_region_info->start_key(), &_region_info->end_key(), pk_index, index)) {
             return -3;

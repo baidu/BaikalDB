@@ -183,6 +183,9 @@ void FunctionManager::register_operators() {
     register_object_ret("if", if_, pb::STRING);
     // MurmurHash sign
     register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
+    register_object_ret("md5", md5, pb::STRING);
+    register_object_ret("sha", md5, pb::STRING);
+    register_object_ret("sha1", md5, pb::STRING);
 }
 
 int FunctionManager::init() {

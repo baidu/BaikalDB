@@ -14,6 +14,11 @@
 
 #include "access_path.h"
 #include "slot_ref.h"
+#ifdef BAIDU_INTERNAL 
+#include <base/containers/flat_map.h>
+#else
+#include <butil/containers/flat_map.h>
+#endif
 
 namespace baikaldb {
 using namespace range;
@@ -72,6 +77,11 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
         return false;
     }
 }
+
+struct RecordRange {
+    SmartRecord left_record;
+    SmartRecord right_record;
+};
 // 现在只支持CNF，DNF怎么做?
 // 普通索引按照range匹配，匹配到EQ可以往下走，匹配到RANGE、LIKE_PREFIX停止
 // 匹配到IN，如果之前是IN停止（row_expr除外）
@@ -88,7 +98,7 @@ void AccessPath::calc_normal(Property& sort_property) {
     SmartRecord record_template = SchemaFactory::get_instance()->new_record(table_id);
     SmartRecord left_record = record_template->clone(false);
     SmartRecord right_record = record_template->clone(false);
-    std::vector<SmartRecord> in_records;
+    std::vector<RecordRange> in_records;
     int field_cnt = 0;
     for (auto& field : index_info_ptr->fields) {
         bool field_break = false;
@@ -98,34 +108,44 @@ void AccessPath::calc_normal(Property& sort_property) {
         }
         FieldRange& range = iter->second;
         switch (range.type) {
-            case RANGE: 
+            case RANGE: {
                 field_break = true;
-                if (in_pred) {
-                    break;
-                }
                 ++field_cnt;
                 hit_index_field_ids.insert(field.id);
-                if (range.is_row_expr) {
-                    size_t field_idx = field_cnt - 1;
-                    calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
-                            range.left_open, range.left, left_record, field_idx, &left_open, &left_field_cnt);
-                    calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
-                            range.right_open, range.right, right_record, field_idx, &right_open, &right_field_cnt);
+                auto range_func = [&left_open, &left_field_cnt, &right_open, &right_field_cnt, 
+                     &range, this, field_cnt, field](
+                        SmartRecord& left_record, SmartRecord& right_record) {
+                    if (range.is_row_expr) {
+                        size_t field_idx = field_cnt - 1;
+                        calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
+                                range.left_open, range.left, left_record, field_idx, &left_open, &left_field_cnt);
+                        calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
+                                range.right_open, range.right, right_record, field_idx, &right_open, &right_field_cnt);
+                    } else {
+                        if (range.left_expr != nullptr) {
+                            left_record->set_value(left_record->get_field_by_tag(field.id), range.left[0]);
+                            left_open = range.left_open;
+                            left_field_cnt = field_cnt;
+                            need_cut_index_range_condition.insert(range.left_expr);
+                        }
+                        if (range.right_expr != nullptr) {
+                            right_record->set_value(right_record->get_field_by_tag(field.id), range.right[0]);
+                            right_open = range.right_open;
+                            right_field_cnt = field_cnt;
+                            need_cut_index_range_condition.insert(range.right_expr);
+                        }
+                    }
+                };
+                if (in_pred) {
+                    for (auto& rg : in_records) {
+                        rg.right_record = rg.left_record->clone(true);
+                        range_func(rg.left_record, rg.right_record);
+                    }
                 } else {
-                    if (range.left_expr != nullptr) {
-                        left_record->set_value(left_record->get_field_by_tag(field.id), range.left[0]);
-                        left_open = range.left_open;
-                        left_field_cnt = field_cnt;
-                        need_cut_index_range_condition.insert(range.left_expr);
-                    }
-                    if (range.right_expr != nullptr) {
-                        right_record->set_value(right_record->get_field_by_tag(field.id), range.right[0]);
-                        right_open = range.right_open;
-                        right_field_cnt = field_cnt;
-                        need_cut_index_range_condition.insert(range.right_expr);
-                    }
+                    range_func(left_record, right_record);
                 }
                 break;
+            }
             case EQ:
             case LIKE_EQ:
                 ++eq_count;
@@ -140,8 +160,8 @@ void AccessPath::calc_normal(Property& sort_property) {
                     left_record->set_value(left_record->get_field_by_tag(field.id), range.eq_in_values[0]);
                     right_record->set_value(right_record->get_field_by_tag(field.id), range.eq_in_values[0]);
                 } else {
-                    for (auto record : in_records) {
-                        record->set_value(record->get_field_by_tag(field.id), range.eq_in_values[0]);
+                    for (auto& rg : in_records) {
+                        rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), range.eq_in_values[0]);
                     }
                 }
                 if (range.type == LIKE_PREFIX) {
@@ -162,15 +182,16 @@ void AccessPath::calc_normal(Property& sort_property) {
                 }
                 if (in_records.empty()) {
                     for (auto value : range.eq_in_values) {
-                        auto record = left_record->clone(true);
-                        record->set_value(record->get_field_by_tag(field.id), value);
-                        in_records.push_back(record);
+                        RecordRange rg;
+                        rg.left_record = left_record->clone(true);
+                        rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), value);
+                        in_records.push_back(rg);
                     }
                 } else {
                     if (in_records.size() == range.eq_in_values.size()) {
                         for (size_t vi = 0; vi < range.eq_in_values.size(); vi++) {
-                            auto record = in_records[vi];
-                            record->set_value(record->get_field_by_tag(field.id), range.eq_in_values[vi]);
+                            auto rg = in_records[vi];
+                            rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), range.eq_in_values[vi]);
                         }
                     } else {
                         DB_FATAL("inx:%ld in_records.size() %lu != values.size() %lu ", 
@@ -209,6 +230,7 @@ void AccessPath::calc_normal(Property& sort_property) {
         is_sort_index, eq_count, sort_property.slot_order_exprs.size());
     pos_index.set_index_id(index_id);
     if (is_sort_index) {
+        is_possible = true;
         auto sort_index = pos_index.mutable_sort_index();
         sort_index->set_is_asc(sort_property.is_asc[0]);
         sort_index->set_sort_limit(sort_property.expected_cnt);
@@ -217,21 +239,25 @@ void AccessPath::calc_normal(Property& sort_property) {
         pos_index.add_ranges();
     } else if (in_pred) {
         is_possible = true;
-        std::set<std::string> filter;
-        for (auto record : in_records) {
+        butil::FlatSet<std::string> filter;
+        filter.init(12301);
+        for (auto& rg : in_records) {
             std::string str;
-            record->encode(str);
-            if (filter.count(str) == 1) {
+            rg.left_record->encode(str);
+            if (filter.seek(str) != nullptr) {
                 continue;
             }
             filter.insert(str);
             auto range = pos_index.add_ranges();
             range->set_left_pb_record(str);
+            if (rg.right_record != nullptr) {
+                rg.right_record->encode(str);
+            }
             range->set_right_pb_record(str);
             range->set_left_field_cnt(left_field_cnt);
             range->set_right_field_cnt(right_field_cnt);
-            range->set_left_open(false);
-            range->set_right_open(false);
+            range->set_left_open(left_open);
+            range->set_right_open(right_open);
             range->set_like_prefix(like_prefix);
         }
     } else {
@@ -292,12 +318,13 @@ void AccessPath::calc_fulltext() {
         SmartRecord record_template = SchemaFactory::get_instance()->new_record(table_id);
         is_possible = true;
         pos_index.set_index_id(index_id);
-        std::set<std::string> filter;
+        butil::FlatSet<std::string> filter;
+        filter.init(12301);
         for (auto value : *values) {
             record_template->set_value(record_template->get_field_by_tag(field_id), value);
             std::string str;
             record_template->encode(str);
-            if (filter.count(str) == 1) {
+            if (filter.seek(str) != nullptr) {
                 continue;
             }
             filter.insert(str);
@@ -356,35 +383,55 @@ double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
     return 1.0;
 }
 
+double AccessPath::fields_to_selectivity(const std::unordered_set<int32_t>& field_ids) {
+    double selectivity = 1.0;
+    for (auto& field_id : field_ids) {
+        auto iter = field_range_map.find(field_id);
+        if (iter == field_range_map.end()) {
+            continue;
+        }
+        double field_sel = calc_field_selectivity(field_id, iter->second);
+        DB_DEBUG("field_id:%d selectivity:%f", field_id, field_sel);
+        // selectivity < 0 代表超过统计信息范围
+        // TODO 针对递增/时间列按1.0计算有意义，后续是否按表配置区分
+        if (field_sel > 1.0 || field_sel < 0.0) {
+            continue;
+        }
+        selectivity *= field_sel;
+    }
+    return selectivity;
+}
+
 // TODO 后续做成index的统计信息，现在只是单列统计聚合
 void AccessPath::calc_cost() {
     if (cost > 0.0) {
         return;
     }
+    int64_t table_rows = SchemaFactory::get_instance()->get_total_rows(table_id);
     double selectivity = 1.0;
     //没有统计信息，固定给个值
     if (index_type == pb::I_FULLTEXT) {
         selectivity = 0.1;
     } else {
-        for (auto& field_id : hit_index_field_ids) {
-            auto iter = field_range_map.find(field_id);
-            if (iter == field_range_map.end()) {
-                continue;
-            }
-            double field_sel = calc_field_selectivity(field_id, iter->second);
-            DB_DEBUG("field_id:%d selectivity:%f", field_id, field_sel);
-            if (field_sel > 1.0) {
-                continue;
-            }
-            selectivity *= field_sel;
+        selectivity = fields_to_selectivity(hit_index_field_ids);
+    }
+    index_read_rows = selectivity * table_rows;
+    double index_other_condition_selectivity = fields_to_selectivity(index_other_field_ids);
+    double other_condition_selectivity = fields_to_selectivity(other_field_ids);
+
+    if (is_sort_index && index_other_condition_selectivity > 0 and other_condition_selectivity > 0) {
+        int64_t expected_cnt = pos_index.sort_index().sort_limit();
+        expected_cnt = expected_cnt / index_other_condition_selectivity / other_condition_selectivity;
+        if (expected_cnt >= 0 && expected_cnt < index_read_rows) {
+            index_read_rows = expected_cnt;
         }
     }
-    index_read_rows = selectivity * TOTAL_ROWS;
-    // TODO index_other_condition过滤
     if (!is_covering_index && index_type != pb::I_PRIMARY) {
-        table_read_rows = selectivity * TOTAL_ROWS;
+        table_get_rows = index_read_rows * index_other_condition_selectivity;
     }
-    cost = index_read_rows * INDEX_SEEK_FACTOR + table_read_rows * TABLE_GET_FACTOR;
+    cost = index_read_rows * INDEX_SEEK_FACTOR + table_get_rows * TABLE_GET_FACTOR;
+    //DB_WARNING("table_rows:%ld index_read_rows:%ld, selectivity:%f index_other_condition_selectivity:%f other_condition_selectivity:%f cost:%f", 
+    //        table_rows,index_read_rows,selectivity,index_other_condition_selectivity,other_condition_selectivity,cost);
 }
 
 }

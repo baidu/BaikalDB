@@ -1167,7 +1167,8 @@ void RegionManager::check_peer_count(int64_t region_id,
     std::unordered_map<std::string, int64_t> current_logical_room_count_map;
     //如果用户修个了resource_tag, 先加后删
     if (resource_tag_count[table_resource_tag] < replica_num) {
-        DB_WARNING("resource_tag count:%d < replica_num:%d", resource_tag_count[table_resource_tag], replica_num);
+        DB_WARNING("resource_tag %s count:%d < replica_num:%d", 
+                table_resource_tag.c_str(), resource_tag_count[table_resource_tag], replica_num);
         need_add_peer = true;
     }
     //没有指定机房分布的表，只按照replica_num计算

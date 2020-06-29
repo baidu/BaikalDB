@@ -71,7 +71,7 @@ int64_t ScanNode::select_index() {
                     break;
                 }
             }
-            if (contain_by_primary) {
+            if (contain_by_primary && !pos_index.has_sort_index() && field_count > 0) {
                 continue;
             }
         }
@@ -221,6 +221,9 @@ int64_t ScanNode::select_index_by_cost() {
     int min_idx = 0;
     for (auto& pair : _paths) {
         auto& path = pair.second;
+        if (!path->is_possible && path->index_type != pb::I_PRIMARY) {
+            continue;
+        }
         int64_t index_id = pair.first;
         path->calc_cost();
         if (path->cost < min_cost) {
@@ -243,7 +246,7 @@ int64_t ScanNode::select_index_in_baikaldb() {
     _router_index = &_paths[_table_id]->pos_index;
     int64_t select_idx = 0;
     if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
-        && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST)) {
+        && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext) {
         DB_DEBUG("table %ld has statistics", _table_id);
         select_idx = select_index_by_cost();
     } else {
@@ -332,7 +335,7 @@ int ScanNode::choose_arrow_pb_reverse_index() {
                 return -1;
             }
 
-            if (type == pb::ST_PROTOBUF) {
+            if (type == pb::ST_PROTOBUF_OR_FORMAT1) {
                 pb_indexs.push_back(index_id);
                 ++pb_type_num;
             } else if (type == pb::ST_ARROW) {
@@ -340,7 +343,7 @@ int ScanNode::choose_arrow_pb_reverse_index() {
                 ++arrow_type_num;
             }
         }
-        filter_type = pb_type_num <= arrow_type_num ? pb::ST_PROTOBUF : pb::ST_ARROW;
+        filter_type = pb_type_num <= arrow_type_num ? pb::ST_PROTOBUF_OR_FORMAT1 : pb::ST_ARROW;
         DB_DEBUG("reverse_filter type[%s]", pb::StorageType_Name(filter_type).c_str());
         auto remove_indexs_func = [this](std::vector<int>& to_remove_indexs) {
             _multi_reverse_index.erase(std::remove_if(_multi_reverse_index.begin(), _multi_reverse_index.end(), [&to_remove_indexs](const int& index) {
@@ -349,7 +352,7 @@ int ScanNode::choose_arrow_pb_reverse_index() {
             }), _multi_reverse_index.end());
         };
 
-        if (filter_type == pb::ST_PROTOBUF) {
+        if (filter_type == pb::ST_PROTOBUF_OR_FORMAT1) {
             remove_indexs_func(pb_indexs);
         } else if (filter_type == pb::ST_ARROW) {
             remove_indexs_func(arrow_indexs);

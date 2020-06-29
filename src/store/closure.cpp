@@ -54,7 +54,7 @@ void DMLClosure::Run() {
                     butil::endpoint2str(leader).c_str(), 
                     log_id, remote_side.c_str());
     } else {
-        if (transaction != nullptr && region != nullptr) {
+        if (transaction != nullptr && transaction->txn_id() != 0 && region != nullptr) {
             transaction->clear_current_req_point_seq();
         }
     }

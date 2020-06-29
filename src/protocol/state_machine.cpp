@@ -19,6 +19,7 @@
 #include <rapidjson/reader.h>
 #include <rapidjson/document.h>
 #include <boost/algorithm/string/join.hpp>
+#include "re2/re2.h"
 
 namespace baikaldb {
 DEFINE_int32(max_connections_per_user, 4000, "default user max connections");
@@ -379,7 +380,11 @@ void StateMachine::_print_query_time(SmartSocket client) {
         if (stat_info->table.empty()) {
             stat_info->table = "no";
         }
+#ifdef BAIDU_INTERNAL
+        if ((stat_info->family != "no" && stat_info->table != "no") || stat_info->error_code != 1000) {
+#else
         if (stat_info->total_time > FLAGS_print_time_us || stat_info->error_code != 1000) {
+#endif
             boost::replace_all(ctx->sql, "\n", " ");
             std::string sql;
             if (ctx->mysql_cmd == COM_QUERY || ctx->mysql_cmd == COM_STMT_CLOSE
@@ -949,44 +954,61 @@ bool StateMachine::_query_process(SmartSocket client) {
                     || type == SQL_SET_CHARACTER_SET_CLIENT_NUM
                     || type == SQL_SET_CHARACTER_SET_CONNECTION_NUM
                     || type == SQL_SET_CHARACTER_SET_RESULTS_NUM) {
-            boost::regex reg(".*gbk.*", boost::regex::icase);
-            if (boost::regex_match(client->query_ctx->sql, reg)) {
+            re2::RE2::Options option;
+            option.set_utf8(false);
+            option.set_case_sensitive(false);
+            re2::RE2 reg(".*gbk.*", option);
+            if (RE2::FullMatch(client->query_ctx->sql, reg)) {
                 client->charset_name = "gbk";
             } else {
                 client->charset_name = "utf8";
+            }
+            if (reg.error_code() != 0) {
+                DB_WARNING("charset regex match error.");
             }
             _wrapper->make_simple_ok_packet(client);
             client->state = STATE_READ_QUERY_RESULT;
         } else if (boost::iequals(client->query_ctx->sql, SQL_SELECT_DATABASE)) {
             ret = _handle_client_query_select_database(client);
-        } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_DATABASES)) {
-            ret = _handle_client_query_show_databases(client);
-        } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_TABLES)) {
-            ret = _handle_client_query_show_tables(client);
-        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_TABLES)) {
-            ret = _handle_client_query_show_full_tables(client);
-        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_CREATE_TABLE)) {
-            ret = _handle_client_query_show_create_table(client);
-        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_COLUMNS)) {
-            ret = _handle_client_query_show_full_columns(client);
-        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_TABLE_STATUS)) {
-            ret = _handle_client_query_show_table_status(client);
-        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_ABNORMAL_REGIONS)) {
-            ret = _handle_client_query_show_abnormal_regions(client);
-        } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_COLLATION)) {
-            ret = _handle_client_query_show_collation(client);
-        } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_WARNINGS)) {
-            ret = _handle_client_query_show_warnings(client);
-        } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_REGION)) {
-            ret = _handle_client_query_show_region(client);
-        } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_SOCKET)) {
-            ret = _handle_client_query_show_socket(client);
-        } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_PROCESSLIST)) {
-            ret = _handle_client_query_show_processlist(client);
-        } else if (type == SQL_SHOW_NUM
-                    && boost::algorithm::istarts_with(
-                            client->query_ctx->sql, SQL_SHOW_VARIABLES)) {
-            ret = _handle_client_query_show_variables(client);
+        } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW)) {
+            size_t pos = 0;
+            std::string sql = client->query_ctx->sql;
+            while ((pos = sql.find("  ")) != std::string::npos) {
+                sql = sql.replace(pos, 2, " ");
+            }
+            client->query_ctx->sql = sql;
+            if (boost::iequals(client->query_ctx->sql, SQL_SHOW_DATABASES)) {
+                ret = _handle_client_query_show_databases(client);
+            } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_TABLES)) {
+                ret = _handle_client_query_show_tables(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_TABLES)) {
+                ret = _handle_client_query_show_full_tables(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_CREATE_TABLE)) {
+                ret = _handle_client_query_show_create_table(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_COLUMNS)) {
+                ret = _handle_client_query_show_full_columns(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_TABLE_STATUS)) {
+                ret = _handle_client_query_show_table_status(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_ABNORMAL_REGIONS)) {
+                ret = _handle_client_query_show_abnormal_regions(client);
+            } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_COLLATION)) {
+                ret = _handle_client_query_show_collation(client);
+            } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_WARNINGS)) {
+                ret = _handle_client_query_show_warnings(client);
+            } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_REGION)) {
+                ret = _handle_client_query_show_region(client);
+            } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_SOCKET)) {
+                ret = _handle_client_query_show_socket(client);
+            } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_PROCESSLIST)) {
+                ret = _handle_client_query_show_processlist(client);
+            } else if (type == SQL_SHOW_NUM
+                        && boost::algorithm::istarts_with(
+                                client->query_ctx->sql, SQL_SHOW_VARIABLES)) {
+                ret = _handle_client_query_show_variables(client);
+            } else {
+                _wrapper->make_simple_ok_packet(client);
+                client->state = STATE_READ_QUERY_RESULT;
+            }
         } else if (type == SQL_USE_IN_QUERY_NUM
                     && boost::algorithm::istarts_with(client->query_ctx->sql, SQL_USE)) {
             ret = _handle_client_query_use_database(client); 
@@ -1031,20 +1053,28 @@ bool StateMachine::_query_process(SmartSocket client) {
 
 void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
     // Remove comments.
-    boost::regex reg("(\\/\\*.*?\\*\\/)(.*)", boost::regex::icase | boost::regex::perl);
+    re2::RE2::Options option;
+    option.set_utf8(false);
+    option.set_case_sensitive(false);
+    option.set_perl_classes(true);
+    re2::RE2 reg("(\\/\\*.*?\\*\\/)(.*)", option);
 
     // Remove ignore character.
     boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
     boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
 
-    boost::cmatch what;
     while (boost::algorithm::istarts_with(ctx->sql, "/*")) {
         size_t len = ctx->sql.size();
-        std::string comment = boost::regex_replace(ctx->sql, reg, "$1");
+        std::string comment;
+        if (!RE2::Extract(ctx->sql, reg, "\\1", &comment)) {
+            DB_WARNING("extract commit error.");
+        }
         if (comment.size() != 0) {
             ctx->comments.push_back(comment);
         }
-        ctx->sql = boost::regex_replace(ctx->sql, reg, "$2");
+        if (!RE2::Replace(&(ctx->sql), reg, "\\2")) {
+            DB_WARNING("extract sql error.");
+        }
         if (ctx->sql.size() == len) {
             break;
         }
@@ -2504,13 +2534,11 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
         return false;
     }
     TableInfo info = factory->get_table_info(table_id);
-    std::map<int32_t, IndexInfo> field_index;
+    std::multimap<int32_t, IndexInfo> field_index;
     for (auto& index_id : info.indices) {
         IndexInfo index_info = factory->get_index_info(index_id); 
         for (auto& field : index_info.fields) {
-            if (field_index.count(field.id) == 0) {
-                field_index[field.id] = index_info;
-            }
+            field_index.insert(std::make_pair(field.id, index_info));
         }
     }
     // Make rows.
@@ -2531,13 +2559,20 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
         if (field_index.count(field.id) == 0) {
             row.push_back(" ");
         } else {
-            std::string index = IndexType_Name(field_index[field.id].type);
-            if (field_index[field.id].type == pb::I_FULLTEXT) {
-                index += "(" + pb::SegmentType_Name(field_index[field.id].segment_type) + ")";
-            }
-            row.push_back(index);
 
-            extra_vec.push_back(pb::IndexState_Name(field_index[field.id].state));
+            std::vector<std::string> index_types;
+            index_types.reserve(4);
+            auto range = field_index.equal_range(field.id);
+            for (auto index_iter = range.first; index_iter != range.second; ++index_iter) {
+                auto& index_info = index_iter->second;
+                std::string index = pb::IndexType_Name(index_info.type);
+                if (index_info.type == pb::I_FULLTEXT) {
+                    index += "(" + pb::SegmentType_Name(index_info.segment_type) + ")";
+                }
+                index_types.push_back(index);
+                extra_vec.push_back(pb::IndexState_Name(index_info.state));
+            }
+            row.push_back(boost::algorithm::join(index_types, "|"));
         }
         row.push_back(field.default_value);
 

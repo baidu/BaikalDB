@@ -79,14 +79,10 @@ int UnionNode::open(RuntimeState* state) {
                 MemRow* row = batch.get_row().get();
                 std::unique_ptr<MemRow> dual_row = _mem_row_desc->fetch_mem_row();
                 auto projections = _select_projections[i];
-                int slot_id = 0;
                 for (int i = 0; i < projections.size(); i++) {
                     auto expr = projections[i];
-                    if (expr->is_literal()) {
-                        continue;
-                    }
                     ExprValue result = expr->get_value(row).cast_to(expr->col_type());
-                    auto slot = _tuple_desc->slots(slot_id++);
+                    auto slot = _tuple_desc->slots(i);
                     dual_row->set_value(slot.tuple_id(), slot.slot_id(), result);
                 }
                 batch_ptr->move_row(std::move(dual_row));

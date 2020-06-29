@@ -560,7 +560,7 @@ public:
             uint64_t log_id = 0);
 
     void clear_transactions() {
-        if (_shutdown || !_init_success) {
+        if (_shutdown || !_init_success || get_version() <= 0) {
             return;
         }
         _multi_thread_cond.increase();

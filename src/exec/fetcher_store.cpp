@@ -460,6 +460,15 @@ ErrorType FetcherStore::send_request(
         }
     }
     cost.reset();
+    {
+        BAIDU_SCOPED_LOCK(region_lock);
+        row_cnt += res.row_values_size();
+    }
+    // TODO reduce mem used by streaming
+    if ((!state->is_full_export) && (row_cnt > FLAGS_max_select_rows)) {
+        DB_FATAL("_row_cnt:%ld > max_select_rows", row_cnt, FLAGS_max_select_rows);
+        return E_BIG_SQL;
+    }
     std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
     for (auto& pb_row : *res.mutable_row_values()) {
         std::unique_ptr<MemRow> row = state->mem_row_desc()->fetch_mem_row();
@@ -473,23 +482,14 @@ ErrorType FetcherStore::send_request(
         state->cmsketch->add_proto(res.cmsketch());
         DB_WARNING("region_id:%ld, cmsketch:%s", region_id, res.cmsketch().ShortDebugString().c_str());
     }
-    int64_t lock_tm = 0;
     {
-        TimeCost lock;
         BAIDU_SCOPED_LOCK(region_lock);
         start_key_sort[info.start_key()] = region_id;
         region_batch[region_id] = batch;
-        lock_tm= lock.get_time();
-        row_cnt += batch->size();
-        // TODO reduce mem used by streaming
-        if ((!state->is_full_export) && (row_cnt > FLAGS_max_select_rows)) {
-            DB_FATAL("_row_cnt:%ld > max_select_rows", row_cnt, FLAGS_max_select_rows);
-            return E_BIG_SQL;
-        }
     }
     if (cost.get_time() > FLAGS_print_time_us) {
-        DB_WARNING("lock_tm:%ld, parse region:%ld time:%ld rows:%u log_id:%lu ", 
-                lock_tm, region_id, cost.get_time(), batch->size(), log_id);
+        DB_WARNING("parse region:%ld time:%ld rows:%u log_id:%lu ", 
+                region_id, cost.get_time(), batch->size(), log_id);
     }
     return E_OK;
 }
