@@ -67,10 +67,15 @@ public:
         return _bucket_mapping.size();
     }
 
-    float calc_fraction(const ExprValue& start, const ExprValue& end, 
+    double calc_diff(const ExprValue& start, const ExprValue& end, int prefix_len) {
+        double ret = end.float_value(prefix_len) - start.float_value(prefix_len);
+        return ret;
+    }
+
+    double calc_fraction(const ExprValue& start, const ExprValue& end, 
         const ExprValue& value) {
         int prefix_len = start.common_prefix_length(end);
-        float ret = (value.float_value(prefix_len) - start.float_value(prefix_len)) / 
+        double ret = (value.float_value(prefix_len) - start.float_value(prefix_len)) / 
             (end.float_value(prefix_len) - start.float_value(prefix_len));
         return ret;
     }
@@ -85,14 +90,16 @@ public:
             return floor(bucket_ptr->bucket_size * calc_fraction(bucket_ptr->start, bucket_ptr->end, upper));
         } else if (upper.compare(bucket_ptr->end) >= 0) {
             return floor(bucket_ptr->bucket_size * (1 - calc_fraction(bucket_ptr->start, bucket_ptr->end, lower)));
+        } else {
+            return floor(bucket_ptr->bucket_size 
+                        * (calc_fraction(bucket_ptr->start, bucket_ptr->end, upper) - calc_fraction(bucket_ptr->start, bucket_ptr->end, lower)));
         }
         return 0;
     }
 
-    //为避免无效值：lower is_null时取最小值；upper is_null时取最大值
-    int32_t get_count(const ExprValue& lower, const ExprValue& upper) {
+    double get_histogram_ratio_dummy(const ExprValue& lower, const ExprValue& upper) {
         if (_bucket_mapping.size() <= 0) {
-            return 0;
+            return 1.0;
         }
 
         ExprValue tmp_lower = lower;
@@ -105,6 +112,36 @@ public:
         if (upper.is_null()) {
             auto it = _bucket_mapping.rbegin();
             tmp_upper = it->second->end;
+        }
+        ExprValue start = _bucket_mapping.begin()->second->start;
+        ExprValue end   = _bucket_mapping.rbegin()->second->end;
+        int prefix_len = start.common_prefix_length(end);
+        double ret = calc_diff(lower, upper, prefix_len) / calc_diff(start, end, prefix_len);
+        return ret > 1.0 ? 1.0 : ret;
+    }
+
+    //为避免无效值：lower is_null时取最小值；upper is_null时取最大值
+    int32_t get_count(const ExprValue& lower, const ExprValue& upper) {
+        if (_bucket_mapping.size() <= 0) {
+            return -1;
+        }
+
+        ExprValue tmp_lower = lower;
+        ExprValue tmp_upper = upper;
+        if (lower.is_null()) {
+            auto it = _bucket_mapping.begin();
+            tmp_lower = it->second->start;
+        }
+
+        if (upper.is_null()) {
+            auto it = _bucket_mapping.rbegin();
+            tmp_upper = it->second->end;
+        }
+
+        //超出取值范围返-2，上层需要特殊处理
+        if (lower.compare(_bucket_mapping.rbegin()->second->end) > 0 
+           || upper.compare(_bucket_mapping.begin()->second->start) < 0) {
+            return -2;
         }
 
         int32_t count = 0;

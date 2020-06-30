@@ -36,6 +36,10 @@ public:
         return _version;
     }
 
+    int64_t total_rows() const {
+        return _total_rows;
+    }
+
     std::shared_ptr<CMsketchColumn> get_cmsketchcolumn_ptr(int field_id) {
         if (field_id <= 0) {
             return nullptr;
@@ -79,17 +83,28 @@ public:
     int64_t get_histogram_count(const int field_id, const ExprValue& lower, const ExprValue& upper) {
         auto iter = _field_histogram.find(field_id);
         if (iter == _field_histogram.end()) {
-            return 0;
+            return -1;
         }
 
         return iter->second->get_count(lower, upper);
     }
 
-    double get_histogram_ratio(const int field_id, const ExprValue& lower, const ExprValue& upper) {
+    //get_histogram_count返-2时说明超出取值范围时，根据need_mapping标记判断是否映射到已存在的范围，默认进行映射
+    double get_histogram_ratio(const int field_id, const ExprValue& lower, const ExprValue& upper, bool need_mapping = true) {
         if (_sample_rows == 0) {
             return 1.0;
         }
+        
         int64_t cnt = get_histogram_count(field_id, lower, upper);
+        if (cnt == -2) {
+            if (need_mapping) {
+                return _field_histogram[field_id]->get_histogram_ratio_dummy(lower, upper);
+            } else {
+                return -1.0;
+            }
+        } else if (cnt == -1) {
+            return 1.0;
+        }
         return static_cast<double>(cnt) / static_cast<double>(_sample_rows);
     }
 

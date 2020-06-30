@@ -95,6 +95,10 @@ public:
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 
     void add_access_path(const SmartPath& access_path) {
+        //如果使用倒排索引，则不使用代价进行索引选择
+        if (access_path->index_type == pb::I_FULLTEXT && access_path->is_possible == true) {
+            _use_fulltext = true;
+        }
         _paths[access_path->index_id] = access_path;
     }
 
@@ -112,6 +116,7 @@ protected:
     pb::TupleDescriptor* _tuple_desc = nullptr;
     pb::PossibleIndex* _router_index = nullptr;
     bool _is_covering_index = true;
+    bool _use_fulltext = false;
 };
 }
 

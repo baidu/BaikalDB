@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <boost/regex.hpp>
+#include "re2/re2.h"
 #include "predicate.h"
 
 int main(int argc, char* argv[])
@@ -34,15 +35,31 @@ TEST(test_covent_pattern, case_all) {
     pred.covent_pattern("%?bd\\_vid%");
     boost::regex regex;
     try {
-        pred._regex = pred._regex_pattern;
-        std::cout << boost::regex_match("www.bad/aca?bd_vid", pred._regex) << "\n";
-        std::cout << boost::regex_match("www.bad/aca?bd_vidxxx", pred._regex) << "\n";
-        std::cout << boost::regex_match("www.bad/aca?bdvid", pred._regex) << "\n";
-        //regex = pred._regex_pattern;
+        re2::RE2::Options option;
+        option.set_utf8(false);
+        pred._regex_ptr.reset(new re2::RE2(pred._regex_pattern, option));
+        regex = pred._regex_pattern;
+        EXPECT_EQ(
+            RE2::FullMatch("www.bad/aca?bd_vid", *pred._regex_ptr),
+            boost::regex_match("www.bad/aca?bd_vid", regex)
+        );
+        EXPECT_EQ(
+            RE2::FullMatch("www.bad/aca?bd_vidxxx", *pred._regex_ptr),
+            boost::regex_match("www.bad/aca?bd_vidxxx", regex)
+        );
+        EXPECT_EQ(
+            RE2::FullMatch("www.bad/aca?bdvid", *pred._regex_ptr),
+            boost::regex_match("www.bad/aca?bdvid", regex)
+        );
+        
+        EXPECT_EQ(
+            RE2::FullMatch("中文testbd_vid中文test", *pred._regex_ptr),
+            boost::regex_match("中文testbd_vid中文test", regex)
+        );
         std::cout << pred._regex_pattern << "\n";
-    } catch (boost::regex_error& e) {
-        DB_FATAL("regex error:%d,  _regex_pattern:%s", 
-                e.code(), pred._regex_pattern.c_str());
+    } catch (std::exception& e) {
+        DB_FATAL("regex error:%s,  _regex_pattern:%s", 
+                e.what(), pred._regex_pattern.c_str());
     }
 }
 

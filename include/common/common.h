@@ -34,6 +34,7 @@
 #include <base/base64.h>
 #include <webfoot_naming.h>
 #include <base/fast_rand.h>
+#include <base/sha1.h>
 #include "naming.pb.h"
 #else
 #include <bthread/bthread.h>
@@ -43,6 +44,7 @@
 #include <butil/endpoint.h>
 #include <butil/base64.h>
 #include <butil/fast_rand.h>
+#include <butil/sha1.h>
 #endif
 #include <bthread/execution_queue.h>
 #include <gflags/gflags.h>

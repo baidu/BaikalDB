@@ -53,21 +53,6 @@ public:
                     group_exprs[i]->set_col_type(select_projections[i]->col_type());
                 }
             }
-            SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
-            if (sort_node != nullptr) {
-                std::vector<ExprNode*>& order_exprs = sort_node->order_exprs();
-                std::vector<ExprNode*>& slot_order_exprs = sort_node->slot_order_exprs();
-                for (int i = 0; i < order_exprs.size(); i++) {
-                    auto slot_id = order_exprs[i]->slot_id();
-                    for (auto slot : tuple_desc->slots()) {
-                        if (slot.slot_id() == slot_id) {
-                            order_exprs[i]->set_col_type(slot.slot_type());
-                            slot_order_exprs[i]->set_col_type(slot.slot_type());
-                        }
-                    }
-                }
-            }
-
         }
         int ret = plan->expr_optimize(ctx->mutable_tuple_descs());
         if (ret == -2) {

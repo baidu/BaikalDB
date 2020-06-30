@@ -501,7 +501,6 @@ int TableIterator::get_next_columns(const rocksdb::Slice& iter_key, SmartRecord*
     pk.remove_prefix(_prefix_len);
     int64_t table_id = _pri_info->id;
 
-
     for (size_t i = 0; i < _non_pk_fields.size(); i++) {
         int32_t field_id = _non_pk_fields[i]->id;
         int32_t slot_id = _field_slot[field_id];
@@ -509,6 +508,7 @@ int TableIterator::get_next_columns(const rocksdb::Slice& iter_key, SmartRecord*
             return -1;
         }
         rocksdb::Iterator* iter = _column_iters[i];
+        rocksdb::Slice column_key = iter->key();
         // total valid is depend on pk's _iter, column iter's valid is not necessary
         if (!iter->Valid()) {
             if (record != nullptr) {
@@ -521,7 +521,7 @@ int TableIterator::get_next_columns(const rocksdb::Slice& iter_key, SmartRecord*
                      _non_pk_fields[i]->default_value.c_str());
             continue;
         }
-        if (!_fits_prefix(iter_key, field_id)) {
+        if (!_fits_prefix(column_key, field_id)) {
             if (record != nullptr) {
                 (*record)->set_default_value(*_non_pk_fields[i]);
             } else {
@@ -535,7 +535,6 @@ int TableIterator::get_next_columns(const rocksdb::Slice& iter_key, SmartRecord*
         MutTableKey key(primary_key);
         key.replace_i32(table_id, sizeof(int64_t));
         key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
-        rocksdb::Slice column_key = iter->key();
         column_key.remove_prefix(_prefix_len);
         auto cmp = pk.compare(column_key);
         // when column pure key is equal to pk's pure key, get column value to record.

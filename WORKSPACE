@@ -146,6 +146,17 @@ bind(
 )
 
 git_repository(
+    name = "com_github_google_re2",
+    remote = "https://github.com/google/re2.git",
+    tag = "2019-01-01",
+)
+
+bind(
+    name = "re2",
+    actual = "@com_github_google_re2//:re2",
+)
+
+git_repository(
     name = "com_github_brpc_brpc",
     remote= "https://github.com/apache/incubator-brpc.git",
     tag = "0.9.7",

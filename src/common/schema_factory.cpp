@@ -547,7 +547,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     //用于构建 std::vector<std::pair<int,int> > pk_pos;
     std::unordered_map<int32_t, int32_t> id_map;
 
-    bool nullable = false;
+    idx_info.has_nullable = false;
     if (idx_info.type == pb::I_KEY || idx_info.type == pb::I_UNIQ) {
         idx_info.length = 1; //nullflag
     } else {
@@ -566,7 +566,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
         id_map.insert(std::make_pair(info->id, idx_info.length));
         //DB_WARNING("index:%ld, field:%d, length:%d", idx_info.id, info.id, idx_info.length);
         if (info->can_null) {
-            nullable = true;
+            idx_info.has_nullable = true;
         }
         if (info->size == -1) {
             idx_info.length = -1;
@@ -574,7 +574,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
             idx_info.length += info->size;
         }
     }
-    if (nullable) {
+    if (idx_info.has_nullable) {
         idx_info.length = -1;
     }
     //DB_WARNING("index:%ld, index_length:%d", idx_info.id, idx_info.length);
@@ -1052,7 +1052,6 @@ int SchemaFactory::update_statistics_internal(SchemaMapping& background, const s
     return 1;
 }
 
-
 int64_t SchemaFactory::get_statis_version(int64_t table_id) {
 
     DoubleBufferedTable::ScopedPtr table_ptr;
@@ -1064,6 +1063,21 @@ int64_t SchemaFactory::get_statis_version(int64_t table_id) {
     auto iter = table_statistics_mapping.find(table_id);
     if (iter != table_statistics_mapping.end()) {
         return iter->second->version();
+    }
+    return 0;
+}
+
+int64_t SchemaFactory::get_total_rows(int64_t table_id) {
+
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return 0; 
+    }
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second->total_rows();
     }
     return 0;
 }

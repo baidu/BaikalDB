@@ -374,6 +374,10 @@ void TransactionPool::clear_transactions(Region* region) {
                 region->get_region_id(), txn->txn_id(), txn->seq_id());
             txn->rollback();
             remove_txn(txn->txn_id());
+        } else {
+            if (txn->primary_region_id_seted()) {
+                txns_need_reverse.push_back(txn);
+            }
         }
     }
     auto it = primary_txns_need_clear.begin();

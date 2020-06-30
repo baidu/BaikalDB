@@ -52,7 +52,7 @@ namespace baikaldb {
 #define RETURN_IF_NOT_INIT(init, response, log_id) \
     do {\
         if (!init) {\
-            DB_FATAL("have not init, log_id:%lu", log_id);\
+            DB_WARNING("have not init, log_id:%lu", log_id);\
             response->set_errcode(pb::HAVE_NOT_INIT);\
             response->set_errmsg("have not init");\
             return;\

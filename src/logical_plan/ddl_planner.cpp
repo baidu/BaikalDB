@@ -224,7 +224,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     index->set_segment_type(pb_segment_type);
                 }
                 auto storage_type_iter = root.FindMember("storage_type");
-                pb::StorageType pb_storage_type = pb::ST_PROTOBUF;
+                pb::StorageType pb_storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
                 if (storage_type_iter != root.MemberEnd()) {
                     std::string storage_type = storage_type_iter->value.GetString();
                     StorageType_Parse(storage_type, &pb_storage_type);
@@ -695,7 +695,7 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
             }
             
             auto storage_type_iter = root.FindMember("storage_type");
-            pb::StorageType pb_storage_type = pb::ST_PROTOBUF;
+            pb::StorageType pb_storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
             if (storage_type_iter != root.MemberEnd()) {
                 std::string storage_type = storage_type_iter->value.GetString();
                 StorageType_Parse(storage_type, &pb_storage_type);
@@ -710,7 +710,7 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
 }
 
 bool DDLPlanner::is_fulltext_type_constraint(pb::StorageType pb_storage_type, bool& has_arrow_fulltext, bool& has_pb_fulltext) const {
-    if (pb_storage_type == pb::ST_PROTOBUF) {
+    if (pb_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
         has_pb_fulltext = true;
         if (has_arrow_fulltext) {
             DB_WARNING("fulltext has two types : pb&arrow"); 

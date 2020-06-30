@@ -123,12 +123,12 @@ int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<i
     }
     const Descriptor* descriptor = tuple->GetDescriptor();
     const Reflection* reflection = tuple->GetReflection();
-    for (uint32_t idx = 0; idx < index.pk_fields.size(); ++idx) {
-        int32_t slot = field_slot[index.pk_fields[idx].id];
+    for (auto& field_info : index.pk_fields) {
+        int32_t slot = field_slot[field_info.id];
         //说明不需要解析
         //pos需要更新，容易出bug
         if (slot == 0) {
-            if (0 != key.skip_field(index.fields[idx], pos)) {
+            if (0 != key.skip_field(field_info, pos)) {
                 DB_WARNING("skip index field error");
                 return -1;
             }
@@ -136,12 +136,12 @@ int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<i
         }
         const FieldDescriptor* field = descriptor->field(slot - 1);
         if (field == nullptr) {
-            DB_WARNING("invalid field: %d slot: %d", index.fields[idx].id, slot);
+            DB_WARNING("invalid field: %d slot: %d", field_info.id, slot);
             return -1;
         }
-        if (0 != key.decode_field(tuple, reflection, field, index.pk_fields[idx], pos)) {
+        if (0 != key.decode_field(tuple, reflection, field, field_info, pos)) {
             DB_WARNING("decode index field error: field_id: %d, type: %d", 
-                index.pk_fields[idx].id, index.pk_fields[idx].type);
+                field_info.id, field_info.type);
             return -1;
         }
     }

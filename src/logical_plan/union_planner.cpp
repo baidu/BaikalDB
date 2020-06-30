@@ -78,6 +78,7 @@ int UnionPlanner::gen_select_stmts_plan() {
         select_ctx->user_info = _ctx->user_info;
         select_ctx->row_ttl_duration = _ctx->row_ttl_duration;
         select_ctx->get_runtime_state()->set_client_conn(client);
+        select_ctx->client_conn = client;
         select_ctx->sql = select->to_string();
         std::unique_ptr<LogicalPlanner> planner;
         planner.reset(new SelectPlanner(select_ctx.get()));
@@ -90,7 +91,6 @@ int UnionPlanner::gen_select_stmts_plan() {
             _first_select_exprs = planner->select_exprs();
             _select_alias_mapping = planner->select_alias_mapping();
         }
-        select_ctx->get_runtime_state()->init(select_ctx.get(), nullptr);
         select_ctx->is_full_export = false;
         int ret = select_ctx->create_plan_tree();
         if (ret < 0) {
@@ -117,26 +117,22 @@ void UnionPlanner::parse_dual_fields() {
     tuple_desc.set_tuple_id(tuple_id);
     tuple_desc.set_table_id(1);
     for (int i = 0; i < _select_names.size(); i++) {
-        if (!is_literal(_first_select_exprs[i])) {
-            pb::Expr select_expr;
-            pb::SlotDescriptor slot_desc;
-            slot_desc.set_slot_id(slot_id++);
-            slot_desc.set_tuple_id(tuple_id);
-            slot_desc.set_slot_type(pb::INVALID_TYPE);
-            slot_desc.set_ref_cnt(1);
-            pb::SlotDescriptor* slot = tuple_desc.add_slots();
-            slot->CopyFrom(slot_desc);
-            pb::ExprNode* node = select_expr.add_nodes();
-            node->set_node_type(pb::SLOT_REF);
-            node->set_col_type(pb::INVALID_TYPE);
-            node->set_num_children(0);
-            node->mutable_derive_node()->set_tuple_id(slot_desc.tuple_id());
-            node->mutable_derive_node()->set_slot_id(slot_desc.slot_id());
-            _name_slot_id_mapping[_select_names[i]] = slot_desc.slot_id();
-            _select_exprs.push_back(select_expr);
-        } else {
-            _select_exprs.push_back(_first_select_exprs[i]);
-        }
+        pb::Expr select_expr;
+        pb::SlotDescriptor slot_desc;
+        slot_desc.set_slot_id(slot_id++);
+        slot_desc.set_tuple_id(tuple_id);
+        slot_desc.set_slot_type(pb::INVALID_TYPE);
+        slot_desc.set_ref_cnt(1);
+        pb::SlotDescriptor* slot = tuple_desc.add_slots();
+        slot->CopyFrom(slot_desc);
+        pb::ExprNode* node = select_expr.add_nodes();
+        node->set_node_type(pb::SLOT_REF);
+        node->set_col_type(pb::INVALID_TYPE);
+        node->set_num_children(0);
+        node->mutable_derive_node()->set_tuple_id(slot_desc.tuple_id());
+        node->mutable_derive_node()->set_slot_id(slot_desc.slot_id());
+        _name_slot_id_mapping[_select_names[i]] = slot_desc.slot_id();
+        _select_exprs.push_back(select_expr);
     }
     _ctx->add_tuple(tuple_desc);
 }
@@ -243,7 +239,7 @@ int UnionPlanner::create_common_plan_node() {
             sort->add_is_asc(_order_ascs[idx]);
             sort->add_is_null_first(_order_ascs[idx]);
         }
-        sort->set_tuple_id(_order_tuple_id);
+        sort->set_tuple_id(0);
     }
     if (_is_distinct) {
         pb::PlanNode* agg_node = _ctx->add_plan_node();

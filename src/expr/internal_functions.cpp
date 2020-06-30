@@ -13,13 +13,13 @@
 // limitations under the License.
 
 #include "internal_functions.h"
+#include <openssl/md5.h>
 #include "hll_common.h"
 #include "datetime.h"
 #include <boost/date_time/gregorian/gregorian.hpp>
 #include <cctype>
 #include <cmath>
 #include <algorithm>
-#include "hll_common.h"
 
 namespace baikaldb {
 static const int32_t DATE_FORMAT_LENGTH = 128;
@@ -1108,6 +1108,49 @@ ExprValue murmur_hash(const std::vector<ExprValue>& input) {
         tmp._u.uint64_val = make_sign(input[0].str_val);
     }
     return tmp;
+}
+
+ExprValue md5(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue orig = input[0];
+    if (orig.type != pb::STRING) {
+        orig.cast_to(pb::STRING);
+    }
+    ExprValue tmp(pb::STRING);
+    unsigned char md5_str[16] = {0};
+    MD5_CTX ctx;
+    MD5_Init(&ctx);
+    MD5_Update(&ctx, orig.str_val.c_str(), orig.str_val.size());
+    MD5_Final(md5_str, &ctx);
+    tmp.str_val.resize(32);
+
+    int j = 0;
+    static char const zEncode[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i ++) {
+        int a = md5_str[i];
+        tmp.str_val[j++] = zEncode[(a >> 4) & 0xf];
+        tmp.str_val[j++] = zEncode[a & 0xf];
+    }
+    return tmp;
+}
+
+ExprValue sha1(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue orig = input[0];
+    if (orig.type != pb::STRING) {
+        orig.cast_to(pb::STRING);
+    }
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = butil::SHA1HashString(orig.str_val);
+    return tmp;
+}
+
+ExprValue sha(const std::vector<ExprValue>& input) {
+    return sha1(input);
 }
 }
 

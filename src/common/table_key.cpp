@@ -190,7 +190,7 @@ int TableKey::skip_field(const FieldInfo& field_info, int& pos) const {
                 DB_WARNING("string pos out of bound: %d %zu", pos, size());
                 return -2;
             }
-            pos += (strlen(_data.data_) + 1);
+            pos += (strlen(_data.data_ + pos) + 1);
         } break;
         default: {
             DB_WARNING("un-supported field type: %d", field_info.type);

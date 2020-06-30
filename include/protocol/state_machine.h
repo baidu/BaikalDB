@@ -17,7 +17,6 @@
 #include <unordered_map>
 #include <map>
 #include <bvar/bvar.h>
-#include <boost/regex.hpp>
 #include "network_socket.h"
 #include "epoll_info.h"
 #include "mysql_wrapper.h"

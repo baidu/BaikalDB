@@ -20,16 +20,15 @@ namespace baikaldb {
 struct Property {
     std::vector<ExprNode*> slot_order_exprs;
     std::vector<bool> is_asc;
-    int64_t expected_cnt = INT64_MAX;
+    int64_t expected_cnt = -1;
     Property() {
     }
-    Property(const std::vector<ExprNode*>& slot_order_exprs, 
-            const std::vector<bool>& is_asc, 
-            int64_t expected_cnt) : 
-            slot_order_exprs(slot_order_exprs),
-            is_asc(is_asc),
-            expected_cnt(expected_cnt) {
-            }
+    Property(const std::vector<ExprNode*>& slot_order_exprs_, 
+            const std::vector<bool>& is_asc_, 
+            int64_t expected_cnt_) : 
+            slot_order_exprs(slot_order_exprs_),
+            is_asc(is_asc_),
+            expected_cnt(expected_cnt_) {}
 
 };
 }

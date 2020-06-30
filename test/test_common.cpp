@@ -29,6 +29,7 @@
 #endif
 #include <proto/meta.interface.pb.h>
 #include "rapidjson.h"
+#include "re2/re2.h"
 #include <raft/raft.h>
 #include <bvar/bvar.h>
 #include "common.h"
@@ -57,6 +58,26 @@ TEST(test_exmaple, case_all) {
         usleep(1000000);
     }
 }
+
+TEST(regex_test, re2_regex) {
+    re2::RE2::Options option;
+    option.set_utf8(false);
+    option.set_case_sensitive(false);
+    option.set_perl_classes(true);
+    re2::RE2 reg("(\\/\\*.*?\\*\\/)(.*)", option);
+    std::string sql = "/*{\"ttl_duration\" : 86400}*/select * from t;";
+    std::string comment;
+    if (!RE2::Extract(sql, reg, "\\1", &comment)) {
+        DB_WARNING("extract commit error.");
+    }
+    EXPECT_EQ(comment, "/*{\"ttl_duration\" : 86400}*/");
+    
+    if (!RE2::Replace(&(sql), reg, "\\2")) {
+        DB_WARNING("extract sql error.");
+    }
+    EXPECT_EQ(sql, "select * from t;");
+}
+
 TEST(test_stripslashes, case_all) {
     std::cout << 
         ("\x26\x4f\x37\x58"

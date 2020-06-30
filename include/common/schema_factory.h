@@ -206,6 +206,7 @@ struct IndexInfo {
     std::vector<FieldInfo>  fields;
     //主键字段和索引字段是否有重叠，如果没有重叠，不需要重建主键
     bool                    overlap = false;
+    bool                    has_nullable = false;
 
     // all pk fields not in index fields
     // empty if this is a pk index
@@ -219,9 +220,9 @@ struct IndexInfo {
 
     //index comments in the create SQL
     std::string             comments;
-    pb::IndexState           state;
+    pb::IndexState          state;
     bool                    is_global = false;
-    pb::StorageType storage_type = pb::ST_PROTOBUF;
+    pb::StorageType storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
 };
 
 struct DatabaseInfo {
@@ -335,6 +336,7 @@ public:
     void update_statistics(const StatisticsVec& statistics);
     int update_statistics_internal(SchemaMapping& background, const std::map<int64_t, SmartStatistics>& mapping);
     int64_t get_statis_version(int64_t table_id);
+    int64_t get_total_rows(int64_t table_id);
     // 从直方图中计算取值区间占比，如果计算小于某值的比率，则lower填null；如果计算大于某值的比率，则upper填null
     double get_histogram_ratio(int64_t table_id, int field_id, const ExprValue& lower, const ExprValue& upper);
     // 计算单个值占比

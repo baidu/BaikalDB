@@ -478,7 +478,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
             return -1;
         }
 
-        if (_storage_type == pb::ST_PROTOBUF) {
+        if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
             std::vector<ReverseIndex<CommonSchema>*> common_reverse_indexes;
             common_reverse_indexes.reserve(4);
             for (auto index_ptr : _reverse_indexes) {
@@ -751,6 +751,12 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         && _region_info->main_table_id() != _region_info->table_id()) {
         is_global_index = true;
     }
+    // 只普通索引扫描并且不会反查主表的省略record
+    bool use_record = false;
+    if ((!_is_covering_index && !is_global_index) || 
+            !_reverse_indexes.empty() || _reverse_index != nullptr) {
+        use_record = true;
+    }
     int ret = 0;
     SmartRecord record = _factory->new_record(_table_id);
     while (1) {
@@ -805,7 +811,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         }
         //TimeCost cost;
         ++_scan_rows;
-        if (!_is_covering_index && !is_global_index) {
+        if (use_record) {
             record->clear();
         }
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
@@ -822,7 +828,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
         } else {
-            if (!_is_covering_index && !is_global_index) {
+            if (use_record) {
                 ret = _index_iter->get_next(record);
             } else {
                 ret = _index_iter->get_next(_tuple_id, row);
@@ -836,7 +842,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         // 倒排索引直接下推到了布尔引擎，但是主键条件未下推，因此也需要再次过滤
         // toto: 后续可以再次优化，把userid和source的条件干掉
         // 索引谓词过滤
-        if (!_is_covering_index && !is_global_index) {
+        if (use_record) {
             for (auto& pair : _index_slot_field_map) {
                 auto field = record->get_field_by_tag(pair.second);
                 row->set_value(_tuple_id, pair.first, record->get_value(field));
@@ -910,7 +916,7 @@ int RocksdbScanNode::choose_arrow_pb_reverse_index(const pb::ScanNode& node) {
                 return -1;
             }
 
-            if (type == pb::ST_PROTOBUF) {
+            if (type == pb::ST_PROTOBUF_OR_FORMAT1) {
                 pb_indexs.push_back(index_id);
                 ++pb_type_num;
             } else if (type == pb::ST_ARROW) {
@@ -918,7 +924,7 @@ int RocksdbScanNode::choose_arrow_pb_reverse_index(const pb::ScanNode& node) {
                 ++arrow_type_num;
             }
         }
-        filter_type = pb_type_num <= arrow_type_num ? pb::ST_PROTOBUF : pb::ST_ARROW;
+        filter_type = pb_type_num <= arrow_type_num ? pb::ST_PROTOBUF_OR_FORMAT1 : pb::ST_ARROW;
         DB_DEBUG("reverse_filter type[%s]", pb::StorageType_Name(filter_type).c_str());
         auto remove_indexs_func = [this](std::vector<int>& to_remove_indexs) {
             _multi_reverse_index.erase(std::remove_if(_multi_reverse_index.begin(), _multi_reverse_index.end(), [&to_remove_indexs](const int& index) {
@@ -927,7 +933,7 @@ int RocksdbScanNode::choose_arrow_pb_reverse_index(const pb::ScanNode& node) {
             }), _multi_reverse_index.end());
         };
 
-        if (filter_type == pb::ST_PROTOBUF) {
+        if (filter_type == pb::ST_PROTOBUF_OR_FORMAT1) {
             remove_indexs_func(pb_indexs);
         } else if (filter_type == pb::ST_ARROW) {
             remove_indexs_func(arrow_indexs);
