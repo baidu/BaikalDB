@@ -5015,7 +5015,7 @@ void Region::delete_local_rocksdb_for_ddl() {
     MutTableKey end_key;
     begin_key.append_i64(_region_id).append_i64(_ddl_param.index_id);
     end_key.append_i64(_region_id).append_i64(_ddl_param.index_id).append_u64(0xFFFFFFFFFFFFFFFF);
-    auto res = _rocksdb->remove_range(write_options, _data_cf, begin_key.data(), end_key.data());
+    auto res = _rocksdb->remove_range(write_options, _data_cf, begin_key.data(), end_key.data(), true);
     if (!res.ok()) {
         DB_FATAL("DDL_LOG remove_index error: code=%d, msg=%s, region_id: %ld", 
             res.code(), res.ToString().c_str(), _region_id);

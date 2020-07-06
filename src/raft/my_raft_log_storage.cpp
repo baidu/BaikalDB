@@ -370,7 +370,8 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     auto status = _db->remove_range(rocksdb::WriteOptions(), 
                 _handle, 
                 rocksdb::Slice(start_key, LOG_DATA_KEY_SIZE), 
-                rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE));
+                rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE),
+                true);
     if (!status.ok()) {
         DB_WARNING("tuncate log entry fail, region_id: %ld, truncate to first index kept:%ld from first log index:%ld",
                  _region_id, first_index_kept, _first_log_index.load());

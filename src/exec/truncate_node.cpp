@@ -56,12 +56,15 @@ int TruncateNode::open(RuntimeState* state) {
 
     rocksdb::Slice begin(region_start.data());
     rocksdb::Slice end(region_end.data());
-    auto res = _db->remove_range(write_options, _data_cf, begin, end);
+    TimeCost cost;
+    auto res = _db->remove_range(write_options, _data_cf, begin, end, true);
     if (!res.ok()) {
         DB_WARNING_STATE(state, "truncate table failed: table:%ld, region:%ld, code=%d, msg=%s", 
             _table_id, _region_id, res.code(), res.ToString().c_str());
         return -1;
     }
+    DB_WARNING_STATE(state, "truncate table:%ld, region:%ld, cost:%ld", 
+            _table_id, _region_id, cost.get_time());
     /*
     res = _db->compact_range(rocksdb::CompactRangeOptions(), _data_cf, &begin, &end);
     if (!res.ok()) {

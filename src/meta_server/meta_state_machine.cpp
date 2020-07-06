@@ -461,7 +461,8 @@ int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
     auto status = RocksWrapper::get_instance()->remove_range(options, 
                     RocksWrapper::get_instance()->get_meta_info_handle(),
                     remove_start_key, 
-                    MetaServer::MAX_IDENTIFY);
+                    MetaServer::MAX_IDENTIFY,
+                    false);
     if (!status.ok()) {
         DB_FATAL("remove_range error when on snapshot load: code=%d, msg=%s",
             status.code(), status.ToString().c_str());
