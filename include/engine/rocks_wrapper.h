@@ -16,6 +16,7 @@
  
 #include <string>
 #include "rocksdb/db.h"
+#include "rocksdb/convenience.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/options.h"
@@ -110,7 +111,14 @@ public:
     rocksdb::Status remove_range(const rocksdb::WriteOptions& options,
             rocksdb::ColumnFamilyHandle* column_family, 
             const rocksdb::Slice& begin, 
-            const rocksdb::Slice& end) {
+            const rocksdb::Slice& end,
+            bool delete_files_in_range) {
+        if (delete_files_in_range) {
+            auto s = rocksdb::DeleteFilesInRange(_txn_db, column_family, &begin, &end, false);
+            if (!s.ok()) {
+                return s;
+            }
+        }
         return _txn_db->DeleteRange(options, column_family, begin, end);
     }
     

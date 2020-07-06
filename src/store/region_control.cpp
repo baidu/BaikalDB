@@ -45,7 +45,7 @@ int RegionControl::remove_data(int64_t drop_region_id) {
     }
     TimeCost cost;
     auto res = rocksdb->remove_range(options, data_cf, 
-            start_key.data(), end_key.data());
+            start_key.data(), end_key.data(), true);
     if (!res.ok()) {
         DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld", 
             res.code(), res.ToString().c_str(), drop_region_id);
@@ -89,7 +89,7 @@ void RegionControl::compact_data_in_queue(int64_t region_id) {
     }
     in_compact_regions[region_id] = true;
     Store::get_instance()->compact_queue().run([region_id]() {
-        if (in_compact_regions.count(region_id) == 0) {
+        if (in_compact_regions.count(region_id) == 1) {
             if (!Store::get_instance()->is_shutdown()) {
                 RegionControl::compact_data(region_id);
                 in_compact_regions.erase(region_id);
@@ -116,7 +116,8 @@ int RegionControl::remove_log_entry(int64_t drop_region_id) {
     auto status = rocksdb->remove_range(options,
                                     rocksdb->get_raft_log_handle(),
                                     start_key.data(),
-                                    end_key.data());
+                                    end_key.data(),
+                                    true);
     if (!status.ok()) {
         DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
             status.code(), status.ToString().c_str(), drop_region_id);
@@ -145,6 +146,8 @@ int RegionControl::remove_snapshot_path(int64_t drop_region_id) {
     return 0;
 }
 int RegionControl::clear_all_infos_for_region(int64_t drop_region_id) {
+    DB_WARNING("region_id: %ld, clear_all_infos_for_region do compact in queue", drop_region_id);
+    compact_data_in_queue(drop_region_id);
     remove_data(drop_region_id);
     remove_meta(drop_region_id);
     remove_snapshot_path(drop_region_id);

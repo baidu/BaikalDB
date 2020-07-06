@@ -291,7 +291,7 @@ int MetaWriter::clear_txn_log_index(int64_t region_id) {
     std::string start_key = transcation_log_index_key(region_id, 0);
     std::string end_key = transcation_log_index_key(region_id, UINT64_MAX);
     auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
-            start_key, end_key);
+            start_key, end_key, false);
     if (!status.ok()) {
         DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
             status.code(), status.ToString().c_str(), region_id);
@@ -303,7 +303,7 @@ int MetaWriter::clear_txn_infos(int64_t region_id) {
     std::string start_key = transcation_pb_key(region_id, 0, 0);
     std::string end_key = transcation_pb_key(region_id, UINT64_MAX, INT64_MAX);
     auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
-            start_key, end_key);
+            start_key, end_key, false);
     if (!status.ok()) {
         DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
             status.code(), status.ToString().c_str(), region_id);
@@ -316,7 +316,7 @@ int MetaWriter::clear_pre_commit_infos(int64_t region_id) {
     std::string start_key = pre_commit_key(region_id, 0);
     std::string end_key = pre_commit_key(region_id, UINT64_MAX);
     auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
-            start_key, end_key);
+            start_key, end_key, false);
     if (!status.ok()) {
         DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
             status.code(), status.ToString().c_str(), region_id);
