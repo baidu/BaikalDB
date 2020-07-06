@@ -14,6 +14,7 @@
 
 #include "scalar_fn_call.h"
 #include "slot_ref.h"
+#include "literal.h"
 #include "parser.h"
 
 namespace baikaldb {
@@ -38,6 +39,25 @@ int ScalarFnCall::type_inferer() {
     if (ret < 0) {
         return ret;
     }
+    // 兼容mysql， predicate 处理成列的类型
+    switch (_fn.fn_op()) { 
+        case parser::FT_EQ:
+        case parser::FT_IN:
+        case parser::FT_NE:
+        case parser::FT_GE:
+        case parser::FT_GT:
+        case parser::FT_LE:
+        case parser::FT_LT: {
+            if (_children[0]->is_slot_ref() && _children[1]->is_constant()) {
+                for (size_t i = 1; i < _children.size(); i++) {
+                    _children[i]->set_col_type(_children[0]->col_type());
+                }
+            }
+            break;
+        } 
+        default:
+            break;
+    }
     std::vector<pb::PrimitiveType> types;
     for (auto c : _children) {
         if (c->col_type() == pb::INVALID_TYPE && !c->is_row_expr()) {
@@ -47,8 +67,16 @@ int ScalarFnCall::type_inferer() {
         types.push_back(c->col_type());
     }
     ret = FunctionManager::complete_fn(_fn, types);
+
     if (_col_type == pb::INVALID_TYPE) {
         _col_type = _fn.return_type();
+    }
+
+    // Literal type cast
+    for (int i = 0; i < _fn.arg_types_size(); i++) {
+        if (_children[i]->is_literal()) {
+            static_cast<Literal*>(_children[i])->cast_to_col_type(_fn.arg_types(i));
+        }
     }
     return 0;
 }
@@ -86,12 +114,20 @@ int ScalarFnCall::open() {
             _fn.fn_op() != parser::FT_GE &&
             _fn.fn_op() != parser::FT_GT &&
             _fn.fn_op() != parser::FT_LE &&
-            _fn.fn_op() != parser::FT_LT) {
+            _fn.fn_op() != parser::FT_LT && 
+            _fn.fn_op() != parser::FT_MATCH_AGAINST) {
             DB_FATAL("Operand should contain 1 column(s)");
             return -1;
         }
-        _is_row_expr = true;
         size_t col_size = children(0)->children_size();
+        if (_fn.fn_op() == parser::FT_MATCH_AGAINST) {
+            if (col_size > 1) {
+                DB_FATAL("MATCH_AGAINST column list support only 1, size:%lu", col_size);
+                return -1;
+            }
+            return 0;
+        }
+        _is_row_expr = true;
         for (size_t i = 1; i < children_size(); i++) {
             if (!children(i)->is_row_expr() ||
                 children(i)->children_size() != col_size) {
@@ -148,8 +184,7 @@ ExprValue ScalarFnCall::get_value(MemRow* row) {
     for (int i = 0; i < _fn.arg_types_size(); i++) {
         args[i].cast_to(_fn.arg_types(i));
     }
-    return _fn_call(args);
+    return _fn_call(args).cast_to(_col_type);
 }
 }
-
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

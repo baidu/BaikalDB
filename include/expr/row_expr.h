@@ -55,6 +55,14 @@ public:
         }
     }
 
+    void get_all_slot_ref(std::map<size_t, SlotRef*>* slots) {
+        for (size_t i = 0; i < children_size(); i++) {
+            if (children(i)->is_slot_ref()) {
+                (*slots)[i] = static_cast<SlotRef*>(children(i));
+            }
+        }
+    }
+
     virtual void transfer_pb(pb::ExprNode* pb_node) {
         ExprNode::transfer_pb(pb_node);
     }

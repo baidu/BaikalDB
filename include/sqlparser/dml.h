@@ -19,6 +19,7 @@
 namespace parser {
 
 static const char* priority_str[] = {"", " LOW_PRIORITY", " DELAYED", " HIGH_PRIORITY"};
+static const char* for_lock_str[] = {"", " FOR UPDATE", " IN SHARED MODE"};
 enum PriorityEnum {
     PE_NO_PRIORITY = 0,
     PE_LOW_PRIORITY = 1,
@@ -521,7 +522,8 @@ struct SelectStmt : public DmlNode {
     ExprNode* having = nullptr;
     OrderByClause* order = nullptr;
     LimitClause* limit = nullptr;
-    SelectLock lock;
+    bool is_in_braces = false;
+    SelectLock lock = SL_NONE;
     SelectStmt() {
         node_type = NT_SELECT;
     }
@@ -551,7 +553,9 @@ struct SelectStmt : public DmlNode {
     }
 
     virtual void to_stream(std::ostream& os) const override {
-        static const char* for_lock_str[] = {"", " FOR UPDATE", " IN SHARED MODE"};
+        if (is_in_braces) {
+            os << "(";
+        }
         os << "SELECT";
         select_opt->to_stream(os);
         for (int i = 0; i < fields.size(); ++i) {
@@ -571,6 +575,45 @@ struct SelectStmt : public DmlNode {
         }
         if (having != nullptr) {
             os << " HAVING" << having;
+        }
+        if (order != nullptr) {
+            os << " ORDER BY" << order;
+        }
+        if (limit != nullptr) {
+            os << " LIMIT" << limit;
+        }
+        os << for_lock_str[lock];
+        if (is_in_braces) {
+            os << ")";
+        }
+    }
+};
+
+struct UnionStmt : public DmlNode {
+    bool distinct = false;   // 只支持全部去重
+    Vector<SelectStmt*> select_stmts;
+    OrderByClause* order = nullptr;
+    LimitClause* limit = nullptr;
+    SelectLock lock = SL_NONE;
+    UnionStmt() {
+        node_type = NT_UNION;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        for (int i = 0; i < select_stmts.size(); i++) {
+            select_stmts[i]->set_print_sample(print_sample_);
+        }
+    }
+
+    virtual void to_stream(std::ostream& os) const override {
+         for (int i = 0; i < select_stmts.size(); i++) {
+            select_stmts[i]->to_stream(os);
+            if (i < select_stmts.size() -1) {
+                if (distinct) {
+                    os << " UNION ";
+                } else {
+                    os << " UNION ALL ";
+                }
+            }
         }
         if (order != nullptr) {
             os << " ORDER BY" << order;
@@ -620,6 +663,7 @@ struct ShowStmt : public DmlNode {
 
 struct ExplainStmt : public DmlNode {
     StmtNode* stmt = nullptr;
+    String format;
     ExplainStmt() {
         node_type = NT_EXPLAIN;
     }

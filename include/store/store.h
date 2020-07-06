@@ -47,6 +47,8 @@ inline int map_idx(int64_t region_id) {
     return region_id % max_region_map_count;
 }
 
+
+
 class Store : public pb::StoreService {
 public:
     virtual ~Store();
@@ -81,6 +83,11 @@ public:
                                const pb::RemoveRegion* request,
                                pb::StoreRes* response,
                                google::protobuf::Closure* done);
+    //恢复延迟删除的region
+    virtual void restore_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
 
     virtual void add_peer(google::protobuf::RpcController* controller,
                             const pb::AddPeer* request,
@@ -106,6 +113,17 @@ public:
                                         const pb::RegionIds* request,
                                         pb::StoreRes* response,
                                         google::protobuf::Closure* done);
+
+    virtual void backup_region(google::protobuf::RpcController* controller,
+                                const pb::BackUpReq* request,
+                                pb::BackUpRes* response,
+                                google::protobuf::Closure* done);
+
+    virtual void backup(google::protobuf::RpcController* controller,
+        const pb::BackupRequest* request,
+        pb::BackupResponse* response,
+        google::protobuf::Closure* done); 
+
     //上报心跳
     void heart_beat_thread();
 
@@ -114,8 +132,10 @@ public:
     void start_db_statistics();
 
     void reverse_merge_thread();
+    void ttl_remove_thread();
+    void delay_remove_region_thread();
 
-    void flush_region_thread();
+    void flush_memtable_thread();
     void snapshot_thread();
     void txn_clear_thread();
     
@@ -143,9 +163,6 @@ public:
         return _compact_queue;
     }
     
-    bool get_is_running() {
-        return _is_running;
-    }
     void sub_split_num() {
         --_split_num;
     }
@@ -186,20 +203,30 @@ public:
         });
         DB_WARNING("all region was join");
     }
+    bool is_shutdown() const {
+        return _shutdown;
+    }
     void close() {
         _add_peer_queue.stop();
+        _remove_region_queue.stop();
         _compact_queue.stop();
-        _is_running = false;
+        _shutdown = true;
         _heart_beat_bth.join();
         DB_WARNING("heart beat bth join");
         _add_peer_queue.join();
         DB_WARNING("_add_peer_queue join");
+        _remove_region_queue.join();
+        DB_WARNING("_remove_region_queue join");
         _compact_queue.join();
         DB_WARNING("_compact_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
         _merge_bth.join();
         DB_WARNING("merge bth check bth join");
+        _ttl_bth.join();
+        DB_WARNING("ttl bth check bth join");
+        _delay_remove_region_bth.join();
+        DB_WARNING("delay_remove_region_bth bth check bth join");
         _flush_bth.join();
         DB_WARNING("flush check bth join");
         _snapshot_bth.join();
@@ -210,6 +237,9 @@ public:
         _rocksdb->close();
         DB_WARNING("rockdb close, quit success");
     }
+    MetaServerInteract& get_meta_server_interact() {
+        return _meta_server_interact;
+    }
 private:
     Store(): _split_num(0),
              _disk_total("disk_total", 0),
@@ -217,7 +247,7 @@ private:
              dml_time_cost("dml_time_cost"),
              select_time_cost("select_time_cost") {}
     
-    int drop_region_from_store(int64_t drop_region_id);
+    int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
     void update_schema_info(const pb::SchemaInfo& request);
 
@@ -246,14 +276,16 @@ private:
     //metaServer交互类
     MetaServerInteract _meta_server_interact;
     
-    bool _is_running = true;
-
     //发送心跳的线程
     Bthread _heart_beat_bth;
     //判断是否需要分裂的线程
     Bthread _split_check_bth;
     //全文索引定时merge线程
     Bthread _merge_bth;
+    //TTL定期删除过期数据
+    Bthread _ttl_bth;
+    //延迟删除region
+    Bthread _delay_remove_region_bth;
 
     //定时flush region meta信息，确保rocksdb的wal正常删除
     Bthread _flush_bth;
@@ -270,6 +302,7 @@ private:
     std::vector<rocksdb::Transaction*> _recovered_txns;
     ExecutionQueue _add_peer_queue;
     ExecutionQueue _compact_queue;
+    ExecutionQueue _remove_region_queue;
 
     bool _has_prepared_tran = true;
 public:

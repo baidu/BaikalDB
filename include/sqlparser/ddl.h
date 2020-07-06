@@ -261,6 +261,14 @@ struct DropTableStmt : public DdlNode {
     }
 };
 
+struct RestoreTableStmt : public DdlNode {
+    Vector<TableName*> table_names;
+
+    RestoreTableStmt() {
+        node_type = NT_RESTORE_TABLE;
+    }
+};
+
 struct DatabaseOption : public Node {
     DatabaseOptionType  type;
     String              str_value;

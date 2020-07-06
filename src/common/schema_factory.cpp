@@ -61,7 +61,7 @@ int SchemaFactory::init() {
 }
 
 void SchemaFactory::update_table(const pb::SchemaInfo& table) {
-    DB_NOTICE("update_table");
+    //DB_NOTICE("update_table");
     bthread::execution_queue_execute(_table_queue_id, table);
 }
 
@@ -75,7 +75,8 @@ void SchemaFactory::update_tables_double_buffer(bthread::TaskIterator<pb::Schema
     for (; iter; ++iter) {
         std::function<int(SchemaMapping& schema_mapping, const pb::SchemaInfo& table)> update_func =
             std::bind(&SchemaFactory::update_table_internal, this, std::placeholders::_1, std::placeholders::_2);
-        DB_NOTICE("update_table double_buffer");
+        //DB_NOTICE("update_table double_buffer");
+        delete_table_region_map(*iter);
         _double_buffer_table.Modify(update_func, *iter);
     }
 }
@@ -85,6 +86,7 @@ void SchemaFactory::update_tables_double_buffer_sync(const SchemaVec& tables) {
         std::function<int(SchemaMapping& schema_mapping, const pb::SchemaInfo& table)> update_func =
             std::bind(&SchemaFactory::update_table_internal, this, std::placeholders::_1, std::placeholders::_2);
         DB_NOTICE("update_table double_buffer_sync");
+        delete_table_region_map(table);
         _double_buffer_table.Modify(update_func, table);
     }
 }
@@ -113,7 +115,7 @@ void SchemaFactory::update_idc_double_buffer(bthread::TaskIterator<pb::IdcInfo>&
 
 int SchemaFactory::update_idc_internal(IdcMapping& ida_mapping, const pb::IdcInfo& idc_info) {
     //double buffer根据该函数返回值确定是否更新ida_mapping。0：不更新，非0：更新
-    DB_NOTICE("update_idc idc_info[%s]", idc_info.ShortDebugString().c_str());
+    SELF_TRACE("update_idc idc_info[%s]", idc_info.ShortDebugString().c_str());
     ida_mapping.instance_logical_mapping.clear();
     ida_mapping.physical_logical_mapping.clear();
     for (auto& logical_physical : idc_info.logical_physical_map()) {
@@ -165,35 +167,35 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
         DB_FATAL("missing fields in SchemaInfo");
         return;
     }
-    auto& _table_info_mapping = background.table_info_mapping;
-    auto& _table_name_id_mapping = background.table_name_id_mapping;
-    auto& _index_info_mapping = background.index_info_mapping;
-    auto& _index_name_id_mapping = background.index_name_id_mapping;
-    auto& _global_index_id_mapping = background.global_index_id_mapping;
+    auto& table_info_mapping = background.table_info_mapping;
+    auto& table_name_id_mapping = background.table_name_id_mapping;
+    auto& index_info_mapping = background.index_info_mapping;
+    auto& index_name_id_mapping = background.index_name_id_mapping;
+    auto& global_index_id_mapping = background.global_index_id_mapping;
     int64_t table_id = table.table_id();
-    if (_table_info_mapping.count(table_id) == 0) {
+    if (table_info_mapping.count(table_id) == 0) {
         DB_FATAL("no table found with tableid: %ld", table_id);
         return;
     }
-    auto tbl_info_ptr = _table_info_mapping[table_id];
+    auto tbl_info_ptr = table_info_mapping[table_id];
     auto& tbl_info = *tbl_info_ptr;
     std::string full_name = tbl_info.namespace_ + "." + tbl_info.name;
-    DB_WARNING("full_name: %s, %ld", full_name.c_str(), _table_name_id_mapping.size());
-    _table_name_id_mapping.erase(full_name);
-    DB_WARNING("full_name deleted: %ld", _table_name_id_mapping.size());
+    DB_WARNING("full_name: %s, %ld", full_name.c_str(), table_name_id_mapping.size());
+    table_name_id_mapping.erase(full_name);
+    DB_WARNING("full_name deleted: %ld", table_name_id_mapping.size());
 
     for (auto index_id : tbl_info.indices) {
-        _global_index_id_mapping.erase(index_id);
-        if (_index_info_mapping.count(index_id) == 0) {
+        global_index_id_mapping.erase(index_id);
+        if (index_info_mapping.count(index_id) == 0) {
             continue;
         }
-        IndexInfo& idx_info = *_index_info_mapping[index_id];
+        IndexInfo& idx_info = *index_info_mapping[index_id];
         std::string full_idx_name = tbl_info.namespace_ + "." + idx_info.name;
         DB_WARNING("full_idx_name: %s, %ld", full_idx_name.c_str(), 
-            _index_name_id_mapping.size());
-        _index_name_id_mapping.erase(full_idx_name);
-        DB_WARNING("full_idx_name deleted: %ld", _index_name_id_mapping.size());
-        _index_info_mapping.erase(index_id);
+            index_name_id_mapping.size());
+        index_name_id_mapping.erase(full_idx_name);
+        DB_WARNING("full_idx_name deleted: %ld", index_name_id_mapping.size());
+        index_info_mapping.erase(index_id);
     }
 
     delete tbl_info.file_proto;
@@ -206,36 +208,24 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
             delete _pool; 
             });
 
-    //
-    // delete_table函数在_double_buffer_table的Modify函数中。注意锁顺序，防止死锁。
-    //
-    _table_region_mapping.Modify(double_buffer_table_region_erase, table_id);
-    _table_info_mapping.erase(table_id);
+    table_info_mapping.erase(table_id);
     return;
 }
 
 void SchemaFactory::update_schema_conf(const std::string& table_name, 
                                        const pb::SchemaConf &schema_conf, 
                                        pb::SchemaConf& mem_conf) {
-    if (schema_conf.has_need_merge()) {
-        mem_conf.set_need_merge(schema_conf.need_merge());
-        DB_WARNING("table:%s changed need_merge:%d", 
-                   table_name.c_str(), schema_conf.need_merge());
-    }
-    if (schema_conf.has_storage_compute_separate()) {
-        mem_conf.set_storage_compute_separate(schema_conf.storage_compute_separate());
-        DB_WARNING("table:%s changed storage_compute_separate:%d", 
-                   table_name.c_str(), schema_conf.storage_compute_separate());
-    }
+    
+    update_schema_conf_common(table_name, schema_conf, &mem_conf);
 }
 
 // not thread-safe
 int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::SchemaInfo &table) {
-    auto& _table_info_mapping = background.table_info_mapping;
-    auto& _table_name_id_mapping = background.table_name_id_mapping;
-    auto& _db_info_mapping = background.db_info_mapping;
-    auto& _db_name_id_mapping = background.db_name_id_mapping;
-    auto& _global_index_id_mapping = background.global_index_id_mapping;
+    auto& table_info_mapping = background.table_info_mapping;
+    auto& table_name_id_mapping = background.table_name_id_mapping;
+    auto& db_info_mapping = background.db_info_mapping;
+    auto& db_name_id_mapping = background.db_name_id_mapping;
+    auto& global_index_id_mapping = background.global_index_id_mapping;
 
     //DB_WARNING("table:%s", table.ShortDebugString().c_str());
     if (!_is_init) {
@@ -274,16 +264,18 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     // create table if not exists
     std::string table_name("table_" + std::to_string(table_id));
     //std::string old_tbl_name;
+    std::unordered_set<int64_t> last_indics;
 
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
-    if (_table_info_mapping.count(table_id) == 0) {
+    if (table_info_mapping.count(table_id) == 0) {
         if (nullptr == (tbl_info_ptr->file_proto = new (std::nothrow)FileDescriptorProto)) {
             DB_FATAL("create FileDescriptorProto failed");
             return -1;
         }
     } else {
-        *tbl_info_ptr = *_table_info_mapping[table_id];
+        *tbl_info_ptr = *table_info_mapping[table_id];
         TableInfo& tbl_info = *tbl_info_ptr;
+        std::copy(tbl_info.indices.begin(), tbl_info.indices.end(), std::inserter(last_indics, last_indics.end()));
         // need not  update when version GE
         if (tbl_info.version >= table.version()) {
             //DB_WARNING("need not  update, orgin version:%ld, new version:%ld, table_id:%ld", 
@@ -333,6 +325,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     }
     if (table.has_ttl_duration()) {
         tbl_info.ttl_duration = table.ttl_duration();
+        DB_DEBUG("table:%s ttl_duration:%ld", tbl_info.name.c_str(), tbl_info.ttl_duration);
     }
     for (auto& dist : table.dists()) {
         DistInfo dist_info;
@@ -355,6 +348,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     //1. create temp DescriptorProto using the input schema
     int field_cnt = table.fields_size();
     std::ostringstream new_fields_sign;
+    int pb_idx = 0;
     for (int idx = 0; idx < field_cnt; ++idx) {
         const pb::FieldInfo& field = table.fields(idx);
         if (field.deleted()) {
@@ -389,6 +383,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
 
         FieldInfo field_info;
         field_info.id = field.field_id();
+        field_info.pb_idx = pb_idx++;
         field_info.table_id = table_id;
         field_info.name = tbl_info.name + "." + field.field_name();
         field_info.short_name = field.field_name();
@@ -418,34 +413,50 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     }
     bool pb_need_update = tbl_info.fields_sign != new_fields_sign.str();
     DB_NOTICE("double_buffer_write pb_need_update:%d, old:%s new:%s table:%s ", pb_need_update,
-    tbl_info.fields_sign.c_str(), new_fields_sign.str().c_str(), table.ShortDebugString().c_str());
+            tbl_info.fields_sign.c_str(), new_fields_sign.str().c_str(), table.ShortDebugString().c_str());
     tbl_info.fields_sign = new_fields_sign.str();
 
-    const FileDescriptor *db_desc = tmp_pool->BuildFile(*tbl_info.file_proto);
-    if (!db_desc) {
-        DB_FATAL("build proto_file [%ld] failed, %s", database_id, tbl_info.file_proto->DebugString().c_str());
-        return -1;
+
+    if (pb_need_update) {
+        const FileDescriptor* db_desc = tmp_pool->BuildFile(*tbl_info.file_proto);
+        if (db_desc == nullptr) {
+            DB_FATAL("build proto_file [%ld] failed, %s", database_id, tbl_info.file_proto->DebugString().c_str());
+            return -1;
+        }
+        const Descriptor* descriptor = db_desc->FindMessageTypeByName(table_name);
+        if (descriptor == nullptr) {
+            DB_FATAL("FindMessageTypeByName [%ld] failed.", table_id);
+            return -1;
+        }
+        auto del_pool = tbl_info.pool;
+        auto del_factory = tbl_info.factory;
+        tbl_info.pool = tmp_pool.release();
+        tbl_info.factory = tmp_factory.release();
+        tbl_info.tbl_desc = descriptor;
+        tbl_info.msg_proto = tbl_info.factory->GetPrototype(tbl_info.tbl_desc);
+
+        Bthread bth;
+        bth.run([table_id, del_pool, del_factory]() {
+                // 延迟删除
+                bthread_usleep(3600 * 1000 * 1000L);
+                delete del_factory;
+                delete del_pool; 
+                });
     }
-    const Descriptor *descriptor = db_desc->FindMessageTypeByName(table_name);
-    if (!descriptor) {
-        DB_FATAL("FindMessageTypeByName [%ld] failed.", table_id);
-        return -1;
-    }
-    tbl_info.tbl_desc = descriptor;
 
     // create name => id mapping
-    _db_name_id_mapping[_namespace + "." + _db_name] = database_id;
+    db_name_id_mapping[_namespace + "." + _db_name] = database_id;
 
-    DB_WARNING("_db_name_id_mapping: %s->%ld", std::string(_namespace + "." + _db_name).c_str(), 
+    DB_WARNING("db_name_id_mapping: %s->%ld", std::string(_namespace + "." + _db_name).c_str(), 
         database_id);
 
     std::string _db_table(_namespace + "." + _db_name + "." + _tbl_name);
     //old_tbl_name = _namespace + "." + old_tbl_name;
     //if (!old_tbl_name.empty() && old_tbl_name != _db_table) {
-        //_table_name_id_mapping.erase(old_tbl_name);
+        //table_name_id_mapping.erase(old_tbl_name);
         //_db_table = _namespace + "." + _db_name + "." + table.new_table_name();
     //}
-    _table_name_id_mapping[_db_table] = table_id;
+    table_name_id_mapping[_db_table] = table_id;
     //get all pk fields descriptor
     size_t index_cnt = table.indexs_size();
     const pb::IndexInfo* pk_index = nullptr;
@@ -464,32 +475,33 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         const pb::IndexInfo& cur = table.indexs(idx);
         int64_t index_id = cur.index_id();
         DB_WARNING("schema_factory_update_index: %ld", index_id);
+        last_indics.erase(index_id);
         update_index(tbl_info, cur, pk_index, background);
         if (cur.index_type() == pb::I_PRIMARY
                 || cur.is_global() == true) {
-            _global_index_id_mapping[index_id] = table_id;
+            global_index_id_mapping[index_id] = table_id;
         }
         tbl_info.indices.push_back(index_id);
     }
-    
-    if (pb_need_update) {
-        auto del_pool = tbl_info.pool;
-        auto del_factory = tbl_info.factory;
-        tbl_info.pool = tmp_pool.release();
-        tbl_info.factory = tmp_factory.release();
-        tbl_info.msg_proto = tbl_info.factory->GetPrototype(tbl_info.tbl_desc);
-
-        Bthread bth;
-        bth.run([table_id, del_pool, del_factory]() {
-                // 延迟删除
-                bthread_usleep(3600 * 1000 * 1000L);
-                delete del_factory;
-                delete del_pool; 
-                });
+    //删除index索引。
+    auto& index_info_mapping = background.index_info_mapping;
+    auto& index_name_id_mapping = background.index_name_id_mapping; 
+    for (auto index_id : last_indics) {
+        auto index_info_iter = index_info_mapping.find(index_id);
+        if (index_info_iter != index_info_mapping.end()) {
+            std::string fullname = tbl_info.namespace_ + "."  + index_info_iter->second->name;
+            index_info_mapping.erase(index_info_iter);
+            if (index_name_id_mapping.erase(fullname) != 1) {
+                DB_WARNING("delete index_name_id_mapping error.");
+            }
+            DB_NOTICE("delete index info: index_id[%lld] index_name[%s].", 
+                index_id, fullname.c_str());
+        }
     }
+    
 
-    _db_info_mapping[database_id] = db_info;
-    _table_info_mapping[table_id] = tbl_info_ptr;
+    db_info_mapping[database_id] = db_info;
+    table_info_mapping[table_id] = tbl_info_ptr;
     return 1;
 }
 
@@ -498,13 +510,13 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
         const pb::IndexInfo* pk_index, SchemaMapping& background) {
 
     DB_NOTICE("double_buffer_write index_info [%s]", index.ShortDebugString().c_str());
-    auto& _index_info_mapping = background.index_info_mapping;
-    auto& _index_name_id_mapping = background.index_name_id_mapping;
+    auto& index_info_mapping = background.index_info_mapping;
+    auto& index_name_id_mapping = background.index_name_id_mapping;
     SmartIndex idx_info_ptr = std::make_shared<IndexInfo>();
     std::string old_idx_name;
     //如果表存在，需要清空里面的内容
-    if (_index_info_mapping.count(index.index_id()) != 0) {
-        *idx_info_ptr = *_index_info_mapping[index.index_id()];
+    if (index_info_mapping.count(index.index_id()) != 0) {
+        *idx_info_ptr = *index_info_mapping[index.index_id()];
         IndexInfo& idx_info = *idx_info_ptr;
         old_idx_name = idx_info.name;
         idx_info.fields.clear();
@@ -527,12 +539,15 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     idx_info.type = index.index_type();
     idx_info.state = index.state();
     idx_info.segment_type = index.segment_type();
+    if (index.has_storage_type()) {
+        idx_info.storage_type = index.storage_type();
+    }
     int field_cnt = index.field_ids_size();
 
     //用于构建 std::vector<std::pair<int,int> > pk_pos;
     std::unordered_map<int32_t, int32_t> id_map;
 
-    bool nullable = false;
+    idx_info.has_nullable = false;
     if (idx_info.type == pb::I_KEY || idx_info.type == pb::I_UNIQ) {
         idx_info.length = 1; //nullflag
     } else {
@@ -551,7 +566,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
         id_map.insert(std::make_pair(info->id, idx_info.length));
         //DB_WARNING("index:%ld, field:%d, length:%d", idx_info.id, info.id, idx_info.length);
         if (info->can_null) {
-            nullable = true;
+            idx_info.has_nullable = true;
         }
         if (info->size == -1) {
             idx_info.length = -1;
@@ -559,7 +574,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
             idx_info.length += info->size;
         }
     }
-    if (nullable) {
+    if (idx_info.has_nullable) {
         idx_info.length = -1;
     }
     //DB_WARNING("index:%ld, index_length:%d", idx_info.id, idx_info.length);
@@ -616,14 +631,14 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
             idx_info.overlap = true;
         }
     }
-    _index_info_mapping[idx_info.id] = idx_info_ptr;
+    index_info_mapping[idx_info.id] = idx_info_ptr;
     std::string fullname = idx_info.name;
     if (!old_idx_name.empty() && old_idx_name != fullname) {
-        _index_name_id_mapping.erase(old_idx_name);
+        index_name_id_mapping.erase(old_idx_name);
     }
     fullname = table_info.namespace_ + "."  + idx_info.name;
     DB_WARNING("index full name:%s, %ld, %d", fullname.c_str(), idx_info.id, idx_info.overlap);
-    _index_name_id_mapping[fullname] = idx_info.id;
+    index_name_id_mapping[fullname] = idx_info.id;
 }
 
 void SchemaFactory::update_regions(
@@ -635,7 +650,7 @@ int SchemaFactory::update_regions_double_buffer(
     SchemaFactory* factory = (SchemaFactory*)meta;
     TimeCost cost;
     factory->update_regions_double_buffer(iter);
-    DB_NOTICE("update_regions_double_buffer time:%ld", cost.get_time());
+    SELF_TRACE("update_regions_double_buffer time:%ld", cost.get_time());
     return 0;
 }
 // 心跳更新时，如果region有分裂，需要保证分裂出来的region与源region同时更新
@@ -721,7 +736,7 @@ void SchemaFactory::update_region(TableRegionPtr table_region_ptr,
     key_reg_map.insert(std::make_pair(region.start_key(), region.region_id()));
 
     table_region_ptr->insert_region_info(region);
-    DB_WARNING("region_id: %ld ver:%d key:(%s, %s), update success", 
+    DB_DEBUG("region_id: %ld ver:%d key:(%s, %s), update success", 
                region.region_id(), region.version(), 
                str_to_hex(region.start_key()).c_str(), 
                str_to_hex(region.end_key()).c_str());
@@ -747,19 +762,26 @@ void SchemaFactory::get_clear_regions(const std::string& new_start_key,
                         std::map<std::string, int64_t>& clear_regions) {
     //获取key_region_map中新旧start key之间的所有key，这些key是已经发生merge的，需要删除，
     //包括origin_region
+    bool is_over = false;
     std::vector<int64_t> region_ids;
-    std::string start_key = new_start_key;
+    std::string key = new_start_key;
     std::vector<StrInt64Map>& vec = table_region_ptr->key_region_mapping;
     StrInt64Map& key_reg_map = vec[0];
     auto region_iter = key_reg_map.find(new_start_key);
     while (region_iter != key_reg_map.end()) {
-        if (end_key_compare(start_key, origin_start_key) > 0) {
-            break;
+        if (key.empty() || key > origin_start_key) {
+            //为空则为最后一个region
+            if (is_over) {
+                break;
+            } else {
+                clear_regions.clear();
+                return;
+            }
         }
-        if (start_key != region_iter->first) {
+        if (key != region_iter->first) {
             clear_regions.clear();
             DB_FATAL("region id:%ld, nonsequence start_key:%s vs %s", 
-                    region_iter->second, str_to_hex(start_key).c_str(), 
+                    region_iter->second, str_to_hex(key).c_str(), 
                     str_to_hex(region_iter->first).c_str());
             return;
         }
@@ -775,8 +797,11 @@ void SchemaFactory::get_clear_regions(const std::string& new_start_key,
                    region_id, region.version(), 
                    str_to_hex(region.start_key()).c_str(),
                    str_to_hex(region.end_key()).c_str());
-        clear_regions[start_key] = region_id;
-        start_key = region.end_key();
+        clear_regions[key] = region_id;
+        key = region.end_key();
+        if (key == origin_start_key) {
+            is_over = true;
+        }
         region_iter++;
     }
 }
@@ -800,11 +825,11 @@ size_t SchemaFactory::update_regions_table(
         std::string end_key;
         for (auto iter = start_key_region_map.begin(); iter != start_key_region_map.end(); ++iter) {
             const pb::RegionInfo& region = *iter->second;
-            DB_NOTICE("double_buffer_write update region_info:%s", region.ShortDebugString().c_str());
+            DB_DEBUG("double_buffer_write update region_info:%s", region.ShortDebugString().c_str());
             pb::RegionInfo orgin_region;
             int ret = table_region_ptr->get_region_info(region.region_id(), orgin_region);
             if (ret < 0) {
-                DB_WARNING("region:%s", region.ShortDebugString().c_str());
+                DB_DEBUG("region:%s", region.ShortDebugString().c_str());
                 if (last_regions.size() != 0) {
                     //DB_WARNING("last_region:%s, region:%s",
                     //        last_region->ShortDebugString().c_str(), region.ShortDebugString().c_str());
@@ -821,7 +846,7 @@ size_t SchemaFactory::update_regions_table(
                         clear_region(table_region_ptr, clear_regions);
                         for (auto r : last_regions) {
                             update_region(table_region_ptr, *r);
-                            DB_WARNING("update regions %s", r->ShortDebugString().c_str());
+                            DB_DEBUG("update regions %s", r->ShortDebugString().c_str());
                         }
                         clear_regions.clear();
                         last_regions.clear();
@@ -833,7 +858,7 @@ size_t SchemaFactory::update_regions_table(
                         last_regions.clear();
                     }
                 } else {
-                    DB_WARNING("region:%s", region.ShortDebugString().c_str());
+                    DB_DEBUG("region:%s", region.ShortDebugString().c_str());
                     // 先判断加入的region是否与现有的region有范围重叠
                     std::vector<StrInt64Map>& vec = table_region_ptr->key_region_mapping;
                     if (vec.size() < 1) {
@@ -852,13 +877,13 @@ size_t SchemaFactory::update_regions_table(
                             continue;
                         }
                     }
-                    DB_WARNING("region:%s", region.ShortDebugString().c_str());
+                    DB_DEBUG("region:%s", region.ShortDebugString().c_str());
                     update_region(table_region_ptr, region);
                 }
             } else if (region.version() > orgin_region.version()) {
-                DB_WARNING("region:%s, orgin_region:%s",
+                DB_DEBUG("region:%s, orgin_region:%s",
                         region.ShortDebugString().c_str(), orgin_region.ShortDebugString().c_str());
-                DB_WARNING("region id:%ld, new vs origin (%ld, %s, %s) vs (%ld, %s, %s)",
+                DB_DEBUG("region id:%ld, new vs origin (%ld, %s, %s) vs (%ld, %s, %s)",
                          region.region_id(), region.version(), str_to_hex(region.start_key()).c_str(), 
                          str_to_hex(region.end_key()).c_str(), orgin_region.version(), 
                          str_to_hex(orgin_region.start_key()).c_str(), 
@@ -903,7 +928,7 @@ size_t SchemaFactory::update_regions_table(
                 }
                 continue;
             } else {
-                DB_WARNING("region:%s, orgin_region:%s",
+                DB_DEBUG("region:%s, orgin_region:%s",
                         region.ShortDebugString().c_str(), orgin_region.ShortDebugString().c_str());
                 update_region(table_region_ptr, region);
             }
@@ -984,14 +1009,129 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     _user_info_mapping[username] = user_info;
 }
 
-void SchemaFactory::update_show_db(const pb::DataBaseInfo& db_info) {
+void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
     BAIDU_SCOPED_LOCK(_update_show_db_mutex);
-    DatabaseInfo info;
-    info.id = db_info.database_id();
-    info.version = db_info.version();
-    info.name = db_info.database();
-    info.namespace_ = db_info.namespace_name();
-    _show_db_info[info.id] = info;
+    _show_db_info.clear();
+    for (auto db_info : db_infos) {
+        DatabaseInfo info;
+        info.id = db_info.database_id();
+        info.version = db_info.version();
+        info.name = db_info.database();
+        info.namespace_ = db_info.namespace_name();
+        _show_db_info[info.id] = info;
+    }
+}
+
+void SchemaFactory::update_statistics(const StatisticsVec& statistics) {
+    std::map<int64_t, SmartStatistics> tmp_mapping;
+    for (auto& st : statistics) {
+        SmartStatistics ptr = std::make_shared<Statistics>(st);
+        tmp_mapping[ptr->table_id()] = ptr;
+        DB_WARNING("update statistics, table_id:%ld, version:%ld", ptr->table_id(), ptr->version());
+    }
+
+    std::function<int(SchemaMapping& schema_mapping, const std::map<int64_t, SmartStatistics>& mapping)> func =
+        std::bind(&SchemaFactory::update_statistics_internal, this, std::placeholders::_1, std::placeholders::_2);
+    _double_buffer_table.Modify(func, tmp_mapping);
+}
+
+int SchemaFactory::update_statistics_internal(SchemaMapping& background, const std::map<int64_t, SmartStatistics>& mapping) {
+    auto& table_statistics_mapping = background.table_statistics_mapping;
+
+    for (auto iter = mapping.begin(); iter != mapping.end(); iter++) {
+        auto origin_iter = table_statistics_mapping.find(iter->first);
+        if (origin_iter != table_statistics_mapping.end()) {
+            if (iter->second->version() > origin_iter->second->version()) {
+                table_statistics_mapping[iter->first] = iter->second;
+            }
+        } else {
+            table_statistics_mapping[iter->first] = iter->second;
+        }
+    }
+
+    return 1;
+}
+
+int64_t SchemaFactory::get_statis_version(int64_t table_id) {
+
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return 0; 
+    }
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second->version();
+    }
+    return 0;
+}
+
+int64_t SchemaFactory::get_total_rows(int64_t table_id) {
+
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return 0; 
+    }
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second->total_rows();
+    }
+    return 0;
+}
+
+double SchemaFactory::get_histogram_ratio(int64_t table_id, int field_id, const ExprValue& lower, const ExprValue& upper) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return 1.0; 
+    }
+
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second->get_histogram_ratio(field_id, lower, upper);
+    }
+
+    return 1.0;
+}
+
+double SchemaFactory::get_cmsketch_ratio(int64_t table_id, int field_id, const ExprValue& value) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return 1.0; 
+    }
+
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second->get_cmsketch_ratio(field_id, value);
+    }
+
+    return 1.0;
+}
+
+SmartStatistics SchemaFactory::get_statistics_ptr(int64_t table_id) {
+    if (table_id <= 0) {
+        return nullptr;
+    }
+    
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return nullptr; 
+    }
+
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second;
+    }
+
+    return nullptr;
 }
 
 // create a new table record (aka. a table row)
@@ -1012,12 +1152,12 @@ SmartRecord SchemaFactory::new_record(int64_t tableid) {
         DB_WARNING("read double_buffer_table error.");
         return nullptr; 
     }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_table_info_mapping.count(tableid) == 0) {
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    if (table_info_mapping.count(tableid) == 0) {
         DB_WARNING("no table found: %ld", tableid);
         return nullptr;
     }
-    return new_record(*_table_info_mapping.at(tableid));
+    return new_record(*table_info_mapping.at(tableid));
 }
 
 DatabaseInfo SchemaFactory::get_database_info(int64_t databaseid) {
@@ -1026,11 +1166,11 @@ DatabaseInfo SchemaFactory::get_database_info(int64_t databaseid) {
         DB_WARNING("read double_buffer_table error.");
         return DatabaseInfo(); 
     }
-    auto& _db_info_mapping = table_ptr->db_info_mapping;
-    if (_db_info_mapping.count(databaseid) == 0) {
+    auto& db_info_mapping = table_ptr->db_info_mapping;
+    if (db_info_mapping.count(databaseid) == 0) {
         return DatabaseInfo();
     }
-    return _db_info_mapping.at(databaseid);
+    return db_info_mapping.at(databaseid);
 }
 
 pb::Engine SchemaFactory::get_table_engine(int64_t tableid) {
@@ -1039,24 +1179,20 @@ pb::Engine SchemaFactory::get_table_engine(int64_t tableid) {
         DB_WARNING("read double_buffer_table error.");
         return pb::ROCKSDB; 
     }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_table_info_mapping.count(tableid) == 0) {
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    if (table_info_mapping.count(tableid) == 0) {
         return pb::ROCKSDB;
     }
-    return _table_info_mapping.at(tableid)->engine;
+    return table_info_mapping.at(tableid)->engine;
 }
 
 TableInfo SchemaFactory::get_table_info(int64_t tableid) {
-    DoubleBufferedTable::ScopedPtr table_ptr;
-    if (_double_buffer_table.Read(&table_ptr) != 0) {
-        DB_WARNING("read double_buffer_table error.");
-        return TableInfo(); 
-    }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_table_info_mapping.count(tableid) == 0) {
+    auto ptr = get_table_info_ptr(tableid);
+    if (ptr != nullptr) {
+        return *ptr;
+    } else {
         return TableInfo();
     }
-    return *_table_info_mapping.at(tableid);
 }
 
 SmartTable SchemaFactory::get_table_info_ptr(int64_t tableid) {
@@ -1065,24 +1201,20 @@ SmartTable SchemaFactory::get_table_info_ptr(int64_t tableid) {
         DB_WARNING("read double_buffer_table error.");
         return nullptr; 
     }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_table_info_mapping.count(tableid) == 0) {
+    auto iter = table_ptr->table_info_mapping.find(tableid);
+    if (iter == table_ptr->table_info_mapping.end()) {
         return nullptr;
     }
-    return _table_info_mapping.at(tableid);
+    return iter->second;
 }
 
 IndexInfo SchemaFactory::get_index_info(int64_t indexid) {
-    DoubleBufferedTable::ScopedPtr table_ptr;
-    if (_double_buffer_table.Read(&table_ptr) != 0) {
-        DB_WARNING("read double_buffer_table error.");
-        return IndexInfo(); 
-    }
-    auto& _index_info_mapping = table_ptr->index_info_mapping;
-    if (_index_info_mapping.count(indexid) == 0) {
+    auto ptr = get_index_info_ptr(indexid);
+    if (ptr != nullptr) {
+    return *ptr;
+    } else {
         return IndexInfo();
     }
-    return *_index_info_mapping.at(indexid);
 }
 
 SmartIndex SchemaFactory::get_index_info_ptr(int64_t indexid) {
@@ -1091,11 +1223,31 @@ SmartIndex SchemaFactory::get_index_info_ptr(int64_t indexid) {
         DB_WARNING("read double_buffer_table error.");
         return nullptr; 
     }
-    auto& _index_info_mapping = table_ptr->index_info_mapping;
-    if (_index_info_mapping.count(indexid) == 0) { 
+    auto iter = table_ptr->index_info_mapping.find(indexid);
+    if (iter == table_ptr->index_info_mapping.end()) {
         return nullptr;
     }
-    return _index_info_mapping.at(indexid);
+    return iter->second;
+}
+
+std::string SchemaFactory::get_index_name(int64_t index_id) {
+    std::string name = "";
+    if (index_id == 0) {
+        name = "not use index";
+        return name;
+    }
+
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return "failed"; 
+    }
+
+    auto iter = table_ptr->index_info_mapping.find(index_id);
+    if (iter == table_ptr->index_info_mapping.end()) {
+        return "failed";
+    }
+    return iter->second->short_name;
 }
 
 std::shared_ptr<UserInfo> SchemaFactory::get_user_info(const std::string& user) {
@@ -1163,7 +1315,7 @@ int SchemaFactory::get_region_info(int64_t table_id, int64_t region_id, pb::Regi
     if (it == table_region_mapping_ptr->end()) {
         return -1;
     }
-    return table_region_mapping_ptr->at(table_id)->get_region_info(region_id, info);
+    return it->second->get_region_info(region_id, info);
 }
 
 int SchemaFactory::get_region_info(int64_t region_id, pb::RegionInfo& info) {
@@ -1177,11 +1329,11 @@ int SchemaFactory::get_table_id(const std::string& table_name, int64_t& table_id
         DB_WARNING("read double_buffer_table error.");
         return -1; 
     }
-    auto& _table_name_id_mapping = table_ptr->table_name_id_mapping;
-    if (_table_name_id_mapping.count(table_name) == 0) {
+    auto& table_name_id_mapping = table_ptr->table_name_id_mapping;
+    if (table_name_id_mapping.count(table_name) == 0) {
         return -1;
     }
-    table_id = _table_name_id_mapping.at(table_name);
+    table_id = table_name_id_mapping.at(table_name);
     return 0;
 }
 int SchemaFactory::get_region_capacity(int64_t global_index_id, int64_t& region_capacity) {
@@ -1190,50 +1342,159 @@ int SchemaFactory::get_region_capacity(int64_t global_index_id, int64_t& region_
         DB_WARNING("read double_buffer_table error.");
         return -1;
     }
-    auto& _global_index_id_mapping = table_ptr->global_index_id_mapping;
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_global_index_id_mapping.count(global_index_id) == 0) {
+    auto& global_index_id_mapping = table_ptr->global_index_id_mapping;
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    if (global_index_id_mapping.count(global_index_id) == 0) {
         DB_WARNING("index_id: %ld not exist", global_index_id);
         return -1;
     }
-    int64_t main_table_id = _global_index_id_mapping.at(global_index_id);
-    if (_table_info_mapping.count(main_table_id) == 0) {
+    int64_t main_table_id = global_index_id_mapping.at(global_index_id);
+    if (table_info_mapping.count(main_table_id) == 0) {
         return -1;
     }
-    region_capacity = _table_info_mapping.at(main_table_id)->region_split_lines;
+    region_capacity = table_info_mapping.at(main_table_id)->region_split_lines;
     return 0;
 }
 
 bool SchemaFactory::get_merge_switch(int64_t table_id) {
-    DoubleBufferedTable::ScopedPtr table_ptr;
-    if (_double_buffer_table.Read(&table_ptr) != 0) {
-        DB_WARNING("read double_buffer_table error.");
-        return false;
-    }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_table_info_mapping.count(table_id) == 0) {
-        return false;
-    }
-    if (_table_info_mapping.at(table_id)->schema_conf.has_need_merge()) {
-        return _table_info_mapping.at(table_id)->schema_conf.need_merge();
-    }
-    return false;
+    return is_switch_open(table_id, TABLE_SWITCH_MERGE);
 }
 
 bool SchemaFactory::get_separate_switch(int64_t table_id) {
-    DoubleBufferedTable::ScopedPtr table_ptr;
+    return is_switch_open(table_id, TABLE_SWITCH_SEPARATE);
+}
+
+bool SchemaFactory::is_switch_open(const int64_t table_id, const std::string& switch_name) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {
         DB_WARNING("read double_buffer_table error.");
         return false;
     }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_table_info_mapping.count(table_id) == 0) {
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    if (table_info_mapping.count(table_id) == 0) {
         return false;
     }
-    if (_table_info_mapping.at(table_id)->schema_conf.has_storage_compute_separate()) {
-        return _table_info_mapping.at(table_id)->schema_conf.storage_compute_separate();
+
+    auto& pb_conf = table_info_mapping.at(table_id)->schema_conf;
+    const google::protobuf::Reflection* reflection = pb_conf.GetReflection();
+    const google::protobuf::Descriptor* descriptor = pb_conf.GetDescriptor();
+    const google::protobuf::FieldDescriptor* field = nullptr;
+    field = descriptor->FindFieldByName(switch_name);
+    if (field == nullptr) {
+        return false;
     }
-    return false;
+
+    bool has_field = reflection->HasField(pb_conf, field);
+    if (!has_field) {
+        return false;
+    }
+
+    return reflection->GetBool(pb_conf, field);
+}
+
+void SchemaFactory::get_schema_conf_op_info(const int64_t table_id, int64_t& op_version, std::string& op_desc) {
+    int ret = get_schema_conf_value<int64_t>(table_id, TABLE_OP_VERSION, op_version);
+    if (ret < 0) {
+        op_version = 0;
+        op_desc = "no op";
+        return;
+    }
+
+    ret = get_schema_conf_str(table_id, TABLE_OP_DESC, op_desc);
+    if (ret < 0) {
+       op_desc = "";
+    }
+}
+
+template <class T>
+int SchemaFactory::get_schema_conf_value(const int64_t table_id, const std::string& switch_name, T& value) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return -1;
+    }
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    if (table_info_mapping.count(table_id) == 0) {
+        return -1;
+    }
+
+    auto& pb_conf = table_info_mapping.at(table_id)->schema_conf;
+    const google::protobuf::Reflection* reflection = pb_conf.GetReflection();
+    const google::protobuf::Descriptor* descriptor = pb_conf.GetDescriptor();
+    const google::protobuf::FieldDescriptor* field = nullptr;
+    field = descriptor->FindFieldByName(switch_name);
+    if (field == nullptr) {
+        return -1;
+    }
+
+    bool has_field = reflection->HasField(pb_conf, field);
+    if (!has_field) {
+        return -1;
+    }
+
+    auto type = field->cpp_type();
+    switch (type) {
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT32: {
+            value = reflection->GetInt32(pb_conf, field);
+        } break;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT32: {
+            value = reflection->GetUInt32(pb_conf, field);
+        } break;
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT64: {
+            value = reflection->GetInt64(pb_conf, field);
+        } break;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT64: {
+            value = reflection->GetUInt64(pb_conf, field);
+        } break;
+        case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT: {
+            value = reflection->GetFloat(pb_conf, field);
+        } break;
+        case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE: {
+            value = reflection->GetDouble(pb_conf, field);
+        } break;
+        case google::protobuf::FieldDescriptor::CPPTYPE_BOOL: {
+            value = reflection->GetBool(pb_conf, field);
+        } break;
+        default: {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int SchemaFactory::get_schema_conf_str(const int64_t table_id, const std::string& switch_name, std::string& value) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return -1;
+    }
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    if (table_info_mapping.count(table_id) == 0) {
+        return -1;
+    }
+
+    auto& pb_conf = table_info_mapping.at(table_id)->schema_conf;
+    const google::protobuf::Reflection* reflection = pb_conf.GetReflection();
+    const google::protobuf::Descriptor* descriptor = pb_conf.GetDescriptor();
+    const google::protobuf::FieldDescriptor* field = nullptr;
+    field = descriptor->FindFieldByName(switch_name);
+    if (field == nullptr) {
+        return -1;
+    }
+
+    bool has_field = reflection->HasField(pb_conf, field);
+    if (!has_field) {
+        return -1;
+    }
+
+    if (field->cpp_type() != google::protobuf::FieldDescriptor::CPPTYPE_STRING) {
+        return -1;
+    }
+    
+    value = reflection->GetString(pb_conf, field);
+
+    return 0;
 }
 
 int64_t SchemaFactory::get_ttl_duration(int64_t table_id) {
@@ -1242,11 +1503,11 @@ int64_t SchemaFactory::get_ttl_duration(int64_t table_id) {
         DB_WARNING("read double_buffer_table error.");
         return 0;
     }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    if (_table_info_mapping.count(table_id) == 0) {
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    if (table_info_mapping.count(table_id) == 0) {
         return 0;
     }
-    return _table_info_mapping.at(table_id)->ttl_duration;
+    return table_info_mapping.at(table_id)->ttl_duration;
 }
 
 int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
@@ -1255,11 +1516,11 @@ int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
         DB_WARNING("read double_buffer_table error.");
         return -1;
     }
-    auto& _db_name_id_mapping = table_ptr->db_name_id_mapping;
-    if (_db_name_id_mapping.count(db_name) == 0) {
+    auto& db_name_id_mapping = table_ptr->db_name_id_mapping;
+    if (db_name_id_mapping.count(db_name) == 0) {
         return -1;
     }
-    db_id = _db_name_id_mapping.at(db_name);
+    db_id = db_name_id_mapping.at(db_name);
     return 0;
 }
 bool SchemaFactory::exist_tableid(int64_t table_id) {
@@ -1288,9 +1549,9 @@ int SchemaFactory::get_index_id(int64_t table_id,
         DB_WARNING("read double_buffer_table error.");
         return -1;
     }
-    auto& _table_info_mapping = table_ptr->table_info_mapping;
-    auto& _index_name_id_mapping = table_ptr->index_name_id_mapping;
-    if (_table_info_mapping.count(table_id) == 0) {
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    auto& index_name_id_mapping = table_ptr->index_name_id_mapping;
+    if (table_info_mapping.count(table_id) == 0) {
         return -1;
     }
     std::string lower_index_name = index_name;
@@ -1300,12 +1561,12 @@ int SchemaFactory::get_index_id(int64_t table_id,
         index_id = table_id;
         return 0;
     }
-    const TableInfo& tbl_info = *_table_info_mapping.at(table_id);
+    const TableInfo& tbl_info = *table_info_mapping.at(table_id);
     std::string full_index_name = tbl_info.namespace_ + "." + tbl_info.name + "." + lower_index_name;
-    if (_index_name_id_mapping.count(full_index_name) == 0) {
+    if (index_name_id_mapping.count(full_index_name) == 0) {
         return -1;
     }
-    index_id = _index_name_id_mapping.at(full_index_name);
+    index_id = index_name_id_mapping.at(full_index_name);
     return 0;
 }
 int SchemaFactory::get_region_by_key(IndexInfo& index, 
@@ -1355,45 +1616,44 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
     }
     template_primary.mutable_index_conjuncts()->CopyFrom(primary->index_conjuncts());
 
-    //auto record_template = TableRecord::new_record(index.id);
     auto record_template = TableRecord::new_record(main_table_id);
     int range_size = primary->ranges_size();
     for (const auto& range : primary->ranges()) {
-        SmartRecord left;
-        SmartRecord right;
-        if (range.left_pb_record() != "") {
-            left = record_template->clone(false);
-            left->decode(range.left_pb_record());
-        }
-        if (range.right_pb_record() != "") {
-            right = record_template->clone(false);
-            right->decode(range.right_pb_record());
-        }
+        bool like_prefix = range.like_prefix();
         bool left_open = range.left_open();
         bool right_open = range.right_open();
-        MutTableKey  _start;
-        MutTableKey  _end;
-        if (left != nullptr) {
-            if (0 != _start.append_index(index, left.get(), range.left_field_cnt(), false)) {
-                DB_FATAL("Fail to encode_key, table:%ld", index.id);
+        MutTableKey  start;
+        MutTableKey  end;
+        if (!range.left_pb_record().empty()) {
+            auto left = record_template->clone(false);
+            if (left->decode(range.left_pb_record()) != 0) {
+                DB_FATAL("Fail to encode pb left, table:%ld", index.id);
+                return -1;
+            }
+            if (left->encode_key(index, start, range.left_field_cnt(), false, like_prefix) != 0) {
+                DB_FATAL("Fail to encode_key left, table:%ld", index.id);
                 return -1;
             }
         } else {
             left_open = false;
         }
-
-        if (right != nullptr) {
-            if (0 != _end.append_index(index, right.get(), range.right_field_cnt(), false)) {
-                DB_FATAL("Fail to encode_key, table:%ld", index.id);
+        if (!range.right_pb_record().empty()) {
+            auto right = record_template->clone(false);
+            if (right->decode(range.right_pb_record()) != 0) {
+                DB_FATAL("Fail to encode pb right, table:%ld", index.id);
+                return -1;
+            }
+            if (right->encode_key(index, end, range.right_field_cnt(), false, like_prefix) != 0) {
+                DB_FATAL("Fail to encode_key right, table:%ld", index.id);
                 return -1;
             }
         } else {
             right_open = false;
         }
 
-        MutTableKey _start_sentinel(_start.data());
-        if (!_start.get_full() && left_open) {
-            _start_sentinel.append_u16(0xFFFF);
+        MutTableKey start_sentinel(start.data());
+        if (!start.get_full() && left_open) {
+            start_sentinel.append_u16(0xFFFF);
         }
 
         if (key_region_mapping.size() != 1) {
@@ -1401,18 +1661,18 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
             return -1;
         }
         StrInt64Map& map = key_region_mapping[0];
-        auto region_iter = map.upper_bound(_start_sentinel.data());
+        auto region_iter = map.upper_bound(start_sentinel.data());
         
         while (left_open && region_iter != map.end() && 
-                boost::starts_with(region_iter->first, _start.data())) {
+                boost::starts_with(region_iter->first, start.data())) {
             region_iter++;
         }
         if (region_iter != map.begin()) {
             --region_iter;
         }
         while (region_iter != map.end()) {
-            if (_end.data().empty() || region_iter->first <= _end.data() ||
-                    (!right_open && boost::starts_with(region_iter->first, _end.data()))) {
+            if (end.data().empty() || region_iter->first <= end.data() ||
+                    (!right_open && boost::starts_with(region_iter->first, end.data()))) {
                 int64_t region_id = region_iter->second;
                 frontground->get_region_info(region_id, region_infos[region_id]);
                 if (range_size > 1 && region_primary != nullptr) {
@@ -1594,6 +1854,16 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         frontground->get_region_info(region_id, region_infos[region_id]);
     }
     return 0;
+}
+void SchemaFactory::delete_table_region_map(const pb::SchemaInfo& table) {
+    if (table.has_deleted() && table.deleted()) {
+        for (const auto& index : table.indexs()) {
+            if (index.is_global() || index.index_type() == pb::I_PRIMARY) {
+                DB_DEBUG("erase global index_id %lld", index.index_id());
+                _table_region_mapping.Modify(double_buffer_table_region_erase, index.index_id());
+            }
+        }
+    }
 }
 
 }//namespace

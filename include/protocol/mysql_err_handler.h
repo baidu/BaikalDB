@@ -25,7 +25,6 @@ struct MysqlErrorItem {
     std::string err_name;
     std::string state_odbc;
     std::string state_jdbc;
-    //const std::string err_desc;
 
 };
 

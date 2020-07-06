@@ -17,7 +17,6 @@
 #include <unordered_map>
 #include <map>
 #include <bvar/bvar.h>
-#include <boost/regex.hpp>
 #include "network_socket.h"
 #include "epoll_info.h"
 #include "mysql_wrapper.h"
@@ -47,6 +46,7 @@ const std::string SQL_SHOW_FULL_TABLES           = "show full tables";
 const std::string SQL_SHOW_CREATE_TABLE          = "show create table";
 const std::string SQL_SHOW_FULL_COLUMNS          = "show full columns";
 const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
+const std::string SQL_SHOW_ABNORMAL_REGIONS      = "show abnormal regions";
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
 const std::string SQL_SHOW_WARNINGS              = "show warnings";
@@ -92,15 +92,6 @@ enum QUERY_TYPE {
 class StateMachine {
 public:
     ~StateMachine() {
-        for (auto& minute_pair : database_request_count_minute) {
-            delete minute_pair.second;
-        }
-        for (auto& hour_pair : database_request_count_hour) {
-            delete hour_pair.second;
-        }
-        for (auto& day_pair : database_request_count_day) {
-            delete day_pair.second;
-        }
     }
 
     static StateMachine* get_instance() {
@@ -112,7 +103,8 @@ public:
     void client_free(SmartSocket socket, EpollInfo* epoll_info);
 
 private:
-    StateMachine() {
+    StateMachine(): dml_time_cost("dml_time_cost"),
+                    select_time_cost("select_time_cost") {
         _wrapper = MysqlWrapper::get_instance();
     }
 
@@ -137,6 +129,7 @@ private:
     bool _handle_client_query_show_create_table(SmartSocket client);
     bool _handle_client_query_show_full_columns(SmartSocket client);
     bool _handle_client_query_show_table_status(SmartSocket client);
+    bool _handle_client_query_show_abnormal_regions(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
     bool _handle_client_query_show_socket(SmartSocket client);
     bool _handle_client_query_show_processlist(SmartSocket client);
@@ -163,11 +156,8 @@ private:
     int _reset_network_socket_client_resource(SmartSocket client);
     void _print_query_time(SmartSocket client);
 
-    std::mutex                                        bvar_mutex;
-    std::unordered_map<std::string, bvar::Adder<int>> database_request_count;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_minute;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_hour;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_day;
+    bvar::LatencyRecorder dml_time_cost;
+    bvar::LatencyRecorder select_time_cost;
 
     MysqlWrapper*   _wrapper = nullptr;
 

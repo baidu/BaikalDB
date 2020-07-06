@@ -74,6 +74,15 @@ public:
     static int analyze(QueryContext* ctx);
    
     static std::map<parser::JoinType, pb::JoinType> join_type_mapping;
+    std::vector<std::string>& select_names() {
+        return _select_names;
+    }
+    std::vector<pb::Expr>& select_exprs() {
+        return _select_exprs;
+    }
+    std::multimap<std::string, size_t>& select_alias_mapping() {
+        return _select_alias_mapping;
+    }
 
 protected:
     // add table used in SQL to the context
@@ -153,7 +162,7 @@ protected:
     std::string get_field_full_name(const parser::ColumnName* col);
 
     // make AND exprs to expr vector
-    int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters);
+    int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters, bool use_alias);
 
     void create_order_func_slot();
 
@@ -161,17 +170,17 @@ protected:
     std::vector<pb::SlotDescriptor>& get_agg_func_slot(
             const std::string& agg, const std::string& fn_name, bool& new_slot);
 
-    int create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr);
+    int create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, bool use_alias);
 
     // (col between A and B) ==> (col >= A) and (col <= B)
-    int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr);
+    int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, bool use_alias);
     int create_values_expr(const parser::FuncExpr* item, pb::Expr& expr);
 
     // TODO in next stage: fill full func name
     // fill arg_types, return_type(col_type) and has_var_args
-    int create_scala_func_expr(const parser::FuncExpr* item, pb::Expr& expr, parser::FuncType op);
+    int create_scala_func_expr(const parser::FuncExpr* item, pb::Expr& expr, parser::FuncType op, bool use_alias);
 
-    int create_expr_tree(const parser::Node* item, pb::Expr& expr);
+    int create_expr_tree(const parser::Node* item, pb::Expr& expr, bool use_alias);
 
     int create_orderby_exprs(parser::OrderByClause* order);
 
@@ -184,7 +193,7 @@ protected:
     //TODO: primitive len for STRING, BOOL and NULL
     int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr);
     // (a,b)
-    int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr);
+    int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr, bool use_alias);
 
     void create_scan_tuple_descs();
     void create_values_tuple_desc(); 
@@ -198,28 +207,30 @@ protected:
     pb::SlotDescriptor& get_values_ref_slot(int64_t table, int32_t field, pb::PrimitiveType type);
 
     // create common plan nodes 
-    int create_packet_node(pb::OpType op_type, int num_children = 1);
+    int create_packet_node(pb::OpType op_type);
     int create_filter_node(std::vector<pb::Expr>& filters, pb::PlanNodeType type);
     int create_sort_node();
     int create_scan_nodes();
     int create_join_and_scan_nodes(baikaldb::JoinMemTmp* join_root);
 
 
-    void    set_dml_txn_state(int64_t table_id);
+    void set_dml_txn_state(int64_t table_id);
     uint64_t get_txn_id();
-    void    plan_begin_txn();
-    void    plan_commit_txn();
-    void    plan_rollback_txn();
-    void    plan_commit_and_begin_txn();
-    void    plan_rollback_and_begin_txn();
+    void plan_begin_txn();
+    void plan_commit_txn();
+    void plan_rollback_txn();
+    void plan_commit_and_begin_txn();
+    void plan_rollback_and_begin_txn();
 
 private:
     int create_n_ary_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
-            pb::ExprNodeType type);
+            pb::ExprNodeType type,
+            bool use_alias);
     int create_in_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
-            pb::ExprNodeType type);
+            pb::ExprNodeType type,
+            bool use_alias);
 
     static std::atomic<uint64_t> _txn_id_counter;
 

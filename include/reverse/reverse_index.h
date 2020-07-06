@@ -13,13 +13,13 @@
 // limitations under the License.
 
 #pragma once
+#include "reverse_common.h"
 #include "rocksdb/utilities/transaction.h"
 #include "key_encoder.h"
 #include "table_record.h"
 #include "rocks_wrapper.h"
 #include "transaction.h"
 #include "boolean_executor.h"
-#include "reverse_common.h"
 #include "schema_factory.h"
 #include "expr_node.h"
 #include <atomic>
@@ -33,7 +33,7 @@ public:
     virtual ~ReverseIndexBase() {
     }
     //倒排表的1、2、3级倒排链表merge函数
-    virtual int reverse_merge_func(pb::RegionInfo info) = 0;
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third) = 0;
     //新加正排 创建倒排索引
     virtual int insert_reverse(
                        rocksdb::Transaction* txn,
@@ -54,6 +54,7 @@ public:
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
+                       pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast = false) = 0;
     virtual bool valid() = 0;
@@ -62,20 +63,23 @@ public:
     virtual void sync(AtomicManager<std::atomic<long>>& am) = 0;
 
     //获取1、2level倒排集合和3level倒排，用于Parser获取底层数据
+    /*
     virtual int get_reverse_list_two(
                        rocksdb::Transaction* txn,  
                        const std::string& term, 
                        MessageSP& list_new_ptr,
                        MessageSP& list_old_ptr,
                        bool is_fast = false) = 0;
+    */
     //返回exe，用来给多个倒排索引字段join
     virtual int create_executor(
                     rocksdb::Transaction* txn,
                     const IndexInfo& index_info,
                     const TableInfo& table_info,
                     const std::string& search_data,
+                    pb::MatchMode mode,
                     std::vector<ExprNode*> conjuncts, 
-                    BooleanExecutorBase*& exe,
+    //                BooleanExecutorBase*& exe,
                     bool is_fast = false) = 0;
     virtual void set_second_level_length(int length) = 0;
     virtual void set_cache_size(int size) = 0;
@@ -87,7 +91,8 @@ public:
 template<typename ReverseNode, typename ReverseList>
 class SchemaBase {
 public:
-    typedef std::string PrimaryIdT;
+    using PrimaryIdT = typename ReverseTrait<ReverseList>::PrimaryType;
+    using PostingNodeT = ReverseNode;
     SchemaBase() {
     }
     void init(ReverseIndexBase *reverse, rocksdb::Transaction *txn, 
@@ -110,13 +115,7 @@ public:
     virtual ~SchemaBase() {
         delete _exe;
     }
-    //调用db的拉链
-    int get_reverse_list(
-                    const std::string& term, 
-                    MessageSP& list_new, 
-                    MessageSP& list_old) {
-        return _reverse->get_reverse_list_two(_txn, term, list_new, list_old, _is_fast);
-    }
+    
     virtual bool valid() {
         if (_exe != NULL) {
             while (true) {
@@ -132,13 +131,14 @@ public:
                 }
             }
         } else {
+            DB_WARNING("exec is nullptr");
             return false;
         }
     }
     KeyRange key_range() {
         return _key_range;
     }
-    BooleanExecutorBase*& exe() {
+    BooleanExecutorBase<PostingNodeT>*& exe() {
         return _exe;
     }
     ReverseSearchStatistic& statistic() {
@@ -153,12 +153,13 @@ public:
     void set_table_info(const TableInfo& table_info) {
         _table_info = table_info;
     }
-    virtual int create_executor(const std::string& search_data, pb::SegmentType segment_type) = 0;
+    virtual int create_executor(const std::string& search_data, 
+            pb::MatchMode mode, pb::SegmentType segment_type) = 0;
     virtual int next(SmartRecord record) = 0;
 
 protected:
     int32_t _idx = 0;
-    BooleanExecutorBase* _exe = NULL;
+    BooleanExecutorBase<PostingNodeT>* _exe = NULL;
     const ReverseNode* _cur_node = NULL;
     ReverseIndexBase *_reverse;
     rocksdb::Transaction *_txn;//读取时用的transaction，由调用者释放
@@ -175,6 +176,7 @@ class ReverseIndex : public ReverseIndexBase {
 public:
     typedef typename Schema::ReverseNode ReverseNode;
     typedef typename Schema::ReverseList ReverseList;
+    using ReverseListSptr = typename Schema::ReverseListSptr;
     ReverseIndex(
             int64_t region_id, 
             int64_t index_id, 
@@ -204,7 +206,7 @@ public:
     }
     ~ReverseIndex(){}
 
-    virtual int reverse_merge_func(pb::RegionInfo info);
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third);
     //0:success    -1:fail
     virtual int insert_reverse(
                         rocksdb::Transaction* txn,
@@ -224,6 +226,7 @@ public:
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
+                       pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast = false); 
     virtual bool valid() {
@@ -237,21 +240,23 @@ public:
         _schema = nullptr;
     }
     virtual int get_next(SmartRecord record) {
+        //DB_WARNING("schema get_next()");
         return _schema->next(record);
     }
     virtual int get_reverse_list_two(
                        rocksdb::Transaction* txn,  
                        const std::string& term, 
-                       MessageSP& list_new,
-                       MessageSP& list_old,
+                       ReverseListSptr& list_new,
+                       ReverseListSptr& list_old,
                        bool is_fast = false);
     virtual int create_executor(
                     rocksdb::Transaction* txn,
                     const IndexInfo& index_info,
                     const TableInfo& table_info,
                     const std::string& search_data,
+                    pb::MatchMode mode,
                     std::vector<ExprNode*> conjuncts, 
-                    BooleanExecutorBase*& exe,
+        //            BooleanExecutorBase*& exe,
                     bool is_fast = false);
     //读写和merge同步
     void sync(AtomicManager<std::atomic<long>>& am) {
@@ -276,6 +281,12 @@ public:
     virtual void add_field(const std::string& name, int32_t field_id) {
         _name_field_id_map[name] = field_id;
     }
+    
+    BooleanExecutorBase<typename Schema::PostingNodeT>* get_executor() {
+        auto exe_ptr = _schema->exe();
+        _schema->exe() = nullptr;
+        return exe_ptr;
+    }
 private:
     //0:success    -1:fail
     int handle_reverse(
@@ -288,6 +299,8 @@ private:
     //level取值0、1、2或3, 0和1属于一级 2是2级 3是3级
     //key = tableid_regionid_level
     int _create_reverse_key_prefix(uint8_t level, std::string& key);
+    //remove out of range keys when split
+    int _reverse_remove_range_for_third_level(uint8_t prefix);
     //first(0/1) level merge to second(2) level
     int _reverse_merge_to_second_level(std::unique_ptr<rocksdb::Iterator>&, uint8_t);
     //get some level list
@@ -295,7 +308,7 @@ private:
                     rocksdb::Transaction* txn, 
                     uint8_t level, 
                     const std::string& term, 
-                    MessageSP& list,
+                    ReverseListSptr& list,
                     bool is_statistic = false,
                     bool is_over_cache = false);
     //delete some level list
@@ -313,6 +326,7 @@ private:
 private:
     int64_t             _region_id;
     int64_t             _index_id;
+    uint8_t             _merge_prefix = 0;
     uint8_t             _reverse_prefix = 1;
     std::atomic<long>    _sync_prefix_0;
     std::atomic<long>    _sync_prefix_1;
@@ -320,9 +334,11 @@ private:
     RocksWrapper*       _rocksdb;
     KeyRange            _key_range;
     bool                _prefix_0_succ = false;
+    bool                _merge_success_flag = true;
+    int64_t             _level_1_scan_count = 0;
     // todo: replace thread_local because bthread will switch thread
-    static thread_local SchemaBase<ReverseNode, ReverseList>* _schema;
-    Cache<std::string, std::shared_ptr<google::protobuf::Message>> _cache;
+    static thread_local Schema* _schema;
+    Cache<std::string, ReverseListSptr> _cache;
     Cache<uint64_t, std::shared_ptr<std::map<std::string, ReverseNode>>> _seg_cache;
     pb::SegmentType _segment_type;
     bool _is_over_cache;
@@ -333,8 +349,7 @@ private:
     std::map<std::string, int32_t> _name_field_id_map;
 };
 template<typename Schema>
-thread_local SchemaBase<typename Schema::ReverseNode, 
-                typename Schema::ReverseList>* ReverseIndex<Schema>::_schema = nullptr;
+thread_local Schema* ReverseIndex<Schema>::_schema = nullptr;
 
 //多个倒排索引间做or操作，只读
 template<typename Schema>
@@ -352,8 +367,9 @@ public:
             rocksdb::Transaction* txn,
             const IndexInfo& index_info,
             const TableInfo& table_info,
-            const std::vector<ReverseIndexBase*>& reverse_indexes,
+            const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
             const std::vector<std::string>& search_datas,
+            const std::vector<pb::MatchMode>& modes,
             bool is_fast, bool bool_or); 
     bool valid() {
         if (_exe != NULL) {
@@ -409,8 +425,8 @@ private:
     const ReverseNode* _cur_node = NULL;
     IndexInfo _index_info;
     TableInfo _table_info;
-    std::vector<BooleanExecutorBase*> _son_exe_vec;
-    std::vector<ReverseIndexBase*> _reverse_indexes;
+    std::vector<BooleanExecutorBase<typename Schema::PostingNodeT>*> _son_exe_vec;
+    std::vector<ReverseIndex<Schema>*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;
     int32_t _weight_field_id = 0;
 };

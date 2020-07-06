@@ -24,11 +24,41 @@
 #include "reverse_interface.h"
 #include "row_batch.h"
 #include "mysql_err_code.h"
+#include "trace_state.h"
+#include "statistics.h"
 //#include "region_resource.h"
 
 using google::protobuf::RepeatedPtrField;
 
 namespace baikaldb {
+DECLARE_int32(per_txn_max_num_locks);
+struct TxnLimitMap {
+    static TxnLimitMap* get_instance() {
+        static TxnLimitMap _instance;
+        return &_instance;
+    }
+
+    bool check_txn_limit(const uint64_t txn_id, const int row_count) {
+        bool too_many = false;
+        auto update_func = [&too_many, &row_count] (int& count) {
+            count += row_count;
+            if (count > FLAGS_per_txn_max_num_locks) {
+                too_many = true;
+            }
+        };
+        _txn_limit_mapping.init_if_not_exist_else_update(txn_id, update_func, row_count);
+        return too_many;
+    }
+
+    void erase(const uint64_t txn_id) {
+        _txn_limit_mapping.erase(txn_id);
+    }
+
+private:
+    TxnLimitMap() {}
+    ThreadSafeMap<uint64_t, int> _txn_limit_mapping;
+};
+
 class QueryContext;
 class NetworkSocket;
 
@@ -49,13 +79,13 @@ public:
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool,
-        bool store_compute_separate = false);
+        bool store_compute_separate);
 
     // baikaldb init
     int init(QueryContext* ctx, DataBuffer* send_buf);
 
     // for prepared txn recovery in BaikalDB
-    int init(const pb::CachePlan& commit_plan);
+    //int init(const pb::CachePlan& commit_plan);
 
     void set_reverse_index_map(const std::map<int64_t, ReverseIndexBase*>& reverse_index_map) {
         _reverse_index_map = reverse_index_map;
@@ -117,15 +147,15 @@ public:
         if (_txn != nullptr) {
             return _txn;
         }
-        _txn = SmartTransaction(new Transaction(0, _txn_pool));
+        _txn = SmartTransaction(new Transaction(0, _txn_pool, use_ttl));
         _txn->set_region_info(&(_resource->region_info));
         _txn->set_ddl_state(_resource->ddl_param_ptr);
-        _txn->begin();
         _txn->_is_separate = is_separate;
+        _txn->begin();
         return _txn;
     }
     SmartTransaction create_batch_txn() {
-        auto txn = SmartTransaction(new Transaction(0, _txn_pool));
+        auto txn = SmartTransaction(new Transaction(0, _txn_pool, use_ttl));
         txn->set_region_info(&(_resource->region_info));
         txn->set_ddl_state(_resource->ddl_param_ptr);
         txn->_is_separate = is_separate;
@@ -156,6 +186,23 @@ public:
 
     int num_returned_rows() {
         return _num_returned_rows;
+    }
+    void set_num_scan_rows(int num) {
+        _num_scan_rows = num;
+    }
+    int num_scan_rows() {
+        return _num_scan_rows;
+    }
+
+    void set_num_filter_rows(int num) {
+        _num_filter_rows = num;
+    }
+    void inc_num_filter_rows() {
+        _num_filter_rows++;
+    }
+
+    int num_filter_rows() {
+        return _num_filter_rows;
     }
 
     void set_log_id(uint64_t logid) {
@@ -243,6 +290,17 @@ public:
     void set_eos() {
         _eos = true;
     }
+    std::vector<TraceTimeCost>* get_trace_cost() {
+        return &_trace_cost_vec;
+    } 
+
+    void set_primary_region_id(int64_t region_id) {
+        _primary_region_id = region_id;
+    }
+
+    int64_t primary_region_id() const {
+        return _primary_region_id;
+    }
 
 public:
     uint64_t          txn_id = 0;
@@ -251,12 +309,17 @@ public:
     std::ostringstream error_msg;
     bool              is_full_export = false;
     bool              is_separate = false; //是否为计算存储分离模式
+    bool              use_ttl = false;
     BthreadCond       txn_cond;
     std::function<void(RuntimeState* state, SmartTransaction txn)> raft_func;
     bool              is_fail = false;
+    bool              need_txn_limit = false;
     std::string       raft_error_msg;
+    ExplainType       explain_type = EXPLAIN_NULL;
+    std::shared_ptr<CMsketch> cmsketch = nullptr;
 
 private:
+    bool _is_inited    = false;
     bool _is_cancelled = false;
     bool _eos          = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
@@ -272,6 +335,8 @@ private:
     int _num_increase_rows = 0; //存储净新增行数
     int _num_affected_rows = 0; //存储baikaldb写影响的行数
     int _num_returned_rows = 0; //存储baikaldb读返回的行数
+    int _num_scan_rows     = 0; //存储baikalStore扫描行数
+    int _num_filter_rows   = 0; //存储过滤行数
     int64_t _log_id = 0;
 
     bool              _single_sql_autocommit = true;     // used for baikaldb and store
@@ -281,6 +346,7 @@ private:
     TransactionPool*  _txn_pool = nullptr;    // used for store
     SmartTransaction  _txn = nullptr;         // used for store
     std::shared_ptr<RegionResource> _resource;// used for store
+    int64_t           _primary_region_id = -1;// used for store
 
     // 如果用了排序列做索引，就不需要排序了
     bool _sort_use_index = false;
@@ -288,6 +354,8 @@ private:
     size_t _row_batch_capacity = ROW_BATCH_CAPACITY;
     int _multiple = 1;
     RuntimeStatePool* _pool = nullptr;
+    //trace使用
+    std::vector<TraceTimeCost> _trace_cost_vec;
 };
 typedef std::shared_ptr<RuntimeState> SmartState;
 }

@@ -13,13 +13,17 @@
 // limitations under the License.
 
 #pragma once
+#include "reverse_arrow.h"
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <sstream>
+#include <iomanip>
 #include "proto/reverse.pb.h"
 #include "rocks_wrapper.h"
 #include "key_encoder.h"
 #include "lru_cache.h"
+#include "boolean_executor.h"
 #ifdef BAIDU_INTERNAL
 #include <nlpc/ver_1_0_0/wordseg_input.h>
 #include <nlpc/ver_1_0_0/wordrank_output.h>
@@ -89,7 +93,7 @@ public:
  *倒排链表分为三层，每层的存储形式不一样
  *MergeSortIterator作为倒排链表的中间层，屏蔽底层的差异性
  */
-template<typename ReverseNode>
+template<typename ReverseNode, typename ReverseList>
 class MergeSortIterator{
 public:
     virtual ~MergeSortIterator() {}
@@ -102,12 +106,14 @@ public:
     virtual pb::ReverseNodeType get_flag() = 0;
     //获取元素
     virtual ReverseNode& get_value() = 0;
+
+    virtual void add_node(ReverseList&) = 0;
 };
 /*
  *第一层倒排链表的抽象，ReverseNode是分散的形式
  */
-template<typename ReverseNode>
-class FirstLevelMSIterator : public MergeSortIterator<ReverseNode> {
+template<typename ReverseNode, typename ReverseList>
+class FirstLevelMSIterator : public MergeSortIterator<ReverseNode, ReverseList> {
 public:
     FirstLevelMSIterator(
                        std::unique_ptr<rocksdb::Iterator>& iter,
@@ -130,6 +136,10 @@ public:
     virtual pb::ReverseNodeType get_flag();
     virtual ReverseNode& get_value();
     virtual ~FirstLevelMSIterator() {}
+    virtual void add_node(ReverseList& res_list) {
+        ReverseNode* tmp_node = res_list.add_reverse_nodes();
+        fill_node(tmp_node);
+    }
 private:
     std::unique_ptr<rocksdb::Iterator>& _iter;
     const std::string& _merge_term;
@@ -141,11 +151,17 @@ private:
     RocksWrapper* _rocksdb;
     rocksdb::Transaction* _txn;
 };
+
+//add_node对arrow进行特化
+template<>
+inline void FirstLevelMSIterator<ArrowReverseNode, ArrowReverseList>::add_node(ArrowReverseList& res_list) {
+    res_list.add_node(_curr_node.key(), _curr_node.flag(), _curr_node.weight());
+}
 /*
  *第二/三层倒排链表的抽象，ReverseNode是有序数组的形式
  */
 template<typename ReverseNode, typename ReverseList>
-class SecondLevelMSIterator : public MergeSortIterator<ReverseNode> {
+class SecondLevelMSIterator : public MergeSortIterator<ReverseNode, ReverseList> {
 public:
     SecondLevelMSIterator(ReverseList& list, const KeyRange& key_range) : 
                             _list(list),
@@ -157,16 +173,26 @@ public:
     virtual void fill_node(ReverseNode* node);
     virtual pb::ReverseNodeType get_flag();
     virtual ReverseNode& get_value();
+    virtual void add_node(ReverseList& res_list) {
+        ReverseNode* tmp_node = res_list.add_reverse_nodes();
+        fill_node(tmp_node);
+    }
 private:
     ReverseList& _list;
     KeyRange _key_range;
     int _index;
     bool _first;
 };
-//合并不同层次的倒排链表
+
+template<>
+inline void SecondLevelMSIterator<ArrowReverseNode, ArrowReverseList>::add_node(ArrowReverseList& res_list) {
+    res_list.add_node(*_list.mutable_reverse_nodes(_index));
+}
+
+//合并不同层次的倒排链表，返回合并后的长度
 template<typename ReverseNode, typename ReverseList>
-int level_merge(MergeSortIterator<ReverseNode>* new_iter, 
-                MergeSortIterator<ReverseNode>* old_iter,
+int level_merge(MergeSortIterator<ReverseNode, ReverseList>* new_iter, 
+                MergeSortIterator<ReverseNode, ReverseList>* old_iter,
                 ReverseList& res_list,
                 bool is_del);
 
@@ -228,10 +254,50 @@ public:
     }
 };
 //test api
-void print_reverse_list_test(pb::ReverseList& list);
 void print_reverse_list_common(pb::CommonReverseList& list);
 void print_reverse_list_xbs(pb::XbsReverseList& list);
 
+template<typename, typename = void>
+struct ReverseTrait;
+
+template<typename ListType>
+struct ReverseTrait<ListType,
+    typename std::enable_if<
+        std::is_same<ListType, pb::CommonReverseList>::value ||
+        std::is_same<ListType, pb::XbsReverseList>::value
+    >::type
+> {
+    using PrimaryType = std::string;
+    const static bool_executor_type executor_type = NODE_NOT_COPY; 
+    static void finish(ListType&) {}
+    static const std::string& get_reverse_key(ListType& list, int64_t index) {
+        return list.reverse_nodes(index).key();
+    }
+
+    static pb::ReverseNodeType get_flag(ListType& list, int64_t index) {
+        return list.reverse_nodes(index).flag();
+    }
+};
+
+template<typename ListType>
+struct ReverseTrait<ListType,
+    typename std::enable_if<
+        std::is_same<ListType, ArrowReverseList>::value
+    >::type
+> {
+    using PrimaryType = std::string;
+    const static bool_executor_type executor_type = NODE_COPY; 
+    static void finish(ListType& t) {
+        t.finish();
+    }
+    static std::string get_reverse_key(ListType& list, int64_t index) {
+        return list.get_key(index);
+    }
+
+    static pb::ReverseNodeType get_flag(ListType& list, int64_t index) {
+        return list.get_flag(index);
+    }
+};
 }// end of namespace
 
 #include "reverse_common.hpp"

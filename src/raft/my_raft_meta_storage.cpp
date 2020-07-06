@@ -18,7 +18,7 @@
 #include "mut_table_key.h"
 
 namespace baikaldb {
-DEFINE_string(old_stable_path, "/home/work/shared/data/raft_data/stable", "old stable path");
+//DEFINE_string(old_stable_path, "/home/work/shared/data/raft_data/stable", "old stable path");
 
 static int parse_my_raft_meta_uri(const std::string& uri, std::string& id){
     size_t pos = uri.find("id=");
@@ -66,17 +66,6 @@ RaftMetaStorage* MyRaftMetaStorage::new_instance(const std::string& uri) const {
     return instance;
 }
 
-int MyRaftMetaStorage::init() {
-    if (_is_inited) {
-        return 0;
-    }
-
-    int ret = load();
-    if (ret == 0) {
-        _is_inited = true;
-    }
-    return ret;
-}
 
 int MyRaftMetaStorage::set_term(const int64_t term) {
     if (_is_inited) {
@@ -128,6 +117,43 @@ int MyRaftMetaStorage::set_term_and_votedfor(const int64_t term, const braft::Pe
     }
 }
 
+butil::Status MyRaftMetaStorage::init() {
+    butil::Status status;
+    if (_is_inited) {
+        return status;
+    }
+
+    int ret = load();
+    if (ret == 0) {
+        _is_inited = true;
+        return status;
+    }
+    status.set_error(EINVAL, "MyRaftMetaStorage load pb meta error, region_id: %ld", _region_id);
+    return status;
+}
+
+butil::Status MyRaftMetaStorage::set_term_and_votedfor(const int64_t term, 
+        const braft::PeerId& peer_id, const braft::VersionedGroupId& group) {
+    butil::Status status;
+    int ret = set_term_and_votedfor(term, peer_id);
+    if (ret < 0) {
+        status.set_error(EINVAL, "MyRaftMetaStorage is error, region_id: %ld", _region_id);
+    }
+    return status;
+}
+
+butil::Status MyRaftMetaStorage::get_term_and_votedfor(int64_t* term, braft::PeerId* peer_id, 
+        const braft::VersionedGroupId& group) {
+    butil::Status status;
+    if (_is_inited) {
+        *peer_id = _votedfor;
+        *term = _term;
+        return status;
+    }
+    status.set_error(EINVAL, "MyRaftMetaStorage is error, region_id: %ld", _region_id);
+    return status;
+}
+
 int MyRaftMetaStorage::load() {
     braft::StablePBMeta meta;
     MutTableKey mut_key;
@@ -146,34 +172,7 @@ int MyRaftMetaStorage::load() {
         LOG(INFO) << "load meta success " << _term << " _votedfor" << _votedfor.to_string();
     } else {
         LOG(WARNING) << "Fail to load meta by rocksdb region_id: " << _region_id;
-        return old_load();
-    }
-
-    return ret;
-}
-
-// 兼容老的，稳定后删除
-int MyRaftMetaStorage::old_load() {
-
-    std::ostringstream os;
-    os << FLAGS_old_stable_path << "/region_";
-    os << _region_id << "/stable_meta";
-    std::string path = os.str();
-    LOG(INFO) << path;
-
-    braft::ProtoBufFile pb_file(path);
-
-    braft::StablePBMeta meta;
-    int ret = pb_file.load(&meta);
-    if (ret == 0) {
-        _term = meta.term();
-        ret = _votedfor.parse(meta.votedfor());
-        LOG(ERROR) << "save term " << _term << " _votedfor" << _votedfor.to_string(); 
-        save();
-    } else if (errno == ENOENT) {
-        ret = 0;
-    } else {
-        PLOG(ERROR) << "Fail to load meta from " << path;
+        //return old_load();
     }
 
     return ret;

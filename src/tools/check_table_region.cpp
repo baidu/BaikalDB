@@ -1,5 +1,5 @@
 
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,12 +30,9 @@ namespace baikaldb {
 DEFINE_string(namespace_name, "FENGCHAO", "FENGCHAO");
 DEFINE_string(database, "", "database");
 DEFINE_string(table_name, "", "table_name");
-DEFINE_string(resource_tag, "", "resouce_tag");
-DEFINE_string(suffix, "_tmp", "_tmp");
 
 int create_table(const std::string& namespace_name, const std::string& database, 
-                const std::string& table_name, const std::string& resource_tag,
-                const std::string& suffix) {
+                const std::string& table_name) {
     MetaServerInteract interact;
     if (interact.init() != 0) {
         DB_WARNING("init fail");
@@ -68,64 +65,34 @@ int create_table(const std::string& namespace_name, const std::string& database,
         return -1;
     }
     const pb::SchemaInfo& schema_info = response.schema_infos(0);
-
-    //根据返回的结果创建新的建表请求
-    pb::MetaManagerRequest create_table_request;
-    create_table_request.set_op_type(pb::OP_CREATE_TABLE);
-    create_table_request.mutable_table_info()->set_table_name(schema_info.table_name() + suffix);
-    create_table_request.mutable_table_info()->set_database(schema_info.database());
-    create_table_request.mutable_table_info()->set_namespace_name(schema_info.namespace_name());
-    create_table_request.mutable_table_info()->set_replica_num(schema_info.replica_num());
-    create_table_request.mutable_table_info()->set_resource_tag(schema_info.resource_tag());
-    if (resource_tag.size() > 0) {
-        create_table_request.mutable_table_info()->set_resource_tag(resource_tag);
-    }
-    create_table_request.mutable_table_info()->set_byte_size_per_record(schema_info.byte_size_per_record());
-    for (auto& field_info : schema_info.fields()) {
-        auto add_field = create_table_request.mutable_table_info()->add_fields();
-        *add_field = field_info;
-        add_field->clear_new_field_name();
-        add_field->clear_field_id();
-    }
+    std::map<int64_t, std::string> index_name_ids;
     for (auto& index_info : schema_info.indexs()) {
-        auto add_index = create_table_request.mutable_table_info()->add_indexs();
-        *add_index = index_info;
-        add_index->clear_new_index_name();
-        add_index->clear_field_ids();
-        add_index->clear_index_id();
+        index_name_ids[index_info.index_id()] = index_info.index_name();
     }
-    std::vector<std::string> split_keys;
-    std::map<std::string, const pb::RegionInfo*> table_key_map;
+    std::map<std::string, std::vector<pb::RegionInfo>> index_region_infos;
     for (auto& region_info : response.region_infos()) {
-        if (table_key_map.count(region_info.start_key()) == 0) {
-            table_key_map[region_info.start_key()] = &region_info;
-        } else {
-            std::cout<< "err 2 region_id:" << region_info.region_id() << "\n";
-        }
+        std::string index_name = index_name_ids[region_info.table_id()];
+        index_region_infos[index_name].push_back(region_info);
     }
-    std::string last_end_key = "";
-    for (auto kv : table_key_map) {
-        if (kv.second->start_key() != last_end_key) {
-            std::cout<< "err region_id:" << kv.second->region_id() << "\n";
+    for (auto& region_infos_per_index : index_region_infos) {
+        std::string index_name = region_infos_per_index.first;
+        std::map<std::string, const pb::RegionInfo*> table_key_map;
+        for (auto& region_info : region_infos_per_index.second) {
+            if (table_key_map.count(region_info.start_key()) == 0) {
+                table_key_map[region_info.start_key()] = &region_info;
+            } else {
+                std::cout<< "err 2 index_name: " << index_name << "region_id:" << region_info.region_id() << "\n";
+            }
         }
-        last_end_key = kv.second->end_key();
+        std::string last_end_key = "";
+        for (auto kv : table_key_map) {
+            if (kv.second->start_key() != last_end_key) {
+                std::cout<< "err index_name: " << index_name << "region_id:" << kv.second->region_id() << "\n";
+            }
+            last_end_key = kv.second->end_key();
+        }
     }
     DB_WARNING("end");
-    return 0;
-    std::sort(split_keys.begin(), split_keys.end());
-    for (auto& split_key : split_keys) {
-        create_table_request.mutable_table_info()->add_split_keys(split_key);
-    }
-
-    pb::MetaManagerResponse create_table_response;
-    if (interact.send_request("meta_manager", create_table_request, create_table_response) != 0) {
-        DB_WARNING("send_request fail");
-        return -1;
-    }
-    DB_WARNING("req:%s", create_table_request.ShortDebugString().c_str());
-    DB_WARNING("create table split_key_size:%d", split_keys.size());
-    DB_WARNING("res:%s", create_table_response.ShortDebugString().c_str());
-
     return 0;
 }
 
@@ -135,9 +102,7 @@ int main(int argc, char **argv) {
     google::ParseCommandLineFlags(&argc, &argv, true);
     baikaldb::create_table(baikaldb::FLAGS_namespace_name, 
                            baikaldb::FLAGS_database, 
-                           baikaldb::FLAGS_table_name, 
-                           baikaldb::FLAGS_resource_tag, 
-                           baikaldb::FLAGS_suffix);
+                           baikaldb::FLAGS_table_name);
 
     return 0;
 }

@@ -183,8 +183,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
                 func->set_name("eq");
                 func->set_fn_op(parser::FT_EQ);
                 lt_le->init(node);
-                lt_le->type_inferer();
-                lt_le->const_pre_calc();
+                lt_le->expr_optimize();
                 cut_preds.insert(gt_ge);
                 return 0;
             } else {
@@ -205,13 +204,11 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     std::map<int64_t, SlotPredicate> pred_map;
     for (auto& expr : _conjuncts) {
         //类型推导
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        //常量表达式计算
-        expr->const_pre_calc();
         if (expr->children_size() < 2) {
             continue;
         }
@@ -316,6 +313,8 @@ int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
 }
 
 int FilterNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -326,6 +325,7 @@ int FilterNode::open(RuntimeState* state) {
     std::vector<int64_t>& scan_indices = state->scan_indices();
     for (auto conjunct : _conjuncts) {
         //如果该条件已经被扫描使用的index包含，则不需要再过滤该条件
+        // TODO 后续baikaldb直接过滤掉条件，不需要这个了
         if (conjunct->contained_by_index(scan_indices)) {
             continue;
         }
@@ -343,27 +343,8 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
     auto filter_node = pb_node->mutable_derive_node()->mutable_filter_node();
     filter_node->clear_conjuncts();
-    for (auto expr : _conjuncts) {
+    for (auto expr : _pruned_conjuncts) {
         ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
-    }
-}
-
-void FilterNode::remove_primary_conjunct(int64_t index_id) {
-    auto filter_node = _pb_node.mutable_derive_node()->mutable_filter_node();
-    filter_node->clear_conjuncts();
-    auto iter = _conjuncts.begin();
-    std::vector<int64_t> remove_index;
-    remove_index.push_back(index_id);
-    while (iter != _conjuncts.end()) {
-        auto expr = *iter;
-        if (expr->contained_by_index(remove_index)) {
-            ExprNode::destroy_tree(expr);
-            iter = _conjuncts.erase(iter);
-            continue;
-        }
-        // transfer_pb还会构建，后面删掉试试
-        ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
-        ++iter;
     }
 }
 
@@ -378,6 +359,12 @@ inline bool FilterNode::need_copy(MemRow* row) {
 }
 
 int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    int64_t where_filter_cnt = 0;
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this, &where_filter_cnt](TraceLocalNode& local_node) {
+        local_node.add_where_filter_rows(where_filter_cnt);
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+    
     while (1) {
         if (batch->is_full()) {
             return 0;
@@ -409,6 +396,9 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         if (_is_explain || need_copy(row.get())) {
             batch->move_row(std::move(row));
             ++_num_rows_returned;
+        } else {
+            state->inc_num_filter_rows();
+            ++where_filter_cnt;
         }
         _child_row_batch.next();
     }
@@ -420,6 +410,10 @@ void FilterNode::close(RuntimeState* state) {
     for (auto conjunct : _conjuncts) {
         conjunct->close();
     }
+    _pruned_conjuncts.clear();
+    _child_row_batch.clear();
+    _child_row_idx = 0;
+    _child_eos = false;
 }
 void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
     ExecNode::show_explain(output);
@@ -427,7 +421,7 @@ void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& o
         return;
     }
     if (!_pruned_conjuncts.empty()) {
-        output.back()["Extra"] += "Using where";
+        output.back()["Extra"] += "Using where; ";
     }
 }
 }

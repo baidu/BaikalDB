@@ -31,6 +31,8 @@ const std::string SNAPSHOT_DATA_FILE_WITH_SLASH = "/" + SNAPSHOT_DATA_FILE;
 const std::string SNAPSHOT_META_FILE_WITH_SLASH = "/" + SNAPSHOT_META_FILE;
 
 class RocksdbFileSystemAdaptor;
+class Region;
+typedef std::shared_ptr<Region> SmartRegion;
 
 struct IteratorContext {
     bool reading = false;
@@ -128,7 +130,8 @@ private:
     RocksdbFileSystemAdaptor* _rs = nullptr;
     SnapshotContextPtr _context = nullptr;
     bool _is_meta_reader = false;
-    bool _closed;
+    bool _closed = true;
+    size_t _num_lines = 0;
 };
 
 class SstWriterAdaptor : public braft::FileAdaptor {
@@ -189,7 +192,7 @@ private:
             if ((data.size() - pos) < value_size) {
                 DB_FATAL("read value from iobuf fail, region_id: %ld, value_size: %ld", 
                         _region_id, value_size);
-                return 1;
+                return -1;
             }
             data.copy_to(&value, value_size, pos);
             pos += value_size;
@@ -198,9 +201,11 @@ private:
         return 0;
     }
     int64_t _region_id;
-    bool _closed;
+    SmartRegion _region_ptr;
     std::string _path;
-    size_t _count;
+    size_t _count = 0;
+    bool _closed = true;
+    bool _is_meta = false;
     std::unique_ptr<SstFileWriter> _writer;
 };
 

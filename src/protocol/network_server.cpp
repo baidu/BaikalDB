@@ -13,10 +13,15 @@
 // limitations under the License.
 
 #include "network_server.h"
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "physical_planner.h"
 #include "transaction_manager_node.h"
 #include "log.h"
 #include <gflags/gflags.h>
+#include <time.h>
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -27,37 +32,17 @@ namespace baikaldb {
 DEFINE_int32(backlog, 1024, "Size of waitting queue in listen()");
 DEFINE_int32(baikal_port, 28282, "Server port");
 DEFINE_int32(epoll_timeout, 2000, "Epoll wait timeout in epoll_wait().");
-DEFINE_int32(check_interval, 10, "interval for checking thread alive and conn idle timeout");
-DEFINE_int32(thread_idle_timeout, 100, "thread block(hang) threshold (second)");
+DEFINE_int32(check_interval, 10, "interval for conn idle timeout");
 DEFINE_int32(connect_idle_timeout_s, 1800, "connection idle timeout threshold (second)");
 DEFINE_int32(slow_query_timeout_s, 60, "slow query threshold (second)");
-DEFINE_int32(baikal_heartbeat_interval, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
+DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
 DEFINE_string(recovery_db_path, "./db", "db path for transaction recovery, default: ./db");
+DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 uint8_t NetworkServer::transaction_prefix = 0x01;
-
-// check thread idle state, task queue and connection idle state with a timer
-void* thread_check_func(void* param) {
-    NetworkServer* server = static_cast<NetworkServer*>(param);
-    server->thread_alive_check();
-    server->connection_timeout_check();
-    return nullptr;
-}
-
-void* thread_timer(void* param) {
-    NetworkServer* server = static_cast<NetworkServer*>(param);
-    boost::asio::io_service *ios = server->get_io_service();
-    // check thread idle state, task queue and connection idle state with a timer
-    InfiniteTimer thread_check_timer(FLAGS_check_interval, *ios,
-        thread_check_func, param, false);
-    // delete config and ip check
-    server->start_io_service();
-    DB_NOTICE("thread_timer exit()");
-    return nullptr;
-}
 
 // 1. read meta_db to get prepared (yet not committed) transactions left by last baikaldb instance
 // 2. try to commit transaction until success
@@ -178,30 +163,46 @@ void NetworkServer::report_heart_beat() {
         } else {
             DB_WARNING("send heart beat request to meta server fail");
         }
-        bthread_usleep(FLAGS_baikal_heartbeat_interval);
+        bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
     }
 }
 
 void NetworkServer::print_agg_sql() {
     while (!_shutdown) {
-        bthread_usleep(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL);
         BvarMap sample = StateMachine::get_instance()->sql_agg_cost.reset();
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        time_t timep;
+        struct tm tm;
+        time(&timep);
+        localtime_r(&timep, &tm);
+        
         for (auto& pair : sample.internal_map) {
             if (!pair.first.empty()) {
-                uint64_t out[2];
-                butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
-                SQL_TRACE("sum=[%ld] count=[%ld] avg=[%ld] sign=[%llu] sql_agg: %s", 
-                        pair.second.sum, pair.second.count,
-                        pair.second.count == 0 ? 0 : pair.second.sum / pair.second.count,
-                        out[0], pair.first.c_str());
+                for (auto& pair2 : pair.second) {
+                    uint64_t out[2];
+                    int64_t version;
+                    std::string description;
+                    factory->get_schema_conf_op_info(pair2.second.table_id, version, description);
+                    butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
+                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter=[%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%llu\t%s\t%s] sql_agg: %s "
+                        "op_version_desc=[%ld\t%s]", 
+                        1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
+                        pair2.second.sum, pair2.second.count,
+                        pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
+                        pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
+                        out[0], FLAGS_hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),  
+                        version, description.c_str());
+                }
             }
         }
+        bthread_usleep_fast_shutdown(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL, _shutdown);
     }
 }
 
 void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
+        auto& table_statistics_mapping = schema.table_statistics_mapping;
         for (auto& info_pair : schema.table_info_mapping) {
             if (info_pair.second->engine != pb::ROCKSDB &&
                     info_pair.second->engine != pb::ROCKSDB_CSTORE) {
@@ -209,11 +210,11 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
             }
             //主键索引和全局二级索引都需要传递region信息
             for (auto& index_id : info_pair.second->indices) {
-                auto& _index_info_mapping = schema.index_info_mapping;
-                if (_index_info_mapping.count(index_id) == 0) {
+                auto& index_info_mapping = schema.index_info_mapping;
+                if (index_info_mapping.count(index_id) == 0) {
                     continue;
                 }
-                IndexInfo index = *_index_info_mapping.at(index_id);
+                IndexInfo index = *index_info_mapping.at(index_id);
                 //主键索引
                 if (index.type != pb::I_PRIMARY && !index.is_global) {
                     continue;
@@ -221,6 +222,13 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
                 auto req_info = request.add_schema_infos();
                 req_info->set_table_id(index_id);
                 req_info->set_version(1);
+                int64_t version = 0;
+                auto iter = table_statistics_mapping.find(index_id);
+                if (iter != table_statistics_mapping.end()) {
+                    version = iter->second->version();
+                }
+                req_info->set_statis_version(version);
+
                 if (index_id == info_pair.second->id) {
                     req_info->set_version(info_pair.second->version);
                 } 
@@ -249,17 +257,16 @@ void NetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatRespons
     for (auto& info : response.schema_change_info()) {
         factory->update_table(info);
     }
-
     factory->update_regions(response.region_change_info());
-
     if (response.has_idc_info()) {
         factory->update_idc(response.idc_info());
     }
     for (auto& info : response.privilege_change_info()) {
         factory->update_user(info);
     }
-    for (auto& info : response.db_info()) {
-        factory->update_show_db(info);
+    factory->update_show_db(response.db_info());
+    if (response.statistics().size() > 0) {
+        factory->update_statistics(response.statistics());
     }
     if (response.has_last_updated_index() && 
         response.last_updated_index() > factory->last_updated_index()) {
@@ -278,8 +285,9 @@ void NetworkServer::process_heart_beat_response_sync(const pb::BaikalHeartBeatRe
     for (auto& info : response.privilege_change_info()) {
         factory->update_user(info);
     }
-    for (auto& info : response.db_info()) {
-        factory->update_show_db(info);
+    factory->update_show_db(response.db_info());
+    if (response.statistics().size() > 0) {
+        factory->update_statistics(response.statistics());
     }
 
     factory->update_regions_double_buffer_sync(response.region_change_info());
@@ -290,95 +298,92 @@ void NetworkServer::process_heart_beat_response_sync(const pb::BaikalHeartBeatRe
     DB_NOTICE("sync time:%ld", cost.get_time());
 }
 
-
-void NetworkServer::thread_alive_check() {
-    time_t time_now = time(NULL);
-    if (time_now == (time_t)-1) {
-        DB_WARNING("get current time failed.");
-        return;
-    }
-    for (uint32_t idx = 0; idx < _driver_thread_num; ++idx) {
-        double diff = difftime(time_now, _last_time[idx].second);
-        size_t task_size = MachineDriver::get_instance()->task_size();
-        if ((int32_t)diff >= FLAGS_thread_idle_timeout && task_size > 0) {
-            DB_WARNING("thread is hanging [idx=%d][tid=%d][task_size=%lu][idle_time=%lu(sec)]",
-                idx, _last_time[idx].first, task_size, (uint64_t)diff);
-        }
-    }
-    return;
-}
-
 void NetworkServer::connection_timeout_check() {
-    time_t time_now = time(NULL);
-    if (time_now == (time_t)-1) {
-        DB_WARNING("get current time failed.");
-        return;
-    }
-    if (_epoll_info == NULL) {
-        DB_WARNING("_epoll_info not initialized yet.");
-        return;
-    }
-
-    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
-        SmartSocket sock = _epoll_info->get_fd_mapping(idx);
-        if (sock == NULL || sock->in_pool == true || sock->fd == 0) {
-            continue;
+    auto check_func = [this]() {
+        time_t time_now = time(NULL);
+        if (time_now == (time_t)-1) {
+            DB_WARNING("get current time failed.");
+            return;
+        }
+        if (_epoll_info == NULL) {
+            DB_WARNING("_epoll_info not initialized yet.");
+            return;
         }
 
-        // 处理客户端Hang住的情况，server端没有发送handshake包或者auth_result包
-        timeval current;
-        gettimeofday(&current, NULL);
-        int64_t diff_us = (current.tv_sec - sock->connect_time.tv_sec) * 1000000
+        for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+            SmartSocket sock = _epoll_info->get_fd_mapping(idx);
+            if (sock == NULL || sock->is_free || sock->fd == -1) {
+                continue;
+            }
+
+            // 处理客户端Hang住的情况，server端没有发送handshake包或者auth_result包
+            timeval current;
+            gettimeofday(&current, NULL);
+            int64_t diff_us = (current.tv_sec - sock->connect_time.tv_sec) * 1000000
                 + (current.tv_usec - sock->connect_time.tv_usec);
-        if (!sock->is_authed && diff_us >= 1000000) {
+            if (!sock->is_authed && diff_us >= 1000000) {
+                // 待现有工作处理完成，需要获取锁
+                if (sock->mutex.try_lock() == false) {
+                    continue;
+                }
+                if (sock->is_free || sock->fd == -1) {
+                    DB_WARNING("sock is already free.");
+                    sock->mutex.unlock();
+                    continue;
+                }
+                DB_WARNING("close un_authed connection [fd=%d][ip=%s][port=%d].",
+                        sock->fd, sock->ip.c_str(), sock->port);
+                sock->shutdown = true;
+                MachineDriver::get_instance()->dispatch(sock, _epoll_info,
+                        sock->shutdown || _shutdown);
+                continue;
+            }
+            time_now = time(NULL);
+            if (sock->query_ctx != nullptr && 
+                    sock->query_ctx->mysql_cmd != COM_SLEEP) {
+                int query_time_diff = time_now - sock->query_ctx->stat_info.start_stamp.tv_sec;
+                if (query_time_diff > FLAGS_slow_query_timeout_s) {
+                    DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][sql=%s]",
+                            query_time_diff, sock->fd, sock->ip.c_str(), sock->port,
+                            time_now, sock->last_active,
+                            sock->user_info->username.c_str(),
+                            sock->query_ctx->stat_info.log_id,
+                            sock->query_ctx->sql.c_str());
+                    continue;
+                }
+            }
+            // 处理连接空闲时间过长的情况，踢掉空闲连接
+            double diff = difftime(time_now, sock->last_active);
+            if ((int32_t)diff < FLAGS_connect_idle_timeout_s) {
+                continue;
+            }
             // 待现有工作处理完成，需要获取锁
             if (sock->mutex.try_lock() == false) {
                 continue;
             }
-            DB_WARNING("close un_authed connection [fd=%d][ip=%s][port=%d].",
-                sock->fd, sock->ip.c_str(), sock->port);
-            sock->shutdown = true;
-            MachineDriver::get_instance()->dispatch(sock, _epoll_info,
-                sock->shutdown || _shutdown);
-            continue;
-        }
-        time_now = time(NULL);
-        if (sock->query_ctx != nullptr && 
-            sock->query_ctx->mysql_cmd != COM_SLEEP) {
-            int query_time_diff = time_now - sock->query_ctx->stat_info.start_stamp.tv_sec;
-            if (query_time_diff > FLAGS_slow_query_timeout_s) {
-                DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][sql=%s]",
-                        query_time_diff, sock->fd, sock->ip.c_str(), sock->port,
-                        time_now, sock->last_active,
-                        sock->user_info->username.c_str(),
-                        sock->query_ctx->stat_info.log_id,
-                        sock->query_ctx->sql.c_str());
+            if (sock->is_free || sock->fd == -1) {
+                DB_WARNING("sock is already free.");
+                sock->mutex.unlock();
                 continue;
             }
+            DB_NOTICE("close idle connection [fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s]",
+                    sock->fd, sock->ip.c_str(), sock->port,
+                    time_now, sock->last_active,
+                    sock->user_info->username.c_str());
+            sock->shutdown = true;
+            MachineDriver::get_instance()->dispatch(sock, _epoll_info,
+                    sock->shutdown || _shutdown);
         }
-        // 处理连接空闲时间过长的情况，踢掉空闲连接
-        double diff = difftime(time_now, sock->last_active);
-        if ((int32_t)diff < FLAGS_connect_idle_timeout_s) {
-            continue;
-        }
-        // 待现有工作处理完成，需要获取锁
-        if (sock->mutex.try_lock() == false) {
-            continue;
-        }
-        DB_NOTICE("close idle connection [fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s]",
-            sock->fd, sock->ip.c_str(), sock->port,
-            time_now, sock->last_active,
-            sock->user_info->username.c_str());
-        sock->shutdown = true;
-        MachineDriver::get_instance()->dispatch(sock, _epoll_info,
-            sock->shutdown || _shutdown);
+    };
+    while (!_shutdown) {
+        check_func();
+        bthread_usleep_fast_shutdown(FLAGS_check_interval * 1000 * 1000LL, _shutdown);
     }
 }
 
 // Gracefully shutdown.
 void NetworkServer::graceful_shutdown() {
     _shutdown = true;
-
 }
 
 NetworkServer::NetworkServer():
@@ -444,7 +449,6 @@ bool NetworkServer::init() {
         return false;
     }
     DB_NOTICE("sync time2:%ld", cost.get_time());
-    //bthread_usleep(15 * 1000 * 1000); // 等待region同步完成
     if (FLAGS_fetch_instance_id) {
         if (fetch_instance_info() != 0) {
             return false;
@@ -468,8 +472,6 @@ bool NetworkServer::init() {
 }
 
 void NetworkServer::stop() {
-    _ios.stop();
-    pthread_join(_timer_tid, nullptr);
     _heartbeat_bth.join();
 
     if (_epoll_info == nullptr) {
@@ -481,7 +483,7 @@ void NetworkServer::stop() {
         if (!sock) {
             continue;
         }
-        if (sock == nullptr || sock->in_pool == true || sock->fd == 0) {
+        if (sock == nullptr || sock->fd == 0) {
             continue;
         }
 
@@ -508,8 +510,8 @@ bool NetworkServer::start() {
 
 SmartSocket NetworkServer::create_listen_socket() {
     // Fetch a socket.
-    SocketPool* socket_pool = SocketPool::get_instance();
-    SmartSocket sock = socket_pool->fetch(SERVER_SOCKET);
+    SocketFactory* socket_pool = SocketFactory::get_instance();
+    SmartSocket sock = socket_pool->create(SERVER_SOCKET);
     if (sock == NULL) {
         DB_FATAL("Failed to fetch socket from poll.type:[%u]", SERVER_SOCKET);
         return SmartSocket();
@@ -550,12 +552,7 @@ int NetworkServer::make_worker_process() {
         DB_FATAL("Failed to init machine driver.");
         exit(-1);
     }
-    //create timer thread
-    int ret = pthread_create(&_timer_tid, nullptr, thread_timer, this);
-    if (ret != 0) {
-        DB_FATAL("start timer thread error");
-        return -1;
-    }
+    _conn_check_bth.run([this]() {connection_timeout_check();});
     _heartbeat_bth.run([this]() {report_heart_beat();});
     _recover_bth.run([this]() {recovery_transactions();});
     _agg_sql_bth.run([this]() {print_agg_sql();});
@@ -579,7 +576,7 @@ int NetworkServer::make_worker_process() {
     }
     // Process epoll events.
     int listen_fd = _service->fd;
-    SocketPool* socket_pool = SocketPool::get_instance();
+    SocketFactory* socket_pool = SocketFactory::get_instance();
     while (!_shutdown) {
         int fd_cnt = _epoll_info->wait(FLAGS_epoll_timeout);
         if (_shutdown) {
@@ -613,9 +610,9 @@ int NetworkServer::make_worker_process() {
                     continue;
                 }
                 // Create NetworkSocket for new client socket.
-                SmartSocket client_socket = socket_pool->fetch(CLIENT_SOCKET);
+                SmartSocket client_socket = socket_pool->create(CLIENT_SOCKET);
                 if (client_socket == NULL) {
-                    DB_WARNING("Failed to fetch NetworkSocket from pool.fd:[%d]", client_fd);
+                    DB_WARNING("Failed to create NetworkSocket from pool.fd:[%d]", client_fd);
                     close(client_fd);
                     continue;
                 }
@@ -655,11 +652,10 @@ int NetworkServer::make_worker_process() {
                 continue;
             }
             if (fd != sock->fd) {
-                DB_WARNING("current [fd=%d][sock_fd=%d][in_pool=%d]"
+                DB_WARNING("current [fd=%d][sock_fd=%d]"
                     "[event=%d][fd_cnt=%d][state=%s]",
                     fd,
                     sock->fd,
-                    sock->in_pool,
                     event,
                     fd_cnt,
                     state2str(sock).c_str());
@@ -690,7 +686,7 @@ int NetworkServer::make_worker_process() {
                 if (sock->mutex.try_lock() == false) {
                     continue;
                 }
-                if (sock->in_pool == true || sock->fd == 0) {
+                if (sock->is_free || sock->fd == -1) {
                     DB_WARNING("sock is already free.");
                     sock->mutex.unlock();
                     continue;

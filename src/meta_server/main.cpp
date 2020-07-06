@@ -35,6 +35,9 @@ DECLARE_int32(meta_replica_number);
 }
 
 int main(int argc, char **argv) {
+#ifdef BAIKALDB_REVISION
+    google::SetVersionString(BAIKALDB_REVISION);
+#endif
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     boost::filesystem::path remove_path("init.success");
@@ -148,6 +151,7 @@ int main(int argc, char **argv) {
     }
     DB_WARNING("recevie kill signal, begin to quit"); 
     meta_server->shutdown_raft();
+    meta_server->close();
     baikaldb::RocksWrapper::get_instance()->close();
     DB_WARNING("raft shut down, rocksdb close");
     server.Stop(0);

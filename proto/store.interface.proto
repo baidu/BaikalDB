@@ -4,6 +4,7 @@ import "common.proto";
 import "raft.proto";
 import "plan.proto";
 import "optype.proto";
+import "statistics.proto";
 import "meta.interface.proto";
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
@@ -22,6 +23,14 @@ message CachePlan {
     repeated RegionInfo regions = 5;
 };
 
+enum  TxnState {
+    TXN_UNKEOWN           = 0;
+    TXN_BEGINED           = 1;
+    TXN_PREPARED          = 2;
+    TXN_COMMITTED         = 3;
+    TXN_ROLLBACKED        = 4;
+};
+
 message TransactionInfo {
     required uint64 txn_id           = 1;
     required int32  seq_id           = 2;
@@ -31,12 +40,23 @@ message TransactionInfo {
     repeated CachePlan cache_plans   = 6;  //缓存的query的执行计划
     optional int64   num_rows        = 7;  //事务增加的行数，用于事务恢复使用(split)
     optional bool    autocommit      = 8;
+    optional int64   primary_region_id = 9;
+    optional TxnState txn_state        = 10;
+    optional int64   live_time         = 11;
 };
 
 message KvOp {
     required OpType    op_type = 1;
     optional bytes     key     = 2;
     optional bytes     value   = 3;
+    optional int64     ttl_timestamp_us = 4;
+};
+
+message AnalyzeInfo {
+    required int32     depth   = 1;
+    required int32     width   = 2;
+    required int32     sample_rows = 3;
+    required int64     table_rows  = 4;     
 };
 
 message StoreReq {
@@ -53,7 +73,7 @@ message StoreReq {
     optional int64 split_term       = 11;
     optional int64 split_end_index  = 12;
     optional int64 reduce_num_lines = 13; //split需要删除的行数
-    optional bool async             = 14; //外部事务
+    optional bool force             = 14;
     optional bool not_check_region  = 15; //为true则不判断数据与region的匹配性
     optional RegionInfo new_region_info = 16;
     optional bool select_without_leader = 17;   //为true则select不判断是否leader,增加读性能
@@ -61,6 +81,10 @@ message StoreReq {
     optional DdlWorkInfo ddlwork_info = 19; //更新ddl work
     optional int64   num_increase_rows = 20;
     repeated KvOp          kv_ops   = 21; //kv op
+    optional bool  is_trace         = 22;
+    optional AnalyzeInfo   analyze_info = 23;
+    repeated uint64    rollback_txn_ids = 24;
+    repeated uint64    commit_txn_ids   = 25;
 };
 
 message RowValue {
@@ -75,6 +99,7 @@ message IndexRecords {
     required int64  index_id        = 1;
     repeated bytes  records         = 2;  
 };
+
 message StoreRes {
     required ErrCode errcode        = 1;
     optional bytes errmsg          = 2;
@@ -92,8 +117,10 @@ message StoreRes {
     repeated RegionLeader region_leaders = 13;
     optional bool  is_merge        = 14;//fetch node use it when error code is VERSION_OLD
     repeated IndexRecords  records        = 15;
+    optional int64  scan_rows     = 16;
+    optional CMsketch cmsketch    = 17;
+    optional int64  filter_rows     = 18;
 };
-
 message InitRegion {
     required RegionInfo region_info     = 1;
     optional SchemaInfo schema_info     = 2;
@@ -108,12 +135,37 @@ message GetAppliedIndex {
 message RemoveRegion {
     required int64  region_id       = 1;
     optional bool   force           = 2;
+    optional bool   need_delay_drop = 3;
 };
 
 message RegionIds {
     repeated int64  region_ids      = 1; // if size = 0, it will compact the entire db
     optional bool compact_raft_log  = 2; // if true, compact raft log
+    optional int64  table_id        = 3; // use for restore region
+    optional int32  compact_type    = 4; //  1:data_cf 2:meta_cf 3:raft_log_cf
 };
+
+message BackUpReq {};
+
+message BackUpRes {};
+
+enum BackupOp {
+    BACKUP_DOWNLOAD = 0;
+    BACKUP_UPLOAD = 1;
+};
+
+message BackupRequest {
+    required int64 region_id    = 1;
+    optional int64 log_index   = 2;
+    optional BackupOp backup_op = 3;
+    optional bool ingest_store_latest_sst = 4;
+};
+
+message BackupResponse {
+    optional int64 log_index   = 1;
+    optional ErrCode errcode        = 2;
+};
+
 service StoreService {
     //1、创建table时master调用，region及raft同步创建成功后才返回给metaServer,
     //   创建表时raft node地址初始化为一个节点
@@ -144,7 +196,13 @@ service StoreService {
 
     rpc snapshot_region(RegionIds) returns(StoreRes);
 
+    rpc restore_region(RegionIds) returns(StoreRes);
+
     rpc query_region(RegionIds) returns (StoreRes);
     
     rpc query_illegal_region(RegionIds) returns (StoreRes);
+
+    rpc backup_region(BackUpReq) returns (BackUpRes);
+
+    rpc backup(BackupRequest) returns (BackupResponse);
 };

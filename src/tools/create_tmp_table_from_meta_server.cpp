@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,27 +26,38 @@
 
 namespace baikaldb {
 DEFINE_string(namespace_name, "FENGCHAO", "FENGCHAO");
-DEFINE_string(database, "", "database");
-DEFINE_string(table_name, "", "table_name");
+DEFINE_string(database, "db", "database");
+DEFINE_string(database2, "", "database");
+DEFINE_string(table_name, "tb", "table_name");
+DEFINE_string(table_name2, "", "table_name");
 DEFINE_string(resource_tag, "", "resouce_tag");
 DEFINE_string(suffix, "_tmp", "_tmp");
 DECLARE_string(meta_server_bns);
-DEFINE_string(meta_server_bns2, FLAGS_meta_server_bns, "meta server bns");
+DEFINE_string(meta_server_bns2, "", "meta server bns");
 
-int create_table(const std::string& namespace_name, const std::string& database, 
-                const std::string& table_name, const std::string& resource_tag,
+int create_table(const std::string& namespace_name, 
+                const std::string& resource_tag,
                 const std::string& suffix) {
     MetaServerInteract interact;
     if (interact.init() != 0) {
         DB_WARNING("init fail");
         return -1;
     }
+    if (FLAGS_table_name2.empty()) {
+        FLAGS_table_name2 = FLAGS_table_name;
+    }
+    if (FLAGS_database2.empty()) {
+        FLAGS_database2 = FLAGS_database;
+    }
+    if (FLAGS_meta_server_bns2.empty()) {
+        FLAGS_meta_server_bns2 = FLAGS_meta_server_bns;
+    }
     //先导出table的scheme_info信息
     pb::QueryRequest request;
     request.set_op_type(pb::QUERY_SCHEMA);
     request.set_namespace_name(namespace_name);
-    request.set_database(database);
-    request.set_table_name(table_name);
+    request.set_database(FLAGS_database);
+    request.set_table_name(FLAGS_table_name);
     
     pb::QueryResponse response;
     if (interact.send_request("query", request, response) != 0) {
@@ -71,64 +82,94 @@ int create_table(const std::string& namespace_name, const std::string& database,
 
     //根据返回的结果创建新的建表请求
     pb::MetaManagerRequest create_table_request;
+    std::cout << FLAGS_database2 << " " << FLAGS_table_name2 << "\n";
     create_table_request.set_op_type(pb::OP_CREATE_TABLE);
-    create_table_request.mutable_table_info()->set_table_name(schema_info.table_name() + suffix);
-    create_table_request.mutable_table_info()->set_database(schema_info.database());
+    create_table_request.mutable_table_info()->set_table_name(FLAGS_table_name2 + suffix);
+    create_table_request.mutable_table_info()->set_database(FLAGS_database2);
     create_table_request.mutable_table_info()->set_namespace_name(schema_info.namespace_name());
     create_table_request.mutable_table_info()->set_replica_num(schema_info.replica_num());
-    //create_table_request.mutable_table_info()->set_resource_tag(schema_info.resource_tag());
     if (resource_tag.size() > 0) {
         create_table_request.mutable_table_info()->set_resource_tag(resource_tag);
     }
-    create_table_request.mutable_table_info()->set_byte_size_per_record(50);
+    //create_table_request.mutable_table_info()->set_byte_size_per_record(50);
+
+    create_table_request.mutable_table_info()->set_byte_size_per_record(schema_info.byte_size_per_record());
+    create_table_request.mutable_table_info()->set_region_split_lines(schema_info.region_split_lines());
+
+    //create_table_request.mutable_table_info()->set_ttl_duration(172800);
+
     for (auto& field_info : schema_info.fields()) {
+        /*
+        if (
+            field_info.field_name() == "bidprefer" ||
+            field_info.field_name() == "unitbid" ||
+            field_info.field_name() == "planMpricefactor" ||
+            field_info.field_name() == "planPcpricefactor" ||
+            field_info.field_name() == "unitMpricefactor" ||
+            field_info.field_name() == "unitPcpricefactor"
+            ) {
+            continue;
+        }*/
         auto add_field = create_table_request.mutable_table_info()->add_fields();
         *add_field = field_info;
-        /*
-        if (add_field->field_name() == "terminal" || add_field->field_name() == "channel" ||
-                add_field->field_name() == "os") {
-            add_field->set_mysql_type(pb::UINT8);
+        if (field_info.field_name() == "unitid") {
+            add_field->set_mysql_type(pb::UINT64);
         }
-        */
         add_field->clear_new_field_name();
         add_field->clear_field_id();
     }
-    for (auto& index_info : schema_info.indexs()) {
-        auto add_index = create_table_request.mutable_table_info()->add_indexs();
-        *add_index = index_info;
-        add_index->clear_new_index_name();
-        add_index->clear_field_ids();
-        add_index->clear_index_id();
-        /*
-        if (add_index->index_type() == pb::I_FULLTEXT) {
-        add_index->set_segment_type(pb::S_WORDSEG_BASIC);
-        }
-        */
-    }
+    auto add_index = create_table_request.mutable_table_info()->add_indexs();
+    add_index->set_index_name("PRIMARY");
+    add_index->set_index_type(pb::I_PRIMARY);
+    add_index->add_field_names("userid");
+    add_index->add_field_names("optlevel");
+    add_index->add_field_names("opttime");
+    add_index->add_field_names("id");
+    std::map<int64_t, std::string> index_name_ids;
+    //for (auto& index_info : schema_info.indexs()) {
+    //    index_name_ids[index_info.index_id()] = index_info.index_name(); 
+    //    auto add_index = create_table_request.mutable_table_info()->add_indexs();
+    //    *add_index = index_info;
+    //    add_index->clear_new_index_name();
+    //    add_index->clear_field_ids();
+    //    add_index->clear_index_id();
+    //    /*
+    //    if (add_index->index_type() == pb::I_FULLTEXT) {
+    //        add_index->set_segment_type(pb::S_UNIGRAMS);
+    //    }
+    //    */
+    //}
 
     for (auto& dist : schema_info.dists()) {
         auto add_dist = create_table_request.mutable_table_info()->add_dists();
         *add_dist = dist;
     } 
-   /* 
+    /*
     auto add_index = create_table_request.mutable_table_info()->add_indexs();
-    add_index->set_index_name("user_level_idx");
+    add_index->set_index_name("showword_in");
     add_index->add_field_names("userid");
-    add_index->add_field_names("level");
+    add_index->add_field_names("showword");
     add_index->set_index_type(pb::I_KEY);
-   */ 
-    std::set<std::string> split_keys;
+    */
+    std::map<std::string, std::set<std::string>> index_split_keys;
     for (auto& region_info : response.region_infos()) {
+        std::string index_name = index_name_ids[region_info.table_id()];
         if (region_info.has_start_key() && region_info.start_key().size() != 0) {
-            split_keys.insert(region_info.start_key());
+            index_split_keys[index_name].insert(region_info.start_key());
         }
     }
-    //std::sort(split_keys.begin(), split_keys.end());
-    //int n = 0;
-    for (auto& split_key : split_keys) {
-        //if (++n % 4 == 0) {
-        create_table_request.mutable_table_info()->add_split_keys(split_key);
-        //}
+
+    for (auto& split_keys : index_split_keys) {
+        std::string index_name = split_keys.first;
+        auto pb_split_keys = create_table_request.mutable_table_info()->add_split_keys();
+        pb_split_keys->set_index_name(index_name);
+        int n = 0;
+        for (auto& split_key : split_keys.second) {
+           // if (n++%10==0) {
+            pb_split_keys->add_split_keys(split_key);
+            //}
+
+        }
     }
 
     pb::MetaManagerResponse create_table_response;
@@ -144,7 +185,9 @@ int create_table(const std::string& namespace_name, const std::string& database,
         return -1;
     }
     DB_WARNING("req:%s", create_table_request.ShortDebugString().c_str());
-    DB_WARNING("create table split_key_size:%d", split_keys.size());
+    for (auto& split_keys : index_split_keys) {
+        DB_WARNING("create index_name: %s split_key_size:%d", split_keys.first.c_str(), split_keys.second.size());
+    }
     DB_WARNING("res:%s", create_table_response.ShortDebugString().c_str());
 
     return 0;
@@ -155,8 +198,6 @@ int create_table(const std::string& namespace_name, const std::string& database,
 int main(int argc, char **argv) {
     google::ParseCommandLineFlags(&argc, &argv, true);
     baikaldb::create_table(baikaldb::FLAGS_namespace_name, 
-                           baikaldb::FLAGS_database, 
-                           baikaldb::FLAGS_table_name, 
                            baikaldb::FLAGS_resource_tag, 
                            baikaldb::FLAGS_suffix);
 

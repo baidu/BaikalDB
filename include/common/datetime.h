@@ -33,6 +33,10 @@ extern uint64_t time_to_datetime(int32_t time);
 extern std::string time_to_str(int32_t time);
 extern int32_t str_to_time(const char* str_time);
 extern int32_t seconds_to_time(int32_t seconds);
+struct DateTime;
+extern uint64_t bin_date_to_datetime(DateTime time_struct);
+extern int32_t bin_time_to_datetime(DateTime time_struct);
+extern void datetime_to_time_struct(uint64_t datetime, DateTime& time_struct, uint8_t type);
 
 // inline functions
 // DATE: 17 bits year*13+month  (year 0-9999, month 1-12)

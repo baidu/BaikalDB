@@ -16,6 +16,7 @@
 
 #include "common.h"
 #include "table_record.h"
+#include "mem_row.h"
 #include "schema_factory.h"
 #include "rocksdb/slice.h"
 
@@ -76,123 +77,14 @@ public:
     // decode 'required' (rather than 'all') fields from serialized protobuf bytes
     // and fill to SmartRecord, if null, fill default_value
     int decode_fields(const std::map<int32_t, FieldInfo*>& fields, SmartRecord record) {
-        uint64_t field_key  = 0;
-        uint64_t field_num  = 0;
-        int32_t  wired_type = 0;
-        auto iter = fields.begin();
-
-        while (_offset < _size && iter != fields.end()) {
-            field_key = get_varint<uint64_t>();
-            field_num = field_key >> 3;
-            wired_type = field_key & 0x07;
-
-            if (_offset >= _size) {
-                DB_WARNING("error: %lu, %lu", _offset,_size);
-                return -1;
-            }
-
-            while (iter != fields.end() && field_num > static_cast<uint64_t>(iter->first)) {
-                //add default value
-                auto field = record->get_field_by_tag(iter->first);
-                if (field == nullptr) {
-                    DB_WARNING("invalid field: %d", iter->first);
-                    return -1;
-                }
-                record->set_value(field, iter->second->default_expr_value);
-                iter++;
-            }
-            if (iter == fields.end()) {
-                //DB_WARNING("tag1: %d");
-                return 0;
-            }
-            if (field_num < static_cast<uint64_t>(iter->first)) {
-                // skip current field in proto
-                if (wired_type == 0) {
-                    skip_varint();
-                } else if (wired_type == 1) {
-                    skip_fixed<double>();
-                } else if (wired_type == 2) {
-                    skip_string();
-                } else if (wired_type == 5) {
-                    skip_fixed<float>();
-                } else {
-                    DB_WARNING("invalid wired_type: %d", wired_type);
-                    return -1;
-                }
-            } else if (field_num == static_cast<uint64_t>(iter->first)) {
-                auto field = record->get_field_by_tag(iter->first);
-                if (field == nullptr) {
-                    DB_WARNING("invalid field: %d", iter->first);
-                    return -1;
-                }
-                switch (field->cpp_type()) {
-                case FieldDescriptor::CPPTYPE_INT32: {
-                    uint32_t raw_val = get_varint<uint32_t>();
-                    int32_t value = 0;
-                    if (raw_val & 0x1) {
-                        value = (raw_val << 31) | ~(raw_val >> 1);
-                    } else {
-                        value = (raw_val >> 1);
-                    }
-                    //DB_WARNING("value: %d", value);
-                    record->set_int32(field, value);
-                } break;
-                case FieldDescriptor::CPPTYPE_UINT32: {
-                    if (field->type() == FieldDescriptor::TYPE_UINT32) {
-                        record->set_uint32(field, get_varint<uint32_t>());
-                    } else {
-                        record->set_uint32(field, get_fixed<uint32_t>());
-                    }
-                } break;
-                case FieldDescriptor::CPPTYPE_INT64: {
-                    uint64_t raw_val = get_varint<uint64_t>();
-                    int64_t value = 0;
-                    if (raw_val & 0x1) {
-                        value = (raw_val << 63) | ~(raw_val >> 1);
-                    } else {
-                        value = (raw_val >> 1);
-                    }
-                    //DB_WARNING("value: %ld, %lu", value, raw_val);
-                    record->set_int64(field, value);
-                } break;
-                case FieldDescriptor::CPPTYPE_UINT64: {
-                    if (field->type() == FieldDescriptor::TYPE_UINT64) {
-                        record->set_uint64(field, get_varint<uint64_t>());
-                    } else {
-                        record->set_uint64(field, get_fixed<uint64_t>());
-                    }
-                } break;
-                case FieldDescriptor::CPPTYPE_FLOAT: {
-                    record->set_float(field, get_fixed<float>());
-                } break;
-                case FieldDescriptor::CPPTYPE_DOUBLE: {
-                    record->set_double(field, get_fixed<double>());
-                } break;
-                case FieldDescriptor::CPPTYPE_BOOL: {
-                    record->set_boolean(field, get_varint<uint32_t>());
-                } break;
-                case FieldDescriptor::CPPTYPE_STRING: {
-                    record->set_string(field, get_string());
-                } break;
-                default: {
-                    return -1;
-                } break;
-                }
-                iter++;
-            }
-        }
-        while (iter != fields.end()) {
-            //add default value
-            auto field = record->get_field_by_tag(iter->first);
-            if (field == nullptr) {
-                DB_WARNING("invalid field: %d", iter->first);
-                return -1;
-            }
-            record->set_value(field, iter->second->default_expr_value);
-            iter++;
-        }
-        return 0;
+        return decode_fields(fields, nullptr, &record, 0, nullptr);
     }
+    int decode_fields(const std::map<int32_t, FieldInfo*>& fields, 
+            std::vector<int32_t>& field_slot, int32_t tuple_id, std::unique_ptr<MemRow>& mem_row) {
+        return decode_fields(fields, &field_slot, nullptr, tuple_id, &mem_row);
+    }
+    int decode_fields(const std::map<int32_t, FieldInfo*>& fields, const std::vector<int32_t>* field_slot,
+            SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
 private:
     const char*   _data;
     size_t  _size;

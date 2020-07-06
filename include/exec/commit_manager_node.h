@@ -94,7 +94,7 @@ public:
                 result = -1;
             }
         }
-        return result;
+        return 0;
     }
     pb::TxnCmdType txn_cmd() {
         return _txn_cmd;

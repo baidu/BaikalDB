@@ -32,7 +32,7 @@ int DeleteManagerNode::init_delete_info(const pb::DeleteNode& delete_node) {
         _primary_slots.push_back(slot);
     }
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
-    if (!_table_info) {
+    if (_table_info == nullptr) {
         DB_WARNING("get table info failed, table_id:%ld", _table_id);
         return -1;
     }
@@ -46,7 +46,7 @@ int DeleteManagerNode::init_delete_info(const pb::UpdateNode& update_node) {
         _primary_slots.push_back(slot);
     }
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
-    if (!_table_info) {
+    if (_table_info == nullptr) {
         DB_WARNING("get table info failed, table_id:%ld", _table_id);
         return -1;
     }

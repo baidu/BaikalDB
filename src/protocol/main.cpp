@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string>
 #include <gflags/gflags.h>
+//#include <gperftools/malloc_extension.h>
 #include "common.h"
 #include "network_server.h"
 #include "fn_manager.h"
@@ -27,7 +28,6 @@ namespace baikaldb {
 
 // Signal handlers.
 void handle_exit_signal() {
-    DB_NOTICE("Server shutdown gracefully.");
     NetworkServer::get_instance()->graceful_shutdown();
 }
 } // namespace baikaldb
@@ -37,7 +37,9 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, (sighandler_t)baikaldb::handle_exit_signal);
     signal(SIGTERM, (sighandler_t)baikaldb::handle_exit_signal);
-
+#ifdef BAIKALDB_REVISION
+    google::SetVersionString(BAIKALDB_REVISION);
+#endif
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     // Initail log
@@ -45,7 +47,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "log init failed.");
         return -1;
     }
-    DB_WARNING("log file load success");
+//    DB_WARNING("log file load success; GetMemoryReleaseRate:%f", 
+//            MallocExtension::instance()->GetMemoryReleaseRate());
 
     // init singleton
     baikaldb::FunctionManager::instance()->init();
@@ -74,6 +77,7 @@ int main(int argc, char **argv) {
     if (!server->start()) {
         DB_FATAL("Failed to start server.");
     }
+    DB_NOTICE("Server shutdown gracefully.");
 
     // Stop server.
     server->stop();

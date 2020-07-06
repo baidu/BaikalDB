@@ -56,8 +56,8 @@ int Tokenizer::nlpc_seg(drpc::NLPCClient& client,
 }
 #endif
 
-template<typename ReverseNode>
-int FirstLevelMSIterator<ReverseNode>::next(std::string& key, bool& res) {
+template<typename ReverseNode, typename ReverseList>
+int FirstLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool& res) {
     //当key >= _end_key时该term的拉链实际已经结束，但是merge的时候，所有的term
     //的拉链顺序在一起，所以需要把当前term的拉链遍历完，才能成功访问后续term
     do {
@@ -79,20 +79,22 @@ int FirstLevelMSIterator<ReverseNode>::next(std::string& key, bool& res) {
         res = true;
         rocksdb::Status s;
         rocksdb::ReadOptions read_opt;
-        std::string value;
+        rocksdb::PinnableSlice pin_slice;
         auto data_cf = _rocksdb->get_data_handle();
-        s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &value);
+        s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &pin_slice);
         if (!s.ok()) {
-            DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
-                      term.c_str(), _iter->key().ToString(true).c_str());
-            return -1;
+           DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
+                     term.c_str(), _iter->key().ToString(true).c_str());
+           return -1;
         }
+        //rocksdb::Slice pin_slice = _iter->value();
         
-        if (!_curr_node.ParseFromArray(value.data(), value.size())) {
+        if (!_curr_node.ParseFromArray(pin_slice.data(), pin_slice.size())) {
             DB_FATAL("parse first level from pb failed");
             return -1;
         }
         key = _curr_node.key();
+        
         if (_del) {
             auto remove_res = _txn->Delete(data_cf, _iter->key());
             if (!remove_res.ok()) {
@@ -107,19 +109,19 @@ int FirstLevelMSIterator<ReverseNode>::next(std::string& key, bool& res) {
     return 0;
 }
 
-template<typename ReverseNode>
-void FirstLevelMSIterator<ReverseNode>::fill_node(ReverseNode* node) {
+template<typename ReverseNode, typename ReverseList>
+void FirstLevelMSIterator<ReverseNode, ReverseList>::fill_node(ReverseNode* node) {
     *node = _curr_node;
     return;
 }
 
-template<typename ReverseNode>
-pb::ReverseNodeType FirstLevelMSIterator<ReverseNode>::get_flag() {
+template<typename ReverseNode, typename ReverseList>
+pb::ReverseNodeType FirstLevelMSIterator<ReverseNode, ReverseList>::get_flag() {
     return _curr_node.flag();
 }
 
-template<typename ReverseNode>
-ReverseNode& FirstLevelMSIterator<ReverseNode>::get_value() {
+template<typename ReverseNode, typename ReverseList>
+ReverseNode& FirstLevelMSIterator<ReverseNode, ReverseList>::get_value() {
     return _curr_node;
 }
 
@@ -132,8 +134,10 @@ int SecondLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool
             _first = false;
         }
         if (_index < _list.reverse_nodes_size()) {
+            //DB_WARNING("get %d index reverse node list size[%d]", _index, _list.reverse_nodes_size());
             res = true;
-            key = _list.reverse_nodes(_index).key();
+            key = (_list.mutable_reverse_nodes(_index))->key();
+            //key = _list.reverse_nodes(_index).key();
         } else {
             res = false;
             return 0;
@@ -166,8 +170,8 @@ ReverseNode& SecondLevelMSIterator<ReverseNode, ReverseList>::get_value() {
 }
 
 template<typename ReverseNode, typename ReverseList>
-int level_merge(MergeSortIterator<ReverseNode>* new_iter,
-                MergeSortIterator<ReverseNode>* old_iter,
+int level_merge(MergeSortIterator<ReverseNode, ReverseList>* new_iter,
+                MergeSortIterator<ReverseNode, ReverseList>* old_iter,
                 ReverseList& res_list,
                 bool is_del) {
     std::string new_key;
@@ -183,9 +187,10 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
     if (ret < 0) {
         return -1;
     }
+    int result_count = 0;
     while (true) {
         if (new_not_end && old_not_end) {
-            MergeSortIterator<ReverseNode>* choose_iter;
+            MergeSortIterator<ReverseNode, ReverseList>* choose_iter;
             int res = new_key.compare(old_key);
             if (res < 0) {
                 choose_iter = new_iter;
@@ -196,8 +201,8 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
             }
             pb::ReverseNodeType flag = choose_iter->get_flag();
             if (!(is_del && (flag == pb::REVERSE_NODE_DELETE))) {
-                ReverseNode* tmp_node = res_list.add_reverse_nodes();
-                choose_iter->fill_node(tmp_node);
+                choose_iter->add_node(res_list);
+                ++result_count;
             }
             if (res < 0) {
                 ret = new_iter->next(new_key, new_not_end);
@@ -223,8 +228,8 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
         } else if (new_not_end) {
             pb::ReverseNodeType flag = new_iter->get_flag();
             if (!(is_del && (flag == pb::REVERSE_NODE_DELETE))) {
-                ReverseNode* tmp_node = res_list.add_reverse_nodes();
-                new_iter->fill_node(tmp_node);
+                new_iter->add_node(res_list);
+                ++result_count;
             }
             ret = new_iter->next(new_key, new_not_end);
             if (ret < 0) {
@@ -234,8 +239,8 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
         } else if (old_not_end) {
             pb::ReverseNodeType flag = old_iter->get_flag();
             if (!(is_del && (flag == pb::REVERSE_NODE_DELETE))) {
-                ReverseNode* tmp_node = res_list.add_reverse_nodes();
-                old_iter->fill_node(tmp_node);
+                old_iter->add_node(res_list);
+                ++result_count;
             }
             ret = old_iter->next(old_key, old_not_end);
             if (ret < 0) {
@@ -246,7 +251,8 @@ int level_merge(MergeSortIterator<ReverseNode>* new_iter,
             break;
         }
     }
-    return 0;
+    ReverseTrait<ReverseList>::finish(res_list);
+    return result_count;
 }
 
 } // end of namespace

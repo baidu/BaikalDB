@@ -29,11 +29,11 @@ class PhysicalPlanner {
 public:
     PhysicalPlanner() {}
     static int analyze(QueryContext* ctx);
-
+    static int64_t get_table_rows(QueryContext* ctx); 
     static int execute(QueryContext* ctx, DataBuffer* send_buf);
     static int full_export_start(QueryContext* ctx, DataBuffer* send_buf);
     static int full_export_next(QueryContext* ctx, DataBuffer* send_buf, bool shutdown);
-    static int execute_recovered_commit(NetworkSocket* client, const pb::CachePlan& commit_plan);
+    //static int execute_recovered_commit(NetworkSocket* client, const pb::CachePlan& commit_plan);
     // insert user variables to record for prepared stmt
     static int insert_values_to_record(QueryContext* ctx);
 private:

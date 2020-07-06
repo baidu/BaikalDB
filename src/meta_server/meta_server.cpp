@@ -33,11 +33,14 @@ namespace baikaldb {
 DEFINE_int32(meta_port, 8010, "Meta port");
 DEFINE_int32(meta_replica_number, 3, "Meta replica num");
 DEFINE_int32(concurrency_num, 40, "concurrency num, default: 40");
+DEFINE_int64(region_apply_raft_interval_ms, 1000LL,
+            "region apply raft interval, defalut(1s)");
+DECLARE_int64(flush_memtable_interval_us);
 #ifdef BAIDU_INTERNAL
 // for migrate
 DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(e0_meta_bns, "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all", "");
-DEFINE_string(qa_meta_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "");
+DEFINE_string(holmes_meta_bns, "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all", "");
 DEFINE_string(dmp_meta_bns, "group.opera-online-baikalMeta-000-bj.DMP.all", "");
 #endif
 
@@ -57,6 +60,7 @@ const std::string MetaServer::TABLE_SCHEMA_IDENTIFY(1, 0x04);
 const std::string MetaServer::REGION_SCHEMA_IDENTIFY(1, 0x05);
 
 const std::string MetaServer::DDLWORK_IDENTIFY(1, 0x06);
+const std::string MetaServer::STATISTICS_IDENTIFY(1, 0x07);
 const std::string MetaServer::MAX_IDENTIFY(1, 0xFF);
 
 MetaServer::~MetaServer() {}
@@ -102,16 +106,43 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
 #ifdef BAIDU_INTERNAL
     _meta_interact_map["e0"] = new MetaServerInteract;
     _meta_interact_map["e0"]->init_internal(FLAGS_e0_meta_bns);
-    _meta_interact_map["qa"] = new MetaServerInteract;
-    _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
+    _meta_interact_map["holmes"] = new MetaServerInteract;
+    _meta_interact_map["holmes"]->init_internal(FLAGS_holmes_meta_bns);
     _meta_interact_map["ps"] = new MetaServerInteract;
     _meta_interact_map["ps"]->init_internal(FLAGS_ps_meta_bns);
     _meta_interact_map["dmp"] = new MetaServerInteract;
     _meta_interact_map["dmp"]->init_internal(FLAGS_dmp_meta_bns);
 #endif
-    
+    _flush_bth.run([this]() {flush_memtable_thread();});
+    _apply_region_bth.run([this]() {apply_region_thread();});
     _init_success = true;
     return 0;
+}
+
+void MetaServer::apply_region_thread() {
+    while (!_shutdown) {
+        TableManager::get_instance()->get_update_regions_apply_raft();
+        bthread_usleep_fast_shutdown(FLAGS_region_apply_raft_interval_ms * 1000, _shutdown);
+    }
+}
+
+void MetaServer::flush_memtable_thread() {
+    while (!_shutdown) {
+        bthread_usleep_fast_shutdown(FLAGS_flush_memtable_interval_us, _shutdown);
+        if (_shutdown) {
+            return;
+        }
+        auto rocksdb = RocksWrapper::get_instance();
+        rocksdb::FlushOptions flush_options;
+        auto status = rocksdb->flush(flush_options, rocksdb->get_meta_info_handle());
+        if (!status.ok()) {
+            DB_WARNING("flush meta info to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        }
+        status = rocksdb->flush(flush_options, rocksdb->get_raft_log_handle());
+        if (!status.ok()) {
+            DB_WARNING("flush log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        }
+    }
 }
 
 //该方法主要做请求分发
@@ -159,6 +190,8 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_MODIFY_DATABASE
             || request->op_type() == pb::OP_CREATE_TABLE 
             || request->op_type() == pb::OP_DROP_TABLE 
+            || request->op_type() == pb::OP_DROP_TABLE_TOMBSTONE
+            || request->op_type() == pb::OP_RESTORE_TABLE 
             || request->op_type() == pb::OP_RENAME_TABLE
             || request->op_type() == pb::OP_ADD_FIELD
             || request->op_type() == pb::OP_DROP_FIELD
@@ -172,6 +205,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_SPLIT_LINES
             || request->op_type() == pb::OP_UPDATE_SCHEMA_CONF
             || request->op_type() == pb::OP_UPDATE_DISTS
+            || request->op_type() == pb::OP_UPDATE_STATISTICS
             || request->op_type() == pb::OP_MODIFY_RESOURCE_TAG
             || request->op_type() == pb::OP_ADD_INDEX
             || request->op_type() == pb::OP_DROP_INDEX
@@ -280,6 +314,12 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
         RegionManager::get_instance()->restore_region(*request, response);
         return;
     }
+    if (request->op_type() == pb::OP_RECOVERY_ALL_REGION) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_op_type(request->op_type());
+        RegionManager::get_instance()->recovery_all_region(*request, response);
+        return;
+    }    
     DB_FATAL("request has wrong op_type:%d , log_id:%lu", 
                     request->op_type(), log_id);
     response->set_errcode(pb::INPUT_PARAM_ERROR);
@@ -375,6 +415,10 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         QueryTableManager::get_instance()->get_ddlwork_info(request, response);
         break;                           
     }
+    case pb::QUERY_REGION_PEER_STATUS: {
+        QueryRegionManager::get_instance()->get_region_peer_status(request, response);
+        break;                           
+    }
     default: {
         DB_WARNING("invalid op_type, request:%s logid:%lu", 
                     request->ShortDebugString().c_str(), log_id);
@@ -458,8 +502,7 @@ void MetaServer::console_heartbeat(google::protobuf::RpcController* controller,
 static std::string bns_to_plat(const std::string& bns) {
     static std::map<std::string, std::string> mapping = {
         {"e0", "e0"},
-        {"qa", "qa"},
-        {"qadisk", "qa"},
+        {"holmes", "holmes"},
     };
     std::vector<std::string> vec;
     boost::split(vec, bns, boost::is_any_of(".-"));
@@ -564,6 +607,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
 }
 
 void MetaServer::shutdown_raft() {
+    _shutdown = true;
     if (_meta_state_machine != nullptr) {
         _meta_state_machine->shutdown_raft();
     }   

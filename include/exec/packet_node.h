@@ -18,6 +18,8 @@
 #include "mysql_wrapper.h"
 #include "exec_node.h"
 #include "data_buffer.h"
+#include "sorter.h"
+#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
 class PacketNode : public ExecNode {
@@ -50,8 +52,19 @@ public:
     void set_binary_protocol(bool binary) {
         _binary_protocol = binary;
     }
+    std::vector<ExprNode*>& mutable_projections() {
+        return _projections;
+    }
 
 private:
+    int open_histogram(RuntimeState* state);
+    int open_cmsketch(RuntimeState* state);
+    int open_analyze(RuntimeState* state);
+    int open_trace(RuntimeState* state);
+    int handle_trace(RuntimeState* state);
+    int handle_trace2(RuntimeState* state);
+    void pack_trace2(std::vector<std::map<std::string, std::string>>& info, const pb::TraceNode& trace_node,
+        int64_t& total_scan_rows, int64_t& total_index_filter, int64_t& total_get_primary, int64_t& total_where_filter);
     int handle_explain(RuntimeState* state);
     int pack_ok(int num_affected_rows, NetworkSocket* client);
     // 先不用，err在外部填

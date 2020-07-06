@@ -20,6 +20,8 @@
 namespace baikaldb {
 
 struct DMLClosure : public braft::Closure {
+    DMLClosure() : replay_last_log_cond(nullptr) {};
+    DMLClosure(BthreadCond* cond) : replay_last_log_cond(cond) {};
     virtual void Run();
 
     brpc::Controller* cntl = nullptr;
@@ -30,6 +32,8 @@ struct DMLClosure : public braft::Closure {
     SmartTransaction transaction = nullptr;
     TimeCost cost;
     std::string remote_side;
+    BthreadCond* replay_last_log_cond;
+    bool is_replay = false;
 };
 
 struct AddPeerClosure : public braft::Closure {
@@ -76,6 +80,11 @@ struct SnapshotClosure : public braft::Closure {
         if (!status().ok()) {
             DB_WARNING("region_id: %ld  status:%s, snapshot failed.",
                         region->get_region_id(), status().error_cstr());
+        }
+        // 遇到部分请求报has no applied logs since last snapshot
+        // 不调用on_snapshot_save导致不更新_snapshot_time_cost等信息
+        if (region != nullptr) {
+            region->reset_snapshot_status();
         }
         cond.decrease_signal();
         delete this;

@@ -17,7 +17,10 @@
 #include "namespace_manager.h"
 #include "query_namespace_manager.h"
 #include "meta_rocksdb.h"
-
+#include <gflags/gflags.h>
+namespace baikaldb {
+    DECLARE_string(db_path);
+}
 class NamespaceManagerTest : public testing::Test {
 public:
     ~NamespaceManagerTest() {}
@@ -175,6 +178,7 @@ TEST_F(NamespaceManagerTest, test_create_drop_modify) {
     }
 } // TEST_F
 int main(int argc, char** argv) {
+    baikaldb::FLAGS_db_path = "namespace_manager_db";
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

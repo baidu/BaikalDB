@@ -43,6 +43,7 @@ public:
     static const std::string TABLE_SCHEMA_IDENTIFY;
     static const std::string REGION_SCHEMA_IDENTIFY;
     static const std::string DDLWORK_IDENTIFY;
+    static const std::string STATISTICS_IDENTIFY;
     
     static const std::string MAX_IDENTIFY;
 
@@ -92,8 +93,15 @@ public:
             pb::MigrateResponse* response,
             google::protobuf::Closure* done);
 
+    void flush_memtable_thread();
+    void apply_region_thread();
+
     void shutdown_raft();
     bool have_data();
+    void close() {
+        _flush_bth.join();
+        _apply_region_bth.join();
+    }
 
 private:
     MetaServerInteract* meta_proxy(const std::string& plat) {
@@ -107,8 +115,11 @@ private:
     MetaStateMachine* _meta_state_machine = NULL;
     AutoIncrStateMachine* _auto_incr_state_machine = NULL;
     std::map<std::string, MetaServerInteract*> _meta_interact_map;
-
+    Bthread _flush_bth;
+    //region区间修改等信息应用raft
+    Bthread _apply_region_bth;
     bool _init_success = false;
+    bool _shutdown = false;
 }; //class
 
 }//namespace baikaldb

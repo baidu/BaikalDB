@@ -29,6 +29,14 @@ public:
     virtual ~DmlManagerNode() {
     }
     virtual int open(RuntimeState* state);
+
+    virtual void close(RuntimeState* state) override {
+        ExecNode::close(state);
+        std::vector<int32_t>().swap(_seq_ids);
+        std::vector<SmartRecord>().swap(_insert_scan_records);
+        std::vector<SmartRecord>().swap(_del_scan_records);
+    }
+
     void set_op_type(pb::OpType op_type) {
         _op_type = op_type;
     }

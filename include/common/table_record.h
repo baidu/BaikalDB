@@ -17,16 +17,17 @@
 #include <memory>
 #include "common.h"
 #include "expr_value.h"
+#include "schema_factory.h"
+#include "message_helper.h"
 #include "proto/meta.interface.pb.h"
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/dynamic_message.h>
- 
+
+namespace baikaldb {
 using google::protobuf::FieldDescriptor;
 using google::protobuf::Descriptor;
 using google::protobuf::Message;
 using google::protobuf::Reflection;
-
-namespace baikaldb {
 class TableKey;
 class MutTableKey;
 class TableRecord;
@@ -46,46 +47,99 @@ public:
 
     // by_tag=true  ==> search field by tag
     // by_tag=false ==> search field by index (0-idx_cnt-1)
-    bool is_null(const FieldDescriptor* field);
+    bool is_null(const FieldDescriptor* field) {
+        return MessageHelper::is_null(field, _message);
+    }
 
     //get_int32 value and store in val
-    int get_int32(const FieldDescriptor* field, int32_t& val);
+    int get_int32(const FieldDescriptor* field, int32_t& val) {
+        return MessageHelper::get_int32(field, _message, val);
+    }
 
-    void set_int32(const FieldDescriptor* field, int32_t val);
+    void set_int32(const FieldDescriptor* field, int32_t val) {
+        MessageHelper::set_int32(field, _message, val);
+    }
 
-    int get_uint32(const FieldDescriptor* field, uint32_t& val);
+    int get_uint32(const FieldDescriptor* field, uint32_t& val) {
+        return MessageHelper::get_uint32(field, _message, val);
+    }
 
-    void set_uint32(const FieldDescriptor* field, uint32_t val);
+    void set_uint32(const FieldDescriptor* field, uint32_t val) {
+        MessageHelper::set_uint32(field, _message, val);
+    }
 
-    int get_int64(const FieldDescriptor* field, int64_t& val);
+    int get_int64(const FieldDescriptor* field, int64_t& val) {
+        return MessageHelper::get_int64(field, _message, val);
+    }
 
-    void set_int64(const FieldDescriptor* field, int64_t val);
+    void set_int64(const FieldDescriptor* field, int64_t val) {
+        MessageHelper::set_int64(field, _message, val);
+    }
 
-    int get_uint64(const FieldDescriptor* field, uint64_t& val);
+    int get_uint64(const FieldDescriptor* field, uint64_t& val) {
+        return MessageHelper::get_uint64(field, _message, val);
+    }
 
-    void set_uint64(const FieldDescriptor* field, uint64_t val);
+    void set_uint64(const FieldDescriptor* field, uint64_t val) {
+        MessageHelper::set_uint64(field, _message, val);
+    }
 
-    int get_float(const FieldDescriptor* field, float& val);
+    int get_float(const FieldDescriptor* field, float& val) {
+        return MessageHelper::get_float(field, _message, val);
+    }
 
-    void set_float(const FieldDescriptor* field, float val);
+    void set_float(const FieldDescriptor* field, float val) {
+        MessageHelper::set_float(field, _message, val);
+    }
 
-    int get_double(const FieldDescriptor* field, double& val);
+    int get_double(const FieldDescriptor* field, double& val) {
+        return MessageHelper::get_double(field, _message, val);
+    }
 
-    void set_double(const FieldDescriptor* field, double val);
+    void set_double(const FieldDescriptor* field, double val) {
+        MessageHelper::set_double(field, _message, val);
+    }
 
-    int get_string(const FieldDescriptor* field, std::string& val);
+    int get_string(const FieldDescriptor* field, std::string& val) {
+        return MessageHelper::get_string(field, _message, val);
+    }
 
-    void set_string(const FieldDescriptor* field, std::string val);
+    void set_string(const FieldDescriptor* field, std::string val) {
+        MessageHelper::set_string(field, _message, val);
+    }
 
-    int get_boolean(const FieldDescriptor* field, bool& val);
+    int get_boolean(const FieldDescriptor* field, bool& val) {
+        return MessageHelper::get_boolean(field, _message, val);
+    }
 
-    void set_boolean(const FieldDescriptor* field, bool val);
+    void set_boolean(const FieldDescriptor* field, bool val) {
+        MessageHelper::set_boolean(field, _message, val);
+    }
+
+    ExprValue get_value(const FieldDescriptor* field) {
+        return MessageHelper::get_value(field, _message);
+    }
+
+    // by_tag default true
+    int set_value(const FieldDescriptor* field, const ExprValue& value) {
+        if (field == nullptr) {
+            DB_WARNING("Invalid Field Descriptor");
+            return -1;
+        }
+        return MessageHelper::set_value(field, _message, value);
+    }
+
+    // by_tag default true
+    int set_default_value(const FieldInfo& field_info) {
+        auto field = get_field_by_idx(field_info.pb_idx);
+        if (field == nullptr) {
+            DB_WARNING("Invalid Field Descriptor");
+            return -1;
+        }
+        return MessageHelper::set_value(field, _message, field_info.default_expr_value);
+    }
 
     void clear_field(const FieldDescriptor* field);
-
-    ExprValue get_value(const FieldDescriptor* field);
-
-    int set_value(const FieldDescriptor* field, const ExprValue& value);
 
     int get_reverse_word(IndexInfo& index_info, std::string& word);
 
@@ -150,7 +204,7 @@ public:
 
     // those two funcs are only used for encode/decode non-pk fields after primary, for cstore
     int encode_field(const FieldInfo& field_info, std::string& out);
-    int decode_field(const FieldInfo& field_info, const std::string& in);
+    int decode_field(const FieldInfo& field_info, const rocksdb::Slice& in);
 
     const FieldDescriptor* get_field_by_idx(int32_t idx) {
         auto descriptor = _message->GetDescriptor();
@@ -206,6 +260,5 @@ public:
 
 private:
     Message* _message = nullptr;
-
 };
 }

@@ -25,27 +25,45 @@ void DMLClosure::Run() {
         leader = region->get_leader();
     }
     uint64_t log_id = 0;
-    if (cntl->has_log_id()) { 
+    if (cntl != nullptr && cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
-    //const char* remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
     if (!status().ok()) {
         response->set_errcode(pb::NOT_LEADER);
         response->set_leader(butil::endpoint2str(leader).c_str());
-        response->set_errmsg("not leader");
-        if (op_type == pb::OP_PREPARE && transaction != nullptr) {
+        response->set_errmsg("leader transfer");
+        //  发生切主，回滚当前dml
+        if (transaction != nullptr && region != nullptr) {
             uint64_t txn_id = transaction->txn_id();
-            if (region != nullptr) {
-                region->get_txn_pool().on_leader_stop_rollback(txn_id);
+            if (transaction->primary_region_id_seted()) {
+                if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
+                    int seq_id = transaction->seq_id();
+                    transaction->rollback_current_request();
+                    DB_WARNING("region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
+                    region_id, log_id, transaction->txn_id(), seq_id, pb::OpType_Name(op_type).c_str());
+                }
+            } else {
+                if (op_type == pb::OP_PREPARE) {
+                    region->get_txn_pool().on_leader_stop_rollback(txn_id);
+                }
             }
         }
-        DB_WARNING("region_id: %ld  status:%s ,leader:%s, log_id:%lu,",
+        DB_WARNING("region_id: %ld  status:%s ,leader:%s, log_id:%lu, remote_side: %s",
                     region_id, 
                     status().error_cstr(),
                     butil::endpoint2str(leader).c_str(), 
-                    log_id);
+                    log_id, remote_side.c_str());
+    } else {
+        if (transaction != nullptr && transaction->txn_id() != 0 && region != nullptr) {
+            transaction->clear_current_req_point_seq();
+        }
     }
-    done->Run();
+    if (is_replay) {
+        replay_last_log_cond->decrease_signal();
+    }
+    if (done) {
+        done->Run();
+    }
     if (region != nullptr && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
         region->update_average_cost(cost.get_time());
     }
@@ -92,6 +110,12 @@ void AddPeerClosure::Run() {
 }
 
 void MergeClosure::Run() {
+
+    if (response) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
+    }
+
     if (is_dst_region) {
         if (!status().ok()) {
             if (response) {
@@ -101,7 +125,7 @@ void MergeClosure::Run() {
             }
         }
         //目标region需要返回给源region
-        response->add_regions()->CopyFrom(*region->get_region_info());
+        region->copy_region(response->add_regions());
         if (done) {
             done->Run();
         }

@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
+#include <sstream>
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
 #include "common.h"
@@ -44,6 +45,163 @@ struct ExprValue {
     explicit ExprValue(pb::PrimitiveType type_ = pb::NULL_TYPE) : type(type_) {
         _u.int64_val = 0;
     }
+    explicit ExprValue(const pb::ExprValue& value) {
+        type = value.type();
+        switch (type) {
+            case pb::BOOL:
+                _u.bool_val = value.bool_val();
+                break;
+            case pb::INT8:
+                _u.int8_val = value.int32_val();
+                break;
+            case pb::INT16:
+                _u.int16_val = value.int32_val();
+                break;
+            case pb::INT32:
+            case pb::TIME:
+                _u.int32_val = value.int32_val();
+                break;
+            case pb::INT64:
+                _u.int64_val = value.int64_val();
+                break;
+            case pb::UINT8:
+                _u.uint8_val = value.uint32_val();
+                break;
+            case pb::UINT16:
+                _u.uint16_val = value.uint32_val();
+                break;
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+                _u.uint32_val = value.uint32_val();
+                break;
+            case pb::UINT64:
+            case pb::DATETIME:
+                _u.uint64_val = value.uint64_val();
+                break;
+            case pb::FLOAT:
+                _u.float_val = value.float_val();
+                break;
+            case pb::DOUBLE:
+                _u.double_val = value.double_val();
+                break;
+            case pb::STRING:
+                str_val = value.string_val();
+                break;
+            default:
+                break;
+        }
+    }
+
+    int common_prefix_length(const ExprValue& other) const {
+        if (type != pb::STRING || other.type != pb::STRING) {
+            return 0;
+        }
+        int min_len = str_val.size();
+        if (min_len > (int)other.str_val.size()) {
+            min_len = other.str_val.size();
+        }
+        for (int i = 0; i < min_len; i++) {
+            if (str_val[i] != other.str_val[i]) {
+                return i;
+            }
+        }
+        return min_len;
+    }
+
+    float float_value(int prefix_len) const {
+        uint64_t val = 0;
+        switch (type) {
+            case pb::BOOL:
+                return static_cast<float>(_u.bool_val);
+            case pb::INT8:
+                return static_cast<float>(_u.int8_val);
+            case pb::INT16:
+                return static_cast<float>(_u.int16_val);
+            case pb::INT32:
+            case pb::TIME:
+                return static_cast<float>(_u.int32_val);
+            case pb::INT64:
+                return static_cast<float>(_u.int64_val);
+            case pb::UINT8:
+                return static_cast<float>(_u.uint8_val);
+            case pb::UINT16:
+                return static_cast<float>(_u.uint16_val );
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+                return static_cast<float>(_u.uint32_val);
+            case pb::UINT64:
+            case pb::DATETIME:
+                return static_cast<float>(_u.uint64_val);
+            case pb::FLOAT:
+                return _u.float_val;
+            case pb::DOUBLE:
+                return static_cast<float>(_u.double_val);
+            case pb::STRING:
+                if (prefix_len >= (int)str_val.size()) {
+                    return 0.0;
+                }
+                for (int i = prefix_len; i < prefix_len + 8; i++) {
+                    if (i < (int)str_val.size()) {
+                        val += (val << 8) + uint8_t(str_val[i]);
+                    } else {
+                        val += val << 8;
+                    }
+                }
+                return static_cast<float>(val);
+            default:
+                return 0.0;
+        }
+    }
+    void to_proto(pb::ExprValue* value) {
+        value->set_type(type);
+        switch (type) {
+            case pb::BOOL:
+                value->set_bool_val(_u.bool_val);
+                break;
+            case pb::INT8:
+                value->set_int32_val(_u.int8_val);
+                break;
+            case pb::INT16:
+                value->set_int32_val(_u.int16_val);
+                break;
+            case pb::INT32:
+            case pb::TIME:
+                value->set_int32_val(_u.int32_val);
+                break;
+            case pb::INT64:
+                value->set_int64_val(_u.int64_val);
+                break;
+            case pb::UINT8:
+                value->set_uint32_val(_u.uint8_val);
+                break;
+            case pb::UINT16:
+                value->set_uint32_val(_u.uint16_val );
+                break;
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+                value->set_uint32_val(_u.uint32_val);
+                break;
+            case pb::UINT64:
+            case pb::DATETIME:
+                value->set_uint64_val(_u.uint64_val);
+                break;
+            case pb::FLOAT:
+                value->set_float_val(_u.float_val);
+                break;
+            case pb::DOUBLE:
+                value->set_double_val(_u.double_val);
+                break;
+            case pb::STRING:
+                value->set_string_val(str_val);
+                break;
+            default:
+                break;
+        }
+    }
+
     template <class T>
     T get_numberic() const {
         switch (type) {
@@ -237,10 +395,16 @@ struct ExprValue {
                 return std::to_string(_u.uint32_val);
             case pb::UINT64:
                 return std::to_string(_u.uint64_val);
-            case pb::FLOAT:
-                return std::to_string(_u.float_val);
-            case pb::DOUBLE:
-                return std::to_string(_u.double_val);
+            case pb::FLOAT: {
+                std::ostringstream oss;
+                oss << _u.float_val;
+                return oss.str();
+            }
+            case pb::DOUBLE: {
+                std::ostringstream oss;
+                oss << _u.double_val;
+                return oss.str();
+            }
             case pb::STRING:
             case pb::HLL:
                 return str_val;
@@ -379,7 +543,7 @@ struct ExprValue {
     }
     
     bool is_null() const { 
-        return type == pb::NULL_TYPE;
+        return type == pb::NULL_TYPE || type == pb::INVALID_TYPE;
     }
 
     bool is_bool() const {

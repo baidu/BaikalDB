@@ -126,6 +126,15 @@ public:
         return false;
     }
 public:
+    void get_instances(const std::string& resource_tag, 
+                        std::set<std::string>& instances) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& instance_info : _instance_info) {
+            if (instance_info.second.resource_tag == resource_tag) {
+                instances.insert(instance_info.second.address);
+            }
+        }
+    }
     int64_t get_instance_count(const std::string& resource_tag, const std::string& logical_room) {
         int64_t count = 0; 
         BAIDU_SCOPED_LOCK(_instance_mutex);
@@ -232,12 +241,18 @@ public:
         }
         return _instance_info[instance];
     }
+    void get_instance_by_resource_tags(std::map<std::string, std::vector<std::string>>& instances) {
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        for (auto& iter : _instance_info) {
+            instances[iter.second.resource_tag].push_back(iter.first);
+        }
+    }
     std::string get_resource_tag(const std::string& instance) {
         BAIDU_SCOPED_LOCK(_instance_mutex);
         if (_instance_info.find(instance) != _instance_info.end()) {
             return _instance_info[instance].resource_tag;
         }
-        DB_FATAL("instance: %s not exist", instance.c_str());
+        DB_WARNING("instance: %s not exist", instance.c_str());
         return "";
     }
     void get_resource_tag(const std::set<std::string>& related_peers,
@@ -246,6 +261,8 @@ public:
         for (auto& peer : related_peers) {
             if (_instance_info.find(peer) != _instance_info.end()) {
                 peer_resource_tags[peer] = _instance_info[peer].resource_tag;
+            } else {
+                DB_WARNING("instance: %s not exist", peer.c_str());
             }
         }
     }
@@ -273,10 +290,14 @@ public:
         _instance_info[instance].capacity = instance_info.capacity();
         _instance_info[instance].used_size = instance_info.used_size();
         _instance_info[instance].resource_tag = instance_info.resource_tag();
-        if (_instance_info[instance].instance_status.state != pb::MIGRATE) {
-            _instance_info[instance].instance_status.state = pb::NORMAL;
-        }
         _instance_info[instance].instance_status.timestamp = butil::gettimeofday_us();
+        if (_instance_info[instance].instance_status.state != pb::MIGRATE) {
+            if (_instance_info[instance].instance_status.state != pb::NORMAL) {
+                DB_WARNING("instance:%s status return NORMAL, resource_tag: %s",
+                    instance.c_str(), _instance_info[instance].resource_tag.c_str());
+                _instance_info[instance].instance_status.state = pb::NORMAL;
+            }
+        }
         return 0;
     }
     
@@ -316,7 +337,16 @@ public:
         if (_instance_info.find(instance) != _instance_info.end()) {
             return _instance_info[instance].logical_room;
         }
-        DB_FATAL("instance: %s not exist", instance.c_str());
+        DB_WARNING("instance: %s not exist", instance.c_str());
+        return "";
+    }
+    static std::string get_ip(const std::string& instance) {
+        std::string ip = "";
+        std::string::size_type position = instance.find_first_of(":");
+        if (position != instance.npos) {
+            return instance.substr(0, position);
+        }
+        DB_FATAL("find instance: %s ip error", instance.c_str());
         return "";
     }
 private:

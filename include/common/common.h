@@ -17,9 +17,12 @@
 #include <functional>
 #include <execinfo.h>
 #include <type_traits>
+#include <fstream>
+#include <cmath>
 #include <set>
 #include <unordered_set>
 #include <unordered_map>
+#include <functional>
 #include <bthread/butex.h>
 #include <bvar/bvar.h>
 #ifdef BAIDU_INTERNAL
@@ -30,6 +33,8 @@
 #include <base/endpoint.h>
 #include <base/base64.h>
 #include <webfoot_naming.h>
+#include <base/fast_rand.h>
+#include <base/sha1.h>
 #include "naming.pb.h"
 #else
 #include <bthread/bthread.h>
@@ -38,11 +43,14 @@
 #include <butil/containers/doubly_buffered_data.h>
 #include <butil/endpoint.h>
 #include <butil/base64.h>
+#include <butil/fast_rand.h>
+#include <butil/sha1.h>
 #endif
 #include <bthread/execution_queue.h>
 #include <gflags/gflags.h>
 #include "log.h"
 #include "proto/common.pb.h"
+#include "proto/meta.interface.pb.h"
 
 #ifdef BAIDU_INTERNAL
 namespace baidu {
@@ -73,6 +81,12 @@ enum SerializeStatus {
     STMPS_SUCCESS,
     STMPS_FAIL,
     STMPS_NEED_RESIZE
+};
+
+enum SstBackupType {
+    UNKNOWN_BACKUP,
+    META_BACKUP,
+    DATA_BACKUP
 };
 
 enum MysqlCommand : uint8_t {
@@ -107,6 +121,19 @@ enum MysqlCommand : uint8_t {
     COM_SET_OPTION          = 0x1b,
     COM_STMT_FETCH          = 0x1c
 };
+enum ExplainType {
+    EXPLAIN_NULL            = 0,
+    ANALYZE_STATISTICS      = 1,
+    SHOW_HISTOGRAM          = 2,
+    SHOW_CMSKETCH           = 3,
+    SHOW_PLAN               = 4,
+    SHOW_TRACE              = 5,
+    SHOW_TRACE2             = 6,
+};
+
+inline bool explain_is_trace(ExplainType& type) {
+    return type == SHOW_TRACE || type == SHOW_TRACE2;
+}
 
 class TimeCost {
 public:
@@ -120,7 +147,7 @@ public:
         _start = butil::gettimeofday_us();
     }
 
-    int64_t get_time() {
+    int64_t get_time() const {
         return butil::gettimeofday_us() - _start;
     }
 
@@ -155,6 +182,22 @@ private:
     }
     bthread::ExecutionQueueId<std::function<void()>> _queue_id = {0};
 };
+// return when timeout or shutdown
+inline void bthread_usleep_fast_shutdown(int64_t interval_us, const bool& shutdown) {
+    if (interval_us < 10000) {
+        bthread_usleep(interval_us);
+        return;
+    }
+    int64_t sleep_time_count = interval_us / 10000; //10ms为单位
+    int time = 0;
+    while (time < sleep_time_count) {
+        if (shutdown) {
+            return;
+        }
+        bthread_usleep(10000);
+        ++time;
+    }
+}
 
 class BthreadCond {
 public:
@@ -316,6 +359,7 @@ public:
     void join() {
         _cond.wait();
     }
+
 private:
     int _concurrency = 10;
     BthreadCond _cond;
@@ -347,12 +391,12 @@ template <typename KEY, typename VALUE, uint32_t MAP_COUNT = 23>
 class ThreadSafeMap {
 public:
     ThreadSafeMap() {
-        for (int i = 0; i < MAP_COUNT; i++) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
             bthread_mutex_init(&_mutex[i], NULL);
         }
     }
     ~ThreadSafeMap() {
-        for (int i = 0; i < MAP_COUNT; i++) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
             bthread_mutex_destroy(&_mutex[i]);
         }
     }
@@ -363,11 +407,9 @@ public:
     }
     uint32_t size() {
         uint32_t size = 0;
-        for (int i = 0; i < MAP_COUNT; i++) {
-            {
-                BAIDU_SCOPED_LOCK(_mutex[i]);
-                size += _map[i].size();
-            }
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
+            BAIDU_SCOPED_LOCK(_mutex[i]);
+            size += _map[i].size();
         }
         return size;
     }
@@ -430,6 +472,43 @@ public:
             _map[i].clear();
         } 
     }
+
+    template<typename... Args>
+    void init_if_not_exist_else_update(const KEY& key, 
+        const std::function<void(VALUE& value)>& call, Args&&... args) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        auto iter = _map[idx].find(key);
+        if (iter == _map[idx].end()) {
+            _map[idx].insert(std::make_pair(key, VALUE(std::forward<Args>(args)...)));
+        } else {
+            //字段存在，才执行回调
+            call(iter->second);
+        }
+    }
+
+    void update(const KEY& key, const std::function<void(VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        auto iter = _map[idx].find(key);
+        if (iter != _map[idx].end()) {
+            call(iter->second);
+        }
+    }
+
+    //返回值：true表示执行了全部遍历，false表示遍历中途退出
+    bool traverse_with_early_return(const std::function<bool(VALUE& value)>& call) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
+            BAIDU_SCOPED_LOCK(_mutex[i]);
+            for (auto& pair : _map[i]) {
+                if (!call(pair.second)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
 private:
     uint32_t map_idx(KEY key) {
         if (std::is_integral<KEY>::value) {
@@ -461,47 +540,157 @@ private:
     int _index = 0;
 };
 
+DECLARE_int64(incremental_info_gc_time);
+template <typename T>
+class IncrementalUpdate {
+public:
+    IncrementalUpdate() {
+        bthread_mutex_init(&_mutex, NULL);
+    }
+
+    ~IncrementalUpdate() {
+        bthread_mutex_destroy(&_mutex);
+    }
+
+    void put_incremental_info(const int64_t apply_index, T& infos) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        (*background)[apply_index] = infos;
+        if (FLAGS_incremental_info_gc_time < _gc_time_cost.get_time()) {
+            frontground->clear();
+            _buf.swap();
+            _gc_time_cost.reset();
+        }  
+    }
+
+    // 返回值 true:需要全量更新外部处理 false:增量更新，通过update_incremental处理增量
+    bool check_and_update_incremental(std::function<void(const T&)> update_incremental, int64_t& last_updated_index, const int64_t applied_index) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        if (frontground->size() == 0 && background->size() == 0) {
+            if (last_updated_index < applied_index) {
+                return true;
+            }
+            return false;
+        } else if (frontground->size() == 0 && background->size() > 0) {
+            if (last_updated_index < background->begin()->first) {              
+                return true;
+            } else {
+                auto iter = background->upper_bound(last_updated_index);
+                while (iter != background->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                return false;
+            }
+        } else if (frontground->size() > 0) {
+            if (last_updated_index < frontground->begin()->first) {
+                return true;
+            } else {
+                auto iter = frontground->upper_bound(last_updated_index);
+                while (iter != frontground->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                iter = background->upper_bound(last_updated_index);
+                while (iter != background->end()) {
+                    if (iter->first > applied_index) {
+                        break;
+                    }
+                    update_incremental(iter->second);
+                    last_updated_index = iter->first;
+                    ++iter;
+                }
+                return false;         
+            }
+        }
+        return false;
+    }
+
+    void clear() {
+        auto background  = _buf.read_background();
+        auto frontground = _buf.read();
+        background->clear();
+        frontground->clear();
+    }
+
+private:
+    DoubleBuffer<std::map<int64_t, T>> _buf;
+    bthread_mutex_t                    _mutex;
+    TimeCost                    _gc_time_cost;
+};
+
 struct BvarMap {
     struct SumCount {
         SumCount() {}
-        SumCount(int64_t sum, int64_t count) : sum(sum), count(count) {}
+        SumCount(int64_t table_id, int64_t sum, int64_t count, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows) 
+            : table_id(table_id), sum(sum), count(count), affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows) {}
         SumCount& operator+=(const SumCount& other) {
+            if (other.table_id > 0) {
+                table_id = other.table_id;
+            }
             sum += other.sum;
             count += other.count;
+            affected_rows += other.affected_rows;
+            scan_rows += other.scan_rows;
+            filter_rows += other.filter_rows;
             return *this;
         }
         SumCount& operator-=(const SumCount& other) {
             sum -= other.sum;
             count -= other.count;
+            affected_rows -= other.affected_rows;
+            scan_rows -= other.scan_rows;
+            filter_rows -= other.filter_rows;
             return *this;
         }
+        int64_t table_id = 0;
         int64_t sum = 0;
         int64_t count = 0;
+        int64_t affected_rows = 0;
+        int64_t scan_rows = 0;
+        int64_t filter_rows = 0;
     };
 public:
     BvarMap() {}
-    BvarMap(const std::string& key, int64_t cost) {
-        internal_map[key] = SumCount(cost, 1);
+    BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows) {
+        internal_map[key][index_id] = SumCount(table_id, cost, 1, affected_rows, scan_rows, filter_rows);
     }
     BvarMap& operator+=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
-            internal_map[pair.first] += pair.second;
+            for (auto& pair2 : pair.second) {
+                internal_map[pair.first][pair2.first] += pair2.second;
+            }
         }
         return *this;
     }
     BvarMap& operator-=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
-            internal_map[pair.first] -= pair.second;
+            for (auto& pair2 : pair.second) {
+                internal_map[pair.first][pair2.first] -= pair2.second;
+            }
         }
         return *this;
     }
 public:
-    std::map<std::string, SumCount> internal_map;
+    std::map<std::string, std::map<int64_t, SumCount>> internal_map;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const BvarMap& bm) {
     for (auto& pair : bm.internal_map) {
-        os << pair.first << " : " << pair.second.sum << "," << pair.second.count << std::endl;
+        for (auto& pair2 : pair.second) {
+            os << pair.first << " : " << pair2.first << " : " << pair2.second.sum << "," << pair2.second.count << std::endl;
+        }
     }
     return os;
 }
@@ -522,8 +711,8 @@ extern SerializeStatus to_string(uint64_t number, char *buf, size_t size, size_t
 extern std::string remove_quote(const char* str, char quote);
 extern std::string str_to_hex(const std::string& str);
 void stripslashes(std::string& str);
-extern int end_key_compare(const std::string& key1, const std::string& key2);
-
+extern void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf);
+extern void update_op_version(pb::SchemaConf* p_conf, const std::string& desc);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 extern int get_instance_from_bns(int* ret,
@@ -533,24 +722,19 @@ extern int get_instance_from_bns(int* ret,
 extern bool is_digits(const std::string& str);
 extern std::string url_decode(const std::string& str);
 extern std::string url_encode(const std::string& str);
-
-inline int end_key_compare(const std::string& key1, const std::string& key2) {
-    if (key1 == key2) {
-        return 0;
-    }
-    if (key1.empty()) {
-        return 1;
-    }
-    if (key2.empty()) {
-        return -1;
-    }
-    return key1.compare(key2);
-}
+extern std::vector<std::string> string_split(const std::string &s, char delim);
+extern std::string string_trim(std::string& str);
+extern const std::string& rand_peer(pb::RegionInfo& info);
+extern void other_peer_to_leader(pb::RegionInfo& info);
 
 inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
     butil::MurmurHash3_x64_128(key.c_str(), key.size(), 1234, out);
     return out[0];
+}
+
+inline bool float_equal(double value, double compare, double epsilon = 1e-9) {
+    return std::fabs(value - compare) < epsilon;
 }
 
 //set double buffer
@@ -566,5 +750,6 @@ inline int set_insert(std::unordered_set<std::string>& set, const std::string& i
 //map double buffer
 template<typename Key, typename Val>
 using DoubleBufferMap = butil::DoublyBufferedData<std::unordered_map<Key, Val>>;
+
 } // namespace baikaldb
 

@@ -29,6 +29,7 @@ namespace baikaldb {
     REGISTER_BINARY_OP(NAME1, TYPE) \
     predicate_swap_map[#NAME1"_"#TYPE"_"#TYPE] = #NAME2"_"#TYPE"_"#TYPE;
 #define REGISTER_SWAP_PREDICATE_ALL_TYPES(NAME1, NAME2) \
+    predicate_swap_map[#NAME1] = #NAME2; \
     REGISTER_SWAP_PREDICATE(NAME1, NAME2, int) \
     REGISTER_SWAP_PREDICATE(NAME1, NAME2, uint) \
     REGISTER_SWAP_PREDICATE(NAME1, NAME2, double) \
@@ -102,11 +103,31 @@ void FunctionManager::register_operators() {
     // num funcs
     register_object_ret("round", round, pb::INT64);
     register_object_ret("floor", floor, pb::INT64);
+    register_object_ret("abs", abs, pb::DOUBLE);
+    register_object_ret("sqrt", sqrt, pb::DOUBLE);
+    register_object_ret("mod", mod, pb::DOUBLE);
+    register_object_ret("rand", rand, pb::DOUBLE);
+    register_object_ret("sign", sign, pb::INT64);
+    register_object_ret("sin", sin, pb::DOUBLE);
+    register_object_ret("asin", asin, pb::DOUBLE);
+    register_object_ret("cos", cos, pb::DOUBLE);
+    register_object_ret("acos", acos, pb::DOUBLE);
+    register_object_ret("tan", tan, pb::DOUBLE);
+    register_object_ret("cot", cot, pb::DOUBLE);
+    register_object_ret("atan", atan, pb::DOUBLE);
+    register_object_ret("ln", ln, pb::DOUBLE);
+    register_object_ret("log", log, pb::DOUBLE);
+    register_object_ret("pi", pi, pb::DOUBLE);
+    register_object_ret("pow", pow, pb::DOUBLE);
+    register_object_ret("power", pow, pb::DOUBLE);
+    register_object_ret("greatest", greatest, pb::DOUBLE);
+    register_object_ret("least", least, pb::DOUBLE);
     register_object_ret("ceil", ceil, pb::INT64);
     register_object_ret("ceiling", ceil, pb::INT64);
 
     // str funcs
     register_object_ret("length", length, pb::INT64);
+    register_object_ret("bit_length", bit_length, pb::INT64);
     register_object_ret("upper", upper, pb::STRING);
     register_object_ret("lower", lower, pb::STRING);
     register_object_ret("lower_gbk", lower_gbk, pb::STRING);
@@ -114,13 +135,43 @@ void FunctionManager::register_operators() {
     register_object_ret("substr", substr, pb::STRING);
     register_object_ret("left", left, pb::STRING);
     register_object_ret("right", right, pb::STRING);
+    register_object_ret("trim", trim, pb::STRING);
+    register_object_ret("ltrim", ltrim, pb::STRING);
+    register_object_ret("rtrim", rtrim, pb::STRING);
+    register_object_ret("concat_ws", concat_ws, pb::STRING);
+    register_object_ret("ascii", ascii, pb::INT32);
+    register_object_ret("strcmp", strcmp, pb::INT32);
+    register_object_ret("insert", insert, pb::STRING);
+    register_object_ret("replace", replace, pb::STRING);
+    register_object_ret("repeat", repeat, pb::STRING);
+    register_object_ret("reverse", reverse, pb::STRING);
+    register_object_ret("locate", locate, pb::INT32);
+
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::UINT32);
     register_object_ret("from_unixtime", from_unixtime, pb::TIMESTAMP);
     register_object_ret("now", now, pb::DATETIME);
+    register_object_ret("sysdate", now, pb::DATETIME);
     register_object_ret("date_format", date_format, pb::STRING);
     register_object_ret("timediff", timediff, pb::TIME);
     register_object_ret("timestampdiff", timestampdiff, pb::INT64);
+    register_object_ret("curdate", curdate, pb::DATE);
+    register_object_ret("current_date", current_date, pb::DATE);
+    register_object_ret("curtime", curtime, pb::TIME);
+    register_object_ret("current_time", current_time, pb::TIME);
+    register_object_ret("day", day, pb::UINT32);
+    register_object_ret("dayname", dayname, pb::STRING);
+    register_object_ret("dayofweek", dayofweek, pb::UINT32);
+    register_object_ret("dayofmonth", dayofmonth, pb::UINT32);
+    register_object_ret("dayofyear", dayofyear, pb::UINT32);
+    register_object_ret("week", week, pb::UINT32);
+    register_object_ret("month", month, pb::UINT32);
+    register_object_ret("monthname", monthname, pb::STRING);
+    register_object_ret("year", year, pb::UINT32);
+    register_object_ret("time_to_sec", time_to_sec, pb::UINT32);
+    register_object_ret("sec_to_time", sec_to_time, pb::TIME);
+    register_object_ret("weekday", weekday, pb::UINT32);
+    register_object_ret("datediff", datediff, pb::UINT32);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);
@@ -132,6 +183,9 @@ void FunctionManager::register_operators() {
     register_object_ret("if", if_, pb::STRING);
     // MurmurHash sign
     register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
+    register_object_ret("md5", md5, pb::STRING);
+    register_object_ret("sha", md5, pb::STRING);
+    register_object_ret("sha1", md5, pb::STRING);
 }
 
 int FunctionManager::init() {
@@ -223,6 +277,7 @@ int FunctionManager::complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType
             return 0;
         case parser::FT_COMMON:
             fn.set_return_type(return_type_map[fn.name()]);
+            complete_common_fn(fn, types);
             return 0;
         default:
             //un-support
@@ -281,6 +336,42 @@ void FunctionManager::complete_fn(pb::Function& fn, int num_args,
     fn.set_return_type(ret_type);
 }
 
+void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::PrimitiveType>& types) {
+    if (fn.name() == "case_when" || fn.name() == "case_expr_when") {
+        size_t index = 0;
+        size_t remainder = 1;
+        std::vector<pb::PrimitiveType> target_types;
+        pb::PrimitiveType ret_type = pb::STRING;
+        if (fn.name() == "case_expr_when") {
+            remainder = 0;
+        }
+        for (auto& c : types) {
+            //case_when then子句index为奇数，else子句index为最后一位
+            //case_when_expr then子句index为除第0位的偶数，else子句为最后一位
+            if (index != 0 && (index % 2 == remainder || index + 1 == types.size())) {
+                DB_DEBUG("push col_type : [%s]", pb::PrimitiveType_Name(types[index]).c_str());
+                target_types.push_back(types[index]);
+            }
+            ++index;
+        }
+        if (!has_merged_type(target_types, ret_type)) {
+            DB_WARNING("no merged type.");
+        }
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        fn.set_return_type(ret_type);
+
+    } else if (fn.name() == "if") {
+        std::vector<pb::PrimitiveType> target_types;
+        pb::PrimitiveType ret_type = pb::STRING;
+        if (types.size() == 3) {
+            target_types.push_back(types[1]);
+            target_types.push_back(types[2]);
+            has_merged_type(target_types, ret_type);
+        }
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        fn.set_return_type(ret_type);
+    }
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

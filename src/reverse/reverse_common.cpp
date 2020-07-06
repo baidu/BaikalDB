@@ -183,7 +183,7 @@ int Tokenizer::simple_seg_gbk(std::string word, uint32_t word_count, std::map<st
     } else {
         fast_pos = i;
         std::string term = word.substr(slow_pos, fast_pos - slow_pos);
-        if (!_punctuation_blank.count(term) == 1) {
+        if (_punctuation_blank.count(term) == 0) {
             term_map[term] = 0;
         }
     }
@@ -323,19 +323,6 @@ bool is_prefix_end(std::unique_ptr<rocksdb::Iterator>& iterator, uint8_t level) 
         }
     }
     return true;
-}
-
-void print_reverse_list_test(pb::ReverseList& list) {
-    int size = list.reverse_nodes_size();
-    std::cout << "test size: " << size << std::endl;
-    for (int i = 0; i < size; ++i) {
-        const pb::ReverseNode& reverse_node = list.reverse_nodes(i);
-        pb::common_reverse_extra extra;
-        extra.ParseFromString(reverse_node.extra_info());
-        std::cout << reverse_node.key() << " " << reverse_node.flag() << " " 
-                  << extra.weight() << " | ";
-    }
-    std::cout << std::endl;
 }
 
 void print_reverse_list_common(pb::CommonReverseList& list) {

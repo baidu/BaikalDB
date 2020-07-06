@@ -28,7 +28,6 @@
 
 namespace baikaldb {
 
-const uint32_t NETWORK_SOCKET_MAX_USE_TIMES = 10000;
 const uint32_t MAX_STRING_BUF_SIZE          = 1024;
 const uint32_t SEND_BUF_DEFAULT_SIZE        = 4096;
 const uint32_t SELF_BUF_DEFAULT_SIZE        = 4096;
@@ -67,19 +66,17 @@ struct NetworkSocket {
     NetworkSocket();
     ~NetworkSocket();
 
-    bool buffer_clear();
-    bool reset();
-    void reset_send_buf();
     bool reset_when_err();
     void on_begin(uint64_t txn_id);
     void on_commit_rollback();
+    void update_old_txn_info();
     bool transaction_has_write();
     uint64_t get_global_conn_id();
 
     // Socket basic infomation.
     bool                shutdown;
     int                 fd;           // Socket fd.
-    bool                in_pool;
+    bool                is_free = false;
     SocketStatus        state;        // Socket status for status machine.
     std::string         ip;           // Client ip.
     int                 port;         // Client port.
@@ -120,6 +117,8 @@ struct NetworkSocket {
     int64_t         conn_id = -1;            // The client connection ID in Mysql Client-Server Protocol
 
     // Transaction related members
+    int64_t         primary_region_id = -1;  // used for txn like Percolator
+    bool            primary_region_exec_failed = false;
     bool            autocommit = true;       // The autocommit flag set by SET AUTOCOMMIT=0/1
     uint64_t        txn_id = 0;              // ID of the current transaction, 0 means out-transaction query
     uint64_t        new_txn_id = 0;          // For implicit commit commands (i.e. BEGIN after another BEGIN)
@@ -134,36 +133,30 @@ struct NetworkSocket {
 
     // prepare releated members
     uint64_t         stmt_id = 0;  // The statement ID auto_inc in Mysql Client-Server Protocol
-    std::unordered_map<std::string, QueryContext*> prepared_plans;
-    std::unordered_map<std::string, std::vector<SignedType>> param_type;
+    std::unordered_map<std::string, std::shared_ptr<QueryContext>> prepared_plans;
 
     std::unordered_map<std::string, pb::ExprNode> session_vars;
     std::unordered_map<std::string, pb::ExprNode> user_vars;
-    std::unordered_map<std::string, std::unordered_map<uint64_t, std::string>> long_data_vars;
 };
 
-class SocketPool {
+class SocketFactory {
 public:
-    ~SocketPool();
+    ~SocketFactory() {};
 
-    static SocketPool* get_instance() {
-        static SocketPool pool;
-        return &pool;
+    static SocketFactory* get_instance() {
+        static SocketFactory _instance;
+        return &_instance;
     }
 
-    SmartSocket fetch(SocketType type);
+    SmartSocket create(SocketType type);
     void free(SmartSocket socket);
 private:
-    //void dump();
-    SocketPool() {
-        pthread_mutex_init(&_pool_mutex, NULL);
+    SocketFactory() {
         _cur_conn_id = 0;
     }
-    SocketPool& operator=(const SocketPool& other);
+    SocketFactory& operator=(const SocketFactory& other);
 
-    std::list<SmartSocket> _pool;
-    int64_t         _cur_conn_id;
-    pthread_mutex_t _pool_mutex;
+    std::atomic<int64_t>    _cur_conn_id;
 };
 
 } // namespace baikal

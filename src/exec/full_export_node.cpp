@@ -46,18 +46,24 @@ int FullExportNode::open(RuntimeState* state) {
         _start_key_sort[info.start_key()] = info.region_id();
     }
     for (auto& pair : _start_key_sort) {
-        _send_region_ids.insert(pair.second);
+        _send_region_ids.push_back(pair.second);
     } 
     DB_WARNING("region_count:%ld", _send_region_ids.size());
     return 0;
 }
 
 bool FullExportNode::get_batch(RowBatch* batch) {
-    auto iter = _fetcher_store.region_batch.begin();
-    if (iter != _fetcher_store.region_batch.end()) {
-        batch->swap(*iter->second);
-        _fetcher_store.region_batch.erase(iter);
-        return true;
+    auto iter = _sent_region_ids.begin();
+    if (iter != _sent_region_ids.end()) {
+        auto iter2 = _fetcher_store.region_batch.find(*iter);
+        _sent_region_ids.erase(iter);
+        if (iter2 != _fetcher_store.region_batch.end()) {
+            batch->swap(*iter2->second);
+            _fetcher_store.region_batch.erase(iter2);
+            return true;
+        } else {
+            return false;
+        }
     } else {
         return false;
     }
@@ -98,7 +104,7 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     
     ConcurrencyBthread region_bth(FLAGS_region_per_batch, &BTHREAD_ATTR_SMALL);
     int region_per_batch = 0;
-
+    _fetcher_store.scan_rows = 0;
     for (auto id_iter = _send_region_ids.begin(); id_iter != _send_region_ids.end();) {
         if (region_per_batch >= FLAGS_region_per_batch) {
             break;
@@ -124,6 +130,7 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         };
         region_bth.run(region_thread);
         id_iter = _send_region_ids.erase(id_iter);
+        _sent_region_ids.push_back(region_id);
     }
 
     region_bth.join();
@@ -131,7 +138,8 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     if (_error != E_OK) {
         return -1;
     }
-    
+    state->set_num_scan_rows(state->num_scan_rows() + _fetcher_store.scan_rows.load());
+    state->set_num_filter_rows(state->num_filter_rows() + _fetcher_store.filter_rows.load());
     return 0;
 }
 } 

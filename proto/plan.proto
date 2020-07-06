@@ -41,6 +41,8 @@ enum PlanNodeType {
     LOCK_PRIMARY_NODE = 31;
     LOCK_SECONDARY_NODE = 32;
     FULL_EXPORT_NODE = 33;
+    DUAL_SCAN_NODE = 34;
+    UNION_NODE = 35;
 };
 
 enum TxnCmdType {
@@ -63,6 +65,11 @@ enum LockCmdType {
     LOCK_GET_DML = 4;
     LOCK_NO  = 5; //不加锁的操作
 };
+enum MatchMode {
+    M_NONE = 0;
+    M_NARUTAL_LANGUAGE = 1;
+    M_BOOLEAN = 2;
+};
 message PossibleIndex {
     message Range {
         optional bytes left_pb_record = 3;
@@ -72,6 +79,7 @@ message PossibleIndex {
         optional bool left_open = 7;
         optional bool right_open = 8;
         optional bool like_prefix = 9;
+        optional MatchMode match_mode = 10;
     };
 
     message SortIndex {
@@ -86,6 +94,7 @@ message PossibleIndex {
     repeated Expr index_conjuncts = 3;
     optional SortIndex sort_index = 4;
     optional bool bool_and = 5;
+    optional bool is_covering_index = 6;
 };
 
 message ScanNode {
@@ -160,6 +169,7 @@ message InsertNode {
     optional bool is_replace = 8;
     repeated int32 field_ids = 9;   // store field ids for prepared stmt
     repeated Expr  insert_values = 10;   // store values for prepared stmt
+    optional int64 row_ttl_duration = 11; //row ttl support, compatible whit prepared stmt
 };
 message LockPrimaryNode {
     required int64        table_id       = 1;
@@ -246,3 +256,32 @@ message Plan {
     repeated PlanNode nodes  = 1;
 };
 
+message LocalTraceNode {
+    optional int64             time_cost_us      = 1;
+    optional int64             sort_time         = 2;
+    optional int64             affect_rows       = 3;
+    optional int64             scan_rows         = 4;
+    optional int64             index_filter_rows = 5;
+    optional int64             get_primary_rows  = 6;
+    //optional int64             repeat_cnt        = 7;
+    optional string            description       = 8;
+    optional int64             where_filter_rows = 9;
+    optional string            index_name        = 10;
+};
+
+message TraceNode {
+    optional PlanNodeType      node_type         = 1;
+    optional string            description       = 2;
+    optional string            instance          = 3;
+    optional int64             region_id         = 4;
+    optional int64             total_time        = 5;
+    optional int64             affect_rows       = 6;
+    optional LocalTraceNode    open_trace        = 7;
+    optional LocalTraceNode    get_next_trace    = 8;
+    optional LocalTraceNode    txn_get_trace     = 9;
+    optional LocalTraceNode    txn_put_trace     = 10;
+    optional LocalTraceNode    txn_delete_trace  = 11;
+    optional LocalTraceNode    txn_commit_trace  = 12;
+    optional LocalTraceNode    store_agg         = 13;
+    repeated TraceNode         child_nodes       = 14;
+};

@@ -41,6 +41,16 @@ public:
         for (auto expr : _update_exprs) {
             expr->close();
         }
+        _origin_records.clear();
+        _store_records.clear();
+        _on_dup_key_update_records.clear();
+        _record_ids.clear();
+        _index_keys_record_map.clear();
+        _index_info_map.clear();
+
+        _has_conflict_record = true;
+        _main_table_reversed = false;
+        _affected_rows = 0;
     }
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
     int init_insert_info(UpdateManagerNode* update_manager_node);

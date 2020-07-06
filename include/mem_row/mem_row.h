@@ -16,12 +16,14 @@
 #include "common.h"
 #include <unordered_set>
 #include "expr_value.h"
+#include "message_helper.h"
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/descriptor.h>
 
-using google::protobuf::FieldDescriptor;
 
 namespace baikaldb {
+class TableKey;
+class IndexInfo;
 class MemRowDescriptor;
 //internal memory row meta-data for a query
 class MemRow final {
@@ -35,6 +37,18 @@ public:
             delete t;
             t = nullptr;
         }
+    }
+    google::protobuf::Message* get_tuple(int32_t tuple_id) {
+        return _tuples[tuple_id];
+    }
+
+    const google::protobuf::FieldDescriptor* get_field_by_slot(int32_t tuple_id, int32_t slot_id) {
+        auto tuple = _tuples[tuple_id];
+        if (tuple == nullptr) {
+            return nullptr;
+        }
+        const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
+        return descriptor->field(slot_id - 1);
     }
 
     void set_tuple(int32_t tuple_id, MemRowDescriptor* desc);
@@ -55,9 +69,27 @@ public:
 
     std::string* mutable_string(int32_t tuple_id, int32_t slot_id);
     // slot start with 1
-    ExprValue get_value(int32_t tuple_id, int32_t slot_id);
+    ExprValue get_value(int32_t tuple_id, int32_t slot_id) {
+        auto tuple = _tuples[tuple_id];
+        if (tuple == nullptr) {
+            return ExprValue::Null();
+        }
+        const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
+        // logical plan保证下标肯定是slot-1
+        auto field = descriptor->field(slot_id - 1);
+        return MessageHelper::get_value(field, tuple);
+    }
 
-    int set_value(int32_t tuple_id, int32_t slot_id, const ExprValue& value);
+    int set_value(int32_t tuple_id, int32_t slot_id, const ExprValue& value) {
+        auto tuple = _tuples[tuple_id];
+        if (tuple == nullptr) {
+            return -1;
+        }
+        const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
+        auto field = descriptor->field(slot_id - 1);
+
+        return MessageHelper::set_value(field, tuple, value);
+    }
 
     int copy_from(std::unordered_set<int32_t>& tuple_ids, const MemRow* mem_row) {
         for (auto& tuple_id : tuple_ids) {
@@ -74,7 +106,27 @@ public:
     //        DB_WARNING("tuple:%s", tuple->DebugString().c_str());
     //    }
     //}
-private:
+    int decode_key(int32_t tuple_id, IndexInfo& index,
+            std::vector<int32_t>& field_slot, const TableKey& key, int& pos);
+    int decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<int32_t>& field_slot, 
+            const TableKey& key, int& pos);
+
+    // for cstore
+    int decode_field(int32_t tuple_id, int32_t slot_id, pb::PrimitiveType field_type, const rocksdb::Slice& in) {
+        auto tuple = _tuples[tuple_id];
+        if (tuple == nullptr) {
+            return -1;
+        }
+        auto descriptor = tuple->GetDescriptor();
+        auto field = descriptor->field(slot_id - 1);
+        if (field == nullptr) {
+            DB_WARNING("invalid field: %d", slot_id);
+            return -1;
+        }
+        return MessageHelper::decode_field(field, field_type, tuple, in);
+    }
+
+    private:
     std::vector<google::protobuf::Message*> _tuples;
 };
 }

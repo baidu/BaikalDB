@@ -21,17 +21,17 @@
 namespace baikaldb {
 
 enum MysqlType : uint8_t { 
-    MYSQL_TYPE_DECIMAL, 
+    MYSQL_TYPE_DECIMAL,   // 0
     MYSQL_TYPE_TINY,
     MYSQL_TYPE_SHORT,  
     MYSQL_TYPE_LONG,
     MYSQL_TYPE_FLOAT,  
-    MYSQL_TYPE_DOUBLE,
+    MYSQL_TYPE_DOUBLE,   // 5
     MYSQL_TYPE_NULL,   
     MYSQL_TYPE_TIMESTAMP,
     MYSQL_TYPE_LONGLONG,
     MYSQL_TYPE_INT24,
-    MYSQL_TYPE_DATE,   
+    MYSQL_TYPE_DATE,     // 10
     MYSQL_TYPE_TIME,
     MYSQL_TYPE_DATETIME, 
     MYSQL_TYPE_YEAR,
@@ -57,6 +57,57 @@ struct SignedType {
     bool        is_unsigned = false;
 };
 
+// Package mysql result field.
+// This struct is same as mysql protocal.
+// https://dev.mysql.com/doc/internals/en/com-query-response.html#column-definition
+struct ResultField {
+    ResultField() {}
+    ~ResultField() {}
+
+    std::string     catalog = "def";
+    std::string     db;
+    std::string     table;
+    std::string     org_table;
+    std::string     name;       // Name of column
+    std::string     org_name;
+    uint16_t        charsetnr = 0;  // Character set.
+    uint32_t        length = 0;     // Width of column (create length).
+    uint8_t         type = 0;       // Type of field. See mysql_com.h for types.
+    uint16_t        flags = 1;      // Div flags.
+    uint8_t         decimals = 0;   // Number of decimals in field.
+}; 
+
+struct DateTime {
+    uint64_t year;
+    uint64_t month;
+    uint64_t day;
+    uint64_t hour;
+    uint64_t minute;
+    uint64_t second;
+    uint64_t macrosec;
+    uint64_t is_negative;
+
+    int datetype_length() {
+        if (year == 0 && month == 0 && day == 0 && hour == 0
+            && minute == 0 && second == 0 && macrosec == 0) {
+                return 0;
+        } else if (hour == 0 && minute == 0 && second == 0 && macrosec == 0) {
+            return 4;
+        } else if (macrosec == 0) {
+            return 7;
+        }
+        return 11;
+    }
+    int timetype_length() {
+        if (hour == 0 && minute == 0 && second == 0 && macrosec == 0) {
+            return 0;
+        } else if (macrosec == 0) {
+            return 8;
+        }
+        return 12;
+    }
+};
+
 inline bool is_double(pb::PrimitiveType type) {
     switch (type) {
         case pb::FLOAT:
@@ -78,6 +129,18 @@ inline bool has_double(std::vector<pb::PrimitiveType> types) {
         }
     }
     return false;
+}
+
+inline bool is_datetime_specic(pb::PrimitiveType type) {
+    switch (type) {
+        case pb::DATETIME:
+        case pb::TIMESTAMP:
+        case pb::DATE:
+        case pb::TIME:
+            return true;
+        default:
+            return false;
+    }
 }
 
 inline bool has_timestamp(std::vector<pb::PrimitiveType> types) {
@@ -265,5 +328,81 @@ inline uint8_t to_mysql_type(pb::PrimitiveType type) {
     }
 }
 
+inline bool is_signed(pb::PrimitiveType type) {
+    switch (type) {
+        case pb::INT8:
+        case pb::INT16:
+        case pb::INT32:
+        case pb::INT64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::PrimitiveType& merged_type) {
+    if (types.size() == 0) {
+        return false;
+    }
+
+    bool is_all_equal = true;
+    bool is_all_num = true;
+    bool is_all_time = true;
+    bool is_all_null = true;
+    bool has_double = false;
+    bool has_uint64 = false;
+    bool has_signed = false;
+    auto first_type = *types.begin();
+
+    for (auto type : types) {
+        if (type == pb::NULL_TYPE) {
+            continue;
+        }
+        if (is_all_null) {
+            first_type = type;
+            is_all_null = false;
+        }
+        if (is_all_equal && type != first_type) {
+            is_all_equal = false;
+        }
+        if (is_all_num && !(is_double(type) || is_int(type) || type == pb::BOOL)) {
+            is_all_num = false;
+        }
+        if (is_all_time && !is_datetime_specic(type)) {
+            is_all_time = false;
+        }
+        if (is_double(type)) {
+            has_double = true;
+        }
+        if (type == pb::UINT64) {
+            has_uint64 = true;
+        }
+        if (is_signed(type)) {
+            has_signed = true;
+        }
+    }
+    if (is_all_null) {
+        merged_type = pb::NULL_TYPE;
+    } else if (is_all_equal) {
+       merged_type = first_type; 
+    } else if (is_all_num) {
+        if (has_double) {
+            merged_type = pb::DOUBLE;
+        } else if (has_uint64) {
+            if (has_signed) {
+                merged_type = pb::DOUBLE;
+            } else {
+                merged_type = pb::UINT64;
+            }
+        } else {
+            merged_type = pb::INT64;
+        }
+    } else if (is_all_time) {
+        merged_type = pb::DATETIME;
+    } else {
+        merged_type = pb::STRING;
+    }
+    return true;
+}
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

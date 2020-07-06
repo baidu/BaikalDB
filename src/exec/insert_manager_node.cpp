@@ -441,20 +441,18 @@ int InsertManagerNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_des
         return ret;
     }
     for (auto expr : _update_exprs) {
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        expr->const_pre_calc();
     }
     for (auto expr : _insert_values) {
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        expr->const_pre_calc();
         if (!expr->is_constant()) {
             DB_WARNING("insert expr must be constant");
             return -1;
@@ -645,9 +643,9 @@ int InsertManagerNode::process_records_before_send(RuntimeState* state) {
                     set_err_message(info, record, state);
                     return -1;
                 }
-            }            
+            }
         }
-        id++;      
+        id++;
     }
     for (auto id : need_remove_ids) {
         for (auto index_key_pair : _index_keys_record_map) {

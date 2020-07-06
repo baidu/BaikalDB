@@ -53,12 +53,15 @@ struct QueryStat {
     std::string table;
     std::string server_ip;
     std::ostringstream sample_sql;
+    int64_t     table_id = -1;
 
     MysqlErrCode error_code;
     std::ostringstream error_msg;
 
-    int         num_affected_rows;
-    int         num_returned_rows;
+    int         num_affected_rows = 0;
+    int         num_returned_rows = 0;
+    int         num_scan_rows     = 0;
+    int         num_filter_rows   = 0;
     uint64_t    log_id;
     uint64_t    old_txn_id;
     int         old_seq_id;
@@ -85,12 +88,9 @@ struct QueryStat {
         partition_key       = 0;
         sql_length          = 0;
         hit_cache           = false;
-        start_stamp.tv_sec  = 0;
-        start_stamp.tv_usec = 0;
-        send_stamp.tv_sec   = 0;
-        send_stamp.tv_usec  = 0;
-        end_stamp.tv_sec    = 0;
-        end_stamp.tv_usec   = 0;
+        gettimeofday(&(start_stamp), NULL);
+        gettimeofday(&(send_stamp), NULL);
+        gettimeofday(&(end_stamp), NULL);
         //traceid.clear();
         family.clear();
         table.clear();
@@ -101,6 +101,8 @@ struct QueryStat {
         error_msg.str("");
         num_affected_rows   = 0;
         num_returned_rows   = 0;
+        num_scan_rows       = 0;
+        num_filter_rows     = 0;
         log_id              = butil::fast_rand();
         old_txn_id          = 0;
         old_seq_id          = 0;
@@ -154,6 +156,12 @@ public:
         }
         return -1;
     }
+    SmartState get_runtime_state() {
+        if (runtime_state == nullptr) {
+            runtime_state.reset(new RuntimeState);
+        }
+        return runtime_state;
+    }
     pb::PlanNode* add_plan_node() {
         return plan.add_nodes();
     }
@@ -164,16 +172,19 @@ public:
     std::vector<std::string> comments;
     std::string         cur_db;
     std::string         charset;
+    pb::TraceNode       trace_node;
 
     // new sql parser data structs
     parser::StmtNode*   stmt;
     parser::NodeType    stmt_type;
     bool                is_explain = false;
     bool                is_full_export = false;
+    ExplainType         explain_type = EXPLAIN_NULL;
 
     uint8_t             mysql_cmd;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
     int32_t             thread_idx;
+    int64_t             row_ttl_duration = 0; // used for /*{"duration": xxx}*/ insert ...
     QueryStat           stat_info;      // query execute result status info
     std::shared_ptr<UserInfo> user_info;
 
@@ -183,7 +194,8 @@ public:
     std::string         prepare_stmt_name;
     std::vector<pb::ExprNode> param_values;
 
-    RuntimeState        runtime_state;  // baikaldb side runtime state
+    SmartState          runtime_state;  // baikaldb side runtime state
+    NetworkSocket*      client_conn = nullptr; // used for baikaldb
     // the insertion records, not grouped by region yet
     std::vector<SmartRecord>            insert_records;
     bool                has_recommend = false;
@@ -193,6 +205,10 @@ public:
     bool                return_empty = false;
     bool                new_prepared = false;  // flag for stmt_prepare
     bool                exec_prepared = false; // flag for stmt_execute
+    bool                is_prepared = false;   // flag for stmt_execute
+    bool                is_select = false;
+    bool                need_destroy_tree = false;
+    int64_t             prepared_table_id = -1;
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 
@@ -203,6 +219,10 @@ public:
     bool                enable_2pc = false;
     bool                is_cancelled = false;
     std::shared_ptr<QueryContext> kill_ctx;
+    std::vector<std::shared_ptr<QueryContext>> union_select_plans;
+    std::unordered_map<uint64_t, std::string> long_data_vars;
+    std::vector<SignedType> param_type;
+    std::set<int64_t> index_ids;
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

@@ -51,8 +51,6 @@ public:
     static const uint8_t RAFT_META_IDENTIFY = 0x03;                     
     MyRaftMetaStorage() {
     }
-    // init stable storage, check consistency and integrity
-    virtual int init();
 
     // set current term
     virtual int set_term(const int64_t term);
@@ -68,6 +66,14 @@ public:
 
     // set term and peer_id
     virtual int set_term_and_votedfor(const int64_t term, const braft::PeerId& peer_id);
+    // init stable storage
+    virtual butil::Status init();
+    // set term and votedfor information
+    virtual butil::Status set_term_and_votedfor(const int64_t term, 
+                            const braft::PeerId& peer_id, const braft::VersionedGroupId& group);
+    // get term and votedfor information
+    virtual butil::Status get_term_and_votedfor(int64_t* term, braft::PeerId* peer_id, 
+                                                   const braft::VersionedGroupId& group);
 
     RaftMetaStorage* new_instance(const std::string& uri) const override;
 
@@ -76,7 +82,6 @@ private:
     MyRaftMetaStorage(int64_t region_id, RocksWrapper* db,
                         rocksdb::ColumnFamilyHandle* handle);
     int load();
-    int old_load();
     int save();
 
     bool _is_inited = false;

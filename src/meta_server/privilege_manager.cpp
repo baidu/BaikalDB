@@ -275,8 +275,13 @@ void PrivilegeManager::insert_database_privilege(const pb::PrivilegeDatabase& pr
     for (auto& mem_database : *mem_privilege.mutable_privilege_database()) {
         if (mem_database.database_id() == privilege_database.database_id()) {
             whether_exist = true;
-            if (privilege_database.database_rw() > mem_database.database_rw()) {
+
+            if (privilege_database.force()) {
                 mem_database.set_database_rw(privilege_database.database_rw());
+            } else {
+                if (privilege_database.database_rw() > mem_database.database_rw()) {
+                    mem_database.set_database_rw(privilege_database.database_rw());
+                }
             }
             break;
         }
@@ -296,9 +301,15 @@ void PrivilegeManager::insert_table_privilege(const pb::PrivilegeTable& privileg
         if (mem_privilege_table.database_id() == database_id
                 && mem_privilege_table.table_id() == table_id) {
             whether_exist = true;
-            if (privilege_table.table_rw() > mem_privilege_table.table_rw()) {
+
+            if (privilege_table.force()) {
                 mem_privilege_table.set_table_rw(privilege_table.table_rw());
+            } else {
+                if (privilege_table.table_rw() > mem_privilege_table.table_rw()) {
+                    mem_privilege_table.set_table_rw(privilege_table.table_rw());
+                }
             }
+            
             break;
         }
     }

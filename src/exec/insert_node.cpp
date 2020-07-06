@@ -27,10 +27,12 @@ int InsertNode::init(const pb::PlanNode& node) {
     }
     const pb::InsertNode& insert_node = node.derive_node().insert_node();
     _table_id = insert_node.table_id();
-    _global_index_id = _table_id;
+    _global_index_id = _table_id;//?
     _tuple_id = insert_node.tuple_id();
     _values_tuple_id = insert_node.values_tuple_id();
     _is_replace = insert_node.is_replace();
+    _row_ttl_duration = insert_node.row_ttl_duration();
+    DB_DEBUG("_row_ttl_duration:%ld", _row_ttl_duration);
     if (_node_type == pb::REPLACE_NODE) {
         _is_replace = true;
     }
@@ -49,6 +51,7 @@ int InsertNode::init(const pb::PlanNode& node) {
     for (auto id : insert_node.field_ids()) {
         _prepared_field_ids.push_back(id);
     }
+
     for (auto& expr : insert_node.insert_values()) {
         ExprNode* value_expr = nullptr;
         ret = ExprNode::create_tree(expr, &value_expr);
@@ -61,6 +64,12 @@ int InsertNode::init(const pb::PlanNode& node) {
     return 0;
 }
 int InsertNode::open(RuntimeState* state) {
+    int num_affected_rows = 0;
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([this, &num_affected_rows](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(num_affected_rows);
+        local_node.append_description() << " increase_rows:" + _num_increase_rows;
+    }));
+    
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -82,7 +91,17 @@ int InsertNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
+    // cstore下只更新涉及列
+    if (_is_replace && _table_info->engine == pb::ROCKSDB_CSTORE) {
+        for (auto& field_info : _table_info->fields) {
+            if (_pri_field_ids.count(field_info.id) == 0 &&
+                    _update_field_ids.count(field_info.id) == 0) {
+                _update_field_ids.insert(field_info.id);
+            }
+        }
+    }
     int cnt = 0;
+    // TODO init阶段？
     for (auto& pb_record : _pb_node.derive_node().insert_node().records()) {
         SmartRecord record = _factory->new_record(*_table_info);
         record->decode(pb_record);
@@ -100,7 +119,6 @@ int InsertNode::open(RuntimeState* state) {
         }
     }
 
-    int num_affected_rows = 0;
     AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
     int i = 0;
     for (auto& pair : state->reverse_index_map()) {
@@ -148,12 +166,11 @@ int InsertNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         return ret;
     }
     for (auto expr : _insert_values) {
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        expr->const_pre_calc();
         if (!expr->is_constant()) {
             DB_WARNING("insert expr must be constant");
             return -1;
@@ -214,6 +231,7 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
                 expr->close();
                 return -1;
             }
+            //DB_WARNING("expr type:%d field type: %d", expr->node_type(), insert_fields[col_idx].type);
             expr->close();
         }
         for (auto& field : default_fields) {
@@ -222,13 +240,16 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
                 return -1;
             }
         }
-        //DB_WARNING("row: %s", row->to_string().c_str());
+
+        //DB_WARNING("DEBUG row: %s", row->to_string().c_str());
         insert_records.push_back(row);
     }
+    /*
     for (auto expr : _insert_values) {
         ExprNode::destroy_tree(expr);
     }
     _insert_values.clear();
+    */
     return 0;
 }
 

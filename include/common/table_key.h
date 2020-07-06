@@ -16,12 +16,28 @@
 
 #include "key_encoder.h"
 #include "rocksdb/slice.h"
+#include "schema_factory.h"
 
 namespace baikaldb {
+inline int end_key_compare(rocksdb::Slice key1, rocksdb::Slice key2) {
+    if (key1 == key2) {
+        return 0;
+    }
+    if (key1.empty()) {
+        return 1;
+    }
+    if (key2.empty()) {
+        return -1;
+    }
+    return key1.compare(key2);
+}
 class TableRecord;
 class MutTableKey;
 class IndexInfo;
 class TableKey {
+using FieldDescriptor = google::protobuf::FieldDescriptor;
+using Message = google::protobuf::Message;
+using Reflection = google::protobuf::Reflection;
 public:
     virtual ~TableKey() {}
     TableKey() : _full(false) {}
@@ -132,6 +148,14 @@ public:
     const rocksdb::Slice& data() const {
         return _data;
     }
+
+    int decode_field(Message* message,
+            const Reflection* reflection,
+            const FieldDescriptor* field, 
+            const FieldInfo& field_info,
+            int& pos) const;
+
+    int skip_field(const FieldInfo& field_info, int& pos) const;
 
 private:
     bool             _full;  //full key or just a prefix

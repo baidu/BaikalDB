@@ -59,7 +59,7 @@ CONSTRAINT { return CONSTRAINT; }
 CONVERT { return CONVERT; }
 CREATE { return CREATE; }
 CROSS { return CROSS; }
-CURRENT_DATE { return CURRENT_DATE; }
+CURRENT_DATE { un_reserved_keyword(yylval, yyscanner, parser); return CURRENT_DATE; }
 CURRENT_TIME { un_reserved_keyword(yylval, yyscanner, parser); return CURRENT_TIME; }
 CURRENT_TIMESTAMP { return CURRENT_TIMESTAMP; }
 CURRENT_USER { return CURRENT_USER; }
@@ -135,6 +135,7 @@ LOCK { return LOCK; }
 LONGBLOB { return LONGBLOB; }
 LONGTEXT { return LONGTEXT; }
 LOW_PRIORITY { return LOW_PRIORITY; }
+MATCH {return MATCH; }
 MAXVALUE { return MAXVALUE; }
 MEDIUMBLOB { return MEDIUMBLOB; }
 MEDIUMINT { return MEDIUMINT; }
@@ -217,6 +218,7 @@ NATURAL { return NATURAL; }
 
 ACTION { un_reserved_keyword(yylval, yyscanner, parser); return ACTION; /* The following tokens belong to UnReservedKeyword. */}
 AFTER { un_reserved_keyword(yylval, yyscanner, parser); return AFTER; }
+AGAINST {un_reserved_keyword(yylval, yyscanner, parser); return AGAINST; }
 ALWAYS { un_reserved_keyword(yylval, yyscanner, parser); return ALWAYS; }
 ALGORITHM { un_reserved_keyword(yylval, yyscanner, parser); return ALGORITHM; }
 ANY { un_reserved_keyword(yylval, yyscanner, parser); return ANY; }
@@ -285,6 +287,7 @@ INDEXES { un_reserved_keyword(yylval, yyscanner, parser); return INDEXES; }
 INVOKER { un_reserved_keyword(yylval, yyscanner, parser); return INVOKER; }
 JSON { un_reserved_keyword(yylval, yyscanner, parser); return JSON; }
 KEY_BLOCK_SIZE { un_reserved_keyword(yylval, yyscanner, parser); return KEY_BLOCK_SIZE; }
+LANGUAGE { un_reserved_keyword(yylval, yyscanner, parser); return LANGUAGE; }
 LOCAL { un_reserved_keyword(yylval, yyscanner, parser); return LOCAL; }
 LESS { un_reserved_keyword(yylval, yyscanner, parser); return LESS; }
 LEVEL { un_reserved_keyword(yylval, yyscanner, parser); return LEVEL; }
@@ -320,6 +323,7 @@ QUERY { un_reserved_keyword(yylval, yyscanner, parser); return QUERY; }
 QUERIES { un_reserved_keyword(yylval, yyscanner, parser); return QUERIES; }
 QUICK { un_reserved_keyword(yylval, yyscanner, parser); return QUICK; }
 RECOVER { un_reserved_keyword(yylval, yyscanner, parser); return RECOVER; }
+RESTORE { un_reserved_keyword(yylval, yyscanner, parser); return RESTORE; }
 REDUNDANT { un_reserved_keyword(yylval, yyscanner, parser); return REDUNDANT; }
 RELOAD { un_reserved_keyword(yylval, yyscanner, parser); return RELOAD; }
 REPEATABLE { un_reserved_keyword(yylval, yyscanner, parser); return REPEATABLE; }
@@ -422,7 +426,7 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 \>\> { return RS_OP; }
 
 [0-9]+ {
-    //整数..
+    //integer
     yylval->expr = LiteralExpr::make_int(yytext, parser->arena);
     return INTEGER_LIT;
 }
@@ -432,17 +436,17 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 [0-9]+\.[0-9]+    |
 [0-9]+\.        |
 \.[0-9]+ {
-    //浮点数..
+    //float point number
     yylval->expr = LiteralExpr::make_double(yytext, parser->arena);
     return DECIMAL_LIT;
 }
 
 \"([^\\\"]|\\.)*\" |
 \'([^\\\']|\\.)*\' {
-    //字符串..
+    //string
     LiteralExpr* lit;
     lit = LiteralExpr::make_string(yytext, parser->arena);
-    lit->_u.str_val.stripslashes(); // 从logical_plan移到这边
+    lit->_u.str_val.stripslashes(); // move from logical_plan
     if (parser->is_gbk && parser->has_5c) {
         lit->_u.str_val.restore_5c();
     }
@@ -457,7 +461,7 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 }
 
 (([A-Za-z0-9_]+)|(`[^`]+`))((@([A-Za-z0-9_*]+|(`[^`]`)+))*) {
-    //标识符..
+    //identifier
     if (yytext[0] != '`') {
         yylval->string.strdup(yytext, parser->arena);
     } else {
@@ -467,7 +471,7 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 }
 
 @@?[A-Za-z][A-Za-z0-9_.$]* {
-    //变量..
+    //variable
     yylval->string.strdup(yytext, parser->arena);
     return IDENT;
 }

@@ -166,6 +166,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LONGBLOB
     LONGTEXT
     LOW_PRIORITY
+    MATCH
     MAXVALUE
     MEDIUMBLOB
     MEDIUMINT
@@ -263,6 +264,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     /* The following tokens belong to UnReservedKeyword. */
     ACTION
     AFTER
+    AGAINST
     ALWAYS
     ALGORITHM
     ANY
@@ -331,6 +333,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     INVOKER
     JSON
     KEY_BLOCK_SIZE
+    LANGUAGE
     LOCAL
     LESS
     LEVEL
@@ -366,6 +369,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     QUERIES
     QUICK
     RECOVER
+    RESTORE 
     REDUNDANT
     RELOAD
     REPEATABLE
@@ -470,6 +474,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DBName
     FunctionNameCurtime
     FunctionaNameCurdate
+    FunctionaNameDateRelate
     FunctionNameDateArithMultiForms
     FunctionNameDateArith
     FunctionNameSubstring
@@ -508,6 +513,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TrimDirection
     DefaultValue
     ShowLikeOrWhereOpt
+    FulltextSearchModifierOpt
 
 %type <item> 
     ColumnNameListOpt 
@@ -576,6 +582,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SelectStmtFromDual
     SelectStmtFromTable
     SelectStmt
+    UnionSelect
+    UnionClauseList
+    UnionStmt
     TruncateStmt 
     ShowStmt
     ShowTargetFilterable
@@ -586,6 +595,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %type <stmt> 
     CreateTableStmt
     DropTableStmt
+    RestoreTableStmt
     CreateDatabaseStmt
     DropDatabaseStmt
     StartTransactionStmt
@@ -625,11 +635,13 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SelectStmtSQLCache 
     SelectStmtStraightJoin 
     DistinctOpt  
-    DefaultFalseDistinctOpt 
+    DefaultFalseDistinctOpt
+    DefaultTrueDistinctOpt
     BuggyDefaultFalseDistinctOpt
     SelectLockOpt
     GlobalScope
     OptFull
+    UnionOpt
 
 %type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
@@ -683,7 +695,9 @@ Statement:
     | TruncateStmt
     | CreateTableStmt
     | SelectStmt
+    | UnionStmt
     | DropTableStmt
+    | RestoreTableStmt
     | CreateDatabaseStmt
     | DropDatabaseStmt
     | StartTransactionStmt
@@ -1597,6 +1611,76 @@ FieldAsName:
     }
     ;
 
+// See https://dev.mysql.com/doc/refman/5.7/en/union.html
+UnionStmt:
+    UnionClauseList UNION UnionOpt SelectStmtBasic OrderByOptional LimitClause SelectLockOpt {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        union_stmt->select_stmts.push_back((SelectStmt*)$4, parser->arena);
+        union_stmt->order = $5;
+        union_stmt->limit = $6;        
+        union_stmt->lock = (SelectLock)$7;
+        $$ = union_stmt;
+    }
+    | UnionClauseList UNION UnionOpt SelectStmtFromTable OrderByOptional LimitClause SelectLockOpt {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        union_stmt->select_stmts.push_back((SelectStmt*)$4, parser->arena);
+        union_stmt->order = $5;
+        union_stmt->limit = $6;        
+        union_stmt->lock = (SelectLock)$7;
+        $$ = union_stmt;
+    }
+    | UnionClauseList UNION UnionOpt '(' SelectStmt ')' OrderByOptional LimitClause SelectLockOpt {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        SelectStmt* select = (SelectStmt*)$5;
+        select->is_in_braces = true;
+        union_stmt->select_stmts.push_back(select, parser->arena);
+        union_stmt->order = $7;
+        union_stmt->limit = $8;
+        union_stmt->lock = (SelectLock)$9;
+        $$ = union_stmt;
+    }
+    ;
+
+UnionClauseList:
+    UnionSelect {
+        UnionStmt* union_stmt = new_node(UnionStmt);
+        union_stmt->select_stmts.push_back((SelectStmt*)$1, parser->arena);
+        $$ = union_stmt;
+    }
+    | UnionClauseList UNION UnionOpt UnionSelect {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        union_stmt->select_stmts.push_back((SelectStmt*)$4, parser->arena);
+        $$ = union_stmt;
+    }
+    ;
+
+UnionSelect:
+    SelectStmt {
+        $$ = $1;
+    }
+    | '(' SelectStmt ')' {
+        SelectStmt* select = (SelectStmt*)$2;
+        select->is_in_braces = true;
+        $$ = select;
+    }
+    ;
+
+UnionOpt:
+    DefaultTrueDistinctOpt
+    ;
+
 /*Expr*/
 Expr:
     Operators { $$ = $1;}
@@ -1751,11 +1835,15 @@ TrimDirection:
 
 FunctionNameCurtime:
     CURTIME | CURRENT_TIME
-;
+    ;
 
 FunctionaNameCurdate:
     CURDATE | CURRENT_DATE
-;
+    ;
+
+FunctionaNameDateRelate:
+    DAY | MONTH | YEAR
+    ;
 
 FunctionCallNonKeyword: 
     FunctionNameCurtime '(' FuncDatetimePrecListOpt ')' {
@@ -1780,6 +1868,25 @@ FunctionCallNonKeyword:
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
         $$ = fun; 
+    }
+    | FunctionaNameDateRelate '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | WEEK '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;      
+    }
+    | WEEK '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;         
     }
     | SYSDATE '(' FuncDatetimePrecListOpt ')' {
         FuncExpr* fun = new_node(FuncExpr);
@@ -1913,6 +2020,13 @@ FunctionCallNonKeyword:
         fun->children.push_back($6, parser->arena);
         fun->children.push_back($4, parser->arena);
         fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | MOD '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "mod";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
         $$ = fun;
     }
     ;
@@ -2093,6 +2207,13 @@ DefaultFalseDistinctOpt:
     | DistinctOpt
     ;
 
+DefaultTrueDistinctOpt:
+    {
+        $$ = true;
+    }
+    | DistinctOpt
+    ;
+
 BuggyDefaultFalseDistinctOpt:
     DefaultFalseDistinctOpt
     | DistinctKwd ALL {
@@ -2173,6 +2294,7 @@ AllIdent:
     | INVOKER
     | JSON
     | KEY_BLOCK_SIZE
+    | LANGUAGE
     | LOCAL
     | LESS
     | LEVEL
@@ -2208,6 +2330,7 @@ AllIdent:
     | QUERIES
     | QUICK
     | RECOVER
+    | RESTORE
     | REDUNDANT
     | RELOAD
     | REPEATABLE
@@ -2292,6 +2415,7 @@ AllIdent:
     | VARIANCE
     | VAR_POP
     | VAR_SAMP
+    | MOD
     ;
 
 NumLiteral:
@@ -2340,6 +2464,14 @@ SimpleExpr:
     | NOT_OP SimpleExpr {
         $$ = FuncExpr::new_unary_op_node(FT_LOGIC_NOT, $2, parser->arena);
     }
+    | MATCH '(' ColumnNameList ')' AGAINST '(' SimpleExpr FulltextSearchModifierOpt ')' {
+        RowExpr* row = new_node(RowExpr);
+        row->children.reserve($3->children.size(), parser->arena);
+        for (int i = 0; i < $3->children.size(); i++) {
+            row->children.push_back($3->children[i], parser->arena);
+        }
+        $$ = FuncExpr::new_ternary_op_node(FT_MATCH_AGAINST, row, $7, $8, parser->arena);
+    }
     | '~' SimpleExpr {
         $$ = FuncExpr::new_unary_op_node(FT_BIT_NOT, $2, parser->arena);
     }
@@ -2368,6 +2500,18 @@ SimpleExpr:
             fun->children.push_back($3, parser->arena);
         }
         $$ = fun;
+    }
+    ;
+
+FulltextSearchModifierOpt:
+    {
+        $$ = LiteralExpr::make_string("IN NATURAL LANGUAGE MODE", parser->arena);
+    }
+    | IN NATURAL LANGUAGE MODE {
+        $$ = LiteralExpr::make_string("IN NATURAL LANGUAGE MODE", parser->arena);
+    }
+    | IN BOOLEAN MODE {
+        $$ = LiteralExpr::make_string("IN BOOLEAN MODE", parser->arena);
     }
     ;
 
@@ -2743,7 +2887,9 @@ ColumnOption:
 
 SignedLiteral:
     Literal {}
-    | '+' NumLiteral {}
+    | '+' NumLiteral {
+        $$ = $2;
+    }
     | '-' NumLiteral
     {
         LiteralExpr* literal = (LiteralExpr*)$2;
@@ -3591,6 +3737,18 @@ RestrictOrCascadeOpt:
     | CASCADE
     ;
 
+// Restore Table(s) Statement
+RestoreTableStmt:
+    RESTORE TableOrTables TableNameList 
+    {
+        RestoreTableStmt* stmt = new_node(RestoreTableStmt);
+        for (int i = 0; i < $3->children.size(); i++) {
+            stmt->table_names.push_back((TableName*)$3->children[i], parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+
 // Create Database Statement
 CreateDatabaseStmt:
     CREATE DATABASE IfNotExists DBName DatabaseOptionListOpt
@@ -4216,6 +4374,13 @@ ExplainStmt:
     ExplainSym ExplainableStmt {
         ExplainStmt* explain = new_node(ExplainStmt);
         explain->stmt = $2;
+        explain->format = "row";
+        $$ = explain;
+    }
+    | ExplainSym FORMAT EQ_OP STRING_LIT ExplainableStmt {
+        ExplainStmt* explain = new_node(ExplainStmt);
+        explain->format = ((LiteralExpr*)$4)->_u.str_val;
+        explain->stmt = $5;
         $$ = explain;
     }
     ;

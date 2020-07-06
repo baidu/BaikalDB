@@ -37,6 +37,12 @@ int DeleteNode::init(const pb::PlanNode& node) {
 }
 
 int DeleteNode::open(RuntimeState* state) { 
+    int num_affected_rows = 0;
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([this, &num_affected_rows](TraceLocalNode& local_node) {
+            local_node.set_affect_rows(num_affected_rows);
+            local_node.append_description() << " increase_rows:" << _num_increase_rows;
+    }));
+    
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
@@ -61,7 +67,6 @@ int DeleteNode::open(RuntimeState* state) {
     }
 
     bool eos = false;
-    int num_affected_rows = 0;
     AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
     int i = 0;
     for (auto& pair : state->reverse_index_map()) {
@@ -85,7 +90,6 @@ int DeleteNode::open(RuntimeState* state) {
         } else {
             _txn = state->txn();
         }
-
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             MemRow* row = batch.get_row().get();
             //SmartRecord record = record_template->clone(false);
@@ -103,7 +107,14 @@ int DeleteNode::open(RuntimeState* state) {
             num_affected_rows += ret;
         }
         _txn->batch_num_increase_rows = _num_increase_rows - tmp_num_increase_rows;
-
+        if (state->need_txn_limit) {
+            bool is_limit = TxnLimitMap::get_instance()->check_txn_limit(state->txn_id, batch.size());
+            if (is_limit) {
+                DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%d", 
+                    state->region_id(), state->txn_id, batch.size());
+                return -1;
+            }
+        }
         if (state->txn_id == 0 && !eos) {
             if (state->is_separate) {
                 //batch单独走raft,raft on_apply中commit

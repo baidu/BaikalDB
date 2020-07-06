@@ -32,12 +32,14 @@ public:
 private:
     int parse_create_table(pb::SchemaInfo& table);
     int parse_drop_table(pb::SchemaInfo& table);
+    int parse_restore_table(pb::SchemaInfo& table);
     int parse_create_database(pb::DataBaseInfo& database);
     int parse_drop_database(pb::DataBaseInfo& database);
     int parse_alter_table(pb::MetaManagerRequest& alter_request);
 
     int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column);
     int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint);
+    bool is_fulltext_type_constraint(pb::StorageType pb_storage_type, bool& has_arrow_type, bool& has_pb_type) const;
     pb::PrimitiveType to_baikal_type(parser::FieldType* field_type);
 };
 } //namespace baikal

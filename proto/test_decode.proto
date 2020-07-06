@@ -11,3 +11,20 @@ message TestMessage {
 	optional uint64 col7 = 7;
 	optional string col8 = 8;
 }
+
+message TestTupleRecord {
+	optional sint32 col1 = 1;
+	optional sint64 col2 = 2;
+	optional uint32 col3 = 3;
+	optional uint64 col4 = 4;
+	optional int32 col5 = 5;
+	optional int64 col6 = 6;
+	optional fixed32 col7 = 7;
+	optional fixed64 col8 = 8;
+	optional sfixed32 col9 = 9;
+	optional sfixed64 col10 = 10;
+	optional float col11 = 11;
+	optional double col12 = 12;
+	optional bool col13 = 13;
+	optional bytes col14 = 14;
+}

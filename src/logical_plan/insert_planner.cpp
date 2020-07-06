@@ -32,6 +32,10 @@ int InsertPlanner::plan() {
     pb::InsertNode* insert = derive->mutable_insert_node();
     insert->set_need_ignore(_insert_stmt->is_ignore);
     insert->set_is_replace(_insert_stmt->is_replace);
+    if (_ctx->row_ttl_duration > 0) {
+        insert->set_row_ttl_duration(_ctx->row_ttl_duration);
+    }
+    insert->set_is_replace(_insert_stmt->is_replace);
     
     // parse db.table in insert SQL
     if (0 != parse_db_table(insert)) {
@@ -61,7 +65,10 @@ int InsertPlanner::plan() {
     if (0 != parse_values_list(insert)) {
         return -1;
     }
-    set_dml_txn_state(_table_id);
+    _ctx->prepared_table_id = _table_id;
+    if (!_ctx->is_prepared) {
+        set_dml_txn_state(_table_id);
+    }
     return 0;
 }
 
@@ -116,7 +123,7 @@ int InsertPlanner::parse_kv_list() {
         _update_slots.push_back(slot);
 
         pb::Expr value_expr;
-        if (0 != create_expr_tree(_insert_stmt->on_duplicate[i]->expr, value_expr)) {
+        if (0 != create_expr_tree(_insert_stmt->on_duplicate[i]->expr, value_expr, false)) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
@@ -179,7 +186,7 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
         if (_ctx->new_prepared) {
             for (size_t idx = 0; idx < (size_t)row_expr->children.size(); ++idx) {
                 pb::Expr* expr = node->add_insert_values();
-                if (0 != create_expr_tree(row_expr->children[idx], *expr)) {
+                if (0 != create_expr_tree(row_expr->children[idx], *expr, false)) {
                     DB_WARNING("create insertion value expr failed");
                     return -1;
                 }
@@ -225,7 +232,7 @@ int InsertPlanner::fill_default_value(SmartRecord record, FieldInfo& field) {
 
 int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartRecord record, FieldInfo& field) {
     pb::Expr value_expr;
-    if (0 != create_expr_tree(parser_expr, value_expr)) {
+    if (0 != create_expr_tree(parser_expr, value_expr, false)) {
         DB_WARNING("create insertion value expr failed");
         return -1;
     }
@@ -250,7 +257,13 @@ int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartR
         DB_WARNING("expr open fail");
         return -1;
     }
-    ExprValue value = expr->get_value(nullptr).cast_to(field.type);
+    ExprValue value = expr->get_value(nullptr);
+    // 20190101101112 这种转换现在只支持string类型
+    if (is_datetime_specic(field.type) && value.is_numberic()) {
+        value.cast_to(pb::STRING).cast_to(field.type);
+    } else {
+        value.cast_to(field.type);
+    }
     expr->close();
     delete expr;
     // fill default

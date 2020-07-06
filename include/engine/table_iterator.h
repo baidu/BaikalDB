@@ -73,32 +73,11 @@ struct IndexRange {
         left_open(_l_open),
         right_open(_r_open),
         like_prefix(_like_prefix) {}
-/*
-    IndexRange(TableKey* _left, 
-        TableKey* _right,
-        IndexInfo*  _index_info,
-        IndexInfo*  _pri_info,
-        pb::RegionInfo* _region_info,
-        int left_cnt,
-        int right_cnt,
-        bool _l_open,
-        bool _r_open) :
-        left_key(_left),
-        right_key(_right),
-        index_info(_index_info),
-        pri_info(_pri_info),
-        region_info(_region_info),
-        left_field_cnt(left_cnt),
-        right_field_cnt(right_cnt),
-        left_open(_l_open),
-        right_open(_r_open) {}
-        */
 };
 
 class Iterator {
 public:
     Iterator(bool need_check_region, bool forward) : 
-        _valid(true), 
         _need_check_region(need_check_region),
         _forward(forward) {}
 
@@ -112,6 +91,7 @@ public:
     }
 
     virtual int open(const IndexRange& range, std::map<int32_t, FieldInfo*>& fields, 
+            std::vector<int32_t>& field_slot,
             SmartTransaction txn = nullptr);
 
     virtual int open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransaction txn = nullptr);
@@ -124,12 +104,14 @@ public:
         SmartTransaction        txn,
         const IndexRange&       range, 
         std::map<int32_t, FieldInfo*>&   fields, 
+        std::vector<int32_t>& field_slot,
         bool                    check_region, 
         bool                    forward);
 
     static IndexIterator* scan_secondary(
         SmartTransaction    txn,
         const IndexRange&   range, 
+        std::vector<int32_t>& field_slot,
         bool                check_region, 
         bool                forward);
 
@@ -150,36 +132,37 @@ protected:
     int                     _lower_suffix = 0;
     int                     _upper_sufix = 0;
 
-    bool                    _valid;
-    //int64_t               _index;
-    //int64_t               _pk_index;
+    bool                    _valid = true;
+    bool                    _use_ttl = false;
+    bool                    _is_cstore = false;
+    int64_t                 _read_ttl_timestamp_us = 0;
     int64_t                 _region;
-    pb::RegionInfo*          _region_info;
-    IndexInfo*               _index_info;
-    IndexInfo*               _pri_info;
+    pb::RegionInfo*         _region_info;
+    IndexInfo*              _index_info;
+    IndexInfo*              _pri_info;
     pb::IndexType           _idx_type;
     rocksdb::Iterator*      _iter = nullptr;
     RocksWrapper*           _db;
     SchemaFactory*          _schema;
-    rocksdb::Transaction*   _txn;
+    rocksdb::Transaction*   _txn = nullptr;
     bool                    _need_check_region;
     bool                    _forward;
     rocksdb::ColumnFamilyHandle* _data_cf;
     std::map<int32_t, FieldInfo*>    _fields;
+    std::vector<int32_t> _field_slot;
 
     std::vector<rocksdb::Iterator*>     _column_iters; // cstore, own it, should delete when destruct
     std::vector<FieldInfo*>             _non_pk_fields; // cstore
 
     int _prefix_len = sizeof(int64_t) * 2;
 
-    bool _fits_left_bound();
+    bool _fits_left_bound(const rocksdb::Slice& key);
 
-    bool _fits_right_bound();
+    bool _fits_right_bound(const rocksdb::Slice& key);
 
-    bool _fits_region();
+    bool _fits_region(rocksdb::Slice key, rocksdb::Slice value);
 
-    bool _fits_prefix(rocksdb::Iterator* iter, int32_t field_id = 0); // cstore
-    bool is_cstore();
+    bool _fits_prefix(const rocksdb::Slice& key, int32_t field_id); // cstore
 };
 
 class TableIterator : public Iterator {
@@ -189,17 +172,23 @@ public:
 
     virtual ~TableIterator() {}
 
-    int get_next(SmartRecord record);
-
-    // _iter is used to fit_bound and set pk field value,
-    // _column_iters is only used for set non-pk field value
-    int get_next_columns(SmartRecord record);
+    int get_next(SmartRecord& record) {
+        return get_next_internal(&record, 0, nullptr);
+    }
+    int get_next(int32_t tuple_id, std::unique_ptr<MemRow>& mem_row) {
+        return get_next_internal(nullptr, tuple_id, &mem_row);
+    }
 
     void set_mode(KVMode mode) {
         _mode = mode;
     }
 
 private:
+    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
+    // _iter is used to fit_bound and set pk field value,
+    // _column_iters is only used for set non-pk field value
+    int get_next_columns(const rocksdb::Slice& iter_key, SmartRecord* record, 
+            int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
     KVMode  _mode;
 };
 
@@ -210,12 +199,19 @@ public:
 
     virtual ~IndexIterator() {}
 
-    int get_next(SmartRecord index);
+    int get_next(SmartRecord& record) {
+        return get_next_internal(&record, 0, nullptr);
+    }
+    int get_next(int32_t tuple_id, std::unique_ptr<MemRow>& mem_row) {
+        return get_next_internal(nullptr, tuple_id, &mem_row);
+    }
 
     // get the index slice and primary key slice
     // primary key slice is used for primary table query
     int get_next(rocksdb::Slice& index, rocksdb::Slice& pk) {
         return -1;
     }
+private:
+    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
 };
 } // end of namespace

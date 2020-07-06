@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "select_planner.h"
+#include "dual_scan_node.h"
 #include "network_socket.h"
 #include <boost/algorithm/string.hpp>
 
@@ -28,8 +29,18 @@ int SelectPlanner::plan() {
         if (0 != parse_select_fields()) {
             return -1;        
         }
-        create_packet_node(pb::OP_SELECT, 0);
-        //DB_WARNING("no sql from");
+        if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
+            create_packet_node(pb::OP_SELECT);
+            create_dual_scan_node();
+        } else {
+            create_agg_tuple_desc();
+            create_packet_node(pb::OP_SELECT);
+            // create_agg_node
+            if (0 != create_agg_node()) {
+                return -1;
+            }
+            create_dual_scan_node();
+        }
         return 0;
     }
 
@@ -98,16 +109,20 @@ int SelectPlanner::plan() {
     if (0 != create_join_and_scan_nodes(_join_root)) {
         return -1;
     }
-    auto client = _ctx->runtime_state.client_conn();
+    auto client = _ctx->client_conn;
     if (client->txn_id == 0) {
-        _ctx->runtime_state.set_single_sql_autocommit(true);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
-        _ctx->runtime_state.set_single_sql_autocommit(false);
+        _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
     return 0;
 }
 
 bool SelectPlanner::is_full_export() {
+    //代价信息统计时不走full export流程
+    if (_ctx->explain_type != EXPLAIN_NULL) {
+        return false;
+    }
     if (_select->where != nullptr) {
         return false;
     } 
@@ -135,6 +150,14 @@ bool SelectPlanner::is_full_export() {
         return false;
     }
     return true;
+}
+
+void SelectPlanner::create_dual_scan_node() {
+    pb::PlanNode* scan_node = _ctx->add_plan_node();
+    scan_node->set_node_type(pb::DUAL_SCAN_NODE);
+    scan_node->set_limit(1);
+    scan_node->set_is_explain(_ctx->is_explain);
+    scan_node->set_num_children(0); 
 }
 
 int SelectPlanner::create_limit_node() {
@@ -262,6 +285,7 @@ void SelectPlanner::add_single_table_columns(TableInfo* table_info) {
         node->set_num_children(0);
         node->mutable_derive_node()->set_tuple_id(slot.tuple_id()); //TODO
         node->mutable_derive_node()->set_slot_id(slot.slot_id());
+        node->mutable_derive_node()->set_field_id(slot.field_id());
 
         std::string& select_name = items[items.size() - 1];
         _select_exprs.push_back(select_expr);
@@ -322,7 +346,7 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         DB_WARNING("field expr is nullptr");
         return -1;
     }
-    if (0 != create_expr_tree(field->expr, select_expr)) {
+    if (0 != create_expr_tree(field->expr, select_expr, false)) {
         DB_WARNING("create select expr failed");
         return -1;
     }
@@ -379,7 +403,7 @@ int SelectPlanner::parse_where() {
     if (_select->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_select->where, _where_filters)) {
+    if (0 != flatten_filter(_select->where, _where_filters, false)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }
@@ -390,7 +414,7 @@ int SelectPlanner::_parse_having() {
     if (_select->having == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_select->having, _having_filters)) {
+    if (0 != flatten_filter(_select->having, _having_filters, true)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }
@@ -409,7 +433,7 @@ int SelectPlanner::parse_groupby() {
         }
         // create group by expr node
         pb::Expr group_expr;
-        if (0 != create_expr_tree(by_items[idx]->expr, group_expr)) {
+        if (0 != create_expr_tree(by_items[idx]->expr, group_expr, true)) {
             DB_WARNING("create group expr failed");
             return -1;
         }
@@ -434,11 +458,11 @@ int SelectPlanner::parse_limit() {
         return 0;
     }
     parser::LimitClause* limit = _select->limit;
-    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset)) {
+    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, false)) {
         DB_WARNING("create limit offset expr failed");
         return -1;
     }
-    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count)) {
+    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, false)) {
         DB_WARNING("create limit count expr failed");
         return -1;
     }

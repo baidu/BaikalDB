@@ -19,6 +19,9 @@
 
 namespace baikaldb {
 int SelectManagerNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([state](TraceLocalNode& local_node) {
+        local_node.set_scan_rows(state->num_scan_rows());
+    }));
     int ret = 0;
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
@@ -43,13 +46,13 @@ int SelectManagerNode::open(RuntimeState* state) {
         return -1;
     }
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);
-    int64_t index_id = scan_node->index_ids()[0];
+    int64_t router_index_id = scan_node->router_index_id();
     int64_t main_table_id = scan_node->table_id();
     //如果命中的不是全局二级索引，或者全局二级索引是covering_index, 则直接在主表或者索引表上做scan即可
-    if (!_factory->is_global_index(index_id) || scan_node->covering_index()) {
+    if (router_index_id == main_table_id || scan_node->covering_index()) {
         ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, pb::OP_SELECT);
     } else {
-        ret = open_global_index(state, scan_node, index_id, main_table_id);
+        ret = open_global_index(state, scan_node, router_index_id, main_table_id);
     } 
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
@@ -68,6 +71,10 @@ int SelectManagerNode::open(RuntimeState* state) {
 }
 
 int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+
     if (state->is_cancelled()) {
         DB_WARNING_STATE(state, "cancelled");
         *eos = true;
@@ -96,64 +103,19 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
         int64_t global_index_id, int64_t main_table_id) {
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
     auto client_conn = state->client_conn();
-    std::vector<ExprNode*> conjuncts_copy;
-    std::vector<ExprNode*> conjuncts_global;
-    std::vector<ExprNode*> conjuncts_others;
-    //重构filter 和scan_node
-    std::vector<ExecNode*> filter_nodes;
-    get_node(pb::WHERE_FILTER_NODE, filter_nodes);
-    //能命中全局二级索引，不可能没有filter(不成立，可能有order by)
-    if (filter_nodes.size() >0) {
-        auto pri_info = _factory->get_index_info_ptr(main_table_id);
-        auto index_info = _factory->get_index_info_ptr(global_index_id);
-        for (auto& f : pri_info->fields) {
-            auto slot_id = state->get_slot_id(scan_node->tuple_id(), f.id);
-            if (slot_id > 0) {
-                _index_slot_field_map[slot_id] = f.id;
-            }
-        }
-        for (auto& f : index_info->fields) {
-            auto slot_id = state->get_slot_id(scan_node->tuple_id(), f.id);
-            if (slot_id > 0) {
-                _index_slot_field_map[slot_id] = f.id;
-            }
-        }
-        //如果命中二级索引，需要把filter_node中的条件分为两类，一类是可以在索引中过滤掉的， 一类是必须在主表中过滤的
-        std::vector<ExprNode*>* conjuncts = static_cast<FilterNode*>(filter_nodes[0])->mutable_conjuncts();
-        conjuncts_copy.swap(*conjuncts);
-        for (auto& conjunct : conjuncts_copy) {
-            std::unordered_set<int32_t> slot_ids;
-            conjunct->get_all_slot_ids(slot_ids);
-            bool contained = true;
-            for (auto& slot_id : slot_ids) {
-                if (_index_slot_field_map.count(slot_id) == 0) {
-                    contained = false;
-                }
-            }
-            if (contained) {
-                conjuncts_global.push_back(conjunct);
-            } else {
-                conjuncts_others.push_back(conjunct);
-            }
-        }
-        filter_nodes[0]->mutable_conjuncts()->swap(conjuncts_global);
-    }
-    //二级索引只执行filter 和 scan_node
-    ExecNode* store_exec = _children[0];
+    //二级索引只执行scan_node，因为索引条件已经被下推到scan_node了
+    ExecNode* store_exec = scan_node;
     //agg or sort 不在二级索引表上执行
+    /*
     if (_children[0]->node_type() != pb::SCAN_NODE
         && _children[0]->node_type() != pb::WHERE_FILTER_NODE) {
         store_exec = _children[0]->children(0);
-    }
+    }*/
     auto ret = _fetcher_store.run(state, _region_infos, store_exec, client_conn->seq_id, pb::OP_SELECT);
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());
         return ret;
-    }
-    //重新构造scan_node 的possibble_index
-    if (filter_nodes.size() > 0) {
-        filter_nodes[0]->mutable_conjuncts()->swap(conjuncts_others);
     }
     ret = construct_primary_possible_index(state, scan_node, main_table_id);
     if (ret < 0) {
@@ -161,11 +123,6 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
         return ret;
     }
     ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, pb::OP_SELECT);
-    if (filter_nodes.size() > 0) {
-        filter_nodes[0]->mutable_conjuncts()->swap(conjuncts_copy);
-        conjuncts_global.clear();
-        conjuncts_others.clear();
-    }
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());
@@ -181,6 +138,10 @@ int SelectManagerNode::construct_primary_possible_index(
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
     int32_t tuple_id = scan_node->tuple_id();
     auto pri_info = _factory->get_index_info_ptr(main_table_id);
+    if (pri_info == nullptr) {
+        DB_WARNING("pri index info not found table_id:%ld", main_table_id);
+        return -1;
+    }
     scan_node->clear_possible_indexes();
     pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     auto pos_index = pb_scan_node->add_indexes();

@@ -18,6 +18,9 @@
 #include "boolean_executor.h"
 #include "logical_query.h"
 #include "schema_factory.h"
+#include "reverse_arrow.h"
+#include "reverse_common.h"
+#include "reverse_index.h"
 #include <map>
 
 namespace baikaldb {
@@ -31,6 +34,7 @@ public:
     typedef typename Schema::PrimaryIdT PrimaryIdT;
     typedef typename Schema::ReverseList ReverseList;
 
+    using ReverseListSptr = typename Schema::ReverseListSptr;
     CommRindexNodeParser(Schema* schema) : 
                             RindexNodeParser<Schema>(schema) {
         _key_range = schema->key_range();
@@ -43,15 +47,15 @@ public:
     const PrimaryIdT* current_id();
     //只进不退
     const ReverseNode* next();
-    const ReverseNode* advance(const std::string& target_id);
+    const ReverseNode* advance(const PrimaryIdT& target_id);
 private:
     //二分查找，大于或等于
     uint32_t binary_search(uint32_t first, 
                            uint32_t last, 
-                           const std::string& target_id, 
+                           const PrimaryIdT& target_id, 
                            ReverseList* list);
-    MessageSP _new_list_ptr;
-    MessageSP _old_list_ptr;
+    ReverseListSptr _new_list_ptr;
+    ReverseListSptr _old_list_ptr;
     ReverseList* _new_list;
     ReverseList* _old_list;
     int32_t _curr_ix_new;//-1表示链表遍历结束，大于等于0表示链表当前节点
@@ -66,12 +70,15 @@ private:
 };
 
 //--common
-class CommonSchema : public SchemaBase<pb::CommonReverseNode, pb::CommonReverseList> {
+template<typename Node, typename List>
+class NewSchema : public SchemaBase<Node, List> {
 public:
-    typedef pb::CommonReverseNode ReverseNode;
-    typedef pb::CommonReverseList ReverseList;
-    typedef pb::CommonReverseNode PostingNodeT;
-    typedef CommRindexNodeParser<CommonSchema> Parser;
+    using ReverseNode = Node;
+    using ReverseList = List;
+    using ReverseListSptr = std::shared_ptr<ReverseList>;
+    using ThisType = NewSchema<ReverseNode, ReverseList>;
+    using Parser = CommRindexNodeParser<ThisType> ;
+    using IndexSearchType = ReverseIndex<ThisType>;
 
     static int segment(
                     const std::string& word,
@@ -93,7 +100,7 @@ public:
                     ReverseNode& to, 
                     const ReverseNode& from, 
                     BoolArg* arg) {
-        to.set_weight(std::max(to.weight(), from.weight()));
+        to.set_weight(to.weight() + from.weight());
         return 0;
     }
     static int merge_weight(
@@ -104,9 +111,9 @@ public:
     }
     //search_data 字符串格式
     //"hello world"
-    int create_executor(const std::string& search_data, pb::SegmentType segment_type);
+    int create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type);
     int next(SmartRecord record);
-    bool_executor_type executor_type = NODE_NOT_COPY;
+    bool_executor_type executor_type = ReverseTrait<List>::executor_type;
     void set_term(const std::string& term, Parser* parse) {
         _temp_map[term] = parse;
     }
@@ -116,10 +123,34 @@ public:
         }
         return NULL;
     }
+    void set_index_search(IndexSearchType* index_ptr) {
+        _index_ptr = index_ptr;
+    }
+
+    int get_reverse_list(
+                    const std::string& term, 
+                    ReverseListSptr& list_new, 
+                    ReverseListSptr& list_old) {
+        return _index_ptr->get_reverse_list_two(_txn, term, list_new, list_old, _is_fast);
+    }
+
 private:
     int _weight_field_id = 0;
     std::map<std::string, Parser*> _temp_map;
+    using SchemaBase<Node, List>::_table_info;
+    using SchemaBase<Node, List>::_exe;
+    using SchemaBase<Node, List>::_statistic;
+    using SchemaBase<Node, List>::_cur_node;
+    using SchemaBase<Node, List>::_index_info;
+    using SchemaBase<Node, List>::_txn;
+    using SchemaBase<Node, List>::_is_fast;
+
+    IndexSearchType* _index_ptr;
 };
+
+using CommonSchema = NewSchema<pb::CommonReverseNode, pb::CommonReverseList>;
+using ArrowSchema = NewSchema<ArrowReverseNode, ArrowReverseList>;
+
 //--xbs
 class XbsArg : public BoolArg {
 public:
@@ -131,7 +162,7 @@ public:
 };
 class XbsNodeCmp {
 public:
-    bool operator()(const pb::XbsReverseNode& l, const pb::XbsReverseNode& r) {
+    bool operator()(const pb::XbsReverseNode& l, const pb::XbsReverseNode& r) const {
         return l.weight() > r.weight();
     }
 };
@@ -142,6 +173,8 @@ public:
     typedef pb::XbsReverseList ReverseList;
     typedef pb::XbsReverseNode PostingNodeT;
     typedef CommRindexNodeParser<XbsSchema> Parser;
+    using IndexSearchType = ReverseIndex<XbsSchema>;
+    using ReverseListSptr = std::shared_ptr<ReverseList>;
 
     static int segment(
                     const std::string& word,
@@ -162,7 +195,7 @@ public:
     //              {"and" : ["term1", "term2"], "weight" : ["term1", "term3"]}
     //          ]
     //  }
-    int create_executor(const std::string& search_data, pb::SegmentType segment_type);
+    int create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type);
     bool valid();
     int next(SmartRecord record);
     bool_executor_type executor_type = NODE_COPY;
@@ -178,6 +211,17 @@ public:
         }
         return NULL;
     }
+    void set_index_search(IndexSearchType* index_ptr) {
+        _index_ptr = index_ptr;
+    }
+
+    //调用db的拉链
+    int get_reverse_list(
+                    const std::string& term, 
+                    ReverseListSptr& list_new, 
+                    ReverseListSptr& list_old) {
+        return _index_ptr->get_reverse_list_two(_txn, term, list_new, list_old, _is_fast);
+    }
 private:
     int32_t _weight_field_id = 0;
     int32_t _pic_scores_field_id = 0;
@@ -186,6 +230,7 @@ private:
     std::multiset<ReverseNode, XbsNodeCmp> _res;
     std::multiset<ReverseNode, XbsNodeCmp>::iterator _it;
     std::map<std::string, Parser*> _temp_map;
+    IndexSearchType* _index_ptr;
 
 };
 

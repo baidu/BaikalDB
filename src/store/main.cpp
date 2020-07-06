@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string>
 #include <boost/filesystem.hpp>
+//#include <gperftools/malloc_extension.h>
 #include "common.h"
 #include "my_raft_log.h"
 #include "store.h"
@@ -34,6 +35,9 @@ DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
 } // namespace baikaldb
 
 int main(int argc, char **argv) {
+#ifdef BAIKALDB_REVISION
+    google::SetVersionString(BAIKALDB_REVISION);
+#endif
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     srand((unsigned)time(NULL));
@@ -44,7 +48,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "log init failed.");
         return -1;
     }
-    DB_WARNING("log file load success");
+//    DB_WARNING("log file load success; GetMemoryReleaseRate:%f", 
+//            MallocExtension::instance()->GetMemoryReleaseRate());
     baikaldb::register_myraft_extension();
     int ret = 0;
     baikaldb::Tokenizer::get_instance()->init();

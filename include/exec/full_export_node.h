@@ -28,12 +28,19 @@ public:
     virtual int init(const pb::PlanNode& node);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
-    virtual void close(RuntimeState* state) {}
+    virtual void close(RuntimeState* state) {
+        ExecNode::close(state);
+        _send_region_ids.clear();
+        _sent_region_ids.clear();
+        _start_key_sort.clear();
+        _error = E_OK;
+    }
     bool get_batch(RowBatch* batch);
 
 private:
     FetcherStore _fetcher_store;
-    std::set<int64_t> _send_region_ids;
+    std::vector<int64_t> _send_region_ids;
+    std::vector<int64_t> _sent_region_ids;
     std::map<std::string, int64_t> _start_key_sort;
     ErrorType _error = E_OK;
     pb::OpType _op_type;

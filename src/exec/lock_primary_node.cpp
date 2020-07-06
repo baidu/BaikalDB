@@ -88,6 +88,15 @@ int LockPrimaryNode::open(RuntimeState* state) {
             _field_ids[field_info.id] = &field_info;
         }
     }
+    // cstore下只更新涉及列，暂时全部涉及，原因同_field_ids
+    if (_table_info->engine == pb::ROCKSDB_CSTORE) {
+        for (auto& field_info : _table_info->fields) {
+            if (_pri_field_ids.count(field_info.id) == 0 &&
+                    _update_field_ids.count(field_info.id) == 0) {
+                _update_field_ids.insert(field_info.id);
+            }
+        }
+    }
     auto txn = state->txn();
     if (txn == nullptr) {
         DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
@@ -186,6 +195,15 @@ int LockPrimaryNode::open(RuntimeState* state) {
         }
     }
     state->set_num_increase_rows(_num_increase_rows);
+    if (state->need_txn_limit) {
+        int row_count = put_records.size() + delete_records.size();
+        bool is_limit = TxnLimitMap::get_instance()->check_txn_limit(state->txn_id, row_count);
+        if (is_limit) {
+            DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%d", 
+                state->region_id(), state->txn_id, row_count);
+            return -1;
+        }
+    }
     return num_affected_rows;
 }
 
@@ -195,7 +213,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
     SmartRecord primary_record = record->clone(true);
     auto ret = txn->get_update_primary(_region_id, *_pri_info, primary_record, _field_ids, GET_LOCK, true);
     if (ret == -1) {
-        DB_WARNING("get lock fail");
+        DB_WARNING("get lock fail txn_id: %lu", txn->txn_id());
         return -1;
     }
     //代表存在
@@ -206,6 +224,10 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
     for (auto& index_id: _affected_index_ids) {
         //因为这边查到的值可能会被修改，后边锁二级索引还要用到输入的record, 所以要复制出来
         auto index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (index_ptr == nullptr) {
+            DB_WARNING("index info not found index_id:%ld", index_id);
+            return -1;
+        }
         if (index_ptr->id == _table_id) {
             continue;
         }
@@ -215,7 +237,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
             continue;
         }
         if (ret == -1) {
-            DB_WARNING("get lock fail");
+            DB_WARNING("get lock fail txn_id: %lu", txn->txn_id());
             return -1;
         }
         _return_records[index_ptr->id].push_back(get_record);
@@ -239,7 +261,7 @@ int LockPrimaryNode::put_row(RuntimeState* state, SmartRecord record) {
     }
     for (auto& index_id : _affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (!info_ptr) {
+        if (info_ptr == nullptr) {
             DB_WARNING_STATE(state, "index info is null, index:%ld", index_id);
             return -1;
         }

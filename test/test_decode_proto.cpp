@@ -230,7 +230,7 @@ int main(int argc, char** argv) {
             if (use_arena == 1) {
                 if (idx % batch_cnt == 0) {
                     if (arena) {
-                        auto pair = arena->SpaceAllocatedAndUsed();
+                        //auto pair = arena->SpaceAllocatedAndUsed();
                         //DB_WARNING("allocated and used: %lu, %lu", pair.first, pair.second);
                     }
                     delete arena;

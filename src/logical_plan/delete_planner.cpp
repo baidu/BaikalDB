@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "delete_planner.h"
+#include "meta_server_interact.hpp"
 #include <gflags/gflags.h>
 #include "network_socket.h"
 
@@ -20,7 +21,7 @@ namespace baikaldb {
 DEFINE_bool(delete_all_to_truncate, false,  "delete from xxx; treat as truncate");
 int DeletePlanner::plan() {
     if (_ctx->stmt_type == parser::NT_TRUNCATE) {
-        if (_ctx->runtime_state.client_conn()->txn_id != 0) {
+        if (_ctx->client_conn->txn_id != 0) {
             DB_FATAL("not allowed truncate table in txn connection");
             return -1;
         }
@@ -32,6 +33,9 @@ int DeletePlanner::plan() {
         create_packet_node(pb::OP_TRUNCATE_TABLE);
         if (0 != create_truncate_node()) {
             DB_WARNING("get truncate_table plan failed");
+            return -1;
+        }
+        if (0 != reset_auto_incr_id()) {
             return -1;
         }
         return 0;
@@ -58,6 +62,9 @@ int DeletePlanner::plan() {
         create_packet_node(pb::OP_TRUNCATE_TABLE);
         if (0 != create_truncate_node()) {
             DB_WARNING("get truncate_table plan failed");
+            return -1;
+        }
+        if (0 != reset_auto_incr_id()) {
             return -1;
         }
         return 0;
@@ -90,7 +97,10 @@ int DeletePlanner::plan() {
     }
     auto iter = _table_tuple_mapping.begin();
     int64_t table_id = iter->first;
-    set_dml_txn_state(table_id);
+    _ctx->prepared_table_id = table_id;
+    if (!_ctx->is_prepared) {
+        set_dml_txn_state(table_id);
+    }
     return 0;
 }
 
@@ -152,11 +162,40 @@ int DeletePlanner::create_truncate_node() {
     return 0;
 }
 
+int DeletePlanner::reset_auto_incr_id() {
+    auto iter = _table_tuple_mapping.begin();
+    int64_t table_id = iter->first;
+
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+    auto table_info_ptr = schema_factory->get_table_info_ptr(table_id);
+    if (table_info_ptr == nullptr || table_info_ptr->auto_inc_field_id == -1) {
+        return 0;
+    }
+
+    pb::MetaManagerRequest request;
+    request.set_op_type(pb::OP_UPDATE_FOR_AUTO_INCREMENT);
+    auto auto_increment_ptr = request.mutable_auto_increment();
+    auto_increment_ptr->set_table_id(table_id);
+    auto_increment_ptr->set_force(true);
+    auto_increment_ptr->set_start_id(0);
+
+    pb::MetaManagerResponse response;
+    if (MetaServerInteract::get_instance()->send_request("meta_manager", request, response) != 0) {
+        if (response.errcode() != pb::SUCCESS && _ctx->stat_info.error_code == ER_ERROR_FIRST) {
+            _ctx->stat_info.error_code = ER_TABLE_CANT_HANDLE_AUTO_INCREMENT;
+            _ctx->stat_info.error_msg.str("reset auto increment failed");
+        }
+        DB_WARNING("send_request fail");
+        return -1;
+    }
+    return 0;
+}
+
 int DeletePlanner::parse_where() {
     if (_delete_stmt->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_delete_stmt->where, _where_filters)) {
+    if (0 != flatten_filter(_delete_stmt->where, _where_filters, false)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }

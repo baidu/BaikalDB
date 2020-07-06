@@ -23,8 +23,7 @@ public:
         _is_constant = true;
     }
 
-    Literal(ExprValue value) : _value(value) {
-        _is_constant = true;
+    void value_to_node_type() {
         _col_type = _value.type;
         if (_value.is_timestamp()) {
             _node_type = pb::TIMESTAMP_LITERAL;
@@ -47,6 +46,11 @@ public:
         } else {
             _node_type = pb::NULL_LITERAL;
         }
+    }
+
+    Literal(ExprValue value) : _value(value) {
+        _is_constant = true;
+        value_to_node_type();
     }
 
     virtual ~Literal() {
@@ -99,8 +103,9 @@ public:
                 _value._u.uint32_val = node.derive_node().int_val();
                 break;
             case pb::PLACE_HOLDER_LITERAL:
-                _value.type = pb::PLACE_HOLDER;
-                _value._u.int64_val = node.derive_node().int_val(); // place_holder id
+                _value.type = pb::NULL_TYPE;
+                _is_place_holder = true;
+                _place_holder_id = node.derive_node().int_val(); // place_holder id
                 break;
             default:
                 return -1;
@@ -108,10 +113,13 @@ public:
         return 0;
     }
 
+    virtual bool is_place_holder() {
+        return _is_place_holder;
+    }
+
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
-        ExprNode::find_place_holder(placeholders);
-        if (pb::PLACE_HOLDER_LITERAL == _node_type) {
-            placeholders.insert({_value._u.int64_val, this});
+        if (_is_place_holder) {
+            placeholders.insert({_place_holder_id, this});
         }
     }
 
@@ -124,7 +132,6 @@ public:
                 pb_node->mutable_derive_node()->set_bool_val(_value.get_numberic<bool>());
                 break;
             case pb::INT_LITERAL:
-            case pb::PLACE_HOLDER_LITERAL:
                 pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
                 break;
             case pb::DOUBLE_LITERAL:
@@ -139,6 +146,10 @@ public:
             case pb::TIME_LITERAL:
             case pb::TIMESTAMP_LITERAL:
                 pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
+                break;
+            case pb::PLACE_HOLDER_LITERAL:
+                pb_node->mutable_derive_node()->set_int_val(_place_holder_id); 
+                DB_FATAL("place holder need not transfer pb, %d", _place_holder_id);
                 break;
             default:
                 break;
@@ -163,12 +174,19 @@ public:
         _col_type = _value.type;
     }
 
+    void cast_to_col_type(pb::PrimitiveType type) {
+        _value.cast_to(type);
+        value_to_node_type();
+    }
+
     virtual ExprValue get_value(MemRow* row) {
-        return _value;
+        return _value.cast_to(_col_type);
     }
 
 private:
     ExprValue _value;
+    int _place_holder_id = 0;
+    bool _is_place_holder = false;
 };
 }
 

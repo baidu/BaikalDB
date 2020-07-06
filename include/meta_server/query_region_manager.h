@@ -38,6 +38,7 @@ public:
 
     void send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_set_peer(const pb::QueryRequest* request, pb::QueryResponse* response);
+    void get_region_peer_status(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_remove_region_request(std::string instance_address, int64_t region_id);
     void check_region_and_update(
             const std::unordered_map<int64_t, std::tuple<int64_t,int64_t, std::string, int64_t>>&  

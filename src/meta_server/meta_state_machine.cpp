@@ -35,8 +35,8 @@
 #include "query_region_manager.h"
 
 namespace baikaldb {
+DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(healthy_check_interval_times);
-DECLARE_int32(store_heart_beat_interval_us);
 DECLARE_int32(balance_periodicity);
 
 void MetaStateMachine::store_heartbeat(google::protobuf::RpcController* controller,
@@ -284,6 +284,14 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->drop_table(request, iter.index(), done);
             break;
         }
+        case pb::OP_DROP_TABLE_TOMBSTONE: {
+            TableManager::get_instance()->drop_table_tombstone(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_RESTORE_TABLE: {
+            TableManager::get_instance()->restore_table(request, iter.index(), done);
+            break;
+        }
         case pb::OP_RENAME_TABLE: {
             TableManager::get_instance()->rename_table(request, iter.index(), done);
             break;
@@ -350,6 +358,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         }
         case pb::OP_DELETE_DDLWORK: {
             TableManager::get_instance()->delete_ddlwork(request, done);
+            break;
+        }
+        case pb::OP_UPDATE_STATISTICS: {
+            TableManager::get_instance()->update_statistics(request, iter.index(), done);
             break;
         }
         default: {
@@ -449,7 +461,8 @@ int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
     auto status = RocksWrapper::get_instance()->remove_range(options, 
                     RocksWrapper::get_instance()->get_meta_info_handle(),
                     remove_start_key, 
-                    MetaServer::MAX_IDENTIFY);
+                    MetaServer::MAX_IDENTIFY,
+                    false);
     if (!status.ok()) {
         DB_FATAL("remove_range error when on snapshot load: code=%d, msg=%s",
             status.code(), status.ToString().c_str());
@@ -543,12 +556,14 @@ void MetaStateMachine::healthy_check_function() {
             bthread_usleep(1000);                                                         
             ++time;                                                                       
         }
-        SELF_TRACE("start healthy check(region and store), count: %ld", count);
+        DB_WARNING("start healthy check(region and store), count: %ld", count);
         ++count;
         //store的相关信息目前存在cluster中
         ClusterManager::get_instance()->store_healthy_check_function();
         //region多久没上报心跳了
         RegionManager::get_instance()->region_healthy_check_function();
+        //gc删除很久的表
+        TableManager::get_instance()->drop_table_tombstone_gc_check();
     }
     return;
 }
@@ -563,6 +578,7 @@ void MetaStateMachine::on_leader_stop() {
         _healthy_check_start = false;
         DB_WARNING("healthy check bthread join");
     }
+    RegionManager::get_instance()->clear_region_peer_state_map();
     DB_WARNING("leader stop");
     CommonStateMachine::on_leader_stop();
 }

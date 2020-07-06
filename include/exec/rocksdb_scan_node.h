@@ -15,7 +15,6 @@
 #pragma once
 
 #include "scan_node.h"
-#include "fetcher_node.h"
 #include "table_record.h"
 #include "table_iterator.h"
 #include "transaction.h"
@@ -43,8 +42,9 @@ public:
     }
     virtual int init(const pb::PlanNode& node);
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
+    // TODO 索引条件下推后续也不需要做
     bool need_pushdown(ExprNode* expr);
-    virtual int index_condition_pushdown();
+    int index_condition_pushdown();
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
@@ -72,18 +72,11 @@ public:
             expr->find_place_holder(placeholders);
         }
     }
-    virtual int select_index(std::vector<int>& multi_reverse_index); 
     void add_index_id(int64_t index_id) {
         _index_ids.push_back(index_id);
     }
     const std::vector<int64_t>& index_ids() {
         return _index_ids;
-    }
-    void set_covering_index(bool covering_index) {
-        _is_covering_index = covering_index;
-    }
-    bool covering_index() {
-        return _is_covering_index;
     }
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -91,15 +84,34 @@ private:
     int get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos);
     int choose_index(RuntimeState* state);
+    int select_index_for_store();
+
+    int multi_get_next(pb::StorageType st, SmartRecord record) {
+        if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
+            return _m_index.get_next(record);
+        } else if (st == pb::ST_ARROW) {
+            return _m_arrow_index.get_next(record);
+        }
+        return -1;
+    }
+    bool multi_valid(pb::StorageType st) {
+        if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
+            return _m_index.valid();
+        } else if (st == pb::ST_ARROW) {
+            return _m_arrow_index.valid();
+        }
+        return false;
+    }
+    int choose_arrow_pb_reverse_index(const pb::ScanNode& node);
 
 private:
     std::map<int32_t, FieldInfo*> _field_ids;
+    std::vector<int32_t> _field_slot;
     MemRowDescriptor* _mem_row_desc;
     SelectManagerNode* _related_manager_node = NULL;
     SchemaFactory* _factory = nullptr;
     int64_t _index_id = -1;
     int64_t _region_id;
-    bool _is_covering_index = true;
     bool _use_get = false;
 
     //record all used indices here (LIKE & MATCH may use multiple indices)
@@ -117,6 +129,8 @@ private:
     std::vector<bool> _left_opens;
     std::vector<bool> _right_opens;
     std::vector<bool> _like_prefixs;
+    // trace使用
+    int _scan_rows = 0;
     size_t _idx = 0;
     //后续做下推用
     std::vector<ExprNode*> _index_conjuncts;
@@ -130,12 +144,15 @@ private:
     pb::RegionInfo*  _region_info;
     std::vector<IndexInfo> _reverse_infos;
     std::vector<std::string> _query_words;
+    std::vector<pb::MatchMode> _match_modes;
     std::vector<ReverseIndexBase*> _reverse_indexes;
     MutilReverseIndex<CommonSchema> _m_index;
+    MutilReverseIndex<ArrowSchema> _m_arrow_index;
     bool _bool_and = false;
 
     std::map<int64_t, pb::PossibleIndex> _region_primary;
     std::map<int32_t, int32_t> _index_slot_field_map;
+    pb::StorageType _storage_type = pb::ST_UNKNOWN;
 };
 }
 

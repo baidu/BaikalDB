@@ -206,7 +206,9 @@ static int hll_sparse_set_promote(std::string& hll, long index, uint8_t count) {
     }
     struct hllhdr *hdr = (struct hllhdr *)hll.data();
     int dense_retval = hll_dense_set(hdr->registers, index, count);
-    assert(dense_retval == 1);
+    if (dense_retval != 1) {
+        return -1;
+    }
     HLL_INVALIDATE_CACHE(hdr);
     return dense_retval;
 }
@@ -354,7 +356,7 @@ static int hll_sparse_set(std::string& hll, long index, uint8_t count) {
     int deltalen = seqlen-oldlen;
 
     if (deltalen > 0 && (hll_size+deltalen > hll_sparse_max_bytes)) {
-        DB_WARNING("size > 3000 hll_sparse_to_dense");
+        //DB_WARNING("size > 3000 hll_sparse_to_dense");
         return hll_sparse_set_promote(hll, index, count);
     }
     size_t front= p - start;
@@ -389,6 +391,7 @@ int hll_add(std::string& hll, uint64_t hash_value) {
         }
     } else {
         DB_WARNING("wrong hll object");
+        return -1;
     }
 }
 
@@ -480,7 +483,7 @@ uint64_t hll_estimate(const std::string& hll, bool* invalid) {
         card |= (uint64_t)hdr->card[7] << 56;
     } else {
         double m = HLL_REGISTERS;
-        double E;
+        double E = 0.0;
         int j;
         int reghisto[64] = {0};
 
@@ -499,7 +502,9 @@ uint64_t hll_estimate(const std::string& hll, bool* invalid) {
             z *= 0.5;
         }
         z += m * hll_sigma(reghisto[0]/(double)m);
-        E = llroundl(HLL_ALPHA_INF*m*m/z);
+        if (!float_equal(z, 0.0)) {
+            E = llroundl(HLL_ALPHA_INF*m*m/z);
+        }
         card = (uint64_t) E;
         hdr->card[0] = card & 0xff;
         hdr->card[1] = (card >> 8) & 0xff;
@@ -541,20 +546,24 @@ uint64_t hll_estimate(const ExprValue& hll) {
     return count;
 }
 
-int hll_merge(uint8_t *max, std::string& hll) {
-    struct hllhdr *hdr = (struct hllhdr *)hll.data();
+int hll_merge_agg(std::string& hll1, std::string& hll2) {
+    if (hll_sparse_to_dense(hll1) < 0) {
+        return -1;
+    }
+    struct hllhdr *hdr1 = (struct hllhdr *)hll1.data();
+    struct hllhdr *hdr2 = (struct hllhdr *)hll2.data();
     int i;
 
-    if (hdr->encoding == HLL_DENSE) {
+    if (hdr2->encoding == HLL_DENSE) {
         uint8_t val;
 
         for (i = 0; i < HLL_REGISTERS; i++) {
-            HLL_DENSE_GET_REGISTER(val,hdr->registers,i);
-            if (val > max[i]) max[i] = val;
+            HLL_DENSE_GET_REGISTER(val,hdr2->registers,i);
+            hll_dense_set(hdr1->registers,i,val);
         }
     } else {
-        uint8_t *p = (uint8_t *)hll.data();
-        uint8_t *end = p + hll.size();
+        uint8_t *p = (uint8_t *)hll2.data();
+        uint8_t *end = p + hll2.size();
         long runlen, regval;
 
         p += HLL_HDR_SIZE;
@@ -573,6 +582,49 @@ int hll_merge(uint8_t *max, std::string& hll) {
                 regval = HLL_SPARSE_VAL_VALUE(p);
                 if ((runlen + i) > HLL_REGISTERS) break;
                 while(runlen--) {
+                    hll_dense_set(hdr1->registers,i,regval);
+                    i++;
+                }
+                p++;
+            }
+        }
+        if (i != HLL_REGISTERS) return -1;
+    }
+
+    HLL_INVALIDATE_CACHE(hdr1);
+    return 0;
+}
+
+int hll_merge(uint8_t *max, std::string& hll) {
+    struct hllhdr *hdr = (struct hllhdr *)hll.data();
+    int i = 0;
+    if (hdr->encoding == HLL_DENSE) {
+        uint8_t val = 0;
+        for (i = 0; i < HLL_REGISTERS; i++) {
+            HLL_DENSE_GET_REGISTER(val,hdr->registers,i);
+            if (val > max[i]) max[i] = val;
+        }
+    } else {
+        uint8_t *p = (uint8_t *)hll.data();
+        uint8_t *end = p + hll.size();
+        long runlen = 0;
+        long regval = 0;
+        p += HLL_HDR_SIZE;
+        i = 0;
+        while (p < end) {
+            if (HLL_SPARSE_IS_ZERO(p)) {
+                runlen = HLL_SPARSE_ZERO_LEN(p);
+                i += runlen;
+                p++;
+            } else if (HLL_SPARSE_IS_XZERO(p)) {
+                runlen = HLL_SPARSE_XZERO_LEN(p);
+                i += runlen;
+                p += 2;
+            } else {
+                runlen = HLL_SPARSE_VAL_LEN(p);
+                regval = HLL_SPARSE_VAL_VALUE(p);
+                if ((runlen + i) > HLL_REGISTERS) break;
+                while (runlen--) {
                     if (regval > max[i]) max[i] = regval;
                     i++;
                 }
@@ -589,12 +641,10 @@ int hll_merge(std::string& hll1, std::string& hll2) {
     memset(max,0,sizeof(max));
     int use_dense = 0;
     struct hllhdr *hdr;
-
     hdr = (struct hllhdr *)hll1.data();
     if (hdr->encoding == HLL_DENSE) use_dense = 1;
     hdr = (struct hllhdr *)hll2.data();
     if (hdr->encoding == HLL_DENSE) use_dense = 1;
-
     if (hll_merge(max,hll1) < 0) {
         return -1;
     }
@@ -608,7 +658,7 @@ int hll_merge(std::string& hll1, std::string& hll2) {
     for (int j = 0; j < HLL_REGISTERS; j++) {
         if (max[j] == 0) continue;
         hdr = (struct hllhdr *)hll1.data();
-        switch(hdr->encoding) {
+        switch (hdr->encoding) {
         case HLL_DENSE: hll_dense_set(hdr->registers,j,max[j]); break;
         case HLL_SPARSE: hll_sparse_set(hll1,j,max[j]); break;
         }
@@ -616,15 +666,6 @@ int hll_merge(std::string& hll1, std::string& hll2) {
     hdr = (struct hllhdr *)hll1.data();
     HLL_INVALIDATE_CACHE(hdr);
     return 0;
-}
-
-ExprValue& hll_merge(ExprValue& hll1, ExprValue& hll2) {
-    hll_merge(hll1.str_val, hll2.str_val);
-    return hll1;
-}
-
-void hll_merge(std::string* hll1, std::string* hll2) {
-    hll_merge(*hll1, *hll2);
 }
 
 ExprValue hll_init() {

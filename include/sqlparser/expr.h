@@ -61,13 +61,14 @@ enum FuncType {
     FT_LOGIC_AND,
     FT_LOGIC_OR,
     FT_LOGIC_XOR,
-    // is like in null ture
+    // is like in null true
     FT_IS_NULL,
     FT_IS_TRUE,
     FT_IS_UNKNOWN,
     FT_IN,
     FT_LIKE,
     FT_EXACT_LIKE,
+    FT_MATCH_AGAINST,
     FT_BETWEEN,
     /* use in on dup key update */
     FT_VALUES
@@ -194,7 +195,14 @@ struct LiteralExpr : public ExprNode {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_STRING;
         // trim ' "
-        lit->_u.str_val.strdup(str + 1, strlen(str) - 2, arena);
+        if (str[0] == '"' || str[0] == '\'') {
+            //处理sql "query in ('\x00text', 'text')" ，strlen(str)=1
+            auto str_len = strlen(str);
+            auto cut_num = (str_len == 1 || str[str_len - 1] != str[0]) ? 1 : 2;
+            lit->_u.str_val.strdup(str + 1, str_len - cut_num, arena);
+        } else {
+            lit->_u.str_val.strdup(str, strlen(str), arena);
+        }
         return lit;
     }
     static LiteralExpr* make_string(String value, butil::Arena& arena) {

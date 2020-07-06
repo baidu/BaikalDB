@@ -94,6 +94,8 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_CREATE_TABLE:
     case pb::OP_RENAME_TABLE:
     case pb::OP_DROP_TABLE: 
+    case pb::OP_DROP_TABLE_TOMBSTONE: 
+    case pb::OP_RESTORE_TABLE: 
     case pb::OP_ADD_FIELD:
     case pb::OP_DROP_FIELD:
     case pb::OP_MODIFY_FIELD:
@@ -196,6 +198,15 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     }
     case pb::OP_UPDATE_INDEX_STATUS:
     case pb::OP_DELETE_DDLWORK: {
+        _meta_state_machine->process(controller, request, response, done_guard.release());
+        return;
+    }
+    case pb::OP_UPDATE_STATISTICS: {
+        if (!request->has_statistics()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no statistics info", request->op_type(), log_id);
+            return;
+        }
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
@@ -413,6 +424,9 @@ int SchemaManager::load_snapshot() {
 
     std::string ddl_prefix = MetaServer::SCHEMA_IDENTIFY;
     ddl_prefix += MetaServer::DDLWORK_IDENTIFY;
+
+    std::string statistics_prefix = MetaServer::SCHEMA_IDENTIFY;
+    statistics_prefix += MetaServer::STATISTICS_IDENTIFY;
    
     for (; iter->Valid(); iter->Next()) {
         int ret = 0;
@@ -428,6 +442,8 @@ int SchemaManager::load_snapshot() {
             ret = load_max_id_snapshot(max_id_prefix, iter->key().ToString(), iter->value().ToString());
         } else if (iter->key().starts_with(ddl_prefix)) {
             ret = TableManager::get_instance()->load_ddl_snapshot(iter->value().ToString());
+        } else if (iter->key().starts_with(statistics_prefix)) {
+            ret = TableManager::get_instance()->load_statistics_snapshot(iter->value().ToString());
         } else {
             DB_FATAL("unsupport schema info when load snapshot, key:%s", iter->key().data());
         }
@@ -538,9 +554,9 @@ int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* re
     TimeCost time_cost;
     int64_t src_region_id = request->region_merge().src_region_id();
     if (request->region_merge().src_end_key().empty()) {
-        DB_FATAL("src end key is empty request:%s log_id:%lu",
+        DB_WARNING("src end key is empty request:%s log_id:%lu",
                  request->ShortDebugString().c_str(), log_id); 
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                            "src end key is empty", request->op_type(), log_id);
         return -1;
     }
@@ -549,7 +565,7 @@ int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* re
     if (src_region == nullptr) {
         DB_WARNING("can`t find src region request:%s, src region_id:%ld, log_id:%lu",
                  request->ShortDebugString().c_str(), src_region_id, log_id); 
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                            "can not find src region", request->op_type(), log_id);
         return -1;
     }
@@ -561,7 +577,7 @@ int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* re
                    str_to_hex(request->region_merge().src_end_key()).c_str(),
                    str_to_hex(src_region->start_key()).c_str(),
                    str_to_hex(src_region->end_key()).c_str());
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                            "src key diff with local", request->op_type(), log_id);
         return -1;
     }
@@ -570,19 +586,19 @@ int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* re
                         table_id, request->region_merge().src_start_key(), 
                         request->region_merge().src_end_key());
     if (dst_region_id <= 0) {
-        DB_FATAL("can`t find dst merge region request: %s, src region id:%ld, log_id:%ld",
+        DB_WARNING("can`t find dst merge region request: %s, src region id:%ld, log_id:%ld",
                  request->ShortDebugString().c_str(), src_region_id, log_id);
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                            "dst merge region not exist", request->op_type(), log_id);
         return -1;
     }
     auto dst_region = region_manager->get_region_info(dst_region_id);
     if (dst_region == nullptr) {
-        DB_FATAL("can`t find dst merge region request: %s, src region id:%ld, "
+        DB_WARNING("can`t find dst merge region request: %s, src region id:%ld, "
                  "dst region id:%ld, log_id:%lu",
                  request->ShortDebugString().c_str(), 
                  src_region_id, dst_region_id, log_id); 
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                            "dst merge region not exist", request->op_type(), log_id);
         return -1;
     }
@@ -614,12 +630,12 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     int64_t region_id = request->region_split().region_id();
     auto ptr_region = RegionManager::get_instance()->get_region_info(region_id);
     if (ptr_region == nullptr) {
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                             "table id not exist", request->op_type(), log_id);
         return -1;
     }
     if (ptr_region->peers_size() < 2) {
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                             "region not stable, cannot split", 
                             request->op_type(), 
                             log_id);
@@ -639,7 +655,7 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     } else {
         auto ret = TableManager::get_instance()->get_resource_tag(table_id, resource_tag);
         if (ret < 0) {
-            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+            ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                                 "table id not exist", request->op_type(), log_id);
             return -1;
         }
@@ -725,9 +741,14 @@ int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
         return -1;
     }
     if (request->table_info().main_logical_room().size() == 0) {
-        request->mutable_table_info()->set_main_logical_room(
-                request->table_info().dists(0).logical_room()); 
+        for (auto& dist : request->table_info().dists()) {
+            if (dist.count() > 0) {
+                request->mutable_table_info()->set_main_logical_room(dist.logical_room());
+                break;
+            }
+        }
     }
+    
     if (total_count != request->table_info().replica_num()) {
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                 "replica num not match", request->op_type(), log_id);

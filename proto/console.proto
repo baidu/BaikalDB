@@ -6,20 +6,21 @@ option cc_generic_services = true;
 
 
 enum WatchOpType {
-    WATCH_OVERVIEW        = 1;
-    WATCH_TABLE           = 2;
-    WATCH_INSTANCE        = 3;
-    WATCH_REGION          = 4;
-    WATCH_USER            = 5;
-    WATCH_NAMESPACE       = 6;
-    WATCH_DATABASE        = 7;
-    WATCH_CLUSTER         = 8;
-    WATCH_SCHEMA          = 9;
-    WATCH_IMPORTTASK      = 10;
-    WATCH_IMPORTTASK2     = 11;
-    WATCH_TASKLIST        = 12;
-    SUBMIT_IMPORTTASK     = 13;
-    WATCH_UNKNOWN         = 14;
+    WATCH_UNKNOWN         = 1;
+    WATCH_PLATFORM        = 2;
+    WATCH_OVERVIEW        = 3;
+    WATCH_TABLE           = 4;
+    WATCH_INSTANCE        = 5;
+    WATCH_REGION          = 6;
+    WATCH_USER            = 7;
+    WATCH_NAMESPACE       = 8;
+    WATCH_DATABASE        = 9;
+    WATCH_CLUSTER         = 10;
+    WATCH_SCHEMA          = 11;
+    WATCH_IMPORTTASK      = 12;
+    WATCH_IMPORTTASK2     = 13;
+    WATCH_TASKLIST        = 14;
+    SUBMIT_IMPORTTASK     = 15;
 };
 
 message ConsoleRequest {
@@ -62,6 +63,9 @@ message QueryParam {
     optional string      modle              = 19;
     optional string      charset            = 20;
     optional string      interval_days      = 21;
+    optional string      crud_database      = 22;
+    optional string      platform           = 23;
+    optional string      meta_server_bns    = 24;
 };
 
 message OverViewInfo {
@@ -164,6 +168,15 @@ message WatchImportTask {
     optional string    status               = 7;
 }
 
+message WatchSSTTask {
+    optional string    database             = 1;
+    optional string    table_name           = 2;
+    optional string    table_id             = 3;
+    optional string    start_time           = 4;
+    optional string    end_time             = 5;
+    optional string    status               = 6;
+}
+
 message WatchTaskList {
     optional string    table_info           = 1;
     optional string    cluster_name         = 2;
@@ -178,6 +191,10 @@ message WatchTaskList {
 message WatchSchemaInfo {
     optional string       full_table_name   = 1;
     repeated QuerySchema  schemas           = 2;
+};
+
+message WatchPlatForm {
+    repeated string plat_form         = 1;
 };
 
 message ConsoleResponse {
@@ -195,9 +212,49 @@ message ConsoleResponse {
     repeated WatchClusterInfo   cluster_infos       = 12;
     repeated WatchImportTask    import_task         = 13;
     repeated WatchTaskList      task_list           = 14;
+    optional WatchPlatForm      plat_forms          = 15;
+    repeated WatchSSTTask       sst_backup_task     = 16;
 };
-
+message ShowxCondition {
+    optional string t = 1;
+    optional string k = 2;
+    optional string v = 3;
+};
+message ShowxRequest {
+    repeated ShowxCondition conditions = 1;
+};
+message ShowxColumn {
+    required string name = 1;
+    required string id   = 2;
+    optional string unit = 3;
+    optional string textAlign = 4;
+    optional bool   autoWrap  = 5;
+    optional string width     = 6;
+    optional string accuracy  = 7;
+    optional string remark    = 8;
+};
+message ShowxRow {
+    optional string database_name = 1;
+    optional string table_name    = 2;
+    optional string sign          = 3;
+    optional string time_range    = 4;
+    optional int64  pv            = 5;
+    optional int64  pv_diff       = 6;
+    optional float  avg           = 7;
+    optional float  avg_diff      = 8;
+};
+message ShowxData {
+    repeated ShowxColumn columns = 1;
+    repeated ShowxRow    rows    = 2;
+};
+message ShowxResponse {
+    optional int64  status = 1;
+    optional string msg    = 2;
+    optional ShowxData data = 3;
+    optional int64 total    = 4;
+};
 service ConsoleService {
     rpc watch(ConsoleRequest) returns (ConsoleResponse);
+    rpc showx(ShowxRequest) returns (ShowxResponse);
 };
 

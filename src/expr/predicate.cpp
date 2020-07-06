@@ -196,18 +196,15 @@ int LikePredicate::open() {
         return -1;
     }
     std::string like_pattern = children(1)->get_value(nullptr).get_string();
-    try {
-        if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
-            covent_exact_pattern(like_pattern);
-            _regex.assign(_regex_pattern, boost::regex::icase);
-        } else {
-            covent_pattern(like_pattern);
-            _regex.assign(_regex_pattern);
-        }
-    } catch (boost::regex_error& e) {
-        DB_FATAL("regex error:%d|%s, like_pattern:%s, _regex_pattern:%ss", 
-                e.code(), e.what(), like_pattern.c_str(), _regex_pattern.c_str());
-        return -1;
+    re2::RE2::Options option;
+    option.set_utf8(false);
+    if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
+        covent_exact_pattern(like_pattern);
+        option.set_case_sensitive(false);
+        _regex_ptr.reset(new re2::RE2(_regex_pattern, option));
+    } else {
+        covent_pattern(like_pattern);
+        _regex_ptr.reset(new re2::RE2(_regex_pattern, option));
     }
     return 0;
 }
@@ -295,11 +292,10 @@ ExprValue LikePredicate::get_value(MemRow* row) {
     value.cast_to(pb::STRING);
     ExprValue ret(pb::BOOL);
     try {
-        ret._u.bool_val = boost::regex_match(value.str_val, _regex);
-    } catch (boost::regex_error& e) {
-        DB_FATAL("regex error:%d|%s, _regex_pattern:%ss", 
-                e.code(), e.what(), _regex_pattern.c_str());
-        ret._u.bool_val = false;
+        ret._u.bool_val = RE2::FullMatch(value.str_val, *_regex_ptr);
+        if (_regex_ptr->error_code() != 0) {
+            DB_FATAL("regex error[%d]", _regex_ptr->error_code());
+        }
     } catch (std::exception& e) {
         DB_FATAL("regex error:%s, _regex_pattern:%ss", 
                 e.what(), _regex_pattern.c_str());

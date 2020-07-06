@@ -27,7 +27,6 @@ struct DllParam {
     DllParam () = default;
     TimeCost total_cost;
     bool is_start = false;
-    int disconnect_count = 0;
     uint32_t begin_timestamp = 0;
     bool is_doing = false;
     bool is_waiting = false;
@@ -42,7 +41,6 @@ struct DllParam {
         is_start = false;
         is_doing = false;
         is_waiting = false;
-        disconnect_count = 0;
         begin_timestamp = 0;
         total_cost.reset();
         delete_only_count = 0;

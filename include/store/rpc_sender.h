@@ -28,6 +28,10 @@ public:
     static int send_query_method(const pb::StoreReq& request, 
                 const std::string& instance, 
                 int64_t receive_region_id);
+    static int send_query_method(const pb::StoreReq& request,
+                                 pb::StoreRes& response,
+                                 const std::string& instance,
+                                 int64_t receive_region_id);
 
     static void send_remove_region_method(int64_t drop_region_id, const std::string& instance);
     static int send_init_region_method(const std::string& instance_address, 

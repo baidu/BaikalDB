@@ -28,15 +28,18 @@ namespace baikaldb {
 struct RegionStateInfo { 
     int64_t timestamp; //上次收到该实例心跳的时间戳
     pb::Status status; //实例状态
-}; 
+};
+struct RegionPeerState {
+    std::map<std::string, pb::PeerStateInfo> legal_peers_state;  // peer in raft-group
+    std::map<std::string, pb::PeerStateInfo> ilegal_peers_state; // peer not in raft-group
+};
 typedef std::shared_ptr<RegionStateInfo> SmartRegionStateInfo;
 class RegionManager {
 public:
     ~RegionManager() {
         bthread_mutex_destroy(&_instance_region_mutex);
         bthread_mutex_destroy(&_count_mutex);
-        bthread_mutex_destroy(&_resource_tag_mutex);
-        bthread_mutex_destroy(&_log_entry_mutex);
+        bthread_mutex_destroy(&_doing_mutex);
     }
     static RegionManager* get_instance() {
         static RegionManager instance;
@@ -49,12 +52,16 @@ public:
     void split_region(const pb::MetaManagerRequest& request, braft::Closure* done);
     void send_remove_region_request(const std::vector<int64_t>& drop_region_ids);
 
-     void delete_all_region_for_store(const std::string& instance, pb::Status status);
+    // MIGRATE/DEAD可以任意使用add_peer_for_store/delete_all_region_for_store
+    // 内部都判断了状态
+    // default for MIGRATE
+    void add_peer_for_store(const std::string& instance, InstanceStateInfo status);
+    // default for DEAD
+    void delete_all_region_for_store(const std::string& instance, InstanceStateInfo status);
     void pre_process_remove_peer_for_store(const std::string& instance,
-                                                std::vector<pb::RaftControlRequest>& requests); 
-    //void add_peer_for_dead_store(const std::string& instance, pb::Status status);
-    //void pre_process_add_peer_for_store(const std::string& instance,
-    //                                std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests);
+                                                pb::Status status, std::vector<pb::RaftControlRequest>& requests); 
+    void pre_process_add_peer_for_store(const std::string& instance, pb::Status status,
+            std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests);
     bool add_region_is_exist(int64_t table_id, const std::string& start_key, 
                                             const std::string& end_key);
     void check_update_region(const pb::BaikalHeartBeatRequest* request,
@@ -75,7 +82,6 @@ public:
                                      const std::set<std::string>& peers_in_master);
     //是否有超过replica_num数量的region, 这种region需要删掉多余的peer
     void check_peer_count(int64_t region_id,
-                        const std::string& resource_tag,
                         const pb::LeaderHeartBeat& leader_region,
                         const std::set<std::string>& peers_in_heart,
                         const std::set<std::string>& peers_in_master,
@@ -109,13 +115,16 @@ public:
     void clear() {
         _region_info_map.clear();
         _region_state_map.clear();
+        _region_peer_state_map.clear();
         _instance_region_map.clear();
         _instance_leader_count.clear();
-        RegionIncrementalMap* background = _incremental_regioninfo_map.read_background();
-        background->clear();
-        RegionIncrementalMap* frontground = _incremental_regioninfo_map.read();
-        frontground->clear();
+        _incremental_region_info.clear();
     }
+
+    void clear_region_peer_state_map() {
+        _region_peer_state_map.clear();
+    }
+
 public:
     void set_max_region_id(int64_t max_region_id) {
         _max_region_id = max_region_id;
@@ -163,6 +172,16 @@ public:
         status = region_state.status;
         return 0;
     }
+
+    void recovery_single_region_by_set_peer(const int64_t region_id,
+                                const std::set<std::string>& resource_tags,
+                                std::set<std::string> peers,
+                                std::map<std::string, std::set<int64_t>>& not_alive_regions,
+                                std::vector<pb::PeerStateInfo>& recover_region_way);
+    void recovery_single_region_by_init_region(const std::set<int64_t> region_ids,
+                    std::vector<std::string>& instances,
+                    std::vector<pb::PeerStateInfo>& recover_region_way);
+    void recovery_all_region(const pb::MetaManagerRequest& request, pb::MetaManagerResponse* response);
 
     void whether_add_instance(const std::map<std::string, int64_t>& uniq_instance) {
         std::map<std::string, int64_t> add_instances;
@@ -301,6 +320,9 @@ public:
     void traverse_copy_region_map(const std::function<void(SmartRegionInfo& region)>& call) {
         _region_info_map.traverse_copy(call);
     }
+    ThreadSafeMap<int64_t, RegionPeerState>&  region_peer_state_map() {
+        return _region_peer_state_map;
+    }
     void put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos);
     bool check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index); 
@@ -309,9 +331,7 @@ private:
     RegionManager(): _max_region_id(0) {
         bthread_mutex_init(&_instance_region_mutex, NULL);
         bthread_mutex_init(&_count_mutex, NULL);
-        bthread_mutex_init(&_resource_tag_mutex, NULL);
-        bthread_mutex_init(&_log_entry_mutex, NULL);
-        //bthread_mutex_init(&_doing_mutex, NULL);
+        bthread_mutex_init(&_doing_mutex, NULL);
     }
 private:
     int64_t                                             _max_region_id;
@@ -324,19 +344,14 @@ private:
     std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_region_map;
 
     ThreadSafeMap<int64_t, RegionStateInfo>        _region_state_map;
+    ThreadSafeMap<int64_t, RegionPeerState>        _region_peer_state_map;
     //该信息只在meta_server的leader中内存保存, 该map可以单用一个锁
     bthread_mutex_t                                     _count_mutex;
     std::unordered_map<std::string, std::unordered_map<int64_t, int64_t>> _instance_leader_count;
-    //临时方案，为了安全，每个resource_tag只控制单实例迁移
-    bthread_mutex_t                                     _resource_tag_mutex;
-    std::map<std::string, std::string>                         _resource_tag_delete_region_map;
 
-    //bthread_mutex_t                                     _doing_mutex;
-    //std::set<std::string>                               _doing_migrate; 
-    bthread_mutex_t                                      _log_entry_mutex;
-    typedef std::map<int64_t, std::vector<pb::RegionInfo>> RegionIncrementalMap;
-    DoubleBuffer<RegionIncrementalMap>                   _incremental_regioninfo_map;
-    TimeCost                                             _gc_time_cost;
+    bthread_mutex_t                                     _doing_mutex;
+    std::set<std::string>                               _doing_migrate; 
+    IncrementalUpdate<std::vector<pb::RegionInfo>> _incremental_region_info;
 }; //class
 
 }//namespace

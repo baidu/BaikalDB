@@ -15,12 +15,12 @@
 #include "exec_node.h"
 #include "agg_node.h"
 #include "filter_node.h"
-#include "fetcher_node.h"
 #include "insert_node.h"
 #include "update_node.h"
 #include "delete_node.h"
 #include "join_node.h"
 #include "scan_node.h"
+#include "dual_scan_node.h"
 #include "rocksdb_scan_node.h"
 #include "sort_node.h"
 #include "packet_node.h"
@@ -34,6 +34,7 @@
 #include "lock_primary_node.h"
 #include "lock_secondary_node.h"
 #include "full_export_node.h"
+#include "union_node.h"
 #include "runtime_state.h"
 
 namespace baikaldb {
@@ -119,7 +120,8 @@ bool ExecNode::need_seperate() {
         case pb::TRANSACTION_NODE:
         case pb::BEGIN_MANAGER_NODE:
         case pb::COMMIT_MANAGER_NODE:
-            case pb::ROLLBACK_MANAGER_NODE:
+        case pb::UNION_NODE:
+        case pb::ROLLBACK_MANAGER_NODE:
             return true;
         case pb::SCAN_NODE:
             //DB_NOTICE("engine:%d", static_cast<ScanNode*>(this)->engine());
@@ -140,7 +142,18 @@ bool ExecNode::need_seperate() {
     }
     return false;
 }
-
+void ExecNode::create_trace() {
+    if (_trace != nullptr) {
+        for (auto c : _children) {
+            if (c->get_trace() == nullptr) {
+                pb::TraceNode* trace_node = _trace->add_child_nodes();
+                trace_node->set_node_type(c->node_type());
+                c->set_trace(trace_node);
+            }
+            c->create_trace();
+        }
+    }
+}
 int ExecNode::open(RuntimeState* state) {
     int num_affected_rows = 0;
     for (auto c : _children) {
@@ -184,19 +197,22 @@ int ExecNode::create_tree(const pb::Plan& plan, ExecNode** root) {
     return 0;
 }
 
-int ExecNode::create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, ExecNode** root) {
+int ExecNode::create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, 
+                          ExecNode** root) {
     if (*idx >= plan.nodes_size()) {
-        DB_FATAL("idx %d > size %d", *idx, plan.nodes_size());
+        DB_FATAL("idx %d >= size %d", *idx, plan.nodes_size());
         return -1;
     }
     int num_children = plan.nodes(*idx).num_children();
     ExecNode* exec_node = nullptr;
+
     int ret = 0;
     ret = create_exec_node(plan.nodes(*idx), &exec_node);
     if (ret < 0) {
         DB_FATAL("create_exec_node fail:%s", plan.nodes(*idx).DebugString().c_str());
         return ret;
     }
+    
     if (parent != nullptr) {
         parent->add_child(exec_node);
     } else if (root != nullptr) { 
@@ -235,9 +251,6 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
         case pb::WHERE_FILTER_NODE:
         case pb::HAVING_FILTER_NODE:
             *exec_node = new FilterNode;
-            return (*exec_node)->init(node);
-        case pb::FETCHER_NODE:
-            *exec_node = new FetcherNode;
             return (*exec_node)->init(node);
         case pb::UPDATE_NODE:
             *exec_node = new UpdateNode;
@@ -286,6 +299,12 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
             return (*exec_node)->init(node);
         case pb::FULL_EXPORT_NODE:
             *exec_node = new FullExportNode;
+            return (*exec_node)->init(node);
+        case pb::DUAL_SCAN_NODE:
+            *exec_node = new DualScanNode;
+            return (*exec_node)->init(node);
+        case pb::UNION_NODE:
+            *exec_node = new UnionNode;
             return (*exec_node)->init(node);
         default:
             DB_FATAL("create_exec_node failed: %s", node.DebugString().c_str());

@@ -278,18 +278,11 @@ int64_t MyRaftLogStorage::get_term(const int64_t index) {
 int MyRaftLogStorage::append_entry(const braft::LogEntry* entry) {
     std::vector<braft::LogEntry*> entries;
     entries.push_back(const_cast<braft::LogEntry*>(entry));
-#ifdef BAIDU_INTERNAL
     return append_entries(entries, nullptr) == 1 ? 0 : -1;
-#else 
-    return append_entries(entries) == 1 ? 0 : -1;
-#endif
 }
 
 int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entries
-#ifdef BAIDU_INTERNAL
-        , braft::IOMetric* metric
-#endif
-        ) {
+        , braft::IOMetric* metric) {
     TimeCost time_cost;
     if (entries.empty()) {
         return 0;
@@ -297,8 +290,9 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
 
     if (_last_log_index.load() + 1 != entries.front()->id.index) {
         DB_FATAL("There's gap betwenn appending entries and _last_log_index,"
-                " last_log_index: %ld, entry_log_index: %ld region_id: %ld",
-                _last_log_index.load(), entries.front()->id.index, _region_id);
+                " last_log_index: %ld, entry_log_index: %ld, term:%ld region_id: %ld",
+                _last_log_index.load(), entries.front()->id.index, 
+                entries.front()->id.term, _region_id);
         return -1;
     }
     Concurrency::get_instance()->raft_write_concurrency.increase_wait();
@@ -376,7 +370,8 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     auto status = _db->remove_range(rocksdb::WriteOptions(), 
                 _handle, 
                 rocksdb::Slice(start_key, LOG_DATA_KEY_SIZE), 
-                rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE));
+                rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE),
+                true);
     if (!status.ok()) {
         DB_WARNING("tuncate log entry fail, region_id: %ld, truncate to first index kept:%ld from first log index:%ld",
                  _region_id, first_index_kept, _first_log_index.load());

@@ -22,6 +22,10 @@
 
 namespace baikaldb {
 
+DECLARE_int64(store_heart_beat_interval_us);
+DECLARE_int32(store_dead_interval_times);
+DECLARE_int32(region_faulty_interval_times);
+
 void QueryRegionManager::construct_query_region(const pb::RegionInfo* region_info, 
                      pb::QueryRegion* query_region_info) {
     int64_t table_id = region_info->table_id();
@@ -209,7 +213,7 @@ void QueryRegionManager::get_region_info(const pb::QueryRequest* request,
             *region_pb = *region_ptr;
         } else {
             response->set_errmsg("region info not exist");
-            response->set_errcode(pb::INPUT_PARAM_ERROR);
+            response->set_errcode(pb::REGION_NOT_EXIST);
         }    
     }    
 }
@@ -276,6 +280,76 @@ void QueryRegionManager::get_peer_ids_per_instance(
             peer_ids.insert(region_id);
         } 
     }
+}
+
+void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request, pb::QueryResponse* response) {
+    RegionManager* manager = RegionManager::get_instance();
+    std::map<int64_t, std::string> table_id_name_map;
+
+    if (request->has_resource_tag()) {
+        TableManager::get_instance()->get_table_by_resource_tag(request->resource_tag(), table_id_name_map);
+    } else {
+        TableManager::get_instance()->get_table_by_resource_tag("", table_id_name_map);
+    }
+    
+    auto func = [&table_id_name_map, response](const int64_t region_id, RegionPeerState& region_state) {
+        bool healthy = true;
+
+        int64_t table_id = 0;
+        std::vector<pb::PeerStateInfo> region_peer_status_vec;
+        for (auto& pair : region_state.legal_peers_state) {
+            if (pair.second.has_table_id()) {
+                table_id = pair.second.table_id();
+                if (table_id_name_map.count(table_id) == 0) {
+                    return;
+                }
+            } else {
+                return;
+            }
+
+            if (pair.second.peer_status() == pb::STATUS_NORMAL 
+                && (butil::gettimeofday_us() - pair.second.timestamp() >
+                FLAGS_store_heart_beat_interval_us * FLAGS_region_faulty_interval_times)) {
+                pair.second.set_peer_status(pb::STATUS_NOT_HEARTBEAT);
+                healthy = false;
+            } else if (pair.second.peer_status() != pb::STATUS_NORMAL) {
+                healthy = false;
+            }
+        }
+        if (!healthy || !region_state.ilegal_peers_state.empty()) {
+            for (auto& pair : region_state.legal_peers_state) {
+                pair.second.set_region_id(region_id);
+                pair.second.set_peer_id(pair.first);
+                region_peer_status_vec.push_back(pair.second);
+            }  
+        }
+        for (auto& pair : region_state.ilegal_peers_state) {
+            if (pair.second.has_table_id()) {
+                table_id = pair.second.table_id();
+                if (table_id_name_map.count(table_id) == 0) {
+                    return;
+                }
+            } else {
+                return;
+            }
+            pair.second.set_peer_id(pair.first);
+            pair.second.set_region_id(region_id);
+            region_peer_status_vec.push_back(pair.second);
+        }
+
+        if (!region_peer_status_vec.empty()) {
+            pb::RegionStateInfo* region_info = response->add_region_status_infos();
+            region_info->set_table_id(region_peer_status_vec[0].table_id());
+            region_info->set_region_id(region_peer_status_vec[0].region_id());
+            region_info->set_table_name(table_id_name_map[table_id]);
+            region_info->set_is_healthy(healthy);
+            for (auto peer_status : region_peer_status_vec) {
+                pb::PeerStateInfo* peer_info = region_info->add_peer_status_infos();
+                *peer_info = peer_status;
+            }       
+        }
+    };
+    manager->region_peer_state_map().traverse_with_key_value(func);
 }
 
 void QueryRegionManager::send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response) {
