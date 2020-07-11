@@ -1,4 +1,4 @@
-# Copyright (c) 2019 Baidu, Inc. All Rights Reserved.
+# Copyright (c) 2020-present Baidu, Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,13 +31,17 @@ SET(BOOST_INCLUDE_DIR "${BOOST_INSTALL_DIR}/include" CACHE PATH "boost include d
 
 SET(Boost_INCLUDE_DIR ${BOOST_INCLUDE_DIR})
 SET(Boost_INCLUDE_DIRS ${BOOST_INCLUDE_DIR})
-SET(Boost_LIBRARIES ${BOOST_INSTALL_DIR}/lib/libboost_thread.a)
+SET(Boost_LIBRARIES ${BOOST_INSTALL_DIR}/lib/libboost_thread.a
+        ${BOOST_INSTALL_DIR}/lib/libboost_filesystem.a
+        ${BOOST_INSTALL_DIR}/lib/libboost_regex.a
+        ${BOOST_INSTALL_DIR}/lib/libboost_system.a
+        )
 
 set_directory_properties(PROPERTIES CLEAN_NO_CUSTOM 1)
 include_directories(${BOOST_INCLUDE_DIR})
 
 FILE(WRITE ${BOOST_DOWNLOAD_DIR}/build.sh
-        "cd ${BOOST_DOWNLOAD_DIR}/${BOOST_TAR} && mkdir -p build && sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread && ./b2 install"
+        "cd ${BOOST_DOWNLOAD_DIR}/${BOOST_TAR} && mkdir -p build && sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread,filesystem,regex,system && ./b2 install"
         )
 
 ExternalProject_Add(
@@ -48,7 +52,7 @@ ExternalProject_Add(
 #        GIT_TAG "boost-1.63.0"
         DOWNLOAD_DIR ${BOOST_DOWNLOAD_DIR}
         DOWNLOAD_NO_PROGRESS 1
-        DOWNLOAD_COMMAND wget -q --no-check-certificate ${BOOST_URL} -O ${BOOST_TAR}.tar.gz COMMAND tar -zxf ${BOOST_TAR}.tar.gz
+        DOWNLOAD_COMMAND wget --no-check-certificate ${BOOST_URL} -O ${BOOST_TAR}.tar.gz COMMAND tar -zxf ${BOOST_TAR}.tar.gz
         UPDATE_COMMAND ""
         CONFIGURE_COMMAND ""
 #        BUILD_COMMAND sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread && ./b2 install
