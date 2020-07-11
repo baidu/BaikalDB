@@ -2,10 +2,12 @@
 
 ## 依赖
 * C++11，GCC4.8以上
-* boost 1.56以上
+* zlib
+* boost(thread, filesystem, 1.56以上)
 * libmariadb
 * gflags
-* [bthread](https://github.com/apache/incubator-brpc)(开启GLOG)  
+* glog
+* [brpc](https://github.com/apache/incubator-brpc)(开启GLOG)
 
 上述依赖使用CMAKE自动下载编译。如果指定了编译选项`-DWITH_SYSTEM_LIBS=ON`，则会使用系统依赖，需要自行手动安装。  
 

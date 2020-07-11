@@ -19,7 +19,6 @@ SET(MARIADB_DOWNLOAD_DIR ${MARIADB_SOURCES_DIR}/src/extern_mariadb)
 SET(MARIADB_INSTALL_DIR ${THIRD_PARTY_PATH}/install/mariadb)
 SET(MARIADB_INCLUDE_DIR "${MARIADB_INSTALL_DIR}/include/mariadb" CACHE PATH "mariadb include directory." FORCE)
 SET(MARIADB_LIBRARIES "${MARIADB_INSTALL_DIR}/lib/mariadb/libmariadbclient.a" CACHE FILEPATH "mariadb library." FORCE)
-INCLUDE_DIRECTORIES(${MARIADB_INCLUDE_DIR})
 
 set(prefix_path "${THIRD_PARTY_PATH}/install/zlib")
 

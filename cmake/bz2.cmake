@@ -20,9 +20,6 @@ SET(BZ2_INSTALL_DIR ${THIRD_PARTY_PATH}/install/bz2)
 SET(BZ2_INCLUDE_DIR "${BZ2_INSTALL_DIR}/include" CACHE PATH "bz2 include directory." FORCE)
 SET(BZ2_LIBRARIES "${BZ2_INSTALL_DIR}/lib/libbz2.a" CACHE FILEPATH "bz2 library." FORCE)
 
-INCLUDE_DIRECTORIES(${BZ2_INCLUDE_DIR}) # For bz2 code to include its own headers.
-INCLUDE_DIRECTORIES(${THIRD_PARTY_PATH}/install) # For Paddle code to include bz2.h.
-
 SET(BZ2_TAR "bzip2-1.0.8")
 
 FILE(WRITE ${BZ2_DOWNLOAD_DIR}/build.sh

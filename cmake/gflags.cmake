@@ -25,8 +25,6 @@ ELSE (WIN32)
     set(INSTALL_COMMAND $(MAKE) install)
 ENDIF (WIN32)
 
-INCLUDE_DIRECTORIES(${GFLAGS_INCLUDE_DIR})
-
 ExternalProject_Add(
         extern_gflags
         ${EXTERNAL_PROJECT_LOG_ARGS}

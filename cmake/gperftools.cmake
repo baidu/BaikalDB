@@ -18,7 +18,6 @@ SET(GPERF_SOURCES_DIR ${THIRD_PARTY_PATH}/gperf)
 SET(GPERF_INSTALL_DIR ${THIRD_PARTY_PATH}/install/gperf)
 SET(GPERFTOOLS_INCLUDE_DIR "${GPERF_INSTALL_DIR}/include" CACHE PATH "gperf include directory." FORCE)
 SET(GPERFTOOLS_LIBRARIES "${GPERF_INSTALL_DIR}/lib/libtcmalloc_and_profiler.a" CACHE FILEPATH "gperf library." FORCE)
-INCLUDE_DIRECTORIES(${GPERFTOOLS_INCLUDE_DIR})
 
 ExternalProject_Add(
         extern_gperf

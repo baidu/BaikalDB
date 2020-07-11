@@ -18,7 +18,6 @@ SET(LEVELDB_SOURCES_DIR ${THIRD_PARTY_PATH}/leveldb)
 SET(LEVELDB_INSTALL_DIR ${THIRD_PARTY_PATH}/install/leveldb)
 SET(LEVELDB_INCLUDE_DIR "${LEVELDB_INSTALL_DIR}/include" CACHE PATH "leveldb include directory." FORCE)
 SET(LEVELDB_LIBRARIES "${LEVELDB_INSTALL_DIR}/lib/libleveldb.a" CACHE FILEPATH "leveldb library." FORCE)
-INCLUDE_DIRECTORIES(${LEVELDB_INCLUDE_DIR})
 
 ExternalProject_Add(
         extern_leveldb

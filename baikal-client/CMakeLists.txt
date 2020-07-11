@@ -15,61 +15,29 @@
 cmake_minimum_required(VERSION 3.1)
 project(baikal_client C CXX)
 
-#mysqlclient
-if (WITH_SYSTEM_LIBS)
-    find_path(MARIADB_INCLUDE_DIR NAMES mariadb/mysql.h)
-    if (MARIADB_INCLUDE_DIR)
-        set(MARIADB_INCLUDE_DIR ${MARIADB_INCLUDE_DIR}/mariadb)
-    else ()
-        find_path(MARIADB_INCLUDE_DIR NAMES mysql.h)
-    endif ()
-    find_library(MARIADB_LIBRARIES NAMES mariadbclient)
-    if ((NOT MARIADB_INCLUDE_DIR) OR (NOT MARIADB_LIBRARIES))
-        message(FATAL_ERROR "Fail to find mariadbclient")
-    endif ()
-else ()
-    include(libmariadb)
-endif ()
-message(mysqlclient: ${MARIADB_INCLUDE_DIR}, ${MARIADB_LIBRARIES})
-
-message(CUR_DIR : ${CMAKE_CURRENT_BINARY_DIR}, SRC_DIR : ${CMAKE_SOURCE_DIR})
-
-set(DEP_INC
-        ${DEP_INC}
-        ${MARIADB_INCLUDE_DIR}
-        )
-
-set(DEP_LIB
-        ${MARIADB_LIBRARIES}
-        ${DEP_LIB}
-        )
-
-message("DEP INCLUDE: ${DEP_INC}")
-message("DEP LIBRARY: ${DEP_LIB}")
-
 file(GLOB BAIKAL_CLIENT
-        src/*.h
-        src/*.hpp
-        src/*.cpp
+        ${CMAKE_SOURCE_DIR}/baikal-client/src/*.h
+        ${CMAKE_SOURCE_DIR}/baikal-client/src/*.hpp
+        ${CMAKE_SOURCE_DIR}/baikal-client/src/*.cpp
         )
 
 # for *.so
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../output/lib)
 # for *.a
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../output/lib)
 
 add_library(baikal_client ${BAIKAL_CLIENT})
 if (NOT WITH_SYSTEM_LIBS)
     add_dependencies(baikal_client boost brpc mariadb)
 endif ()
-include_directories(${DEP_INC} include)
-target_link_libraries(baikal_client ${DEP_LIB})
+target_include_directories(baikal_client PUBLIC ${DEP_INC} ${CMAKE_SOURCE_DIR}/baikal-client/include)
+target_link_libraries(baikal_client PUBLIC ${DEP_LIB})
 
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output)
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/include)
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/lib)
-file(COPY ${CMAKE_SOURCE_DIR}/include/
-        DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/output/include/
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../output)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../output/include)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../output/lib)
+file(COPY ${CMAKE_SOURCE_DIR}/baikal-client/include/
+        DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/../output/include/
         FILES_MATCHING PATTERN "*.h")
 
 #TODO.. install

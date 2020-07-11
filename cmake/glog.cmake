@@ -26,8 +26,6 @@ ELSE (WIN32)
     SET(GLOG_CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
 ENDIF (WIN32)
 
-INCLUDE_DIRECTORIES(${GLOG_INCLUDE_DIR})
-
 set(prefix_path "${THIRD_PARTY_PATH}/install/gflags")
 
 SET(GLOG_REPOSITORY "https://github.com/google/glog.git")
