@@ -353,23 +353,8 @@ if (NOT DEBUG)
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNDEBUG")
 endif ()
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
-
-macro(use_cxx11)
-    if (CMAKE_VERSION VERSION_LESS "3.1.3")
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-        elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-            SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-        endif ()
-    else ()
-        SET(CMAKE_CXX_STANDARD 11)
-        SET(CMAKE_CXX_STANDARD_REQUIRED ON)
-    endif ()
-endmacro(use_cxx11)
-
-use_cxx11()
 
 add_definitions(
         -D_GNU_SOURCE
