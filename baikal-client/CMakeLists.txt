@@ -28,7 +28,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../output/lib)
 
 add_library(baikal_client ${BAIKAL_CLIENT})
 if (NOT WITH_SYSTEM_LIBS)
-    add_dependencies(baikal_client boost brpc mariadb)
+    add_dependencies(baikal_client ssl crypto zlib boost rapidjson glog gflags protobuf mariadb brpc)
 endif ()
 target_include_directories(baikal_client PUBLIC ${DEP_INC} ${CMAKE_SOURCE_DIR}/baikal-client/include)
 target_link_libraries(baikal_client PUBLIC ${DEP_LIB})
