@@ -14,9 +14,7 @@
 
 INCLUDE(ExternalProject)
 # Always invoke `FIND_PACKAGE(Protobuf)` for importing function protobuf_generate_cpp
-IF(NOT WIN32)
-    FIND_PACKAGE(Protobuf QUIET)
-ENDIF(NOT WIN32)
+FIND_PACKAGE(Protobuf QUIET)
 macro(UNSET_VAR VAR_NAME)
     UNSET(${VAR_NAME} CACHE)
     UNSET(${VAR_NAME})
@@ -44,13 +42,13 @@ macro(PROMPT_PROTOBUF_LIB)
     INCLUDE_DIRECTORIES(${PROTOBUF_INCLUDE_DIR})
 
     # Assuming that all the protobuf libraries are of the same type.
-    IF(${PROTOBUF_LIBRARY} MATCHES ${CMAKE_STATIC_LIBRARY_SUFFIX})
+    IF (${PROTOBUF_LIBRARY} MATCHES ${CMAKE_STATIC_LIBRARY_SUFFIX})
         SET(protobuf_LIBTYPE STATIC)
-    ELSEIF(${PROTOBUF_LIBRARY} MATCHES "${CMAKE_SHARED_LIBRARY_SUFFIX}$")
+    ELSEIF (${PROTOBUF_LIBRARY} MATCHES "${CMAKE_SHARED_LIBRARY_SUFFIX}$")
         SET(protobuf_LIBTYPE SHARED)
-    ELSE()
+    ELSE ()
         MESSAGE(FATAL_ERROR "Unknown library type: ${PROTOBUF_LIBRARY}")
-    ENDIF()
+    ENDIF ()
 
     ADD_LIBRARY(protobuf ${protobuf_LIBTYPE} IMPORTED GLOBAL)
     SET_PROPERTY(TARGET protobuf PROPERTY IMPORTED_LOCATION ${PROTOBUF_LIBRARY})
@@ -65,12 +63,12 @@ macro(PROMPT_PROTOBUF_LIB)
     SET_PROPERTY(TARGET protoc PROPERTY IMPORTED_LOCATION ${PROTOBUF_PROTOC_EXECUTABLE})
     SET(Protobuf_PROTOC_EXECUTABLE ${PROTOBUF_PROTOC_EXECUTABLE})
 
-    FOREACH(dep ${protobuf_DEPS})
+    FOREACH (dep ${protobuf_DEPS})
         ADD_DEPENDENCIES(protobuf ${dep})
         ADD_DEPENDENCIES(protobuf_lite ${dep})
         ADD_DEPENDENCIES(libprotoc ${dep})
         ADD_DEPENDENCIES(protoc ${dep})
-    ENDFOREACH()
+    ENDFOREACH ()
 
     RETURN()
 endmacro()
@@ -80,11 +78,9 @@ macro(SET_PROTOBUF_VERSION)
 endmacro()
 
 set(PROTOBUF_ROOT "" CACHE PATH "Folder contains protobuf")
-IF (WIN32)
-    SET(PROTOBUF_ROOT ${THIRD_PARTY_PATH}/install/protobuf)
-ENDIF(WIN32)
 
 if (NOT "${PROTOBUF_ROOT}" STREQUAL "")
+    message("found system protobuf")
 
     find_path(PROTOBUF_INCLUDE_DIR google/protobuf/message.h PATHS ${PROTOBUF_ROOT}/include NO_DEFAULT_PATH)
     find_library(PROTOBUF_LIBRARY protobuf libprotobuf.lib PATHS ${PROTOBUF_ROOT}/lib NO_DEFAULT_PATH)
@@ -96,12 +92,12 @@ if (NOT "${PROTOBUF_ROOT}" STREQUAL "")
         SET(PROTOBUF_FOUND true)
         SET_PROTOBUF_VERSION()
         PROMPT_PROTOBUF_LIB()
-    else()
+    else ()
         message(WARNING "Cannot find protobuf library in ${PROTOBUF_ROOT}")
-    endif()
-endif()
+    endif ()
+endif ()
 
-FUNCTION(build_protobuf TARGET_NAME BUILD_FOR_HOST)
+FUNCTION(build_protobuf TARGET_NAME)
     STRING(REPLACE "extern_" "" TARGET_DIR_NAME "${TARGET_NAME}")
     SET(PROTOBUF_SOURCES_DIR ${THIRD_PARTY_PATH}/${TARGET_DIR_NAME})
     SET(PROTOBUF_INSTALL_DIR ${THIRD_PARTY_PATH}/install/${TARGET_DIR_NAME})
@@ -121,53 +117,24 @@ FUNCTION(build_protobuf TARGET_NAME BUILD_FOR_HOST)
             "${PROTOBUF_INSTALL_DIR}/bin/protoc${CMAKE_EXECUTABLE_SUFFIX}"
             PARENT_SCOPE)
 
-    SET(OPTIONAL_CACHE_ARGS "")
-    SET(OPTIONAL_ARGS "")
-    IF(BUILD_FOR_HOST)
-        SET(OPTIONAL_ARGS "-Dprotobuf_WITH_ZLIB=OFF")
-    ELSE()
-        SET(OPTIONAL_ARGS
-                "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
-                "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
-                "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}"
-                "-DCMAKE_C_FLAGS_DEBUG=${CMAKE_C_FLAGS_DEBUG}"
-                "-DCMAKE_C_FLAGS_RELEASE=${CMAKE_C_FLAGS_RELEASE}"
-                "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
-                "-DCMAKE_CXX_FLAGS_RELEASE=${CMAKE_CXX_FLAGS_RELEASE}"
-                "-DCMAKE_CXX_FLAGS_DEBUG=${CMAKE_CXX_FLAGS_DEBUG}"
-                "-Dprotobuf_WITH_ZLIB=ON"
-                "-DZLIB_ROOT:FILEPATH=${ZLIB_ROOT}"
-                ${EXTERNAL_OPTIONAL_ARGS})
-        SET(OPTIONAL_CACHE_ARGS "-DZLIB_ROOT:STRING=${ZLIB_ROOT}")
-    ENDIF()
-    IF(WIN32)
-        SET(OPTIONAL_ARGS ${OPTIONAL_ARGS}
-                "-DCMAKE_GENERATOR=${CMAKE_GENERATOR}"
-                "-DCMAKE_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}")
-    ENDIF()
+    set(prefix_path "${THIRD_PARTY_PATH}/install/zlib")
 
-    SET(PROTOBUF_REPO "https://github.com/protocolbuffers/protobuf.git")
-    SET(PROTOBUF_TAG "v3.6.0")
+    # Make sure zlib's two headers are in your /Path/to/install/include path,
+    # and delete libz.so which we don't need
+    FILE(WRITE ${PROTOBUF_SOURCES_DIR}/src/config.sh
+            "rm ${THIRD_PARTY_PATH}/install/zlib/lib/libz.so* -f && mkdir -p ${THIRD_PARTY_PATH}/install/protobuf/include && cp ${THIRD_PARTY_PATH}/install/zlib/include/* ${THIRD_PARTY_PATH}/install/protobuf/include/ && ${CMAKE_COMMAND} ${PROTOBUF_SOURCES_DIR}/src/${TARGET_NAME}/cmake -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER} -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_C_FLAGS='${CMAKE_C_FLAGS}' -DCMAKE_C_FLAGS_DEBUG=${CMAKE_C_FLAGS_DEBUG} -DCMAKE_C_FLAGS_RELEASE='${CMAKE_C_FLAGS_RELEASE}' -DCMAKE_CXX_FLAGS='${CMAKE_CXX_FLAGS}' -DCMAKE_CXX_FLAGS_RELEASE='${CMAKE_CXX_FLAGS_RELEASE}' -DCMAKE_CXX_FLAGS_DEBUG='${CMAKE_CXX_FLAGS_DEBUG}' -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_SKIP_RPATH=ON -Dprotobuf_WITH_ZLIB=ON -DZLIB_INCLUDE_DIR=${THIRD_PARTY_PATH}/install/zlib/include -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX=${PROTOBUF_INSTALL_DIR} -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE='${THIRD_PARTY_BUILD_TYPE}' -DCMAKE_PREFIX_PATH=${prefix_path} ${EXTERNAL_OPTIONAL_ARGS}"
+            )
 
     ExternalProject_Add(
             ${TARGET_NAME}
             ${EXTERNAL_PROJECT_LOG_ARGS}
-            PREFIX          ${PROTOBUF_SOURCES_DIR}
-            UPDATE_COMMAND  ""
-            DEPENDS         zlib
-            GIT_REPOSITORY  ${PROTOBUF_REPO}
-            GIT_TAG         ${PROTOBUF_TAG}
-            CONFIGURE_COMMAND
-            ${CMAKE_COMMAND} ${PROTOBUF_SOURCES_DIR}/src/${TARGET_NAME}/cmake
-            ${OPTIONAL_ARGS}
-            -Dprotobuf_BUILD_TESTS=OFF
-            -DCMAKE_SKIP_RPATH=ON
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-            -DCMAKE_BUILD_TYPE=${THIRD_PARTY_BUILD_TYPE}
-            -DCMAKE_INSTALL_PREFIX=${PROTOBUF_INSTALL_DIR}
-            -DCMAKE_INSTALL_LIBDIR=lib
-            -DBUILD_SHARED_LIBS=OFF
-            -Dprotobuf_MSVC_STATIC_RUNTIME=${MSVC_STATIC_CRT}
+            PREFIX ${PROTOBUF_SOURCES_DIR}
+            UPDATE_COMMAND ""
+            DEPENDS zlib
+            #            GIT_REPOSITORY  "https://github.com/protocolbuffers/protobuf.git"
+            #            GIT_TAG         "v3.6.1"
+            URL "https://github.com/protocolbuffers/protobuf/archive/v3.6.1.tar.gz"
+            CONFIGURE_COMMAND mv ../config.sh . COMMAND sh config.sh
             CMAKE_CACHE_ARGS
             -DCMAKE_INSTALL_PREFIX:PATH=${PROTOBUF_INSTALL_DIR}
             -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
@@ -175,12 +142,15 @@ FUNCTION(build_protobuf TARGET_NAME BUILD_FOR_HOST)
             -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
             ${OPTIONAL_CACHE_ARGS}
     )
+
 ENDFUNCTION()
 
-SET(PROTOBUF_VERSION 3.6.0)
+SET(PROTOBUF_VERSION 3.6.1)
 
-IF(NOT PROTOBUF_FOUND)
-    build_protobuf(extern_protobuf FALSE)
+IF (NOT PROTOBUF_FOUND)
+    message("build protobuf")
+
+    build_protobuf(extern_protobuf)
 
     SET(PROTOBUF_INCLUDE_DIR ${extern_protobuf_INCLUDE_DIR}
             CACHE PATH "protobuf include directory." FORCE)
@@ -195,5 +165,5 @@ IF(NOT PROTOBUF_FOUND)
 
     SET(PROTOBUF_PROTOC_EXECUTABLE ${extern_protobuf_PROTOC_EXECUTABLE}
             CACHE FILEPATH "protobuf executable." FORCE)
-    PROMPT_PROTOBUF_LIB(extern_protobuf)
-ENDIF(NOT PROTOBUF_FOUND)
+    PROMPT_PROTOBUF_LIB(extern_protobuf zlib)
+ENDIF (NOT PROTOBUF_FOUND)

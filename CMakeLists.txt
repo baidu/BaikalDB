@@ -338,6 +338,7 @@ SET(DEP_LIB
         ${OPENSSL_CRYPTO_LIBRARY}
         dl
         rt
+        m
         ${CMAKE_THREAD_LIBS_INIT}
         )
 

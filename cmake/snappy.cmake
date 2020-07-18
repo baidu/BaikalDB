@@ -19,7 +19,7 @@ SET(SNAPPY_INSTALL_DIR ${THIRD_PARTY_PATH}/install/snappy)
 SET(SNAPPY_INCLUDE_DIR "${SNAPPY_INSTALL_DIR}/include" CACHE PATH "snappy include directory." FORCE)
 SET(SNAPPY_LIBRARIES "${SNAPPY_INSTALL_DIR}/lib/libsnappy.a" CACHE FILEPATH "snappy library." FORCE)
 
-set(prefix_path "${THIRD_PARTY_PATH}/install/snappy")
+set(prefix_path "${THIRD_PARTY_PATH}/install/gflags")
 
 ExternalProject_Add(
         extern_snappy
@@ -50,6 +50,7 @@ ExternalProject_Add(
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
 )
 
+ADD_DEPENDENCIES(extern_snappy gflags)
 ADD_LIBRARY(snappy STATIC IMPORTED GLOBAL)
 SET_PROPERTY(TARGET snappy PROPERTY IMPORTED_LOCATION ${SNAPPY_LIBRARIES})
 ADD_DEPENDENCIES(snappy extern_snappy)
