@@ -309,7 +309,15 @@ SET(DEP_LIB
 
         ${LEVELDB_LIBRARIES}
         ${ROCKSDB_LIBRARIES}
+        )
 
+if (WITH_BAIKAL_CLIENT)
+    SET(DEP_LIB ${DEP_LIB} ${MARIADB_LIBRARIES})
+    SET(DEP_INC ${DEP_INC} ${MARIADB_INCLUDE_DIR})
+endif ()
+
+SET(DEP_LIB
+        ${DEP_LIB}
         ${PROTOBUF_LIBRARIES}
         ${PROTOBUF_PROTOC_LIBRARY}
         ${GFLAGS_LIBRARIES}
@@ -321,11 +329,6 @@ SET(DEP_LIB
         ${Boost_LIBRARIES}
         #        ${BZ2_LIBRARIES}
         )
-
-if (WITH_BAIKAL_CLIENT)
-    SET(DEP_LIB ${DEP_LIB} ${MARIADB_LIBRARIES})
-    SET(DEP_INC ${DEP_INC} ${MARIADB_INCLUDE_DIR})
-endif ()
 
 if (WITH_GPERF)
     SET(DEP_LIB ${DEP_LIB} ${GPERFTOOLS_LIBRARIES})
@@ -423,11 +426,16 @@ file(GLOB COMMON
         ${STORE}
         )
 
-add_library(common STATIC ${COMMON} $<TARGET_OBJECTS:PROTO_OBJS>)
-add_dependencies(common ssl crypto zlib boost rapidjson arrow glog gflags protobuf re2 snappy rocksdb brpc braft)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
+
+set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow glog gflags protobuf re2 snappy rocksdb brpc braft)
 if (WITH_GPERF)
-    add_dependencies(common gperf)
+    set(COMMON_DEPS ${COMMON_DEPS} gperf)
 endif ()
+
+add_library(common STATIC ${COMMON} $<TARGET_OBJECTS:PROTO_OBJS>)
+add_dependencies(common ${COMMON_DEPS})
 target_include_directories(common PUBLIC ${COMMON_INC})
 
 # baikalMeta
