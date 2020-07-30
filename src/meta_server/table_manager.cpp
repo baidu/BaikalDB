@@ -3025,8 +3025,8 @@ void TableManager::update_index_status(const pb::MetaManagerRequest& request,
                         request_index_info.deleted()) {
                         //删除索引
                         DB_NOTICE("DDL_LOG udpate_index_status delete index [%lld].", index_iter->index_id());
-                        mem_schema_pb.mutable_indexs()->erase(index_iter);
                         update_op_version(mem_schema_pb.mutable_schema_conf(), "drop index " + index_iter->index_name());
+                        mem_schema_pb.mutable_indexs()->erase(index_iter);
                     } else {
                         //改变索引状态
                         DB_NOTICE("DDL_LOG set state index state to [%s]", 

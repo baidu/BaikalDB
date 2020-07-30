@@ -104,10 +104,10 @@ public:
 
 private:
     StateMachine(): dml_time_cost("dml_time_cost"),
-                    select_time_cost("select_time_cost") {
+                    select_time_cost("select_time_cost"),
+                    sql_error("sql_error"),
+                    sql_error_second("sql_error_second", &sql_error){
         _wrapper = MysqlWrapper::get_instance();
-        sql_error("sql_error")
-        sql_error_second("sql_error_second", &sql_error);
     }
 
     StateMachine& operator=(const StateMachine& other);
@@ -161,7 +161,7 @@ private:
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
     bvar::Adder<int> sql_error;
-    bvar::PerSecond<bvar::Adder<int>>* sql_error_second;
+    bvar::PerSecond<bvar::Adder<int>> sql_error_second;
     std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > time_cost_users;
 
     MysqlWrapper*   _wrapper = nullptr;

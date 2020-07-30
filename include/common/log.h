@@ -249,8 +249,8 @@ inline int init_log(const char* bin_name) {
         auto my_logger2 = new SingleLogFileObject(old_logger2, google::GLOG_WARNING);
         google::base::SetLogger(google::GLOG_WARNING, my_logger2);
 
-        auto old_logger3 = google::base::GetLogger(google::ERROR);
-        auto my_logger3 = new SingleLogFileObject(old_logger3, google::ERROR);
+        auto old_logger3 = google::base::GetLogger(google::GLOG_ERROR);
+        auto my_logger3 = new SingleLogFileObject(old_logger3, google::GLOG_ERROR);
         google::base::SetLogger(google::GLOG_ERROR, my_logger3);
     }
     return 0;

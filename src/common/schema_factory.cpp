@@ -228,6 +228,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     auto& global_index_id_mapping = background.global_index_id_mapping;
 
     //DB_WARNING("table:%s", table.ShortDebugString().c_str());
+    DB_WARNING("table_name:%s ,size: %ld", table.table_name().c_str(), table.ByteSizeLong());
     if (!_is_init) {
         DB_FATAL("SchemaFactory not initialized");
         return -1;

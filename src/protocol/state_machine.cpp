@@ -367,10 +367,9 @@ void StateMachine::_print_query_time(SmartSocket client) {
             sql_error << 1;
         }
         if (time_cost_users.find(client->username) == time_cost_users.end()) {
-            std::unique_ptr<bvar::LatencyRecorder> latency(new bvar::LatencyRecorder(client->username));
-            time_cost_users[client->username] = latency;
+            time_cost_users[client->username].reset(new bvar::LatencyRecorder(client->username));
         }
-        time_cost_users[client->username] << 1;
+        (*time_cost_users[client->username]) << 1;
     }
 
     if (ctx->mysql_cmd == COM_QUERY 
