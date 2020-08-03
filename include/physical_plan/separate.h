@@ -56,6 +56,7 @@ private:
     int separate_select(QueryContext* ctx);
     int separate_simple_select(QueryContext* ctx);
     int separate_join(const std::vector<ExecNode*>& scan_nodes);
+    int separate_left_join(QueryContext* ctx);
 
     int separate_global_insert(InsertManagerNode* manager_node, InsertNode* insert_node);
     int separate_global_delete(DeleteManagerNode* manager_node, DeleteNode* delete_node, ExecNode* scan_node);
