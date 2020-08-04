@@ -235,7 +235,12 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
             expr->close();
         }
         for (auto& field : default_fields) {
-            if (0 != row->set_value(row->get_field_by_tag(field.id), field.default_expr_value)) {
+            ExprValue default_value = field.default_expr_value;
+            if (field.default_value == "(current_timestamp())") {
+                default_value = ExprValue::Now();
+                default_value.cast_to(field.type);
+            }
+            if (0 != row->set_value(row->get_field_by_tag(field.id), default_value)) {
                 DB_WARNING("fill insert value failed");
                 return -1;
             }
