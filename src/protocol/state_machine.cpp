@@ -406,7 +406,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
             DB_NOTICE("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row[%d] bufsize=[%d] "
                     "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] stmt_name=[%s] "
-                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sqllen=[%d] sql=[%s]",
+                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sqllen=[%d] sql=[%s] id=[%ld]",
                     stat_info->family.c_str(),
                     stat_info->table.c_str(),
                     op_type,
@@ -441,7 +441,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->old_seq_id,
                     ctx->get_runtime_state()->optimize_1pc(),
                     sql.length(),
-                    sql.c_str());
+                    sql.c_str(),
+                    client->last_insert_id);
         }
     } else {
         if ('\x0e' == ctx->mysql_cmd) {
