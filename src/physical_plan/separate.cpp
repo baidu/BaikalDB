@@ -180,47 +180,50 @@ int Separate::separate_left_join(QueryContext* ctx) {
     if (agg_node != nullptr) {
         return 0;
     }
+    SelectManagerNode* manager_node = static_cast<SelectManagerNode*>(plan->get_node(pb::SELECT_MANAGER_NODE));
     SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
-    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(plan->get_node(pb::SCAN_NODE));
-    int32_t tuple_id = static_cast<ScanNode*>(scan_node)->tuple_id();
-    for (auto& expr :  sort_node->sort_property().slot_order_exprs) {
-        std::unordered_set<int32_t> related_tuple_ids;
-        expr->get_all_tuple_ids(related_tuple_ids);
-        for (auto& related_tuple_id : related_tuple_ids) {
-            if (related_tuple_id != tuple_id) {
-                DB_WARNING("related_tuple_id not match");
-                return 0;
+    if (sort_node != nullptr) {
+        RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(plan->get_node(pb::SCAN_NODE));
+        if (scan_node == nullptr) {
+            return 0;
+        }
+        int32_t tuple_id = static_cast<ScanNode*>(scan_node)->tuple_id();
+        for (auto& expr :  sort_node->sort_property().slot_order_exprs) {
+            std::unordered_set<int32_t> related_tuple_ids;
+            expr->get_all_tuple_ids(related_tuple_ids);
+            for (auto& related_tuple_id : related_tuple_ids) {
+               if (related_tuple_id != tuple_id) {
+                   DB_WARNING("related_tuple_id not match");
+                   return 0;
+               }
             }
         }
-    }
-    SelectManagerNode* manager_node = static_cast<SelectManagerNode*>(plan->get_node(pb::SELECT_MANAGER_NODE));
-    if (sort_node != nullptr) {
-      manager_node->init_sort_info(sort_node->pb_node());
-      // add_child会把子节点的父节点修改，所以一定要在调用这个add_child之前把父节点保存
-      ExecNode* parent = sort_node->get_parent();
-      ExecNode* child = sort_node->children(0);
-      parent->clear_children();
-      parent->add_child(child);
+        manager_node->init_sort_info(sort_node->pb_node());
+        // add_child会把子节点的父节点修改，所以一定要在调用这个add_child之前把父节点保存
+        ExecNode* parent = sort_node->get_parent();
+        ExecNode* child = sort_node->children(0);
+        parent->clear_children();
+        parent->add_child(child);
 
-      child = manager_node->children(0);
-      manager_node->clear_children();
-      manager_node->add_child(sort_node);
-      sort_node->clear_children();
-      sort_node->add_child(child);
-      return 0;
+        child = manager_node->children(0);
+        manager_node->clear_children();
+        manager_node->add_child(sort_node);
+        sort_node->clear_children();
+        sort_node->add_child(child);
+        return 0;
     }
     if (limit_node != nullptr) {
-      ExecNode* parent = limit_node->get_parent();
-      ExecNode* child = limit_node->children(0);
-      parent->clear_children();
-      parent->add_child(child);
+        ExecNode* parent = limit_node->get_parent();
+        ExecNode* child = limit_node->children(0);
+        parent->clear_children();
+        parent->add_child(child);
 
-      parent = manager_node->get_parent();
-      parent->clear_children();
-      parent->add_child(limit_node);
-      limit_node->clear_children();
-      limit_node->add_child(manager_node);
-      return 0;
+        parent = manager_node->get_parent();
+        parent->clear_children();
+        parent->add_child(limit_node);
+        limit_node->clear_children();
+        limit_node->add_child(manager_node);
+        return 0;
     }
     return 0;
 }
