@@ -51,8 +51,8 @@ public:
             return ret;
         }
     }
-    static void analyze_union(QueryContext* ctx, PacketNode* packet_node);
-    static int analyze_derived_table(QueryContext* ctx, PacketNode* packet_node);
+    void analyze_union(QueryContext* ctx, PacketNode* packet_node);
+    int analyze_derived_table(QueryContext* ctx, PacketNode* packet_node);
 };
 }
 
