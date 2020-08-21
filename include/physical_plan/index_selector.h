@@ -37,7 +37,8 @@ public:
                         FilterNode* filter_node,
                         SortNode* sort_node,
                         JoinNode* join_node,
-                        bool* has_recommend);
+                        bool* has_recommend,
+                        std::map<int32_t, int>& field_range_type);
 private:
 
     void hit_row_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null);

@@ -338,6 +338,54 @@ TEST(test_parser, case_option) {
     }
     {
         parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select 1 ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select 0b1101011 ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select 0xFA00 ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
         // select distictrow
         std::string sql_opt2 = "select all  sql_cache sql_calc_found_rows field_a ";
         parser.parse(sql_opt2);
@@ -2658,6 +2706,31 @@ TEST(test_parser, case_union) {
         ASSERT_TRUE(typeid(*(union_stmt->select_stmts[1])) == typeid(parser::SelectStmt));
         ASSERT_TRUE(typeid(*(union_stmt->select_stmts[2])) == typeid(parser::SelectStmt));
         ASSERT_EQ(true, union_stmt->distinct);
+    }
+}
+
+TEST(test_parser, case_from_subselect) {
+    //test union clause
+    {
+        parser::SqlParser parser;
+        std::string sql_from_subselect = "SELECT a,b FROM (select a,b from t1) as t2 WHERE a=10 AND b=1 ORDER BY a LIMIT 10";
+        parser.parse(sql_from_subselect);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        parser::TableSource* table_source = (parser::TableSource*)select_stmt->table_refs;
+        ASSERT_EQ(std::string(table_source->as_name.value), "t2");
+        ASSERT_TRUE(typeid(*(table_source->derived_table)) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt1 = (parser::SelectStmt*)table_source->derived_table;
+        ASSERT_TRUE(select_stmt1->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
     }
 }
 }  // namespace baikal

@@ -17,6 +17,7 @@
 #include "update_manager_node.h"
 #include "insert_node.h"
 #include "network_socket.h"
+#include "type_utils.h"
 #include <set>
 
 namespace baikaldb {
@@ -94,11 +95,89 @@ int InsertManagerNode::init_insert_info(InsertNode* insert_node) {
     return 0;
 }
 
+int InsertManagerNode::subquery_open(RuntimeState* state) {
+    int ret = 0;
+    for (auto expr : _select_projections) {
+        ret = expr->open();
+        if (ret < 0) {
+            DB_WARNING("Expr::open fail:%d", ret);
+            return ret;
+        }
+    }
+    _table_info = _factory->get_table_info_ptr(_table_id);
+    if (_table_info == nullptr) {
+        DB_WARNING("no table found with table_id: %ld", _table_id);
+        return -1;
+    }
+    for (size_t i = 0; i < _table_info->fields.size(); i++) {
+        pb::PrimitiveType sub_type = _select_projections[i]->col_type();
+        bool is_literal = _select_projections[i]->is_literal();
+        pb::ExprNodeType node_type = _select_projections[i]->node_type();
+        pb::PrimitiveType insert_type = _table_info->fields[i].type;
+        if (!is_compatible_type(sub_type, insert_type, is_literal || (node_type == pb::FUNCTION_CALL))) {
+            state->error_code = ER_TRUNCATED_WRONG_VALUE_FOR_FIELD;
+            state->error_msg << "Incorrect cloumn type expect " << pb::PrimitiveType_Name(insert_type);
+            state->error_msg << " but " << pb::PrimitiveType_Name(sub_type);
+            return -1;
+        }
+    }
+    _sub_query_node = _children.back();
+    _children.pop_back();
+    ret = _sub_query_node->open(_sub_query_runtime_state);
+    if (ret < 0) {
+        return ret;
+    }
+    SmartRecord record_template = _factory->new_record(_table_id);
+    if (record_template == nullptr) {
+        DB_WARNING("table not found table_id: %ld", _table_id);
+        return -1;
+    }
+    bool eos = false;
+    do {
+        RowBatch batch;
+        ret = _sub_query_node->get_next(_sub_query_runtime_state, &batch, &eos);
+        if (ret < 0) {
+            DB_WARNING("children:get_next fail:%d", ret);
+            return ret;
+        }
+        for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
+            MemRow* row = batch.get_row().get();
+            SmartRecord record = record_template->clone(false);
+            for (size_t i = 0; i < _select_projections.size(); i++) {
+                auto expr = _select_projections[i];
+                ExprValue result = expr->get_value(row).cast_to(expr->col_type());
+                record->set_value(record->get_field_by_idx(i), result);
+            }
+            _origin_records.push_back(record);
+            //DB_WARNING("record:%s", record->debug_string().c_str());
+        }
+    } while (!eos);
+    return  0;
+}
+
+
 int InsertManagerNode::open(RuntimeState* state) {
     TimeCost cost;
     int ret = 0;
+    if (_has_sub_query) {
+        ret = subquery_open(state);
+        if (ret < 0) {
+            return ret;
+        }
+        if (_origin_records.empty()) {
+            return 0;
+        }
+    }
     // no global index for InsertNode
     if (_children[0]->node_type() == pb::INSERT_NODE) {
+        if (_has_sub_query) {
+            DMLNode* dml_node = static_cast<DMLNode*>(_children[0]);
+            ret = get_region_infos(state, dml_node, _origin_records,
+                _del_scan_records, _region_infos);
+            if (ret < 0) {
+                return ret;
+            }
+        }
         return DmlManagerNode::open(state);
     }
     ret = process_records_before_send(state);
@@ -361,10 +440,26 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
         // 2=插入+删除
         _affected_rows += dup_record_ids.size() * 2;
     }
+    /* 不同的插入row与主表中的某row冲突
+        insert into `t1`(id,name1,name2,class1,class2) values(1,'zhangsan1','zhangsan11',10,11);
+        insert into `t1`(id,name1,name2,class1,class2,address1) values(2,'lisi2','lisi22',20,21);
+        insert into `t1`(id,name1,name2,class1,class2) values(3,'wangwu3','wangwu33',30,3);
+        insert into `t1`(id,name1,name2,class1,class2) values(4,'zhaoliu4','zhaoliu44',40,41);
+
+        insert into `t1`(id,name1,name2,class1,class2) values(1,'zhangsan9','zhangsan99',90,91),
+            (11,'zhangsan1','zhangsan1111',1100,1101) on duplicate key update class1 = class1+1;
+
+        插入的第一行id=1和第二行name1='zhangsan1'与表中已有数据冲突，_on_dup_key_update_records中两个记录
+        对应同一条主表返回的record
+    */
+    std::set<SmartRecord> updated_records;
     for (auto idx_pair : _on_dup_key_update_records) {
         for (auto key_pair : idx_pair.second) {
-            _insert_scan_records.push_back(key_pair.second);
+            updated_records.insert(key_pair.second);
         }
+    }
+    for (auto record :  updated_records) {
+        _insert_scan_records.push_back(record);
     }
     _del_scan_records = _store_records[_pri_info->id];
     _affected_rows += _insert_scan_records.size();
@@ -463,17 +558,18 @@ int InsertManagerNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_des
 
 int InsertManagerNode::reverse_main_table(RuntimeState* state) {
     int ret = 0;
-    // 构造主表返回的主键集合
-    std::vector<SmartRecord> pk_records = _store_records[_pri_info->id];
-    std::set<std::string> pk_key_set;
-    for (auto record : pk_records) {
-        MutTableKey mt_key;
-        ret = record->encode_key(*_pri_info, mt_key, -1, false);
-        if (ret < 0) {
-            DB_WARNING("encode key failed, index:%ld log_id:%lu ret:%d", _pri_info->id, state->log_id(), ret);
-            return ret;
+    if (!_primary_record_key_record_map_construct) {
+        for (auto record : _store_records[_pri_info->id]) {
+            MutTableKey mt_key;
+            ret = record->encode_key(*_pri_info, mt_key, -1, false);
+            if (ret < 0) {
+                DB_WARNING("encode key failed, index:%ld log_id:%lu ret:%d", _pri_info->id, state->log_id(), ret);
+                return ret;
+            }
+            std::string key = mt_key.data();
+            _primary_record_key_record_map[key] = record->clone();;
         }
-        pk_key_set.insert(mt_key.data());
+        _primary_record_key_record_map_construct = true;
     }
     // 判断返回的二级索引数据是否主键已返回
     _insert_scan_records.clear();
@@ -490,8 +586,9 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
                 DB_WARNING("encode key failed, log_id:%lu record:%s", state->log_id(), record->debug_string().c_str());
                 return ret;
             }
-            std::string key = mt_key.data();
-            if (pk_key_set.count(key) == 0) {
+            std::string pk_key = mt_key.data();
+            auto pk_record_iter = _primary_record_key_record_map.find(pk_key);
+            if (pk_record_iter == _primary_record_key_record_map.end()) {
                 // 二级索引的主键主表没有返回，需要反查主表
                 _insert_scan_records.push_back(record);
                 if (_on_dup_key_update) {
@@ -505,10 +602,24 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
                     std::string key = mt_key.data();
                     reversed_idx_keys_map[index_id].insert(key);
                 }
+            } else {
+                if (_on_dup_key_update) {
+                    auto info = _index_info_map[index_id];
+                    MutTableKey mt_key;
+                    ret = record->encode_key(*info, mt_key, -1, false);
+                    if (ret < 0) {
+                        DB_WARNING("encode key failed, index:%ld log_id:%lu ret:%d", index_id, state->log_id(), ret);
+                        return ret;
+                    }
+                    std::string key = mt_key.data();
+                    auto pk_record  = pk_record_iter->second;
+                    _on_dup_key_update_records[index_id][key] = pk_record;
+                    //DB_WARNING("index_id:%ld key:%s %d record:%s", index_id, str_to_hex(key).c_str(), key.size(), pk_record->debug_string().c_str());
+                }
             }
         }
     }
-    if (pk_records.size() == 0 && _insert_scan_records.size() == 0) {
+    if (_primary_record_key_record_map.size() == 0 && _insert_scan_records.size() == 0) {
         // 完全没有冲突
         _has_conflict_record = false;
         return 0;
@@ -538,6 +649,7 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
                     std::string key = mt_key.data();
                     if (pair.second.count(key) > 0) {
                         _on_dup_key_update_records[index_id][key] = record->clone();
+                        //DB_WARNING("index_id:%ld key:%s %d record:%d", index_id, str_to_hex(key).c_str(), key.size(), record->debug_string().c_str());
                     }
                 }
             }
@@ -569,8 +681,12 @@ int InsertManagerNode::get_record_from_store(RuntimeState* state) {
                 return ret;
             }
             std::string key = mt_key.data();
-            _on_dup_key_update_records[index_id][key] = record->clone();
+            //DB_WARNING("index_id:%ld key:%s %d record:%s", index_id, str_to_hex(key).c_str(), key.size(), record->debug_string().c_str());
+            SmartRecord pk_record = record->clone();
+            _on_dup_key_update_records[index_id][key] = pk_record;
+            _primary_record_key_record_map[key] = pk_record;
         }
+        _primary_record_key_record_map_construct = true;
     }
     // 获取二级索引数据，返回索引数据+pk数据
     auto iter = _children.begin();

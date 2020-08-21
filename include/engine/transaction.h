@@ -534,6 +534,8 @@ private:
     bool                            _use_ttl = false;
     int64_t                         _read_ttl_timestamp_us = 0; //ttl读取时间
     int64_t                         _write_ttl_timestamp_us = 0; //ttl写入时间
+    static bvar::LatencyRecorder    rocksdb_put_time_cost;
+    static bvar::LatencyRecorder    rocksdb_get_time_cost;
 };
 
 typedef std::shared_ptr<Transaction> SmartTransaction;

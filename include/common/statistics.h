@@ -117,12 +117,59 @@ public:
         return iter->second->get_value(value.hash());
     }
 
+    int get_cmsketch_width(const int field_id) {
+        auto iter = _field_cmsketch.find(field_id);
+        if (iter == _field_cmsketch.end()) {
+            return -1;
+        }
+
+        return iter->second->get_width();
+    }
+
     double get_cmsketch_ratio(const int field_id, const ExprValue& value) {
         if (_total_rows == 0) {
             return 1.0;
         }
+
+        int64_t distinct_cnt = get_distinct_cnt(field_id);
         int64_t cnt = get_cmsketch_count(field_id, value);
-        return static_cast<double>(cnt) / static_cast<double>(_total_rows);
+        if (cnt <= 0 && distinct_cnt <= 0) {
+            return 0.0;
+        } else if (cnt <= 0) {
+            return 1.0 / distinct_cnt;
+        } else if (distinct_cnt <= 0) {
+            return static_cast<double>(cnt) / static_cast<double>(_total_rows);
+        }
+        double cmsketch_ratio = static_cast<double>(cnt) / static_cast<double>(_total_rows);
+        double distinct_ratio = 1.0 / distinct_cnt;
+        int width = get_cmsketch_width(field_id);
+        if (width < 0) {
+            return 1.0 / distinct_cnt;
+        }
+        if (distinct_cnt <= width) {
+            //distinct_cnt 小于 cmsketch_width时，hash冲突较小，cmsketch_ratio误差率小
+            return cmsketch_ratio;
+        }
+
+        // distinct_ratio 比 cmsketch_ratio小两个数量级则使用distinct_ratio
+        if (distinct_ratio * 100 < cmsketch_ratio) {
+            return distinct_ratio;
+        }
+        
+        return cmsketch_ratio;
+    }
+
+    int64_t get_sample_cnt() {
+        return _sample_rows;
+    }
+
+    int64_t get_distinct_cnt(int field_id) {
+        auto iter = _field_histogram.find(field_id);
+        if (iter == _field_histogram.end()) {
+            return -1;
+        }
+
+        return iter->second->get_distinct_cnt();
     }
 
 private:
@@ -143,13 +190,16 @@ private:
             auto ptr = std::make_shared<CMsketchColumn>(depth, width, column.field_id());
             ptr->add_proto(column);
             _field_cmsketch[column.field_id()] = ptr;
+            if (_total_rows <= 0) {
+                _total_rows = ptr->get_total_rows();
+            }
         }
     }
 private:
-    int64_t _table_id;
-    int64_t _version;
-    int64_t _sample_rows;
-    int64_t _total_rows;
+    int64_t _table_id = 0;
+    int64_t _version = 0;
+    int64_t _sample_rows = 0;
+    int64_t _total_rows = 0;
     std::map<int, std::shared_ptr<Histogram>> _field_histogram;
     std::map<int, std::shared_ptr<CMsketchColumn>> _field_cmsketch;
 };

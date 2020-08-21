@@ -114,7 +114,6 @@ bool ExecNode::need_seperate() {
         case pb::INSERT_NODE:
         case pb::UPDATE_NODE:
         case pb::DELETE_NODE:
-        case pb::REPLACE_NODE:
         case pb::TRUNCATE_NODE:
         case pb::KILL_NODE:
         case pb::TRANSACTION_NODE:
@@ -256,9 +255,6 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
             *exec_node = new UpdateNode;
             return (*exec_node)->init(node);
         case pb::INSERT_NODE:
-            *exec_node = new InsertNode;
-            return (*exec_node)->init(node);
-        case pb::REPLACE_NODE:
             *exec_node = new InsertNode;
             return (*exec_node)->init(node);
         case pb::DELETE_NODE:

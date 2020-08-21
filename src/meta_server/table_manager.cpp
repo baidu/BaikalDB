@@ -1253,7 +1253,7 @@ int TableManager::load_table_snapshot(const std::string& value) {
         DB_FATAL("parse from pb fail when load table snapshot, key: %s", value.c_str());
         return -1;
     }
-    DB_WARNING("table snapshot:%s", table_pb.ShortDebugString().c_str());
+    DB_WARNING("table snapshot:%s, size:%d", table_pb.ShortDebugString().c_str(), value.size());
     TableMem table_mem;
     table_mem.schema_pb = table_pb;
     table_mem.whether_level_table = table_pb.has_upper_table_name();
@@ -3025,8 +3025,8 @@ void TableManager::update_index_status(const pb::MetaManagerRequest& request,
                         request_index_info.deleted()) {
                         //删除索引
                         DB_NOTICE("DDL_LOG udpate_index_status delete index [%lld].", index_iter->index_id());
-                        mem_schema_pb.mutable_indexs()->erase(index_iter);
                         update_op_version(mem_schema_pb.mutable_schema_conf(), "drop index " + index_iter->index_name());
+                        mem_schema_pb.mutable_indexs()->erase(index_iter);
                     } else {
                         //改变索引状态
                         DB_NOTICE("DDL_LOG set state index state to [%s]", 

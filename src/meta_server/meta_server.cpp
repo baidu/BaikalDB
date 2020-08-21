@@ -41,7 +41,9 @@ DECLARE_int64(flush_memtable_interval_us);
 DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(e0_meta_bns, "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all", "");
 DEFINE_string(holmes_meta_bns, "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all", "");
+DEFINE_string(holmes_product_meta_bns, "group.opera-online-baikalMeta-000-bj.HOLMES.all", "");
 DEFINE_string(dmp_meta_bns, "group.opera-online-baikalMeta-000-bj.DMP.all", "");
+DEFINE_string(coffline_meta_bns, "group.opera-coffline-baikalMeta-000-bj.FENGCHAO.all", "");
 #endif
 
 const std::string MetaServer::CLUSTER_IDENTIFY(1, 0x01);
@@ -108,10 +110,14 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     _meta_interact_map["e0"]->init_internal(FLAGS_e0_meta_bns);
     _meta_interact_map["holmes"] = new MetaServerInteract;
     _meta_interact_map["holmes"]->init_internal(FLAGS_holmes_meta_bns);
+    _meta_interact_map["holmes_product"] = new MetaServerInteract;
+    _meta_interact_map["holmes_product"]->init_internal(FLAGS_holmes_product_meta_bns);
     _meta_interact_map["ps"] = new MetaServerInteract;
     _meta_interact_map["ps"]->init_internal(FLAGS_ps_meta_bns);
     _meta_interact_map["dmp"] = new MetaServerInteract;
     _meta_interact_map["dmp"]->init_internal(FLAGS_dmp_meta_bns);
+    _meta_interact_map["coffline"] = new MetaServerInteract;
+    _meta_interact_map["coffline"]->init_internal(FLAGS_coffline_meta_bns);
 #endif
     _flush_bth.run([this]() {flush_memtable_thread();});
     _apply_region_bth.run([this]() {apply_region_thread();});
@@ -503,12 +509,16 @@ static std::string bns_to_plat(const std::string& bns) {
     static std::map<std::string, std::string> mapping = {
         {"e0", "e0"},
         {"holmes", "holmes"},
+        {"hmkv", "holmes"},
+        {"coffline", "coffline"},
     };
     std::vector<std::string> vec;
     boost::split(vec, bns, boost::is_any_of(".-"));
     // DMP产品线采用独立的meta
     if (vec.size() > 6 && vec[6] == "DMP") {
         return "dmp";
+    } else if (vec.size() > 6 && vec[6] == "HOLMES") {
+        return "holmes_product";
     } else if (vec.size() > 2) {
         if (mapping.count(vec[2]) == 1) {
             return mapping[vec[2]];

@@ -300,7 +300,6 @@ void Region::update_average_cost(int64_t request_time_cost) {
 
 bool Region::check_region_legal_complete() {
     do {
-        //bthread_usleep(FLAGS_split_duration_us);
         bthread_usleep(10 * 1000 * 1000);
         //3600S没有收到请求， 并且version 也没有更新的话，分裂失败
         if (_removed) {
@@ -1992,6 +1991,7 @@ int Region::select_sample(RuntimeState& state, ExecNode* root, const pb::Analyze
                 if (value.is_null()) {
                     continue;
                 }
+                value.cast_to(slot.slot_type());
                 cmsketch.set_value(slot.field_id(), value.hash());
             }
             count++;
@@ -2072,21 +2072,24 @@ void Region::construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bo
         // 删除大量数据后做compact
         compact_data_in_queue();
     }
-    if (_region_info.version() == 0) {
+    pb::RegionInfo copy_region_info;
+    copy_region(&copy_region_info);
+    if (copy_region_info.version() == 0) {
         DB_WARNING("region version is 0, region_id: %ld", _region_id);
         return;
     }
     _region_info.set_num_table_lines(_num_table_lines.load());
     //增加peer心跳信息
     if ((need_peer_balance || is_merged()) 
-            && _report_peer_info) {
+        // addpeer过程中，还没走到on_configuration_committed，此时删表，会导致peer清理不掉
+            && (_report_peer_info || !_factory->exist_tableid(get_table_id()))) {
         pb::PeerHeartBeat* peer_info = request.add_peer_infos();
-        peer_info->set_table_id(_region_info.table_id());
+        peer_info->set_table_id(copy_region_info.table_id());
         peer_info->set_main_table_id(get_table_id());
         peer_info->set_region_id(_region_id);
         peer_info->set_log_index(_applied_index);
-        peer_info->set_start_key(_region_info.start_key());
-        peer_info->set_end_key(_region_info.end_key());
+        peer_info->set_start_key(copy_region_info.start_key());
+        peer_info->set_end_key(copy_region_info.end_key());
         if (_node.leader_id().addr.ip != butil::IP_ANY) {
             peer_info->set_exist_leader(true);    
         } else {
@@ -2108,7 +2111,7 @@ void Region::construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bo
         copy_region(leader_region);
         leader_region->set_status(_region_control.get_status());
         //在分裂线程里更新used_sized
-        leader_region->set_used_size(_region_info.used_size());
+        //leader_region->set_used_size(_region_info.used_size());
         leader_region->set_leader(_address);
         //fix bug 不能直接取reigon_info的log index, 
         //因为如果系统在做过snapshot再重启之后，一直没有数据，
@@ -2646,9 +2649,12 @@ void Region::apply_txn_request(const pb::StoreReq& request, braft::Closure* done
     }
 }
 void Region::start_split(braft::Closure* done, int64_t applied_index, int64_t term) {
+    static bvar::Adder<int> bvar_split; 
+    static bvar::Window<bvar::Adder<int>> split_count("split_count_minite", &bvar_split, 60);
     _meta_writer->update_apply_index(_region_id, applied_index);
     //只有leader需要处理split请求，记录当前的log_index, term和迭代器
     if (done) {
+        bvar_split << 1;
         _split_param.split_start_index = applied_index + 1;
         _split_param.split_term = term;
         _split_param.snapshot = _rocksdb->get_db()->GetSnapshot();
@@ -2863,15 +2869,6 @@ void Region::validate_and_add_version(const pb::StoreReq& request,
 void Region::add_version_for_split_region(const pb::StoreReq& request, braft::Closure* done, int64_t applied_index, int64_t term) {
     rocksdb::WriteBatch batch;
     batch.Put(_meta_writer->get_handle(), _meta_writer->applied_index_key(_region_id), _meta_writer->encode_applied_index(applied_index));
-    if (!compare_and_set_legal_for_split()) {
-        _meta_writer->write_batch(&batch, _region_id);    
-        DB_FATAL("split timeout, region was set split fail, region_id: %ld", _region_id);
-        if (done) {
-            ((DMLClosure*)done)->response->set_errcode(pb::SPLIT_TIMEOUT);
-            ((DMLClosure*)done)->response->set_errmsg("split timeout");
-        }
-        return;
-    }
     pb::RegionInfo region_info_mem;
     copy_region(&region_info_mem);
     region_info_mem.set_version(1);
@@ -2894,6 +2891,14 @@ void Region::add_version_for_split_region(const pb::StoreReq& request, braft::Cl
                     _region_id, _applied_index, term);
         _region_control.reset_region_status();
         set_region_with_update_range(region_info_mem);
+        if (!compare_and_set_legal()) {
+            DB_FATAL("split timeout, region was set split fail, region_id: %ld", _region_id);
+            if (done) {
+                ((DMLClosure*)done)->response->set_errcode(pb::SPLIT_TIMEOUT);
+                ((DMLClosure*)done)->response->set_errmsg("split timeout");
+            }
+            return;
+        }
         // 分裂后的新region需要删除范围
         _reverse_remove_range = true;
         std::unordered_map<uint64_t, pb::TransactionInfo> prepared_txn;
@@ -4619,6 +4624,8 @@ void Region::complete_split() {
     ON_SCOPE_EXIT([this]() {
         _multi_thread_cond.decrease_signal();
     });
+    static bvar::LatencyRecorder split_cost("split_cost");
+    split_cost << _split_param.total_cost.get_time();
     _split_param.op_add_version_cost = _split_param.op_add_version.get_time();
     DB_WARNING("split complete, region_id: %ld new_region_id: %ld, total_cost:%ld, no_write_time_cost:%ld,"
                " new_region_cost:%ld, op_start_split_cost:%ld, op_start_split_for_tail_cost:%d, write_sst_cost:%ld,"
@@ -5219,10 +5226,9 @@ void Region::write_local_rocksdb_for_ddl() {
 
                     auto field = record->get_field_by_tag(index_info_to_modify.fields[0].id);
                     if (record->is_null(field)) {
-                        DB_WARNING("DDL_LOG record [%s] record field is_null, rollback.", record->to_string().c_str());
+                        DB_DEBUG("DDL_LOG record [%s] record field is_null.", record->to_string().c_str());
                         txn->rollback();
-                        ddlwork_rollback(pb::INTERNAL_ERROR, is_success);
-                        break;
+                        continue;
                     }
                     std::string word;
                     ret = record->get_reverse_word(index_info_to_modify, word);
@@ -5388,36 +5394,21 @@ void Region::ddlwork_finish_check_process(std::set<int64_t>& ddlwork_table_ids) 
     BAIDU_SCOPED_LOCK(_region_ddl_lock);
     if (_region_ddl_info.ddlwork_infos_size() > 0 && 
         ddlwork_table_ids.find(get_table_id()) == ddlwork_table_ids.end()) {
-        auto op_type = _region_ddl_info.ddlwork_infos(0).op_type();
-        pb::IndexState state;
-        bool should_delete_ddlwork = false;
-        if (ddl_schema_state(state) == 0) {
-            //能取到索引状态，并且状态为结束状态，删除ddlwork。
-            if (DdlHelper::ddlwork_is_finish(op_type, state)) {
-                should_delete_ddlwork = true;
-            }
+
+        //delete work
+        _ddl_param.reset();    
+        _region_ddl_info.clear_ddlwork_infos();
+        _meta_writer->update_region_ddl_info(_region_ddl_info);
+        DB_DEBUG("DDL_LOG region_%lld ddlwork_finish_check_process delete_job", _region_id);
+        pb::RegionStatus expected_status = pb::DOING;
+        if (_region_control.get_status() == pb::DOING &&
+            !_region_control.compare_exchange_strong(expected_status, pb::IDLE)) {
+            DB_FATAL("DDL_LOG region_%lld change status error.", _region_id);
         } else {
-            //不能取到索引状态，且该ddlwork任务为删除索引时，删除ddlwork。
-            if (op_type == pb::OP_DROP_INDEX) {
-                should_delete_ddlwork = true;
-            }
+            DB_NOTICE("DDL_LOG change_region_status region_%lld region status[%s]", 
+                _region_id, pb::RegionStatus_Name(_region_control.get_status()).c_str());
         }
-        if (should_delete_ddlwork) {
-            //delete work
-            _ddl_param.reset();    
-            _region_ddl_info.clear_ddlwork_infos();
-            _meta_writer->update_region_ddl_info(_region_ddl_info);
-            DB_DEBUG("DDL_LOG region_%lld ddlwork_finish_check_process delete_job", _region_id);
-            pb::RegionStatus expected_status = pb::DOING;
-            if (_region_control.get_status() == pb::DOING &&
-                !_region_control.compare_exchange_strong(expected_status, pb::IDLE)) {
-                DB_FATAL("DDL_LOG region_%lld change status error.", _region_id);
-            } else {
-                DB_NOTICE("DDL_LOG change_region_status region_%lld region status[%s]", 
-                    _region_id, pb::RegionStatus_Name(_region_control.get_status()).c_str());
-            }
-            DB_NOTICE("DDL region_%lld delete ddlwork_info", _region_id);
-        }
+        DB_NOTICE("DDL region_%lld delete ddlwork_info", _region_id);
     }
 }
 

@@ -250,6 +250,7 @@ void AggNode::close(RuntimeState* state) {
     for (; _iter != _hash_map.end(); _iter++) {
         delete _iter->second;
     }
+    _hash_map.clear();
 }
 void AggNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);

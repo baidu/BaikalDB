@@ -52,10 +52,7 @@ public:
     }
     pb::LockCmdType lock_type() { return _lock_type; }
     void set_affect_primary(bool affect_primary) {
-        _affect_primary = affect_primary;
-    }
-    void set_affected_index_ids(const std::vector<int64_t>& ids) {
-        _affected_index_ids.insert(_affected_index_ids.end(), ids.begin(), ids.end());
+        _update_affect_primary = affect_primary;
     }
     bool is_replace() {
         return _is_replace;
@@ -93,8 +90,7 @@ protected:
     bool _is_replace = false;
     bool _need_ignore = false;
     bool _on_dup_key_update = false;
-    //std::vector<int64_t> _index_ids;
-    bool _affect_primary = true;
+    bool _update_affect_primary = true;
     SchemaFactory* _factory = nullptr;
     std::vector<pb::SlotDescriptor> _primary_slots;
     std::vector<pb::SlotDescriptor> _update_slots;
@@ -104,7 +100,14 @@ protected:
     SmartTransaction         _txn = nullptr; 
     SmartTable               _table_info;
     SmartIndex               _pri_info;
-    std::vector<int64_t>     _affected_index_ids;
+    // insert delete影响索引索引
+    // update不修改primary的时候影响部分索引
+    // insert on dup key update，在执行update部分时影响部分索引，所以拆出两个变量
+    std::vector<SmartIndex>     _all_indexes; 
+    std::vector<SmartIndex>     _affected_indexes; 
+    std::vector<SmartIndex>*    _indexes_ptr = &_all_indexes;
+    std::vector<SmartIndex>     _reverse_indes; 
+    std::unordered_set<int64_t> _ignore_index_ids;
 
     SmartIndex        _global_index_info; 
     pb::LockCmdType   _lock_type;
@@ -117,6 +120,5 @@ protected:
     int64_t _ttl_timestamp_us = 0; //ttl写入时间，0表示无ttl
 };
 }
-
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -18,11 +18,11 @@ enum OpType {
     OP_START_SPLIT                          = 9; //走raft,创建迭代器，取出index
     OP_START_SPLIT_FOR_TAIL                 = 10; //分发数据完成之后，验证请求的有效性
     OP_VALIDATE_AND_ADD_VERSION             = 11; //分裂时version + 1
-    OP_ADD_VERSION_FOR_SPLIT_REGION         = 12; //该接口是通过网络请求发送的， 上边三个都不是
+    OP_ADD_VERSION_FOR_SPLIT_REGION         = 12; //给新分裂的region发送vertion+1，该接口是通过网络请求发送的， 上边三个都不是
     OP_TRUNCATE_TABLE                       = 13;
     OP_PREPARE                              = 14; 
     OP_EXPLAIN                              = 15;
-    OP_ADJUSTKEY_AND_ADD_VERSION            = 16;
+    OP_ADJUSTKEY_AND_ADD_VERSION            = 16; //region merge时调整region区间并增加version
     OP_START_DDL                            = 17; //store开始ddlwork。
     OP_START_DDL_FOR_DROP_INDEX             = 18;
     OP_UPDATE_STORE_DDLWORK                 = 19; //更新store ddl状态

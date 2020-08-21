@@ -207,6 +207,11 @@ public:
     int32_t tuple_id() const {
         return _tuple_id;
     }
+
+    void set_slot_col_type(int32_t tuple_id, int32_t slot_id, pb::PrimitiveType col_type);
+
+    pb::PrimitiveType get_slot_col_type(int32_t slot_id);
+
     int32_t slot_id() const {
         return _slot_id;
     }

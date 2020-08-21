@@ -47,6 +47,7 @@ static const std::string TABLE_SWITCH_COST     = "select_index_by_cost";      //
 static const std::string TABLE_OP_VERSION      = "op_version";                //操作版本号
 static const std::string TABLE_OP_DESC         = "op_desc";                   //操作描述信息
 static const std::string TABLE_FILTER_RATIO    = "filter_ratio";              //过滤率
+static const std::string VIRTUAL_DATABASE_NAME = "__virtual_db";              // 临时表数据库名
 struct UserInfo;
 class TableRecord;
 typedef std::shared_ptr<TableRecord> SmartRecord;
@@ -122,7 +123,9 @@ struct FieldInfo {
     int64_t             table_id;
     int                 pb_idx = 0; 
     std::string         name;   // db.table.field
+    std::string         lower_name;   // db.table.(lower)field
     std::string         short_name; // field
+    std::string         lower_short_name;   // (lower)field
     std::string         default_value;
     ExprValue           default_expr_value;
     std::string         on_update_value;
@@ -342,6 +345,8 @@ public:
     // 计算单个值占比
     double get_cmsketch_ratio(int64_t table_id, int field_id, const ExprValue& value);
     SmartStatistics get_statistics_ptr(int64_t table_id);
+    int64_t get_histogram_sample_cnt(int64_t table_id);
+    int64_t get_histogram_distinct_cnt(int64_t table_id, int field_id); 
     void schema_info_scope_read(std::function<void(const SchemaMapping&)> callback) {
         DoubleBufferedTable::ScopedPtr table_ptr;
         if (_double_buffer_table.Read(&table_ptr) != 0) {

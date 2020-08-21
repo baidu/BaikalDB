@@ -54,7 +54,7 @@ void AutoIncrStateMachine::on_apply(braft::Iterator& iter) {
         if (done && ((MetaServerClosure*)done)->response) {
             ((MetaServerClosure*)done)->response->set_op_type(request.op_type());
         }
-        DB_NOTICE("on applye, term:%ld, index:%ld, request op_type:%s", 
+        DB_DEBUG("on applye, term:%ld, index:%ld, request op_type:%s", 
                     iter.term(), iter.index(), 
                     pb::OpType_Name(request.op_type()).c_str());
         switch (request.op_type()) {
@@ -143,7 +143,7 @@ void AutoIncrStateMachine::gen_id(const pb::MetaManagerRequest& request,
         ((MetaServerClosure*)done)->response->set_end_id(_auto_increment_map[table_id]);
         ((MetaServerClosure*)done)->response->set_errmsg("SUCCESS");
     }
-    DB_NOTICE("gen_id for auto_increment success, request:%s", 
+    DB_DEBUG("gen_id for auto_increment success, request:%s", 
                 request.ShortDebugString().c_str());
 }
 void AutoIncrStateMachine::update(const pb::MetaManagerRequest& request,

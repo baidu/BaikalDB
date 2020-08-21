@@ -387,6 +387,10 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         field_info.table_id = table_id;
         field_info.name = tbl_info.name + "." + field.field_name();
         field_info.short_name = field.field_name();
+        field_info.lower_short_name.resize(field_info.short_name.size());
+        std::transform(field_info.short_name.begin(), field_info.short_name.end(), 
+                field_info.lower_short_name.begin(), ::tolower);
+        field_info.lower_name = tbl_info.name + "." + field_info.lower_short_name;
         field_info.type = field.mysql_type();
         field_info.can_null = field.can_null();
         field_info.auto_inc = field.auto_increment();
@@ -816,7 +820,7 @@ size_t SchemaFactory::update_regions_table(
 
     TableRegionPtr table_region_ptr = table_region_mapping[table_id];
     
-    DB_NOTICE("double_buffer_write update_regions_table table_id[%ld]", table_id);
+    //DB_NOTICE("double_buffer_write update_regions_table table_id[%ld]", table_id);
     for (auto& start_key_region : key_region_map) {
         auto& start_key_region_map = start_key_region.second;
         std::vector<const pb::RegionInfo*> last_regions;
@@ -956,7 +960,7 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     // 每次都新建一个UserInfo，所以内部无需加锁
     std::shared_ptr<UserInfo> user_info(new (std::nothrow)UserInfo);
     BAIDU_SCOPED_LOCK(_update_user_mutex);
-    if (_user_info_mapping.count(username) == 1) {
+    if (_user_info_mapping.count(username) == 1 && !user.need_auth_addr()) {
         // need not update when version GE
         if (_user_info_mapping[username]->version >= user.version()) {
             return;
@@ -1080,6 +1084,38 @@ int64_t SchemaFactory::get_total_rows(int64_t table_id) {
         return iter->second->total_rows();
     }
     return 0;
+}
+
+int64_t SchemaFactory::get_histogram_sample_cnt(int64_t table_id) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return -1; 
+    }
+
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second->get_sample_cnt();
+    }
+
+    return -1;
+}
+
+int64_t SchemaFactory::get_histogram_distinct_cnt(int64_t table_id, int field_id) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return -1; 
+    }
+
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        return iter->second->get_distinct_cnt(field_id);
+    }
+
+    return -1;
 }
 
 double SchemaFactory::get_histogram_ratio(int64_t table_id, int field_id, const ExprValue& lower, const ExprValue& upper) {

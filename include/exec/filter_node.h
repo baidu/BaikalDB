@@ -35,6 +35,7 @@ public:
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return &_conjuncts;
     }
+
     void add_conjunct(ExprNode* conjunct) {
         _conjuncts.push_back(conjunct);
     }

@@ -162,46 +162,46 @@ public:
         txn->begin();
         return txn;
     }
-    void set_num_increase_rows(int num) {
+    void set_num_increase_rows(int64_t num) {
         _num_increase_rows = num;
     }
-    int num_increase_rows() const {
+    int64_t num_increase_rows() const {
         return _num_increase_rows;
     }
     bool need_check_region() const {
         return _need_check_region;
     }
 
-    void set_num_affected_rows(int num) {
+    void set_num_affected_rows(int64_t num) {
         _num_affected_rows = num;
     }
 
-    void inc_num_returned_rows(int num) {
+    void inc_num_returned_rows(int64_t num) {
         _num_returned_rows += num;
     }
 
-    int num_affected_rows() {
+    int64_t num_affected_rows() {
         return _num_affected_rows;
     }
 
-    int num_returned_rows() {
+    int64_t num_returned_rows() {
         return _num_returned_rows;
     }
-    void set_num_scan_rows(int num) {
+    void set_num_scan_rows(int64_t num) {
         _num_scan_rows = num;
     }
-    int num_scan_rows() {
+    int64_t num_scan_rows() {
         return _num_scan_rows;
     }
 
-    void set_num_filter_rows(int num) {
+    void set_num_filter_rows(int64_t num) {
         _num_filter_rows = num;
     }
     void inc_num_filter_rows() {
         _num_filter_rows++;
     }
 
-    int num_filter_rows() {
+    int64_t num_filter_rows() {
         return _num_filter_rows;
     }
 
@@ -332,11 +332,11 @@ private:
 
     bool _need_check_region = true;
 
-    int _num_increase_rows = 0; //存储净新增行数
-    int _num_affected_rows = 0; //存储baikaldb写影响的行数
-    int _num_returned_rows = 0; //存储baikaldb读返回的行数
-    int _num_scan_rows     = 0; //存储baikalStore扫描行数
-    int _num_filter_rows   = 0; //存储过滤行数
+    int64_t _num_increase_rows = 0; //存储净新增行数
+    int64_t _num_affected_rows = 0; //存储baikaldb写影响的行数
+    int64_t _num_returned_rows = 0; //存储baikaldb读返回的行数
+    int64_t _num_scan_rows     = 0; //存储baikalStore扫描行数
+    int64_t _num_filter_rows   = 0; //存储过滤行数
     int64_t _log_id = 0;
 
     bool              _single_sql_autocommit = true;     // used for baikaldb and store

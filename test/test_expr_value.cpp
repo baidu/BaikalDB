@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 #include <climits>
 #include <iostream>
+#include <fstream>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -33,6 +34,23 @@ int main(int argc, char* argv[])
 namespace baikaldb {
 
 TEST(test_proto, case_all) {
+    /*
+    std::ofstream fp;
+    fp.open("sign", std::ofstream::out);
+    std::ifstream ifp("holmes");
+
+    std::vector<std::string> vec;
+    vec.reserve(10000000);
+    while (ifp.good()) {
+        std::string line;
+        std::getline(ifp, line);
+        vec.push_back(line);
+    }
+    for (uint64_t i = 0; i < 1000000000; i++) {
+        fp << butil::fast_rand() << "\t" << vec[i%vec.size()] << "\n";
+    }
+    return;
+    */
     class LogMessageVoidify {
         public: 
             LogMessageVoidify() { }
@@ -272,6 +290,12 @@ TEST(test_compare, case_all) {
         v2.cast_to(pb::DATETIME);
         std::cout << v1.compare(v2) << std::endl;
         EXPECT_GT(v1.compare(v2), 0);
+    }
+    {
+        ExprValue v1(pb::HEX);
+        v1.str_val = "\xff\xff";
+        v1.cast_to(pb::INT64);
+        EXPECT_EQ(v1.get_numberic<int64_t>(), 65535);
     }
     ExprValue dt(pb::STRING);
     dt.str_val = "2018-1-1 10:11:11";

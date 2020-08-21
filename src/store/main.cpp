@@ -18,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <gflags/gflags.h>
 #include <signal.h>
+#include<execinfo.h>
 #include <stdio.h>
 #include <string>
 #include <boost/filesystem.hpp>
@@ -33,11 +34,36 @@ namespace baikaldb {
 DECLARE_int32(store_port);
 DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
 } // namespace baikaldb
+DEFINE_bool(stop_server_before_core, true, "stop_server_before_core");
+
+brpc::Server server;
+// 内存过大时，coredump需要几分钟，这期间会丢请求
+// 理论上应该采用可重入函数，但是堆栈不好获取
+// 考虑到core的概率不大，先这样处理
+void sigsegv_handler(int signum, siginfo_t* info, void* ptr) {
+    void* buffer[1000];
+    char** strings;
+    int nptrs = backtrace(buffer, 1000);
+    DB_FATAL("segment fault, backtrace() returned %d addresses", nptrs);
+    strings = backtrace_symbols(buffer, nptrs);
+    if (strings != NULL) {
+        for (int j = 0; j < nptrs; j++) {
+            DB_FATAL("%s", strings[j])
+        }
+    }
+    server.Stop(0);
+    // core的过程中依然会hang住baikaldb请求
+    // 先等一分钟，baikaldb反应过来
+    // 后续再调整
+    sleep(60);
+    abort();
+}
 
 int main(int argc, char **argv) {
 #ifdef BAIKALDB_REVISION
     google::SetVersionString(BAIKALDB_REVISION);
 #endif
+
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     srand((unsigned)time(NULL));
@@ -47,6 +73,18 @@ int main(int argc, char **argv) {
     if (baikaldb::init_log(argv[0]) != 0) {
         fprintf(stderr, "log init failed.");
         return -1;
+    }
+    // 信号处理函数非可重入，可能会死锁
+    if (FLAGS_stop_server_before_core) {
+        struct sigaction act;
+        int sig = SIGSEGV;
+        sigemptyset(&act.sa_mask);
+        act.sa_sigaction = sigsegv_handler;
+        act.sa_flags = SA_SIGINFO;
+        if (sigaction(sig, &act, NULL) < 0) {
+            DB_FATAL("sigaction fail, %m");
+            exit(1);
+        }
     }
 //    DB_WARNING("log file load success; GetMemoryReleaseRate:%f", 
 //            MallocExtension::instance()->GetMemoryReleaseRate());
@@ -73,6 +111,7 @@ int main(int argc, char **argv) {
         DB_WARNING("init wordseg agent failed");
         return -1;
     }
+    DB_WARNING("init nlpc success")
 #endif
     /* 
     auto call = []() {
@@ -106,7 +145,6 @@ int main(int argc, char **argv) {
     }
 
     //add service
-    brpc::Server server;
     butil::EndPoint addr;
     addr.ip = butil::IP_ANY;
     addr.port = baikaldb::FLAGS_store_port;

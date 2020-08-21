@@ -105,9 +105,9 @@ public:
     ErrorType error = E_OK;
     // 因为split会导致多region出来,加锁保护公共资源
     int64_t row_cnt = 0;
-    std::atomic<int> affected_rows;
-    std::atomic<int> scan_rows;
-    std::atomic<int> filter_rows;
+    std::atomic<int64_t> affected_rows;
+    std::atomic<int64_t> scan_rows;
+    std::atomic<int64_t> filter_rows;
 };
 }
 

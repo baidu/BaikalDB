@@ -45,7 +45,7 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
     }
     _children.erase(_children.begin());
     //没有全局二级索引的情况下，dmlmanagerNode下的dmlNode直接cache,不执行
-    if (dml_manager_node->children_size() <= 1 ) {
+    if (dml_manager_node->children_size() <= 1) {
         client_conn->seq_id++;
         //dml请求放入cache, 同时更新client_conn上的region_info信息
         state->client_conn()->region_infos = dml_manager_node->region_infos();

@@ -86,6 +86,8 @@ struct ExprValue {
                 _u.double_val = value.double_val();
                 break;
             case pb::STRING:
+            case pb::HLL:
+            case pb::HEX:
                 str_val = value.string_val();
                 break;
             default:
@@ -139,6 +141,7 @@ struct ExprValue {
             case pb::DOUBLE:
                 return static_cast<float>(_u.double_val);
             case pb::STRING:
+            case pb::HEX:
                 if (prefix_len >= (int)str_val.size()) {
                     return 0.0;
                 }
@@ -195,6 +198,7 @@ struct ExprValue {
                 value->set_double_val(_u.double_val);
                 break;
             case pb::STRING:
+            case pb::HEX:
                 value->set_string_val(str_val);
                 break;
             default:
@@ -235,6 +239,17 @@ struct ExprValue {
                 } else {
                     return 0;
                 }
+            case pb::HEX: {
+                if (std::is_integral<T>::value || std::is_floating_point<T>::value) {
+                    uint64_t value = 0;
+                    for (char c : str_val) {
+                        value = value * 256 + (uint8_t)c;
+                    }
+                    return value;
+                } else {
+                    return 0;
+                }
+            }
             case pb::DATETIME: {
                 return _u.uint64_val;
             }
@@ -366,7 +381,8 @@ struct ExprValue {
             case pb::DATETIME: 
                 butil::MurmurHash3_x64_128(&_u, 8, seed, out);
                 return out[0];
-            case pb::STRING: {
+            case pb::STRING: 
+            case pb::HEX: {
                 butil::MurmurHash3_x64_128(str_val.c_str(), str_val.size(), seed, out);
                 return out[0];
             }
@@ -406,6 +422,7 @@ struct ExprValue {
                 return oss.str();
             }
             case pb::STRING:
+            case pb::HEX:
             case pb::HLL:
                 return str_val;
             case pb::DATETIME:
@@ -497,6 +514,7 @@ struct ExprValue {
                 return _u.double_val > other._u.double_val ? 1 : 
                     (_u.double_val < other._u.double_val ? -1 : 0);
             case pb::STRING:
+            case pb::HEX:
                 return str_val.compare(other.str_val);
             case pb::NULL_TYPE:
                 return -1;
@@ -551,7 +569,7 @@ struct ExprValue {
     }
 
     bool is_string() const {
-        return type == pb::STRING;
+        return type == pb::STRING || type == pb::HEX;
     }
 
     bool is_double() const {

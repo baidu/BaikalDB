@@ -29,15 +29,11 @@ int SelectManagerNode::open(RuntimeState* state) {
         return -1;
     }
     client_conn->seq_id++;
-    for (auto expr : _slot_order_exprs) {
-        ret = expr->open();
-        if (ret < 0) {
-            DB_WARNING("Expr::open fail:%d", ret);
-            return ret;
-        }
-    }
     _mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
     _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
+    if (_has_sub_query) {
+        return subquery_open(state);
+    }
     std::vector<ExecNode*> scan_nodes;
     get_node(pb::SCAN_NODE, scan_nodes);
     if (scan_nodes.size() != 1) {
@@ -68,6 +64,53 @@ int SelectManagerNode::open(RuntimeState* state) {
     // 无sort节点时不会排序，按顺序输出
     _sorter->merge_sort();
     return _fetcher_store.affected_rows.load();
+}
+
+int SelectManagerNode::subquery_open(RuntimeState* state) {
+    int ret = 0;
+    for (auto expr : _derived_table_projections) {
+        ret = expr->open();
+        if (ret < 0) {
+            DB_WARNING("Expr::open fail:%d", ret);
+            return ret;
+        }
+    }
+    ret = _sub_query_node->open(_sub_query_runtime_state);
+    if (ret < 0) {
+        return ret;
+    }
+    pb::TupleDescriptor* tuple_desc = state->get_tuple_desc(_derived_tuple_id);
+    MemRowDescriptor* mem_row_desc = state->mem_row_desc();
+    bool eos = false;
+    int32_t affected_rows = 0;
+    do {
+        RowBatch batch;
+        ret = _sub_query_node->get_next(_sub_query_runtime_state, &batch, &eos);
+        if (ret < 0) {
+            DB_WARNING("children:get_next fail:%d", ret);
+            return ret;
+        }
+        std::shared_ptr<RowBatch> batch_ptr = std::make_shared<RowBatch>();
+        for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
+            MemRow* row = batch.get_row().get();
+            std::unique_ptr<MemRow> dual_row = mem_row_desc->fetch_mem_row();
+            for (auto iter : _slot_column_mapping) {
+                int32_t outer_slot_id = iter.first;
+                int32_t inter_column_id = iter.second;
+                auto expr = _derived_table_projections[inter_column_id];
+                ExprValue result = expr->get_value(row).cast_to(expr->col_type());
+                auto slot = tuple_desc->slots(outer_slot_id - 1);
+                dual_row->set_value(slot.tuple_id(), slot.slot_id(), result);
+            }
+            batch_ptr->move_row(std::move(dual_row));
+        }
+        if (batch_ptr->size() != 0) {
+            affected_rows += batch_ptr->size();
+            _sorter->add_batch(batch_ptr);
+        }
+    } while (!eos);
+    _sorter->merge_sort();
+    return affected_rows;
 }
 
 int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {

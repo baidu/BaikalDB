@@ -430,6 +430,7 @@ ErrorType FetcherStore::send_request(
                     DB_FATAL("decode to record fail, region_id:%ld, log_id:%lu", region_id, log_id);
                     return E_FATAL;
                 }
+                //DB_WARNING("record: %s", record->debug_string().c_str());
                 result_records[index_id].push_back(record);
             }
         }
@@ -475,6 +476,7 @@ ErrorType FetcherStore::send_request(
         for (int i = 0; i < res.tuple_ids_size(); i++) {
             int32_t tuple_id = res.tuple_ids(i);
             row->from_string(tuple_id, pb_row.tuple_values(i));
+            //DB_WARNING("row:%s", row->debug_string(tuple_id).c_str());
         }
         batch->move_row(std::move(row));
     }

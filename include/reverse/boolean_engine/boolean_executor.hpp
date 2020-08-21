@@ -247,7 +247,7 @@ const typename Schema::PostingNodeT* AndBooleanExecutor<Schema>::find_next() {
             this->_curr_node_ptr = (PostingNodeT*)this->_sub_clauses[0]->current_node();
             this->_curr_id_ptr = this->_sub_clauses[0]->current_id();
         }
-        for (int i = 1; i < this->_sub_clauses.size(); ++i) {
+        for (size_t i = 1; i < this->_sub_clauses.size(); ++i) {
             this->_merge_func(*this->_curr_node_ptr, *this->_sub_clauses[i]->current_node(), this->_arg);
         }
 

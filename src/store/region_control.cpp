@@ -157,6 +157,10 @@ int RegionControl::clear_all_infos_for_region(int64_t drop_region_id) {
 int RegionControl::ingest_data_sst(const std::string& data_sst_file, int64_t region_id) {
     auto rocksdb = RocksWrapper::get_instance();
     rocksdb::IngestExternalFileOptions ifo;
+    // snapshot恢复流程需要保留原始文件
+    // TODO 修改恢复流程，可以减少一次文件copy
+    //ifo.move_files = true;
+    ifo.write_global_seqno = false;
     auto data_cf = rocksdb->get_data_handle();
     auto res = rocksdb->ingest_external_file(data_cf, {data_sst_file}, ifo);
     if (!res.ok()) {

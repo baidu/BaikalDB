@@ -25,10 +25,13 @@ public:
     virtual int init(const pb::PlanNode& pb_node);
     virtual int open(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);    
-    //virtual int init_schema_info(RuntimeState* state);
+    void set_affected_index_ids(const std::vector<int64_t>& ids) {
+        _affected_index_ids = ids;
+    }
 private:
     int lock_get_main_table(RuntimeState* state, SmartRecord record);
     int put_row(RuntimeState* state, SmartRecord record);
+    std::vector<int64_t>     _affected_index_ids;
 };
 
 }

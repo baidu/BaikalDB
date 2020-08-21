@@ -448,15 +448,6 @@ public:
         }
         return false;
     }
-    bool compare_and_set_legal_for_split() {
-        std::unique_lock<std::mutex> lock(_legal_mutex);
-        if (_legal_region) {
-            _region_info.set_version(1);
-            DB_WARNING("compare and set split verison to 1, region_id: %ld", _region_id);
-            return true;
-        }
-        return false;
-    }
     bool compare_and_set_legal() {
         std::unique_lock<std::mutex> lock(_legal_mutex);
         if (_legal_region) {

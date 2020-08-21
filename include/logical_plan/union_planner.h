@@ -62,7 +62,6 @@ private:
     parser::UnionStmt*           _union_stmt = nullptr;
     pb::Expr                     _limit_offset;
     pb::Expr                     _limit_count;
-    std::vector<pb::Expr>       _first_select_exprs;
     bool                         _is_distinct = false;
     std::vector<pb::PrimitiveType> _select_fields_type;
     std::map<std::string, int32_t> _name_slot_id_mapping;

@@ -339,7 +339,9 @@ void StateMachine::_print_query_time(SmartSocket client) {
             stat_info->send_stamp, stat_info->end_stamp);
     stat_info->total_time = timestamp_diff(
             stat_info->start_stamp, stat_info->end_stamp);
-
+    if (client->state == STATE_ERROR || client->state == STATE_ERROR_REUSE) {
+        return;
+    }
     PacketNode* root = (PacketNode*)(ctx->root);
     int rows = 0;
     pb::OpType op_type = pb::OP_NONE;
@@ -350,17 +352,24 @@ void StateMachine::_print_query_time(SmartSocket client) {
     }
 
     int64_t index_id = 0; //0 没有使用索引，否则选index_ids中的第一个，对于join涉及多个索引可能展示不完整 TODO
-    if (ctx->index_ids.size() > 0) {
+    if (ctx->index_ids.size() > 1) {
         index_id = *ctx->index_ids.begin();
+    } else if (ctx->index_ids.size() == 1) {
+        index_id = *ctx->index_ids.begin();
+        index_recommend_st << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time, 
+                            rows, stat_info->num_scan_rows, stat_info->num_filter_rows, ctx->field_range_type);
     }
+    std::map<int32_t, int> field_range_type;
     sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time, 
-                            rows, stat_info->num_scan_rows, stat_info->num_filter_rows);
+                            rows, stat_info->num_scan_rows, stat_info->num_filter_rows, field_range_type);
 
     if (ctx->mysql_cmd == COM_QUERY
                 || ctx->mysql_cmd == COM_STMT_EXECUTE) {
-        if (root != nullptr && root->op_type() == pb::OP_SELECT) {
+        if (op_type == pb::OP_SELECT) {
             select_time_cost << stat_info->total_time;
-        } else {
+        } else if (op_type == pb::OP_INSERT || 
+                op_type == pb::OP_UPDATE ||
+                op_type == pb::OP_DELETE) {
             dml_time_cost << stat_info->total_time;
         }
     }
@@ -979,7 +988,7 @@ bool StateMachine::_query_process(SmartSocket client) {
             client->query_ctx->sql = sql;
             if (boost::iequals(client->query_ctx->sql, SQL_SHOW_DATABASES)) {
                 ret = _handle_client_query_show_databases(client);
-            } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_TABLES)) {
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_TABLES)) {
                 ret = _handle_client_query_show_tables(client);
             } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_FULL_TABLES)) {
                 ret = _handle_client_query_show_full_tables(client);
@@ -1311,9 +1320,16 @@ bool StateMachine::_handle_client_query_show_tables(SmartSocket client) {
         return false;
     }
 
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r."), boost::token_compress_on);
+
     std::string namespace_ = client->user_info->namespace_;
-    std::string current_db = client->current_db;
-    if (current_db == "") {
+    std::string db = client->current_db;
+    if (split_vec.size() == 4) {
+        db = split_vec[3];
+    }
+    if (db == "") {
         DB_WARNING("no database selected");
         _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
         client->state = STATE_READ_QUERY_RESULT;
@@ -1324,8 +1340,8 @@ bool StateMachine::_handle_client_query_show_tables(SmartSocket client) {
     std::vector<ResultField> fields;
     do {
         ResultField field;
-        field.name = "Tables_in_" + current_db;
-        field.db = current_db;
+        field.name = "Tables_in_" + db;
+        field.db = db;
         field.type = MYSQL_TYPE_VARCHAR;
         field.length = 1024;
         fields.push_back(field);
@@ -1335,8 +1351,7 @@ bool StateMachine::_handle_client_query_show_tables(SmartSocket client) {
     std::vector< std::vector<std::string> > rows;
     SchemaFactory* factory = SchemaFactory::get_instance();
     std::vector<std::string> tables =  factory->get_table_list(
-            namespace_, current_db, client->user_info.get());
-    //DB_NOTICE("db:%s table.size:%d", current_db.c_str(), tables.size());
+            namespace_, db, client->user_info.get());
     for (uint32_t cnt = 0; cnt < tables.size(); ++cnt) {
         //DB_NOTICE("table:%s", tables[cnt].c_str());
         std::vector<std::string> row;
@@ -1913,7 +1928,7 @@ bool StateMachine::_handle_client_query_show_abnormal_regions(SmartSocket client
             boost::is_any_of(" \t\n\r"), boost::token_compress_on);
     std::string resource_tag = "";
     if (split_vec.size() == 4) {
-        resource_tag = split_vec[4];
+        resource_tag = split_vec[3];
     } else if (split_vec.size() != 3) {
         client->state = STATE_ERROR;
         return false;
@@ -2144,8 +2159,12 @@ bool StateMachine::_handle_client_query_show_processlist(SmartSocket client) {
     for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
         SmartSocket sock = epoll_info->get_fd_mapping(idx);
         if (sock == NULL || sock->is_free || sock->fd == -1 || sock->ip == "") {
+            if (sock != NULL) {
+                DB_WARNING_CLIENT(sock, "processlist, free:%d", sock->is_free);
+            }
             continue;
         }
+        DB_WARNING_CLIENT(sock, "processlist, free:%d", sock->is_free);
         std::vector<std::string> row;
         row.push_back(std::to_string(sock->conn_id));
         row.push_back(sock->user_info->username);
@@ -2715,8 +2734,9 @@ void StateMachine::client_free(SmartSocket sock, EpollInfo* epoll_info) {
         DB_FATAL("s==NULL");
         return;
     }
+    DB_WARNING_CLIENT(sock, "client_free");
     if (sock->fd == -1 || sock->is_free) {
-        DB_WARNING("sock is already free.");
+        DB_WARNING_CLIENT(sock, "sock is already free.");
         return;
     }
     if (sock->txn_id != 0) {

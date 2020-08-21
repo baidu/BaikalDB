@@ -77,6 +77,24 @@ public:
         return _is_asc;
     }
 
+    std::vector<bool>& is_null_first() {
+        return _is_null_first;
+    }
+
+    std::vector<ExprNode*>& order_exprs() {
+        return _order_exprs;
+    }
+    std::vector<ExprNode*>& slot_order_exprs() {
+        return _slot_order_exprs;
+    }
+
+    std::vector<ExprNode*>* mutable_order_exprs() {
+        return &_order_exprs;
+    }
+    std::vector<ExprNode*>* mutable_slot_order_exprs() {
+        return &_slot_order_exprs;
+    }
+
     bool is_monotonic() {
         return _monotonic;
     }

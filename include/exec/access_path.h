@@ -154,6 +154,7 @@ public:
     int64_t index_read_rows = 0;
     int64_t table_get_rows = 0;
     double cost = 0.0;
+    double selectivity = 0.0;
     pb::PossibleIndex pos_index;
     int  eq_count = 0;
     bool is_covering_index = true;

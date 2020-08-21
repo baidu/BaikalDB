@@ -340,6 +340,26 @@ inline bool is_signed(pb::PrimitiveType type) {
     }
 }
 
+inline bool is_compatible_type(pb::PrimitiveType src_type, pb::PrimitiveType target_type, bool is_compatible) {
+    if (src_type == target_type) {
+        return true;
+    }
+    if (target_type == pb::STRING) {
+        return true;
+    }
+    int src_size = get_num_size(src_type);
+    int target_size = get_num_size(target_type);
+    if (src_size > 0 && target_size > 0) {
+        if (is_compatible) {
+            return true;
+        }
+        if (src_size <= target_size) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::PrimitiveType& merged_type) {
     if (types.size() == 0) {
         return false;

@@ -85,7 +85,8 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
-    db_options.avoid_unnecessary_blocking_io = true;
+    //打开后有些集群内存严重上涨
+    //db_options.avoid_unnecessary_blocking_io = true;
     db_options.max_background_compactions = 20;
     if (FLAGS_rocks_kSkipAnyCorruptedRecords) {
         db_options.wal_recovery_mode = rocksdb::WALRecoveryMode::kSkipAnyCorruptedRecords;

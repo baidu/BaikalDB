@@ -408,7 +408,7 @@ void AccessPath::calc_cost() {
         return;
     }
     int64_t table_rows = SchemaFactory::get_instance()->get_total_rows(table_id);
-    double selectivity = 1.0;
+    selectivity = 1.0;
     //没有统计信息，固定给个值
     if (index_type == pb::I_FULLTEXT) {
         selectivity = 0.1;
@@ -430,8 +430,8 @@ void AccessPath::calc_cost() {
         table_get_rows = index_read_rows * index_other_condition_selectivity;
     }
     cost = index_read_rows * INDEX_SEEK_FACTOR + table_get_rows * TABLE_GET_FACTOR;
-    //DB_WARNING("table_rows:%ld index_read_rows:%ld, selectivity:%f index_other_condition_selectivity:%f other_condition_selectivity:%f cost:%f", 
-    //        table_rows,index_read_rows,selectivity,index_other_condition_selectivity,other_condition_selectivity,cost);
+    // DB_WARNING("table_id:%ld, index_id:%ld, is_possible:%d, table_rows:%ld index_read_rows:%ld, selectivity:%f index_other_condition_selectivity:%f other_condition_selectivity:%f cost:%f", 
+    //        table_id, index_id, is_possible, table_rows,index_read_rows,selectivity,index_other_condition_selectivity,other_condition_selectivity,cost);
 }
 
 }

@@ -89,12 +89,12 @@ const typename Schema::ReverseNode* CommRindexNodeParser<Schema>::next() {
             _curr_ix_old++;
         }
 
-        if (_curr_ix_new >= _list_size_new) {
+        if (_curr_ix_new == -1 || _curr_ix_new >= _list_size_new) {
             _curr_ix_new = -1;
         } else {
             _curr_id_new = _new_list->mutable_reverse_nodes(_curr_ix_new)->mutable_key();
         }
-        if (_curr_ix_old >= _list_size_old) {
+        if (_curr_ix_old == -1 || _curr_ix_old >= _list_size_old) {
             _curr_ix_old = -1;
         } else {
             _curr_id_old = _old_list->mutable_reverse_nodes(_curr_ix_old)->mutable_key();

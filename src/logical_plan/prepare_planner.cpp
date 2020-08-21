@@ -122,6 +122,12 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     if (iter != client->prepared_plans.end()) {
         client->prepared_plans.erase(iter);
     }
+    if (stmt_sql.size() == 0) {
+        _ctx->stat_info.error_code = ER_EMPTY_QUERY;
+        _ctx->stat_info.error_msg << "Query was empty";
+        DB_WARNING("Query was empty");
+        return -1;
+    }
     //DB_WARNING("stmt_name:%s stmt_sql:%s", stmt_name.c_str(), stmt_sql.c_str());
     parser::SqlParser parser;
     parser.parse(stmt_sql);

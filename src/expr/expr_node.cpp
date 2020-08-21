@@ -142,6 +142,27 @@ void ExprNode::get_all_field_ids(std::unordered_set<int32_t>& field_ids) {
     }
 }
 
+void ExprNode::set_slot_col_type(int32_t tuple_id, int32_t slot_id, pb::PrimitiveType col_type) {
+    if (_node_type == pb::SLOT_REF && _tuple_id == tuple_id && _slot_id == slot_id) {
+        _col_type = col_type;
+    }
+    for (auto& child : _children) {
+        child->set_slot_col_type(tuple_id, slot_id, col_type);
+    }
+}
+
+pb::PrimitiveType ExprNode::get_slot_col_type(int32_t slot_id) {
+    if (_node_type == pb::SLOT_REF && _slot_id == slot_id) {
+        return _col_type;
+    }
+    for (auto& child : _children) {
+        pb::PrimitiveType type = child->get_slot_col_type(slot_id);
+        if (type != pb::INVALID_TYPE) {
+            return type;
+        }
+    }
+    return pb::INVALID_TYPE;
+}
 
 void ExprNode::transfer_pb(pb::ExprNode* pb_node) {
     pb_node->set_node_type(_node_type);
@@ -224,6 +245,7 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
         case pb::INT_LITERAL:
         case pb::DOUBLE_LITERAL:
         case pb::STRING_LITERAL:
+        case pb::HEX_LITERAL:
         case pb::HLL_LITERAL:
         case pb::DATE_LITERAL:
         case pb::DATETIME_LITERAL:

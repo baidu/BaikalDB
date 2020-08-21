@@ -87,14 +87,20 @@ struct TableName : public Node {
 };
 
 struct TableSource : public Node {
-    TableName*  table_name;
+    TableName*  table_name = nullptr;
     String  as_name;
+    DmlNode* derived_table = nullptr;
     Vector<IndexHint*> index_hints;
     TableSource() {
         node_type = NT_TABLE_SOURCE;
     }
     virtual void to_stream(std::ostream& os) const override {
-        os << " " << table_name;
+        if (derived_table != nullptr) {
+            os << " " << derived_table;
+        }
+        if (table_name != nullptr) {
+            os << " " << table_name;
+        }
         if (!as_name.empty()) {
             os << " AS " << as_name.value;
         }
@@ -295,78 +301,6 @@ struct Assignment : public Node {
     }
     virtual void to_stream(std::ostream& os) const override {
         os << name << " = " << expr;
-    }
-};
-
-struct InsertStmt : public DmlNode {
-    PriorityEnum priority;
-    bool is_replace = false;
-    bool is_ignore = false;
-    TableName* table_name = nullptr;
-    Vector<ColumnName*> columns;
-    Vector<RowExpr*> lists;
-    Vector<Assignment*> on_duplicate;
-    InsertStmt() {
-        node_type = NT_INSERT;
-    }
-    virtual void set_print_sample(bool print_sample_) {
-        print_sample = print_sample_;
-        for (int i = 0; i < lists.size(); i++) {
-            lists[i]->set_print_sample(print_sample_);
-        }
-        for (int i = 0; i < on_duplicate.size(); i++) {
-            on_duplicate[i]->set_print_sample(print_sample_);
-        }
-    }
-    static InsertStmt* New(butil::Arena& arena) {
-        InsertStmt* insert = new(arena.allocate(sizeof(InsertStmt)))InsertStmt();
-        insert->columns.reserve(10, arena);
-        insert->lists.reserve(10, arena);
-        insert->on_duplicate.reserve(10, arena);
-        return insert;
-    }
-    virtual void to_stream(std::ostream& os) const override {
-        static const char* desc_str[] = {" INSERT", " REPLACE"};
-        static const char* ignore_str[] = {"", " IGNORE"};
-        os << desc_str[is_replace];
-        os << priority_str[priority] << ignore_str[is_ignore] << " INTO ";
-        if (table_name != nullptr) {
-            table_name->to_stream(os);
-        }
-        if (columns.size() > 0) {
-            os << "(";
-        }
-        for (int i = 0; i < columns.size(); ++i) {
-            columns[i]->to_stream(os);
-            if (i != columns.size() - 1) {
-                os << ", ";
-            }
-        }
-        if (columns.size() > 0) {
-            os << ")";
-        }
-        os << " VALUES";
-        if (print_sample) {
-            os << " (?) ";
-        } else {
-            for (int i = 0; i < lists.size(); ++i) {
-                os << " ";
-                lists[i]->to_stream(os);
-                if (i != lists.size() - 1) {
-                    os << ",";
-                }
-            }
-        }
-        if (on_duplicate.size() != 0) {
-            os << " ON DUPLICATE KEY UPDATE";
-        }
-        for (int i = 0; i < on_duplicate.size(); ++i) {
-            os << " ";
-            on_duplicate[i]->to_stream(os);
-            if (i != on_duplicate.size() - 1) {
-                os << ",";
-            }
-        }
     }
 };
 
@@ -595,6 +529,7 @@ struct UnionStmt : public DmlNode {
     OrderByClause* order = nullptr;
     LimitClause* limit = nullptr;
     SelectLock lock = SL_NONE;
+    bool is_in_braces = false;
     UnionStmt() {
         node_type = NT_UNION;
     }
@@ -605,6 +540,9 @@ struct UnionStmt : public DmlNode {
     }
 
     virtual void to_stream(std::ostream& os) const override {
+        if (is_in_braces) {
+            os << "(";
+        }
          for (int i = 0; i < select_stmts.size(); i++) {
             select_stmts[i]->to_stream(os);
             if (i < select_stmts.size() -1) {
@@ -622,6 +560,87 @@ struct UnionStmt : public DmlNode {
             os << " LIMIT" << limit;
         }
         os << for_lock_str[lock];
+        if (is_in_braces) {
+            os << ")";
+        }
+    }
+};
+
+struct InsertStmt : public DmlNode {
+    PriorityEnum priority;
+    bool is_replace = false;
+    bool is_ignore = false;
+    TableName* table_name = nullptr;
+    DmlNode* subquery_stmt = nullptr;
+    Vector<ColumnName*> columns;
+    Vector<RowExpr*> lists;
+    Vector<Assignment*> on_duplicate;
+    InsertStmt() {
+        node_type = NT_INSERT;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < lists.size(); i++) {
+            lists[i]->set_print_sample(print_sample_);
+        }
+        for (int i = 0; i < on_duplicate.size(); i++) {
+            on_duplicate[i]->set_print_sample(print_sample_);
+        }
+    }
+    static InsertStmt* New(butil::Arena& arena) {
+        InsertStmt* insert = new(arena.allocate(sizeof(InsertStmt)))InsertStmt();
+        insert->columns.reserve(10, arena);
+        insert->lists.reserve(10, arena);
+        insert->on_duplicate.reserve(10, arena);
+        return insert;
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        static const char* desc_str[] = {" INSERT", " REPLACE"};
+        static const char* ignore_str[] = {"", " IGNORE"};
+        os << desc_str[is_replace];
+        os << priority_str[priority] << ignore_str[is_ignore] << " INTO ";
+        if (table_name != nullptr) {
+            table_name->to_stream(os);
+        }
+        if (columns.size() > 0) {
+            os << "(";
+        }
+        for (int i = 0; i < columns.size(); ++i) {
+            columns[i]->to_stream(os);
+            if (i != columns.size() - 1) {
+                os << ", ";
+            }
+        }
+        if (columns.size() > 0) {
+            os << ")";
+        }
+        if (subquery_stmt != nullptr) {
+            os << " ";
+            subquery_stmt->to_stream(os);
+            return ;
+        }
+        os << " VALUES";
+        if (print_sample) {
+            os << " (?) ";
+        } else {
+            for (int i = 0; i < lists.size(); ++i) {
+                os << " ";
+                lists[i]->to_stream(os);
+                if (i != lists.size() - 1) {
+                    os << ",";
+                }
+            }
+        }
+        if (on_duplicate.size() != 0) {
+            os << " ON DUPLICATE KEY UPDATE";
+        }
+        for (int i = 0; i < on_duplicate.size(); ++i) {
+            os << " ";
+            on_duplicate[i]->to_stream(os);
+            if (i != on_duplicate.size() - 1) {
+                os << ",";
+            }
+        }
     }
 };
 

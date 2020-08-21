@@ -16,8 +16,6 @@
 
 #include "exec_node.h"
 #include "packet_node.h"
-#include "agg_node.h"
-#include "sort_node.h"
 #include "query_context.h"
 
 namespace baikaldb {
@@ -33,28 +31,18 @@ public:
         if (packet_node == nullptr) {
             return -1;
         }
+        int ret = 0;
         if (packet_node->op_type() == pb::OP_UNION) {
-            std::vector<ExprNode*>& union_projections = packet_node->mutable_projections();
-            auto select_ctx = ctx->union_select_plans[0];
-            ExecNode* select_plan = select_ctx->root;
-            PacketNode* select_packet_node = static_cast<PacketNode*>(select_plan->get_node(pb::PACKET_NODE));
-            AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
-            std::vector<ExprNode*> group_exprs;
-            if (agg_node != nullptr) {
-                group_exprs = agg_node->group_exprs();
-            }
-            auto select_projections = select_packet_node->mutable_projections();
-            pb::TupleDescriptor* tuple_desc = ctx->get_tuple_desc(0);
-            for (int i = 0; i < union_projections.size(); i++) {
-                union_projections[i]->set_col_type(select_projections[i]->col_type());
-                auto slot = tuple_desc->mutable_slots(i);
-                slot->set_slot_type(select_projections[i]->col_type());
-                if (group_exprs.size()) {
-                    group_exprs[i]->set_col_type(select_projections[i]->col_type());
-                }
+            analyze_union(ctx, packet_node);
+        }
+        
+        if (ctx->has_derived_table) {
+            ret = analyze_derived_table(ctx, packet_node);
+            if (ret < 0) {
+                return ret;
             }
         }
-        int ret = plan->expr_optimize(ctx->mutable_tuple_descs());
+        ret = plan->expr_optimize(ctx->mutable_tuple_descs());
         if (ret == -2) {
             DB_WARNING("filter always false");
             ctx->return_empty = true;
@@ -63,6 +51,8 @@ public:
             return ret;
         }
     }
+    static void analyze_union(QueryContext* ctx, PacketNode* packet_node);
+    static int analyze_derived_table(QueryContext* ctx, PacketNode* packet_node);
 };
 }
 

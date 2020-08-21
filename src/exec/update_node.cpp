@@ -69,63 +69,6 @@ int UpdateNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
-    std::set<int32_t> affect_field_ids;
-    for (auto& slot : _update_slots) {
-        affect_field_ids.insert(slot.field_id());
-    }
-    _affect_primary = false;
-    //临时存放被影响的index_id
-    std::vector<int64_t> affected_indices;
-    for (auto index_id : _affected_index_ids) {
-        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (info_ptr == nullptr) {
-            DB_WARNING("index info not found index_id:%ld", index_id);
-            return -1;
-        }
-        IndexInfo& info = *info_ptr;
-        bool has_id = false;
-        for (auto& field : info.fields) {
-            if (affect_field_ids.count(field.id) == 1) {
-                has_id = true;
-                break;
-            }
-        }
-        if (has_id) {
-            if (info.id == _table_id) {
-                _affect_primary = true;
-                break;
-            } else {
-                affected_indices.push_back(index_id);
-            }
-        }
-    }
-    // 如果更新主键，那么影响了全部索引
-    if (!_affect_primary) {
-        _affected_index_ids.swap(affected_indices);
-        // cstore下只更新涉及列
-        if (_table_info->engine == pb::ROCKSDB_CSTORE) {
-            for (size_t i = 0; i < _update_slots.size(); i++) {
-                auto field_id = _update_slots[i].field_id();
-                if (_pri_field_ids.count(field_id) == 0 &&
-                        _update_field_ids.count(field_id) == 0) {
-                    _update_field_ids.insert(field_id);
-                }
-            }
-            _field_ids.clear();
-            for (auto index_id : _affected_index_ids) {
-                auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-                if (index_info == nullptr) {
-                    DB_WARNING("get index info failed index_id: %ld", index_id);
-                    return -1;
-                }
-                for (auto& field_info : index_info->fields) {
-                    if (_pri_field_ids.count(field_info.id) == 0) {
-                        _field_ids[field_info.id] = &field_info;
-                    }
-                }
-            }
-        }
-    }
     //_region_id = state->region_id();
     //Transaction* txn = state->txn();
     // ScopeGuard auto_rollback([txn]() {

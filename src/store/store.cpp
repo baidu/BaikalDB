@@ -30,6 +30,7 @@
 #include "concurrency.h"
 #include "mut_table_key.h"
 #include "my_raft_log_storage.h"
+//#include <jemalloc/jemalloc.h>
 
 namespace baikaldb {
 DECLARE_int64(store_heart_beat_interval_us);
@@ -682,7 +683,18 @@ void Store::reverse_merge_thread() {
         traverse_copy_region_map([](SmartRegion& region) {
             region->reverse_merge();
         });
-        DB_WARNING("all merge cost: %ld", cost.get_time());
+        /*
+        uint64_t epoch = 1;
+        size_t sz = sizeof(epoch);
+        mallctl("epoch", &epoch, &sz, &epoch, sz);
+        size_t allocated, active, mapped;
+        sz = sizeof(size_t);
+        mallctl("stats.allocated", &allocated, &sz, NULL, 0);
+        mallctl("stats.active", &active, &sz, NULL, 0);
+        mallctl("stats.mapped", &mapped, &sz, NULL, 0);
+        DB_WARNING("all merge cost: %ld allocated/active/mapped: %zu/%zu/%zu", 
+                cost.get_time(), allocated, active, mapped);
+        */
         bthread_usleep_fast_shutdown(FLAGS_reverse_merge_interval_us, _shutdown);
     }
 }
@@ -1216,7 +1228,7 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
         }
     };
     _remove_region_queue.run(remove_func);
-    //ddl work
+
     std::set<int64_t> ddlwork_table_ids;
     for (auto& ddlwork_info : response.ddlwork_infos()) {
         ddlwork_table_ids.insert(ddlwork_info.table_id());

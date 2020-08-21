@@ -224,7 +224,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     index->set_segment_type(pb_segment_type);
                 }
                 auto storage_type_iter = root.FindMember("storage_type");
-                pb::StorageType pb_storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
+                pb::StorageType pb_storage_type = pb::ST_ARROW;
                 if (storage_type_iter != root.MemberEnd()) {
                     std::string storage_type = storage_type_iter->value.GetString();
                     StorageType_Parse(storage_type, &pb_storage_type);

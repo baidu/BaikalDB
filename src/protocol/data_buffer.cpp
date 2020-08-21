@@ -16,13 +16,13 @@
 #include "key_encoder.h"
 
 namespace baikaldb {
-DataBuffer::DataBuffer(uint32_t capacity) {
+DataBuffer::DataBuffer(size_t capacity) {
     if (capacity == 0) {
         return;
     }
     _data = (uint8_t *)malloc(capacity);
     if (_data == nullptr) {
-        DB_FATAL("Failed to malloc memory.size:[%lu]", capacity);
+        DB_FATAL("Failed to malloc memory.size:[%zu]", capacity);
         return;
     }
     _capacity = capacity;
@@ -55,13 +55,13 @@ void DataBuffer::byte_array_clear() {
     return;
 }
 
-bool DataBuffer::byte_array_append_size(int len, int is_pow) {
+bool DataBuffer::byte_array_append_size(size_t len, int is_pow) {
     if (_size + len <= _capacity) {
         return true;
     }
     size_t want_alloc = _size + len;
     if (want_alloc > MAX_ALLOC_BUF_SIZE) {
-        DB_FATAL("want_alloc size[%d] bigger than max[%d]",
+        DB_FATAL("want_alloc size[%zu] bigger than max[%zu]",
                         want_alloc, MAX_ALLOC_BUF_SIZE);
         return false;
     }
@@ -74,7 +74,7 @@ bool DataBuffer::byte_array_append_size(int len, int is_pow) {
     }
     _data = (uint8_t *)realloc(_data, want_alloc);
     if (nullptr == _data) {
-        DB_FATAL("malloc want_alloc=%d append len=%d failed", want_alloc, len);
+        DB_FATAL("malloc want_alloc=%zu append len=%zu failed", want_alloc, len);
         return false;
     }
     _capacity = want_alloc;
@@ -82,7 +82,7 @@ bool DataBuffer::byte_array_append_size(int len, int is_pow) {
 }
 
 // packet大于16M时插入4字节包头，导致内存移动，需要后续优化
-bool DataBuffer::byte_array_insert_len(const uint8_t *data, int start_pos, int len) {
+bool DataBuffer::byte_array_insert_len(const uint8_t *data, size_t start_pos, size_t len) {
     if (data == nullptr) {
         DB_FATAL("data buffer is null");
         return false;
@@ -100,7 +100,7 @@ bool DataBuffer::byte_array_insert_len(const uint8_t *data, int start_pos, int l
     return true;
 }
 
-bool DataBuffer::byte_array_append_len(const uint8_t *data, int len) {
+bool DataBuffer::byte_array_append_len(const uint8_t *data, size_t len) {
     if (data == nullptr) {
         DB_FATAL("data buffer is null");
         return false;
@@ -129,7 +129,7 @@ bool DataBuffer::append_text_value(const ExprValue& value) {
         
         char* buf = (char*)_data + _size;
         if (_capacity < _size) {
-            DB_FATAL("_capacity:%u < size:%u", _capacity, _size);
+            DB_FATAL("_capacity:%zu < size:%zu", _capacity, _size);
             return false;
         }
         size_t size = _capacity - _size;
@@ -294,7 +294,7 @@ bool DataBuffer::byte_array_append_length_coded_binary(uint64_t num) {
 bool DataBuffer::pack_length_coded_string(const std::string& str, bool is_null) {
     uint8_t null_byte = 0xfb;
     uint8_t zero_byte = 0;
-    uint32_t length = str.size();
+    size_t length = str.size();
     if (is_null) {
         if (!byte_array_append_len(&null_byte, 1)) {
             DB_FATAL("Failed to append len.value:[%s],len:[1]", null_byte);
@@ -307,11 +307,11 @@ bool DataBuffer::pack_length_coded_string(const std::string& str, bool is_null) 
         }
     } else {
         if (!byte_array_append_length_coded_binary(length)) {
-            DB_FATAL("Failed to append length coded binary.length:[%u]", length);
+            DB_FATAL("Failed to append length coded binary.length:[%zu]", length);
             return false;
         }
         if (!byte_array_append_len((const uint8_t *)str.c_str(), length)) {
-            DB_FATAL("Failed to append len. value:[%s],len:[%llu]", str.c_str(), length);
+            DB_FATAL("Failed to append len. value:[%s],len:[%zu]", str.c_str(), length);
             return false;
         }
     }
@@ -320,11 +320,11 @@ bool DataBuffer::pack_length_coded_string(const std::string& str, bool is_null) 
 
 bool DataBuffer::network_queue_send_append(
         const uint8_t *data,
-        int len,
+        size_t len,
         int packet_id,
         int append_data_later) {
     if (len <= 0 || (data == nullptr && append_data_later == 0)) {
-        DB_FATAL("send_buf==NULL||len=%d<= 0 ||(data == null&& append_data_later=%d == 0)",
+        DB_FATAL("send_buf==NULL||len=%zu<= 0 ||(data == null&& append_data_later=%d == 0)",
             len, append_data_later);
         return false;
     }
@@ -340,7 +340,7 @@ bool DataBuffer::network_queue_send_append(
     }
     if (append_data_later == 0) {
         if (!byte_array_append_len(data, len)) {
-            DB_FATAL("Failed to append length.length:[%d]", len);
+            DB_FATAL("Failed to append length.length:[%zu]", len);
             return false;
         }
     }
