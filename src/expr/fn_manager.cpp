@@ -101,7 +101,7 @@ void FunctionManager::register_operators() {
         return_type_map[name] = ret_type;
     };
     // num funcs
-    register_object_ret("round", round, pb::INT64);
+    register_object_ret("round", round, pb::DOUBLE);
     register_object_ret("floor", floor, pb::INT64);
     register_object_ret("abs", abs, pb::DOUBLE);
     register_object_ret("sqrt", sqrt, pb::DOUBLE);
