@@ -25,32 +25,7 @@ public:
      * agg tuple类型推导
      * const表达式求值
      */
-    int analyze(QueryContext* ctx) {
-        ExecNode* plan = ctx->root;
-        PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
-        if (packet_node == nullptr) {
-            return -1;
-        }
-        int ret = 0;
-        if (packet_node->op_type() == pb::OP_UNION) {
-            analyze_union(ctx, packet_node);
-        }
-        
-        if (ctx->has_derived_table) {
-            ret = analyze_derived_table(ctx, packet_node);
-            if (ret < 0) {
-                return ret;
-            }
-        }
-        ret = plan->expr_optimize(ctx->mutable_tuple_descs());
-        if (ret == -2) {
-            DB_WARNING("filter always false");
-            ctx->return_empty = true;
-            return 0;
-        } else {
-            return ret;
-        }
-    }
+    int analyze(QueryContext* ctx);
     void analyze_union(QueryContext* ctx, PacketNode* packet_node);
     int analyze_derived_table(QueryContext* ctx, PacketNode* packet_node);
 };
