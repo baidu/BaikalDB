@@ -633,12 +633,20 @@ private:
 struct BvarMap {
     struct SumCount {
         SumCount() {}
-        SumCount(int64_t table_id, int64_t sum, int64_t count, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows) 
-            : table_id(table_id), sum(sum), count(count), affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows) {}
+        SumCount(int64_t table_id, int64_t sum, int64_t count, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, const std::map<int32_t, int>& field_range_type_) 
+            : table_id(table_id), sum(sum), count(count), affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows) {
+                field_range_type = field_range_type_;
+            }
         SumCount& operator+=(const SumCount& other) {
             if (other.table_id > 0) {
                 table_id = other.table_id;
             }
+            if (field_range_type.size() <= 0) {
+                if (other.field_range_type.size() > 0) {
+                    field_range_type = other.field_range_type;
+                }
+            }
+
             sum += other.sum;
             count += other.count;
             affected_rows += other.affected_rows;
@@ -660,11 +668,14 @@ struct BvarMap {
         int64_t affected_rows = 0;
         int64_t scan_rows = 0;
         int64_t filter_rows = 0;
+        // 用于索引推荐
+        std::map<int32_t, int> field_range_type;
     };
 public:
     BvarMap() {}
-    BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows) {
-        internal_map[key][index_id] = SumCount(table_id, cost, 1, affected_rows, scan_rows, filter_rows);
+    BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, 
+        const std::map<int32_t, int>& field_range_type_) {
+        internal_map[key][index_id] = SumCount(table_id, cost, 1, affected_rows, scan_rows, filter_rows, field_range_type_);
     }
     BvarMap& operator+=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {

@@ -141,7 +141,7 @@ int SetKVPlanner::set_autocommit_1() {
 int SetKVPlanner::set_user_variable(const std::string& key, parser::ExprNode* expr) {
     auto client = _ctx->client_conn;
     pb::Expr var_expr_pb;
-    if (0 != create_expr_tree(expr, var_expr_pb, false)) {
+    if (0 != create_expr_tree(expr, var_expr_pb, false, false)) {
         DB_WARNING("create var_expr_pb for user variable failed");
         return -1;
     }

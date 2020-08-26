@@ -21,9 +21,9 @@ namespace baikaldb {
 class CMsketchColumn {
 public:
     CMsketchColumn(int depth, int width, int field_id) :  _depth(depth), _width(width),  _field_id(field_id) {
-        _array = new int* [_depth];
+        _array = new int64_t* [_depth];
         for (int i = 0; i < _depth; i++) {
-            _array[i] = new int[_width];
+            _array[i] = new int64_t[_width];
         }
         for (int i = 0; i < _depth; i++) {
             for (int j = 0; j < _width; j++) {
@@ -41,21 +41,49 @@ public:
     }
 
     void set_value(uint64_t hash, uint64_t count) {
+        const uint64_t delta = (hash >> 17) | (hash << 15);
         for (int i = 0; i < _depth; i++) {
-            int j = (hash * i) % _width;
-            _array[i][j] += count; 
+            int j = hash % _width;
+            _array[i][j] += count;
+            hash += delta; 
         }
     }
 
     int get_value(uint64_t hash) {
-        int min_count = INT32_MAX;
+        std::vector<int> values;
+        values.reserve(_depth);
+        const uint64_t delta = (hash >> 17) | (hash << 15);
+        int64_t min_value = INT64_MAX; 
         for (int i = 0; i < _depth; i++) {
-            int j = (hash * i) % _width;
-            if (_array[i][j] < min_count) {
-                min_count = _array[i][j];
+            int j = hash % _width;
+            if (min_value > _array[i][j]) {
+                min_value = _array[i][j];
             }
+            int64_t noise = (_total_cnt - _array[i][j]) / (_width - 1);
+            if (_array[i][j] < noise) {
+                values.push_back(0);
+            } else {
+                values.push_back(_array[i][j] - noise);
+            }
+            hash += delta;
         }  
-        return min_count;  
+        //CM[i,j] - (N - CM[i, j]) / (w-1)
+        // https://pingcap.com/blog-cn/tidb-source-code-reading-12/
+        std::sort(values.begin(), values.end());
+        int64_t mid_value = 0;
+        int mid_idx = _depth / 2;
+        if (_depth % 2 == 0) {
+            mid_value = (values[mid_idx] + values[mid_idx - 1]) / 2;
+        } else {
+            mid_value = values[mid_idx];
+        }
+
+        if (mid_value < 0) {
+            mid_value = 0;
+        } else if (mid_value > min_value) {
+            mid_value = min_value;
+        }
+        return mid_value;  
     }
 
     CMsketchColumn& operator+=(const CMsketchColumn& other) {
@@ -68,6 +96,14 @@ public:
             }
         }
         return *this;
+    }
+
+    int64_t get_total_rows() {
+        int64_t total_rows = 0;
+        for (int j = 0; j < _width; j++) {
+            total_rows += _array[0][j];
+        }
+        return total_rows;
     }
 
     void to_proto(pb::CMsketchColumn* cmsketch_column) {
@@ -90,6 +126,9 @@ public:
         }
         for (auto& item : cmsketch_column.cmitems()) {
             _array[item.depth()][item.width()] += item.value();
+        }
+        for (int j = 0; j < _width; j++) {
+            _total_cnt += _array[0][j];
         }
     }
 
@@ -116,7 +155,8 @@ public:
     int _depth;
     int _width;
     int _field_id;
-    int** _array = nullptr;
+    int64_t _total_cnt = 0;
+    int64_t** _array = nullptr;
 };
 
 struct CMsketch {

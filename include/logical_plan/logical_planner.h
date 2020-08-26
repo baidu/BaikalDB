@@ -42,6 +42,7 @@ struct JoinMemTmp {
     JoinMemTmp* right_node = nullptr;
     std::multiset<std::string> left_full_table_names; //db.table跟该join相关的所有table
     std::multiset<std::string> right_full_table_names;
+    bool is_derived_table = false;
     std::set<std::int64_t> use_indexes;
     std::set<std::int64_t> ignore_indexes;
     virtual ~JoinMemTmp() {
@@ -85,10 +86,14 @@ public:
     }
 
 protected:
+    int gen_subquery_plan(parser::DmlNode* subquery);
     // add table used in SQL to the context
     // and then do validation using schema info
     int add_table(const std::string& database, const std::string& table,
-            const std::string& alias);
+            const std::string& alias, const bool is_derived_table);
+
+    int add_derived_table(const std::string& database, const std::string& table,
+        const std::string& alias);
 
     std::unordered_set<std::string> get_possible_databases(const std::string& table) {
         if (_table_dbs_mapping.count(table) != 0) {
@@ -146,7 +151,8 @@ protected:
     
     int create_join_node_from_terminator(const std::string db, 
                                          const std::string table, 
-                                         const std::string alias, 
+                                         const std::string alias,
+                                         const bool is_derived_table,
                                          const std::vector<std::string>& use_index_names,
                                          const std::vector<std::string>& ignore_index_names, 
                                          JoinMemTmp** join_root_ptr); 
@@ -157,12 +163,13 @@ protected:
     int parse_db_name_from_table_source(const parser::TableSource* table_source, 
                                         std::string& db, 
                                         std::string& table, 
-                                        std::string& alias);
+                                        std::string& alias,
+                                        bool& is_derived_table);
     // return empty str if failed
     std::string get_field_full_name(const parser::ColumnName* col);
 
     // make AND exprs to expr vector
-    int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters, bool use_alias);
+    int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters, bool use_alias, bool can_agg);
 
     void create_order_func_slot();
 
@@ -173,14 +180,15 @@ protected:
     int create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, bool use_alias);
 
     // (col between A and B) ==> (col >= A) and (col <= B)
-    int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, bool use_alias);
+    int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, bool use_alias, bool can_agg);
     int create_values_expr(const parser::FuncExpr* item, pb::Expr& expr);
 
     // TODO in next stage: fill full func name
     // fill arg_types, return_type(col_type) and has_var_args
-    int create_scala_func_expr(const parser::FuncExpr* item, pb::Expr& expr, parser::FuncType op, bool use_alias);
+    int create_scala_func_expr(const parser::FuncExpr* item, pb::Expr& expr, parser::FuncType op, 
+            bool use_alias, bool can_agg);
 
-    int create_expr_tree(const parser::Node* item, pb::Expr& expr, bool use_alias);
+    int create_expr_tree(const parser::Node* item, pb::Expr& expr, bool use_alias, bool can_agg);
 
     int create_orderby_exprs(parser::OrderByClause* order);
 
@@ -193,7 +201,7 @@ protected:
     //TODO: primitive len for STRING, BOOL and NULL
     int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr);
     // (a,b)
-    int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr, bool use_alias);
+    int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr, bool use_alias, bool can_agg);
 
     void create_scan_tuple_descs();
     void create_values_tuple_desc(); 
@@ -226,11 +234,13 @@ private:
     int create_n_ary_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
             pb::ExprNodeType type,
-            bool use_alias);
+            bool use_alias,
+            bool can_agg);
     int create_in_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
             pb::ExprNodeType type,
-            bool use_alias);
+            bool use_alias,
+            bool can_agg);
 
     static std::atomic<uint64_t> _txn_id_counter;
 
@@ -269,7 +279,6 @@ protected:
 
     // table_alias => db.table
     std::unordered_map<std::string, std::string>  _table_alias_mapping;
-    //std::unordered_map<std::string, int64_t>    _index_id_mapping;
 
     // alias => index in _select_exprs (or _select_names)
     std::multimap<std::string, size_t> _select_alias_mapping;
@@ -283,6 +292,8 @@ protected:
     std::vector<bool>           _order_ascs;
 
     JoinMemTmp*                 _join_root = nullptr;
+    int32_t                     _derived_table_id = -1;
+    int32_t                     _column_id = 0;
 };
 } //namespace baikal
 

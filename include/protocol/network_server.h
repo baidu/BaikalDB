@@ -72,6 +72,12 @@ private:
 
     void connection_timeout_check();
     void report_heart_beat();
+    void index_recommend(const std::string& sample_sql, int64_t table_id, 
+        int64_t index_id, std::string& index_info, std::string& desc);
+    void get_field_distinct_cnt(int64_t table_id, std::set<int> fileds, 
+        std::map<int64_t, int>& distinct_field_map);
+    void fill_field_info(int64_t table_id, std::map<int64_t, int>& distinct_field_map, 
+        std::string type, std::ostringstream& os);
     void print_agg_sql();
     void recovery_transactions();
     

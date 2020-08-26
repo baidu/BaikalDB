@@ -99,6 +99,7 @@ NetworkSocket::NetworkSocket() {
 }
 
 NetworkSocket::~NetworkSocket() {
+    //DB_WARNING_CLIENT(this, "NetworkSocket close");
     if (fd > 0) {
         close(fd);
     }

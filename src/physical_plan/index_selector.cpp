@@ -51,20 +51,21 @@ int IndexSelector::analyze(QueryContext* ctx) {
         }
         //有join节点暂时不考虑sort索引优化
         int ret = 0;
+        std::map<int32_t, int> field_range_type;
         if (join_node != NULL || agg_node != NULL) {
             ret =index_selector(ctx->tuple_descs(),
                             static_cast<ScanNode*>(scan_node_ptr), 
                             filter_node, 
                             NULL,
                             join_node,
-                            &ctx->has_recommend);
+                            &ctx->has_recommend, field_range_type);
         } else {
             ret = index_selector(ctx->tuple_descs(),
                            static_cast<ScanNode*>(scan_node_ptr), 
                            filter_node, 
                            sort_node,
                            join_node,
-                           &ctx->has_recommend);
+                           &ctx->has_recommend, field_range_type);
         }
         if (ret == -2) {
             ctx->return_empty = true;
@@ -75,6 +76,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
         }
         if (ret > 0) {
             ctx->index_ids.insert(ret);
+            ctx->field_range_type = field_range_type;
         }
         pb::ScanNode* pb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->mutable_pb_node()->
             mutable_derive_node()->mutable_scan_node();
@@ -362,7 +364,8 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                                     FilterNode* filter_node, 
                                     SortNode* sort_node,
                                     JoinNode* join_node,
-                                    bool* has_recommend) {
+                                    bool* has_recommend,
+                                    std::map<int32_t, int>& field_range_type) {
     int64_t table_id = scan_node->table_id();
     int32_t tuple_id = scan_node->tuple_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
@@ -391,6 +394,10 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
             }
             expr->get_all_field_ids(expr_field_map[expr]);
         }
+    }
+
+    for (auto& pair : field_range_map) {
+        field_range_type[pair.first] = pair.second.type;
     }
 
     std::vector<int64_t> index_ids = table_info->indices;

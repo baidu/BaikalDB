@@ -783,6 +783,62 @@ InsertValues:
         }
         $$ = insert;
     }
+    | '(' ColumnNameListOpt ')' SelectStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
+        }
+        insert->subquery_stmt = (SelectStmt*)$4;
+        $$ = insert;
+    }
+    | '(' ColumnNameListOpt ')' '(' SelectStmt ')' {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
+        }
+        SelectStmt* select = (SelectStmt*)$5;
+        select->is_in_braces = true;
+        insert->subquery_stmt = select;
+        $$ = insert;
+    }
+    | '(' ColumnNameListOpt ')' UnionStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
+        }
+        insert->subquery_stmt = (UnionStmt*)$4;
+        $$ = insert;
+    }
+    | '(' SelectStmt ')' {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        SelectStmt* select = (SelectStmt*)$2;
+        select->is_in_braces = true;
+        insert->subquery_stmt = select;
+        $$ = insert;
+    }
+    | SelectStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        insert->subquery_stmt = (SelectStmt*)$1;
+        $$ = insert;
+    }
+    | '(' UnionStmt ')' {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        UnionStmt* union_stmt = (UnionStmt*)$2;
+        union_stmt->is_in_braces = true;
+        insert->subquery_stmt = union_stmt;
+        $$ = insert;
+    }
+    | UnionStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        insert->subquery_stmt = (UnionStmt*)$1;
+        $$ = insert;
+    }
     | values_sym ValueList {
         InsertStmt* insert = (InsertStmt*)$2;
         $$ = insert;
@@ -1062,6 +1118,22 @@ TableFactor:
         }
         $$ = table_source;
     }
+    | '(' SelectStmt ')' TableAsName {
+        TableSource* table_source = new_node(TableSource);
+        SelectStmt* select = (SelectStmt*)$2;
+        select->is_in_braces = true;
+        table_source->derived_table = select;
+        table_source->as_name = $4;
+        $$ = table_source;
+    }
+    | '(' UnionStmt ')' TableAsName {
+        TableSource* table_source = new_node(TableSource);
+        UnionStmt* union_stmt = (UnionStmt*)$2;
+        union_stmt->is_in_braces = true;
+        table_source->derived_table = union_stmt;
+        table_source->as_name = $4;
+        $$ = table_source;
+    }
     | '(' TableRefs ')' {
         $$ = $2; 
     }
@@ -1077,7 +1149,10 @@ TableAsNameOpt:
     ;
 
 TableAsName:
-    AllIdent {
+    {
+        $$ = nullptr;                
+    }
+    | AllIdent {
         $$ = $1;
     }
     | AS AllIdent {
@@ -1477,7 +1552,12 @@ SelectStmtFromTable:
     ;
 
 SelectStmt:
-    SelectStmtBasic OrderByOptional LimitClause SelectLockOpt {
+    '(' SelectStmt ')' {
+        SelectStmt* select = (SelectStmt*)$2;
+        select->is_in_braces = true;
+        $$ = select;
+    }
+    | SelectStmtBasic OrderByOptional LimitClause SelectLockOpt {
         SelectStmt* select = (SelectStmt*)$1;
         select->order = $2;
         select->limit = $3;

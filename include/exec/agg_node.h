@@ -49,8 +49,11 @@ public:
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RowBatch& batch);
-    std::vector<ExprNode*>& group_exprs() {
-        return _group_exprs;
+    std::vector<ExprNode*>* mutable_group_exprs() {
+        return &_group_exprs;
+    }
+    std::vector<AggFnCall*>* mutable_agg_fn_calls() {
+        return &_agg_fn_calls;
     }
 private:
     //需要推导_agg_tuple_id内部slot的类型

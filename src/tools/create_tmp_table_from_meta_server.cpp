@@ -26,6 +26,7 @@
 
 namespace baikaldb {
 DEFINE_string(namespace_name, "FENGCHAO", "FENGCHAO");
+DEFINE_string(namespace_name2, "", "");
 DEFINE_string(database, "db", "database");
 DEFINE_string(database2, "", "database");
 DEFINE_string(table_name, "tb", "table_name");
@@ -35,9 +36,7 @@ DEFINE_string(suffix, "_tmp", "_tmp");
 DECLARE_string(meta_server_bns);
 DEFINE_string(meta_server_bns2, "", "meta server bns");
 
-int create_table(const std::string& namespace_name, 
-                const std::string& resource_tag,
-                const std::string& suffix) {
+int create_table() {
     MetaServerInteract interact;
     if (interact.init() != 0) {
         DB_WARNING("init fail");
@@ -45,6 +44,9 @@ int create_table(const std::string& namespace_name,
     }
     if (FLAGS_table_name2.empty()) {
         FLAGS_table_name2 = FLAGS_table_name;
+    }
+    if (FLAGS_namespace_name2.empty()) {
+        FLAGS_namespace_name2 = FLAGS_namespace_name;
     }
     if (FLAGS_database2.empty()) {
         FLAGS_database2 = FLAGS_database;
@@ -55,7 +57,7 @@ int create_table(const std::string& namespace_name,
     //先导出table的scheme_info信息
     pb::QueryRequest request;
     request.set_op_type(pb::QUERY_SCHEMA);
-    request.set_namespace_name(namespace_name);
+    request.set_namespace_name(FLAGS_namespace_name);
     request.set_database(FLAGS_database);
     request.set_table_name(FLAGS_table_name);
     
@@ -84,12 +86,12 @@ int create_table(const std::string& namespace_name,
     pb::MetaManagerRequest create_table_request;
     std::cout << FLAGS_database2 << " " << FLAGS_table_name2 << "\n";
     create_table_request.set_op_type(pb::OP_CREATE_TABLE);
-    create_table_request.mutable_table_info()->set_table_name(FLAGS_table_name2 + suffix);
+    create_table_request.mutable_table_info()->set_table_name(FLAGS_table_name2 + FLAGS_suffix);
     create_table_request.mutable_table_info()->set_database(FLAGS_database2);
-    create_table_request.mutable_table_info()->set_namespace_name(schema_info.namespace_name());
+    create_table_request.mutable_table_info()->set_namespace_name(FLAGS_namespace_name2);
     create_table_request.mutable_table_info()->set_replica_num(schema_info.replica_num());
-    if (resource_tag.size() > 0) {
-        create_table_request.mutable_table_info()->set_resource_tag(resource_tag);
+    if (FLAGS_resource_tag.size() > 0) {
+        create_table_request.mutable_table_info()->set_resource_tag(FLAGS_resource_tag);
     }
     //create_table_request.mutable_table_info()->set_byte_size_per_record(50);
 
@@ -99,51 +101,43 @@ int create_table(const std::string& namespace_name,
     //create_table_request.mutable_table_info()->set_ttl_duration(172800);
 
     for (auto& field_info : schema_info.fields()) {
-        /*
-        if (
-            field_info.field_name() == "bidprefer" ||
-            field_info.field_name() == "unitbid" ||
-            field_info.field_name() == "planMpricefactor" ||
-            field_info.field_name() == "planPcpricefactor" ||
-            field_info.field_name() == "unitMpricefactor" ||
-            field_info.field_name() == "unitPcpricefactor"
-            ) {
+        if (field_info.deleted()) {
             continue;
-        }*/
+        }
         auto add_field = create_table_request.mutable_table_info()->add_fields();
         *add_field = field_info;
-        if (field_info.field_name() == "unitid") {
-            add_field->set_mysql_type(pb::UINT64);
-        }
         add_field->clear_new_field_name();
         add_field->clear_field_id();
     }
-    auto add_index = create_table_request.mutable_table_info()->add_indexs();
-    add_index->set_index_name("PRIMARY");
-    add_index->set_index_type(pb::I_PRIMARY);
-    add_index->add_field_names("userid");
-    add_index->add_field_names("optlevel");
-    add_index->add_field_names("opttime");
-    add_index->add_field_names("id");
+    //auto add_index = create_table_request.mutable_table_info()->add_indexs();
     std::map<int64_t, std::string> index_name_ids;
-    //for (auto& index_info : schema_info.indexs()) {
-    //    index_name_ids[index_info.index_id()] = index_info.index_name(); 
-    //    auto add_index = create_table_request.mutable_table_info()->add_indexs();
-    //    *add_index = index_info;
-    //    add_index->clear_new_index_name();
-    //    add_index->clear_field_ids();
-    //    add_index->clear_index_id();
-    //    /*
-    //    if (add_index->index_type() == pb::I_FULLTEXT) {
-    //        add_index->set_segment_type(pb::S_UNIGRAMS);
-    //    }
-    //    */
-    //}
+    for (auto& index_info : schema_info.indexs()) {
+        index_name_ids[index_info.index_id()] = index_info.index_name(); 
+        auto add_index = create_table_request.mutable_table_info()->add_indexs();
+        *add_index = index_info;
+        add_index->clear_new_index_name();
+        add_index->clear_field_ids();
+        add_index->clear_index_id();
+        /*
+        if (add_index->index_type() == pb::I_FULLTEXT) {
+            add_index->set_segment_type(pb::S_UNIGRAMS);
+        }
+        */
+    }
 
     for (auto& dist : schema_info.dists()) {
         auto add_dist = create_table_request.mutable_table_info()->add_dists();
         *add_dist = dist;
     } 
+    
+    /*
+    auto add_dist = create_table_request.mutable_table_info()->add_dists();
+    add_dist->set_logical_room("bj");
+    add_dist->set_count(2);
+    add_dist = create_table_request.mutable_table_info()->add_dists();
+    add_dist->set_logical_room("nj");
+    add_dist->set_count(1);
+    */
     /*
     auto add_index = create_table_request.mutable_table_info()->add_indexs();
     add_index->set_index_name("showword_in");
@@ -197,9 +191,7 @@ int create_table(const std::string& namespace_name,
 
 int main(int argc, char **argv) {
     google::ParseCommandLineFlags(&argc, &argv, true);
-    baikaldb::create_table(baikaldb::FLAGS_namespace_name, 
-                           baikaldb::FLAGS_resource_tag, 
-                           baikaldb::FLAGS_suffix);
+    baikaldb::create_table();
 
     return 0;
 }

@@ -211,9 +211,10 @@ inline void glog_error_writelog(const char* fmt, ...) {
 
 #define DB_WARNING_CLIENT(sock, _fmt_, args...) \
     do {\
-        DB_WARNING("user=%s fd=%d ip=%s port=%d errno=%d:" _fmt_, \
+        DB_WARNING("user=%s fd=%d ip=%s port=%d errno=%d log_id=%llu:" _fmt_, \
             sock->username.c_str(), sock->fd, sock->ip.c_str(), sock->port, \
-            sock->query_ctx->stat_info.error_code, ##args);\
+            sock->query_ctx->stat_info.error_code, \
+            sock->query_ctx->stat_info.log_id, ##args);\
     } while (0);
 
 #define DB_FATAL_CLIENT(sock, _fmt_, args...) \

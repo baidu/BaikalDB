@@ -22,6 +22,20 @@ class DualScanNode : public ExecNode {
 public:
     DualScanNode() {
     }
+    virtual ~DualScanNode() {
+    }
+    int init(const pb::PlanNode& node) {
+        int ret = 0;
+        ret = ExecNode::init(node);
+        if (ret < 0) {
+            DB_WARNING("ExecNode::init fail, ret:%d", ret);
+            return ret;
+        }
+        _tuple_id = node.derive_node().scan_node().tuple_id();
+        _table_id = node.derive_node().scan_node().table_id();
+        _node_type = pb::DUAL_SCAN_NODE;
+        return 0;
+    }
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         std::unique_ptr<MemRow> row = state->mem_row_desc()->fetch_mem_row();
         batch->move_row(std::move(row));
@@ -29,6 +43,15 @@ public:
         *eos = true;
         return 0;
     }
+    int64_t table_id() const {
+        return _table_id;
+    }
+    int32_t tuple_id() const {
+        return _tuple_id;
+    }
+private:
+    int32_t _tuple_id = 0;
+    int64_t _table_id = 0;
 };
 }
 

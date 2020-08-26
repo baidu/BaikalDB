@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "select_planner.h"
+#include "union_planner.h"
 #include "dual_scan_node.h"
 #include "network_socket.h"
 #include <boost/algorithm/string.hpp>
@@ -82,6 +83,7 @@ int SelectPlanner::plan() {
     if (is_full_export()) {
         _ctx->is_full_export = true;
     }
+    get_slot_column_mapping();
 
     // exec node: scan -> filter -> group by -> having -> order by -> limit -> select
     create_packet_node(pb::OP_SELECT);
@@ -123,6 +125,9 @@ bool SelectPlanner::is_full_export() {
     if (_ctx->explain_type != EXPLAIN_NULL) {
         return false;
     }
+    if (_ctx->has_derived_table) {
+        return false;
+    }
     if (_select->where != nullptr) {
         return false;
     } 
@@ -150,6 +155,32 @@ bool SelectPlanner::is_full_export() {
         return false;
     }
     return true;
+}
+
+
+void SelectPlanner::get_slot_column_mapping() {
+    if (_ctx->has_derived_table) {
+        auto& outer_ref_map = _ctx->ref_slot_id_mapping;
+        for (auto& iter_out : outer_ref_map) {
+            auto it = _ctx->derived_table_ctx_mapping.find(iter_out.first);
+            if (it == _ctx->derived_table_ctx_mapping.end()) {
+                continue;
+            }
+            auto& sub_ctx = it->second;
+            auto& inter_column_map = sub_ctx->field_column_id_mapping;
+            for (auto& field_slot : iter_out.second) {
+                int32_t outer_slot_id = field_slot.second;
+                auto iter = inter_column_map.find(field_slot.first);
+                if (iter == inter_column_map.end()) {
+                    DB_WARNING("field not found:%s", field_slot.first.c_str());
+                    continue;
+                }
+                int32_t inter_column_id = iter->second;
+                _ctx->slot_column_mapping[iter_out.first][outer_slot_id] = inter_column_id;
+                //DB_WARNING("tuple_id:%d outer_slot_id:%d inter_column_id:%d", iter_out.first, outer_slot_id, inter_column_id);
+            }
+        }
+    }    
 }
 
 void SelectPlanner::create_dual_scan_node() {
@@ -268,14 +299,10 @@ int SelectPlanner::create_agg_node() {
 }
 
 void SelectPlanner::add_single_table_columns(TableInfo* table_info) {
-    for (uint32_t idx = 0; idx < table_info->fields.size(); ++idx) {
-        auto field = table_info->fields[idx];
+    for (auto& field : table_info->fields) {
         if (field.deleted) {
             continue;
         }
-        std::string& field_name = field.name;
-        std::vector<std::string> items;
-        boost::split(items, field_name, boost::is_any_of("."));
 
         pb::SlotDescriptor slot = get_scan_ref_slot(table_info->id, field.id, field.type);
         pb::Expr select_expr;
@@ -287,11 +314,11 @@ void SelectPlanner::add_single_table_columns(TableInfo* table_info) {
         node->mutable_derive_node()->set_slot_id(slot.slot_id());
         node->mutable_derive_node()->set_field_id(slot.field_id());
 
-        std::string& select_name = items[items.size() - 1];
+        std::string& select_name = field.short_name;
         _select_exprs.push_back(select_expr);
         _select_names.push_back(select_name);
-
-        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
+        _ctx->ref_slot_id_mapping[slot.tuple_id()][select_name] = slot.slot_id();
+        _ctx->field_column_id_mapping[select_name] = _column_id++;
     }
 }
 
@@ -346,7 +373,7 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         DB_WARNING("field expr is nullptr");
         return -1;
     }
-    if (0 != create_expr_tree(field->expr, select_expr, false)) {
+    if (0 != create_expr_tree(field->expr, select_expr, false, true)) {
         DB_WARNING("create select expr failed");
         return -1;
     }
@@ -365,9 +392,11 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
     }
     _select_names.push_back(select_name);
     _select_exprs.push_back(select_expr);
+    
+    _ctx->field_column_id_mapping[select_name] = _column_id++;
 
-    std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
     if (has_alias) {
+        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
         _select_alias_mapping.insert({select_name, (_select_names.size() - 1)});
     }
     return 0;
@@ -403,7 +432,7 @@ int SelectPlanner::parse_where() {
     if (_select->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_select->where, _where_filters, false)) {
+    if (0 != flatten_filter(_select->where, _where_filters, false, false)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }
@@ -414,7 +443,7 @@ int SelectPlanner::_parse_having() {
     if (_select->having == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_select->having, _having_filters, true)) {
+    if (0 != flatten_filter(_select->having, _having_filters, true, true)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }
@@ -433,7 +462,7 @@ int SelectPlanner::parse_groupby() {
         }
         // create group by expr node
         pb::Expr group_expr;
-        if (0 != create_expr_tree(by_items[idx]->expr, group_expr, true)) {
+        if (0 != create_expr_tree(by_items[idx]->expr, group_expr, true, false)) {
             DB_WARNING("create group expr failed");
             return -1;
         }
@@ -458,11 +487,11 @@ int SelectPlanner::parse_limit() {
         return 0;
     }
     parser::LimitClause* limit = _select->limit;
-    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, false)) {
+    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, false, false)) {
         DB_WARNING("create limit offset expr failed");
         return -1;
     }
-    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, false)) {
+    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, false, false)) {
         DB_WARNING("create limit count expr failed");
         return -1;
     }

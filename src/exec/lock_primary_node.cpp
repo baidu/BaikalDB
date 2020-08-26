@@ -28,7 +28,7 @@ int LockPrimaryNode::init(const pb::PlanNode& node) {
     _table_id = lock_primary_node.table_id();
     _lock_type = lock_primary_node.lock_type();
     _global_index_id = lock_primary_node.table_id();
-    _affect_primary = lock_primary_node.affect_primary();
+    _update_affect_primary = lock_primary_node.affect_primary();
     if (lock_primary_node.affect_index_ids_size() > 0) {
         for (auto i = 0; i < lock_primary_node.affect_index_ids_size(); i++) {
             _affected_index_ids.push_back(lock_primary_node.affect_index_ids(i));
@@ -59,7 +59,7 @@ void LockPrimaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
             record->encode(*str);
         }
     }
-    lock_primary_node->set_affect_primary(_affect_primary);
+    lock_primary_node->set_affect_primary(_update_affect_primary);
     for (auto id : _affected_index_ids) {
         lock_primary_node->add_affect_index_ids(id);
     }
@@ -77,6 +77,23 @@ int LockPrimaryNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
+    // 如果是insert，则_affected_index_ids为空
+    // 只有update才会赋值
+    // TODO 后续baikaldb吃掉这个逻辑，所以上一次线后需要删除这个判断，否则update不影响索引也会全部使用索引
+    if (!_affected_index_ids.empty()) {
+        _affected_indexes.clear();
+        for (auto index_id : _affected_index_ids) {
+            auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+            if (index_info == nullptr) {
+                DB_WARNING("get index info failed index_id: %ld", index_id);
+                return -1;
+            }
+            if (!index_info->is_global) {
+                _affected_indexes.push_back(index_info);
+            }
+        }
+    }
+    _indexes_ptr = &_affected_indexes;
     //对于update 和 insert on duplicate key fields_ids需要全部返回
     //对于replace 和delete是用户如果指定了binlog要全部返回
     //对于ignore 不需要返回
@@ -221,16 +238,11 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
         //DB_WARNING_STATE(state,"record:%s", primary_record->debug_string().c_str());
         _return_records[_pri_info->id].push_back(primary_record);
     } 
-    for (auto& index_id: _affected_index_ids) {
-        //因为这边查到的值可能会被修改，后边锁二级索引还要用到输入的record, 所以要复制出来
-        auto index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (index_ptr == nullptr) {
-            DB_WARNING("index info not found index_id:%ld", index_id);
-            return -1;
-        }
+    for (auto& index_ptr: _affected_indexes) {
         if (index_ptr->id == _table_id) {
             continue;
         }
+        //因为这边查到的值可能会被修改，后边锁二级索引还要用到输入的record, 所以要复制出来
         SmartRecord get_record = record->clone(true);
         auto ret = txn->get_update_secondary(_region_id, *_pri_info, *index_ptr, get_record, GET_LOCK, true);
         if (ret == -3 || ret == -2) {
@@ -259,12 +271,7 @@ int LockPrimaryNode::put_row(RuntimeState* state, SmartRecord record) {
             //_table_id, _region_id, record->debug_string().c_str());
         return 0;
     }
-    for (auto& index_id : _affected_index_ids) {
-        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (info_ptr == nullptr) {
-            DB_WARNING_STATE(state, "index info is null, index:%ld", index_id);
-            return -1;
-        }
+    for (auto& info_ptr : _affected_indexes) {
         if (info_ptr->id == _table_id) {
             continue;
         }

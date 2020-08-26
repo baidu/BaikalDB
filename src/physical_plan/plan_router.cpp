@@ -65,13 +65,13 @@ int PlanRouter::insert_node_analyze(T* node, QueryContext* ctx) {
     ret = schema_factory->get_region_by_key(
             *index_ptr, 
             ctx->insert_records, 
-            node->records_by_region(), 
+            node->insert_records_by_region(), 
             node->region_infos());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
     }
-    if (node->region_infos().size() == 0) {
+    if (node->region_infos().size() == 0 && ctx->sub_query_plans.size() == 0) {
         DB_WARNING("region_infos.size = 0");
         return -1;
     }
@@ -129,9 +129,10 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
         DB_WARNING("invalid index info: %ld", router_index_id);
         return -1;
     }
+    /*
     if (router_index != nullptr) {
-        DB_DEBUG("index:%ld router_index_id:%ld", router_index->index_id(), router_index_id);
-    }
+        DB_WARNING("index:%ld router_index_id:%ld", router_index->index_id(), router_index_id);
+    }*/
 
     auto ret = schema_factory->get_region_by_key(main_table_id, 
             *index_ptr, router_index,

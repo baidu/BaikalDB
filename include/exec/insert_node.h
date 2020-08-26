@@ -38,16 +38,13 @@ public:
             expr->close();
         }
         _records.clear();
-        _records_by_region.clear();
+        _insert_records_by_region.clear();
     }
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     int insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert_records);
 
-    std::map<int64_t, std::vector<SmartRecord>>& records_by_region() {
-        return _records_by_region;
-    }
     std::vector<ExprNode*>& insert_values() {
         return _insert_values;
     }
@@ -59,9 +56,6 @@ private:
     std::vector<SmartRecord> _records;
     std::vector<int32_t>     _prepared_field_ids;
     std::vector<ExprNode*>   _insert_values;
-
-    // the insertion records grouped by region id
-    std::map<int64_t, std::vector<SmartRecord>> _records_by_region;
 };
 }
 

@@ -441,6 +441,30 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
     return DECIMAL_LIT;
 }
 
+0[b][0-1]+ {
+    // bit
+    yylval->expr = LiteralExpr::make_bit(yytext + 2, strlen(yytext) - 2, parser->arena);
+    return STRING_LIT;
+}
+
+[bB]\'[0-1]*\' {
+    // bit
+    yylval->expr = LiteralExpr::make_bit(yytext + 2, strlen(yytext) - 3, parser->arena);
+    return STRING_LIT;
+}
+
+0[x][0-9a-fA-F]+ {
+    // hex
+    yylval->expr = LiteralExpr::make_hex(yytext + 2, strlen(yytext) - 2, parser->arena);
+    return STRING_LIT;
+}
+
+[xX]\'[0-9a-fA-F]*\' {
+    // hex
+    yylval->expr = LiteralExpr::make_hex(yytext + 2, strlen(yytext) - 3, parser->arena);
+    return STRING_LIT;
+}
+
 \"([^\\\"]|\\.)*\" |
 \'([^\\\']|\\.)*\' {
     //string

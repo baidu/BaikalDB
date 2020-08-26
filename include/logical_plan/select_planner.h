@@ -61,6 +61,8 @@ private:
   
     bool is_full_export();
 
+    void get_slot_column_mapping();
+
     // create tuples for table scan
     void create_agg_tuple_desc();
 

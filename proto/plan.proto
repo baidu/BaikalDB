@@ -23,7 +23,6 @@ enum PlanNodeType {
     HAVING_FILTER_NODE = 13;
     PACKET_NODE = 14;
     UPDATE_NODE = 15;
-    REPLACE_NODE = 16;
     TRUNCATE_NODE = 17;
     TRANSACTION_NODE = 18;  //TransactionNode
     KILL_NODE = 19;

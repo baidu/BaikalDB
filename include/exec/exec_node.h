@@ -100,6 +100,9 @@ public:
         return _trace;
     }
     void add_child(ExecNode* exec_node) {
+        if (exec_node == nullptr) {
+            return ;
+        }
         _children.push_back(exec_node);
         exec_node->set_parent(this);
     }
@@ -128,6 +131,9 @@ public:
         return _children.size();
     }
     ExecNode* children(size_t idx) {
+        if (_children.size() == 0) {
+            return nullptr;
+        }
         return _children[idx];
     }
     std::vector<ExecNode*> children() {

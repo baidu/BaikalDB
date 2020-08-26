@@ -343,6 +343,66 @@ TEST(test_parser, case_insert) {
         
         ASSERT_EQ(1, insert_stmt->on_duplicate.size());
     }
+    {
+        parser::SqlParser parser;
+        std::string sql_insert9 = "insert into db.t1 select f1,f2,f3 from db.t2;";
+        parser.parse(sql_insert9);
+
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::InsertStmt));
+        parser::InsertStmt* insert_stmt = (parser::InsertStmt*)parser.result[0];
+        std::cout << insert_stmt->to_string() << std::endl;
+        ASSERT_TRUE(insert_stmt->table_name != nullptr);
+        ASSERT_TRUE(std::string(insert_stmt->table_name->db.value) == "db");
+        ASSERT_EQ(std::string(insert_stmt->table_name->table.value), "t1");
+        ASSERT_EQ(0, insert_stmt->columns.size());
+        ASSERT_TRUE(insert_stmt->subquery_stmt != nullptr);
+        ASSERT_TRUE(insert_stmt->subquery_stmt->node_type == NT_SELECT);
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)insert_stmt->subquery_stmt;
+        ASSERT_EQ(3, select_stmt->fields.size());
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_insert9 = "insert into db.t1 (select f1,f2,f3 from db.t2);";
+        parser.parse(sql_insert9);
+
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::InsertStmt));
+        parser::InsertStmt* insert_stmt = (parser::InsertStmt*)parser.result[0];
+        std::cout << insert_stmt->to_string() << std::endl;
+        ASSERT_TRUE(insert_stmt->table_name != nullptr);
+        ASSERT_TRUE(std::string(insert_stmt->table_name->db.value) == "db");
+        ASSERT_EQ(std::string(insert_stmt->table_name->table.value), "t1");
+        ASSERT_EQ(0, insert_stmt->columns.size());
+        ASSERT_TRUE(insert_stmt->subquery_stmt != nullptr);
+        ASSERT_TRUE(insert_stmt->subquery_stmt->node_type == NT_SELECT);
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)insert_stmt->subquery_stmt;
+        ASSERT_EQ(3, select_stmt->fields.size());
+        ASSERT_TRUE(select_stmt->is_in_braces == true);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_insert9 = "insert into db.student1 (id,name1,name2,age1,age2,class1,class2,address,height)"
+            "(select id,name1,name2,age1,age2,class1,class2,address,2 from student);";
+        parser.parse(sql_insert9);
+
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::InsertStmt));
+        parser::InsertStmt* insert_stmt = (parser::InsertStmt*)parser.result[0];
+        std::cout << insert_stmt->to_string() << std::endl;
+        ASSERT_TRUE(insert_stmt->table_name != nullptr);
+        ASSERT_TRUE(std::string(insert_stmt->table_name->db.value) == "db");
+        ASSERT_EQ(std::string(insert_stmt->table_name->table.value), "student1");
+        ASSERT_EQ(9, insert_stmt->columns.size());
+        ASSERT_TRUE(insert_stmt->subquery_stmt != nullptr);
+        ASSERT_TRUE(insert_stmt->subquery_stmt->node_type == NT_SELECT);
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)insert_stmt->subquery_stmt;
+        ASSERT_EQ(9, select_stmt->fields.size());
+        ASSERT_TRUE(select_stmt->is_in_braces == true);
+    }
 }
 TEST(test_parser, case_replace) {
     {

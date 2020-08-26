@@ -15,6 +15,7 @@
 #pragma once
 
 #include "exec_node.h"
+#include "sort_node.h"
 #include "table_record.h"
 #include "proto/store.interface.pb.h"
 #include "sorter.h"
@@ -28,7 +29,7 @@ public:
         _factory = SchemaFactory::get_instance();
     }
     virtual ~SelectManagerNode() {
-        for (auto expr : _slot_order_exprs) {
+        for (auto expr : _derived_table_projections) {
             ExprNode::destroy_tree(expr);
         }
     }
@@ -36,28 +37,16 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state) {
         ExecNode::close(state);
-        for (auto expr : _slot_order_exprs) {
+        for (auto expr : _derived_table_projections) {
             expr->close();
         }
         _sorter = nullptr;
         _fetcher_store.clear();
     }
-    int init_sort_info(const pb::PlanNode& node) {
-        for (auto& expr : node.derive_node().sort_node().slot_order_exprs()) {
-            ExprNode* order_expr = nullptr;
-            auto ret = ExprNode::create_tree(expr, &order_expr);
-            if (ret < 0) {
-                //如何释放资源
-                return ret;
-            }
-            _slot_order_exprs.push_back(order_expr);
-        }
-        for (auto asc : node.derive_node().sort_node().is_asc()) {
-            _is_asc.push_back(asc);
-        }
-        for (auto null_first : node.derive_node().sort_node().is_null_first()) {
-            _is_null_first.push_back(null_first);
-        } 
+    int init_sort_info(SortNode* sort_node) {
+        _slot_order_exprs = sort_node->slot_order_exprs();
+        _is_asc = sort_node->is_asc();
+        _is_null_first = sort_node->is_null_first();
         return 0;
     }
     int open_global_index(RuntimeState* state,
@@ -68,6 +57,30 @@ public:
                           RuntimeState* state,
                           ExecNode* exec_node,
                           int64_t main_table_id);
+
+    void set_has_sub_query(bool flag) {
+        _has_sub_query = flag;
+    }
+
+    void set_sub_query_runtime_state(RuntimeState* state) {
+        _sub_query_runtime_state = state;
+    }
+    void steal_projections(std::vector<ExprNode*>& projections) {
+        _derived_table_projections.swap(projections);
+    }
+
+    void set_sub_query_node(ExecNode* sub_query_node) {
+        _sub_query_node = sub_query_node;
+    }
+
+    int subquery_open(RuntimeState* state);
+
+    void set_slot_column_mapping(std::map<int32_t, int32_t>& slot_column_map) {
+        _slot_column_mapping.swap(slot_column_map);
+    }
+    void set_derived_tuple_id(int32_t derived_tuple_id) {
+        _derived_tuple_id = derived_tuple_id;
+    }
 private:
     //允许fetcher回来后排序
     std::vector<ExprNode*> _slot_order_exprs;
@@ -78,6 +91,12 @@ private:
     FetcherStore    _fetcher_store;
     std::map<int32_t, int32_t> _index_slot_field_map;
     SchemaFactory*  _factory = nullptr;
+    bool            _has_sub_query = false;
+    RuntimeState*   _sub_query_runtime_state = nullptr;
+    ExecNode*       _sub_query_node = nullptr;
+    std::vector<ExprNode*>  _derived_table_projections;
+    std::map<int32_t, int32_t>  _slot_column_mapping;
+    int32_t         _derived_tuple_id = 0;
 };
 }
 

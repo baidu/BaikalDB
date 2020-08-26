@@ -249,6 +249,9 @@ void LiteralExpr::to_stream(std::ostream& os) const {
         case LT_STRING:
             os << "'" << _u.str_val.value << "'";
             break;
+        case LT_HEX:
+            os << "'" << _u.str_val.value << "'";
+            break;
         case LT_BOOL:
             os << true_str[_u.bool_val];
             break;
@@ -278,6 +281,9 @@ std::string LiteralExpr::to_string() const {
             os << _u.double_val;
             break;
         case LT_STRING:
+            os << _u.str_val.value;
+            break;
+        case LT_HEX:
             os << _u.str_val.value;
             break;
         case LT_BOOL:

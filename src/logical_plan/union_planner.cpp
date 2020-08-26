@@ -62,42 +62,19 @@ int UnionPlanner::plan() {
 }
 
 int UnionPlanner::gen_select_stmts_plan() {
-    auto client = _ctx->client_conn;
     int  _number_for_columns = 0; // union的每个select的column个数必须一样
     _is_distinct = _union_stmt->distinct;
+    std::vector<std::string>    final_select_names;
     for (int stmt_idx = 0; stmt_idx < _union_stmt->select_stmts.size(); stmt_idx++) {
-        std::shared_ptr<QueryContext> select_ctx(new (std::nothrow)QueryContext());
-        if (select_ctx.get() == nullptr) {
-            DB_WARNING("create select context failed");
-            return -1;
-        }
         parser::SelectStmt* select = _union_stmt->select_stmts[stmt_idx];
-        select_ctx->stmt = select;
-        select_ctx->stmt_type = select->node_type;
-        select_ctx->cur_db = _ctx->cur_db;
-        select_ctx->user_info = _ctx->user_info;
-        select_ctx->row_ttl_duration = _ctx->row_ttl_duration;
-        select_ctx->get_runtime_state()->set_client_conn(client);
-        select_ctx->client_conn = client;
-        select_ctx->sql = select->to_string();
-        std::unique_ptr<LogicalPlanner> planner;
-        planner.reset(new SelectPlanner(select_ctx.get()));
-        if (planner->plan() != 0) {
-            DB_WARNING("gen plan failed, type:%d", select_ctx->stmt_type);
+        int ret = gen_subquery_plan(select);
+        if (ret < 0) {
             return -1;
         }
         if (stmt_idx == 0) {
-            _select_names = planner->select_names();
-            _first_select_exprs = planner->select_exprs();
-            _select_alias_mapping = planner->select_alias_mapping();
+            final_select_names = _select_names;
         }
-        select_ctx->is_full_export = false;
-        int ret = select_ctx->create_plan_tree();
-        if (ret < 0) {
-            DB_WARNING("Failed to pb_plan to execnode");
-            return -1;
-        }
-        int columns_size = planner->select_names().size();
+        int columns_size = _select_names.size();
         if (_number_for_columns != 0 &&  _number_for_columns != columns_size) {
             _ctx->stat_info.error_code = ER_WRONG_NUMBER_OF_COLUMNS_IN_SELECT;
             _ctx->stat_info.error_msg << "The used SELECT statements have a different number of columns";
@@ -105,8 +82,8 @@ int UnionPlanner::gen_select_stmts_plan() {
         } else {
             _number_for_columns = columns_size;
         }
-        _ctx->union_select_plans.push_back(select_ctx);
     }
+    _select_names.swap(final_select_names);
     return 0;
 }
 
@@ -116,7 +93,7 @@ void UnionPlanner::parse_dual_fields() {
     pb::TupleDescriptor tuple_desc;
     tuple_desc.set_tuple_id(tuple_id);
     tuple_desc.set_table_id(1);
-    for (int i = 0; i < _select_names.size(); i++) {
+    for (auto& field_name : _select_names) {
         pb::Expr select_expr;
         pb::SlotDescriptor slot_desc;
         slot_desc.set_slot_id(slot_id++);
@@ -131,7 +108,8 @@ void UnionPlanner::parse_dual_fields() {
         node->set_num_children(0);
         node->mutable_derive_node()->set_tuple_id(slot_desc.tuple_id());
         node->mutable_derive_node()->set_slot_id(slot_desc.slot_id());
-        _name_slot_id_mapping[_select_names[i]] = slot_desc.slot_id();
+        _name_slot_id_mapping[field_name] = slot_desc.slot_id();
+        _ctx->field_column_id_mapping[field_name] = _column_id++;
         _select_exprs.push_back(select_expr);
     }
     _ctx->add_tuple(tuple_desc);
@@ -268,11 +246,11 @@ int UnionPlanner::parse_limit() {
         return 0;
     }
     parser::LimitClause* limit = _union_stmt->limit;
-    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, false)) {
+    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, false, false)) {
         DB_WARNING("create limit offset expr failed");
         return -1;
     }
-    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, false)) {
+    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, false, false)) {
         DB_WARNING("create limit count expr failed");
         return -1;
     }

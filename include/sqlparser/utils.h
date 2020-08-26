@@ -34,8 +34,10 @@ namespace braft = raft;
 namespace parser {
 struct String {
     char* value;
+    size_t length;
     void strdup(const char* str, int len, butil::Arena& arena) {
         value = (char*)arena.allocate(len + 1);
+        length = len;
         memcpy(value, str, len);
         value[len] = '\0';
     }
@@ -44,29 +46,33 @@ struct String {
     }
     void append(const char* str, butil::Arena& arena) {
         int len = strlen(str);
-        int old_len = strlen(value);
-        char* value_new = (char*)arena.allocate(len + old_len + 1);
+        int old_len = length;
+        length += len;
+        char* value_new = (char*)arena.allocate(length + 1);
         memcpy(value_new, value, old_len);
         memcpy(value_new + old_len, str, len);
-        value_new[len + old_len] = '\0';
+        value_new[length] = '\0';
         value = value_new;
     }
     // cannot have constructor in union
     void set_null() {
         value = nullptr;
+        length = 0;
     }
     const char* c_str() const {
         return value;
     }
+    std::string to_string() const {
+        return std::string(value, length);
+    }
     bool empty() const {
-        return (value == nullptr || value[0] == '\0');
+        return (length == 0 || value == nullptr || value[0] == '\0');
     }
     void restore_5c() {
         size_t i = 0;
-        size_t len = strlen(value);
-        while (i < len) {
+        while (i < length) {
             if ((value[i] & 0x80) != 0) {
-                if (++i >= len) {
+                if (++i >= length) {
                     return;
                 }
                 if (value[i] == 0x7F) {
@@ -90,8 +96,7 @@ struct String {
             {'b', '\b'},
             {'Z', '\x1A'},
         };
-        size_t len = strlen(value);
-        while (fast < len) {
+        while (fast < length) {
             if (has_slash) {
                 if (trans_map.count(value[fast]) == 1) {
                     value[slow++] = trans_map[value[fast++]];
@@ -111,17 +116,17 @@ struct String {
             }
         }
         value[slow] = '\0';
+        length = slow;
     }
     String& to_lower_inplace() {
         if (value != nullptr) {
-            int len = strlen(value);
-            std::transform(value, value + len, value, ::tolower);
+            std::transform(value, value + length, value, ::tolower);
         }
         return *this;
     }
     std::string to_lower() const {
         if (value != nullptr) {
-            std::string tmp = value;
+            std::string tmp(value, length);
             std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::tolower);
             return tmp;
         } else {
@@ -131,14 +136,17 @@ struct String {
     // shallow copy
     String& operator=(std::nullptr_t n) {
         value = nullptr;
+        length = 0;
         return *this;
     }
     String& operator=(char* str) {
         value = str;
+        length = strlen(str);
         return *this;
     }
     String& operator=(const char* str) {
         value = (char*)str;
+        length = strlen(str);
         return *this;
     }
 
@@ -226,6 +234,28 @@ private:
     T* _end = nullptr;
     T* _mem_end = nullptr;
 };
+
+inline char bit_to_char(const char* str, size_t len) {
+    char out = 0;
+    for (size_t i = 0; i < len; i++) {
+        out = out * 2 + str[i] - '0';
+    }
+    return out;
+}
+
+inline char hex_to_char(const char* str, size_t len) {
+    char out = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (str[i] >= 'A' && str[i] <= 'F') {
+            out = out * 16 + str[i] - 'A' + 10;
+        } else if (str[i] >= 'a' && str[i] <= 'f') {
+            out = out * 16 + str[i] - 'a' + 10;
+        } else {
+            out = out * 16 + str[i] - '0';
+        }
+    }
+    return out;
+}
 
 }
 

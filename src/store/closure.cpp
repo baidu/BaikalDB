@@ -67,6 +67,8 @@ void DMLClosure::Run() {
     if (region != nullptr && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
         region->update_average_cost(cost.get_time());
     }
+    static bvar::LatencyRecorder raft_total_cost("raft_total_cost");
+    raft_total_cost << cost.get_time();
     if (cost.get_time() > FLAGS_print_time_us) {
         DB_NOTICE("dml log_id:%lu, type:%s, raft_total_cost:%ld, region_id: %ld, "
                     "qps:%ld, average_cost:%ld, num_prepared:%d remote_side:%s",

@@ -60,8 +60,8 @@ private:
     ReverseList* _old_list;
     int32_t _curr_ix_new;//-1表示链表遍历结束，大于等于0表示链表当前节点
     int32_t _curr_ix_old;
-    uint32_t _list_size_new;//链表的长度
-    uint32_t _list_size_old;
+    int32_t _list_size_new;//链表的长度
+    int32_t _list_size_old;
     PrimaryIdT* _curr_id_new;//
     PrimaryIdT* _curr_id_old;
     int _cmp_res;//确定当前使用的node

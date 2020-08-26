@@ -33,12 +33,21 @@ public:
         for (auto expr : _insert_values) {
             ExprNode::destroy_tree(expr);
         }
+        for (auto expr : _select_projections) {
+            ExprNode::destroy_tree(expr);
+        }
+        if (_sub_query_node != nullptr) {
+            delete _sub_query_node;
+        }
     }
     virtual int init(const pb::PlanNode& node) override;
     virtual int open(RuntimeState* state) override;
     virtual void close(RuntimeState* state) override {
         ExecNode::close(state);
         for (auto expr : _update_exprs) {
+            expr->close();
+        }
+        for (auto expr : _select_projections) {
             expr->close();
         }
         _origin_records.clear();
@@ -89,6 +98,22 @@ public:
         _origin_records.swap(records);
     }
 
+    int subquery_open(RuntimeState* state);
+    void set_has_sub_query(bool flag) {
+        _has_sub_query = flag;
+    }
+
+    void set_sub_query_runtime_state(RuntimeState* state) {
+        _sub_query_runtime_state = state;
+    }
+
+    void steal_projections(std::vector<ExprNode*>& projections) {
+        _select_projections.swap(projections);
+    }
+    void set_table_id(int64_t table_id) {
+        _table_id = table_id;
+    }
+
 private:
     void update_record(SmartRecord record);
     int64_t     _table_id = -1;
@@ -97,6 +122,7 @@ private:
     bool        _is_replace = false;
     bool        _need_ignore = false;
     bool        _on_dup_key_update = false;
+    bool        _has_sub_query = false;
     pb::TupleDescriptor* _tuple_desc = nullptr;
     pb::TupleDescriptor* _values_tuple_desc = nullptr;
     std::unique_ptr<MemRow> _dup_update_row; // calc for on_dup_key_update
@@ -117,9 +143,16 @@ private:
     std::map<int64_t, std::map<std::string, std::set<int32_t>>> _index_keys_record_map;
     std::map<int64_t, SmartIndex> _index_info_map;
 
+    // 主表返回的主键key->record映射
+    std::map<std::string, SmartRecord> _primary_record_key_record_map;
+    bool _primary_record_key_record_map_construct = false;
+
     bool   _has_conflict_record = true;
     bool   _main_table_reversed = false;
     int    _affected_rows = 0;
+    RuntimeState* _sub_query_runtime_state;
+    std::vector<ExprNode*>  _select_projections;
+    ExecNode*               _sub_query_node = nullptr;
 };
 
 }

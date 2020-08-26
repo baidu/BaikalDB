@@ -24,27 +24,24 @@ using google::protobuf::Descriptor;
 using google::protobuf::Message;
 using google::protobuf::Reflection;
 
-void MemRow::set_tuple(int32_t tuple_id, MemRowDescriptor* desc) {
-    if (_tuples[tuple_id] == nullptr) {
-        _tuples[tuple_id] = desc->new_tuple_message(tuple_id);
-    }
-}
-
 void MemRow::to_string(int32_t tuple_id, std::string* out) {
-    if (_tuples[tuple_id] != nullptr) {
-        _tuples[tuple_id]->SerializeToString(out);
-    }
+        auto tuple = get_tuple(tuple_id);
+        if (tuple == nullptr) {
+            return ;
+        }
+        tuple->SerializeToString(out);
 }
 
 std::string MemRow::debug_string(int32_t tuple_id) {
-    if (_tuples[tuple_id] != nullptr) {
-        return _tuples[tuple_id]->ShortDebugString();
+    auto tuple = get_tuple(tuple_id);
+    if (tuple == nullptr) {
+        return "";
     }
-    return "";
+    return tuple->ShortDebugString();
 }
 
 std::string* MemRow::mutable_string(int32_t tuple_id, int32_t slot_id) {
-    auto tuple = _tuples[tuple_id];
+    auto tuple = get_tuple(tuple_id);
     if (tuple == nullptr) {
         return nullptr;
     }
@@ -67,7 +64,7 @@ int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
         DB_WARNING("unknown table index type: %ld", index.id);
         return -1;
     }
-    auto tuple = _tuples[tuple_id];
+    auto tuple = get_tuple(tuple_id);
     if (tuple == nullptr) {
         DB_FATAL("unknown tuple: %d", tuple_id);
         return -1;
@@ -116,7 +113,7 @@ int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<i
         DB_WARNING("invalid secondary index type: %ld", index.id);
         return -1;
     }
-    auto tuple = _tuples[tuple_id];
+    auto tuple = get_tuple(tuple_id);
     if (tuple == nullptr) {
         DB_FATAL("unknown tuple: %d", tuple_id);
         return -1;

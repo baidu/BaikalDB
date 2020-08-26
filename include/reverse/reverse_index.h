@@ -235,9 +235,11 @@ public:
     // release immediately
     virtual void clear() {
         TimeCost timer;
-        delete _schema;
+        for (auto& ptr : _schema_ptrs) {
+            delete ptr;
+            ptr = nullptr;
+        }
         DB_NOTICE("reverse delete time:%ld", timer.get_time());
-        _schema = nullptr;
     }
     virtual int get_next(SmartRecord record) {
         //DB_WARNING("schema get_next()");
@@ -338,6 +340,7 @@ private:
     int64_t             _level_1_scan_count = 0;
     // todo: replace thread_local because bthread will switch thread
     static thread_local Schema* _schema;
+    static thread_local std::vector<Schema*> _schema_ptrs;
     Cache<std::string, ReverseListSptr> _cache;
     Cache<uint64_t, std::shared_ptr<std::map<std::string, ReverseNode>>> _seg_cache;
     pb::SegmentType _segment_type;
@@ -351,6 +354,8 @@ private:
 template<typename Schema>
 thread_local Schema* ReverseIndex<Schema>::_schema = nullptr;
 
+template<typename Schema>
+thread_local std::vector<Schema*> ReverseIndex<Schema>::_schema_ptrs;
 //多个倒排索引间做or操作，只读
 template<typename Schema>
 class MutilReverseIndex {

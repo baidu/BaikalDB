@@ -39,11 +39,14 @@ public:
         }
     }
     google::protobuf::Message* get_tuple(int32_t tuple_id) {
+        if (tuple_id >= (int32_t)_tuples.size()) {
+            return nullptr;
+        }
         return _tuples[tuple_id];
     }
 
     const google::protobuf::FieldDescriptor* get_field_by_slot(int32_t tuple_id, int32_t slot_id) {
-        auto tuple = _tuples[tuple_id];
+        auto tuple = get_tuple(tuple_id);
         if (tuple == nullptr) {
             return nullptr;
         }
@@ -51,10 +54,13 @@ public:
         return descriptor->field(slot_id - 1);
     }
 
-    void set_tuple(int32_t tuple_id, MemRowDescriptor* desc);
     void from_string(int32_t tuple_id, const std::string& in) {
-        if (_tuples[tuple_id] != nullptr && in.size() > 0) {
-            _tuples[tuple_id]->ParseFromString(in);
+        auto tuple = get_tuple(tuple_id);
+        if (tuple == nullptr) {
+            return ;
+        }
+        if (in.size() > 0) {
+            tuple->ParseFromString(in);
         }
     }
 
@@ -70,7 +76,7 @@ public:
     std::string* mutable_string(int32_t tuple_id, int32_t slot_id);
     // slot start with 1
     ExprValue get_value(int32_t tuple_id, int32_t slot_id) {
-        auto tuple = _tuples[tuple_id];
+        auto tuple = get_tuple(tuple_id);
         if (tuple == nullptr) {
             return ExprValue::Null();
         }
@@ -81,7 +87,7 @@ public:
     }
 
     int set_value(int32_t tuple_id, int32_t slot_id, const ExprValue& value) {
-        auto tuple = _tuples[tuple_id];
+        auto tuple = get_tuple(tuple_id);
         if (tuple == nullptr) {
             return -1;
         }
@@ -101,11 +107,6 @@ public:
         }
         return 0;
     }
-    //void print_content() {
-    //    for (auto& tuple : _tuples) {
-    //        DB_WARNING("tuple:%s", tuple->DebugString().c_str());
-    //    }
-    //}
     int decode_key(int32_t tuple_id, IndexInfo& index,
             std::vector<int32_t>& field_slot, const TableKey& key, int& pos);
     int decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<int32_t>& field_slot, 
@@ -113,7 +114,7 @@ public:
 
     // for cstore
     int decode_field(int32_t tuple_id, int32_t slot_id, pb::PrimitiveType field_type, const rocksdb::Slice& in) {
-        auto tuple = _tuples[tuple_id];
+        auto tuple = get_tuple(tuple_id);
         if (tuple == nullptr) {
             return -1;
         }

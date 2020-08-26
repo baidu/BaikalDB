@@ -158,7 +158,6 @@ public:
         return count;
     }
 
-
 private:
     pb::PrimitiveType _type;
     int32_t           _field_id;

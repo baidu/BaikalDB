@@ -23,31 +23,6 @@ public:
         _is_constant = true;
     }
 
-    void value_to_node_type() {
-        _col_type = _value.type;
-        if (_value.is_timestamp()) {
-            _node_type = pb::TIMESTAMP_LITERAL;
-        } else if (_value.is_date()) {
-            _node_type = pb::DATE_LITERAL;
-        } else if (_value.is_datetime()) {
-            _node_type = pb::DATETIME_LITERAL;
-        } else if (_value.is_time()) {
-            _node_type = pb::TIME_LITERAL;
-        } else if (_value.is_int()) {
-            _node_type = pb::INT_LITERAL;
-        } else if (_value.is_string()) {
-            _node_type = pb::STRING_LITERAL;
-        } else if (_value.is_bool()) {
-            _node_type = pb::BOOL_LITERAL;
-        } else if (_value.is_double()) {
-            _node_type = pb::DOUBLE_LITERAL;
-        } else if (_value.is_hll()) {
-            _node_type = pb::HLL_LITERAL;
-        } else {
-            _node_type = pb::NULL_LITERAL;
-        }
-    }
-
     Literal(ExprValue value) : _value(value) {
         _is_constant = true;
         value_to_node_type();
@@ -80,6 +55,10 @@ public:
                 break;
             case pb::STRING_LITERAL:
                 _value.type = pb::STRING;
+                _value.str_val = node.derive_node().string_val();
+                break;
+            case pb::HEX_LITERAL:
+                _value.type = pb::HEX;
                 _value.str_val = node.derive_node().string_val();
                 break;
             case pb::HLL_LITERAL:
@@ -138,6 +117,7 @@ public:
                 pb_node->mutable_derive_node()->set_double_val(_value.get_numberic<double>());
                 break;
             case pb::STRING_LITERAL:
+            case pb::HEX_LITERAL:
             case pb::HLL_LITERAL:
                 pb_node->mutable_derive_node()->set_string_val(_value.get_string());
                 break;
@@ -181,6 +161,32 @@ public:
 
     virtual ExprValue get_value(MemRow* row) {
         return _value.cast_to(_col_type);
+    }
+
+private:
+    void value_to_node_type() {
+        _col_type = _value.type;
+        if (_value.is_timestamp()) {
+            _node_type = pb::TIMESTAMP_LITERAL;
+        } else if (_value.is_date()) {
+            _node_type = pb::DATE_LITERAL;
+        } else if (_value.is_datetime()) {
+            _node_type = pb::DATETIME_LITERAL;
+        } else if (_value.is_time()) {
+            _node_type = pb::TIME_LITERAL;
+        } else if (_value.is_int()) {
+            _node_type = pb::INT_LITERAL;
+        } else if (_value.is_string()) {
+            _node_type = pb::STRING_LITERAL;
+        } else if (_value.is_bool()) {
+            _node_type = pb::BOOL_LITERAL;
+        } else if (_value.is_double()) {
+            _node_type = pb::DOUBLE_LITERAL;
+        } else if (_value.is_hll()) {
+            _node_type = pb::HLL_LITERAL;
+        } else {
+            _node_type = pb::NULL_LITERAL;
+        }
     }
 
 private:

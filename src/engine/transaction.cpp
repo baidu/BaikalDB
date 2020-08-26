@@ -23,6 +23,8 @@ DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raf
 DECLARE_int32(rocks_transaction_lock_timeout_ms);
 // DEFINE_int32(rocks_transaction_expiration_ms, 600 * 1000, 
 //         "rocksdb transaction_expiration timeout(us)");
+bvar::LatencyRecorder Transaction::rocksdb_put_time_cost{"rocksdb_put_time_cost"};
+bvar::LatencyRecorder Transaction::rocksdb_get_time_cost{"rocksdb_get_time_cost"};
 
 int Transaction::begin() {
     rocksdb::TransactionOptions txn_opt;
@@ -393,6 +395,7 @@ int Transaction::get_for_update(const std::string& key, std::string* value) {
 }
 
 rocksdb::Status Transaction::put_kv_without_lock(const std::string& key, const std::string& value, int64_t ttl_timestamp_us) {
+    TimeCost cost;
     // support ttl
     rocksdb::Slice key_slice(key);
     rocksdb::Slice value_slices[2];
@@ -412,6 +415,7 @@ rocksdb::Status Transaction::put_kv_without_lock(const std::string& key, const s
         value_slice_parts.num_parts = 1;
     }
     auto res = _txn->Put(_data_cf, key_slice_parts, value_slice_parts);
+    rocksdb_put_time_cost << cost.get_time();
     return res;
 }
 
@@ -522,6 +526,7 @@ int Transaction::get_update_primary(
 
     rocksdb::PinnableSlice pin_slice;
     rocksdb::Status res;
+    TimeCost cost;
     if (mode == GET_ONLY) {
         //TimeCost cost;
         rocksdb::ReadOptions read_opt;
@@ -536,6 +541,7 @@ int Transaction::get_update_primary(
         DB_WARNING("invalid GetMode: %d", mode);
         return -1;
     }
+    rocksdb_get_time_cost << cost.get_time();
 
     if (res.ok()) {
         DB_DEBUG("lock ok and key exist");
@@ -660,6 +666,7 @@ int Transaction::get_update_secondary(
     //std::string* val_ptr = nullptr;
     rocksdb::PinnableSlice pin_slice;
     rocksdb::Status res;
+    TimeCost cost;
     if (mode == GET_ONLY) {
         rocksdb::ReadOptions read_opt;
         read_opt.snapshot = _snapshot;
@@ -671,6 +678,7 @@ int Transaction::get_update_secondary(
         DB_WARNING("invalid GetMode: %d", mode);
         return -1;
     }
+    rocksdb_get_time_cost << cost.get_time();
     if (res.ok()) {
         DB_DEBUG("lock ok and key exist");
     } else if (res.IsNotFound()) {

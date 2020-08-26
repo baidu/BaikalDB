@@ -95,6 +95,8 @@ ExprValue hll_init(const std::vector<ExprValue>& input);
 ExprValue case_when(const std::vector<ExprValue>& input);
 ExprValue case_expr_when(const std::vector<ExprValue>& input);
 ExprValue if_(const std::vector<ExprValue>& input);
+ExprValue ifnull(const std::vector<ExprValue>& input);
+ExprValue nullif(const std::vector<ExprValue>& input);
 // MurmurHash sign
 ExprValue murmur_hash(const std::vector<ExprValue>& input);
 //  Encryption and Compression Functions

@@ -163,6 +163,8 @@ private:
 
 public:
     bvar::Adder<BvarMap> sql_agg_cost;
+    // 索引推荐统计信息，一直积累，不清理
+    bvar::Adder<BvarMap> index_recommend_st;
 };
 
 } // namespace baikal

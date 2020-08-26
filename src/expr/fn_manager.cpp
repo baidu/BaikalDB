@@ -101,7 +101,7 @@ void FunctionManager::register_operators() {
         return_type_map[name] = ret_type;
     };
     // num funcs
-    register_object_ret("round", round, pb::INT64);
+    register_object_ret("round", round, pb::DOUBLE);
     register_object_ret("floor", floor, pb::INT64);
     register_object_ret("abs", abs, pb::DOUBLE);
     register_object_ret("sqrt", sqrt, pb::DOUBLE);
@@ -181,6 +181,8 @@ void FunctionManager::register_operators() {
     register_object_ret("case_when", case_when, pb::STRING);
     register_object_ret("case_expr_when", case_expr_when, pb::STRING);
     register_object_ret("if", if_, pb::STRING);
+    register_object_ret("ifnull", ifnull, pb::STRING);
+    register_object_ret("nullif", nullif, pb::STRING);
     // MurmurHash sign
     register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
     register_object_ret("md5", md5, pb::STRING);
@@ -366,6 +368,16 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
         if (types.size() == 3) {
             target_types.push_back(types[1]);
             target_types.push_back(types[2]);
+            has_merged_type(target_types, ret_type);
+        }
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        fn.set_return_type(ret_type);
+    } else if (fn.name() == "ifnull" || fn.name() == "nullif") {
+        std::vector<pb::PrimitiveType> target_types;
+        pb::PrimitiveType ret_type = pb::STRING;
+        if (types.size() == 2) {
+            target_types.push_back(types[0]);
+            target_types.push_back(types[1]);
             has_merged_type(target_types, ret_type);
         }
         DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())

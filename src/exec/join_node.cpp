@@ -309,12 +309,13 @@ int JoinNode::open(RuntimeState* state) {
         
         scan_node->clear_possible_indexes();
         //索引选择
+        std::map<int32_t, int> field_range_type;
         IndexSelector().index_selector(state->tuple_descs(),
                                         scan_node, 
                                         filter_node,
                                         NULL,
                                         NULL,
-                                        NULL);
+                                        NULL, field_range_type);
         if (!_is_explain) {
             //路由选择,
             //这一块做完索引选择之后如果命中二级索引需要重构mem_row的结构，mem_row已经在run_time
@@ -575,7 +576,7 @@ int JoinNode::get_next_for_other_join(RuntimeState* state, RowBatch* batch, bool
                     return 0;
                 }
                 if (batch->is_full()) {
-                     DB_WARNING("when join, batch is full, time_cost:%ld", get_next_time.get_time());
+                     //DB_WARNING("when join, batch is full, time_cost:%ld", get_next_time.get_time());
                     return 0;
                 }
                 //DB_WARNING("construct result batch");
@@ -598,7 +599,7 @@ int JoinNode::get_next_for_other_join(RuntimeState* state, RowBatch* batch, bool
                 return 0;
             }
             if (batch->is_full()) {
-                DB_WARNING("when join, batch is full, time_cost:%ld", get_next_time.get_time());
+                //DB_WARNING("when join, batch is full, time_cost:%ld", get_next_time.get_time());
                 return 0;
             }
             auto ret = _construct_result_batch(batch, *_outer_iter, NULL, false);
@@ -629,8 +630,8 @@ int JoinNode::get_next_for_inner_join(RuntimeState* state, RowBatch* batch, bool
                     DB_WARNING("_children get_next fail");
                     return ret;
                 }
-                DB_WARNING("when join, get_row from inner table success, batch_size:%d, time_cost:%ld", 
-                        _inner_row_batch.size(), get_next_time.get_time());
+                //DB_WARNING("when join, get_row from inner table success, batch_size:%d, time_cost:%ld", 
+                //        _inner_row_batch.size(), get_next_time.get_time());
                 continue;
             }
         }
@@ -647,8 +648,8 @@ int JoinNode::get_next_for_inner_join(RuntimeState* state, RowBatch* batch, bool
                     return 0;
                 }
                 if (batch->is_full()) {
-                    DB_WARNING("when join, batch is full, time_cost:%ld", 
-                                get_next_time.get_time());
+                    //DB_WARNING("when join, batch is full, time_cost:%ld", 
+                    //            get_next_time.get_time());
                     return 0;
                 }
                 //DB_WARNING("construct reslut batch");

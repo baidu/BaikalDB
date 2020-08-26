@@ -33,9 +33,6 @@ int InsertNode::init(const pb::PlanNode& node) {
     _is_replace = insert_node.is_replace();
     _row_ttl_duration = insert_node.row_ttl_duration();
     DB_DEBUG("_row_ttl_duration:%ld", _row_ttl_duration);
-    if (_node_type == pb::REPLACE_NODE) {
-        _is_replace = true;
-    }
     _need_ignore = insert_node.need_ignore();
     for (auto& slot : insert_node.update_slots()) {
         _update_slots.push_back(slot);
@@ -147,10 +144,10 @@ void InsertNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     for (auto expr : _update_exprs) {
         ExprNode::create_pb_expr(insert_node->add_update_exprs(), expr);
     }
-    if (region_id == 0 || _records_by_region.count(region_id) == 0) {
+    if (region_id == 0 || _insert_records_by_region.count(region_id) == 0) {
         return;
     }
-    std::vector<SmartRecord>& records = _records_by_region[region_id];
+    std::vector<SmartRecord>& records = _insert_records_by_region[region_id];
     insert_node->clear_records();
     for (auto& record : records) {
         std::string* str = insert_node->add_records();
@@ -194,13 +191,13 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
         return -1;
     }
     auto& tbl = *tbl_ptr;
-    std::unordered_map<int32_t, FieldInfo> table_field_map;
+    std::unordered_map<int32_t, FieldInfo*> table_field_map;
     std::unordered_set<int32_t> insert_prepared_field_ids;
-    std::vector<FieldInfo>  insert_fields;
-    std::vector<FieldInfo>  default_fields;
+    std::vector<FieldInfo*>  insert_fields;
+    std::vector<FieldInfo*>  default_fields;
 
     for (auto& field : tbl.fields) {
-        table_field_map.insert({field.id, field});
+        table_field_map.insert({field.id, &field});
     }
     for (auto id : _prepared_field_ids) {
         if (table_field_map.count(id) == 0) {
@@ -212,7 +209,7 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
     }
     for (auto& field : tbl.fields) {
         if (insert_prepared_field_ids.count(field.id) == 0) {
-            default_fields.push_back(field);
+            default_fields.push_back(&field);
         }
     }
     size_t row_size = _insert_values.size() / _prepared_field_ids.size();
@@ -225,8 +222,8 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
                 DB_WARNING("expr open fail");
                 return -1;
             }
-            if (0 != row->set_value(row->get_field_by_tag(insert_fields[col_idx].id), 
-                    expr->get_value(nullptr).cast_to(insert_fields[col_idx].type))) {
+            if (0 != row->set_value(row->get_field_by_idx(insert_fields[col_idx]->pb_idx), 
+                    expr->get_value(nullptr).cast_to(insert_fields[col_idx]->type))) {
                 DB_WARNING("fill insert value failed");
                 expr->close();
                 return -1;
@@ -235,7 +232,7 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
             expr->close();
         }
         for (auto& field : default_fields) {
-            if (0 != row->set_value(row->get_field_by_tag(field.id), field.default_expr_value)) {
+            if (0 != row->set_value(row->get_field_by_idx(field->pb_idx), field->default_expr_value)) {
                 DB_WARNING("fill insert value failed");
                 return -1;
             }

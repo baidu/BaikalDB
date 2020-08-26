@@ -29,9 +29,15 @@ namespace baikaldb {
 class FetcherNode;
 class PacketNode;
 class TransactionNode;
+class SelectManagerNode;
 
 class Separate {
 public:
+enum NodeMode {
+    BOTH,
+    PRIMARY,
+    GLOBAL
+};
     /* 分裂原则：
      * insert、delete、update、truncate 分裂packet
      * 无scan不分裂
@@ -55,7 +61,8 @@ private:
     int separate_begin(QueryContext* ctx);
     int separate_select(QueryContext* ctx);
     int separate_simple_select(QueryContext* ctx);
-    int separate_join(const std::vector<ExecNode*>& scan_nodes);
+    int separate_join(QueryContext* ctx, const std::vector<ExecNode*>& scan_nodes,
+                        const std::vector<ExecNode*>& dual_scan_nodes);
 
     int separate_global_insert(InsertManagerNode* manager_node, InsertNode* insert_node);
     int separate_global_delete(DeleteManagerNode* manager_node, DeleteNode* delete_node, ExecNode* scan_node);
@@ -63,11 +70,15 @@ private:
     //mode:0, 生成所有index的node
     //mode:1, 只生成主键的node
     //mode:2, 只生成全局索引表的node
-    int create_lock_node(int64_t table_id, pb::LockCmdType lock_type, int mode, ExecNode* manager_node);
+    int create_lock_node(int64_t table_id, pb::LockCmdType lock_type, NodeMode mode, ExecNode* manager_node);
     //生成指定索引的node, update时适用
-    int create_lock_node(int64_t table_id, pb::LockCmdType lock_type, int mode, const std::vector<int64_t>& affected_indexs, ExecNode* manager_node);
+    int create_lock_node(int64_t table_id, pb::LockCmdType lock_type, NodeMode mode, 
+            const std::vector<int64_t>& global_affected_indexs,
+            const std::vector<int64_t>& local_affected_indexs, 
+            ExecNode* manager_node);
 
     TransactionNode* create_txn_node(pb::TxnCmdType cmd_type);
+    SelectManagerNode* create_select_manager_node();
 };
 }
 

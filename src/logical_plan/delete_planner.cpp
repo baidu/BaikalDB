@@ -130,17 +130,6 @@ int DeletePlanner::create_delete_node() {
         auto& slot = get_scan_ref_slot(iter->first, field.id, field.type);
         _delete->add_primary_slots()->CopyFrom(slot);
     }
-    //全局唯一索引涉及的field_id都要放到slot_ref中
-    //auto table_info = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
-    //for (auto& index_id : table_info->indices) {
-    //    if (!SchemaFactory::get_instance()->is_global_index(index_id)) {
-    //        continue;
-    //    }
-    //    auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-    //    for (auto& field : index_info->fields) {
-    //        get_scan_ref_slot(table_id, field.id, field.type);
-    //    }
-    //}
     return 0;
 }
 
@@ -195,7 +184,7 @@ int DeletePlanner::parse_where() {
     if (_delete_stmt->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_delete_stmt->where, _where_filters, false)) {
+    if (0 != flatten_filter(_delete_stmt->where, _where_filters, false, false)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }

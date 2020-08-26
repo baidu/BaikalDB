@@ -103,12 +103,12 @@ TEST(test_stripslashes, case_all) {
     EXPECT_STREQ(str2.c_str(), "abc");
 }
 
-TEST(test_pb2json, pb2json) {
-    std::cout << sizeof(pb::RegionInfo) << " " << sizeof(rapidjson::StringBuffer) 
-    << " " << sizeof(Pb2JsonOptions) << " " << sizeof(TableInfo) << " " << sizeof(pb::SchemaInfo) << "\n";
-    std::cout << sizeof(raft::NodeOptions) << " " << sizeof(std::string) << " " << sizeof(size_t) << " "
-    << sizeof(raft::PeerId) << sizeof(butil::EndPoint) << "\n"; 
-}
+// TEST(test_pb2json, pb2json) {
+//     std::cout << sizeof(pb::RegionInfo) << " " << sizeof(rapidjson::StringBuffer) 
+//     << " " << sizeof(Pb2JsonOptions) << " " << sizeof(TableInfo) << " " << sizeof(pb::SchemaInfo) << "\n";
+//     std::cout << sizeof(raft::NodeOptions) << " " << sizeof(std::string) << " " << sizeof(size_t) << " "
+//     << sizeof(raft::PeerId) << sizeof(butil::EndPoint) << "\n"; 
+// }
 
 TEST(test_cond, wait) {
     
@@ -258,10 +258,11 @@ TEST(ThreadSafeMap, count) {
 
 TEST(BvarMap, bvarmap) {
     bvar::Adder<BvarMap> bm;
+    std::map<int32_t, int> field_range_type;
     //bm << BvarMap(std::make_pair("abc", 1));
-    bm << BvarMap("abc", 1, 101, 10, 1, 5, 3);
-    bm << BvarMap("abc", 4, 102, 20, 2, 6, 2);
-    bm << BvarMap("bcd", 5, 103, 30, 3, 7, 1);
+    bm << BvarMap("abc", 1, 101, 10, 1, 5, 3, field_range_type);
+    bm << BvarMap("abc", 4, 102, 20, 2, 6, 2, field_range_type);
+    bm << BvarMap("bcd", 5, 103, 30, 3, 7, 1, field_range_type);
     std::cout << bm.get_value();
 }
 

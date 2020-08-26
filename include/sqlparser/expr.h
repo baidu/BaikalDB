@@ -137,7 +137,8 @@ enum LiteralType {
     LT_STRING,
     LT_BOOL,
     LT_NULL,
-    LT_PLACE_HOLDER
+    LT_PLACE_HOLDER,
+    LT_HEX
 };
 
 struct LiteralExpr : public ExprNode {
@@ -161,6 +162,9 @@ struct LiteralExpr : public ExprNode {
                 std::cout << _u.double_val;
                 break;
             case LT_STRING:
+                std::cout << _u.str_val.value;
+                break;
+            case LT_HEX:
                 std::cout << _u.str_val.value;
                 break;
             case LT_BOOL:
@@ -191,6 +195,39 @@ struct LiteralExpr : public ExprNode {
         return lit;
     }
 
+
+    static LiteralExpr* make_bit(const char* str, size_t len, butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        std::string out_str;
+        out_str.reserve(len / 8 + 1);
+        size_t pos = len % 8;
+        if (pos != 0) {
+            out_str.append(1, bit_to_char(str, pos));
+        }
+        for (; pos < len; pos += 8) {
+            out_str.append(1, bit_to_char(str + pos, 8));
+        }
+        lit->_u.str_val.strdup(out_str.c_str(), out_str.size(), arena);
+        lit->literal_type = LT_HEX;
+        return lit;
+    }
+
+    static LiteralExpr* make_hex(const char* str, size_t len, butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        std::string out_str;
+        out_str.reserve(len / 2 + 1);
+        size_t pos = len % 2;
+        if (pos != 0) {
+            out_str.append(1, hex_to_char(str, pos));
+        }
+        for (; pos < len; pos += 2) {
+            out_str.append(1, hex_to_char(str + pos, 2));
+        }
+        lit->_u.str_val.strdup(out_str.c_str(), out_str.size(), arena);
+        lit->literal_type = LT_HEX;
+        return lit;
+    }
+
     static LiteralExpr* make_string(const char* str, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_STRING;
@@ -205,6 +242,7 @@ struct LiteralExpr : public ExprNode {
         }
         return lit;
     }
+
     static LiteralExpr* make_string(String value, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_STRING;

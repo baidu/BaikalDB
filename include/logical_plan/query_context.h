@@ -19,6 +19,7 @@
 #include "table_record.h"
 #include "runtime_state.h"
 #include "base.h"
+#include "range.h"
 
 namespace baikaldb {
 DECLARE_bool(default_2pc);
@@ -209,6 +210,14 @@ public:
     bool                is_select = false;
     bool                need_destroy_tree = false;
     int64_t             prepared_table_id = -1;
+    bool                has_derived_table = false;
+    // field: column_id
+    std::map<std::string, int32_t> field_column_id_mapping;
+    // tuple_id: field: slot_id
+    std::map<int64_t, std::map<std::string, int32_t>> ref_slot_id_mapping;
+    // tuple_id: slot_id: column_id
+    std::map<int64_t, std::map<int32_t, int32_t>>     slot_column_mapping;
+    std::map<int64_t, std::shared_ptr<QueryContext>> derived_table_ctx_mapping;
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 
@@ -219,10 +228,12 @@ public:
     bool                enable_2pc = false;
     bool                is_cancelled = false;
     std::shared_ptr<QueryContext> kill_ctx;
-    std::vector<std::shared_ptr<QueryContext>> union_select_plans;
+    std::vector<std::shared_ptr<QueryContext>> sub_query_plans;
     std::unordered_map<uint64_t, std::string> long_data_vars;
     std::vector<SignedType> param_type;
     std::set<int64_t> index_ids;
+    // 用于索引推荐
+    std::map<int32_t, int> field_range_type;
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

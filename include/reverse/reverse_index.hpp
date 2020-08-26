@@ -146,6 +146,8 @@ int ReverseIndex<Schema>::handle_reverse(
     if (word.empty()) {
         return 0;
     }
+    static bvar::LatencyRecorder reverse_time_cost("reverse_time_cost");
+    TimeCost cost;
     int8_t status;
     std::shared_ptr<std::map<std::string, ReverseNode>> cache_seg_res;
     std::shared_ptr<std::map<std::string, ReverseNode>> seg_res =
@@ -171,6 +173,7 @@ int ReverseIndex<Schema>::handle_reverse(
         }
         ++map_it;
     }
+    reverse_time_cost << cost.get_time();
     return 0;
 }
 
@@ -296,6 +299,7 @@ int ReverseIndex<Schema>::create_executor(
                             bool is_fast) {
     TimeCost timer;
     _schema = new Schema();
+    _schema_ptrs.push_back(_schema);
     _schema->init(this, txn, _key_range, conjuncts, is_fast);
     timer.reset();
     _schema->set_index_info(index_info);

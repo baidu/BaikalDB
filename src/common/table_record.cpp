@@ -29,7 +29,7 @@ SmartRecord TableRecord::new_record(int64_t tableid) {
 std::string TableRecord::get_index_value(IndexInfo& index) {
     std::string tmp;
     for (auto& field : index.fields) {
-        auto tag_field = get_field_by_tag(field.id);
+        auto tag_field = get_field_by_idx(field.pb_idx);
         tmp += get_value(tag_field).get_string();
         tmp += "-";
     }
@@ -41,7 +41,7 @@ std::string TableRecord::get_index_value(IndexInfo& index) {
 
 int TableRecord::get_reverse_word(IndexInfo& index_info, std::string& word) {
     //int ret = 0;
-    auto field = get_field_by_tag(index_info.fields[0].id);
+    auto field = get_field_by_idx(index_info.fields[0].pb_idx);
     //DB_WARNING("index_info:%d id:%d", index_info.fields[0].type, index_info.fields[0].id);
     if (index_info.fields[0].type == pb::STRING) {
         return get_string(field, word);

@@ -38,7 +38,6 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
         DB_WARNING("get table info failed, table_id:%ld", _table_id);
         return -1;
     }
-    _affected_index_ids = _table_info->indices;
     _primary_slots = update_node->primary_slots();
     _update_slots = update_node->update_slots();
     std::set<int32_t> affect_field_ids;
@@ -46,14 +45,20 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
         affect_field_ids.insert(slot.field_id());
     }
     _affect_primary = false;
-    std::vector<int64_t> affected_indices;
-    for (auto index_id : _affected_index_ids) {
+    std::vector<int64_t> local_affected_indices;
+    std::vector<int64_t> global_affected_indices;
+    for (auto index_id : _table_info->indices) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
             DB_WARNING("get index info failed, index_id:%ld", index_id);
             return -1;
         }
         IndexInfo& info = *info_ptr;
+        if (info.is_global) {
+            _global_affected_index_ids.push_back(index_id);
+        } else {
+            _local_affected_index_ids.push_back(index_id);
+        }
         bool has_id = false;
         for (auto& field : info.fields) {
             if (affect_field_ids.count(field.id) == 1) {
@@ -64,17 +69,20 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
         if (has_id) {
             if (info.id == _table_id) {
                 _affect_primary = true;
+            } else if (info.is_global) {
+                global_affected_indices.push_back(index_id);
             } else {
-                affected_indices.push_back(index_id);
+                local_affected_indices.push_back(index_id);
             }
         }
     }
     
     // 如果更新主键，那么影响了全部索引
     if (!_affect_primary) {
-        _affected_index_ids.swap(affected_indices);
+        _global_affected_index_ids.swap(global_affected_indices);
+        _local_affected_index_ids.swap(local_affected_indices);
     }
-    for (auto index_id : _affected_index_ids) {
+    for (auto index_id : _global_affected_index_ids) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
             DB_WARNING("index info not found index_id:%ld", index_id);

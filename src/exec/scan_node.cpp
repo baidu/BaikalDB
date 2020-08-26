@@ -78,7 +78,7 @@ int64_t ScanNode::select_index() {
         // sort index 权重调整到全命中unique或primary索引之后
         if (pos_index.has_sort_index() && field_count > 0) {
             prefix_ratio_round = 100;
-            index_priority = 190;
+            index_priority = 150 + field_count;
         }
         uint32_t prefix_ratio_index_score = (prefix_ratio_round << 16) | index_priority;
         // ignore index用到最低优先级，其实只有primary会走到这里
@@ -219,6 +219,9 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
 int64_t ScanNode::select_index_by_cost() {
     double min_cost = DBL_MAX;
     int min_idx = 0;
+    bool multi_0_0 = false;
+    bool multi_1_0 = false;
+    bool enable_use_cost = true;
     for (auto& pair : _paths) {
         auto& path = pair.second;
         if (!path->is_possible && path->index_type != pb::I_PRIMARY) {
@@ -230,9 +233,29 @@ int64_t ScanNode::select_index_by_cost() {
             min_cost = path->cost;
             min_idx = index_id;
         }
+        if (float_equal(path->selectivity, 0.0)) {
+            if (multi_0_0) {
+                enable_use_cost = false;
+                break;
+            } else {
+                multi_0_0 = true;
+            }
+        } else if (float_equal(path->selectivity, 1.0)) {
+            if (multi_1_0) {
+                enable_use_cost = false;
+                break;
+            } else {
+                multi_1_0 = true;
+            }
+        }
         DB_DEBUG("idx:%ld cost:%f", index_id, path->cost);
     }
-    return min_idx;
+    //兜底方案，如果出现多个0.0或者1.0可能代价计算有问题，使用基于规则的索引选择
+    if (enable_use_cost) {
+        return min_idx;
+    } else {
+        return select_index();
+    }
 }
 
 int64_t ScanNode::select_index_in_baikaldb() {

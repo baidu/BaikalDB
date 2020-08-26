@@ -22,6 +22,7 @@
 #include "log.h"
 #include <gflags/gflags.h>
 #include <time.h>
+#include "range.h"
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -92,79 +93,176 @@ void NetworkServer::recovery_transactions() {
     }
 }
 
-static void request_log(pb::BaikalHeartBeatRequest& request) {
-    static int reduce_log = 0;
-    if (reduce_log++ % 10 != 0) {
-        return;
-    }
-    for (auto& schema_info : request.schema_infos()) {
-        SELF_TRACE("heartbeat request(table version): table_id: %ld, table_version:%ld", 
-                schema_info.table_id(), schema_info.version());
-        std::string region_version;
-        int count = 0;
-        for (auto& region_heart : schema_info.regions()) {
-            region_version += region_heart.ShortDebugString() + ", ";
-            ++count;
-            if (count % 50 == 0) {
-                SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
-                region_version.clear();
-            }
-        }
-        if (!region_version.empty()) {
-            SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
-        }
-    }
-}
-
-static void response_log(pb::BaikalHeartBeatResponse& response) {
-    static int reduce_log = 0;
-    if (reduce_log++ % 10 != 0) {
-        return;
-    }
-    int count = 0;
-    std::string str_response;
-    for (auto& schema_change_info : response.schema_change_info()) {
-        str_response += schema_change_info.ShortDebugString() + ", ";
-        ++count;
-        if (count % 5 == 0) {
-            SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
-            str_response.clear();
-        }
-    }
-    if (!str_response.empty()) {
-        SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
-    }
-    for (auto& region_change_info : response.region_change_info()) {
-        SELF_TRACE("heartbeat response(region info):%s", 
-                region_change_info.ShortDebugString().c_str());
-    }
-    for (auto& privilege_change_info : response.privilege_change_info()) {
-        SELF_TRACE("heartbeat response(privilege info):%s", 
-                privilege_change_info.ShortDebugString().c_str());
-    }
-    if (response.has_idc_info()) {
-        SELF_TRACE("heartbeat response(idc_info):%s",
-                response.idc_info().ShortDebugString().c_str());
-    }
-}
-
 void NetworkServer::report_heart_beat() {
     while (!_shutdown) {
+        TimeCost cost;
         pb::BaikalHeartBeatRequest request;
         pb::BaikalHeartBeatResponse response;
         //1、construct heartbeat request
         construct_heart_beat_request(request);
-        request_log(request);
+        int64_t construct_req_cost = cost.get_time();
+        cost.reset();
         //2、send heartbeat request to meta server
         if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
             //处理心跳
             process_heart_beat_response(response);
-            response_log(response);
+            DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
+                    construct_req_cost, cost.get_time());
         } else {
             DB_WARNING("send heart beat request to meta server fail");
         }
         bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
     }
+}
+
+void NetworkServer::get_field_distinct_cnt(int64_t table_id, std::set<int> fields, std::map<int64_t, int>& distinct_field_map) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (fields.size() <= 0) {
+        return;
+    }
+    for (auto field_id : fields) {
+        int64_t distinct_cnt = factory->get_histogram_distinct_cnt(table_id, field_id);
+        if (distinct_cnt < 0) {
+            continue;
+        }
+        while (true) {
+            auto iter = distinct_field_map.find(distinct_cnt);
+            if (iter != distinct_field_map.end()) {
+                // 有重复, ++ 避免重复
+                distinct_cnt++;
+                continue;
+            }
+            distinct_field_map[distinct_cnt] = field_id;
+            break;
+        }
+    }
+}
+
+void NetworkServer::fill_field_info(int64_t table_id, std::map<int64_t, int>& distinct_field_map, std::string type, std::ostringstream& os) {
+    if (distinct_field_map.size() <= 0) {
+        return;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    auto table_ptr = factory->get_table_info_ptr(table_id);
+    for (auto iter = distinct_field_map.rbegin(); iter != distinct_field_map.rend(); iter++) {
+        auto field_ptr = table_ptr->get_field_ptr(iter->second);
+        os << field_ptr->short_name << ":" << type << ":" << iter->first << " ";
+    }
+}
+
+// 推荐索引
+void NetworkServer::index_recommend(const std::string& sample_sql, int64_t table_id, int64_t index_id, std::string& index_info, std::string& desc) {
+    BvarMap sample = StateMachine::get_instance()->index_recommend_st.get_value();
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    
+    // 没有统计信息无法推荐索引
+    auto st_ptr = factory->get_statistics_ptr(table_id);
+    if (st_ptr == nullptr) {
+        desc = "no statistics info";
+        return;
+    }
+
+    auto iter = sample.internal_map.find(sample_sql);
+    if (iter == sample.internal_map.end()) {
+        return;
+    }
+
+    auto sum_iter = iter->second.find(index_id);
+    if (sum_iter == iter->second.end()) {
+        return;
+    }
+
+    // 没有条件不推荐索引
+    auto field_range_type = sum_iter->second.field_range_type;
+    if (field_range_type.size() <= 0) {
+        desc = "no condition";
+        return;
+    }
+
+    std::set<int> eq_field;
+    std::set<int> in_field;
+    std::set<int> range_field;
+
+    for (auto pair : field_range_type) {
+        if (pair.second == range::EQ) {
+            eq_field.insert(pair.first);
+        } else if (pair.second == range::IN) {
+            in_field.insert(pair.first);
+        } else if (pair.second == range::RANGE) {
+            range_field.insert(pair.first);
+        } else {
+            // 非 RANGE EQ IN 条件暂时无法推荐索引
+            desc = "not only range eq in";
+            return;
+        }
+    }
+
+    std::map<int64_t, int> eq_distinct_field_map;
+    std::map<int64_t, int> in_distinct_field_map;
+    std::map<int64_t, int> range_distinct_field_map;
+    get_field_distinct_cnt(table_id, eq_field, eq_distinct_field_map);
+    get_field_distinct_cnt(table_id, in_field, in_distinct_field_map);
+    get_field_distinct_cnt(table_id, range_field, range_distinct_field_map);
+    std::ostringstream os;
+    fill_field_info(table_id, eq_distinct_field_map, "EQ", os);
+    fill_field_info(table_id, in_distinct_field_map, "IN", os);
+    fill_field_info(table_id, range_distinct_field_map, "RANGE", os);
+    desc = os.str();
+
+    // 平均过滤行数小于100不用推荐索引
+    if (sum_iter->second.count == 0 || (sum_iter->second.filter_rows / sum_iter->second.count) < 100) {
+        desc = "filter rows < 100";
+        return;
+    }
+
+    // 过滤率小于10%不推荐索引
+    if (sum_iter->second.scan_rows == 0 || sum_iter->second.filter_rows * 1.0 / sum_iter->second.scan_rows < 0.1) {
+        desc = "filter ratio < 0.1";
+        return;
+    }
+
+    std::ostringstream recommend_index;
+    auto table_ptr = factory->get_table_info_ptr(table_id);
+    for (auto iter = eq_distinct_field_map.rbegin(); iter != eq_distinct_field_map.rend(); iter++) {
+        auto field_ptr = table_ptr->get_field_ptr(iter->second);
+        recommend_index << field_ptr->short_name << ",";
+    }
+
+    bool in_pre = false;
+    bool finish = false;
+    for (auto iter = in_distinct_field_map.rbegin(); iter != in_distinct_field_map.rend(); iter++) {
+        auto field_ptr = table_ptr->get_field_ptr(iter->second);
+        if (in_pre) {
+            if (range_distinct_field_map.size() <= 0) {
+                recommend_index << field_ptr->short_name;
+            } else {
+                auto range_iter = range_distinct_field_map.rbegin();
+                if (range_iter->first > iter->first) {
+                    auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
+                    recommend_index << range_field_ptr->short_name;
+                } else {
+                    recommend_index << field_ptr->short_name;
+                }
+            }
+            finish = true;
+            break;
+        }
+        recommend_index << field_ptr->short_name << ",";
+        in_pre = true;
+    }
+
+    if (finish) {
+        index_info = recommend_index.str();
+        return;
+    }
+
+    if (range_distinct_field_map.size() > 0) {
+        auto range_iter = range_distinct_field_map.rbegin();
+        auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
+        recommend_index << range_field_ptr->short_name;
+    }
+
+    index_info = recommend_index.str();
 }
 
 void NetworkServer::print_agg_sql() {
@@ -181,17 +279,20 @@ void NetworkServer::print_agg_sql() {
                 for (auto& pair2 : pair.second) {
                     uint64_t out[2];
                     int64_t version;
-                    std::string description;
-                    factory->get_schema_conf_op_info(pair2.second.table_id, version, description);
+                    std::string op_description;
+                    factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
+                    std::string recommend_index = "-";
+                    std::string field_desc = "-";
+                    index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
                     butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
                     SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter=[%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%llu\t%s\t%s] sql_agg: %s "
-                        "op_version_desc=[%ld\t%s]", 
+                        "op_version_desc=[%ld\t%s\t%s\t%s]", 
                         1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
                         pair2.second.sum, pair2.second.count,
                         pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
                         pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
                         out[0], FLAGS_hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),  
-                        version, description.c_str());
+                        version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str());
                 }
             }
         }
@@ -231,7 +332,8 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
 
                 if (index_id == info_pair.second->id) {
                     req_info->set_version(info_pair.second->version);
-                } 
+                }
+                /*
                 std::map<int64_t, pb::RegionInfo> region_infos;
                 //
                 // TODO：读多个double buffer，可能死锁？
@@ -243,7 +345,7 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
                     region->set_region_id(region_info.region_id());
                     region->set_version(region_info.version());
                     region->set_conf_version(region_info.conf_version());
-                }
+                }*/
             }
         }
     };
@@ -638,7 +740,7 @@ int NetworkServer::make_worker_process() {
                 // New connection will be handled immediately.
                 fd = client_fd;
                 //DB_NOTICE("Accept new connect [ip=%s, port=%d, client_fd=%d]",
-                DB_WARNING("Accept new connect [ip=%s, port=%d, client_fd=%d]",
+                DB_WARNING_CLIENT(client_socket, "Accept new connect [ip=%s, port=%d, client_fd=%d]",
                         ip_address,
                         client_socket->port,
                         client_socket->fd);
@@ -652,7 +754,7 @@ int NetworkServer::make_worker_process() {
                 continue;
             }
             if (fd != sock->fd) {
-                DB_WARNING("current [fd=%d][sock_fd=%d]"
+                DB_WARNING_CLIENT(sock, "current [fd=%d][sock_fd=%d]"
                     "[event=%d][fd_cnt=%d][state=%s]",
                     fd,
                     sock->fd,
@@ -668,14 +770,14 @@ int NetworkServer::make_worker_process() {
             if (event & EPOLLHUP || event & EPOLLERR) {
                 if (sock->socket_type == CLIENT_SOCKET) {
                     if ((event & EPOLLHUP) && sock->shutdown == false) {
-                        DB_WARNING("CLIENT EPOLL event is EPOLLHUP, fd=%d event=0x%x",
+                        DB_WARNING_CLIENT(sock, "CLIENT EPOLL event is EPOLLHUP, fd=%d event=0x%x",
                                         fd, event);
                     } else if ((event & EPOLLERR) && sock->shutdown == false) {
-                        DB_WARNING("CLIENT EPOLL event is EPOLLERR, fd=%d event=0x%x",
+                        DB_WARNING_CLIENT(sock, "CLIENT EPOLL event is EPOLLERR, fd=%d event=0x%x",
                                         fd, event);
                     }
                 } else {
-                    DB_WARNING("socket type is wrong, fd %d event=0x%x", fd, event);
+                    DB_WARNING_CLIENT(sock, "socket type is wrong, fd %d event=0x%x", fd, event);
                 }
                 sock->shutdown = true;
             }
@@ -687,7 +789,7 @@ int NetworkServer::make_worker_process() {
                     continue;
                 }
                 if (sock->is_free || sock->fd == -1) {
-                    DB_WARNING("sock is already free.");
+                    DB_WARNING_CLIENT(sock, "sock is already free.");
                     sock->mutex.unlock();
                     continue;
                 }

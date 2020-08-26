@@ -1097,6 +1097,25 @@ ExprValue if_(const std::vector<ExprValue>& input) {
     return input[0].get_numberic<bool>() ? input[1] : input[2];
 }
 
+ExprValue ifnull(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    return input[0].is_null() ? input[1] : input[0];
+}
+
+ExprValue nullif(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue arg1 = input[0];
+    ExprValue arg2 = input[1];
+    if (arg1.compare_diff_type(arg2) == 0) {
+        return ExprValue::Null();
+    } else {
+        return input[0];
+    }
+}
 ExprValue murmur_hash(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();

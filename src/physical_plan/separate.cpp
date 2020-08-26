@@ -17,6 +17,7 @@
 #include "limit_node.h"
 #include "agg_node.h"
 #include "scan_node.h"
+#include "dual_scan_node.h"
 #include "rocksdb_scan_node.h"
 #include "join_node.h"
 #include "sort_node.h"
@@ -47,11 +48,11 @@ int Separate::analyze(QueryContext* ctx) {
     if (packet_node == nullptr) {
         return -1;
     }
-    if (packet_node->children_size() == 0) {
+    if (packet_node->children_size() == 0 && !ctx->has_derived_table) {
         return 0;
     }
     //DB_WARNING("need_seperate:%d", plan->need_seperate());
-    if (!plan->need_seperate()) {
+    if (!plan->need_seperate() && !ctx->has_derived_table) {
         return 0;
     }
     int ret = 0;
@@ -108,15 +109,19 @@ int Separate::analyze(QueryContext* ctx) {
 int Separate::separate_union(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     UnionNode* union_node = static_cast<UnionNode*>(plan->get_node(pb::UNION_NODE));
-    for (int i = 0; i < ctx->union_select_plans.size(); i++) {
-        auto select_ctx = ctx->union_select_plans[i];
+    for (int i = 0; i < ctx->sub_query_plans.size(); i++) {
+        auto select_ctx = ctx->sub_query_plans[i];
         ExecNode* select_plan = select_ctx->root;
         PacketNode* packet_node = static_cast<PacketNode*>(select_plan->get_node(pb::PACKET_NODE));
         union_node->steal_projections(packet_node->mutable_projections());
         union_node->add_child(packet_node->children(0));
         packet_node->clear_children();
-        select_ctx->get_runtime_state()->init(select_ctx.get(), nullptr);
-        union_node->mutable_select_runtime_states()->push_back(select_ctx->get_runtime_state().get());
+        auto state = select_ctx->get_runtime_state();
+        if (state->init(select_ctx.get(), nullptr) < 0) {
+            DB_WARNING("init runtime_state failed");
+            return -1;
+        }
+        union_node->mutable_select_runtime_states()->push_back(state.get());
     }
     return 0;
 }
@@ -127,6 +132,8 @@ int Separate::separate_select(QueryContext* ctx) {
     plan->get_node(pb::JOIN_NODE, join_nodes);
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
+    std::vector<ExecNode*> dual_scan_nodes;
+    plan->get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
     if (ctx->is_full_export) {
         PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
         LimitNode* limit_node = static_cast<LimitNode*>(plan->get_node(pb::LIMIT_NODE));
@@ -160,7 +167,7 @@ int Separate::separate_select(QueryContext* ctx) {
         }
         return separate_simple_select(ctx);
     } else {
-        return separate_join(scan_nodes);
+        return separate_join(ctx, scan_nodes, dual_scan_nodes);
     }
 }
 
@@ -181,19 +188,46 @@ int Separate::separate_simple_select(QueryContext* ctx) {
         manager_node_inter->set_region_infos(region_infos);
         return 0;
     }
-    pb::PlanNode pb_manager_node;
-    pb_manager_node.set_node_type(pb::SELECT_MANAGER_NODE);
-    pb_manager_node.set_limit(-1);
-
-    std::unique_ptr<SelectManagerNode> manager_node(new (std::nothrow) SelectManagerNode);
+    std::unique_ptr<SelectManagerNode> manager_node(create_select_manager_node());
     if (manager_node == nullptr) {
         DB_WARNING("create manager_node failed");
         return -1;
     }
-    manager_node->init(pb_manager_node);
-    std::map<int64_t, pb::RegionInfo> region_infos =
-            static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
-    manager_node->set_region_infos(region_infos);
+    if (scan_nodes.size() > 0) {
+        std::map<int64_t, pb::RegionInfo> region_infos =
+                static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
+        manager_node->set_region_infos(region_infos);
+    }
+
+    if (ctx->sub_query_plans.size() == 1) {
+        auto sub_query_ctx = ctx->sub_query_plans[0];
+        sub_query_ctx->get_runtime_state()->init(sub_query_ctx.get(), nullptr);
+        manager_node->set_sub_query_runtime_state(sub_query_ctx->get_runtime_state().get());
+        auto iter = ctx->derived_table_ctx_mapping.begin();
+        int32_t tuple_id = iter->first;
+        manager_node->set_slot_column_mapping(ctx->slot_column_mapping[tuple_id]);
+        manager_node->set_derived_tuple_id(tuple_id);
+        ExecNode* sub_query_plan = sub_query_ctx->root;
+        PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
+        manager_node->steal_projections(packet_node->mutable_projections());
+        manager_node->set_sub_query_node(packet_node->children(0));
+        packet_node->clear_children();
+        manager_node->set_has_sub_query(true);
+        FilterNode* filter_node = static_cast<FilterNode*>(plan->get_node(pb::WHERE_FILTER_NODE));
+        if (filter_node != nullptr) {
+            manager_node->add_child(filter_node->children(0));
+            filter_node->clear_children();
+            filter_node->add_child(manager_node.release());
+            return 0;
+        }
+    } else if (ctx->sub_query_plans.size() != 0) {
+        DB_WARNING("illegal plan, has multiple sub query ctx");
+        for (auto iter : ctx->sub_query_plans) {
+            DB_WARNING("sql:%s", iter->sql.c_str());
+        }
+        return -1;
+    }
+
     if (agg_node != nullptr) {
         ExecNode* parent = agg_node->get_parent();
         pb::PlanNode pb_node;
@@ -203,6 +237,16 @@ int Separate::separate_simple_select(QueryContext* ctx) {
         std::unique_ptr<AggNode> merge_agg_node(new (std::nothrow) AggNode);
         merge_agg_node->init(pb_node);
 
+       if (ctx->sub_query_plans.size() > 0) {
+            parent->clear_children();
+            parent->add_child(merge_agg_node.get());
+            merge_agg_node->add_child(agg_node);
+            merge_agg_node.release();
+            manager_node->add_child(agg_node->children(0));
+            agg_node->clear_children();
+            agg_node->add_child(manager_node.release());
+            return 0;
+        }
         manager_node->add_child(agg_node);
         merge_agg_node->add_child(manager_node.release());
         if (parent == nullptr) {
@@ -216,7 +260,13 @@ int Separate::separate_simple_select(QueryContext* ctx) {
         return 0;
     }
     if (sort_node != nullptr) {
-        manager_node->init_sort_info(sort_node->pb_node());
+        manager_node->init_sort_info(sort_node);
+        if (ctx->sub_query_plans.size() > 0) {
+            manager_node->add_child(sort_node->children(0));
+            sort_node->clear_children();
+            sort_node->add_child(manager_node.release());
+            return 0;
+        }
         // add_child会把子节点的父节点修改，所以一定要在调用这个add_child之前把父节点保存
         ExecNode* parent = sort_node->get_parent();
         manager_node->add_child(sort_node);
@@ -231,9 +281,9 @@ int Separate::separate_simple_select(QueryContext* ctx) {
         return 0;
     }
     if (limit_node != nullptr) {
-        if (limit_node->children_size() == 0) {
-            return 0;
-        }
+        // if (limit_node->children_size() == 0) {
+        //     return 0;
+        // }
         manager_node->add_child(limit_node->children(0));
         limit_node->clear_children();
         limit_node->add_child(manager_node.release());
@@ -244,7 +294,8 @@ int Separate::separate_simple_select(QueryContext* ctx) {
     packet_node->add_child(manager_node.release());
     return 0;
 }
-int Separate::separate_join(const std::vector<ExecNode*>& scan_nodes) {
+int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& scan_nodes,
+                            const std::vector<ExecNode*>& dual_scan_nodes) {
     for (auto& scan_node_ptr : scan_nodes) {
         ExecNode* manager_node_parent = scan_node_ptr->get_parent();
         ExecNode* manager_node_child = scan_node_ptr;
@@ -268,18 +319,54 @@ int Separate::separate_join(const std::vector<ExecNode*>& scan_nodes) {
             manager_node_parent->set_region_infos(region_infos);
             continue;
         }
-        pb::PlanNode pb_manager_node;
-        pb_manager_node.set_node_type(pb::SELECT_MANAGER_NODE);
-        pb_manager_node.set_limit(-1);
 
-        SelectManagerNode* manager_node = new SelectManagerNode;
-        static_cast<RocksdbScanNode*>(scan_node_ptr)->set_related_manager_node(manager_node);
+        std::unique_ptr<SelectManagerNode> manager_node(create_select_manager_node());
+        if (manager_node == nullptr) {
+            DB_WARNING("create manager_node failed");
+            return -1;
+        }
+        static_cast<RocksdbScanNode*>(scan_node_ptr)->set_related_manager_node(manager_node.get());
         std::map<int64_t, pb::RegionInfo> region_infos =
                 static_cast<RocksdbScanNode*>(scan_node_ptr)->region_infos();
         manager_node->set_region_infos(region_infos);
-        manager_node->init(pb_manager_node);
-        manager_node_parent->replace_child(manager_node_child, manager_node);
+        manager_node_parent->replace_child(manager_node_child, manager_node.get());
         manager_node->add_child(manager_node_child);
+        manager_node.release();
+    }
+    for (auto& scan_node_ptr : dual_scan_nodes) {
+        DualScanNode* dual = static_cast<DualScanNode*>(scan_node_ptr);
+        auto iter = ctx->derived_table_ctx_mapping.find(dual->tuple_id());
+        if (iter == ctx->derived_table_ctx_mapping.end()) {
+            DB_WARNING("illegal plan table_id:%d _tuple_id:%d", dual->table_id(), dual->tuple_id());
+            return -1;
+        }
+        int32_t tuple_id = iter->first;
+        auto sub_query_ctx = iter->second;
+        sub_query_ctx->get_runtime_state()->init(sub_query_ctx.get(), nullptr);
+        ExecNode* manager_node_parent = scan_node_ptr->get_parent();
+        ExecNode* manager_node_child = scan_node_ptr;
+        if (manager_node_parent == nullptr) {
+            DB_WARNING("fether node children is null");
+            return -1;
+        }
+
+        std::unique_ptr<SelectManagerNode> manager_node(create_select_manager_node());
+        if (manager_node == nullptr) {
+            DB_WARNING("create manager_node failed");
+            return -1;
+        }
+        manager_node_parent->replace_child(manager_node_child, manager_node.get());
+        manager_node->add_child(manager_node_child);
+        manager_node->set_sub_query_runtime_state(sub_query_ctx->get_runtime_state().get());
+        manager_node->set_slot_column_mapping(ctx->slot_column_mapping[tuple_id]);
+        manager_node->set_derived_tuple_id(tuple_id);
+        ExecNode* sub_query_plan = sub_query_ctx->root;
+        PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
+        manager_node->steal_projections(packet_node->mutable_projections());
+        manager_node->set_sub_query_node(packet_node->children(0));
+        packet_node->clear_children();
+        manager_node->set_has_sub_query(true);
+        manager_node.release();
     }
     return 0;
 }
@@ -306,9 +393,24 @@ int Separate::separate_insert(QueryContext* ctx) {
         manager_node->set_op_type(pb::OP_INSERT);
         manager_node->set_region_infos(insert_node->region_infos());
         manager_node->add_child(insert_node);
+        manager_node->set_table_id(main_table_id);
     }
+
+    if (ctx->sub_query_plans.size() > 0) {
+        auto sub_query_ctx = ctx->sub_query_plans[0];
+        sub_query_ctx->get_runtime_state()->init(sub_query_ctx.get(), nullptr);
+        manager_node->set_sub_query_runtime_state(sub_query_ctx->get_runtime_state().get());
+        ExecNode* sub_query_plan = sub_query_ctx->root;
+        PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
+        manager_node->steal_projections(packet_node->mutable_projections());
+        manager_node->add_child(packet_node->children(0));
+        packet_node->clear_children();
+        manager_node->set_has_sub_query(true);
+    }
+
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
+
     if (ctx->get_runtime_state()->single_sql_autocommit() && 
         (ctx->enable_2pc 
             || SchemaFactory::get_instance()->has_global_index(main_table_id))) {
@@ -327,36 +429,36 @@ int Separate::separate_global_insert(InsertManagerNode* manager_node, InsertNode
     }
     // ignore
     if (manager_node->need_ignore()) {
-        create_lock_node(table_id, pb::LOCK_GET, 0, manager_node);
-        create_lock_node(table_id, pb::LOCK_NO, 0, manager_node);
+        create_lock_node(table_id, pb::LOCK_GET, Separate::BOTH, manager_node);
+        create_lock_node(table_id, pb::LOCK_NO, Separate::BOTH, manager_node);
     } else if (manager_node->is_replace()) {
-        create_lock_node(table_id, pb::LOCK_GET, 0, manager_node);
-        create_lock_node(table_id, pb::LOCK_GET_ONLY_PRIMARY, 1, manager_node);
-        create_lock_node(table_id, pb::LOCK_DML, 0, manager_node);
+        create_lock_node(table_id, pb::LOCK_GET, Separate::BOTH, manager_node);
+        create_lock_node(table_id, pb::LOCK_GET_ONLY_PRIMARY, Separate::PRIMARY, manager_node);
+        create_lock_node(table_id, pb::LOCK_DML, Separate::BOTH, manager_node);
     } else if (manager_node->on_dup_key_update()) {
-        create_lock_node(table_id, pb::LOCK_GET, 0, manager_node);
-        create_lock_node(table_id, pb::LOCK_GET_ONLY_PRIMARY, 1, manager_node);
-        create_lock_node(table_id, pb::LOCK_DML, 0, manager_node);
+        create_lock_node(table_id, pb::LOCK_GET, Separate::BOTH, manager_node);
+        create_lock_node(table_id, pb::LOCK_GET_ONLY_PRIMARY, Separate::PRIMARY, manager_node);
+        create_lock_node(table_id, pb::LOCK_DML, Separate::BOTH, manager_node);
     } else {
         // basic insert
-        create_lock_node(table_id, pb::LOCK_DML, 0, manager_node);
+        create_lock_node(table_id, pb::LOCK_DML, Separate::BOTH, manager_node);
     }
     // 复用
     delete insert_node;
     return 0;
 }
+
 int Separate::create_lock_node(
         int64_t table_id,
         pb::LockCmdType lock_type,
-        int mode,
+        Separate::NodeMode mode,
         ExecNode* manager_node) {
     auto table_info = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
     if (table_info == nullptr) {
         return -1;
     }
-    std::vector<int64_t> affected_indexs;
-    std::set<int64_t> unique_indexs;
-    std::set<int64_t> non_unique_indexs;
+    std::vector<int64_t> global_affected_indexs;
+    std::vector<int64_t> local_affected_indexs;
     for (auto index_id : table_info->indices) {
         auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
         if (index_info == nullptr) {
@@ -364,31 +466,31 @@ int Separate::create_lock_node(
         }
         if (index_info->is_global) {
             if (index_info->type == pb::I_UNIQ) {
-                unique_indexs.insert(index_id);
-            } else {
-                non_unique_indexs.insert(index_id);
+                global_affected_indexs.push_back(index_id);
+            } else if (lock_type != pb::LOCK_GET) {
+                //LOGK_GET只需要关注全局唯一索引
+                global_affected_indexs.push_back(index_id);
+            }
+        } else {
+            if (index_info->type == pb::I_UNIQ) {
+                local_affected_indexs.push_back(index_id);
+            } else if (lock_type != pb::LOCK_GET) {
+                //LOGK_GET只需要关注全局唯一索引
+                local_affected_indexs.push_back(index_id);
             }
         }
     }
-    for (auto id : unique_indexs) {
-        affected_indexs.push_back(id);
-    }
-    //LOGK_GET只需要关注全局唯一索引
-    if (lock_type != pb::LOCK_GET) {
-        for (auto id : non_unique_indexs) {
-            affected_indexs.push_back(id);
-        }
-    }
-    return create_lock_node(table_id, lock_type, mode, affected_indexs, manager_node);
+    return create_lock_node(table_id, lock_type, mode, global_affected_indexs, local_affected_indexs, manager_node);
 }
 int Separate::create_lock_node(
         int64_t table_id,
         pb::LockCmdType lock_type,
-        int mode,
-        const std::vector<int64_t>& affected_indexs,
+        Separate::NodeMode mode,
+        const std::vector<int64_t>& global_affected_indexs,
+        const std::vector<int64_t>& local_affected_indexs,
         ExecNode* manager_node) {
     //构造LockAndPutPrimaryNode
-    if (mode == 0 || mode == 1) {
+    if (mode == Separate::BOTH || mode == Separate::PRIMARY) {
         std::unique_ptr<LockPrimaryNode> primary_node(new (std::nothrow) LockPrimaryNode);
         if (primary_node == nullptr) {
             DB_WARNING("create manager_node failed");
@@ -400,32 +502,27 @@ int Separate::create_lock_node(
         plan_node.mutable_derive_node()->mutable_lock_primary_node()->set_lock_type(lock_type);
         plan_node.mutable_derive_node()->mutable_lock_primary_node()->set_table_id(table_id);
         primary_node->init(plan_node);
+        primary_node->set_affected_index_ids(local_affected_indexs); 
         manager_node->add_child(primary_node.release());
     }
     //构造LockAndPutSecondaryNode
-    if (mode == 0 || mode == 2) {
-    for (auto index_id : affected_indexs) {
-        auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (index_info == nullptr) {
+    if (mode == Separate::BOTH || mode == Separate::GLOBAL) {
+    for (auto index_id : global_affected_indexs) {
+        std::unique_ptr<LockSecondaryNode> secondary_node(new (std::nothrow) LockSecondaryNode);
+        if (secondary_node == nullptr) {
+            DB_WARNING("create manager_node failed");
             return -1;
         }
-        if (index_info->is_global) {
-            std::unique_ptr<LockSecondaryNode> secondary_node(new (std::nothrow) LockSecondaryNode);
-            if (secondary_node == nullptr) {
-                DB_WARNING("create manager_node failed");
-                return -1;
-            }
-            pb::PlanNode plan_node;
-            plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
-            plan_node.set_limit(-1);
-            plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_lock_type(
-                    lock_type);
-            plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_global_index_id(index_id);
-            plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_table_id(
-                    table_id);
-            secondary_node->init(plan_node);
-            manager_node->add_child(secondary_node.release());
-        }
+        pb::PlanNode plan_node;
+        plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
+        plan_node.set_limit(-1);
+        plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_lock_type(
+                lock_type);
+        plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_global_index_id(index_id);
+        plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_table_id(
+                table_id);
+        secondary_node->init(plan_node);
+        manager_node->add_child(secondary_node.release());
     }
     }
     return 0;
@@ -522,15 +619,12 @@ int Separate::separate_global_update(
     if (ret < 0) {
         return -1;
     }
-    pb::PlanNode pb_select_manager_node;
-    pb_select_manager_node.set_node_type(pb::SELECT_MANAGER_NODE);
-    pb_select_manager_node.set_limit(-1);
-    std::unique_ptr<SelectManagerNode> select_manager_node(new (std::nothrow) SelectManagerNode);
+
+    std::unique_ptr<SelectManagerNode> select_manager_node(create_select_manager_node());
     if (select_manager_node == nullptr) {
         DB_WARNING("create manager_node failed");
         return -1;
     }
-    select_manager_node->init(pb_select_manager_node);
     select_manager_node->set_region_infos(scan_node->region_infos());
     select_manager_node->add_child(update_node->children(0));
     delete_manager_node->add_child(select_manager_node.release());
@@ -541,18 +635,19 @@ int Separate::separate_global_update(
     create_lock_node(
             main_table_id,
             pb::LOCK_GET_DML,
-            1,
-            manager_node->affected_index_ids(),
+            Separate::PRIMARY,
+            manager_node->global_affected_index_ids(),
+            manager_node->local_affected_index_ids(),
             delete_manager_node.get());
     create_lock_node(
             main_table_id,
             pb::LOCK_DML,
-            2,
-            manager_node->affected_index_ids(),
+            Separate::GLOBAL,
+            manager_node->global_affected_index_ids(),
+            manager_node->local_affected_index_ids(),
             delete_manager_node.get());
     LockPrimaryNode* pri_node = static_cast<LockPrimaryNode*>(delete_manager_node->children(1));
     pri_node->set_affect_primary(manager_node->affect_primary());
-    pri_node->set_affected_index_ids(manager_node->affected_index_ids()); 
 
     manager_node->add_child(delete_manager_node.release());
     //生成basic_insert
@@ -565,10 +660,12 @@ int Separate::separate_global_update(
         return -1;
     }
     insert_manager_node->init(pb_insert_manager_node);
-    create_lock_node(main_table_id, pb::LOCK_DML, 0, manager_node->affected_index_ids(), insert_manager_node.get());
+    create_lock_node(main_table_id, pb::LOCK_DML, Separate::BOTH, 
+            manager_node->global_affected_index_ids(), 
+            manager_node->local_affected_index_ids(), 
+            insert_manager_node.get());
     pri_node = static_cast<LockPrimaryNode*>(insert_manager_node->children(0));
     pri_node->set_affect_primary(manager_node->affect_primary());
-    pri_node->set_affected_index_ids(manager_node->affected_index_ids());
     manager_node->add_child(insert_manager_node.release());
     return 0;
 }
@@ -594,15 +691,11 @@ int Separate::separate_global_delete(
     if (ret < 0) {
         return -1;
     }
-    pb::PlanNode pb_manager_node;
-    pb_manager_node.set_node_type(pb::SELECT_MANAGER_NODE);
-    pb_manager_node.set_limit(-1);
-    std::unique_ptr<SelectManagerNode> select_manager_node(new (std::nothrow) SelectManagerNode);
+    std::unique_ptr<SelectManagerNode> select_manager_node(create_select_manager_node());
     if (select_manager_node.get() == nullptr) {
         DB_WARNING("create manager_node failed");
         return -1;
     }
-    select_manager_node->init(pb_manager_node);
     std::map<int64_t, pb::RegionInfo> region_infos =
             static_cast<RocksdbScanNode*>(scan_node)->region_infos();
     select_manager_node->set_region_infos(region_infos);
@@ -610,8 +703,8 @@ int Separate::separate_global_delete(
     manager_node->add_child(select_manager_node.release());
     delete_node->clear_children();
 
-    create_lock_node(main_table_id, pb::LOCK_GET_DML, 1, manager_node);
-    create_lock_node(main_table_id, pb::LOCK_DML, 2, manager_node);
+    create_lock_node(main_table_id, pb::LOCK_GET_DML, Separate::PRIMARY, manager_node);
+    create_lock_node(main_table_id, pb::LOCK_DML, Separate::GLOBAL, manager_node);
     // manager_node->children(0)->add_child(delete_node->children(0));
     delete delete_node;
     return 0;
@@ -809,6 +902,21 @@ TransactionNode* Separate::create_txn_node(pb::TxnCmdType cmd_type) {
     store_txn_node->init(pb_plan_node);
     return store_txn_node;
 }
+
+SelectManagerNode* Separate::create_select_manager_node() {
+    pb::PlanNode pb_manager_node;
+    pb_manager_node.set_node_type(pb::SELECT_MANAGER_NODE);
+    pb_manager_node.set_limit(-1);
+
+    SelectManagerNode* manager_node = new (std::nothrow) SelectManagerNode;
+    if (manager_node == nullptr) {
+        DB_WARNING("create manager_node failed");
+        return nullptr;
+    }
+    manager_node->init(pb_manager_node);
+    return manager_node;
+}
+
 }  // namespace baikaldb
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -34,7 +34,7 @@ public:
     typedef int (*MergeFuncT)(PostingNodeT&, const PostingNodeT&, BoolArg*);
 
     ~ExecutorNode() {
-        for (int i = 0; i < _sub_nodes.size(); ++i) {
+        for (size_t i = 0; i < _sub_nodes.size(); ++i) {
             delete _sub_nodes[i];
         }
     }

@@ -15,8 +15,8 @@
 #include "physical_planner.h"
 
 namespace baikaldb {
-DEFINE_int32(cmsketch_depth, 20, "cmsketch_depth");
-DEFINE_int32(cmsketch_width, 50, "cmsketch_width");
+DEFINE_int32(cmsketch_depth, 5, "cmsketch_depth");
+DEFINE_int32(cmsketch_width, 2048, "cmsketch_width");
 DEFINE_int32(sample_rows, 1000000, "sample rows 100w");
 int PhysicalPlanner::analyze(QueryContext* ctx) {
     int ret = 0;
@@ -35,12 +35,10 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
         }
         node->mutable_children()->clear();
     };
-    if (ctx->stmt_type == parser::NT_UNION) {
-        for (auto select_ctx : ctx->union_select_plans) {
-            ret = analyze(select_ctx.get());
-            if (ret < 0) {
-                return ret;
-            }
+    for (auto sub_query_ctx : ctx->sub_query_plans) {
+        ret = analyze(sub_query_ctx.get());
+        if (ret < 0) {
+            return ret;
         }
     }
     // 包括类型推导与常量表达式计算

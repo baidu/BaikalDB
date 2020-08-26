@@ -36,8 +36,11 @@ public:
     bool affect_global_index() {
         return _affect_global_index;
     }
-    const std::vector<int64_t>& affected_index_ids() {
-        return _affected_index_ids;
+    const std::vector<int64_t>& global_affected_index_ids() {
+        return _global_affected_index_ids;
+    }
+    const std::vector<int64_t>& local_affected_index_ids() {
+        return _local_affected_index_ids;
     }
     bool affect_primary() {
         return _affect_primary;
@@ -58,7 +61,8 @@ private:
     pb::TupleDescriptor* _tuple_desc = nullptr;
     std::unique_ptr<MemRow> _update_row;
     bool _affect_primary = true;
-    std::vector<int64_t>     _affected_index_ids;
+    std::vector<int64_t>     _global_affected_index_ids;
+    std::vector<int64_t>     _local_affected_index_ids;
     SmartTable               _table_info;
     bool _affect_global_index = false;
 };
