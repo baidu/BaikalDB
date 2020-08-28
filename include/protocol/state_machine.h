@@ -162,7 +162,8 @@ private:
     bvar::LatencyRecorder select_time_cost;
     bvar::Adder<int> sql_error;
     bvar::PerSecond<bvar::Adder<int>> sql_error_second;
-    std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > time_cost_users;
+    std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > select_by_users;
+    std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > dml_by_users;
 
     MysqlWrapper*   _wrapper = nullptr;
 

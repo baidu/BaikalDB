@@ -360,16 +360,20 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 || ctx->mysql_cmd == COM_STMT_EXECUTE) {
         if (root != nullptr && root->op_type() == pb::OP_SELECT) {
             select_time_cost << stat_info->total_time;
+            if (select_by_users.find(client->username) == dml_by_users.end()) {
+                select_by_users[client->username].reset(new bvar::LatencyRecorder("select_" + client->username));
+            }
+            (*select_by_users[client->username]) << stat_info->total_time;
         } else {
             dml_time_cost << stat_info->total_time;
+            if (dml_by_users.find(client->username) == dml_by_users.end()) {
+                dml_by_users[client->username].reset(new bvar::LatencyRecorder("dml_" + client->username));
+            }
+            (*dml_by_users[client->username]) << stat_info->total_time;
         }
         if (stat_info->error_code != 1000) {
             sql_error << 1;
         }
-        if (time_cost_users.find(client->username) == time_cost_users.end()) {
-            time_cost_users[client->username].reset(new bvar::LatencyRecorder(client->username));
-        }
-        (*time_cost_users[client->username]) << 1;
     }
 
     if (ctx->mysql_cmd == COM_QUERY 
