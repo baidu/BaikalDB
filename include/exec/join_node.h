@@ -36,7 +36,7 @@ public:
         }
     }
     virtual int init(const pb::PlanNode& node); 
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);

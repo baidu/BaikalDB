@@ -17,6 +17,7 @@
 #include "literal.h"
 #include "parser.h"
 #include "runtime_state.h"
+#include "query_context.h"
 #include "rapidjson/rapidjson.h"
 #include "rapidjson/reader.h"
 #include "rapidjson/writer.h"
@@ -194,9 +195,9 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
     return 0;
 }
 
-int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int FilterNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
@@ -219,7 +220,8 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         int64_t sign = (slot_ref->tuple_id() << 16) + slot_ref->slot_id();
         bool all_const = true;
         for (uint32_t i = 1; i < expr->children_size(); i++) { 
-            if (!expr->children(i)->is_constant()) {
+            // place holder被替换会导致下一次exec参数对不上
+            if (!expr->children(i)->is_constant() || expr->children(i)->has_place_holder()) {
                 all_const = false;
                 break;
             }
@@ -227,6 +229,7 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         if (!all_const) {
             continue;
         }
+        // TODO 整块剪枝逻辑挪到index selector
         if (expr->node_type() == pb::IN_PREDICATE) {
             pred_map[sign].in_preds.push_back(expr);
         } else if (expr->node_type() == pb::FUNCTION_CALL) {
@@ -255,7 +258,8 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             ret = predicate_cut(pair.second, cut_preds);
             if (ret < 0) {
                 DB_WARNING("expr is always false");
-                return -2;
+                ctx->return_empty = true;
+                return 0;
             }
         }
     }
@@ -279,8 +283,9 @@ int FilterNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             //有一个false则应该返回0行，true则直接删除
             if (value.is_null() || value.get_numberic<bool>() == false) {
                 DB_WARNING("expr is always false");
-                return -2;
-            } else {
+                ctx->return_empty = true;
+                return 0;
+            } else if (!expr->has_place_holder()) {
                 ExprNode::destroy_tree(expr);
                 iter = _conjuncts.erase(iter);
                 continue;
@@ -320,6 +325,9 @@ int FilterNode::open(RuntimeState* state) {
     if (ret < 0) {
         DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
+    }
+    if (_return_empty) {
+        return 0;
     }
 
     std::vector<int64_t>& scan_indices = state->scan_indices();
@@ -364,6 +372,11 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         local_node.add_where_filter_rows(where_filter_cnt);
         local_node.set_affect_rows(_num_rows_returned);
     }));
+    if (_return_empty) {
+        DB_WARNING_STATE(state, "return_empty");
+        *eos = true;
+        return 0;
+    }
     
     while (1) {
         if (batch->is_full()) {

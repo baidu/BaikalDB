@@ -20,21 +20,6 @@ DEFINE_int32(cmsketch_width, 2048, "cmsketch_width");
 DEFINE_int32(sample_rows, 1000000, "sample rows 100w");
 int PhysicalPlanner::analyze(QueryContext* ctx) {
     int ret = 0;
-    auto return_empty_func = [ctx]() {
-        ExecNode* node = ctx->root;
-        if (node->children_size() > 0) {
-            if (node->children(0)->node_type() == pb::MERGE_AGG_NODE || 
-                    node->children(0)->node_type() == pb::AGG_NODE) {
-                node = node->children(0);
-            } else {
-                node->set_limit(0);
-            }
-        }
-        for (size_t i = 0; i < node->children_size(); i++) {
-            ExecNode::destroy_tree(node->children(i));
-        }
-        node->mutable_children()->clear();
-    };
     for (auto sub_query_ctx : ctx->sub_query_plans) {
         ret = analyze(sub_query_ctx.get());
         if (ret < 0) {
@@ -45,10 +30,6 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     ret = ExprOptimize().analyze(ctx);
     if (ret < 0) {
         return ret;
-    }
-    if (ctx->return_empty) {
-        return_empty_func();
-        return 0;
     }
     // for INSERT/REPLACE statements
     // insert user variables to records for prepared stmt
@@ -71,11 +52,6 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
-    if (ctx->return_empty) {
-        DB_WARNING("index field can not be null");
-        return_empty_func();
-        return 0;
-    }
     // 目前只对纯inner join重排序，方便使用索引和构造等值join
     ret = JoinReorder().analyze(ctx);
     if (ret < 0) {
@@ -86,11 +62,6 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
-    if (ctx->return_empty) {
-        DB_WARNING("kill no regions");
-        return_empty_func();
-        return 0;
-    }
     // db与store的计划分离，生成FetcherNode，并且根据region数量做不同决策
     ret = Separate().analyze(ctx);
     if (ret < 0) {
@@ -100,6 +71,9 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     ret = LimitCalc().analyze(ctx);
     if (ret < 0) {
         return ret;
+    }
+    if (ctx->return_empty) {
+        ctx->root->set_return_empty();
     }
     return 0;
 }
@@ -223,33 +197,6 @@ int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, b
     }
     return 0;            
 }
-/*
-int PhysicalPlanner::execute_recovered_commit(NetworkSocket* client, const pb::CachePlan& commit_plan) {
-    int ret = 0;
-    RuntimeState& state = *client->query_ctx->get_runtime_state();
-    state.set_client_conn(client);
-    ret = state.init(commit_plan);
-    if (ret < 0) {
-        DB_FATAL("RuntimeState init fail");
-        return ret;
-    }
-    ExecNode* root = nullptr;
-    ret = ExecNode::create_tree(commit_plan.plan(), &root);
-    if (ret < 0) {
-        ExecNode::destroy_tree(root);
-        DB_FATAL("create plan tree failed, txn_id: %lu", state.txn_id);
-        return ret;
-    }
-    ret = root->open(&state);
-    if (ret < 0) {
-        root->close(&state);
-        ExecNode::destroy_tree(root);
-        DB_FATAL("open plan tree failed, txn_id: %lu", state.txn_id);
-        return ret;
-    }
-    root->close(&state);
-    return 0;
-}*/
 // insert user variables to record for prepared stmt
 int PhysicalPlanner::insert_values_to_record(QueryContext* ctx) {
     if (ctx->stmt_type != parser::NT_INSERT || ctx->exec_prepared == false) {

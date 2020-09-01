@@ -137,6 +137,7 @@ struct NetworkSocket {
 
     std::unordered_map<std::string, pb::ExprNode> session_vars;
     std::unordered_map<std::string, pb::ExprNode> user_vars;
+    static bvar::Adder<int64_t> bvar_prepare_count; 
 };
 
 class SocketFactory {

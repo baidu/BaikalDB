@@ -21,14 +21,14 @@ class FilterNode : public ExecNode {
 public:
     FilterNode() {
     }
-    virtual  ~FilterNode() {
+    virtual ~FilterNode() {
         for (auto conjunct : _conjuncts) {
             ExprNode::destroy_tree(conjunct);
         }
     }
     virtual int init(const pb::PlanNode& node);
 
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
 
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
 

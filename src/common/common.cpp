@@ -40,6 +40,7 @@ DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:
 DEFINE_int32(service_lock_concurrency, 40, "service_write concurrency, default:40");
 DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
 DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
+DEFINE_int32(baikal_heartbeat_concurrency, 10, "baikal heartbeat concurrency, default:10");
 DEFINE_int64(incremental_info_gc_time, 600 * 1000 * 1000, "time interval to clear incremental info");
 DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");

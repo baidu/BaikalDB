@@ -52,6 +52,7 @@ void ExprNode::const_pre_calc() {
             continue;
         }
         // place holder被替换会导致下一次exec参数对不上
+        // TODO 后续得考虑普通查询计划复用，表达式如何对上
         if (c->has_place_holder()) {
             continue;
         }

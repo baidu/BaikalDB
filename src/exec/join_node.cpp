@@ -51,9 +51,9 @@ int JoinNode::init(const pb::PlanNode& node) {
     _hash_map.init(12301);
     return 0;
 }
-int JoinNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int JoinNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
@@ -313,6 +313,7 @@ int JoinNode::open(RuntimeState* state) {
         IndexSelector().index_selector(state->tuple_descs(),
                                         scan_node, 
                                         filter_node,
+                                        NULL,
                                         NULL,
                                         NULL,
                                         NULL, field_range_type);

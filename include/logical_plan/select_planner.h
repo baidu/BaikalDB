@@ -47,7 +47,7 @@ private:
     // method to parse SQL elements
     int parse_select_fields();
 
-    void add_single_table_columns(TableInfo* table_info);
+    void add_single_table_columns(const std::string& table_name, TableInfo* table_info);
 
     int parse_where();
 

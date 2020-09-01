@@ -483,6 +483,23 @@ message BaikalHeartBeatRequest {
     //物理机房和逻辑机房对应关系
     repeated BaikalSchemaHeartBeat schema_infos    = 1;
     optional int64        last_updated_index       = 2;
+    optional bool         not_need_statistics      = 3; // meta能识别到时，说明baikaldb已经升级，不再通过该心跳更新统计信息
+};
+
+message BaikalOtherHeartBeat {
+    required int64 table_id             = 1;
+    optional int64 statis_version       = 2;
+};
+
+message BaikalOtherHeartBeatRequest {
+    repeated BaikalOtherHeartBeat schema_infos    = 1;
+};
+
+message BaikalOtherHeartBeatResponse {
+    required ErrCode errcode                      = 1;
+    optional string errmsg                        = 2;
+    optional string leader                        = 3;
+    repeated Statistics   statistics              = 4;
 };
 
 message IdcInfo {
@@ -767,5 +784,6 @@ service MetaService {
     rpc query(QueryRequest) returns (QueryResponse);
     rpc migrate(MigrateRequest) returns (MigrateResponse);
     rpc console_heartbeat(ConsoleHeartBeatRequest) returns (ConsoleHeartBeatResponse);
+    rpc baikal_other_heartbeat(BaikalOtherHeartBeatRequest) returns (BaikalOtherHeartBeatResponse);
 };
 

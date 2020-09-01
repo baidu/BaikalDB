@@ -68,7 +68,7 @@ int UpdatePlanner::plan() {
         return -1;
     }
     auto iter = _table_tuple_mapping.begin();
-    int64_t table_id = iter->first;
+    int64_t table_id = iter->second.table_id;
     _ctx->prepared_table_id = table_id;
     if (!_ctx->is_prepared) {
         set_dml_txn_state(table_id);
@@ -91,6 +91,7 @@ int UpdatePlanner::create_update_node() {
         return -1;
     }
     auto iter = _table_tuple_mapping.begin();
+    int64_t table_id = iter->second.table_id;
 
     pb::PlanNode* update_node = _ctx->add_plan_node();
     update_node->set_node_type(pb::UPDATE_NODE);
@@ -99,7 +100,7 @@ int UpdatePlanner::create_update_node() {
     update_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = update_node->mutable_derive_node();
     pb::UpdateNode* update = derive->mutable_update_node();
-    update->set_table_id(iter->first);
+    update->set_table_id(table_id);
 
     // add slots and exprs
     for (uint32_t idx = 0; idx < _update_slots.size(); ++idx) {
@@ -107,20 +108,20 @@ int UpdatePlanner::create_update_node() {
         update->add_update_exprs()->CopyFrom(_update_values[idx]);
     }
 
-    auto pk = _factory->get_index_info_ptr(iter->first);
+    auto pk = _factory->get_index_info_ptr(table_id);
     if (pk == nullptr) {
-        DB_WARNING("no pk found with id: %ld", iter->first);
+        DB_WARNING("no pk found with id: %ld", table_id);
         return -1;
     }
     for (auto& field : pk->fields) {
-        auto& slot = get_scan_ref_slot(iter->first, field.id, field.type);
+        auto& slot = get_scan_ref_slot(iter->first, table_id, field.id, field.type);
         update->add_primary_slots()->CopyFrom(slot);
     }
     return 0;
 }
 
 int UpdatePlanner::parse_kv_list() {
-    int64_t table_id = _table_tuple_mapping.begin()->first;
+    int64_t table_id = _table_tuple_mapping.begin()->second.table_id;
     auto table_info_ptr = _factory->get_table_info_ptr(table_id); 
     if (table_info_ptr == nullptr) {
         DB_WARNING("table:%ld is nullptr", table_id);
@@ -134,17 +135,20 @@ int UpdatePlanner::parse_kv_list() {
             DB_WARNING("set item is nullptr");
             return -1;
         }
-        std::string full_name = get_field_full_name(set_list[idx]->name);
-        if (full_name.empty()) {
-            DB_WARNING("get full field name failed");
+        std::string alias_name = get_field_alias_name(set_list[idx]->name);
+        if (alias_name.empty()) {
+            DB_WARNING("get_field_alias_name failed: %s", set_list[idx]->name->to_string().c_str());
             return -1;
         }
+        std::string full_name = alias_name;
+        full_name += ".";
+        full_name += set_list[idx]->name->name.to_lower();
         FieldInfo* field_info = nullptr;
         if (nullptr == (field_info = get_field_info_ptr(full_name))) {
             DB_WARNING("invalid field name in");
             return -1;
         }
-        auto slot = get_scan_ref_slot(field_info->table_id, field_info->id, field_info->type);
+        auto slot = get_scan_ref_slot(alias_name, field_info->table_id, field_info->id, field_info->type);
         _update_slots.push_back(slot);
         update_field_ids.insert(field_info->id);
 
@@ -175,7 +179,7 @@ int UpdatePlanner::parse_kv_list() {
             node->set_node_type(pb::STRING_LITERAL);
             node->set_col_type(pb::STRING);
             node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
-            auto slot = get_scan_ref_slot(field.table_id, field.id, field.type);
+            auto slot = get_scan_ref_slot(table_info.name, field.table_id, field.id, field.type);
             _update_slots.push_back(slot);
             _update_values.push_back(value_expr);
         }

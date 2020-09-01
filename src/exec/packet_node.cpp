@@ -44,7 +44,7 @@ int PacketNode::init(const pb::PlanNode& node) {
     }
     return 0;
 }
-int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int PacketNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
     int i = 0;
     for (auto expr : _projections) {
@@ -62,7 +62,7 @@ int PacketNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
         }
         ++i;
     }
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("ExecNode::optimize fail:%d", ret);
         return ret;

@@ -20,9 +20,9 @@ namespace baikaldb {
 DEFINE_bool(disable_writebatch_index, false,
     "disable the indexing of transaction writebatch, if true the uncommitted data cannot be read");
 
-int DMLNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int DMLNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("expr type_inferer fail:%d", ret);
         return ret;

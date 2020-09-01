@@ -66,6 +66,15 @@ int MetaRocksdb::put_meta_info(const std::vector<std::string>& keys,
     return 0;
 }
 
+int MetaRocksdb::get_meta_info(const std::string& key, std::string* value) {
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _handle, rocksdb::Slice(key), value);
+    if (!status.ok()) {
+        return -1;
+    }
+    return 0;
+}
+
 int MetaRocksdb::delete_meta_info(const std::vector<std::string>& keys) {
     rocksdb::WriteOptions write_option;
     write_option.disableWAL = true;

@@ -30,7 +30,7 @@ DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M")
 DEFINE_int32(ddl_update_time, 300 * 1000 * 1000, "time interval to update ddl");
 DEFINE_int32(ddl_update_process_per_thread_size, 500, "ddl common update process ddlwork size per thread");
 DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 2, "time interval to clear table_tombstone. default(2d)");
-
+DEFINE_int64(statistics_heart_beat_bytesize, 256 * 1024 * 1024, "default(256M)");
 void TableManager::update_index_status(const pb::DdlWorkInfo& ddl_work) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     auto table_id = ddl_work.table_id();
@@ -690,6 +690,10 @@ bool TableManager::check_and_update_incremental(const pb::BaikalHeartBeatRequest
     }
 
     last_updated_index = request->last_updated_index();
+    if (request->not_need_statistics()) {
+        // 识别到baikaldb已经有这个标记，说明已更新到最新版本,统计信息不再通过该流程更新
+        return false;
+    }
     auto update_st_func = [response](const std::vector<pb::Statistics>& st_infos) {
         for (auto info : st_infos) {
             *(response->add_statistics()) = info;
@@ -774,11 +778,7 @@ void TableManager::update_statistics(const pb::MetaManagerRequest& request,
     int64_t version = 0;
     {
         BAIDU_SCOPED_LOCK(_table_mutex);
-        if (_table_info_map[table_id].statistics_pb.has_version()) {
-            version = _table_info_map[table_id].statistics_pb.version() + 1;
-        } else {
-            version = 1;
-        }
+        version = _table_info_map[table_id].statistics_version + 1;
     }
 
     pb::Statistics stat_pb = request.statistics();
@@ -791,7 +791,7 @@ void TableManager::update_statistics(const pb::MetaManagerRequest& request,
     }
     {
         BAIDU_SCOPED_LOCK(_table_mutex);
-        _table_info_map[table_id].statistics_pb = stat_pb;
+        _table_info_map[table_id].statistics_version = version;
     }
     std::vector<pb::Statistics> st_infos{stat_pb};
     put_incremental_statistics_info(apply_index, st_infos);
@@ -1153,12 +1153,19 @@ void TableManager::check_update_or_drop_table(
         if (_table_info_map[table_id].schema_pb.version() > schema_heart_beat.version()) {
             *(response->add_schema_change_info()) = _table_info_map[table_id].schema_pb;
         }
+
         //统计信息更新
-        if (_table_info_map[table_id].statistics_pb.has_version()) {
+        // 识别到baikaldb已经有这个标记，说明已更新到最新版本,统计信息不再通过该流程更新
+        if (!request->not_need_statistics()) {
             if (schema_heart_beat.has_statis_version() && 
-                _table_info_map[table_id].statistics_pb.version() > schema_heart_beat.statis_version()) {
-                *(response->add_statistics()) = _table_info_map[table_id].statistics_pb;
-                DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_pb.version());
+                _table_info_map[table_id].statistics_version > schema_heart_beat.statis_version()) {
+                pb::Statistics stat_pb;
+                int ret = get_statistics(table_id, stat_pb);
+                if (ret < 0) {
+                    continue;
+                }
+                response->add_statistics()->Swap(&stat_pb);
+                DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_version);
             }
         }
     }
@@ -1175,18 +1182,69 @@ void TableManager::full_update_statistics(const pb::BaikalHeartBeatRequest* requ
         }
 
         //统计信息更新
-        if (_table_info_map[table_id].statistics_pb.has_version()) {
-            if (schema_heart_beat.has_statis_version() && 
-                _table_info_map[table_id].statistics_pb.version() > schema_heart_beat.statis_version()) {
-                *(response->add_statistics()) = _table_info_map[table_id].statistics_pb;
-                DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_pb.version());
+        if (schema_heart_beat.has_statis_version() && 
+            _table_info_map[table_id].statistics_version > schema_heart_beat.statis_version()) {
+            pb::Statistics stat_pb;
+            int ret = get_statistics(table_id, stat_pb);
+            if (ret < 0) {
+                continue;
             }
+            response->add_statistics()->Swap(&stat_pb);
+            DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_version);
         }
     }
 }
 
+void TableManager::check_update_statistics(const pb::BaikalOtherHeartBeatRequest* request,
+        pb::BaikalOtherHeartBeatResponse* response) {
+    BAIDU_SCOPED_LOCK(_table_mutex);
+    for (auto& schema_heart_beat : request->schema_infos()) {
+        int64_t table_id = schema_heart_beat.table_id();
+        //表已经删除
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            continue;
+        }
+        int upd_cnt = 0;
+        //统计信息更新，如果需要更新直接从rocksdb读，避免占用内存
+        if (schema_heart_beat.has_statis_version() && 
+                _table_info_map[table_id].statistics_version > schema_heart_beat.statis_version()) {
+            pb::Statistics stat_pb; 
+            int ret = get_statistics(table_id, stat_pb);
+            if (ret < 0) {
+                continue;
+            }
+            if (response->ByteSizeLong() + stat_pb.ByteSizeLong() > FLAGS_statistics_heart_beat_bytesize) {
+                DB_WARNING("response size: %ld, statistics size: %ld, big than %ld; count: %d", 
+                    response->ByteSizeLong(), stat_pb.ByteSizeLong(), FLAGS_statistics_heart_beat_bytesize, upd_cnt);
+                break;
+            }
+            upd_cnt++;
+            response->add_statistics()->Swap(&stat_pb);
+            DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_version);
+        }
+    }
+}
+
+int TableManager::get_statistics(const int64_t table_id, pb::Statistics& stat_pb) {
+
+    std::string stat_value;
+    int ret = MetaRocksdb::get_instance()->get_meta_info(construct_statistics_key(table_id), &stat_value);    
+    if (ret < 0) {
+        DB_WARNING("get statistics info from rocksdb fail, table_id: %ld", table_id);
+        return -1;
+    } 
+
+    if (!stat_pb.ParseFromString(stat_value)) {
+        DB_FATAL("parse statistics failed, table_id: %ld", table_id);
+        return -1;
+    }
+
+    return 0;
+}
+
 void TableManager::check_add_table(std::set<int64_t>& report_table_ids, 
             std::vector<int64_t>& new_add_region_ids,
+            bool not_need_statistics, 
             pb::BaikalHeartBeatResponse* response) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     for (auto& table_info_pair : _table_info_map) {
@@ -1197,9 +1255,17 @@ void TableManager::check_add_table(std::set<int64_t>& report_table_ids,
         if (!table_info_pair.second.is_global_index) {
             auto schema_info = response->add_schema_change_info();
             *schema_info = table_info_pair.second.schema_pb;
-            if (table_info_pair.second.statistics_pb.has_version()) {
-                auto stat_info = response->add_statistics();
-                *stat_info = table_info_pair.second.statistics_pb;
+            // 识别到baikaldb已经有这个标记，说明已更新到最新版本,统计信息不再通过该流程更新
+            if (!not_need_statistics) {
+                if (table_info_pair.second.statistics_version > 0) {
+                    pb::Statistics stat_pb;
+                    int ret = get_statistics(table_info_pair.first, stat_pb);
+                    if (ret < 0) {
+                        continue;
+                    }
+                    auto stat_info = response->add_statistics();
+                    stat_info->Swap(&stat_pb);
+                }
             }
         }
         for (auto& partition_region : table_info_pair.second.partition_regions) {
@@ -1290,7 +1356,7 @@ int TableManager::load_statistics_snapshot(const std::string& value) {
             DB_FATAL("cant find table id:%ld", stat_pb.table_id());
             return -1;
         }
-        _table_info_map[stat_pb.table_id()].statistics_pb = stat_pb;
+        _table_info_map[stat_pb.table_id()].statistics_version = stat_pb.version();
     }
     return 0;
 }

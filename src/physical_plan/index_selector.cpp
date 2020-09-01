@@ -52,26 +52,32 @@ int IndexSelector::analyze(QueryContext* ctx) {
         //有join节点暂时不考虑sort索引优化
         int ret = 0;
         std::map<int32_t, int> field_range_type;
+        bool index_has_null = false;
         if (join_node != NULL || agg_node != NULL) {
             ret =index_selector(ctx->tuple_descs(),
                             static_cast<ScanNode*>(scan_node_ptr), 
                             filter_node, 
                             NULL,
                             join_node,
-                            &ctx->has_recommend, field_range_type);
+                            &ctx->has_recommend,
+                            &index_has_null,
+                            field_range_type);
         } else {
             ret = index_selector(ctx->tuple_descs(),
                            static_cast<ScanNode*>(scan_node_ptr), 
                            filter_node, 
                            sort_node,
                            join_node,
-                           &ctx->has_recommend, field_range_type);
+                           &ctx->has_recommend,
+                           &index_has_null,
+                           field_range_type);
         }
-        if (ret == -2) {
+        if (index_has_null) {
             ctx->return_empty = true;
             DB_WARNING("normal predicate compare whih null");
             return 0;
-        } else if (ret < 0) {
+        }
+        if (ret < 0) {
             return ret;
         }
         if (ret > 0) {
@@ -214,7 +220,7 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
     }
 }
 
-void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, FieldRange>& field_range_map) {
+void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, FieldRange>& field_range_map, int64_t table_id) {
     std::vector<ExprNode*> or_exprs;
     expr->flatten_or_expr(&or_exprs);
     for (auto sub_expr : or_exprs) {
@@ -226,6 +232,21 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
         }
         if (!sub_expr->children(1)->is_literal()) {
             return;
+        }
+    }
+    {
+        // or 只能全部是倒排索引才能选择。
+        // 倒排索引 or 普通索引时，不选择倒排索引（针对该 expr，不排除其他 expr 选择该倒排索引）。
+        auto table_info_ptr = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
+        if (table_info_ptr == nullptr) {
+            return;
+        }
+        for (auto& sub_expr : or_exprs) {
+            int32_t field_id = static_cast<SlotRef*>(sub_expr->children(0))->field_id();
+            if (table_info_ptr->reverse_fields.count(field_id) == 0) {
+                DB_DEBUG("table_id %ld field_id %ld not all reverse list", table_id, field_id);
+                return;
+            }
         }
     }
     for (auto sub_expr : or_exprs) {
@@ -259,9 +280,9 @@ void IndexSelector::hit_match_against_field_range(ExprNode* expr, std::map<int32
 }
 
 void IndexSelector::hit_field_range(ExprNode* expr, 
-        std::map<int32_t, FieldRange>& field_range_map, bool* index_predicate_is_null) {
+        std::map<int32_t, FieldRange>& field_range_map, bool* index_predicate_is_null, int64_t table_id) {
     if (expr->node_type() == pb::OR_PREDICATE) { 
-        return hit_field_or_like_range(expr, field_range_map);
+        return hit_field_or_like_range(expr, field_range_map, table_id);
     }
     if (expr->node_type() == pb::FUNCTION_CALL) {
         int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
@@ -365,6 +386,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                                     SortNode* sort_node,
                                     JoinNode* join_node,
                                     bool* has_recommend,
+                                    bool* index_has_null,
                                     std::map<int32_t, int>& field_range_type) {
     int64_t table_id = scan_node->table_id();
     int32_t tuple_id = scan_node->tuple_id();
@@ -388,9 +410,12 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
     if (conjuncts != nullptr) {
         for (auto expr : *conjuncts) {
             bool index_predicate_is_null = false;
-            hit_field_range(expr, field_range_map, &index_predicate_is_null);
+            hit_field_range(expr, field_range_map, &index_predicate_is_null, table_id);
             if (index_predicate_is_null) {
-                return -2;
+                if (index_has_null != nullptr) {
+                    *index_has_null = true;
+                }
+                break;
             }
             expr->get_all_field_ids(expr_field_map[expr]);
         }

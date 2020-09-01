@@ -331,7 +331,7 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
         TableManager::get_instance()->check_update_or_drop_table(request, response); 
         //判断是否有新增的表没有下推给baikaldb
         std::vector<int64_t> new_add_region_ids;
-        TableManager::get_instance()->check_add_table(report_table_ids, new_add_region_ids, response);
+        TableManager::get_instance()->check_add_table(report_table_ids, new_add_region_ids, request->not_need_statistics(), response);
         RegionManager::get_instance()->add_region_info(new_add_region_ids, response);      
     }
     int64_t update_table_time = step_time_cost.get_time();

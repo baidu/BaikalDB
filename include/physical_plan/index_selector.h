@@ -38,13 +38,14 @@ public:
                         SortNode* sort_node,
                         JoinNode* join_node,
                         bool* has_recommend,
+                        bool* index_has_null,
                         std::map<int32_t, int>& field_range_type);
 private:
 
     void hit_row_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null);
     void hit_match_against_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map);
-    void hit_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null);
-    void hit_field_or_like_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map);
+    void hit_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null, int64_t table_id);
+    void hit_field_or_like_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, int64_t table_id);
 
 };
 }
