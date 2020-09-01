@@ -407,6 +407,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     sql = iter->second->sql;
                 }
             }
+            RE2::GlobalReplace(&sql, "\\s+", " ");
             DB_NOTICE("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row[%d] bufsize=[%d] "
                     "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] stmt_name=[%s] "
