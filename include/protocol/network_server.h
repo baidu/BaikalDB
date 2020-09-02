@@ -65,6 +65,8 @@ private:
     void construct_heart_beat_request(pb::BaikalHeartBeatRequest& request);
     void process_heart_beat_response(const pb::BaikalHeartBeatResponse& response);
     void process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response);
+    void construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request);
+    void process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response);
 
     std::string state2str(SmartSocket client);
 
@@ -72,6 +74,7 @@ private:
 
     void connection_timeout_check();
     void report_heart_beat();
+    void report_other_heart_beat();
     void index_recommend(const std::string& sample_sql, int64_t table_id, 
         int64_t index_id, std::string& index_info, std::string& desc);
     void get_field_distinct_cnt(int64_t table_id, std::set<int> fileds, 
@@ -97,6 +100,7 @@ private:
     std::vector<ThreadTimeStamp> _last_time;
     Bthread         _conn_check_bth;
     Bthread         _heartbeat_bth;
+    Bthread         _other_heartbeat_bth;
     Bthread         _recover_bth;
     Bthread         _agg_sql_bth;
     uint32_t        _driver_thread_num;

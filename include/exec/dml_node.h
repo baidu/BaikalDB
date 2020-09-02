@@ -24,7 +24,7 @@ public:
         _factory = SchemaFactory::get_instance();
     }
     virtual ~DMLNode() {}
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     int insert_row(RuntimeState* state, SmartRecord record, bool is_update = false);
     int delete_row(RuntimeState* state, SmartRecord record);

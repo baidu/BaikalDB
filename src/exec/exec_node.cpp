@@ -48,13 +48,10 @@ int ExecNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
-int ExecNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
-    if (_limit == 0) {
-        return -2;
-    }
+int ExecNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
     for (auto c : _children) {
-        int ret2 = c->expr_optimize(tuple_descs);
+        int ret2 = c->expr_optimize(ctx);
         if (ret2 < 0) {
             ret = ret2;
         }

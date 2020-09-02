@@ -115,6 +115,28 @@ void NetworkServer::report_heart_beat() {
     }
 }
 
+void NetworkServer::report_other_heart_beat() {
+    while (!_shutdown) {
+        TimeCost cost;
+        pb::BaikalOtherHeartBeatRequest request;
+        pb::BaikalOtherHeartBeatResponse response;
+        //1、construct heartbeat request
+        construct_other_heart_beat_request(request);
+        int64_t construct_req_cost = cost.get_time();
+        cost.reset();
+        //2、send heartbeat request to meta server
+        if (MetaServerInteract::get_instance()->send_request("baikal_other_heartbeat", request, response) == 0) {
+            //处理心跳
+            process_other_heart_beat_response(response);
+            DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
+                    construct_req_cost, cost.get_time());
+        } else {
+            DB_WARNING("send heart beat request to meta server fail");
+        }
+        bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
+    }
+}
+
 void NetworkServer::get_field_distinct_cnt(int64_t table_id, std::set<int> fields, std::map<int64_t, int>& distinct_field_map) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     if (fields.size() <= 0) {
@@ -350,8 +372,38 @@ void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& req
         }
     };
     request.set_last_updated_index(factory->last_updated_index());
+    request.set_not_need_statistics(true);
     factory->schema_info_scope_read(schema_read_recallback);
     
+}
+
+void NetworkServer::construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
+        auto& table_statistics_mapping = schema.table_statistics_mapping;
+        for (auto& info_pair : schema.table_info_mapping) {
+            if (info_pair.second->engine != pb::ROCKSDB &&
+                    info_pair.second->engine != pb::ROCKSDB_CSTORE) {
+                continue;
+            }
+            auto req_info = request.add_schema_infos();
+            req_info->set_table_id(info_pair.first);
+            int64_t version = 0;
+            auto iter = table_statistics_mapping.find(info_pair.first);
+            if (iter != table_statistics_mapping.end()) {
+                version = iter->second->version();
+            }
+            req_info->set_statis_version(version);
+        }
+    };
+    factory->schema_info_scope_read(schema_read_recallback);
+}
+
+void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (response.statistics().size() > 0) {
+        factory->update_statistics(response.statistics());
+    }
 }
 
 void NetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatResponse& response) {
@@ -391,7 +443,6 @@ void NetworkServer::process_heart_beat_response_sync(const pb::BaikalHeartBeatRe
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }
-
     factory->update_regions_double_buffer_sync(response.region_change_info());
     if (response.has_last_updated_index() && 
         response.last_updated_index() > factory->last_updated_index()) {
@@ -575,6 +626,7 @@ bool NetworkServer::init() {
 
 void NetworkServer::stop() {
     _heartbeat_bth.join();
+    _other_heartbeat_bth.join();
 
     if (_epoll_info == nullptr) {
         DB_WARNING("_epoll_info not initialized yet.");
@@ -656,6 +708,7 @@ int NetworkServer::make_worker_process() {
     }
     _conn_check_bth.run([this]() {connection_timeout_check();});
     _heartbeat_bth.run([this]() {report_heart_beat();});
+    _other_heartbeat_bth.run([this]() {report_other_heart_beat();});
     _recover_bth.run([this]() {recovery_transactions();});
     _agg_sql_bth.run([this]() {print_agg_sql();});
 

@@ -14,6 +14,7 @@
 
 #include "limit_node.h"
 #include "runtime_state.h"
+#include "query_context.h"
  
 namespace baikaldb {
 int LimitNode::init(const pb::PlanNode& node) {
@@ -41,9 +42,9 @@ int LimitNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
-int LimitNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int LimitNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
@@ -102,6 +103,10 @@ int LimitNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
             DB_WARNING("invalid count_expr type: %d", _count_expr->node_type());
             return -1;
         }
+    }
+    if (_limit == 0) {
+        DB_WARNING("limit is 0");
+        ctx->return_empty = true;
     }
     // DB_WARNING("offset and count: %ld, %ld", _offset, _limit);
     return 0;

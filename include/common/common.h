@@ -556,12 +556,18 @@ public:
         BAIDU_SCOPED_LOCK(_mutex);
         auto background  = _buf.read_background();
         auto frontground = _buf.read();
+        //保证bg中最少有一个元素
+        if (background->size() <= 0) {
+            (*background)[apply_index] = infos;
+            _the_earlist_time_for_background.reset();
+            return;
+        }
         (*background)[apply_index] = infos;
-        if (FLAGS_incremental_info_gc_time < _gc_time_cost.get_time()) {
+        // 当bg中最早的元素大于回收时间时清理fg，互换bg和fg；这样可以保证清理掉的都是大于超时时间的，极端情况下超时回收时间变为2倍的gc time
+        if (_the_earlist_time_for_background.get_time() > FLAGS_incremental_info_gc_time) {
             frontground->clear();
             _buf.swap();
-            _gc_time_cost.reset();
-        }  
+        } 
     }
 
     // 返回值 true:需要全量更新外部处理 false:增量更新，通过update_incremental处理增量
@@ -627,7 +633,7 @@ public:
 private:
     DoubleBuffer<std::map<int64_t, T>> _buf;
     bthread_mutex_t                    _mutex;
-    TimeCost                    _gc_time_cost;
+    TimeCost        _the_earlist_time_for_background;
 };
 
 struct BvarMap {

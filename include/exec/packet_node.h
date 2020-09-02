@@ -32,7 +32,7 @@ public:
         }
     }
     virtual int init(const pb::PlanNode& node);
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state);
     virtual void close(RuntimeState* state);

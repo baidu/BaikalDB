@@ -527,10 +527,10 @@ void InsertManagerNode::update_record(SmartRecord record) {
     }
 }
 
-int InsertManagerNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int InsertManagerNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
     //DB_WARNING("expr_optimize exec");
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("expr type_inferer fail:%d", ret);
         return ret;

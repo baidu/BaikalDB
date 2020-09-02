@@ -183,6 +183,7 @@ struct TableInfo {
     DescriptorPool*         pool = nullptr;
     const Message*          msg_proto = nullptr;
     bool                    have_statistics = false;
+    std::unordered_set<int64_t>    reverse_fields;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {

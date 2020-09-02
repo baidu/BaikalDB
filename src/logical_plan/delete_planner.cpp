@@ -96,7 +96,7 @@ int DeletePlanner::plan() {
         return -1;
     }
     auto iter = _table_tuple_mapping.begin();
-    int64_t table_id = iter->first;
+    int64_t table_id = iter->second.table_id;
     _ctx->prepared_table_id = table_id;
     if (!_ctx->is_prepared) {
         set_dml_txn_state(table_id);
@@ -110,7 +110,7 @@ int DeletePlanner::create_delete_node() {
         return -1;
     }
     auto iter = _table_tuple_mapping.begin();
-    int64_t table_id = iter->first;
+    int64_t table_id = iter->second.table_id;
 
     pb::PlanNode* delete_node = _ctx->add_plan_node();
     delete_node->set_node_type(pb::DELETE_NODE);
@@ -121,13 +121,13 @@ int DeletePlanner::create_delete_node() {
     pb::DeleteNode* _delete = derive->mutable_delete_node();
     _delete->set_table_id(table_id);
 
-    auto pk = _factory->get_index_info_ptr(iter->first);
+    auto pk = _factory->get_index_info_ptr(table_id);
     if (pk == nullptr) {
-        DB_WARNING("no pk found with id: %ld", iter->first);
+        DB_WARNING("no pk found with id: %ld", table_id);
         return -1;
     }
     for (auto& field : pk->fields) {
-        auto& slot = get_scan_ref_slot(iter->first, field.id, field.type);
+        auto& slot = get_scan_ref_slot(iter->first, table_id, field.id, field.type);
         _delete->add_primary_slots()->CopyFrom(slot);
     }
     return 0;
@@ -147,13 +147,13 @@ int DeletePlanner::create_truncate_node() {
 
     pb::DerivePlanNode* derive = truncate_node->mutable_derive_node();
     pb::TruncateNode* _truncate = derive->mutable_truncate_node();
-    _truncate->set_table_id(iter->first);
+    _truncate->set_table_id(iter->second.table_id);
     return 0;
 }
 
 int DeletePlanner::reset_auto_incr_id() {
     auto iter = _table_tuple_mapping.begin();
-    int64_t table_id = iter->first;
+    int64_t table_id = iter->second.table_id;
 
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     auto table_info_ptr = schema_factory->get_table_info_ptr(table_id);

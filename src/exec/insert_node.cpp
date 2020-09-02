@@ -155,9 +155,9 @@ void InsertNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     }
 }
 
-int InsertNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int InsertNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = DMLNode::expr_optimize(tuple_descs);
+    ret = DMLNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("expr type_inferer fail:%d", ret);
         return ret;

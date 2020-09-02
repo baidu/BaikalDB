@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "runtime_state.h"
 #include "sort_node.h"
+#include "runtime_state.h"
+#include "query_context.h"
 
 namespace baikaldb {
 int SortNode::init(const pb::PlanNode& node) {
@@ -73,15 +74,15 @@ int SortNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
-int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int SortNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         return ret;
     }
     pb::TupleDescriptor* tuple_desc = nullptr;
     if (_tuple_id >= 0) {
-        tuple_desc =  &(*tuple_descs)[_tuple_id];
+        tuple_desc =  ctx->get_tuple_desc(_tuple_id);
     }
     int slot_idx = 0;
     int idx = 0;

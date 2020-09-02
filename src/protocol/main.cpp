@@ -47,6 +47,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "log init failed.");
         return -1;
     }
+    DB_NOTICE("baikaldb starting");
 //    DB_WARNING("log file load success; GetMemoryReleaseRate:%f", 
 //            MallocExtension::instance()->GetMemoryReleaseRate());
 

@@ -30,6 +30,7 @@ public:
     int put_meta_info(const std::string& key, const std::string& value);
     int put_meta_info(const std::vector<std::string>& keys,
                         const std::vector<std::string>& values);
+    int get_meta_info(const std::string& key, std::string* value);
     int delete_meta_info(const std::vector<std::string>& keys);
     int write_meta_info(const std::vector<std::string>& put_keys,
                        const std::vector<std::string>& put_values,

@@ -121,6 +121,7 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     auto iter = client->prepared_plans.find(stmt_name);
     if (iter != client->prepared_plans.end()) {
         client->prepared_plans.erase(iter);
+        NetworkSocket::bvar_prepare_count << -1;
     }
     if (stmt_sql.size() == 0) {
         _ctx->stat_info.error_code = ER_EMPTY_QUERY;
@@ -205,6 +206,7 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     }
     */
     client->prepared_plans[stmt_name] = prepare_ctx;
+    NetworkSocket::bvar_prepare_count << 1;
     return 0;
 }
 
@@ -277,6 +279,7 @@ int PreparePlanner::stmt_close(const std::string& stmt_name) {
     if (iter != client->prepared_plans.end()) {
         client->query_ctx->sql = iter->second->sql;
         client->prepared_plans.erase(iter);
+        NetworkSocket::bvar_prepare_count << -1;
     }
     return 0;
 }

@@ -22,6 +22,9 @@ int SelectManagerNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([state](TraceLocalNode& local_node) {
         local_node.set_scan_rows(state->num_scan_rows());
     }));
+    if (_return_empty) {
+        return 0;
+    }
     int ret = 0;
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
@@ -117,6 +120,11 @@ int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos)
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
         local_node.set_affect_rows(_num_rows_returned);
     }));
+    if (_return_empty) {
+        DB_WARNING_STATE(state, "return_empty");
+        *eos = true;
+        return 0;
+    }
 
     if (state->is_cancelled()) {
         DB_WARNING_STATE(state, "cancelled");

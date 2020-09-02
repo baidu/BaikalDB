@@ -95,6 +95,7 @@ struct QueryStat {
         //traceid.clear();
         family.clear();
         table.clear();
+        table_id = -1;
         server_ip.clear();
         sample_sql.str("");
 
@@ -139,7 +140,7 @@ public:
     const std::vector<pb::TupleDescriptor>& tuple_descs() {
         return _tuple_descs;
     }
-
+/*
     int32_t get_tuple_id(int64_t table_id) {
         for (auto& tuple_desc : _tuple_descs) {
             if (tuple_desc.table_id() == table_id) {
@@ -148,7 +149,7 @@ public:
         }
         return -1;
     }
-
+*/
     int32_t get_slot_id(int32_t tuple_id, int32_t field_id) {
         for (const auto& slot_desc : _tuple_descs[tuple_id].slots()) {
             if (slot_desc.field_id() == field_id) {

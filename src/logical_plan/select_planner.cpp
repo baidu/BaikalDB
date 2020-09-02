@@ -298,13 +298,13 @@ int SelectPlanner::create_agg_node() {
     return 0;
 }
 
-void SelectPlanner::add_single_table_columns(TableInfo* table_info) {
+void SelectPlanner::add_single_table_columns(const std::string& table_name, TableInfo* table_info) {
     for (auto& field : table_info->fields) {
         if (field.deleted) {
             continue;
         }
 
-        pb::SlotDescriptor slot = get_scan_ref_slot(table_info->id, field.id, field.type);
+        pb::SlotDescriptor slot = get_scan_ref_slot(table_name, table_info->id, field.id, field.type);
         pb::Expr select_expr;
         pb::ExprNode* node = select_expr.add_nodes();
         node->set_node_type(pb::SLOT_REF);
@@ -330,10 +330,14 @@ int SelectPlanner::parse_select_star(parser::SelectField* field) {
         for (auto& table_name : _table_names) {
             auto table_info = get_table_info_ptr(table_name);
             if (table_info == nullptr) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_WRONG_TABLE_NAME;
+                    _ctx->stat_info.error_msg << "Incorrect table name \'" << table_name << "\'";
+                }
                 DB_WARNING("no table found for select field: %s", field->to_string().c_str());
                 return -1;
             }
-            add_single_table_columns(table_info);
+            add_single_table_columns(table_name, table_info);
         }
     } else {
         // select db.table.* / table.*
@@ -345,24 +349,39 @@ int SelectPlanner::parse_select_star(parser::SelectField* field) {
         std::string db_name;
         std::string full_name;
         // try to search alias table
-        if (_table_alias_mapping.count(table_name) == 1) {
-            full_name = _table_alias_mapping[table_name];
-        } else if (!wild_card->db_name.empty()) {
+        if (!wild_card->db_name.empty()) {
             db_name = wild_card->db_name.value;
             full_name = db_name + "." + table_name;
-        } else if (!_ctx->cur_db.empty()) {
-            db_name = _ctx->cur_db;
-            full_name = db_name + "." + table_name;
         } else {
-            DB_WARNING("no db selected, please specify db name");
-            return -1;
+            //table.field_name
+            auto dbs = get_possible_databases(table_name);
+            if (dbs.size() == 0) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_WRONG_TABLE_NAME;
+                    _ctx->stat_info.error_msg << "Incorrect table name \'" << table_name << "\'";
+                }
+                DB_WARNING("no database found for field: %s", table_name.c_str());
+                return -1;
+            } else if (dbs.size() > 1) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
+                    _ctx->stat_info.error_msg << "table  \'" << table_name << "\' is ambiguous";
+                }
+                DB_WARNING("ambiguous table_name: %s", table_name.c_str());
+                return -1;
+            }
+            full_name = *dbs.begin() + "." + table_name;
         }
         auto table_info = get_table_info_ptr(full_name);
         if (table_info == nullptr) {
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_WRONG_TABLE_NAME;
+                _ctx->stat_info.error_msg << "Incorrect table name \'" << table_name << "\'";
+            }
             DB_WARNING("no table found for select field: %s", field->to_string().c_str());
             return -1;
         }
-        add_single_table_columns(table_info);
+        add_single_table_columns(full_name, table_info);
     }
     return 0;
 }

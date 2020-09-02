@@ -20,6 +20,7 @@
 #include <braft/util.h>
 #include <braft/storage.h>
 #endif
+#include "concurrency.h"
 #include "cluster_manager.h"
 #include "privilege_manager.h"
 #include "schema_manager.h"
@@ -120,9 +121,24 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
         response->set_leader(_node.leader_id().to_string());
         return;
     }
+    TimeCost step_time_cost;
+    ON_SCOPE_EXIT([]() {
+        Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_broadcast();
+    });
+    int ret = Concurrency::get_instance()->baikal_heartbeat_concurrency.increase_timed_wait(10 * 1000 * 1000LL);
+    if (ret != 0) {
+        DB_FATAL("baikaldb:%s time_cost: %ld, log_id: %ld",
+                butil::endpoint2str(cntl->remote_side()).c_str(),
+                time_cost.get_time(),
+                log_id);
+        response->set_errcode(pb::DISABLE_WRITE_TIMEOUT);
+        response->set_errmsg("wait timeout");
+        return;
+    }
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
-    TimeCost step_time_cost;
+    int64_t wait_time = step_time_cost.get_time();
+    step_time_cost.reset();
     DatabaseManager::get_instance()->process_baikal_heartbeat(request, response);
     ClusterManager::get_instance()->process_baikal_heartbeat(request, response);
     int64_t cluster_time = step_time_cost.get_time();
@@ -133,12 +149,47 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     SchemaManager::get_instance()->process_baikal_heartbeat(request, response, log_id);
     int64_t schema_time = step_time_cost.get_time();
     step_time_cost.reset();
-    DB_NOTICE("baikaldb:%s heart beat, time_cost: %ld, cluster_time: %ld, "
+    DB_NOTICE("baikaldb:%s heart beat, wait_time:%ld, time_cost: %ld, cluster_time: %ld, "
                 "privilege_time: %ld, schema_time: %ld, log_id: %lu", 
                 butil::endpoint2str(cntl->remote_side()).c_str(),
-                time_cost.get_time(),
+                wait_time, time_cost.get_time(),
                 cluster_time, privilege_time, schema_time,
                 log_id);
+}
+
+void MetaStateMachine::baikal_other_heartbeat(google::protobuf::RpcController* controller,
+                                        const pb::BaikalOtherHeartBeatRequest* request,
+                                        pb::BaikalOtherHeartBeatResponse* response,
+                                        google::protobuf::Closure* done) {
+    TimeCost time_cost;
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+    uint64_t log_id = 0; 
+    if (cntl->has_log_id()) {
+        log_id = cntl->log_id();
+    }
+    if (!_is_leader.load()) {
+        DB_WARNING("NOT LEADER, logid:%lu", log_id);
+        response->set_errcode(pb::NOT_LEADER);
+        response->set_errmsg("not leader");
+        response->set_leader(_node.leader_id().to_string());
+        return;
+    }
+    TimeCost step_time_cost;
+    Concurrency::get_instance()->baikal_heartbeat_concurrency.increase_wait();
+    ON_SCOPE_EXIT([]() {
+        Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_broadcast();
+    });
+    int64_t wait_time = step_time_cost.get_time();
+    step_time_cost.reset();
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    TableManager::get_instance()->check_update_statistics(request, response);
+    int64_t schema_time = step_time_cost.get_time();
+    DB_NOTICE("baikaldb:%s heart beat, wait time: %ld, update_cost: %ld, log_id: %lu", 
+                butil::endpoint2str(cntl->remote_side()).c_str(),
+                wait_time, schema_time, log_id);
 }
 
 void MetaStateMachine::console_heartbeat(google::protobuf::RpcController* controller,

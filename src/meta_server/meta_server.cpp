@@ -488,6 +488,23 @@ void MetaServer::baikal_heartbeat(google::protobuf::RpcController* controller,
     }
 }
 
+void MetaServer::baikal_other_heartbeat(google::protobuf::RpcController* controller,
+                                  const pb::BaikalOtherHeartBeatRequest* request,
+                                  pb::BaikalOtherHeartBeatResponse* response,
+                                  google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+    uint64_t log_id = 0;
+    if (cntl->has_log_id()) {
+        log_id = cntl->log_id();
+    }
+    RETURN_IF_NOT_INIT(_init_success, response, log_id);
+    if (_meta_state_machine != nullptr) {
+        _meta_state_machine->baikal_other_heartbeat(controller, request, response, done_guard.release());
+    }
+}
+
 void MetaServer::console_heartbeat(google::protobuf::RpcController* controller,
                                   const pb::ConsoleHeartBeatRequest* request,
                                   pb::ConsoleHeartBeatResponse* response,
@@ -537,6 +554,11 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
         static_cast<brpc::Controller*>(controller);
     const std::string* data = cntl->http_request().uri().GetQuery("data");
     cntl->http_response().set_content_type("text/plain");
+    if (!_init_success) {
+        DB_WARNING("migrate have not init");
+        cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        return;
+    }
     pb::MigrateRequest request;
     DB_WARNING("start any_migrate");
     if (data != NULL) {

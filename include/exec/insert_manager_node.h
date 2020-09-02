@@ -61,7 +61,7 @@ public:
         _main_table_reversed = false;
         _affected_rows = 0;
     }
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
     int init_insert_info(UpdateManagerNode* update_manager_node);
     int init_insert_info(InsertNode* insert_node);
     bool need_ignore() {

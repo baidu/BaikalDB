@@ -20,32 +20,6 @@
 #include "expr_optimizer.h"
 
 namespace baikaldb {
-int ExprOptimize::analyze(QueryContext* ctx) {
-    ExecNode* plan = ctx->root;
-    PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
-    if (packet_node == nullptr) {
-        return -1;
-    }
-    int ret = 0;
-    if (packet_node->op_type() == pb::OP_UNION) {
-        analyze_union(ctx, packet_node);
-    }
-    
-    if (ctx->has_derived_table) {
-        ret = analyze_derived_table(ctx, packet_node);
-        if (ret < 0) {
-            return ret;
-        }
-    }
-    ret = plan->expr_optimize(ctx->mutable_tuple_descs());
-    if (ret == -2) {
-        DB_WARNING("filter always false");
-        ctx->return_empty = true;
-        return 0;
-    } else {
-        return ret;
-    }
-}
 
 void ExprOptimize::analyze_union(QueryContext* ctx, PacketNode* packet_node) {
     ExecNode* plan = ctx->root;
@@ -71,7 +45,6 @@ void ExprOptimize::analyze_union(QueryContext* ctx, PacketNode* packet_node) {
         }
     }
 }
-
 int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_node) {
     ExecNode* plan = ctx->root;
     std::vector<ExecNode*> join_nodes;
@@ -80,6 +53,7 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
     FilterNode* filter_node = static_cast<FilterNode*>(plan->get_node(pb::WHERE_FILTER_NODE));
     FilterNode* having_node = static_cast<FilterNode*>(plan->get_node(pb::HAVING_FILTER_NODE));
     AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
+    AggNode* merge_agg_node = static_cast<AggNode*>(plan->get_node(pb::MERGE_AGG_NODE));
     std::vector<ExprNode*>& outer_projections = packet_node->mutable_projections();
     for (auto& iter : ctx->derived_table_ctx_mapping) {
         auto& subquery_ctx = iter.second;
@@ -125,6 +99,14 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
                 for (auto expr : *(agg_node->mutable_agg_fn_calls())) {
+                    expr->set_slot_col_type(tuple_id, outer_slot_id, type);
+                }
+            }
+            if (merge_agg_node != nullptr) {
+                for (auto expr : *(merge_agg_node->mutable_group_exprs())) {
+                    expr->set_slot_col_type(tuple_id, outer_slot_id, type);
+                }
+                for (auto expr : *(merge_agg_node->mutable_agg_fn_calls())) {
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
             }

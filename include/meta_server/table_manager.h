@@ -67,7 +67,7 @@ struct TableMem {
         id_noneregion_map.clear();
         id_keyregion_map.clear();
     }
-    pb::Statistics statistics_pb;
+    int64_t statistics_version = 0;
     void print() {
         /*
         DB_WARNING("whether_level_table: %d, schema_pb: %s, is_global_index: %d, main_table_id:%ld, global_index_id: %ld",
@@ -175,6 +175,9 @@ public:
 
     void full_update_statistics(const pb::BaikalHeartBeatRequest* request,
         pb::BaikalHeartBeatResponse* response);
+    void check_update_statistics(const pb::BaikalOtherHeartBeatRequest* request,
+        pb::BaikalOtherHeartBeatResponse* response);
+    int get_statistics(const int64_t table_id, pb::Statistics& stat_pb);
     void check_update_or_drop_table(const pb::BaikalHeartBeatRequest* request,
                 pb::BaikalHeartBeatResponse* response);
     void check_table_exist_for_peer(
@@ -182,6 +185,7 @@ public:
                     pb::StoreHeartBeatResponse* response);
     void check_add_table(std::set<int64_t>& report_table_ids,
             std::vector<int64_t>& new_add_region_ids,
+            bool not_need_statistics,
             pb::BaikalHeartBeatResponse* response);
 
     void check_add_region(const std::set<std::int64_t>& report_table_ids,

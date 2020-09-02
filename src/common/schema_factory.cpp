@@ -288,6 +288,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.fields.clear();
         tbl_info.indices.clear();
         tbl_info.dists.clear();
+        tbl_info.reverse_fields.clear();
     }
     TableInfo& tbl_info = *tbl_info_ptr;
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
@@ -576,6 +577,11 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
             idx_info.length = -1;
         } else if (idx_info.length != -1) {
             idx_info.length += info->size;
+        }
+        if (idx_info.type == pb::I_FULLTEXT || idx_info.type == pb::I_RECOMMEND) {
+            DB_NOTICE("table %ld index %ld insert reverse field %ld", 
+                table_info.id, idx_info.id, info->id);
+            table_info.reverse_fields.insert(info->id);
         }
     }
     if (idx_info.has_nullable) {

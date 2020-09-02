@@ -35,6 +35,7 @@ namespace baikaldb {
     } while (0);
 
 class RuntimeState;
+class QueryContext;
 class ExecNode {
 public:
     ExecNode() {
@@ -50,7 +51,7 @@ public:
      *     -1 - ERROR
      *     -2 - EMPTY_RESULT
      */
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
 
     //input: 需要下推的条件
     //input_exprs 既是输入参数，也是输出参数
@@ -72,6 +73,7 @@ public:
     }
     virtual void close(RuntimeState* state) {
         _num_rows_returned = 0;
+        _return_empty = false;
         for (auto e : _children) {
             e->close(state);
         }
@@ -142,6 +144,12 @@ public:
     std::vector<ExecNode*>* mutable_children() {
         return &_children;
     }
+    void set_return_empty() {
+        _return_empty = true;
+        for (auto child : _children) {
+            child->set_return_empty();
+        }
+    }
     bool reached_limit() {
         return _limit != -1 && _num_rows_returned >= _limit;
     }
@@ -188,6 +196,7 @@ protected:
     int64_t _limit = -1;
     int64_t _num_rows_returned = 0;
     bool _is_explain = false;
+    bool _return_empty = false;
     pb::PlanNodeType _node_type;
     std::vector<ExecNode*> _children;
     ExecNode* _parent = nullptr;

@@ -166,7 +166,7 @@ protected:
                                         std::string& alias,
                                         bool& is_derived_table);
     // return empty str if failed
-    std::string get_field_full_name(const parser::ColumnName* col);
+    std::string get_field_alias_name(const parser::ColumnName* col);
 
     // make AND exprs to expr vector
     int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters, bool use_alias, bool can_agg);
@@ -207,11 +207,12 @@ protected:
     void create_values_tuple_desc(); 
     void create_order_by_tuple_desc();
 
-    ScanTupleInfo* get_scan_tuple(int64_t table);
+    ScanTupleInfo* get_scan_tuple(const std::string& table_name, int64_t table_id);
 
     // get or create a new SlotDescriptor with the given field name
     // used for create slot_ref
-    pb::SlotDescriptor& get_scan_ref_slot(int64_t table, int32_t field, pb::PrimitiveType type);
+    pb::SlotDescriptor& get_scan_ref_slot(const std::string& alias_name, 
+            int64_t table, int32_t field, pb::PrimitiveType type);
     pb::SlotDescriptor& get_values_ref_slot(int64_t table, int32_t field, pb::PrimitiveType type);
 
     // create common plan nodes 
@@ -258,7 +259,7 @@ protected:
     //field_name=>db.table
     std::unordered_map<std::string, std::unordered_set<std::string>> _field_tbls_mapping;
     
-    std::unordered_map<int64_t, ScanTupleInfo>  _table_tuple_mapping;
+    std::unordered_map<std::string, ScanTupleInfo>  _table_tuple_mapping;
 
     int32_t                 _agg_tuple_id = -1;
     int32_t                 _agg_slot_cnt = 1;
@@ -278,7 +279,7 @@ protected:
     std::unordered_map<std::string, FieldInfo*>    _field_info;
 
     // table_alias => db.table
-    std::unordered_map<std::string, std::string>  _table_alias_mapping;
+    //std::unordered_map<std::string, std::string>  _table_alias_mapping;
 
     // alias => index in _select_exprs (or _select_names)
     std::multimap<std::string, size_t> _select_alias_mapping;

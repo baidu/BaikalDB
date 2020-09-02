@@ -20,6 +20,7 @@ DEFINE_bool(default_2pc, false, "default enable/disable 2pc for autocommit queri
 QueryContext::~QueryContext() {
     if (need_destroy_tree) {
         ExecNode::destroy_tree(root);
+        root = nullptr;
     }
 }
 

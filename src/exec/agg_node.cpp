@@ -14,6 +14,7 @@
 
 #include "agg_node.h"
 #include "runtime_state.h"
+#include "query_context.h"
 
 namespace baikaldb {
 int AggNode::init(const pb::PlanNode& node) {
@@ -60,9 +61,9 @@ int AggNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
-int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int AggNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
@@ -77,7 +78,7 @@ int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
     if (_agg_tuple_id < 0) {
         return 0;
     }
-    pb::TupleDescriptor* agg_tuple_desc = &(*tuple_descs)[_agg_tuple_id];
+    pb::TupleDescriptor* agg_tuple_desc = ctx->get_tuple_desc(_agg_tuple_id);
     //_intermediate_slot_id != _final_slot_id则type为pb::STRING
     //_final_slot_id type在AggExpr里会设置
     for (auto& slot : *agg_tuple_desc->mutable_slots()) {

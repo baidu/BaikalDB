@@ -133,17 +133,23 @@ int InsertPlanner::parse_kv_list() {
             DB_WARNING("on_duplicate name[%d] is enmty", i);
             return -1;
         }
-        std::string full_name = get_field_full_name(_insert_stmt->on_duplicate[i]->name);
-        if (full_name.empty()) {
-            DB_WARNING("get full field name failed: %s", _insert_stmt->on_duplicate[i]->name->name.value);
+        std::string alias_name = get_field_alias_name(_insert_stmt->on_duplicate[i]->name);
+        if (alias_name.empty()) {
+            DB_WARNING("get_field_alias_name failed: %s", 
+                    _insert_stmt->on_duplicate[i]->name->to_string().c_str());
             return -1;
         }
+        std::string full_name = alias_name;
+        full_name += ".";
+        full_name += _insert_stmt->on_duplicate[i]->name->name.to_lower();
+
         FieldInfo* field_info = nullptr;
         if (nullptr == (field_info = get_field_info_ptr(full_name))) {
             DB_WARNING("invalid field name in: %s", full_name.c_str());
             return -1;
         }
-        auto slot = get_scan_ref_slot(field_info->table_id, field_info->id, field_info->type);
+        auto slot = get_scan_ref_slot(alias_name, 
+                field_info->table_id, field_info->id, field_info->type);
         _update_slots.push_back(slot);
 
         pb::Expr value_expr;
@@ -174,11 +180,15 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
     }
     std::set<int32_t> field_ids;
     for (int i = 0; i < _insert_stmt->columns.size(); ++i) {
-        std::string full_name = get_field_full_name(_insert_stmt->columns[i]);
-        if (full_name.empty()) {
-            DB_WARNING("get full field name failed: %s", _insert_stmt->columns[i]->name.value);
+        std::string alias_name = get_field_alias_name(_insert_stmt->columns[i]);
+        if (alias_name.empty()) {
+            DB_WARNING("get_field_alias_name failed: %s", _insert_stmt->columns[i]->to_string().c_str());
             return -1;
         }
+        std::string full_name = alias_name;
+        full_name += ".";
+        full_name += _insert_stmt->columns[i]->name.to_lower();
+
         FieldInfo* field_info = nullptr;
         if (nullptr == (field_info = get_field_info_ptr(full_name))) {
             DB_WARNING("invalid field name in: %s", full_name.c_str());

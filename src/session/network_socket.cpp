@@ -19,6 +19,7 @@
 
 namespace baikaldb {
 static UserInfo dummy;
+bvar::Adder<int64_t> NetworkSocket::bvar_prepare_count{"bvar_prepare_count"};
 
 NetworkSocket::NetworkSocket() {
     //send_buf = boost::make_shared<DataBuffer>();

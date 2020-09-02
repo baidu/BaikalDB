@@ -43,6 +43,11 @@ public:
                          const pb::BaikalHeartBeatRequest* request,                
                          pb::BaikalHeartBeatResponse* response,                    
                          google::protobuf::Closure* done); 
+
+    void baikal_other_heartbeat(google::protobuf::RpcController* controller,             
+                         const pb::BaikalOtherHeartBeatRequest* request,                
+                         pb::BaikalOtherHeartBeatResponse* response,                    
+                         google::protobuf::Closure* done); 
     
     void console_heartbeat(google::protobuf::RpcController* controller,             
                          const pb::ConsoleHeartBeatRequest* request,                
