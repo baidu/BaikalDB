@@ -111,7 +111,7 @@ class SingleLogFileObject : public google::base::Logger {
     google::LogSeverity severity_;
 };
 
-const int MAX_LOG_LEN = 2048;
+const int MAX_LOG_LEN = 4096;
 inline void glog_info_writelog(const char* fmt, ...) {
     char buf[MAX_LOG_LEN];
     va_list args;
