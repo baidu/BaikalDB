@@ -1095,6 +1095,10 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
         boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
         boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
     }
+    re2::RE2 ignore_reg("(\\/\\*.*?\\*\\/)", option);
+    if (!RE2::GlobalReplace(&(ctx->sql), reg, " ")) {
+        DB_WARNING("global replace sql error.");
+    }
 }
 
 int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
