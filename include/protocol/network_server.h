@@ -23,6 +23,7 @@
 #include "schema_factory.h"
 #include "common.h"
 #include "meta_server_interact.hpp"
+#include "rocks_wrapper.h"
 
 namespace baikaldb {
 class NetworkServer {

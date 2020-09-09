@@ -408,7 +408,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 }
             }
             RE2::GlobalReplace(&sql, "\\s+", " ");
-            DB_NOTICE("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
+            DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row[%d] bufsize=[%d] "
                     "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] stmt_name=[%s] "
                     "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sqllen=[%d] sql=[%s] id=[%ld]",
@@ -1096,8 +1096,8 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
         boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
     }
     re2::RE2 ignore_reg("(\\/\\*.*?\\*\\/)", option);
-    if (!RE2::GlobalReplace(&(ctx->sql), reg, " ")) {
-        DB_WARNING("global replace sql error.");
+    if (RE2::GlobalReplace(&(ctx->sql), reg, " ")) {
+        DB_WARNING("global replace sql.");
     }
 }
 

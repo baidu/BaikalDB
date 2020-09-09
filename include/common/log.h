@@ -111,7 +111,7 @@ class SingleLogFileObject : public google::base::Logger {
     google::LogSeverity severity_;
 };
 
-const int MAX_LOG_LEN = 4096;
+const int MAX_LOG_LEN = 2048;
 inline void glog_info_writelog(const char* fmt, ...) {
     char buf[MAX_LOG_LEN];
     va_list args;
@@ -120,6 +120,21 @@ inline void glog_info_writelog(const char* fmt, ...) {
     va_end(args);
     LOG(INFO) << buf;
 }
+const int MAX_LOG_LEN_LONG = 20480;
+inline void glog_info_writelog_long(const char* fmt, ...) {
+    char buf[MAX_LOG_LEN_LONG];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    LOG(INFO) << buf;
+}
+#define DB_NOTICE_LONG(_fmt_, args...) \
+    do {\
+        ::baikaldb::glog_info_writelog_long("[%s:%d][%s][%llu]" _fmt_, \
+                strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
+    } while (0);
+
 inline void glog_warning_writelog(const char* fmt, ...) {
     char buf[MAX_LOG_LEN];
     va_list args;
