@@ -77,6 +77,9 @@ int AutoInc::analyze(QueryContext* ctx) {
     }
     
     if (auto_id_count == 0) {
+        if (max_id > 0) {
+            ctx->client_conn->last_insert_id = max_id;
+        }
         return 0;
     }
     int64_t start_id = response.start_id();
