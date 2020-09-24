@@ -129,6 +129,7 @@ enum ExplainType {
     SHOW_PLAN               = 4,
     SHOW_TRACE              = 5,
     SHOW_TRACE2             = 6,
+    EXPLAIN_SHOW_COST       = 7,
 };
 
 inline bool explain_is_trace(ExplainType& type) {
@@ -767,6 +768,22 @@ inline int set_insert(std::unordered_set<std::string>& set, const std::string& i
 //map double buffer
 template<typename Key, typename Val>
 using DoubleBufferMap = butil::DoublyBufferedData<std::unordered_map<Key, Val>>;
+
+namespace tso {
+constexpr int64_t update_timestamp_interval_ms = 50LL; // 50ms
+constexpr int64_t update_timestamp_guard_ms = 1LL; // 1ms
+constexpr int64_t save_interval_ms = 3000LL;  // 3000ms
+constexpr int64_t base_timestamp_ms = 1577808000000LL; // 2020-01-01 12:00:00
+constexpr int    logical_bits = 18;
+constexpr int64_t max_logical = 1 << logical_bits;
+
+inline int64_t clock_realtime_ms() {
+  struct timespec tp;
+  ::clock_gettime(CLOCK_REALTIME, &tp);
+  return tp.tv_sec * 1000ULL + tp.tv_nsec / 1000000ULL - base_timestamp_ms;
+}
+
+} // namespace tso
 
 } // namespace baikaldb
 

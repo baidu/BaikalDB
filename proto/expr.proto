@@ -67,5 +67,7 @@ message Expr {
     repeated ExprNode nodes = 1;
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用
     repeated int64 index_ids = 2;
+    optional string database = 3;
+    optional string table = 4;
 };
 

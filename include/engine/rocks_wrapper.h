@@ -19,7 +19,9 @@
 #include "rocksdb/convenience.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/cache.h"
+#include "rocksdb/listener.h"
 #include "rocksdb/options.h"
+#include "rocksdb/status.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/transaction_db.h"
@@ -43,6 +45,7 @@ enum GetMode {
 class RocksWrapper {
 public:
     static const std::string RAFT_LOG_CF;
+    static const std::string BIN_LOG_CF;
     static const std::string DATA_CF;
     static const std::string METAINFO_CF;
 
@@ -140,6 +143,8 @@ public:
     }
 
     rocksdb::ColumnFamilyHandle* get_raft_log_handle();
+    
+    rocksdb::ColumnFamilyHandle* get_bin_log_handle();
 
     rocksdb::ColumnFamilyHandle* get_data_handle();
 
@@ -172,6 +177,18 @@ public:
     void close() {
         delete _txn_db;
     }
+    void set_is_stall(const std::string& cf_name, bool is_stall) {
+        if (cf_name == RAFT_LOG_CF) {
+            _log_cf_is_stall = is_stall;
+        } else if (cf_name == DATA_CF) {
+            _data_cf_is_stall = is_stall;
+        } else if (cf_name == METAINFO_CF) {
+           _meta_cf_is_stall = is_stall;
+        }
+    }
+    bool is_any_stall() {
+        return _data_cf_is_stall || _log_cf_is_stall || _meta_cf_is_stall;
+    }
 private:
 
     RocksWrapper();
@@ -186,7 +203,11 @@ private:
     std::map<std::string, rocksdb::ColumnFamilyHandle*> _column_families;
 
     rocksdb::ColumnFamilyOptions _log_cf_option;
+    rocksdb::ColumnFamilyOptions _binlog_cf_option;
     rocksdb::ColumnFamilyOptions _data_cf_option;
     rocksdb::ColumnFamilyOptions _meta_info_option;
+    bool _log_cf_is_stall = false;
+    bool _data_cf_is_stall = false;
+    bool _meta_cf_is_stall = false;
 };
 }

@@ -14,6 +14,11 @@
 
 #include "plan_router.h"
 #include "network_socket.h"
+#include "expr.h"
+#include "slot_ref.h"
+#include "scalar_fn_call.h"
+#include "expr_node.h"
+#include "literal.h"
 
 namespace baikaldb {
 int PlanRouter::analyze(QueryContext* ctx) {
@@ -137,7 +142,8 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     auto ret = schema_factory->get_region_by_key(main_table_id, 
             *index_ptr, router_index,
             scan_node->region_infos(),
-            scan_node->mutable_region_primary());
+            scan_node->mutable_region_primary(),
+            scan_node->get_partition());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
@@ -261,6 +267,77 @@ int PlanRouter::transaction_node_analyze(TransactionNode* txn_node, QueryContext
         return 0;
     }
     // txn_node is routed in FetcherNode
+    return 0;
+}
+
+int PartitionAnalyze::analyze(QueryContext* ctx) {
+    if (ctx->is_explain) {
+        return 0;
+    }
+    ExecNode* plan = ctx->root;
+    if (!plan->need_seperate()) {
+        return 0;
+    }
+    std::vector<ExecNode*> scan_nodes;
+    plan->get_node(pb::SCAN_NODE, scan_nodes);
+    ExecNode* filter_node = plan->get_node(pb::WHERE_FILTER_NODE);
+    ExecNode* having_node = plan->get_node(pb::HAVING_FILTER_NODE);
+
+    if (scan_nodes.size() != 0) {
+        bool has_join = scan_nodes.size() > 1;
+        bool has_partition = false;
+        for (auto scan_node : scan_nodes) {
+            auto node = static_cast<RocksdbScanNode*>(scan_node);
+            if (node->get_partition_num() > 1) {
+                has_partition = true;
+                if (has_join) {
+                    DB_WARNING("partition table can't join.")
+                    return -1;
+                }
+            }
+        }
+        if (has_partition) {
+            ctx->is_full_export = false;
+            bool get_partition = false;
+            auto scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);
+            int64_t table_id = scan_node->table_id();
+            scan_node->get_partition().clear();
+            if (filter_node != nullptr) {
+                //如果分区字段满足条件，进行分区选择，不然返回-1
+                for (const auto& expr : *filter_node->mutable_conjuncts()) {
+                    std::unordered_set<int32_t> field_ids;
+                    expr->get_all_field_ids(field_ids);
+                    if (field_ids.count(scan_node->get_partition_field()) == 1) {
+                        if (expr->node_type() == pb::FUNCTION_CALL &&
+                            static_cast<ScalarFnCall*>(expr)->fn().fn_op() == parser::FT_EQ &&
+                            expr->children_size() == 2 &&
+                            expr->children(0)->node_type() == pb::SLOT_REF && 
+                            static_cast<SlotRef*>(expr->children(0))->field_id() == scan_node->get_partition_field() &&
+                            expr->children(1)->is_literal()) {
+                            auto lietral_value = static_cast<Literal*>(expr->children(1))->get_value(nullptr);
+                            int64_t partition_num = 0;
+                            if (SchemaFactory::get_instance()->get_partition_num(table_id, lietral_value, partition_num) == 0) {
+                                scan_node->get_partition().push_back(partition_num);
+                                DB_DEBUG("get partition num %ld", partition_num);
+                                get_partition = true;
+                            } else {
+                                DB_WARNING("get table %ld partition number error.", table_id)
+                                return -1;
+                            }
+                        } else {
+                            DB_WARNING("pattern not supported.");
+                            return -1;
+                        }
+                    }
+                }
+            }
+            if (!get_partition) {
+                for (int64_t i = 0; i < scan_node->get_partition_num(); ++i) {
+                    scan_node->get_partition().push_back(i);
+                }
+            }
+        }
+    }
     return 0;
 }
 }

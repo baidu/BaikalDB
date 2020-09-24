@@ -596,7 +596,7 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
             record = _left_records[_idx++];
         }
         ++_scan_rows;
-        int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, true);
+        int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, state->need_check_region());
         if (ret < 0) {
             continue;
         }
@@ -708,7 +708,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                         _like_prefixs[_idx]);
                 delete _table_iter;
                 _table_iter = Iterator::scan_primary(
-                        state->txn(), range, _field_ids, _field_slot, true, _scan_forward);
+                        state->txn(), range, _field_ids, _field_slot, state->need_check_region(), _scan_forward);
                 if (_table_iter == nullptr) {
                     DB_WARNING_STATE(state, "open TableIterator fail, table_id:%ld", _index_id);
                     return -1;

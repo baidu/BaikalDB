@@ -119,7 +119,8 @@ enum TableOptionType : unsigned char {
     TABLE_OPT_ROW_FORMAT,
     TABLE_OPT_STATS_PERSISTENT,
     TABLE_OPT_SHARD_ROW_ID,
-    TABLE_OPT_PACK_KEYS
+    TABLE_OPT_PACK_KEYS,
+    TABLE_OPT_PARTITION
 };
 
 enum DatabaseOptionType : unsigned char {
@@ -142,6 +143,12 @@ enum AlterSpecType : unsigned char {
     ALTER_SPEC_RENAME_TABLE,
     ALTER_SPEC_TABLE_OPTION
 };
+
+enum PartitionType : unsigned char {
+    PARTITION_HASH = 0,
+    PARTITION_RANGE
+};
+
 
 struct TypeOption : public Node {
     bool is_unsigned = false;
@@ -222,6 +229,12 @@ struct TableOption : public Node {
     TableOption() {
         node_type = NT_TABLE_OPT;
     }
+};
+
+struct PartitionOption : public TableOption {
+    PartitionType type;
+    ExprNode* expr = nullptr;
+    Vector<ExprNode*> range;
 };
 
 struct Constraint : public Node {

@@ -62,6 +62,7 @@ int LogEntryReader::read_log_entry(int64_t region_id, int64_t start_log_index, i
     options.iterate_upper_bound = &upper_bound_slice;
     options.prefix_same_as_start = true;
     options.total_order_seek = false;
+    options.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(options, _log_cf));
     iter->Seek(log_data_key.data());
     for (; iter->Valid(); iter->Next()) {
@@ -91,7 +92,6 @@ int LogEntryReader::read_log_entry(int64_t region_id, int64_t start_log_index, i
             && store_req.op_type() != pb::OP_DELETE
             && store_req.op_type() != pb::OP_UPDATE
             && store_req.op_type() != pb::OP_PREPARE
-            && store_req.op_type() != pb::OP_PREPARE_V2
             && store_req.op_type() != pb::OP_ROLLBACK
             && store_req.op_type() != pb::OP_COMMIT) {
             //DB_WARNING("log entry is not txn, region_id: %ld head.type: %d", region_id, store_req.op_type());
@@ -129,6 +129,7 @@ int LogEntryReader::read_txn_last_log_entry(int64_t region_id, int64_t start_log
     options.iterate_upper_bound = &upper_bound_slice;
     options.prefix_same_as_start = true;
     options.total_order_seek = false;
+    options.fill_cache = false;
     std::map<int64_t, uint64_t> log_index_txn_map;
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(options, _log_cf));
     iter->Seek(log_data_key.data());
@@ -159,7 +160,6 @@ int LogEntryReader::read_txn_last_log_entry(int64_t region_id, int64_t start_log
             && store_req.op_type() != pb::OP_DELETE
             && store_req.op_type() != pb::OP_UPDATE
             && store_req.op_type() != pb::OP_PREPARE
-            && store_req.op_type() != pb::OP_PREPARE_V2
             && store_req.op_type() != pb::OP_ROLLBACK
             && store_req.op_type() != pb::OP_COMMIT) {
             //DB_WARNING("log entry is not txn, region_id: %ld head.type: %d", region_id, store_req.op_type());

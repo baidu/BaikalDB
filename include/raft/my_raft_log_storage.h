@@ -53,7 +53,7 @@ struct LogHead {
 
 // Implementation of LogStorage based on RocksDB
 class MyRaftLogStorage : public braft::LogStorage {
-
+typedef std::vector<std::pair<rocksdb::SliceParts, rocksdb::SliceParts>> SlicePartsVec;
 public:
 
     /* raft_log_cf data format
@@ -70,7 +70,7 @@ public:
     static const uint8_t LOG_DATA_IDENTIFY = 0x02;    
     const static size_t LOG_HEAD_SIZE = sizeof(int64_t) + sizeof(int);
     ~MyRaftLogStorage();
-    MyRaftLogStorage():_db(NULL), _handle(NULL) {
+    MyRaftLogStorage():_db(NULL), _raftlog_handle(NULL), _binlog_handle(NULL) {
         bthread_mutex_init(&_mutex, NULL);
     }
     // init logstorage, check consistency and integrity
@@ -117,10 +117,16 @@ public:
 private:
 
     MyRaftLogStorage(int64_t region_id, RocksWrapper* db,
-                        rocksdb::ColumnFamilyHandle* handle);
+                        rocksdb::ColumnFamilyHandle* raftlog_handle,
+                        rocksdb::ColumnFamilyHandle* binlog_handle);
 
-    int _build_key_value(rocksdb::SliceParts* key, rocksdb::SliceParts* value,
+    int get_binlog_entry(rocksdb::Slice& raftlog_value_slice, std::string& binlog_value);
+
+    int _build_key_value(SlicePartsVec& kv_raftlog_vec, SlicePartsVec& kv_binlog_vec,
                         const braft::LogEntry* entry, butil::Arena& arena);
+
+    int _construct_slice_array(void* head_buf, const butil::IOBuf& binlog_buf, rocksdb::SliceParts* raftlog_value, 
+                            rocksdb::SliceParts* binlog_key, rocksdb::SliceParts* binlog_value, butil::Arena& arena);
 
     rocksdb::Slice* _construct_slice_array(
                 void* head_buf, 
@@ -148,7 +154,9 @@ private:
     int64_t _region_id; 
     
     RocksWrapper* _db; 
-    rocksdb::ColumnFamilyHandle* _handle;
+    rocksdb::ColumnFamilyHandle* _raftlog_handle;
+    rocksdb::ColumnFamilyHandle* _binlog_handle;
+    bool _is_binlog_region = false;
 
     IndexTermMap _term_map;
     bthread_mutex_t _mutex; // for term_map     

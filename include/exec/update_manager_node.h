@@ -16,6 +16,8 @@
 #pragma once
 
 #include "dml_manager_node.h"
+#include "binlog_context.h"
+
 namespace baikaldb {
 class UpdateNode;
 
@@ -65,6 +67,8 @@ private:
     std::vector<int64_t>     _local_affected_index_ids;
     SmartTable               _table_info;
     bool _affect_global_index = false;
+    pb::TableMutation     _update_binlog;
+    SmartRecord _partition_record;
 };
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

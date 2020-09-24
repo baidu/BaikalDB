@@ -60,6 +60,7 @@ public:
             _use_ttl(use_ttl) {
         _write_opt.disableWAL = FLAGS_disable_wal;
         bthread_mutex_init(&_txn_mutex, nullptr);
+        bthread_mutex_init(&_cache_map_mutex, nullptr);
     }
 
     virtual ~Transaction() {
@@ -99,6 +100,7 @@ public:
         _txn = nullptr;
         _ddl_state = nullptr;
         bthread_mutex_destroy(&_txn_mutex);
+        bthread_mutex_destroy(&_cache_map_mutex);
     }
 
     // Begin a new transaction
@@ -225,12 +227,12 @@ public:
         return _is_finished;
     }
 
-    bool prepare_apply() {
-        return _prepare_apply;
+    bool in_process() {
+        return _in_process;
     }
 
-    void set_prepare_apply() {
-        _prepare_apply = true;
+    void set_in_process(bool flag) {
+        _in_process = flag;
     }
 
     int64_t prepare_time_us() {
@@ -246,20 +248,20 @@ public:
     }
 
     void push_cmd_to_cache(int seq_id, pb::CachePlan plan_item) {
-        BAIDU_SCOPED_LOCK(_txn_mutex);
+        BAIDU_SCOPED_LOCK(_cache_map_mutex);
         _seq_id = seq_id;
         if (_cache_plan_map.count(seq_id) > 0) {
             return;
+        }
+        pb::OpType op_type = plan_item.op_type();
+        if (op_type == pb::OP_INSERT || op_type == pb::OP_UPDATE || op_type == pb::OP_DELETE) {
+            _has_write = true;
         }
         _cache_plan_map.insert(std::make_pair(seq_id, plan_item));
     }
 
     bool has_write() {
         return _has_write;
-    }
-
-    void set_has_write(bool flag) {
-        _has_write = flag;
     }
 
     bool write_begin_index() {
@@ -271,7 +273,7 @@ public:
     }
     // return -1表示没有cache plan
     int get_cache_plan_infos(pb::TransactionInfo& txn_info) {
-        BAIDU_SCOPED_LOCK(_txn_mutex);
+        BAIDU_SCOPED_LOCK(_cache_map_mutex);
         if (_cache_plan_map.size() == 0) {
             return -1;
         }
@@ -423,19 +425,7 @@ public:
         return _primary_region_id;
     }
 
-    /* baikaldb执行insert/delete/update时才会设置primary_region_id
-       只读事务_primary_region_id == -1 */
-    bool primary_region_id_seted() {
-        if (_primary_region_id != -1) {
-            return true;
-        }
-        return false;
-    }
-
     bool is_primary_region() {
-        if (!primary_region_id_seted()) {
-            return true;
-        }
         if (_region_info != nullptr) {
             return (_region_info->region_id() == _primary_region_id);
         }
@@ -451,6 +441,7 @@ public:
 
     void clear_current_req_point_seq() {
         _current_req_point_seq.clear();
+        _current_req_point_seq.insert(1);
     }
 
     size_t save_point_seq_size() {
@@ -502,7 +493,7 @@ private:
     bool                            _is_prepared = false;
     bool                            _is_finished = false;
     bool                            _is_rolledback = false;
-    bool                            _prepare_apply = false;
+    std::atomic<bool>               _in_process {false};
     bool                            _has_write = false;
     bool                            _write_begin_index = true;
     int64_t                         _prepare_time_us = 0;
@@ -513,6 +504,7 @@ private:
     std::set<int>                   _current_req_point_seq;
     std::set<int>                   _need_rollback_seq;
     // store the query cmd from BEGIN to PREPARE
+    bthread_mutex_t                 _cache_map_mutex;
     CachePlanMap                    _cache_plan_map;
 
     rocksdb::WriteOptions           _write_opt;

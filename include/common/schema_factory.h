@@ -29,6 +29,10 @@
 #include "proto/meta.interface.pb.h"
 #include "proto/plan.pb.h"
 #include "statistics.h"
+#include "expr_node.h"
+#include "literal.h"
+#include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/join.hpp>
 
 using google::protobuf::FileDescriptorProto;
 using google::protobuf::DescriptorProto;
@@ -53,6 +57,9 @@ class TableRecord;
 typedef std::shared_ptr<TableRecord> SmartRecord;
 typedef std::map<std::string, int64_t> StrInt64Map;
 
+enum PartitionRegionSelect {
+    PRS_RANDOM = 0
+};
 struct RegionInfo {
     pb::RegionInfo region_info;
     RegionInfo() {}
@@ -64,8 +71,8 @@ struct RegionInfo {
 struct TableRegionInfo {
     // region_id => RegionInfo
     std::unordered_map<int64_t, RegionInfo> region_info_mapping;
-    // partion vector of (start_key => regionid)
-    std::vector<StrInt64Map> key_region_mapping;
+    // partion map of (partition_id => (start_key => regionid))
+    std::unordered_map<int64_t, StrInt64Map> key_region_mapping;
     void update_leader(int64_t region_id, const std::string& leader) {
         if (region_info_mapping.count(region_id) == 1) {
             region_info_mapping[region_id].region_info.set_leader(leader);
@@ -151,6 +158,94 @@ inline int32_t get_field_id_by_name(
     }
     return 0;
 }
+class Partition {
+public:
+    virtual int init(const pb::PartitionInfo& partition_info, int64_t table_id, int64_t partition_num) = 0;
+    virtual int64_t calc_partition(SmartRecord record) = 0;
+    virtual int64_t calc_partition(ExprValue& field_value) = 0;
+    virtual std::string to_str() = 0;
+};
+
+class HashPartition : public Partition {
+public: 
+    int init(const pb::PartitionInfo& partition_info, int64_t table_id, 
+        int64_t partition_num) {
+        _table_id = table_id;
+        _partition_num = partition_num;
+        _partition_info.CopyFrom(partition_info);
+        if (_partition_num == 0) {
+            DB_FATAL("table_id[%ld] partition_num is zero", _table_id);
+            return -1;
+        }
+        return 0;
+    };
+    int64_t calc_partition(SmartRecord record);
+    int64_t calc_partition(ExprValue& field_value) {
+        if (field_value.is_numberic()) {
+            return field_value.get_numberic<int64_t>() % _partition_num; 
+        } else {
+            return field_value.hash() % _partition_num;
+        }
+    }
+
+    std::string to_str() {
+        return ""; 
+    }
+private:
+    pb::PartitionInfo _partition_info;
+    int64_t _table_id;
+    int64_t _partition_num;
+};
+
+class RangePartition : public Partition {
+public: 
+    int init(const pb::PartitionInfo& partition_info, int64_t table_id, int64_t partition_num) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _table_id = table_id;
+        _partition_num = partition_num;
+        _range_expr.clear();
+        _partition_info.CopyFrom(partition_info);
+        for (const auto& range : partition_info.range_partition_values()) {
+            ExprNode* node_ptr = nullptr;
+            if (0 != ExprNode::create_expr_node(range.nodes(0), &node_ptr)) {
+                DB_WARNING("create expr node error.");
+                return -1;
+            }
+            _range_expr.push_back(node_ptr->get_value(nullptr));
+        }
+        if (_partition_num == 0 || _range_expr.size() == 0) {
+            DB_WARNING("partition_num [%d] or range_expr size is zero", _partition_num);
+            return -1;
+        }
+        return 0;
+    };
+    int64_t calc_partition(SmartRecord record);
+    int64_t calc_partition(ExprValue& field_value) {
+        size_t range_index = 0;
+        for (; range_index < _range_expr.size(); ++range_index) {
+            if (field_value.compare(_range_expr[range_index]) <= 0) {
+                return range_index;
+            }
+        }
+        return range_index;
+    }
+
+    std::string to_str() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        std::vector<std::string> exprs;
+        exprs.reserve(5);
+        for (const auto& expr : _range_expr) {
+            exprs.push_back(expr.get_string());
+        }
+        return "\"range\":\"" + boost::algorithm::join(exprs, ",") + "\"";
+    }
+private:
+    std::vector<ExprValue> _range_expr;
+    pb::PartitionInfo _partition_info;
+    int64_t _table_id;
+    int64_t _partition_num;
+    std::mutex _mutex;
+};
 
 struct TableInfo {
     int64_t                 id = -1;
@@ -183,6 +278,18 @@ struct TableInfo {
     DescriptorPool*         pool = nullptr;
     const Message*          msg_proto = nullptr;
     bool                    have_statistics = false;
+    pb::PartitionInfo partition_info;
+    // 该binlog表关联的普通表集合
+    std::set<uint64_t> binlog_target_ids;
+    // 该表是否已和 binlog 表关联
+    bool is_linked = false;
+    // 该表关联的 binlog 表id
+    uint64_t binlog_id = 0;
+    // 该表是否为 binlog 表
+    bool is_binlog = false;
+    std::shared_ptr<Partition> partition_ptr = nullptr;
+    // 普通表 使用该字段和 binlog 表进行关联
+    std::vector<FieldInfo> link_field;
     std::unordered_set<int64_t>    reverse_fields;
     
     TableInfo() {}
@@ -227,6 +334,7 @@ struct IndexInfo {
     pb::IndexState          state;
     bool                    is_global = false;
     pb::StorageType storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
+    pb::IndexHintStatus     index_hint_status = pb::IHS_NORMAL;
 };
 
 struct DatabaseInfo {
@@ -322,9 +430,9 @@ public:
     void get_clear_regions(const std::string& new_start_key, 
                            const std::string& origin_start_key,
                            TableRegionPtr background,
-                           std::map<std::string, int64_t>& clear_regions);
+                           std::map<std::string, int64_t>& clear_regions, int64_t partition);
     void clear_region(TableRegionPtr background, 
-                      std::map<std::string, int64_t>& clear_regions);
+                      std::map<std::string, int64_t>& clear_regions, int64_t partition);
     void update_region(TableRegionPtr background, 
                                      const pb::RegionInfo& region);
     // 删除判断deleted
@@ -402,6 +510,8 @@ public:
     bool get_merge_switch(int64_t table_id);
     bool get_separate_switch(int64_t table_id);
     bool is_switch_open(const int64_t table_id, const std::string& switch_name);
+    void get_cost_switch_open(std::vector<std::string>& database_table);
+    void table_with_statistics_info(std::vector<std::string>& database_table);
     void get_schema_conf_op_info(const int64_t table_id, int64_t& op_version, std::string& op_desc);
     template <class T>
     int get_schema_conf_value(const int64_t table_id, const std::string& switch_name, T& value);
@@ -412,7 +522,8 @@ public:
             IndexInfo& index,
             const pb::PossibleIndex* primary,
             std::map<int64_t, pb::RegionInfo>& region_infos,
-            std::map<int64_t, pb::PossibleIndex>* region_primary = nullptr);
+            std::map<int64_t, pb::PossibleIndex>* region_primary = nullptr,
+            const std::vector<int64_t>& partitions = std::vector<int64_t>{0});
     // only used for pk (not null)
     int get_region_by_key(IndexInfo& index, 
             const pb::PossibleIndex* primary,
@@ -551,6 +662,84 @@ public:
             return -1;
         }
     }
+
+    bool is_table_partitioned(int64_t table_id) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        auto& table_info_mapping = table_ptr->table_info_mapping;
+        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
+            //DB_WARNING("table_id: %ld not exist", table_id);
+            return false;
+        }
+        auto table_info = table_info_mapping.at(table_id);
+        return table_info->partition_num > 1;
+    }
+
+    int get_partition_num(int64_t table_id, ExprValue& value, int64_t& partition_num) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return -1;
+        }
+        auto& table_info_mapping = table_ptr->table_info_mapping;
+        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
+            DB_WARNING("table_id: %ld not exist", table_id);
+            return -1;
+        }
+        auto table_info = table_info_mapping.at(table_id);
+        if (table_info->partition_ptr != nullptr) {
+            partition_num = table_info->partition_ptr->calc_partition(value);
+        } else {
+            //非分区表，返回0分区
+            partition_num = 0;
+        }
+        return 0;
+    }
+
+    int get_binlog_id(int64_t table_id, int64_t& binlog_id) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return -1;
+        }
+        auto& table_info_mapping = table_ptr->table_info_mapping;
+        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
+            DB_WARNING("table_id: %ld not exist", table_id);
+            return -1;
+        }
+        auto table_info = table_info_mapping.at(table_id);
+        if (table_info->is_linked) {
+            binlog_id = table_info->binlog_id;
+            return 0;
+        }
+        return -1;
+    }
+
+    int get_binlog_regions(int64_t binlog_id, int64_t partition_num, std::map<int64_t, pb::RegionInfo>& region_infos);
+
+    int has_open_binlog(int64_t table_id) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        auto& table_info_mapping = table_ptr->table_info_mapping;
+        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
+            DB_WARNING("table_id: %ld not exist", table_id);
+            return -1;
+        }
+        auto table_info = table_info_mapping.at(table_id);
+        if (table_info->is_linked) {
+            return true;
+        }
+        return false;
+    }
+
+int get_binlog_regions(int64_t table_id, ExprValue& value, pb::RegionInfo& region_info, 
+    PartitionRegionSelect prs = PRS_RANDOM);
 
 private:
     SchemaFactory() {

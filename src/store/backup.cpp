@@ -26,7 +26,7 @@ void Backup::process_download_sst(brpc::Controller* cntl,
         int64_t log_index = 0;
         if (request_vec.size() == 4) {
             auto client_index = request_vec[3];
-            log_index = region_ptr->get_log_index();
+            log_index = region_ptr->get_data_index();
             if (client_index == std::to_string(log_index)) {
                 DB_NOTICE("backup region[%lld] not changed.", _region_id);
                 cntl->http_response().set_status_code(brpc::HTTP_STATUS_NO_CONTENT);
@@ -110,6 +110,7 @@ int Backup::backup_datainfo_to_file(const std::string& path, int64_t& file_size)
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = false;
     read_options.total_order_seek = true;
+    read_options.fill_cache = false;
     std::string prefix;
     MutTableKey key;
 
@@ -161,6 +162,7 @@ int Backup::backup_metainfo_to_file(const std::string& path, int64_t& file_size)
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = false;
     read_options.total_order_seek = true;
+    read_options.fill_cache = false;
     std::string prefix = MetaWriter::get_instance()->meta_info_prefix(_region_id);
     std::unique_ptr<rocksdb::Iterator> iter(RocksWrapper::get_instance()->new_iterator(read_options, db->get_meta_info_handle()));
 
@@ -313,7 +315,7 @@ void Backup::process_download_sst_streaming(brpc::Controller* cntl,
         pb::BackupResponse* response) {
     
     if (auto region_ptr = _region.lock()) {
-        auto log_index = region_ptr->get_log_index();
+        auto log_index = region_ptr->get_data_index();
         if (request->log_index() == log_index) {
             response->set_errcode(pb::BACKUP_SAME_LOG_INDEX);
             DB_NOTICE("backup region[%lld] not changed.", _region_id);

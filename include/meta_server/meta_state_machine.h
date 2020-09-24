@@ -111,9 +111,6 @@ public:
     bool get_unsafe_decision() {
         return _unsafe_decision;
     }
-    bool have_data() {
-        return _have_data;
-    }
 private:
     void save_snapshot(braft::Closure* done,
                         rocksdb::Iterator* iter,
@@ -131,7 +128,6 @@ private:
     std::map<std::string, bool> _resource_migrate;
 
     bool _unsafe_decision = false;
-    bool _have_data = false;
     int64_t _applied_index = 0;
 };
 

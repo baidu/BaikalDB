@@ -383,15 +383,25 @@ double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
     return 1.0;
 }
 
-double AccessPath::fields_to_selectivity(const std::unordered_set<int32_t>& field_ids) {
+double AccessPath::fields_to_selectivity(const std::unordered_set<int32_t>& field_ids, std::map<int32_t, double>& filed_selectivity) {
     double selectivity = 1.0;
     for (auto& field_id : field_ids) {
+        auto sel_iter = filed_selectivity.find(field_id);
+        if (sel_iter != filed_selectivity.end()) {
+            //从map中找到直接使用
+            if (sel_iter->second > 1.0 || sel_iter->second < 0.0) {
+                continue;
+            }
+            selectivity *= sel_iter->second;
+            continue;
+        }
         auto iter = field_range_map.find(field_id);
         if (iter == field_range_map.end()) {
             continue;
         }
         double field_sel = calc_field_selectivity(field_id, iter->second);
         DB_DEBUG("field_id:%d selectivity:%f", field_id, field_sel);
+        filed_selectivity[field_id] = field_sel;
         // selectivity < 0 代表超过统计信息范围
         // TODO 针对递增/时间列按1.0计算有意义，后续是否按表配置区分
         if (field_sel > 1.0 || field_sel < 0.0) {
@@ -403,8 +413,8 @@ double AccessPath::fields_to_selectivity(const std::unordered_set<int32_t>& fiel
 }
 
 // TODO 后续做成index的统计信息，现在只是单列统计聚合
-void AccessPath::calc_cost() {
-    if (cost > 0.0) {
+void AccessPath::calc_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity) {
+    if (cost > 0.0 && cost_info == nullptr) {
         return;
     }
     int64_t table_rows = SchemaFactory::get_instance()->get_total_rows(table_id);
@@ -413,11 +423,30 @@ void AccessPath::calc_cost() {
     if (index_type == pb::I_FULLTEXT) {
         selectivity = 0.1;
     } else {
-        selectivity = fields_to_selectivity(hit_index_field_ids);
+        selectivity = fields_to_selectivity(hit_index_field_ids, filed_selectivity);
     }
     index_read_rows = selectivity * table_rows;
-    double index_other_condition_selectivity = fields_to_selectivity(index_other_field_ids);
-    double other_condition_selectivity = fields_to_selectivity(other_field_ids);
+    double index_other_condition_selectivity = fields_to_selectivity(index_other_field_ids, filed_selectivity);
+    double other_condition_selectivity = fields_to_selectivity(other_field_ids, filed_selectivity);
+    if (cost_info != nullptr) {
+        std::ostringstream os;
+        for (auto field_id : hit_index_field_ids) {
+            os << field_id << ":" << filed_selectivity[field_id] << ";";
+        }
+        (*cost_info)["hit_index_fields"] = os.str();
+        os.clear();
+
+        for (auto field_id : index_other_field_ids) {
+            os << field_id << ":" << filed_selectivity[field_id] << ";";
+        }
+        (*cost_info)["index_other_fields"] = os.str();
+        os.clear();
+
+        for (auto field_id : other_field_ids) {
+            os << field_id << ":" << filed_selectivity[field_id] << ";";
+        }
+        (*cost_info)["other_fields"] = os.str();
+    }
 
     if (is_sort_index && index_other_condition_selectivity > 0 and other_condition_selectivity > 0) {
         int64_t expected_cnt = pos_index.sort_index().sort_limit();
@@ -430,8 +459,24 @@ void AccessPath::calc_cost() {
         table_get_rows = index_read_rows * index_other_condition_selectivity;
     }
     cost = index_read_rows * INDEX_SEEK_FACTOR + table_get_rows * TABLE_GET_FACTOR;
-    // DB_WARNING("table_id:%ld, index_id:%ld, is_possible:%d, table_rows:%ld index_read_rows:%ld, selectivity:%f index_other_condition_selectivity:%f other_condition_selectivity:%f cost:%f", 
-    //        table_id, index_id, is_possible, table_rows,index_read_rows,selectivity,index_other_condition_selectivity,other_condition_selectivity,cost);
+    DB_DEBUG("table_rows:%ld index_read_rows:%ld, selectivity:%f index_other_condition_selectivity:%f other_condition_selectivity:%f cost:%f", 
+            table_rows,index_read_rows,selectivity,index_other_condition_selectivity,other_condition_selectivity,cost);
+    if (cost_info != nullptr) {
+        (*cost_info)["cost"] = std::to_string(cost);
+        (*cost_info)["selectivity"] = std::to_string(selectivity);
+        (*cost_info)["index_other_sel"] = std::to_string(index_other_condition_selectivity);
+        (*cost_info)["other_sel"] = std::to_string(other_condition_selectivity);
+        (*cost_info)["index_read_rows"] = std::to_string(index_read_rows);
+        (*cost_info)["table_rows"] = std::to_string(table_rows);
+        (*cost_info)["is_sort"] = std::to_string(is_sort_index);
+        (*cost_info)["is_possible"] = std::to_string(is_possible);
+        (*cost_info)["is_cover"] = std::to_string(is_covering_index);
+        (*cost_info)["index_name"] = index_info_ptr->short_name;
+    }
+}
+
+void AccessPath::show_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity) {
+    calc_cost(cost_info, filed_selectivity);
 }
 
 }

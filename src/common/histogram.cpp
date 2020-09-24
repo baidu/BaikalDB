@@ -34,56 +34,81 @@ SampleSorter::SampleSorter(std::vector<std::shared_ptr<RowBatch> >& batch_vector
     }
 }
 
-
 void SampleSorter::insert_row(MemRow* row) {
     if (row == nullptr) {
         return;
     }
 
-    ExprValue cur_value = _slot_order_exprs[0]->get_value(row);
-    if (cur_value.is_null()) {
+    ExprValue value = _slot_order_exprs[0]->get_value(row);
+    if (value.is_null()) {
         _null_value_cnt++;
         return;
     }
 
-    _cur_row = row;
-    if (_pre_row == nullptr) {
-        //首行特殊处理,开辟新桶
-        _distinct_cnt_total = 1;
-        BucketInfo bucket_info;
-        bucket_info.distinct_cnt = 1;
-        bucket_info.bucket_size = 1;
-        bucket_info.start = cur_value;
-        bucket_info.end = cur_value;
-        _bucket_infos.push_back(bucket_info);
-        _pre_row = _cur_row;
+    if (_cur_value_cnt == 0) {
+        _cur_value = value;
+        _cur_value_cnt = 1;
         return;
-    } 
-
-    int64_t ret = _mem_row_compare->compare(_pre_row, _cur_row);
-    auto& back_bucket_info = _bucket_infos.back();
-    if (ret < 0) {
-        _distinct_cnt_total++;
-        if (back_bucket_info.bucket_size >= _expect_bucket_size) {
-            //开辟新桶
-            BucketInfo bucket_info;
-            bucket_info.distinct_cnt = 1;
-            bucket_info.bucket_size = 1;
-            bucket_info.start = cur_value;
-            bucket_info.end = cur_value;
-            _bucket_infos.push_back(bucket_info);
-        } else {
-            //继续加入旧桶
-            back_bucket_info.distinct_cnt++;
-            back_bucket_info.bucket_size++;
-            back_bucket_info.end = cur_value;
-        }
-    } else if (ret == 0) {
-        //继续加入旧桶
-        back_bucket_info.bucket_size++;
     }
 
-    _pre_row = _cur_row;
+    int64_t k = _cur_value.compare(value);
+    if (k == 0) {
+        _cur_value_cnt++;
+        return;
+    }
+
+    if (k > 0) {
+        return;
+    }
+
+    // _cur_value < value
+
+    // 1.先处理 _cur_value
+    insert_distinct_value(_cur_value, _cur_value_cnt);
+
+    // 2.再处理 value，放入 _cur_value
+    _cur_value = value;
+    _cur_value_cnt = 1;
+
+}
+
+void SampleSorter::insert_distinct_value(const ExprValue& value, const int& cnt) {
+    _distinct_cnt_total++;
+    if (_bucket_infos.empty()) {
+        // 首个桶
+        BucketInfo bucket_info;
+        bucket_info.distinct_cnt = 1;
+        bucket_info.bucket_size = cnt;
+        bucket_info.start = value;
+        bucket_info.end = value;
+        _bucket_infos.push_back(bucket_info);
+    } else {
+        // 已存在桶
+        auto& back_bucket_info = _bucket_infos.back();
+        if (cnt >= _expect_bucket_size || back_bucket_info.bucket_size >= _expect_bucket_size) {
+            // 当前_cur_value cnt 大于 _expect_bucket_size 或者上一个桶已经超过阈值，为该值开辟新桶
+            BucketInfo bucket_info;
+            bucket_info.distinct_cnt = 1;
+            bucket_info.bucket_size = cnt;
+            bucket_info.start = value;
+            bucket_info.end = value;
+            _bucket_infos.push_back(bucket_info);
+        } else {
+            // 继续加入旧桶
+            back_bucket_info.distinct_cnt++;
+            back_bucket_info.bucket_size += cnt;
+            back_bucket_info.end = value;
+        }
+    }
+}
+
+void SampleSorter::insert_done() {
+    if (_cur_value_cnt == 0) {
+        return;
+    }
+
+    insert_distinct_value(_cur_value, _cur_value_cnt);
+    _cur_value_cnt= 0;
 }
 
 void SampleSorter::packet_column(pb::ColumnInfo* column_info) {

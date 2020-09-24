@@ -203,6 +203,8 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         } else if (format == "cmsketch") {
             ctx->explain_type = SHOW_CMSKETCH;
             ctx->is_explain = true;
+        } else if (format == "show_cost") {
+            ctx->explain_type = EXPLAIN_SHOW_COST;
         } else {
             ctx->is_explain = true;
         }
@@ -279,6 +281,7 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(stat_info->table_id);
         if (table_ptr == nullptr) {
             resource_tag = "unknown";
+            stat_info->table_id = -1;
         } else {
             resource_tag = table_ptr->resource_tag;
         }
@@ -1423,6 +1426,11 @@ int LogicalPlanner::create_term_slot_ref_node(
     }
 
     pb::ExprNode* node = expr.add_nodes();
+    auto table_info_ptr = SchemaFactory::get_instance()->get_table_info_ptr(field_info->table_id);
+    if (table_info_ptr != nullptr) {
+        expr.set_database(table_info_ptr->name.substr(0, table_info_ptr->name.find(".")));
+        expr.set_table(table_info_ptr->short_name);
+    }
     node->set_node_type(pb::SLOT_REF);
     node->set_col_type(field_info->type);
     node->set_num_children(0);
@@ -1752,9 +1760,14 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
     auto client = _ctx->client_conn;
     if (client->txn_id == 0) {
         if (_ctx->enable_2pc
-            || _factory->has_global_index(table_id)) {
+            || _factory->has_global_index(table_id)
+            || _factory->has_open_binlog(table_id)) {
             client->txn_id = get_txn_id();
             client->seq_id = 0;
+            if (_factory->has_open_binlog(table_id)) {
+                client->open_binlog = true;
+                _ctx->open_binlog = true;
+            }
         } else {
             client->txn_id = 0;
             client->seq_id = 0;
@@ -1762,6 +1775,10 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
+        if (_factory->has_open_binlog(table_id)) {
+                client->open_binlog = true;
+                _ctx->open_binlog = true;
+        }
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }

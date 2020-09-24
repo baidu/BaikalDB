@@ -121,20 +121,36 @@ int UpdateManagerNode::open(RuntimeState* state) {
             return ret;
         }
     }
+    bool open_binlog = false;
+    if (state->open_binlog() && _table_info->is_linked) {
+        open_binlog = true;
+    }
+    state->set_open_binlog(false);
     DeleteManagerNode* delete_manager = static_cast<DeleteManagerNode*>(_children[0]);
     ret = delete_manager->open(state);
     if (ret < 0) {
         DB_WARNING("fetch store failed, log_id:%lu ret:%d ", state->log_id(), ret);
         return -1;
     }
-    std::vector<SmartRecord> delete_records = delete_manager->get_real_delete_records();
+    std::vector<SmartRecord>& delete_records = delete_manager->get_real_delete_records();
     if (delete_records.size() == 0) {
         DB_WARNING("no record return");
         return 0;
     }
+
     for (auto record : delete_records) {
+        if (open_binlog) {
+            std::string* row = _update_binlog.add_deleted_rows();
+            record->encode(*row);
+            _partition_record = record;
+        }
         update_record(record);
+        if (open_binlog) {
+            std::string* row = _update_binlog.add_insert_rows();
+            record->encode(*row);
+        }
     }
+
     InsertManagerNode* insert_manager = static_cast<InsertManagerNode*>(_children[1]);
     insert_manager->init_insert_info(this);
     insert_manager->set_records(delete_records);
@@ -147,6 +163,20 @@ int UpdateManagerNode::open(RuntimeState* state) {
             client_conn->need_rollback_seq.insert(seq_id);
         }
         return -1;
+    }
+    if (open_binlog) {
+        state->set_open_binlog(true);
+        if (ret >=0) {
+            auto client = state->client_conn();
+            auto binlog_ctx = client->get_binlog_ctx();
+            pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
+            auto mutation = binlog_value->add_mutations();
+            mutation->CopyFrom(_update_binlog);
+            mutation->add_sequence(pb::MutationType::UPDATE);
+            mutation->set_table_id(_table_id);
+            binlog_ctx->set_table_info(_table_info);
+            binlog_ctx->set_partition_record(_partition_record);
+        }
     }
     return ret;
 }

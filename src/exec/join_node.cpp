@@ -729,6 +729,7 @@ int JoinNode:: _construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_r
 
 void JoinNode::close(RuntimeState* state) {
     ExecNode::close(state);
+    _conditions.insert(_conditions.end(), _have_removed.begin(), _have_removed.end());
     _have_removed.clear();
     _outer_join_values.clear();
     for (auto expr : _conditions) {

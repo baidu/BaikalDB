@@ -212,10 +212,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             need_increase = false;
         }
         if (ret != -2 && ret != -4) {
-            if (_need_ignore) {
-                return 0;
-            }
             if (ret == 0) { 
+                if (_need_ignore) {
+                    return 0;
+                }
                 if (is_update) {
                     DB_WARNING_STATE(state, "update new primary row must not exist, "
                             "index:%ld, ret:%d", _table_id, ret);

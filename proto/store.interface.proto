@@ -6,6 +6,7 @@ import "plan.proto";
 import "optype.proto";
 import "statistics.proto";
 import "meta.interface.proto";
+import "binlog.proto";
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
 
@@ -43,6 +44,10 @@ message TransactionInfo {
     optional int64   primary_region_id = 9;
     optional TxnState txn_state        = 10;
     optional int64   live_time         = 11;
+    optional int64   start_ts     = 12;
+    optional int64   commit_ts    = 13;  //事务commit的tso，用于恢复超时的prewrite binlog
+    optional bool    open_binlog  = 14;
+    optional bool    from_store        = 15;
 };
 
 message KvOp {
@@ -57,6 +62,18 @@ message AnalyzeInfo {
     required int32     width   = 2;
     required int32     sample_rows = 3;
     required int64     table_rows  = 4;     
+};
+
+//prewrite binlog需要填写binlog_ts、txn_id、primary_region_id、partion_key
+//commit/rollback binlog 只填binlog_ts、txn_id、start_ts
+//read binlog只填binlog_ts、read_binlog_cnt
+message BinlogDesc {
+    required int64     binlog_ts         = 1;
+    optional int64     txn_id            = 2;
+    optional int64     start_ts          = 3;
+    optional int64     primary_region_id = 4;
+    optional int64     partion_key       = 5;
+    optional int64     read_binlog_cnt   = 6;
 };
 
 message StoreReq {
@@ -85,6 +102,8 @@ message StoreReq {
     optional AnalyzeInfo   analyze_info = 23;
     repeated uint64    rollback_txn_ids = 24;
     repeated uint64    commit_txn_ids   = 25;
+    optional BinlogDesc binlog_desc     = 26;
+    optional Binlog      binlog         = 27;
 };
 
 message RowValue {
@@ -119,7 +138,9 @@ message StoreRes {
     repeated IndexRecords  records        = 15;
     optional int64  scan_rows     = 16;
     optional CMsketch cmsketch    = 17;
-    optional int64  filter_rows     = 18;
+    optional int64  filter_rows   = 18;
+    repeated bytes binlogs       = 19; //直接存储binlog序列化结果，由capture反序列化
+    repeated int64 commit_ts     = 20; //与上面的binlog一一对应
 };
 message InitRegion {
     required RegionInfo region_info     = 1;
@@ -180,6 +201,9 @@ service StoreService {
     
     //增删改查功能，需要走raft状态机的都通过此接口
     rpc query(StoreReq) returns (StoreRes);
+
+    //binlog相关操作
+    rpc query_binlog(StoreReq) returns (StoreRes);
     
     //删除region，包括数据
     rpc remove_region(RemoveRegion) returns (StoreRes);

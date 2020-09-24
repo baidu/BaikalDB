@@ -81,7 +81,12 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     IteratorContext* iter_context = _context->data_context;
     if (_is_meta_reader) {
         iter_context = _context->meta_context;
-    } 
+    } else if (!_context->need_copy_data) {
+        iter_context->done = true;
+        DB_WARNING("region_id: %ld need not copy data, time_cost: %ld", 
+                _region_id, time_cost.get_time());
+        return 0;
+    }
     if (offset < iter_context->offset) {
         iter_context->offset = 0;
         iter_context->iter->Seek(iter_context->prefix);
@@ -166,7 +171,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         iter_context->offset += read_size;
         iter_context->iter->Next();
     }
-    DB_WARNING("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld", 
+    DB_DEBUG("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld", 
                 _region_id, count, key_num, time_cost.get_time());
     return count;
 }
@@ -214,29 +219,39 @@ SstWriterAdaptor::SstWriterAdaptor(int64_t region_id, const std::string& path, c
 int SstWriterAdaptor::open() {
     _region_ptr = Store::get_instance()->get_region(_region_id);
     if (_region_ptr == nullptr) {
-        DB_FATAL("open sst file path: %s failed, region not exist", _path.c_str());
+        DB_FATAL("open sst file path: %s failed, region_id: %ld not exist", 
+                _path.c_str(), _region_id);
         return -1;
     }
     _is_meta = _path.find("meta") != std::string::npos;
-    auto s = _writer->open(_path);
+    std::string path = _path;
+    if (!_is_meta) {
+        path += std::to_string(_sst_idx);
+    }
+    auto s = _writer->open(path);
     if (!s.ok()) {
-        DB_FATAL("open sst file path: %s failed, err: %s, region_id: %ld", _path.c_str(), s.ToString().c_str());
+        DB_FATAL("open sst file path: %s failed, err: %s, region_id: %ld",
+                path.c_str(), s.ToString().c_str(), _region_id);
         return -1;
     }
     _closed = false;
-    DB_WARNING("rocksdb sst writer open, path: %s, region_id: %ld", _path.c_str(), _region_id);
+    DB_WARNING("rocksdb sst writer open, path: %s, region_id: %ld", path.c_str(), _region_id);
     return 0;
 }
 
 ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
     (void)offset;
+    std::string path = _path;
+    if (!_is_meta) {
+        path += std::to_string(_sst_idx);
+    }
     if (_closed) {
         DB_FATAL("write sst file path: %s failed, file closed: %d data len: %d, region_id: %ld",
-                _path.c_str(), _closed, data.size(), _region_id);
+                path.c_str(), _closed, data.size(), _region_id);
         return -1;
     }
     if (data.size() == 0) {
-        DB_WARNING("write sst file path: %s data len = 0, region_id: %ld", _path.c_str(), _region_id);
+        DB_WARNING("write sst file path: %s data len = 0, region_id: %ld", path.c_str(), _region_id);
     }
     std::string region_info_key = MetaWriter::get_instance()->region_info_key(_region_id);
     std::string applied_index_key = MetaWriter::get_instance()->applied_index_key(_region_id);
@@ -245,7 +260,7 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
     auto ret = parse_from_iobuf(data, keys, values);
     if (ret < 0) {
         DB_FATAL("write sst file path: %s failed, received invalid data, data len: %d, region_id: %ld",
-                _path.c_str(), data.size(), _region_id);
+                path.c_str(), data.size(), _region_id);
         return -1;
     }
     // 大region addpeer中重置time_cost，防止version=0超时删除
@@ -267,15 +282,33 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
         auto s = _writer->put(rocksdb::Slice(keys[i]), rocksdb::Slice(values[i]));
         if (!s.ok()) {            
             DB_FATAL("write sst file path: %s failed, err: %s, region_id: %ld", 
-                        _path.c_str(), s.ToString().c_str(), _region_id);
+                        path.c_str(), s.ToString().c_str(), _region_id);
             return -1;
         }
         _count++;
     }
+    //_data_size += data.size();
+
+    if (!_is_meta && _writer->file_size() >= SST_FILE_LENGTH) {
+        DB_WARNING("rocksdb sst write, region_id: %ld, path: %s, offset: %lu, file_size:%lu, total_count: %lu",
+                _region_id, path.c_str(), offset, _writer->file_size(), _count);
+        if (!finish_sst()) {
+            return -1;
+        }
+        //_data_size = 0;
+        _count = 0;
+        ++_sst_idx;
+        path = _path + std::to_string(_sst_idx);
+        auto s = _writer->open(path);
+        if (!s.ok()) {
+            DB_FATAL("open sst file path: %s failed, err: %s, region_id: %ld", path.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    }
     if (_is_meta) {
         DB_WARNING("rocksdb sst write, region_id: %ld, path: %s, offset: %lu, data.size: %ld,"
-                " keys size: %ld, total_count: %ld", _region_id, _path.c_str(), offset, data.size(),
-                keys.size(), _count);
+                " keys size: %ld, file_size: %lu, total_count: %lu", _region_id, path.c_str(), offset, data.size(),
+                keys.size(), _writer->file_size(), _count);
     }
     return data.size();
 }
@@ -286,25 +319,74 @@ bool SstWriterAdaptor::close() {
         return true;
     }
     _closed = true;
-    bool ret = true;
+    return finish_sst();
+}
+
+bool SstWriterAdaptor::finish_sst() {
+    std::string path = _path;
+    if (!_is_meta) {
+        path += std::to_string(_sst_idx);
+    }
     if (_count > 0) {
+        DB_WARNING("_writer finished, path: %s, region_id: %ld, file_size: %lu, total_count: %ld",
+                path.c_str(), _region_id, _writer->file_size(), _count);
         auto s = _writer->finish();
-        DB_WARNING("_writer finished, path: %s, region_id: %ld, total_count: %ld",
-                _path.c_str(), _region_id, _count);
         if (!s.ok()) {
             DB_FATAL("finish sst file path: %s failed, err: %s, region_id: %ld", 
-                    _path.c_str(), s.ToString().c_str(), _region_id);
-            ret = false;
+                    path.c_str(), s.ToString().c_str(), _region_id);
+            return false;
         }
     } else {
-        ret = butil::DeleteFile(butil::FilePath(_path), false);
-        DB_WARNING("count is 0, delete path: %s, region_id: %ld", _path.c_str(), _region_id);
+        bool ret = butil::DeleteFile(butil::FilePath(path), false);
+        DB_WARNING("count is 0, delete path: %s, region_id: %ld", path.c_str(), _region_id);
         if (!ret) {
             DB_FATAL("delete sst file path: %s failed, region_id: %ld", 
-                        _path.c_str(), _region_id);
+                        path.c_str(), _region_id);
         }
     }
-    return ret;
+    return true;
+}
+
+int SstWriterAdaptor::parse_from_iobuf(const butil::IOBuf& data, std::vector<std::string>& keys, std::vector<std::string>& values) {
+    size_t pos = 0;
+    while (pos < data.size()) {
+        if ((data.size() - pos) < sizeof(size_t)) {
+            DB_FATAL("read key size from iobuf fail, region_id: %ld", _region_id);
+            return -1;
+        }
+        size_t key_size = 0;
+        data.copy_to((void*)&key_size, sizeof(size_t), pos);
+
+        pos += sizeof(size_t);
+        std::string key;
+        if ((data.size() - pos) < key_size) {
+            DB_FATAL("read key from iobuf fail, region_id: %ld, key_size: %ld", 
+                    _region_id, key_size);
+            return -1;
+        }
+        data.copy_to(&key, key_size, pos);
+
+        pos += key_size;
+        keys.push_back(key);
+        if ((data.size() - pos) < sizeof(size_t)) {
+            DB_FATAL("read value size from iobuf fail, region_id: %ld", _region_id);
+            return -1;
+        }
+        size_t value_size = 0;
+        data.copy_to((void*)&value_size, sizeof(size_t), pos);
+
+        pos += sizeof(size_t);
+        std::string value;
+        if ((data.size() - pos) < value_size) {
+            DB_FATAL("read value from iobuf fail, region_id: %ld, value_size: %ld", 
+                    _region_id, value_size);
+            return -1;
+        }
+        data.copy_to(&value, value_size, pos);
+        pos += value_size;
+        values.push_back(value);
+    }
+    return 0;
 }
 
 SstWriterAdaptor::~SstWriterAdaptor() {
@@ -457,6 +539,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
         }
         return nullptr;
     }
+
     bool is_meta_reader = false;
     IteratorContext* iter_context = nullptr;
     if (is_snapshot_data_file(path)) {
@@ -472,11 +555,34 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             rocksdb::ReadOptions read_options;
             read_options.snapshot = sc->snapshot;
             read_options.total_order_seek = true;
+            read_options.fill_cache = false;
             read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
             rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_data_handle();
             iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
             iter_context->iter->Seek(prefix);
             sc->data_context = iter_context;
+
+            braft::NodeStatus status;
+
+            auto region = Store::get_instance()->get_region(_region_id);
+            region->get_node_status(&status);
+            int64_t peer_next_index = 0;
+            // 通过peer状态和data_index判断是否需要复制数据
+            // addpeer在unstable里，peer_next_index=0就会走复制流程
+            for (auto iter : status.stable_followers) {
+                auto& peer = iter.second;
+                DB_WARNING("region_id: %ld %s %d %ld", _region_id, iter.first.to_string().c_str(),
+                peer.installing_snapshot, peer.next_index);
+                if (peer.installing_snapshot) {
+                    peer_next_index = peer.next_index;
+                    break;
+                }
+            }
+            if (sc->data_index < peer_next_index) {
+                sc->need_copy_data = false;
+            }
+            DB_WARNING("region_id: %ld open reader, data_index:%ld,peer_next_index:%ld, path: %s, time_cost: %ld", 
+                    _region_id, sc->data_index, peer_next_index, path.c_str(), time_cost.get_time());
         }
     }
     if (is_snapshot_meta_file(path)) {
@@ -490,6 +596,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             read_options.snapshot = sc->snapshot;
             read_options.prefix_same_as_start = true;
             read_options.total_order_seek = false;
+            read_options.fill_cache = false;
             rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
             iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
             iter_context->iter->Seek(prefix);
@@ -563,10 +670,13 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
     DB_WARNING("region_id: %ld get lock before open snapshot", _region_id);
     _snapshots[path].first.reset(new SnapshotContext());
     region = Store::get_instance()->get_region(_region_id);
+    int64_t data_index = region->get_data_index();
+    _snapshots[path].first->data_index = data_index;
     region->unlock_commit_meta_mutex();
     DB_WARNING("region_id: %ld relase lock before open snapshot", _region_id);
     _snapshots[path].second++;
-    DB_WARNING("region_id: %ld open snapshot path: %s", _region_id, path.c_str());
+    DB_WARNING("region_id: %ld, data_index:%ld, open snapshot path: %s", 
+            _region_id, data_index, path.c_str());
     return true;
 }
 

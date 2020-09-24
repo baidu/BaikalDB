@@ -38,6 +38,10 @@ const std::string MetaWriter::REGION_DDL_INFO_IDENTIFY(1, 0x08);
 
 const std::string MetaWriter::ROLLBACKED_TXN_IDENTIFY(1, 0x09);
 
+const std::string MetaWriter::BINLOG_CHECK_POINT_IDENTIFY(1, 0x0A);
+
+const std::string MetaWriter::BINLOG_OLDEST_IDENTIFY(1, 0x0B);
+
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
     std::vector<std::string> values;
@@ -50,10 +54,17 @@ int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     values.push_back(string_region_info);
  
     keys.push_back(applied_index_key(region_id));
-    values.push_back(encode_applied_index(0));
+    values.push_back(encode_applied_index(0, 0));
 
     keys.push_back(num_table_lines_key(region_id));
     values.push_back(encode_num_table_lines(0));
+
+    keys.push_back(binlog_check_point_key(region_id));
+    values.push_back(encode_binlog_ts(0));
+
+    keys.push_back(binlog_oldest_ts_key(region_id));
+    values.push_back(encode_binlog_ts(0));
+
     auto status = _rocksdb->write(MetaWriter::write_options, _meta_cf, keys, values);
     if (!status.ok()) {
         DB_FATAL("write init_meta_info fail, err_msg: %s, region_id: %ld",
@@ -114,10 +125,10 @@ int MetaWriter::update_num_table_lines(int64_t region_id, int64_t num_table_line
     return 0;
 }
 
-int MetaWriter::update_apply_index(int64_t region_id, int64_t applied_index) {
+int MetaWriter::update_apply_index(int64_t region_id, int64_t applied_index, int64_t data_index) {
     auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf, 
                 rocksdb::Slice(applied_index_key(region_id)), 
-                rocksdb::Slice(encode_applied_index(applied_index)));
+                rocksdb::Slice(encode_applied_index(applied_index, data_index)));
     if (!status.ok()) {
         DB_FATAL("write apply index fail, err_msg: %s, region_id: %ld",
                     status.ToString().c_str(), region_id);
@@ -177,12 +188,12 @@ int MetaWriter::read_transcation_rollbacked_tag(int64_t region_id, uint64_t txn_
 }
 
 int MetaWriter::write_meta_after_commit(int64_t region_id, int64_t num_table_lines, 
-            int64_t applied_index, uint64_t txn_id, bool need_write_rollback) {
+            int64_t applied_index, int64_t data_index, uint64_t txn_id, bool need_write_rollback) {
     if (applied_index == 0) {
         return 0;
     }
     rocksdb::WriteBatch batch;
-    batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(applied_index));
+    batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(applied_index, data_index));
     batch.Put(_meta_cf, num_table_lines_key(region_id), encode_num_table_lines(num_table_lines));
     if (need_write_rollback) {
         // 这条记录会残留，考虑ttl解决
@@ -192,21 +203,21 @@ int MetaWriter::write_meta_after_commit(int64_t region_id, int64_t num_table_lin
     batch.Delete(_meta_cf, transcation_log_index_key(region_id, txn_id));
     return write_batch(&batch, region_id);
 }
-int MetaWriter::write_meta_begin_index(int64_t region_id, int64_t log_index, uint64_t txn_id) {
+int MetaWriter::write_meta_begin_index(int64_t region_id, int64_t log_index, int64_t data_index, uint64_t txn_id) {
     if (log_index == 0) {
         return 0;
     }
     rocksdb::WriteBatch batch;
-    batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(log_index));
+    batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(log_index, data_index));
     batch.Put(_meta_cf, transcation_log_index_key(region_id, txn_id), encode_transcation_log_index_value(log_index));
     return write_batch(&batch, region_id);
 }
-int MetaWriter::write_meta_index_and_num_table_lines(int64_t region_id, int64_t log_index,
+int MetaWriter::write_meta_index_and_num_table_lines(int64_t region_id, int64_t log_index, int64_t data_index,
                         int64_t num_table_lines, SmartTransaction txn) {
     if (log_index == 0) {
         return 0;
     }
-    txn->put_meta_info(applied_index_key(region_id), encode_applied_index(log_index));
+    txn->put_meta_info(applied_index_key(region_id), encode_applied_index(log_index, data_index));
     txn->put_meta_info(num_table_lines_key(region_id), encode_num_table_lines(num_table_lines));
     return 0;
 }
@@ -354,6 +365,7 @@ int MetaWriter::parse_region_infos(std::vector<pb::RegionInfo>& region_infos) {
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
     read_options.total_order_seek = false;
+    read_options.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _meta_cf));
     std::string region_info_prefix = MetaWriter::META_IDENTIFY;
     for (iter->Seek(region_info_prefix); iter->Valid(); iter->Next()) {
@@ -377,6 +389,7 @@ int MetaWriter::parse_txn_infos(int64_t region_id, std::map<int64_t, std::string
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
     read_options.total_order_seek = false;
+    read_options.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _meta_cf));
     std::string prefix = transcation_pb_key_prefix(region_id) ;
     for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
@@ -404,6 +417,7 @@ int MetaWriter::parse_txn_log_indexs(int64_t region_id, std::unordered_map<uint6
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
     read_options.total_order_seek = false;
+    read_options.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _meta_cf));
     std::string prefix = log_index_key_prefix(region_id);
     for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
@@ -437,16 +451,25 @@ int MetaWriter::parse_doing_snapshot(std::set<int64_t>& region_ids) {
     return 0;
 }
 
-int64_t MetaWriter::read_applied_index(int64_t region_id) {
+void MetaWriter::read_applied_index(int64_t region_id, int64_t* applied_index, int64_t* data_index) {
     std::string value;
     rocksdb::ReadOptions options;
     auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(applied_index_key(region_id)), &value);
     if (!status.ok()) {
         DB_WARNING("Error while read applied index, Error %s, region_id: %ld",
                     status.ToString().c_str(), region_id);
-        return -1;
+        *applied_index = -1;
+        *data_index = -1;
+        return;
     }
-    return TableKey(rocksdb::Slice(value)).extract_i64(0);
+    TableKey tk(value);
+    *applied_index = tk.extract_i64(0);
+    // 兼容处理
+    if (value.size() == 16) {
+        *data_index = tk.extract_i64(8);
+    } else {
+        *data_index = *applied_index;
+    }
 }
 
 int64_t MetaWriter::read_num_table_lines(int64_t region_id) {
@@ -612,9 +635,10 @@ std::string MetaWriter::doing_snapshot_key(int64_t region_id) const {
     key.append_char(MetaWriter::DOING_SNAPSHOT_IDENTIFY.c_str(), 1);
     return key.data();
 }
-std::string MetaWriter::encode_applied_index(int64_t index) const {
+std::string MetaWriter::encode_applied_index(int64_t applied_index, int64_t data_index) const {
     MutTableKey index_value;
-    index_value.append_i64(index);
+    index_value.append_i64(applied_index);
+    index_value.append_i64(data_index);
     return index_value.data();
 }
 std::string MetaWriter::encode_num_table_lines(int64_t line) const {
@@ -665,4 +689,79 @@ std::string MetaWriter::meta_info_prefix(int64_t region_id) {
     prefix_key.append_i64(region_id);
     return prefix_key.data();
 }
+
+std::string MetaWriter::encode_binlog_ts(int64_t ts) const {
+    MutTableKey ts_value;
+    ts_value.append_i64(ts);
+    return ts_value.data();
+}
+
+std::string MetaWriter::binlog_check_point_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::BINLOG_CHECK_POINT_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+
+int MetaWriter::write_binlog_check_point(int64_t region_id, int64_t ts) {
+    MutTableKey value;
+    value.append_i64(ts);
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(binlog_check_point_key(region_id)),
+                rocksdb::Slice(value.data()));
+    if (!status.ok()) {
+        DB_FATAL("write binlog check point fail, err_msg: %s, region_id: %ld, ts: %ld",
+                    status.ToString().c_str(), region_id, ts);
+        return -1;
+    }
+    return 0;
+}
+
+int64_t MetaWriter::read_binlog_check_point(int64_t region_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(binlog_check_point_key(region_id)), &value);
+    if (!status.ok()) {
+        DB_FATAL("Error while read binlog check point, Error %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return TableKey(rocksdb::Slice(value)).extract_i64(0);
+}
+
+std::string MetaWriter::binlog_oldest_ts_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::BINLOG_OLDEST_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+
+int MetaWriter::write_binlog_oldest_ts(int64_t region_id, int64_t ts) {
+    MutTableKey value;
+    value.append_i64(ts);
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(binlog_oldest_ts_key(region_id)),
+                rocksdb::Slice(value.data()));
+    if (!status.ok()) {
+        DB_FATAL("write binlog oldest ts fail, err_msg: %s, region_id: %ld, ts: %ld",
+                    status.ToString().c_str(), region_id, ts);
+        return -1;
+    }
+    return 0;
+}
+
+int64_t MetaWriter::read_binlog_oldest_ts(int64_t region_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(binlog_oldest_ts_key(region_id)), &value);
+    if (!status.ok()) {
+        DB_FATAL("Error while read binlog oldest ts, Error %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return TableKey(rocksdb::Slice(value)).extract_i64(0);
+}
+
 } // end of namespace

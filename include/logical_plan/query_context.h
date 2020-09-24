@@ -183,7 +183,7 @@ public:
     bool                is_full_export = false;
     ExplainType         explain_type = EXPLAIN_NULL;
 
-    uint8_t             mysql_cmd;      // Command number in mysql protocal.
+    uint8_t             mysql_cmd = COM_SLEEP;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
     int32_t             thread_idx;
     int64_t             row_ttl_duration = 0; // used for /*{"duration": xxx}*/ insert ...
@@ -219,6 +219,7 @@ public:
     // tuple_id: slot_id: column_id
     std::map<int64_t, std::map<int32_t, int32_t>>     slot_column_mapping;
     std::map<int64_t, std::shared_ptr<QueryContext>> derived_table_ctx_mapping;
+    bool                open_binlog = false;
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 

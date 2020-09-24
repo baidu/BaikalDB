@@ -89,6 +89,16 @@ public:
         return iter->second->get_count(lower, upper);
     }
 
+    int64_t get_histogram_count(const int field_id, const ExprValue& value) {
+        auto iter = _field_histogram.find(field_id);
+        if (iter == _field_histogram.end()) {
+            return -1;
+        }
+
+        int64_t count = iter->second->get_count(value);
+        return count;
+    }
+
     //get_histogram_count返-2时说明超出取值范围时，根据need_mapping标记判断是否映射到已存在的范围，默认进行映射
     double get_histogram_ratio(const int field_id, const ExprValue& lower, const ExprValue& upper, bool need_mapping = true) {
         if (_sample_rows == 0) {
@@ -98,7 +108,7 @@ public:
         int64_t cnt = get_histogram_count(field_id, lower, upper);
         if (cnt == -2) {
             if (need_mapping) {
-                return _field_histogram[field_id]->get_histogram_ratio_dummy(lower, upper);
+                return _field_histogram[field_id]->get_histogram_ratio_dummy(lower, upper, _sample_rows);
             } else {
                 return -1.0;
             }
@@ -132,31 +142,12 @@ public:
         }
 
         int64_t distinct_cnt = get_distinct_cnt(field_id);
-        int64_t cnt = get_cmsketch_count(field_id, value);
-        if (cnt <= 0 && distinct_cnt <= 0) {
-            return 0.0;
-        } else if (cnt <= 0) {
+        int64_t value_cnt = get_histogram_count(field_id, value);
+        if (value_cnt <= 0) {
             return 1.0 / distinct_cnt;
-        } else if (distinct_cnt <= 0) {
-            return static_cast<double>(cnt) / static_cast<double>(_total_rows);
+        } else {
+            return value_cnt * 1.0 / _sample_rows;
         }
-        double cmsketch_ratio = static_cast<double>(cnt) / static_cast<double>(_total_rows);
-        double distinct_ratio = 1.0 / distinct_cnt;
-        int width = get_cmsketch_width(field_id);
-        if (width < 0) {
-            return 1.0 / distinct_cnt;
-        }
-        if (distinct_cnt <= width) {
-            //distinct_cnt 小于 cmsketch_width时，hash冲突较小，cmsketch_ratio误差率小
-            return cmsketch_ratio;
-        }
-
-        // distinct_ratio 比 cmsketch_ratio小两个数量级则使用distinct_ratio
-        if (distinct_ratio * 100 < cmsketch_ratio) {
-            return distinct_ratio;
-        }
-        
-        return cmsketch_ratio;
     }
 
     int64_t get_sample_cnt() {

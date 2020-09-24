@@ -58,6 +58,8 @@ int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
     if (_use_ttl) {
         _read_ttl_timestamp_us = last_active_time;
     }
+    _in_process = true;
+    _current_req_point_seq.insert(1);
     _snapshot = _db->get_snapshot();
     return 0; 
 }
@@ -83,6 +85,8 @@ int Transaction::begin(rocksdb::Transaction* txn) {
     if (_use_ttl) {
         _read_ttl_timestamp_us = last_active_time;
     }
+    _in_process = true;
+    _current_req_point_seq.insert(1);
     _snapshot = _db->get_snapshot();
     //_pool->increase_prepared();
     return 0;
@@ -291,6 +295,10 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
                              std::set<int32_t>* update_fields) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
     MutTableKey key;
     int ret = -1;
     key.append_i64(region).append_i64(pk_index.id);
@@ -332,6 +340,10 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
 int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord record) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
     if (index.type != pb::I_KEY && index.type != pb::I_UNIQ) {
         DB_WARNING("invalid index type, region_id: %ld, table_id: %ld, index_type:%d", region, index.id, index.type);
         return -1;
@@ -506,6 +518,10 @@ int Transaction::get_update_primary(
         return -1;
     }
     last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
     int ret = -1;
     if (pk_index.type != pb::I_PRIMARY) {
         DB_WARNING("invalid index type: %d", pk_index.type);
@@ -645,6 +661,10 @@ int Transaction::get_update_secondary(
         return -1;
     }
     last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
     if (index.type != pb::I_UNIQ) {
         //DB_WARNING("invalid index type: %d", index.type);
         return -2;
@@ -719,8 +739,12 @@ int Transaction::get_update_secondary(
 int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,*/ 
             const SmartRecord key) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
-    MutTableKey _key;
     last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
+    MutTableKey _key;
     _key.append_i64(region).append_i64(index.id);
     if (0 != _key.append_index(index, key.get(), -1, false)) {
         DB_FATAL("Fail to append_index, reg:%ld,tab:%ld", region, index.id);
@@ -753,6 +777,10 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
 int Transaction::remove(int64_t region, IndexInfo& index, const TableKey& key) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
     MutTableKey _key;
     _key.append_i64(region).append_i64(index.id).append_index(key);
     if (index.type == pb::I_KEY) {
@@ -782,6 +810,10 @@ rocksdb::Status Transaction::prepare() {
     if (_is_prepared) {
         return rocksdb::Status();
     }
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: prepare a rolledback txn: %lu", _txn_id);
+        return rocksdb::Status::Expired();
+    }
     last_active_time = butil::gettimeofday_us();
     auto res = _txn->Prepare();
     if (res.ok()) {
@@ -800,6 +832,10 @@ rocksdb::Status Transaction::prepare() {
 rocksdb::Status Transaction::commit() {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: commit a rolledback txn: %lu", _txn_id);
+        return rocksdb::Status::Expired();
+    }
     if (_is_finished) {
         DB_WARNING("TransactionWarn: commit a finished txn: %lu", _txn_id);
         return rocksdb::Status();
@@ -850,13 +886,6 @@ int Transaction::set_save_point() {
     //}
     if (_save_point_seq.empty() || _save_point_seq.top() < _seq_id) {
         _txn->SetSavePoint();
-        if (_current_req_point_seq.empty()) {
-            if (!_save_point_seq.empty()) {
-                _current_req_point_seq.insert(_save_point_seq.top());
-            } else {
-                _current_req_point_seq.insert(1);
-            }
-        }
         _save_point_seq.push(_seq_id);
         _save_point_increase_rows.push(num_increase_rows);
         _current_req_point_seq.insert(_seq_id);
@@ -875,7 +904,10 @@ void Transaction::rollback_to_point(int seq_id) {
         DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), seq_id, _save_point_seq.top());
     }
     _need_rollback_seq.insert(seq_id);
-    _cache_plan_map.erase(seq_id);
+    {
+        BAIDU_SCOPED_LOCK(_cache_map_mutex);
+        _cache_plan_map.erase(seq_id);
+    }
     if (!_save_point_seq.empty() && _save_point_seq.top() == seq_id) {
         num_increase_rows = _save_point_increase_rows.top();
         _save_point_seq.pop();
@@ -884,16 +916,13 @@ void Transaction::rollback_to_point(int seq_id) {
         DB_WARNING("txn:%s rollback cmd seq_id: %d, num_increase_rows: %ld", 
             _txn->GetName().c_str(), seq_id, num_increase_rows);
     }
-//    if (!_save_point_seq.empty() && _save_point_seq.top() >= seq_id) {
-//        DB_FATAL("TransactionError: need to rollback to earlier point: top: %d, seq_id: %d",
-//            _save_point_seq.top(), seq_id);
-//    }
 }
 
 void Transaction::rollback_current_request() {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
-    if (_current_req_point_seq.empty()) {
+    if (_current_req_point_seq.size() == 1) {
+        DB_WARNING("txn_id:%lu seq_id:%d no need rollback", _txn_id, _seq_id);
         return;
     }
     int first_seq_id = *_current_req_point_seq.begin();
@@ -903,7 +932,10 @@ void Transaction::rollback_current_request() {
         if (first_seq_id == seq_id) {
             break;
         }
-        _cache_plan_map.erase(seq_id);
+        {
+            BAIDU_SCOPED_LOCK(_cache_map_mutex);
+            _cache_plan_map.erase(seq_id);
+        }
         if (!_save_point_seq.empty() && _save_point_seq.top() == seq_id) {
             num_increase_rows = _save_point_increase_rows.top();
             _save_point_seq.pop();
@@ -912,6 +944,9 @@ void Transaction::rollback_current_request() {
             DB_WARNING("txn:%s first_seq_id:%d rollback cmd seq_id: %d, num_increase_rows: %ld",
                 _txn->GetName().c_str(), first_seq_id, seq_id, num_increase_rows);
         }
+    }
+    if (_seq_id == 1) {
+        _has_write = false;
     }
     _current_req_point_seq.clear();
 }

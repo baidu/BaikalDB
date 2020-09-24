@@ -34,6 +34,26 @@ struct DMLClosure : public braft::Closure {
     std::string remote_side;
     BthreadCond* replay_last_log_cond;
     bool is_replay = false;
+    int64_t txn_num_increase_rows = 0;
+};
+
+struct BinlogClosure : public braft::Closure {
+    BinlogClosure() : cond(nullptr) { };
+    BinlogClosure(BthreadCond* cond) : cond(cond) { };
+    virtual void Run() {
+        if (cond) {
+            cond->decrease_broadcast();
+        }
+        if (done) {
+            done->Run();
+        }
+        delete this;
+    }
+
+    BthreadCond* cond;
+    TimeCost cost;
+    pb::StoreRes* response = nullptr;
+    google::protobuf::Closure* done = nullptr;
 };
 
 struct AddPeerClosure : public braft::Closure {
@@ -107,5 +127,7 @@ struct Dml1pcClosure : public braft::Closure {
     google::protobuf::Closure* done = nullptr;
     TimeCost cost;
 };
+
+
 
 } // end of namespace

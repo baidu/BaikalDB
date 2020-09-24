@@ -32,6 +32,9 @@ public:
     rocksdb::Status finish(rocksdb::ExternalSstFileInfo* file_info = nullptr) {
         return _sst_writer.Finish(file_info);
     }
+    uint64_t file_size() {
+        return _sst_writer.FileSize();
+    }
     virtual ~SstFileWriter() {}
 private:
     rocksdb::SstFileWriter _sst_writer;

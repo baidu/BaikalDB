@@ -32,6 +32,9 @@ enum ErrCode {
     TXN_IS_ROLLBACK     = 25;
     BACKUP_SAME_LOG_INDEX = 26;
     BACKUP_ERROR = 27;
+    RETRY_LATER  = 28;
+    LESS_THAN_OLDEST_TS  = 29;
+    IN_PROCESS   = 30;
 };
 
 enum PrimitiveType {
@@ -76,6 +79,7 @@ enum Engine {
     ROCKSDB = 1;
     REDIS = 2;
     ROCKSDB_CSTORE = 3;
+    BINLOG = 4;
 };
 
 message SlotDescriptor {

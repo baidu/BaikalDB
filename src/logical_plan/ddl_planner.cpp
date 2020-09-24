@@ -16,6 +16,7 @@
 #include "meta_server_interact.hpp"
 #include "proto/meta.interface.pb.h"
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string.hpp>
 #include <rapidjson/reader.h>
 #include <rapidjson/document.h>
 
@@ -257,6 +258,9 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             } else if (boost::algorithm::iequals(str_val, "rocksdb_cstore")) {
                 table.set_engine(pb::ROCKSDB_CSTORE);
                 can_support_ttl = false;
+            } else if (boost::algorithm::iequals(str_val, "binlog")) {
+                table.set_engine(pb::BINLOG);
+                can_support_ttl = false;
             }
         } else if (option->type == parser::TABLE_OPT_CHARSET) {
             std::string str_val(option->str_value.value);
@@ -333,10 +337,73 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     }
                     DB_WARNING("storage_compute_separate: %ld", separate);
                 }
+                json_iter = root.FindMember("region_num");
+                if (json_iter != root.MemberEnd() && root["region_num"].IsNumber()) {
+                    int32_t region_num = json_iter->value.GetInt64();
+                    table.set_region_num(region_num);
+                }
+                // hash 分区通过commit进行配置。
+                json_iter = root.FindMember("partition_type");
+                if (json_iter != root.MemberEnd() && root["partition_type"].IsString()) {
+                    auto partition_ptr = table.mutable_partition_info();
+                    auto partition_type = json_iter->value.GetString();
+                    if (strcmp(partition_type, "hash") == 0) {
+                        partition_ptr->set_type(pb::PT_HASH);
+                        json_iter = root.FindMember("partition");
+                        if (json_iter != root.MemberEnd() && root["partition"].IsNumber()) {
+                            int64_t partition_num = json_iter->value.GetInt64();
+                            table.set_partition_num(partition_num);
+                        } else {
+                            DB_WARNING("unknown partition number.");
+                            return -1;
+                        }
+                        json_iter = root.FindMember("column");
+                        if (json_iter != root.MemberEnd() && root["column"].IsString()) {
+                            partition_ptr->set_type(pb::PT_HASH);
+                            auto field_ptr = partition_ptr->mutable_field_info();
+                            field_ptr->set_field_name(json_iter->value.GetString());
+                        } else {
+                            DB_WARNING("hash partition no column.");
+                            return -1;
+                        }
+                    } else {
+                        DB_WARNING("unsupport partition type.");
+                        return -1;
+                    }
+                }
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", option->str_value.value);
                 return -1;
             }
+        } else if (option->type == parser::TABLE_OPT_PARTITION) {
+            // range 分区这里进行配置。
+            parser::PartitionOption* p_option = static_cast<parser::PartitionOption*>(option);
+            auto partition_ptr = table.mutable_partition_info();
+            partition_ptr->set_type(pb::PT_RANGE);
+
+            if (!p_option->expr || p_option->expr->expr_type != parser::ET_COLUMN) {
+                DB_WARNING("no range partition field only support column expr.");
+                return -1;
+            }
+            
+            // 只能把field字段传给Meta，等schema建立好之后，创建表达式树。
+            auto field_ptr = partition_ptr->mutable_field_info();
+            field_ptr->set_field_name(static_cast<parser::ColumnName*>(p_option->expr)->name.value);
+            
+            for (int32_t index = 0; index < p_option->range.size(); ++index) {
+                auto range_ptr = partition_ptr->add_range_partition_values();
+                if (0 != create_expr_tree(p_option->range[index], *range_ptr, false, false)) {
+                    DB_WARNING("error pasing common expression");
+                    return -1;
+                }
+                // 不支持多表达式，只支持字面量
+                if (range_ptr->nodes_size() != 1) {
+                    DB_WARNING("only support literal");
+                    return -1;
+                }
+            }
+            // 默认range最后为最大值MAXVALUE
+            table.set_partition_num(p_option->range.size() + 1);
         } else {
 
         }

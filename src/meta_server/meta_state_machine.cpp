@@ -91,8 +91,8 @@ void MetaStateMachine::store_heartbeat(google::protobuf::RpcController* controll
     TableManager::get_instance()->process_ddl_heartbeat_for_store(request, response, log_id);
     int64_t ddlwork_time = step_time_cost.get_time();
 
-    DB_DEBUG("store_heart_beat req[%s]", request->ShortDebugString().c_str());
-    DB_DEBUG("store_heart_beat resp[%s]", response->ShortDebugString().c_str());
+    DB_DEBUG("store_heart_beat req[%s]", request->DebugString().c_str());
+    DB_DEBUG("store_heart_beat resp[%s]", response->DebugString().c_str());
 
     DB_NOTICE("store:%s heart beat, time_cost: %ld, "
                 "instance_time: %ld, peer_balance_time: %ld, schema_time: %ld,"
@@ -415,6 +415,18 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->update_statistics(request, iter.index(), done);
             break;
         }
+        case pb::OP_LINK_BINLOG: {
+            TableManager::get_instance()->link_binlog(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_UNLINK_BINLOG: {
+            TableManager::get_instance()->unlink_binlog(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_SET_INDEX_HINT_STATUS: {
+            TableManager::get_instance()->set_index_hint_status(request, iter.index(), done);
+            break;
+        }
         default: {
             DB_FATAL("unsupport request type, type:%d", request.op_type());
             IF_DONE_SET_RESPONSE(done, pb::UNSUPPORT_REQ_TYPE, "unsupport request type");
@@ -572,7 +584,7 @@ int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
             }
         }
     }
-    _have_data = true;
+    set_have_data(true);
     return 0;
 }
 

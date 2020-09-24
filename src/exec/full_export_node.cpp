@@ -17,10 +17,7 @@
 #include "network_socket.h"
 
 namespace baikaldb {
-
-DECLARE_int32(retry_interval_us);
 DEFINE_int32(region_per_batch, 4, "request region number in a batch");
-DECLARE_int64(print_time_us);
 
 int FullExportNode::init(const pb::PlanNode& node) {
     int ret = 0;

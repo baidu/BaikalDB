@@ -131,12 +131,28 @@ int LockPrimaryNode::open(RuntimeState* state) {
     for (auto& str_record : _pb_node.derive_node().lock_primary_node().put_records()) {
         SmartRecord record = record_template->clone(false);
         record->decode(str_record);
-        put_records.push_back(record);
+        bool fit_region = true;
+        if (txn->fits_region_range_for_primary(*_pri_info, record, fit_region) < 0) {
+            DB_WARNING("fits_region_range_for_primary fail, region_id: %ld, table_id: %ld",
+                    _region_id, _table_id);
+            return -1;
+        }
+        if (fit_region) {
+            put_records.push_back(record);
+        }
     }
     for (auto& str_record : _pb_node.derive_node().lock_primary_node().delete_records()) {
         SmartRecord record = record_template->clone(false);
         record->decode(str_record);
-        delete_records.push_back(record);
+        bool fit_region = true;
+        if (txn->fits_region_range_for_primary(*_pri_info, record, fit_region) < 0) {
+            DB_WARNING("fits_region_range_for_primary fail, region_id: %ld, table_id: %ld",
+                    _region_id, _table_id);
+            return -1;
+        }
+        if (fit_region) {
+            delete_records.push_back(record);
+        }
     }
     int num_affected_rows = 0;
     //对主表加锁，同时对局部二级索引表加锁
@@ -176,7 +192,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
             //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
             ret = delete_row(state, record);
             if (ret < 0) {
-                DB_WARNING_STATE(state, "insert_row fail");
+                DB_WARNING_STATE(state, "delete_row fail");
                 return -1;
             }
             if (ret == 1 && _lock_type == pb::LOCK_GET_DML) {
@@ -260,17 +276,6 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
 int LockPrimaryNode::put_row(RuntimeState* state, SmartRecord record) {
     int ret = 0;
     auto txn = state->txn();
-    bool fit_region = true;
-    if (txn->fits_region_range_for_primary(*_pri_info, record, fit_region) < 0) {
-        DB_WARNING("fits_region_range_for_primary fail, region_id: %ld, table_id: %ld",
-            _region_id, _table_id);
-        return -1;
-    }
-    if (!fit_region) {
-        //DB_WARNING("table_id: %ld not in region_id: %d, record: %s",
-            //_table_id, _region_id, record->debug_string().c_str());
-        return 0;
-    }
     for (auto& info_ptr : _affected_indexes) {
         if (info_ptr->id == _table_id) {
             continue;

@@ -25,6 +25,12 @@ int SelectPlanner::plan() {
         DB_WARNING("no sql command set");
         return -1;
     }
+    auto client = _ctx->client_conn;
+    if (client->txn_id == 0) {
+        _ctx->get_runtime_state()->set_single_sql_autocommit(true);
+    } else {
+        _ctx->get_runtime_state()->set_single_sql_autocommit(false);
+    }
     _select = (parser::SelectStmt*)_ctx->stmt;
     if (_select->table_refs == nullptr) {
         if (0 != parse_select_fields()) {
@@ -110,12 +116,6 @@ int SelectPlanner::plan() {
     // join节点的叶子节点是scan_node
     if (0 != create_join_and_scan_nodes(_join_root)) {
         return -1;
-    }
-    auto client = _ctx->client_conn;
-    if (client->txn_id == 0) {
-        _ctx->get_runtime_state()->set_single_sql_autocommit(true);
-    } else {
-        _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
     return 0;
 }
@@ -306,6 +306,8 @@ void SelectPlanner::add_single_table_columns(const std::string& table_name, Tabl
 
         pb::SlotDescriptor slot = get_scan_ref_slot(table_name, table_info->id, field.id, field.type);
         pb::Expr select_expr;
+        select_expr.set_database(table_info->name.substr(0, table_info->name.find(".")));
+        select_expr.set_table(table_info->short_name);
         pb::ExprNode* node = select_expr.add_nodes();
         node->set_node_type(pb::SLOT_REF);
         node->set_col_type(field.type);

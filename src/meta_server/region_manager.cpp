@@ -37,8 +37,8 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
     std::vector<std::string> put_keys;
     std::vector<std::string> put_values;
     std::vector<bool> is_new;
-    std::string min_start_key;
-    std::string max_end_key;
+    std::map<int64_t, std::string> min_start_key;
+    std::map<int64_t, std::string> max_end_key;
     int64_t g_table_id = 0;
     bool key_init = false;
     bool old_pb = false;
@@ -55,10 +55,11 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
     } else {
         return;
     }
-    std::map<std::string, int64_t> key_id_map;
+    std::map<int64_t, std::map<std::string, int64_t>> key_id_map;
     for (auto& region_info : region_infos) {
         int64_t region_id = region_info.region_id();
         int64_t table_id = region_info.table_id();
+        int64_t partition_id = region_info.partition_id();
         auto ret = TableManager::get_instance()->whether_exist_table_id(table_id); 
         if (ret < 0) {
             DB_WARNING("table name:%s not exist, region_info:%s", 
@@ -85,8 +86,8 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
         put_keys.push_back(construct_region_key(region_id));
         put_values.push_back(region_value);
         if (!key_init) {
-            min_start_key = region_info.start_key();
-            max_end_key = region_info.end_key();
+            min_start_key[partition_id] = region_info.start_key();
+            max_end_key[partition_id] = region_info.end_key();
             g_table_id = table_id;
             key_init = true;
         } else {
@@ -95,14 +96,14 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
                         g_table_id, table_id);
                 return;
             }
-            min_start_key = (min_start_key < region_info.start_key())?
-                            min_start_key : region_info.start_key();
-            max_end_key = (end_key_compare(max_end_key, region_info.end_key()) > 0)?
-                          max_end_key : region_info.end_key();
+            min_start_key[partition_id] = (min_start_key[partition_id] < region_info.start_key())?
+                            min_start_key[partition_id] : region_info.start_key();
+            max_end_key[partition_id] = (end_key_compare(max_end_key[partition_id], region_info.end_key()) > 0)?
+                          max_end_key[partition_id] : region_info.end_key();
         }
         if (region_info.start_key() != region_info.end_key() || 
            (region_info.start_key().empty() && region_info.end_key().empty())) {
-            key_id_map[region_info.start_key()] = region_id;
+            key_id_map[partition_id][region_info.start_key()] = region_id;
         }
     }
     bool add_delete_region = false;
@@ -114,9 +115,7 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
         bool check_ok = TableManager::get_instance()->check_region_when_update(
                             g_table_id, min_start_key, max_end_key);
         if (!check_ok) {
-            DB_FATAL("table_id:%ld, min_start_key:%s, max_end_key:%s check fail", 
-                     g_table_id, str_to_hex(min_start_key).c_str(), 
-                     str_to_hex(max_end_key).c_str());
+            DB_FATAL("table_id:%ld check_region_when_update check fail", g_table_id);
             return;
         } 
     }
@@ -905,15 +904,15 @@ bool RegionManager::check_and_update_incremental(const pb::BaikalHeartBeatReques
 }
 
 bool RegionManager::add_region_is_exist(int64_t table_id, const std::string& start_key, 
-                                       const std::string& end_key) {
+                                       const std::string& end_key, int64_t partition_id) {
     if (start_key.empty()) {
-        int64_t cur_regionid = TableManager::get_instance()->get_startkey_regionid(table_id, start_key);
+        int64_t cur_regionid = TableManager::get_instance()->get_startkey_regionid(table_id, start_key, partition_id);
         if (cur_regionid < 0) {
             //startkey为空且不在map中，说明已经存在
             return true;
         }
     } else {
-        int64_t pre_regionid = TableManager::get_instance()->get_pre_regionid(table_id, start_key);
+        int64_t pre_regionid = TableManager::get_instance()->get_pre_regionid(table_id, start_key, partition_id);
         if (pre_regionid > 0) {
             auto pre_region_info = get_region_info(pre_regionid);
             if (pre_region_info != nullptr) {
@@ -975,7 +974,8 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
                 SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
             } else if (true == add_region_is_exist(leader_region_info.table_id(),
                                                    leader_region_info.start_key(), 
-                                                   leader_region_info.end_key())) {
+                                                   leader_region_info.end_key(),
+                                                   leader_region_info.partition_id())) {
                 DB_WARNING("region_info: %s is exist ", leader_region_info.ShortDebugString().c_str());
                 pb::MetaManagerRequest request;
                 request.set_op_type(pb::OP_UPDATE_REGION);
@@ -1571,7 +1571,7 @@ void RegionManager::erase_region_info(const std::vector<int64_t>& drop_region_id
         result_partition_ids.push_back(region_ptr->partition_id());
         int64_t table_id = region_ptr->table_id();
         TableManager::get_instance()->erase_region(table_id, drop_region_id, 
-                region_ptr->start_key());
+                region_ptr->start_key(), region_ptr->partition_id());
         result_table_ids.push_back(table_id);
         result_start_keys.push_back(region_ptr->start_key());
         result_end_keys.push_back(region_ptr->end_key());
@@ -1718,7 +1718,7 @@ void RegionManager::recovery_single_region_by_init_region(const std::set<int64_t
         pb::RegionInfo select_info;
         auto iter = exist_regions.find(region_id);
         if (iter != exist_regions.end()) {
-            DB_WARNING("region_id:%ld has %d peer alive %s", region_id, iter->second.size());
+            DB_WARNING("region_id:%ld has %lu peer alive ", region_id, iter->second.size());
             int64_t max_log_index = 0;
             bool has_leader = false;
             for (auto region_info_pair : iter->second) {

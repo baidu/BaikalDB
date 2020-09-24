@@ -34,18 +34,13 @@ void DMLClosure::Run() {
         response->set_errmsg("leader transfer");
         //  发生切主，回滚当前dml
         if (transaction != nullptr && region != nullptr) {
-            uint64_t txn_id = transaction->txn_id();
-            if (transaction->primary_region_id_seted()) {
-                if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
+            //uint64_t txn_id = transaction->txn_id();
+            if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
                     int seq_id = transaction->seq_id();
                     transaction->rollback_current_request();
-                    DB_WARNING("region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
+                    region->remove_readonly_txn(transaction.get());
+                    DB_WARNING("txn rollback region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
                     region_id, log_id, transaction->txn_id(), seq_id, pb::OpType_Name(op_type).c_str());
-                }
-            } else {
-                if (op_type == pb::OP_PREPARE) {
-                    region->get_txn_pool().on_leader_stop_rollback(txn_id);
-                }
             }
         }
         DB_WARNING("region_id: %ld  status:%s ,leader:%s, log_id:%lu, remote_side: %s",
@@ -57,6 +52,9 @@ void DMLClosure::Run() {
         if (transaction != nullptr && transaction->txn_id() != 0 && region != nullptr) {
             transaction->clear_current_req_point_seq();
         }
+    }
+    if (transaction != nullptr) {
+        transaction->set_in_process(false);
     }
     if (is_replay) {
         replay_last_log_cond->decrease_signal();

@@ -17,15 +17,23 @@
 #include "raft_log_compaction_filter.h"
 #include "can_add_peer_setter.h"
 #include "concurrency.h"
-
+#include "proto/store.interface.pb.h"
 namespace baikaldb {
 
-static int parse_my_raft_log_uri(const std::string& uri, std::string& id){
+static int parse_my_raft_log_uri(const std::string& uri, std::string& id, bool& is_binlog){
     size_t pos = uri.find("id=");
     if (pos == 0 || pos == std::string::npos) {
         return -1;
     }
     id = uri.substr(pos + 3);
+
+    size_t pos2 = uri.find("my_bin_log");
+    if (pos2 == butil::StringPiece::npos) {
+        is_binlog = false;
+    } else {
+        is_binlog = true;
+    }
+    DB_WARNING("uri:%s, id:%s, is_binlog:%d", uri.c_str(), id.c_str(), is_binlog);
     return 0;
 }
 
@@ -34,12 +42,17 @@ static int parse_my_raft_log_uri(const std::string& uri, std::string& id){
 MyRaftLogStorage::MyRaftLogStorage(
         int64_t region_id,
         RocksWrapper* db, 
-        rocksdb::ColumnFamilyHandle* handle) :
+        rocksdb::ColumnFamilyHandle* raftlog_handle,
+        rocksdb::ColumnFamilyHandle* binlog_handle) :
             _first_log_index(0),
             _last_log_index(0),
             _region_id(region_id),
             _db(db),
-            _handle(handle) {
+            _raftlog_handle(raftlog_handle),
+            _binlog_handle(binlog_handle) {
+    if (_binlog_handle != NULL) {
+        _is_binlog_region = true;
+    }
     bthread_mutex_init(&_mutex, NULL);        
 }
 
@@ -53,20 +66,33 @@ braft::LogStorage* MyRaftLogStorage::new_instance(const std::string& uri) const 
         DB_FATAL("rocksdb is not set");
         return NULL;
     }
+
+    bool is_binlog = false;
     std::string string_region_id;
-    int ret = parse_my_raft_log_uri(uri, string_region_id);
+    int ret = parse_my_raft_log_uri(uri, string_region_id, is_binlog);
     if (ret != 0) {
         DB_FATAL("parse uri fail, uri:%s", uri.c_str());
         return NULL;
     }
     int64_t region_id = boost::lexical_cast<int64_t>(string_region_id);
-    rocksdb::ColumnFamilyHandle* handle = rocksdb->get_raft_log_handle();
-    if (handle == NULL) {
+    rocksdb::ColumnFamilyHandle* raftlog_handle = rocksdb->get_raft_log_handle();
+    if (raftlog_handle == NULL) {
         DB_FATAL("get raft log handle from rocksdb fail, region_id: %ld", 
                     uri.c_str(), region_id);
         return NULL;
     }
-    braft::LogStorage* instance = new(std::nothrow) MyRaftLogStorage(region_id, rocksdb, handle);
+    rocksdb::ColumnFamilyHandle* binlog_handle = NULL;
+    if (is_binlog) {
+        binlog_handle = rocksdb->get_bin_log_handle();
+        if (binlog_handle == NULL) {
+            DB_FATAL("get bin log handle from rocksdb fail, region_id: %ld", 
+                    uri.c_str(), region_id);
+            return NULL;
+        }
+        DB_WARNING("region_id: %ld is binlog region", region_id);
+    }
+    
+    braft::LogStorage* instance = new(std::nothrow) MyRaftLogStorage(region_id, rocksdb, raftlog_handle, binlog_handle);
     if (instance == NULL) {
         DB_FATAL("new log_storage instance fail, region_id: %ld",
                   region_id);
@@ -80,7 +106,7 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
     //read metaInfo from rocksdb
     char log_meta_key[LOG_META_KEY_SIZE];
     _encode_log_meta_key(log_meta_key, LOG_META_KEY_SIZE);
-    if (_handle == NULL) {
+    if (_raftlog_handle == NULL) {
         DB_FATAL("raft init state is not right, handle is null, region_id: %ld",
                 _region_id);
         return -1;
@@ -89,7 +115,7 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
     int64_t last_log_index = 0;
     std::string string_first_log_index;
     rocksdb::Status status = _db->get(rocksdb::ReadOptions(), 
-                                      _handle, 
+                                      _raftlog_handle, 
                                       rocksdb::Slice(log_meta_key, LOG_META_KEY_SIZE),
                                       &string_first_log_index);
     // region is new
@@ -98,7 +124,7 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
         //write_option.sync = true;
         //write_option.disableWAL = true;
         rocksdb::Status put_res = _db->put(write_option, 
-                                           _handle,
+                                           _raftlog_handle,
                                            rocksdb::Slice(log_meta_key, LOG_META_KEY_SIZE),
                                            rocksdb::Slice((char*)&first_log_index, sizeof(int64_t)));
         if (!put_res.ok()) {
@@ -118,7 +144,7 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
     _encode_log_data_key(log_data_key, LOG_DATA_KEY_SIZE, first_log_index);
     rocksdb::ReadOptions opt;
     opt.prefix_same_as_start = true;
-    std::unique_ptr<rocksdb::Iterator> iter(_db->new_iterator(opt, _handle));
+    std::unique_ptr<rocksdb::Iterator> iter(_db->new_iterator(opt, _raftlog_handle));
     iter->Seek(rocksdb::Slice(log_data_key, LOG_DATA_KEY_SIZE));
     
     //construct term_map and last_log_index
@@ -203,11 +229,45 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
     return 0;
 }
 
+// return -1 : failed; 
+// return  1 : use raftlog_value_slice; 
+// return  0 : use binlog_value
+int MyRaftLogStorage::get_binlog_entry(rocksdb::Slice& raftlog_value_slice, std::string& binlog_value) {
+    pb::StoreReq raftlog_pb;
+    if (!raftlog_pb.ParseFromArray(raftlog_value_slice.data(), raftlog_value_slice.size())) {
+        DB_FATAL("Fail to parse request fail, split fail, region_id: %ld", _region_id);
+        return -1;
+    }
+
+    pb::OpType op_type = raftlog_pb.op_type();
+    if (op_type != pb::OP_PREWRITE_BINLOG) {
+        return 1;
+    }
+    DB_WARNING("raft_log:%s", raftlog_pb.ShortDebugString().c_str());
+    int64_t ts = -1;
+    if (!raftlog_pb.has_binlog_desc()) {
+        DB_FATAL("binlog region_id: %ld has not binlog ts", _region_id);
+        return -1;
+    }
+    ts = raftlog_pb.binlog_desc().binlog_ts( );
+    char buf[sizeof(int64_t)];
+    memcpy(buf, (void*)&ts, sizeof(int64_t));
+    rocksdb::Status status = _db->get(rocksdb::ReadOptions(), _binlog_handle, 
+        rocksdb::Slice(buf, sizeof(int64_t)), &binlog_value);
+    if (!status.ok()) {
+        DB_FATAL("get ts:%ld from rocksdb binlog cf fail:%s, region_id: %ld",
+                ts, status.ToString().c_str(), _region_id);
+        return -1;
+    }
+
+    return 0;
+}
+
 braft::LogEntry* MyRaftLogStorage::get_entry(const int64_t index) {
     char buf[LOG_DATA_KEY_SIZE];
     _encode_log_data_key(buf, LOG_DATA_KEY_SIZE, index);
     std::string value;
-    rocksdb::Status status = _db->get(rocksdb::ReadOptions(), _handle, 
+    rocksdb::Status status = _db->get(rocksdb::ReadOptions(), _raftlog_handle, 
             rocksdb::Slice(buf, LOG_DATA_KEY_SIZE), &value);
     if (!status.ok()) {
         DB_WARNING("get index:%ld from rocksdb fail, region_id: %ld",
@@ -228,7 +288,21 @@ braft::LogEntry* MyRaftLogStorage::get_entry(const int64_t index) {
     entry->id = braft::LogId(index, head.term);
     switch (entry->type) {
         case braft::ENTRY_TYPE_DATA:
-            entry->data.append(value_slice.data(), value_slice.size());
+            if (!_is_binlog_region) {
+                entry->data.append(value_slice.data(), value_slice.size());
+            } else {
+                std::string binlog_value;
+                int ret = get_binlog_entry(value_slice, binlog_value);
+                if (ret < 0) {
+                    return NULL;
+                }
+                if (ret == 1) {
+                    entry->data.append(value_slice.data(), value_slice.size());
+                } else if (ret == 0) {
+                    rocksdb::Slice binlog_value_slice(binlog_value);
+                    entry->data.append(binlog_value_slice.data(), binlog_value_slice.size());
+                }
+            }
             break;
         case braft::ENTRY_TYPE_CONFIGURATION:
             if (_parse_meta(entry, value_slice) != 0) {
@@ -301,18 +375,17 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
     });
 
     //construct data
-    std::vector<std::pair<rocksdb::SliceParts, rocksdb::SliceParts>> kv_vec;
-    kv_vec.reserve(entries.size());
+    SlicePartsVec kv_raftlog_vec; //存储raftlog
+    SlicePartsVec kv_binlog_vec;  //存储binlog
+    kv_raftlog_vec.reserve(entries.size());
+    kv_binlog_vec.reserve(entries.size());
     butil::Arena arena;
     for (auto iter = entries.begin(); iter != entries.end(); ++iter) {
-        rocksdb::SliceParts key;
-        rocksdb::SliceParts value;
-        if (_build_key_value(&key, &value, *iter, arena) != 0) {
+        if (_build_key_value(kv_raftlog_vec, kv_binlog_vec, *iter, arena) != 0) {
             DB_FATAL("Fail to build key-value, logid:%ld:%ld, region_id: %ld",
                             (*iter)->id.index, (*iter)->id.term, _region_id);
             return -1;
         }
-        kv_vec.emplace_back(key, value);
     }
     
     // write date to rocksdb in batch
@@ -321,9 +394,14 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
     //options.sync = true;
     //options.disableWAL = true;
     
-    for (auto iter = kv_vec.begin(); iter != kv_vec.end(); ++iter) {
-        batch.Put(_handle, iter->first, iter->second);
+    for (auto iter = kv_raftlog_vec.begin(); iter != kv_raftlog_vec.end(); ++iter) {
+        batch.Put(_raftlog_handle, iter->first, iter->second);
     }
+    
+    for (auto iter = kv_binlog_vec.begin(); iter != kv_binlog_vec.end(); ++iter) {
+        batch.Put(_binlog_handle, iter->first, iter->second);
+    }
+
     auto status = _db->write(options, &batch);
     if (!status.ok()) {
         DB_FATAL("Fail to write db, region_id: %ld, err_mes:%s",
@@ -368,7 +446,7 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     _encode_log_data_key(end_key, LOG_DATA_KEY_SIZE, first_index_kept);
    
     auto status = _db->remove_range(rocksdb::WriteOptions(), 
-                _handle, 
+                _raftlog_handle, 
                 rocksdb::Slice(start_key, LOG_DATA_KEY_SIZE), 
                 rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE),
                 true);
@@ -391,7 +469,7 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     //write_option.sync = true;
     //write_option.disableWAL = true;
     status = _db->put(write_option, 
-                      _handle,
+                      _raftlog_handle,
                       rocksdb::Slice(key_buf, LOG_META_KEY_SIZE),
                       rocksdb::Slice((char*)&first_index_kept, sizeof(int64_t)));
     if (!status.ok()) {
@@ -422,7 +500,7 @@ int MyRaftLogStorage::truncate_suffix(const int64_t last_index_kept) {
     //options.disableWAL = true;
     for (int64_t i = last_index_kept + 1; i <= last_log_index; ++i) {
         _encode_log_data_key(buf, LOG_DATA_KEY_SIZE, i);
-        batch.Delete(_handle, rocksdb::Slice(buf, LOG_DATA_KEY_SIZE));
+        batch.Delete(_raftlog_handle, rocksdb::Slice(buf, LOG_DATA_KEY_SIZE));
         buf += LOG_DATA_KEY_SIZE;
     }
     auto status = _db->write(options, &batch);
@@ -444,9 +522,13 @@ int  MyRaftLogStorage::reset(const int64_t next_log_index) {
 }
 
 int MyRaftLogStorage::_build_key_value(
-        rocksdb::SliceParts* key, rocksdb::SliceParts* value,
+        SlicePartsVec& kv_raftlog_vec, SlicePartsVec& kv_binlog_vec,
         const braft::LogEntry* entry, butil::Arena& arena) {
 
+    rocksdb::SliceParts raftlog_key;
+    rocksdb::SliceParts raftlog_value;
+    rocksdb::SliceParts binlog_key;
+    rocksdb::SliceParts binlog_value;
     // construct key
     void* key_buf = arena.allocate(LOG_DATA_KEY_SIZE);
     if (key_buf == NULL) {
@@ -461,8 +543,8 @@ int MyRaftLogStorage::_build_key_value(
         return -1;
     }
     new (key_slice_mem) rocksdb::Slice((char*)key_buf, LOG_DATA_KEY_SIZE);
-    key->parts = (rocksdb::Slice*)key_slice_mem;
-    key->num_parts = 1;
+    raftlog_key.parts = (rocksdb::Slice*)key_slice_mem;
+    raftlog_key.num_parts = 1;
 
     // construct value
     LogHead head(entry->id.term, entry->type);
@@ -472,31 +554,132 @@ int MyRaftLogStorage::_build_key_value(
         return -1;
     }
     head.serialize_to(head_buf);
-    value->parts = NULL;
+    raftlog_value.parts = NULL;
     switch (entry->type) {
     case braft::ENTRY_TYPE_DATA:
-        value->parts = _construct_slice_array(head_buf, entry->data, arena);
-        value->num_parts = entry->data.backing_block_num() + 1;
+        if (!_is_binlog_region) {
+            raftlog_value.parts = _construct_slice_array(head_buf, entry->data, arena);
+            raftlog_value.num_parts = entry->data.backing_block_num() + 1;
+        } else {
+            int ret = _construct_slice_array(head_buf, entry->data, &raftlog_value, &binlog_key, &binlog_value, arena);
+            if (ret < 0) {
+                return -1;
+            }
+        }
         break;
     case braft::ENTRY_TYPE_CONFIGURATION:
-        value->parts = _construct_slice_array(head_buf, entry->peers, 
+        raftlog_value.parts = _construct_slice_array(head_buf, entry->peers, 
                 entry->old_peers, arena);
-        value->num_parts = 2;
+        raftlog_value.num_parts = 2;
         //DB_WARNING("region_id: %ld, term:%ld, index:%ld",
         //            _region_id, entry->id.term, entry->id.index);
         break;
     case braft::ENTRY_TYPE_NO_OP:
-        value->parts = _construct_slice_array(head_buf, nullptr, nullptr, arena);
-        value->num_parts = 1;
+        raftlog_value.parts = _construct_slice_array(head_buf, nullptr, nullptr, arena);
+        raftlog_value.num_parts = 1;
         break;
     default:
         DB_FATAL("Unknown type:%d, region_id: %ld", entry->type, _region_id);
         return -1; 
     }
-    if (value->parts == NULL) {
+    if (raftlog_value.parts == NULL) {
         DB_FATAL("Fail to construct value, region_id: %ld", _region_id);
         return -1;
-    }    
+    } 
+
+    kv_raftlog_vec.emplace_back(raftlog_key, raftlog_value); 
+    
+    //op_type非OP_PREWRITE_BINLOG时，binlog_value.parts == NULL
+    if (_is_binlog_region && binlog_value.parts != NULL) {
+        kv_binlog_vec.emplace_back(binlog_key, binlog_value); 
+    }
+
+    return 0;
+}
+
+// return ts (binlog key)
+int MyRaftLogStorage::_construct_slice_array(void* head_buf, const butil::IOBuf& binlog_buf, rocksdb::SliceParts* raftlog_value, 
+                                    rocksdb::SliceParts* binlog_key, rocksdb::SliceParts* binlog_value, butil::Arena& arena) {
+
+    butil::IOBufAsZeroCopyInputStream wrapper(binlog_buf);
+    pb::StoreReq binlog_pb;
+    if (!binlog_pb.ParseFromZeroCopyStream(&wrapper)) {
+        DB_FATAL("parse from protobuf fail");
+        return -1;
+    }
+
+    pb::OpType op_type = binlog_pb.op_type();
+    if (op_type != pb::OP_PREWRITE_BINLOG) {
+        //非prewrite binlog，value较小可以直接写raftlog，不用kv分离
+        raftlog_value->parts = _construct_slice_array(head_buf, binlog_buf, arena);
+        raftlog_value->num_parts = binlog_buf.backing_block_num() + 1;
+        binlog_value->parts = NULL;
+        return 0;
+    }
+
+    int64_t ts = binlog_pb.binlog_desc().binlog_ts();
+    DB_WARNING("write binlog desc: %s, region_id: %ld", binlog_pb.binlog_desc().ShortDebugString().c_str(), _region_id);
+    void* key_buf = arena.allocate(sizeof(int64_t));
+    if (key_buf == NULL) {
+        DB_FATAL("Fail to allocate mem, region_id: %ld", _region_id);
+        return -1;
+    }
+    memcpy(key_buf, (void*)&ts, sizeof(int64_t));
+    auto key_slices = (rocksdb::Slice*)arena.allocate(sizeof(rocksdb::Slice));
+    if (key_slices == NULL) {
+        DB_FATAL("Fail to allocate mem, region_id: %ld", _region_id);
+        return -1;
+    }
+    new (key_slices) rocksdb::Slice((char*)key_buf, sizeof(int64_t));
+    binlog_key->parts = key_slices;
+    binlog_key->num_parts = 1;
+
+    auto binlog_slices = (rocksdb::Slice*)arena.allocate(
+        sizeof(rocksdb::Slice) * binlog_buf.backing_block_num());
+    if (binlog_slices == NULL) {
+        DB_FATAL("Fail to allocate mem, region_id: %ld", _region_id);
+        return -1;
+    }
+
+    for (size_t i = 0; i < binlog_buf.backing_block_num(); ++i) {
+        auto block = binlog_buf.backing_block(i);
+        new (binlog_slices + i) rocksdb::Slice(block.data(), block.size());
+    }
+
+    binlog_value->parts = binlog_slices;
+    binlog_value->num_parts = binlog_buf.backing_block_num();
+
+    pb::StoreReq raftlog_pb;
+    raftlog_pb.set_op_type(binlog_pb.op_type());
+    raftlog_pb.set_region_id(binlog_pb.region_id());
+    raftlog_pb.set_region_version(binlog_pb.region_version());
+    auto binlog_desc = raftlog_pb.mutable_binlog_desc();
+    (*binlog_desc) = binlog_pb.binlog_desc();
+    butil::IOBuf raftlog_buf;
+    butil::IOBufAsZeroCopyOutputStream wrapper2(&raftlog_buf);
+    if (!raftlog_pb.SerializeToZeroCopyStream(&wrapper2)) {
+        DB_FATAL("serialize fail");
+        return -1;
+    }
+
+    auto raftlog_slices = (rocksdb::Slice*)arena.allocate(
+        sizeof(rocksdb::Slice) * (raftlog_buf.backing_block_num() + 1));
+    if (raftlog_slices == NULL) {
+        DB_FATAL("Fail to allocate mem, region_id: %ld", _region_id);
+        return -1;
+    }
+
+    new (raftlog_slices) rocksdb::Slice((const char*)head_buf, LOG_HEAD_SIZE);
+    for (size_t i = 0; i < raftlog_buf.backing_block_num(); ++i) {
+        auto block = raftlog_buf.backing_block(i);
+        void* mem_buf = arena.allocate(block.size());
+        memcpy(mem_buf, block.data(), block.size());
+        new (raftlog_slices + i + 1) rocksdb::Slice((const char*)mem_buf, block.size());
+    }
+
+    raftlog_value->parts = raftlog_slices;
+    raftlog_value->num_parts = raftlog_buf.backing_block_num() + 1;
+
     return 0;
 }
 

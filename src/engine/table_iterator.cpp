@@ -25,7 +25,9 @@ TableIterator* Iterator::scan_primary(
         std::vector<int32_t>& field_slot,
         bool                    check_region, 
         bool                    forward) {
-    txn->reset_active_time();
+    if (txn != nullptr) {
+        txn->reset_active_time();
+    }
     TableIterator* iter = new (std::nothrow)TableIterator(check_region, forward);
     if (nullptr == iter) {
         return nullptr;
@@ -44,7 +46,9 @@ IndexIterator* Iterator::scan_secondary(
         std::vector<int32_t>& field_slot,
         bool                check_region, 
         bool                forward) {
-    txn->reset_active_time();
+    if (txn != nullptr) {
+        txn->reset_active_time();
+    }
     IndexIterator* iter = new (std::nothrow)IndexIterator(check_region, forward);
     if (nullptr == iter) {
         return nullptr;
@@ -382,7 +386,9 @@ bool Iterator::_fits_region(rocksdb::Slice key, rocksdb::Slice value) {
     }
     //check range end_key
     key.remove_prefix(_prefix_len);
-    bool ret = Transaction::fits_region_range(key, value, nullptr, 
+    // 按理说start_key不需要判断，之前global index
+    // 有bug，分裂后put_row有在start_key之前的记录写入
+    bool ret = Transaction::fits_region_range(key, value, &_region_info->start_key(), 
         &_region_info->end_key(), *_pri_info, *_index_info);
     return ret;
 }

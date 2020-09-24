@@ -34,7 +34,7 @@ int SelectManagerNode::open(RuntimeState* state) {
     client_conn->seq_id++;
     _mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
     _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
-    if (_has_sub_query) {
+    if (_sub_query_node != nullptr) {
         return subquery_open(state);
     }
     std::vector<ExecNode*> scan_nodes;

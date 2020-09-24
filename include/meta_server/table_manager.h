@@ -33,7 +33,6 @@ struct RegionDesc {
     int64_t region_id;
     MergeStatus merge_status;
 };
-
 struct TableMem {
     bool whether_level_table;
     pb::SchemaInfo schema_pb;
@@ -41,10 +40,10 @@ struct TableMem {
     std::unordered_map<std::string, int32_t> field_id_map;
     std::unordered_map<std::string, int64_t> index_id_map;
     //start_key=>regionid
-    std::map<std::string, RegionDesc>  startkey_regiondesc_map;
+    std::map<int64_t, std::map<std::string, RegionDesc>>  startkey_regiondesc_map;
     //发生split或merge时，用以下三个map暂存心跳上报的region信息，保证整体更新
     //start_key => region 存放new region，new region为分裂出来的region
-    std::map<std::string, SmartRegionInfo> startkey_newregion_map;
+    std::map<int64_t, std::map<std::string, SmartRegionInfo>> startkey_newregion_map;
     //region id => none region 存放空region
     std::map<int64_t, SmartRegionInfo> id_noneregion_map;
     //region id => region 存放key发生变化的region，以该region为基准，查找merge或split所涉及到的所有region
@@ -52,6 +51,14 @@ struct TableMem {
     bool is_global_index = false;
     int64_t global_index_id = 0;
     int64_t main_table_id = 0;
+    bool is_partition = false;
+    //binlog表使用
+    std::set<int64_t> binlog_target_ids;
+    //普通表使用
+    bool is_linked = false;
+    bool is_binlog = false;
+    int64_t binlog_id = 0;
+    std::vector<pb::Expr> range_infos;
     bool exist_global_index(int64_t global_index_id) {
         for (auto& index : schema_pb.indexs()) {
             if (index.is_global() && index.index_id() == global_index_id) {
@@ -69,16 +76,13 @@ struct TableMem {
     }
     int64_t statistics_version = 0;
     void print() {
-        /*
-        DB_WARNING("whether_level_table: %d, schema_pb: %s, is_global_index: %d, main_table_id:%ld, global_index_id: %ld",
-                    whether_level_table, schema_pb.ShortDebugString().c_str(), is_global_index,  main_table_id, global_index_id);
-        return;
-        for (auto& partition_region : partition_regions) {
-            for (auto& region : partition_region.second) {
-                DB_WARNING("table_id: %ld region_id: %ld", global_index_id, region);
-            }
-        }
-        */
+        //DB_WARNING("whether_level_table: %d, schema_pb: %s, is_global_index: %d, main_table_id:%ld, global_index_id: %ld",
+        //            whether_level_table, schema_pb.ShortDebugString().c_str(), is_global_index,  main_table_id, global_index_id);
+        //for (auto& partition_region : partition_regions) {
+        //    for (auto& region : partition_region.second) {
+        //        DB_WARNING("table_id: %ld region_id: %ld", global_index_id, region);
+        //    }
+        //}
     }
 };
 struct DdlPeerMem {
@@ -165,6 +169,9 @@ public:
     void drop_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void rename_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void modify_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void link_binlog(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void unlink_binlog(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void set_index_hint_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
 
     void update_index_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void delete_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done);
@@ -194,25 +201,29 @@ public:
 
     int load_table_snapshot(const std::string& value);
     int load_statistics_snapshot(const std::string& value);
-    int erase_region(int64_t table_id, int64_t region_id, std::string start_key);
+    int erase_region(int64_t table_id, int64_t region_id, std::string start_key, int64_t partition);
     int64_t get_next_region_id(int64_t table_id, std::string start_key, 
-            std::string end_key);
+            std::string end_key, int64_t partition);
     int add_startkey_regionid_map(const pb::RegionInfo& region_info);
-    bool check_region_when_update(int64_t table_id, std::string min_start_key, 
-            std::string max_end_key);
+    bool check_region_when_update(int64_t table_id, std::map<int64_t, std::string>& min_start_key, 
+            std::map<int64_t, std::string>& max_end_key);
     int check_startkey_regionid_map();
     void update_startkey_regionid_map_old_pb(int64_t table_id, 
-            std::map<std::string, int64_t>& key_id_map);
-    void update_startkey_regionid_map(int64_t table_id, std::string min_start_key, 
-                                      std::string max_end_key, 
-                                      std::map<std::string, int64_t>& key_id_map);
-    int64_t get_pre_regionid(int64_t table_id, const std::string& start_key);
-    int64_t get_startkey_regionid(int64_t table_id, const std::string& start_key);
+            std::map<int64_t, std::map<std::string, int64_t>>& key_id_map);
+    void update_startkey_regionid_map(int64_t table_id, std::map<int64_t, std::string>& min_start_key, 
+                                      std::map<int64_t, std::string>& max_end_key, 
+                                      std::map<int64_t, std::map<std::string, int64_t>>& key_id_map);
+    void partition_update_startkey_regionid_map(int64_t table_id, std::string min_start_key, 
+        std::string max_end_key, 
+        std::map<std::string, int64_t>& key_id_map,
+        std::map<std::string, RegionDesc>& startkey_regiondesc_map);
+    int64_t get_pre_regionid(int64_t table_id, const std::string& start_key, int64_t partition);
+    int64_t get_startkey_regionid(int64_t table_id, const std::string& start_key, int64_t partition);
     void add_new_region(const pb::RegionInfo& leader_region_info);
     void add_update_region(const pb::RegionInfo& leader_region_info, bool is_none);
     int get_merge_regions(int64_t table_id, 
                           std::string new_start_key, std::string origin_start_key, 
-                          std::map<std::string, RegionDesc>& startkey_regiondesc_map,
+                          std::map<int64_t, std::map<std::string, RegionDesc>>& startkey_regiondesc_map,
                           std::map<int64_t, SmartRegionInfo>& id_noneregion_map,
                           std::vector<SmartRegionInfo>& regions);
     int get_split_regions(int64_t table_id, 
@@ -220,7 +231,7 @@ public:
                           std::map<std::string, SmartRegionInfo>& key_newregion_map,
                           std::vector<SmartRegionInfo>& regions);
     int get_presplit_regions(int64_t table_id, 
-                                           std::map<std::string, SmartRegionInfo>& key_newregion_map,
+                                           std::map<int64_t, std::map<std::string, SmartRegionInfo>>& key_newregion_map,
                                            pb::MetaManagerRequest& request);
                                           
     void get_update_region_requests(int64_t table_id, TableMem& table_info,
@@ -594,6 +605,14 @@ public:
         }
         return false;
     }
+    bool check_table_is_linked(int64_t table_id) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        auto table_iter = _table_info_map.find(table_id);
+        if (table_iter == _table_info_map.end()) {
+            return false;
+        }
+        return table_iter->second.is_linked || table_iter->second.binlog_target_ids.size() > 0;
+    }
 
     int get_ddlwork_info(int64_t table_id, pb::QueryResponse* query_response) {
         auto ddlwork_ptr = get_ddlwork_ptr(table_id);
@@ -887,6 +906,9 @@ private:
     void ddlwork_process_leader_region(const pb::StoreHeartBeatRequest& store_req);
 
     void collect_ddlwork_info(DdlWorkMem& meta_work);
+    bool partition_check_region_when_update(int64_t table_id, 
+        std::string min_start_key, 
+        std::string max_end_key, std::map<std::string, RegionDesc>& partition_region_map);
 private:
     bthread_mutex_t                                     _table_mutex;
     bthread_mutex_t                                     _table_ddlinfo_mutex;

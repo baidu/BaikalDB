@@ -39,11 +39,18 @@ private:
 
     int scan_node_analyze(RocksdbScanNode* scan_node, 
         QueryContext* ctx, bool has_join);
+    
     int truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ctx);
     int kill_node_analyze(KillNode* kill_node, QueryContext* ctx);
     int transaction_node_analyze(TransactionNode* txn_node, QueryContext* ctx);
     int select_index(pb::ScanNode* scan_node, std::vector<int>& multi_reverse_index);
 };
+
+class PartitionAnalyze {
+public:
+    int analyze(QueryContext* ctx);
+};
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

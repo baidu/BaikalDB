@@ -31,6 +31,12 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
+
+    ret = PartitionAnalyze().analyze(ctx);
+    if (ret < 0) {
+        return ret;
+    }
+    
     // for INSERT/REPLACE statements
     // insert user variables to records for prepared stmt
     ret = insert_values_to_record(ctx);

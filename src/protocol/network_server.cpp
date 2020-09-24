@@ -17,12 +17,9 @@
 #include <netinet/tcp.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include "physical_planner.h"
-#include "transaction_manager_node.h"
 #include "log.h"
 #include <gflags/gflags.h>
 #include <time.h>
-#include "range.h"
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -39,59 +36,9 @@ DEFINE_int32(slow_query_timeout_s, 60, "slow query threshold (second)");
 DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
-DEFINE_string(recovery_db_path, "./db", "db path for transaction recovery, default: ./db");
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
-uint8_t NetworkServer::transaction_prefix = 0x01;
-
-// 1. read meta_db to get prepared (yet not committed) transactions left by last baikaldb instance
-// 2. try to commit transaction until success
-// 3. remove the transaction entry from the meta_db
-void NetworkServer::recovery_transactions() {
-    rocksdb::ReadOptions read_options;
-    read_options.total_order_seek = false;
-    read_options.prefix_same_as_start = true;
-    std::unique_ptr<rocksdb::Iterator> iter(_meta_db->new_iterator(read_options, _meta_handle));
-    MutTableKey txn_key;
-    txn_key.append_u8(transaction_prefix);
-    for (iter->Seek(txn_key.data()); iter->Valid(); iter->Next()) {
-        TableKey key(iter->key(), true);
-        int pos = 1;
-        uint64_t txn_id = key.extract_u64(pos);
-        uint64_t instance = txn_id >> 40;
-        if (instance == _instance_id) {
-            continue;
-        }
-        DB_WARNING("recover txn_id: %lu", txn_id);
-        pb::CachePlan commit_plan;
-        if (!commit_plan.ParseFromArray(iter->value().data(), iter->value().size())) {
-            DB_FATAL("TransactionError: parse recovery plan failed, txn_id: %lu", txn_id);
-            continue;
-        }
-        TransactionManagerNode::remove_commit_log_entry(txn_id);
-        SmartSocket dummy_client = SmartSocket(new (std::nothrow)NetworkSocket);
-        dummy_client->txn_id = txn_id;
-        dummy_client->seq_id = commit_plan.seq_id();
-        for (auto& region_info : commit_plan.regions()) {
-            dummy_client->region_infos[region_info.region_id()] = region_info;
-        }
-        RuntimeState state;
-        state.set_client_conn(dummy_client.get());
-        state.txn_id = txn_id;
-        ExecNode* commit_root = nullptr;
-        ExecNode::create_tree(commit_plan.plan(), &commit_root);
-        TransactionManagerNode commit_manager_node;
-        commit_manager_node.set_op_type(pb::OP_COMMIT);
-        int ret = commit_manager_node.exec_commit_node(&state, commit_root);
-        delete commit_root;
-        if (ret < 0) {
-            DB_FATAL("TransactionError: execute recovery plan failed, txn_id: %lu", txn_id);
-            continue;
-        }
-        DB_WARNING("TransactionNote: execute recovery plan, txn_id: %lu", txn_id);
-    }
-}
 
 void NetworkServer::report_heart_beat() {
     while (!_shutdown) {
@@ -99,13 +46,13 @@ void NetworkServer::report_heart_beat() {
         pb::BaikalHeartBeatRequest request;
         pb::BaikalHeartBeatResponse response;
         //1、construct heartbeat request
-        construct_heart_beat_request(request);
+        BaikalHeartBeat::construct_heart_beat_request(request);
         int64_t construct_req_cost = cost.get_time();
         cost.reset();
         //2、send heartbeat request to meta server
         if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
             //处理心跳
-            process_heart_beat_response(response);
+            BaikalHeartBeat::process_heart_beat_response(response);
             DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
                     construct_req_cost, cost.get_time());
         } else {
@@ -322,61 +269,6 @@ void NetworkServer::print_agg_sql() {
     }
 }
 
-void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request) {
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
-        auto& table_statistics_mapping = schema.table_statistics_mapping;
-        for (auto& info_pair : schema.table_info_mapping) {
-            if (info_pair.second->engine != pb::ROCKSDB &&
-                    info_pair.second->engine != pb::ROCKSDB_CSTORE) {
-                continue;
-            }
-            //主键索引和全局二级索引都需要传递region信息
-            for (auto& index_id : info_pair.second->indices) {
-                auto& index_info_mapping = schema.index_info_mapping;
-                if (index_info_mapping.count(index_id) == 0) {
-                    continue;
-                }
-                IndexInfo index = *index_info_mapping.at(index_id);
-                //主键索引
-                if (index.type != pb::I_PRIMARY && !index.is_global) {
-                    continue;
-                }
-                auto req_info = request.add_schema_infos();
-                req_info->set_table_id(index_id);
-                req_info->set_version(1);
-                int64_t version = 0;
-                auto iter = table_statistics_mapping.find(index_id);
-                if (iter != table_statistics_mapping.end()) {
-                    version = iter->second->version();
-                }
-                req_info->set_statis_version(version);
-
-                if (index_id == info_pair.second->id) {
-                    req_info->set_version(info_pair.second->version);
-                }
-                /*
-                std::map<int64_t, pb::RegionInfo> region_infos;
-                //
-                // TODO：读多个double buffer，可能死锁？
-                //
-                factory->get_region_by_key(index, NULL, region_infos);
-                for (auto& pair : region_infos) {
-                    auto region = req_info->add_regions();
-                    auto& region_info = pair.second;
-                    region->set_region_id(region_info.region_id());
-                    region->set_version(region_info.version());
-                    region->set_conf_version(region_info.conf_version());
-                }*/
-            }
-        }
-    };
-    request.set_last_updated_index(factory->last_updated_index());
-    request.set_not_need_statistics(true);
-    factory->schema_info_scope_read(schema_read_recallback);
-    
-}
-
 void NetworkServer::construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
@@ -404,51 +296,6 @@ void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeart
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }
-}
-
-void NetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatResponse& response) {
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    for (auto& info : response.schema_change_info()) {
-        factory->update_table(info);
-    }
-    factory->update_regions(response.region_change_info());
-    if (response.has_idc_info()) {
-        factory->update_idc(response.idc_info());
-    }
-    for (auto& info : response.privilege_change_info()) {
-        factory->update_user(info);
-    }
-    factory->update_show_db(response.db_info());
-    if (response.statistics().size() > 0) {
-        factory->update_statistics(response.statistics());
-    }
-    if (response.has_last_updated_index() && 
-        response.last_updated_index() > factory->last_updated_index()) {
-        factory->set_last_updated_index(response.last_updated_index());
-    }
-}
-
-void NetworkServer::process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response) {
-    TimeCost cost;
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    factory->update_tables_double_buffer_sync(response.schema_change_info());
-
-    if (response.has_idc_info()) {
-        factory->update_idc(response.idc_info());
-    }
-    for (auto& info : response.privilege_change_info()) {
-        factory->update_user(info);
-    }
-    factory->update_show_db(response.db_info());
-    if (response.statistics().size() > 0) {
-        factory->update_statistics(response.statistics());
-    }
-    factory->update_regions_double_buffer_sync(response.region_change_info());
-    if (response.has_last_updated_index() && 
-        response.last_updated_index() > factory->last_updated_index()) {
-        factory->set_last_updated_index(response.last_updated_index());
-    }
-    DB_NOTICE("sync time:%ld", cost.get_time());
 }
 
 void NetworkServer::connection_timeout_check() {
@@ -591,11 +438,11 @@ bool NetworkServer::init() {
     pb::BaikalHeartBeatRequest request;
     pb::BaikalHeartBeatResponse response;
     //1、构造心跳请求
-    construct_heart_beat_request(request);
+    BaikalHeartBeat::construct_heart_beat_request(request);
     //2、发送请求
     if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
         //处理心跳
-        process_heart_beat_response_sync(response);
+        BaikalHeartBeat::process_heart_beat_response_sync(response);
         //DB_WARNING("req:%s  \nres:%s", request.DebugString().c_str(), response.DebugString().c_str());
     } else {
         DB_FATAL("send heart beat request to meta server fail");
@@ -608,18 +455,6 @@ bool NetworkServer::init() {
         }        
     }
     DB_WARNING("get instance_id: %lu", _instance_id);
-
-    _meta_db = RocksWrapper::get_instance();
-    if (!_meta_db) {
-        DB_FATAL("create meta database failed");
-        return false;
-    }
-    int32_t res = _meta_db->init(FLAGS_recovery_db_path);
-    if (res != 0) {
-        DB_FATAL("rocksdb init failed: code:%d", res);
-        return false;
-    }
-    _meta_handle = _meta_db->get_meta_info_handle();
     _is_init = true;
     return true;
 }
@@ -709,7 +544,6 @@ int NetworkServer::make_worker_process() {
     _conn_check_bth.run([this]() {connection_timeout_check();});
     _heartbeat_bth.run([this]() {report_heart_beat();});
     _other_heartbeat_bth.run([this]() {report_other_heart_beat();});
-    _recover_bth.run([this]() {recovery_transactions();});
     _agg_sql_bth.run([this]() {print_agg_sql();});
 
     // Create listen socket.
@@ -922,5 +756,6 @@ bool NetworkServer::set_fd_flags(int fd) {
     }
     return true;
 }
+
 
 } // namespace baikal

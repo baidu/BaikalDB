@@ -26,6 +26,7 @@
 namespace baikaldb {
 class MetaStateMachine;
 class AutoIncrStateMachine;
+class TSOStateMachine;
 class MetaServer : public pb::MetaService {
 public:
     static const std::string CLUSTER_IDENTIFY;
@@ -91,7 +92,12 @@ public:
     virtual void console_heartbeat(google::protobuf::RpcController* controller,
                                   const pb::ConsoleHeartBeatRequest* request,
                                   pb::ConsoleHeartBeatResponse* response,
-                                  google::protobuf::Closure* done); 
+                                  google::protobuf::Closure* done);
+
+    virtual void tso_service(google::protobuf::RpcController* controller,
+                                  const pb::TsoRequest* request,
+                                  pb::TsoResponse* response,
+                                  google::protobuf::Closure* done);
 
     virtual void migrate(google::protobuf::RpcController* controller,
             const pb::MigrateRequest* /*request*/,
@@ -119,6 +125,7 @@ private:
     
     MetaStateMachine* _meta_state_machine = NULL;
     AutoIncrStateMachine* _auto_incr_state_machine = NULL;
+    TSOStateMachine*      _tso_state_machine = NULL;
     std::map<std::string, MetaServerInteract*> _meta_interact_map;
     Bthread _flush_bth;
     //region区间修改等信息应用raft
