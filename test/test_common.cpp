@@ -44,6 +44,10 @@ int main(int argc, char* argv[])
 
 namespace baikaldb {
 TEST(test_exmaple, case_all) {
+    int a = 10;
+    int& b = a;
+    int& c = b;
+    std::cout << &a << " " << &b << " " << &c << std::endl;
     boost::regex partion_key_pattern("[0-9.]+[eE][+-][0-9]+");
     boost::cmatch what;  
     auto aa = boost::regex_search("insert into user_acct (cop_userid, fc_userid) values (1123, 1.0E+7)", what, partion_key_pattern);

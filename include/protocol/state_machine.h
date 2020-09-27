@@ -55,6 +55,8 @@ const std::string SQL_SHOW_WARNINGS              = "show warnings";
 const std::string SQL_SHOW_REGION                = "show region";
 const std::string SQL_SHOW_SOCKET                = "show socket";
 const std::string SQL_SHOW_PROCESSLIST           = "show processlist";
+const std::string SQL_SHOW_META                  = "show meta";
+const std::string SQL_SHOW_NAMESPACE             = "show namespace";
 
 enum QUERY_TYPE {
     SQL_UNKNOWN_NUM                         = 0,

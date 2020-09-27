@@ -4106,7 +4106,6 @@ void Region::write_local_rocksdb_for_split() {
 
             ScopeGuard auto_fail_guard([path, this]() {
                 _split_param.err_code = -1;
-                start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
                 butil::DeleteFile(butil::FilePath(path), false);
             });
 
@@ -4163,22 +4162,24 @@ void Region::write_local_rocksdb_for_split() {
                 num_write_lines++;
             }
             s = writer->finish();
-            if (!s.ok()) {
-                DB_FATAL("finish sst file path: %s failed, err: %s, region_id: %ld, index %ld", 
-                        path.c_str(), s.ToString().c_str(), _region_id, index_id);
-                return;
-            }
             uint64_t file_size = writer->file_size();
-            int ret_data = RegionControl::ingest_data_sst(path, _region_id, true);
-            if (ret_data < 0) {
-                DB_FATAL("ingest sst fail, path:%s, region_id: %ld", path.c_str(), _region_id);
-                return;
+            if (num_write_lines > 0) {
+                if (!s.ok()) {
+                    DB_FATAL("finish sst file path: %s failed, err: %s, region_id: %ld, index %ld", 
+                            path.c_str(), s.ToString().c_str(), _region_id, index_id);
+                    return;
+                }
+                int ret_data = RegionControl::ingest_data_sst(path, _region_id, true);
+                if (ret_data < 0) {
+                    DB_FATAL("ingest sst fail, path:%s, region_id: %ld", path.c_str(), _region_id);
+                    return;
+                }
             }
-            auto_fail_guard.release();
             write_sst_lines += num_write_lines;
             if (index_info.type == pb::I_PRIMARY || _is_global_index) {
                 _split_param.reduce_num_lines = num_write_lines;
             }
+            auto_fail_guard.release();
             DB_WARNING("scan index:%ld, cost=%ld, file_size=%lu, lines=%ld, skip:%ld, region_id: %ld "
                     "level lines=[%ld,%ld,%ld]", 
                     index_id, cost.get_time(), file_size, num_write_lines, skip_write_lines, _region_id,
@@ -4254,6 +4255,7 @@ void Region::write_local_rocksdb_for_split() {
     }
     copy_bth.join();
     if (_split_param.err_code != 0) {
+        start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
         return;
     }
     DB_WARNING("region split success when write sst file to new region,"

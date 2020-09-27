@@ -26,6 +26,7 @@ DEFINE_int32(max_connections_per_user, 4000, "default user max connections");
 DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second");
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
 DECLARE_int64(print_time_us);
+DECLARE_string(meta_server_bns);
 
 void StateMachine::run_machine(SmartSocket client,
         EpollInfo* epoll_info,
@@ -1017,6 +1018,12 @@ bool StateMachine::_query_process(SmartSocket client) {
                         && boost::algorithm::istarts_with(
                                 client->query_ctx->sql, SQL_SHOW_VARIABLES)) {
                 ret = _handle_client_query_show_variables(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_META)) {
+                ret = _handle_client_query_template(client, "Meta", 
+                    MYSQL_TYPE_VARCHAR, FLAGS_meta_server_bns);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_NAMESPACE)) {
+                ret = _handle_client_query_template(client, "Namespace", MYSQL_TYPE_VARCHAR,
+                    client->user_info->namespace_);
             } else {
                 _wrapper->make_simple_ok_packet(client);
                 client->state = STATE_READ_QUERY_RESULT;

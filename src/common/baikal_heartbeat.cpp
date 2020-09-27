@@ -241,7 +241,7 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
             DB_NOTICE("skip region info table_id %lld", region_info.table_id());
             continue;
         }
-        auto region_info_move = region_info;
+        *rv.Add() = region_info;
     }
     factory->update_regions(rv);
     factory->update_show_db(response.db_info());
