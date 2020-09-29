@@ -89,9 +89,10 @@ enum IndexHint {
     
     double calc_field_selectivity(int32_t field_id, range::FieldRange& range);
 
-    double fields_to_selectivity(const std::unordered_set<int32_t>& field_ids);
+    double fields_to_selectivity(const std::unordered_set<int32_t>& field_ids, std::map<int32_t, double>& filed_selectivity);
     // TODO 后续做成index的统计信息，现在只是单列统计聚合
-    void calc_cost();
+    void calc_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity);
+    void show_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity);
 
     void insert_no_cut_condition(const std::map<ExprNode*, std::unordered_set<int32_t>>& expr_field_map) {
         for (auto& pair : expr_field_map) {

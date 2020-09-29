@@ -56,7 +56,7 @@ public:
         if (ret < 0) {
             return false;
         }
-        if (/*start_key.empty() &&*/end_key.empty()) {
+        if (/*start_key.empty() &&*/ end_key.empty()) {
             return false;
         }
         int64_t index_id = table_key.extract_i64(sizeof(int64_t));

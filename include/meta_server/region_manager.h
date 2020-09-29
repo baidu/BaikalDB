@@ -63,7 +63,7 @@ public:
     void pre_process_add_peer_for_store(const std::string& instance, pb::Status status,
             std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests);
     bool add_region_is_exist(int64_t table_id, const std::string& start_key, 
-                                            const std::string& end_key);
+                                            const std::string& end_key, int64_t partition_id);
     void check_update_region(const pb::BaikalHeartBeatRequest* request,
                 pb::BaikalHeartBeatResponse* response);
     void add_region_info(const std::vector<int64_t>& new_add_region_ids, 

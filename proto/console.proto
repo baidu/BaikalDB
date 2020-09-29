@@ -256,5 +256,6 @@ message ShowxResponse {
 service ConsoleService {
     rpc watch(ConsoleRequest) returns (ConsoleResponse);
     rpc showx(ShowxRequest) returns (ShowxResponse);
+    rpc sql_alarm(ShowxRequest) returns (ShowxResponse);
 };
 

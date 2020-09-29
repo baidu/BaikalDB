@@ -199,6 +199,7 @@ void AggNode::process_row_batch(RowBatch& batch) {
             // 以便于 select id,count(*) from t where id>1;这种sql时id不会时造出来的null
             if (_is_merger && _group_exprs.size() == 0) {
                 if (AggFnCall::all_is_initialize(_agg_fn_calls, *agg_row)) {
+                    delete cur_row;
                     continue;
                 }
             }

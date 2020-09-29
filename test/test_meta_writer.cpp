@@ -56,8 +56,9 @@ TEST_F(MetaWriterTest, test_encode) {
     ret = _writer->parse_region_infos(region_infos);
     ASSERT_EQ(1, region_infos.size());
     DB_WARNING("region_info: %s", region_infos[0].ShortDebugString().c_str());
-    
-    int64_t applied_index = _writer->read_applied_index(region_id);
+    int64_t applied_index = 0;
+    int64_t data_index = 0;
+    _writer->read_applied_index(region_id, &applied_index, &data_index);
     ASSERT_EQ(0, applied_index);
 
     int64_t num_table_lines = _writer->read_num_table_lines(region_id);
@@ -84,10 +85,10 @@ TEST_F(MetaWriterTest, test_encode) {
     ASSERT_EQ(ret, 0);
 
     //update_apply_index
-    ret = _writer->update_apply_index(region_id, 100);
+    ret = _writer->update_apply_index(region_id, 100, 80);
     ASSERT_EQ(ret, 0);
 
-    applied_index = _writer->read_applied_index(region_id);
+    _writer->read_applied_index(region_id, &applied_index, &data_index);
     ASSERT_EQ(100, applied_index);
 
     num_table_lines = _writer->read_num_table_lines(region_id);
@@ -102,9 +103,11 @@ TEST_F(MetaWriterTest, test_encode) {
         //write_batch, transcation_log_index
         rocksdb::WriteBatch batch;
         applied_index = 102;
+        data_index = 101;
         batch.Put(_writer->get_handle(), 
                     _writer->applied_index_key(region_id), 
-                    _writer->encode_applied_index(applied_index));
+                    _writer->encode_applied_index(applied_index, data_index)
+                    );
         
         uint64_t txn_id = 1;
         batch.Put(_writer->get_handle(), _writer->transcation_log_index_key(region_id,txn_id),
@@ -117,9 +120,10 @@ TEST_F(MetaWriterTest, test_encode) {
         //write_batch, transcation_log_index
         rocksdb::WriteBatch batch;
         int64_t applied_index = 101;
+        int64_t data_index = 101;
         batch.Put(_writer->get_handle(), 
                     _writer->applied_index_key(region_id), 
-                    _writer->encode_applied_index(applied_index));
+                    _writer->encode_applied_index(applied_index, data_index));
         
         uint64_t txn_id = 2;
         batch.Put(_writer->get_handle(), _writer->transcation_log_index_key(region_id,txn_id),
@@ -177,8 +181,8 @@ TEST_F(MetaWriterTest, test_encode) {
     ret = _writer->read_num_table_lines(region_id);
     ASSERT_EQ(ret, -1);
 
-    ret = _writer->read_applied_index(region_id);
-    ASSERT_EQ(ret, -1);
+    _writer->read_applied_index(region_id, &applied_index, &data_index);
+    ASSERT_EQ(applied_index, -1);
 }
 
 int main(int argc, char** argv) {

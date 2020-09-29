@@ -106,7 +106,10 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_UPDATE_DISTS:
     case pb::OP_MODIFY_RESOURCE_TAG: 
     case pb::OP_ADD_INDEX:
-    case pb::OP_DROP_INDEX: {
+    case pb::OP_DROP_INDEX: 
+    case pb::OP_LINK_BINLOG:
+    case pb::OP_UNLINK_BINLOG:
+    case pb::OP_SET_INDEX_HINT_STATUS:{
         if (!request->has_table_info()) { 
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
                     "no schema_info", request->op_type(), log_id);
@@ -460,11 +463,13 @@ int SchemaManager::load_snapshot() {
 int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* request,
             pb::MetaManagerResponse* response,
             uint64_t log_id) {
+    auto& table_info = const_cast<pb::SchemaInfo&>(request->table_info());
     int partition_num = 1;
     if (request->table_info().has_partition_num()) {
         partition_num = request->table_info().partition_num(); 
     }
     std::set<std::string> indexs_name;
+    std::string primary_index_name;
     //校验只有普通索引和uniq 索引可以设置全局属性
     for (auto& index_info : request->table_info().indexs()) {
         if (index_info.is_global() 
@@ -479,7 +484,22 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
                     "index name repeated", request->op_type(), log_id);
             return -1;
         }
+        if (index_info.index_type() == pb::I_PRIMARY || index_info.is_global()) {
+            primary_index_name = index_info.index_name();
+            DB_NOTICE("set primary index name %s", primary_index_name.c_str());
+        }
         indexs_name.insert(index_info.index_name());
+    }
+    // 分区表多region时，设置多split_key
+    if (table_info.has_region_num()) {
+        int32_t region_num = table_info.region_num();
+        if (region_num > 1) {
+            auto split_keys = table_info.add_split_keys();
+            split_keys->set_index_name(primary_index_name);
+            for (auto index = 1; index < region_num; ++index) {
+                split_keys->add_split_keys(std::string(index+1, 0x01));
+            }
+        }
     }
     //校验split_key是否有序
     int32_t total_region_count = 0;
@@ -582,9 +602,14 @@ int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* re
         return -1;
     }
     int64_t table_id = request->region_merge().table_id();
+
+    int64_t partition_id = 0;
+    if (request->region_merge().has_partition_id()) {
+        partition_id = request->region_merge().partition_id();
+    }
     int64_t dst_region_id = TableManager::get_instance()->get_next_region_id(
                         table_id, request->region_merge().src_start_key(), 
-                        request->region_merge().src_end_key());
+                        request->region_merge().src_end_key(), partition_id);
     if (dst_region_id <= 0) {
         DB_WARNING("can`t find dst merge region request: %s, src region id:%ld, log_id:%ld",
                  request->ShortDebugString().c_str(), src_region_id, log_id);

@@ -212,7 +212,6 @@ int Separate::separate_simple_select(QueryContext* ctx) {
         manager_node->steal_projections(packet_node->mutable_projections());
         manager_node->set_sub_query_node(packet_node->children(0));
         packet_node->clear_children();
-        manager_node->set_has_sub_query(true);
         FilterNode* filter_node = static_cast<FilterNode*>(plan->get_node(pb::WHERE_FILTER_NODE));
         if (filter_node != nullptr) {
             manager_node->add_child(filter_node->children(0));
@@ -365,11 +364,29 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& sca
         manager_node->steal_projections(packet_node->mutable_projections());
         manager_node->set_sub_query_node(packet_node->children(0));
         packet_node->clear_children();
-        manager_node->set_has_sub_query(true);
         manager_node.release();
     }
     return 0;
 }
+
+bool Separate::need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id) {
+    if (ctx->get_runtime_state()->single_sql_autocommit() && 
+        (ctx->enable_2pc 
+            || SchemaFactory::get_instance()->has_global_index(main_table_id)
+            || ctx->open_binlog)) {
+        return true;
+    }
+    return false;
+}
+
+bool Separate::need_separate_plan(QueryContext* ctx, const int64_t main_table_id) {
+    if (SchemaFactory::get_instance()->has_global_index(main_table_id) 
+        || ctx->open_binlog) {
+        return true;
+    }
+    return false;
+}
+
 int Separate::separate_insert(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
@@ -387,13 +404,13 @@ int Separate::separate_insert(QueryContext* ctx) {
     manager_node->init(pb_manager_node);
     manager_node->set_records(ctx->insert_records);
     int64_t main_table_id = insert_node->table_id();
-    if (SchemaFactory::get_instance()->has_global_index(main_table_id)) {
-        separate_global_insert(manager_node.get(), insert_node);
-    } else {
+    if (!need_separate_plan(ctx, main_table_id)) {
         manager_node->set_op_type(pb::OP_INSERT);
         manager_node->set_region_infos(insert_node->region_infos());
         manager_node->add_child(insert_node);
         manager_node->set_table_id(main_table_id);
+    } else {
+        separate_global_insert(manager_node.get(), insert_node);
     }
 
     if (ctx->sub_query_plans.size() > 0) {
@@ -403,17 +420,13 @@ int Separate::separate_insert(QueryContext* ctx) {
         ExecNode* sub_query_plan = sub_query_ctx->root;
         PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
         manager_node->steal_projections(packet_node->mutable_projections());
-        manager_node->add_child(packet_node->children(0));
+        manager_node->set_sub_query_node(packet_node->children(0));
         packet_node->clear_children();
-        manager_node->set_has_sub_query(true);
     }
 
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
-
-    if (ctx->get_runtime_state()->single_sql_autocommit() && 
-        (ctx->enable_2pc 
-            || SchemaFactory::get_instance()->has_global_index(main_table_id))) {
+    if (need_separate_single_txn(ctx, main_table_id)) {
         separate_single_txn(packet_node);
     }
     return 0;
@@ -550,7 +563,7 @@ int Separate::separate_update(QueryContext* ctx) {
         return -1;
     }
     int64_t main_table_id = update_node->table_id();
-    if (!SchemaFactory::get_instance()->has_global_index(main_table_id)) {
+    if (!need_separate_plan(ctx, main_table_id)) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_UPDATE);
         manager_node->set_region_infos(region_infos);
@@ -560,8 +573,7 @@ int Separate::separate_update(QueryContext* ctx) {
     }
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
-    if (ctx->get_runtime_state()->single_sql_autocommit() && 
-        (ctx->enable_2pc || SchemaFactory::get_instance()->has_global_index(main_table_id))) {
+    if (need_separate_single_txn(ctx, main_table_id)) {
         separate_single_txn(packet_node);
     }
     return 0;
@@ -582,18 +594,17 @@ int Separate::separate_delete(QueryContext* ctx) {
         return -1;
     }
     manager_node->init(pb_manager_node);
-    if (SchemaFactory::get_instance()->has_global_index(main_table_id)) {
-        separate_global_delete(manager_node.get(), delete_node, scan_nodes[0]);
-    } else {
+    if (!need_separate_plan(ctx, main_table_id)) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_DELETE);
         manager_node->set_region_infos(region_infos);
-        manager_node->add_child(packet_node->children(0));
+        manager_node->add_child(packet_node->children(0));       
+    } else {
+        separate_global_delete(manager_node.get(), delete_node, scan_nodes[0]);
     }
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
-    if (ctx->get_runtime_state()->single_sql_autocommit() &&
-        (ctx->enable_2pc || SchemaFactory::get_instance()->has_global_index(main_table_id))) {
+    if (need_separate_single_txn(ctx, main_table_id)) {
         separate_single_txn(packet_node);
     }
     return 0;

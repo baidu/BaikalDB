@@ -26,7 +26,8 @@ class MetaWriter;
 // TODO: remove locking for thread-safe codes
 class TransactionPool {
 public:
-    virtual ~TransactionPool() {}
+    virtual ~TransactionPool() {
+    }
 
     void close() {
         std::unique_lock<std::mutex> lock(_map_mutex);
@@ -44,7 +45,7 @@ public:
     // -1 means insert error (already exists)
     int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id);
 
-    void remove_txn(uint64_t txn_id);
+    void remove_txn(uint64_t txn_id, bool mark_finished = true);
 
     SmartTransaction get_txn(uint64_t txn_id) {
         std::unique_lock<std::mutex> lock(_map_mutex);
@@ -55,7 +56,6 @@ public:
     }
     // -1 not found;
     int get_finished_txn_affected_rows(uint64_t txn_id) {
-
         std::unique_lock<std::mutex> lock(_map_mutex);
         if (_finished_txn_map.read()->count(txn_id) == 1) {
             return _finished_txn_map.read()->at(txn_id);
@@ -94,26 +94,15 @@ public:
 
     void on_leader_start_recovery(Region* region);
 
-    int on_shutdown_recovery(
-            std::vector<rocksdb::Transaction*>& recovered_txns,
-            std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn);
+    void get_prepared_txn_info(std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn);
 
-    // int on_crash_recovery(
-    //         std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn);
-
-    // get transaction info (num_increase_rows and seq_id) for all prepared txns 
-    // on shutdown gracefully. used for txn recovery on graceful shutdown
-    //std::unordered_map<uint64_t, PreparedTxnInfo> get_prepared_txn_info();
-    void get_prepared_txn_info(
-            std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn,
-            bool graceful_shutdown);
-
-    void update_txn_num_rows_after_split(const pb::TransactionInfo& txn_info);
+    void update_txn_num_rows_after_split(const std::vector<pb::TransactionInfo>& txn_infos);
 
     void txn_query_primary_region(SmartTransaction txn, Region* region, pb::RegionInfo& region_info);
-    void txn_commit_through_raft(SmartTransaction txn, pb::RegionInfo& region_info, pb::OpType op_type);
+    bool txn_commit_through_raft(SmartTransaction txn, pb::RegionInfo& region_info, pb::OpType op_type);
     void get_txn_state(const pb::StoreReq* request, pb::StoreRes* response);
-    void read_only_txn_process(SmartTransaction txn, pb::OpType op_type, bool optimize_1pc);
+    void read_only_txn_process(int64_t region_id, SmartTransaction txn, pb::OpType op_type, bool optimize_1pc);
+    int get_region_info_from_meta(int64_t region_id, pb::RegionInfo& region_info);
     //清空所有的状态
     void clear();
 private:

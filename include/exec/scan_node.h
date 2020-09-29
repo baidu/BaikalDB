@@ -88,6 +88,7 @@ public:
         ExecNode::find_place_holder(placeholders);
     }
 
+    void show_cost(std::vector<std::map<std::string, std::string>>& path_infos);
     int64_t select_index(); 
     int64_t select_index_by_cost(); 
     int64_t select_index_in_baikaldb();
@@ -96,7 +97,8 @@ public:
 
     void add_access_path(const SmartPath& access_path) {
         //如果使用倒排索引，则不使用代价进行索引选择
-        if (access_path->index_type == pb::I_FULLTEXT && access_path->is_possible == true) {
+        if ((access_path->index_type == pb::I_FULLTEXT || access_path->index_type == pb::I_RECOMMEND) 
+            && access_path->is_possible) {
             _use_fulltext = true;
         }
         _paths[access_path->index_id] = access_path;
@@ -105,6 +107,15 @@ public:
     size_t access_path_size() const {
         return _paths.size();
     }
+
+    bool full_coverage(const std::unordered_set<int32_t>& smaller, const std::unordered_set<int32_t>& bigger);
+
+    int compare_two_path(SmartPath outer_path, SmartPath inner_path);
+
+    void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
+
+// 两两比较，根据一些简单规则干掉次优索引
+    int64_t pre_process_select_index();
     
 protected:
     pb::Engine _engine = pb::ROCKSDB;
@@ -117,6 +128,9 @@ protected:
     pb::PossibleIndex* _router_index = nullptr;
     bool _is_covering_index = true;
     bool _use_fulltext = false;
+    int32_t _possible_index_cnt = 0;
+    int32_t _cover_index_cnt = 0;
+    std::map<int32_t, double> _filed_selectiy; //缓存，避免重复的filed_id多次调用代价接口
 };
 }
 

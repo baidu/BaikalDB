@@ -36,7 +36,7 @@ public:
         _type(type), _field_id(field_id), _distinct_cnt(distinct_cnt), _null_value_cnt(null_value_cnt), 
         _bucket_mapping([](const ExprValue& a, const ExprValue& b) { 
             int64_t k = a.compare(b);
-            return k > 0 ? false : true;}) {}
+            return k >= 0 ? false : true;}) {}
 
     void add_proto(const pb::ColumnInfo& column_info) {
         for (auto& bucket_pb : column_info.bucket_infos()) {
@@ -68,53 +68,83 @@ public:
     }
 
     double calc_diff(const ExprValue& start, const ExprValue& end, int prefix_len) {
-        double ret = end.float_value(prefix_len) - start.float_value(prefix_len);
+        ExprValue tmp_start = start;
+        ExprValue tmp_end = end;
+        double ret = tmp_end.float_value(prefix_len) - tmp_start.float_value(prefix_len);
+        DB_DEBUG("start:%s, end:%s, prefix_len:%d, ret:%f", 
+               start.get_string().c_str(),end.get_string().c_str(), prefix_len, ret);
         return ret;
     }
 
     double calc_fraction(const ExprValue& start, const ExprValue& end, 
         const ExprValue& value) {
         int prefix_len = start.common_prefix_length(end);
-        double ret = (value.float_value(prefix_len) - start.float_value(prefix_len)) / 
-            (end.float_value(prefix_len) - start.float_value(prefix_len));
+        ExprValue tmp_start = start;
+        ExprValue tmp_end = end;
+        ExprValue tmp_value = value;
+        double ret = (tmp_value.float_value(prefix_len) - tmp_start.float_value(prefix_len)) / 
+            (tmp_end.float_value(prefix_len) - tmp_start.float_value(prefix_len));
+        DB_DEBUG("value:%s, start:%s, end:%s, prefix_len:%d, ret:%f", 
+               value.get_string().c_str(), start.get_string().c_str(),end.get_string().c_str(), prefix_len, ret);
         return ret;
     }
 
     int32_t calc_scalar(const ExprValue& lower, const ExprValue& upper, 
         std::shared_ptr<BucketInfo> bucket_ptr) {
+        int32_t count = 0;
+        double ratio = 0.0;
+        double distinct_1 = 1.0 / bucket_ptr->distinct_cnt;
         if (lower.compare(bucket_ptr->start) <= 0 && upper.compare(bucket_ptr->end) >= 0) {
-            return bucket_ptr->bucket_size;
+            count = bucket_ptr->bucket_size;
         } else if (lower.compare(bucket_ptr->end) > 0 || upper.compare(bucket_ptr->start) < 0) {
-            return 0;
+            count = 0;
         } else if (lower.compare(bucket_ptr->start) <= 0) {
-            return floor(bucket_ptr->bucket_size * calc_fraction(bucket_ptr->start, bucket_ptr->end, upper));
+            ratio = calc_fraction(bucket_ptr->start, bucket_ptr->end, upper);
+            ratio = ratio > 1.0 ? 1.0 : ratio;
+            ratio = ratio < distinct_1 ? distinct_1 : ratio;
+            count = ceil(bucket_ptr->bucket_size * ratio);
         } else if (upper.compare(bucket_ptr->end) >= 0) {
-            return floor(bucket_ptr->bucket_size * (1 - calc_fraction(bucket_ptr->start, bucket_ptr->end, lower)));
+            ratio = calc_fraction(bucket_ptr->start, bucket_ptr->end, lower);
+            ratio = ratio > 1.0 ? 1.0 : ratio;
+            ratio = ratio < distinct_1 ? distinct_1 : ratio;
+            count =  ceil(bucket_ptr->bucket_size * (1.0 - ratio));
         } else {
-            return floor(bucket_ptr->bucket_size 
-                        * (calc_fraction(bucket_ptr->start, bucket_ptr->end, upper) - calc_fraction(bucket_ptr->start, bucket_ptr->end, lower)));
+            ratio = calc_fraction(bucket_ptr->start, bucket_ptr->end, upper) - calc_fraction(bucket_ptr->start, bucket_ptr->end, lower);
+            ratio = ratio > 1.0 ? 1.0 : ratio;
+            ratio = ratio < distinct_1 ? distinct_1 : ratio;
+            count =  ceil(bucket_ptr->bucket_size * ratio);
         }
-        return 0;
+        if (count < 0) {
+            count = 0;
+        }
+        DB_DEBUG("tmp_lower:%s, tmp_upper%s,start:%s, end:%s, count:%d", 
+               lower.get_string().c_str(), upper.get_string().c_str(),
+               bucket_ptr->start.get_string().c_str(),bucket_ptr->end.get_string().c_str(), count);
+        return count;
     }
 
-    double get_histogram_ratio_dummy(const ExprValue& lower, const ExprValue& upper) {
+    double get_histogram_ratio_dummy(const ExprValue& lower, const ExprValue& upper, int64_t sample_rows) {
         if (_bucket_mapping.size() <= 0) {
             return 1.0;
         }
 
-        ExprValue tmp_lower = lower;
-        ExprValue tmp_upper = upper;
         if (lower.is_null()) {
-            auto it = _bucket_mapping.begin();
-            tmp_lower = it->second->start;
+            return _bucket_mapping.begin()->second->bucket_size * 1.0 / sample_rows;
         }
 
         if (upper.is_null()) {
-            auto it = _bucket_mapping.rbegin();
-            tmp_upper = it->second->end;
+            return _bucket_mapping.rbegin()->second->bucket_size * 1.0 / sample_rows;
         }
+
         ExprValue start = _bucket_mapping.begin()->second->start;
         ExprValue end   = _bucket_mapping.rbegin()->second->end;
+        if (lower.compare(_bucket_mapping.rbegin()->second->end) > 0) {
+            end = upper;
+        }
+        if (upper.compare(_bucket_mapping.begin()->second->start) < 0) {
+            start = lower;
+        }
+
         int prefix_len = start.common_prefix_length(end);
         double ret = calc_diff(lower, upper, prefix_len) / calc_diff(start, end, prefix_len);
         return ret > 1.0 ? 1.0 : ret;
@@ -122,7 +152,7 @@ public:
 
     //为避免无效值：lower is_null时取最小值；upper is_null时取最大值
     int32_t get_count(const ExprValue& lower, const ExprValue& upper) {
-        if (_bucket_mapping.size() <= 0) {
+        if (_bucket_mapping.empty()) {
             return -1;
         }
 
@@ -139,8 +169,11 @@ public:
         }
 
         //超出取值范围返-2，上层需要特殊处理
-        if (lower.compare(_bucket_mapping.rbegin()->second->end) > 0 
-           || upper.compare(_bucket_mapping.begin()->second->start) < 0) {
+        if (tmp_lower.compare(_bucket_mapping.rbegin()->second->end) > 0 
+           || tmp_upper.compare(_bucket_mapping.begin()->second->start) < 0) {
+               DB_DEBUG("tmp_lower:%s, tmp_upper%s,start:%s, end:%s", 
+               tmp_lower.get_string().c_str(), tmp_upper.get_string().c_str(),
+               _bucket_mapping.begin()->second->start.get_string().c_str(),_bucket_mapping.rbegin()->second->end.get_string().c_str());
             return -2;
         }
 
@@ -157,6 +190,40 @@ public:
 
         return count;
     }
+
+    int32_t get_count(const ExprValue& value) {
+        if (_bucket_mapping.empty()) {
+            return -1;
+        }
+
+        if (value.is_null()) {
+            return -1;
+        }
+
+        if (value.compare(_bucket_mapping.rbegin()->second->end) > 0
+            || value.compare(_bucket_mapping.begin()->second->start) < 0) {
+            DB_DEBUG("value:%s, start:%s, end:%s", value.get_string().c_str(), _bucket_mapping.begin()->second->start.get_string().c_str(),_bucket_mapping.rbegin()->second->end.get_string().c_str());
+            return -2;
+        }
+
+        // 找到第一个大于value的值
+        auto iter = _bucket_mapping.upper_bound(value);
+        if (iter != _bucket_mapping.begin()) {
+            --iter;
+            if (value.compare(iter->second->end) > 0
+                || value.compare(iter->second->start) < 0) {
+                DB_DEBUG("value:%s, start:%s, end:%s", value.get_string().c_str(), iter->second->start.get_string().c_str(),iter->second->end.get_string().c_str());
+                return -2;
+            }
+            if (iter->second->distinct_cnt == 0) {
+                return -1;
+            } else {
+                return iter->second->bucket_size / iter->second->distinct_cnt;
+            }
+        } else {
+            return -2;
+        }
+    } 
 
 private:
     pb::PrimitiveType _type;
@@ -179,18 +246,22 @@ public:
         return _sorter->get_next(batch, eos);
     }
 
+    
     void insert_row(MemRow* row);
 
     void packet_column(pb::ColumnInfo* column_info);
 
+
+    void insert_done();
 private:
+    void insert_distinct_value(const ExprValue& value, const int& cnt);
     std::vector<ExprNode*> _slot_order_exprs;
     std::vector<bool> _is_asc;
     std::vector<bool> _is_null_first;
     std::shared_ptr<MemRowCompare> _mem_row_compare = nullptr;
     std::shared_ptr<Sorter> _sorter = nullptr;
-    MemRow* _pre_row = nullptr;
-    MemRow* _cur_row = nullptr;
+    ExprValue _cur_value;
+    int _cur_value_cnt = 0;
     std::vector<BucketInfo> _bucket_infos;
     int _distinct_cnt_total = 0;
     int _null_value_cnt = 0;
@@ -233,6 +304,8 @@ public:
                 batch->reset();
                 _batch_vector.push_back(batch);
             } while (!eos);
+
+            sample_sorter.insert_done();
 
             sample_sorter.packet_column(column_info);
             i++;

@@ -14,6 +14,7 @@
 
 #include "delete_manager_node.h"
 #include "network_socket.h"
+#include "binlog_context.h"
 
 namespace baikaldb {
 int DeleteManagerNode::open(RuntimeState* state) {
@@ -109,6 +110,20 @@ int DeleteManagerNode::open_global_delete(RuntimeState* state) {
         }
         iter = _children.erase(iter);
     }
+    if (state->open_binlog() && _table_info->is_linked) {
+        auto client = state->client_conn();
+        auto binlog_ctx = client->get_binlog_ctx();
+        pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
+        auto mutation = binlog_value->add_mutations();
+        for (auto& record : _del_scan_records) {
+            std::string* row = mutation->add_deleted_rows();
+            record->encode(*row);
+        }
+        mutation->add_sequence(pb::MutationType::DELETE);
+        mutation->set_table_id(_table_id);
+        binlog_ctx->set_table_info(_table_info);
+        binlog_ctx->set_partition_record(_del_scan_records[0]);
+    } 
     return affected_rows;
 }
 

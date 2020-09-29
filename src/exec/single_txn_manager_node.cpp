@@ -45,7 +45,7 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
     }
     _children.erase(_children.begin());
     //没有全局二级索引的情况下，dmlmanagerNode下的dmlNode直接cache,不执行
-    if (dml_manager_node->children_size() <= 1) {
+    if (dml_manager_node->children_size() <= 1 && !state->open_binlog()) {
         client_conn->seq_id++;
         //dml请求放入cache, 同时更新client_conn上的region_info信息
         state->client_conn()->region_infos = dml_manager_node->region_infos();
@@ -56,6 +56,7 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
     } else {
         has_global_index = true;
         ret = dml_manager_node->open(state);
+        affected_rows = ret;
     }
     if (ret < 0) {
         DB_WARNING_STATE(state, "TransactionNote: exec dml_node fail: log_id: %lu, txn_id: %lu, ",
@@ -64,11 +65,11 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
         ret = exec_rollback_node(state, rollback_node);
         return -1;
     }
-    affected_rows = ret;
     //prepare指令执行真正的发送动作，将begin和dml作为缓存的cache发送到store上
     client_conn->seq_id++;
     if (!has_global_index) {
         ret = exec_prepared_node(state, prepared_node, 1);
+        affected_rows = ret;
     } else {
         ret = exec_prepared_node(state, prepared_node, client_conn->seq_id);
     }
@@ -83,14 +84,16 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
     if (state->optimize_1pc() == false) {
         client_conn->seq_id++;
         ret = exec_commit_node(state, commit_node);
-        if (ret >=0 && has_global_index) {
-             return affected_rows;
+        if (ret < 0) {
+            DB_WARNING("TransactionNote: commit failed: log_id: %lu, txn_id: %lu, ",
+                log_id, state->txn_id);
+            ret = exec_rollback_node(state, rollback_node);
+            return -1;
         }
-        return ret;
     } else {
         DB_WARNING("TransactionNote: optimize_1pc, no commit: log_id: %lu, txn_id: %lu, ",
                 log_id, state->txn_id);
-        return ret;
     }
+    return affected_rows;
 }
 }

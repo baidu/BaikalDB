@@ -111,35 +111,36 @@ struct ExprValue {
         return min_len;
     }
 
-    float float_value(int prefix_len) const {
+    double float_value(int prefix_len) {
         uint64_t val = 0;
         switch (type) {
             case pb::BOOL:
-                return static_cast<float>(_u.bool_val);
+                return static_cast<double>(_u.bool_val);
             case pb::INT8:
-                return static_cast<float>(_u.int8_val);
+                return static_cast<double>(_u.int8_val);
             case pb::INT16:
-                return static_cast<float>(_u.int16_val);
+                return static_cast<double>(_u.int16_val);
             case pb::INT32:
-            case pb::TIME:
-                return static_cast<float>(_u.int32_val);
+                return static_cast<double>(_u.int32_val);
             case pb::INT64:
-                return static_cast<float>(_u.int64_val);
+                return static_cast<double>(_u.int64_val);
             case pb::UINT8:
-                return static_cast<float>(_u.uint8_val);
+                return static_cast<double>(_u.uint8_val);
             case pb::UINT16:
-                return static_cast<float>(_u.uint16_val );
+                return static_cast<double>(_u.uint16_val );
             case pb::UINT32:
             case pb::TIMESTAMP:
-            case pb::DATE:
-                return static_cast<float>(_u.uint32_val);
+                return static_cast<double>(_u.uint32_val);
             case pb::UINT64:
-            case pb::DATETIME:
-                return static_cast<float>(_u.uint64_val);
+                return static_cast<double>(_u.uint64_val);
             case pb::FLOAT:
-                return _u.float_val;
+                return static_cast<double>(_u.float_val);
             case pb::DOUBLE:
-                return static_cast<float>(_u.double_val);
+                return _u.double_val;
+            case pb::TIME:
+            case pb::DATE:
+            case pb::DATETIME:
+                return static_cast<double>(cast_to(pb::TIMESTAMP)._u.uint32_val);
             case pb::STRING:
             case pb::HEX:
                 if (prefix_len >= (int)str_val.size()) {
@@ -152,7 +153,7 @@ struct ExprValue {
                         val += val << 8;
                     }
                 }
-                return static_cast<float>(val);
+                return static_cast<double>(val);
             default:
                 return 0.0;
         }

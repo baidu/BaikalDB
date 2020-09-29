@@ -16,6 +16,7 @@
 #include "network_socket.h"
 #include "query_context.h"
 #include "exec_node.h"
+#include "binlog_context.h"
 
 namespace baikaldb {
 static UserInfo dummy;
@@ -130,6 +131,26 @@ bool NetworkSocket::transaction_has_write() {
     return false;
 }
 
+bool NetworkSocket::need_send_binlog() {
+    if (!open_binlog) {
+        return false;
+    }
+    for (auto& pair : cache_plans) {
+        pb::OpType type = pair.second.op_type;
+        if (type == pb::OP_INSERT || type == pb::OP_DELETE || type == pb::OP_UPDATE) {
+            return true;
+        }
+    }
+    return false;    
+}
+
+SmartBinlogContext NetworkSocket::get_binlog_ctx() {
+    if (binlog_ctx == nullptr) {
+        binlog_ctx.reset(new BinlogContext);
+    }
+    return binlog_ctx;
+}
+
 void NetworkSocket::on_begin(uint64_t txn_id) {
     this->txn_id = txn_id;
     this->primary_region_id = -1;
@@ -140,6 +161,7 @@ void NetworkSocket::on_commit_rollback() {
     txn_id = 0;
     new_txn_id = 0;
     seq_id = 0;
+    open_binlog = false;
     need_rollback_seq.clear();
     //multi_state_txn = !autocommit;
     for (auto& pair : cache_plans) {
@@ -147,6 +169,7 @@ void NetworkSocket::on_commit_rollback() {
     }
     cache_plans.clear();
     region_infos.clear();
+    binlog_ctx.reset();
 }
 
 void NetworkSocket::update_old_txn_info() {

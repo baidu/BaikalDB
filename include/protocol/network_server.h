@@ -23,6 +23,7 @@
 #include "schema_factory.h"
 #include "common.h"
 #include "meta_server_interact.hpp"
+#include "baikal_heartbeat.h"
 
 namespace baikaldb {
 class NetworkServer {
@@ -51,27 +52,20 @@ public:
     EpollInfo* get_epoll_info() {
         return _epoll_info;
     }
-    
-    static uint8_t transaction_prefix;
 
 private:
     // For instance.
     NetworkServer();
     NetworkServer& operator=(const NetworkServer& other);
-
     bool set_fd_flags(int fd);
     SmartSocket create_listen_socket();
-    int make_worker_process();
-    void construct_heart_beat_request(pb::BaikalHeartBeatRequest& request);
-    void process_heart_beat_response(const pb::BaikalHeartBeatResponse& response);
-    void process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response);
     void construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request);
     void process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response);
 
     std::string state2str(SmartSocket client);
 
     int fetch_instance_info();
-
+    int make_worker_process();
     void connection_timeout_check();
     void report_heart_beat();
     void report_other_heart_beat();
@@ -82,7 +76,6 @@ private:
     void fill_field_info(int64_t table_id, std::map<int64_t, int>& distinct_field_map, 
         std::string type, std::ostringstream& os);
     void print_agg_sql();
-    void recovery_transactions();
     
 private:
     // Server info.
@@ -92,9 +85,6 @@ private:
     // Socket info.
     SmartSocket     _service = nullptr;  // Server socket.
     EpollInfo*      _epoll_info = nullptr;      // Epoll info and fd mapping.
-    
-    RocksWrapper*   _meta_db = nullptr;
-    rocksdb::ColumnFamilyHandle* _meta_handle = nullptr;
 
     // the last action time for each thread
     std::vector<ThreadTimeStamp> _last_time;
@@ -105,7 +95,5 @@ private:
     Bthread         _agg_sql_bth;
     uint32_t        _driver_thread_num;
     uint64_t        _instance_id = 0;
-
 };
-
 } // namespace baikal

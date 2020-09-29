@@ -225,8 +225,9 @@ protected:
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用
     std::unordered_set<int64_t> _index_ids;
     
-private:
+public:
     static int create_expr_node(const pb::ExprNode& node, ExprNode** expr_node);
+private:
     static int create_tree(const pb::Expr& expr, int* idx, ExprNode* parent, ExprNode** root);
 };
 }

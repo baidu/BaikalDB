@@ -79,6 +79,8 @@ private:
 
     TransactionNode* create_txn_node(pb::TxnCmdType cmd_type);
     SelectManagerNode* create_select_manager_node();
+    bool need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id);
+    bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id);
 };
 }
 

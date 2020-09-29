@@ -32,11 +32,18 @@ public:
         for (auto expr : _derived_table_projections) {
             ExprNode::destroy_tree(expr);
         }
+        if (_sub_query_node != nullptr) {
+            delete _sub_query_node;
+            _sub_query_node = nullptr;
+        }
     }
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state) {
         ExecNode::close(state);
+        if (_sub_query_node != nullptr) {
+            _sub_query_node->close(state);
+        }
         for (auto expr : _derived_table_projections) {
             expr->close();
         }
@@ -57,10 +64,6 @@ public:
                           RuntimeState* state,
                           ExecNode* exec_node,
                           int64_t main_table_id);
-
-    void set_has_sub_query(bool flag) {
-        _has_sub_query = flag;
-    }
 
     void set_sub_query_runtime_state(RuntimeState* state) {
         _sub_query_runtime_state = state;
@@ -91,7 +94,6 @@ private:
     FetcherStore    _fetcher_store;
     std::map<int32_t, int32_t> _index_slot_field_map;
     SchemaFactory*  _factory = nullptr;
-    bool            _has_sub_query = false;
     RuntimeState*   _sub_query_runtime_state = nullptr;
     ExecNode*       _sub_query_node = nullptr;
     std::vector<ExprNode*>  _derived_table_projections;

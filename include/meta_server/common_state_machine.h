@@ -38,6 +38,22 @@ struct MetaServerClosure : public braft::Closure {
     TimeCost time_cost;
 };
 
+struct TsoClosure : public braft::Closure {
+    TsoClosure() : sync_cond(nullptr) {};
+    TsoClosure(BthreadCond* cond) : sync_cond(cond) {};
+    virtual void Run();
+    
+    brpc::Controller* cntl;
+    CommonStateMachine* common_state_machine;
+    google::protobuf::Closure* done;
+    pb::TsoResponse* response;
+    int64_t raft_time_cost;
+    int64_t total_time_cost;
+    TimeCost time_cost;
+    bool is_sync = false;
+    BthreadCond* sync_cond;
+};
+
 struct ApplyraftClosure : public google::protobuf::Closure {
     virtual void Run() {
         cond.decrease_signal();
@@ -69,7 +85,16 @@ public:
                           const pb::RaftControlRequest* request,
                           pb::RaftControlResponse* response,
                           google::protobuf::Closure* done) {
-        common_raft_control(controller, request, response, done, &_node);
+        brpc::ClosureGuard done_guard(done);
+        if (!is_leader() && !request->force()) {
+            DB_WARNING("node is not leader when raft control, region_id: %ld", request->region_id());
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_region_id(request->region_id());
+            response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str());
+            response->set_errmsg("not leader");
+            return;
+        }
+        common_raft_control(controller, request, response, done_guard.release(), &_node);
     }
     virtual void process(google::protobuf::RpcController* controller,
                  const pb::MetaManagerRequest* request,
@@ -110,20 +135,27 @@ public:
         _node.join();
         DB_WARNING("raft node join completely");
     }
+    void start_check_bns();
     virtual bool is_leader() const {
         return _is_leader;
+    }
+    bool have_data() {
+        return _have_data;
+    }
+    void set_have_data(bool flag) {
+         _have_data = flag;
     }
 private:
     virtual int send_set_peer_request(bool remove_peer, const std::string& change_peer);
 protected:
     braft::Node          _node;
     std::atomic<bool>   _is_leader;
-private:
     int64_t             _dummy_region_id;
     std::string         _file_path;
-
+private:
     Bthread             _check_migrate;
     bool                _check_start = false;
+    bool                _have_data = false;
 };
 
 } //namespace baikaldb

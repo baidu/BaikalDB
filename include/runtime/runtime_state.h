@@ -79,7 +79,7 @@ public:
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool,
-        bool store_compute_separate);
+        bool store_compute_separate, bool is_binlog_region = false);
 
     // baikaldb init
     int init(QueryContext* ctx, DataBuffer* send_buf);
@@ -290,6 +290,15 @@ public:
     void set_eos() {
         _eos = true;
     }
+
+    bool open_binlog() {
+        return _open_binlog;
+    }
+
+    void set_open_binlog(bool flag) {
+        _open_binlog = flag;
+    }
+
     std::vector<TraceTimeCost>* get_trace_cost() {
         return &_trace_cost_vec;
     } 
@@ -322,6 +331,7 @@ private:
     bool _is_inited    = false;
     bool _is_cancelled = false;
     bool _eos          = false;
+    bool _open_binlog  = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
     MemRowDescriptor _mem_row_desc;
     int64_t          _region_id = 0;

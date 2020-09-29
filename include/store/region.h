@@ -68,6 +68,43 @@ struct StatisticsInfo {
     int64_t time_cost_sum;
     int64_t end_time_us;
 };
+
+enum BinlogType {
+    PREWRITE_BINLOG,
+    COMMIT_BINLOG,
+    ROLLBACK_BINLOG,
+    FAKE_BINLOG
+};
+
+inline const char* binlog_type_name(const BinlogType type) {
+    if (type == PREWRITE_BINLOG) {
+        return "PREWRITE_BINLOG";
+    } else if (type == COMMIT_BINLOG) {
+        return "COMMIT_BINLOG";
+    } else if (type == ROLLBACK_BINLOG) {
+        return "ROLLBACK_BINLOG";
+    } else {
+        return "FAKE_BINLOG";
+    }
+}
+
+struct BinlogDesc {
+    int64_t primary_region_id = 0;
+    int64_t txn_id;
+    BinlogType binlog_type;
+    TimeCost time;
+};
+
+struct ApproximateInfo {
+    int64_t table_lines = 0;
+    uint64_t region_size = 0;
+    //上次分裂的大小，分裂后不做compaction，则新的大小不会变化
+    //TODO：是否持久化存储，重启后，新老大小差不多则可以做compaction
+    uint64_t last_version_region_size = 0;
+    uint64_t last_version_table_lines = 0;
+    TimeCost time_cost;
+};
+
 class region;
 class ScopeProcStatus {
 public:
@@ -105,6 +142,7 @@ public:
             delete pair.second;
         }
         bthread_mutex_destroy(&_commit_meta_mutex);
+        bthread_mutex_destroy(&_commit_ts_map_lock);
     }
 
     void shutdown() {
@@ -123,6 +161,9 @@ public:
         DB_WARNING("_multi_thread_cond wait success, region_id: %ld", _region_id);
         _txn_pool.close();
     }
+    void get_node_status(braft::NodeStatus* status) { 
+        _node.get_status(status);
+    } 
 
     Region(RocksWrapper* rocksdb, 
             SchemaFactory*  factory,
@@ -149,10 +190,14 @@ public:
                 _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)){
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
         bthread_mutex_init(&_commit_meta_mutex, NULL);
+        bthread_mutex_init(&_commit_ts_map_lock, NULL);
         _region_control.store_status(_region_info.status());
-        _is_global_index = _region_info.has_main_table_id() && 
-            _region_info.main_table_id() != 0 && 
-            region_info.table_id() != _region_info.main_table_id();
+        _is_global_index = _region_info.has_main_table_id() &&
+                   _region_info.main_table_id() != 0 &&
+                   region_info.table_id() != _region_info.main_table_id();
+        if (_region_info.has_is_binlog_region()) {
+            _is_binlog_region = _region_info.is_binlog_region();
+        }
     }
 
     int init(bool new_region, int32_t snapshot_times);
@@ -174,7 +219,12 @@ public:
             const pb::StoreReq* request,
             pb::StoreRes* response,
             google::protobuf::Closure* done);
-     
+
+    void query_binlog(google::protobuf::RpcController* controller,
+        const pb::StoreReq* request,
+        pb::StoreRes* response,
+        google::protobuf::Closure* done); 
+
     void dml(const pb::StoreReq& request, 
             pb::StoreRes& response,
             int64_t applied_index, 
@@ -242,6 +292,13 @@ public:
         return _region_control;
     }
 
+    void remove_readonly_txn(Transaction* txn) {
+        if (txn->seq_id() == 1) {
+            DB_WARNING("region_id:%ld txn_id: %lu need rollback", _region_id, txn->txn_id());
+            _txn_pool.remove_txn(txn->txn_id(), false);
+        }
+    }
+
     void add_peer(const pb::AddPeer* request,  
             pb::StoreRes* response, 
             google::protobuf::Closure* done) {
@@ -266,6 +323,7 @@ public:
 
     int clear_data();
     void compact_data_in_queue();
+    int ingest_snapshot_sst(const std::string& dir); 
     int ingest_sst(const std::string& data_sst_file, const std::string& meta_sst_file); 
     // other thread
     void reverse_merge();
@@ -386,6 +444,16 @@ public:
         std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.end_key();
     }
+    int64_t get_partition_num() {
+        std::lock_guard<std::mutex> lock(_region_lock);
+        if (_region_info.has_partition_num()) {
+            return _region_info.partition_num();
+        }
+        return 1;
+    }
+    rocksdb::Range get_rocksdb_range() {
+        return rocksdb::Range(_rocksdb_start, _rocksdb_end);
+    }
     bool is_merged() {
         std::lock_guard<std::mutex> lock(_region_lock);
         if (!_region_info.start_key().empty()) {
@@ -396,6 +464,9 @@ public:
     int64_t get_log_index() const {
         return _applied_index;
     }
+    int64_t get_data_index() const {
+        return _data_index;
+    }
     int64_t get_log_index_lastcycle() const {
         return _applied_index_lastcycle;
     }
@@ -403,8 +474,11 @@ public:
         _applied_index_lastcycle = _applied_index;
         _lastcycle_time_cost.reset();
     } 
-    int64_t get_lastcycle_timecost() {
+    int64_t get_lastcycle_timecost() const {
         return _lastcycle_time_cost.get_time();
+    }   
+    int64_t get_last_split_time_cost() const {
+        return _last_split_time_cost.get_time();
     }   
     rocksdb::ColumnFamilyHandle* get_data_cf() const {
         return _data_cf;
@@ -448,6 +522,16 @@ public:
         }
         return false;
     }
+
+    bool compare_and_set_legal_for_split() {
+        std::unique_lock<std::mutex> lock(_legal_mutex);
+        if (_legal_region) {
+            _region_info.set_version(1);
+            DB_WARNING("compare and set split verison to 1, region_id: %ld", _region_id);
+            return true;
+        }
+        return false;
+    }
     bool compare_and_set_legal() {
         std::unique_lock<std::mutex> lock(_legal_mutex);
         if (_legal_region) {
@@ -455,6 +539,7 @@ public:
         }
         return false;
     }
+    
     int64_t get_num_table_lines() {
         return _num_table_lines.load();
     }
@@ -493,6 +578,7 @@ public:
     bool removed() const {
         return _removed;
     }
+    bool is_binlog_region() const { return _is_binlog_region; }
     void set_removed(bool removed) {
         _removed = removed;
         _removed_time_cost.reset();
@@ -597,6 +683,32 @@ public:
         bthread_mutex_unlock(&_commit_meta_mutex);
     }
 
+    void put_commit_ts(const uint64_t txn_id, int64_t commit_ts) {
+        std::unique_lock<bthread_mutex_t> lck(_commit_ts_map_lock);
+        _commit_ts_map[txn_id] = commit_ts;
+        if (_commit_ts_map.size() > 100000) {
+            // 一天阈值
+            int64_t threshold_value = commit_ts - 86400000LL;
+            auto iter = _commit_ts_map.begin();
+            while (iter != _commit_ts_map.end()) {
+                if (iter->second < threshold_value) {
+                    iter = _commit_ts_map.erase(iter);
+                } else {
+                    ++iter;
+                }
+            }
+        }
+    }
+
+    int64_t get_commit_ts(uint64_t txn_id, int64_t start_ts) {
+        std::unique_lock<bthread_mutex_t> lck(_commit_ts_map_lock);
+        if (_commit_ts_map.count(txn_id) == 0) {
+            return -1;
+        }
+        return _commit_ts_map[txn_id];
+    }
+
+
     int ddlwork_process(const pb::DdlWorkInfo& store_ddl_work);
     int ddlwork_common_init_process(const pb::DdlWorkInfo& store_ddl_work);
     void ddlwork_finish_check_process(std::set<int64_t>& ddlwork_table_ids);
@@ -639,6 +751,33 @@ public:
     std::shared_ptr<Region> get_ptr() {
         return shared_from_this();
     }
+    uint64_t get_approx_size() const {
+        //超过10分钟，或者超过10%的数据量diff则需要重新获取
+        if (_approx_info.time_cost.get_time() > 10 * 60 * 1000 * 1000LL) {
+            return UINT64_MAX;
+        } else {
+            int64_t diff_lines = abs(_num_table_lines.load() - _approx_info.table_lines);
+            if (diff_lines > 0) {
+                if (_num_table_lines.load() / diff_lines < 10) {
+                    return UINT64_MAX;
+                }
+            }
+        }
+        return _approx_info.region_size;
+    }
+    void set_approx_size(uint64_t region_size) {
+        _approx_info.time_cost.reset();
+        _approx_info.table_lines = _num_table_lines.load();
+        _approx_info.region_size = region_size;
+    }
+
+    bool can_use_approximate_split();
+
+    void binlog_scan();
+
+    void binlog_timeout_check(int64_t rollback_ts);
+    
+    void binlog_fake(int64_t ts, BthreadCond& cond);
 
 private:
     struct SplitParam {
@@ -675,6 +814,37 @@ private:
         bool tail_split = false;
         std::unordered_map<uint64_t, pb::TransactionInfo> prepared_txn;
     };
+
+    struct BinlogParam {
+        std::map<int64_t, BinlogDesc> ts_binlog_map;
+        int64_t min_ts_in_map  = -1;
+        int64_t max_ts_in_map  = -1;
+        int64_t check_point_ts = -1;
+        int64_t oldest_ts      = -1;
+    };
+
+        //binlog function
+    void read_binlog(const pb::StoreReq* request, pb::StoreRes* response);
+    void apply_binlog(const pb::StoreReq& request, braft::Closure* done);
+    int write_binlog_record(SmartRecord record);
+    int write_binlog_value(std::map<std::string, ExprValue> field_value_map);
+    int64_t binlog_get_int64_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
+    
+    std::string binlog_get_str_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
+    
+    void binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, std::vector<int32_t>& field_slot);
+    void binlog_get_field_values(std::map<std::string, ExprValue>& field_value_map, SmartRecord record);
+    void binlog_reset_on_snapshot_load_restart();
+    
+    void binlog_reset_on_snapshot_load();
+    void binlog_update_map_when_scan(const std::map<std::string, ExprValue>& field_value_map);
+    int binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map);
+    int binlog_update_check_point();
+    int get_primary_region_info(int64_t primary_region_id, pb::RegionInfo& region_info);
+    
+    void binlog_query_primary_region(const int64_t& start_ts, const int64_t& txn_id, pb::RegionInfo& region_info, int64_t rollback_ts);
+    void binlog_fill_exprvalue(const pb::BinlogDesc& binlog_desc, pb::OpType op_type, std::map<std::string, ExprValue>& field_value_map);
+    //binlog end
     void apply_kv_in_txn(const pb::StoreReq& request, braft::Closure* done, 
                          int64_t index, int64_t term);
 
@@ -700,10 +870,16 @@ private:
             _resource = new_resource;
         }
         //compaction时候删掉多余的数据
-        SplitCompactionFilter::get_instance()->set_range_key(
-                _region_id,
-                region_info.start_key(),
-                region_info.end_key());
+        if (_is_binlog_region) {
+            //binlog region把start key和end key设置为空，防止filter把数据删掉
+            SplitCompactionFilter::get_instance()->set_range_key(
+                    _region_id, "", "");
+        } else {
+            SplitCompactionFilter::get_instance()->set_range_key(
+                    _region_id,
+                    region_info.start_key(),
+                    region_info.end_key());
+        }
         DB_WARNING("region_id: %ld, start_ke: %s, end_key: %s", _region_id, 
             rocksdb::Slice(region_info.start_key()).ToString(true).c_str(), 
             rocksdb::Slice(region_info.end_key()).ToString(true).c_str());
@@ -717,6 +893,12 @@ private:
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
     bool has_sst_data(int64_t* seek_table_lines);
     bool ingest_has_sst_data();
+    void wait_rocksdb_normal() {
+        while (_rocksdb->is_any_stall()) {
+            reset_timecost();
+            bthread_usleep(100 * 1000 * 1000);
+        }
+    }
 private:
     //Singleton
     RocksWrapper*       _rocksdb;
@@ -763,10 +945,13 @@ private:
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;
     int64_t                             _applied_index = 0;  //current log index
+    // 表示数据版本，conf_change,no_op等不影响数据时版本不变
+    int64_t                             _data_index = 0;  
     // bthread cycle: set _applied_index_lastcycle = _applied_index when _num_table_lines == 0
     int64_t                             _applied_index_lastcycle = 0;  
     TimeCost                            _lastcycle_time_cost; //定时线程上次循环的时间，更新_applied_index_lastcycle时更新
-
+    TimeCost                            _last_split_time_cost; //上次分裂时间戳
+    ApproximateInfo                     _approx_info;
 
     bool                                _report_peer_info = false;
     std::atomic<bool>                   _shutdown;
@@ -800,6 +985,15 @@ private:
     std::mutex       _reverse_index_map_lock;
     std::mutex       _backup_lock;
     Backup          _backup;
+    //binlog
+    bool _is_binlog_region = false; //是否为binlog region
+    // txn_id:commit_ts
+    std::map<uint64_t, int64_t> _commit_ts_map;
+    bthread_mutex_t _commit_ts_map_lock;
+    BthreadCond _binlog_cond;
+    BinlogParam _binlog_param;
+    std::string     _rocksdb_start;
+    std::string     _rocksdb_end;
 };
 
 } // end of namespace

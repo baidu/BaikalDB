@@ -25,7 +25,7 @@ int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool,
-        bool store_compute_separate) {
+        bool store_compute_separate, bool is_binlog_region) {
     for (auto& tuple : tuples) {
         _tuple_descs.push_back(tuple);
     }
@@ -40,6 +40,10 @@ int RuntimeState::init(const pb::StoreReq& req,
     _region_version = req.region_version();
     if (req.has_not_check_region()) {
         _need_check_region = !req.not_check_region();
+    }
+    if (is_binlog_region) {
+        // binlog region 不检查
+        _need_check_region = false;
     }
     int64_t limit = req.plan().nodes(0).limit();
     //DB_WARNING("limit:%ld", limit);
@@ -101,6 +105,9 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
             DB_WARNING("_mem_row_desc init fail");
             return -1;
         }
+    }
+    if (ctx->open_binlog) {
+        _open_binlog = true;
     }
     _is_inited = true;
     return 0;

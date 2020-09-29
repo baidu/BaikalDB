@@ -18,6 +18,7 @@
 #include "schema_factory.h"
 #include "runtime_state.h"
 #include "exec_node.h"
+#include "network_socket.h"
 #include "proto/store.interface.pb.h"
 
 namespace baikaldb {
@@ -26,7 +27,7 @@ enum ErrorType {
     E_WARNING,
     E_FATAL,
     E_BIG_SQL,
-    E_RETURN    // primary region已经rollback是使用
+    E_RETURN
 };
 
 struct TraceDesc {
@@ -53,6 +54,7 @@ public:
         scan_rows = 0;
         filter_rows = 0;
         row_cnt = 0;
+        analyze_fail_cnt = 0;
     }
 
     // send (cached) cmds with seq_id >= start_seq_id
@@ -95,11 +97,32 @@ public:
         return run(state, region_infos, store_request, start_seq_id, start_seq_id, op_type);
     }
     void choose_opt_instance(pb::RegionInfo& info, std::string& addr);
+    bool need_process_binlog(RuntimeState* state, pb::OpType op_type) {
+        if (op_type == pb::OP_PREPARE
+            || op_type == pb::OP_COMMIT) {
+            if (client_conn->need_send_binlog()) {
+                return true;
+            }
+        } else if (op_type == pb::OP_ROLLBACK) {
+            if (state->open_binlog() && binlog_prepare_success) {
+                return true;
+            }
+        }
+        return false;
+    }
+    ErrorType process_binlog_start(RuntimeState* state, pb::OpType op_type);
+    void process_binlog_done(RuntimeState* state, pb::OpType op_type) {
+        binlog_cond.wait();
+    }
+    ErrorType write_binlog(RuntimeState* state,
+                           const pb::OpType op_type,
+                           const uint64_t log_id);
+    int64_t get_commit_ts();
 public:
     std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
     std::map<int64_t, std::vector<SmartRecord>>  index_records; //key: index_id
 
-    std::map<std::string, int64_t> start_key_sort;
+    std::multimap<std::string, int64_t> start_key_sort;
     bthread_mutex_t region_lock;
     std::set<int64_t> skip_region_set;
     ErrorType error = E_OK;
@@ -108,6 +131,11 @@ public:
     std::atomic<int64_t> affected_rows;
     std::atomic<int64_t> scan_rows;
     std::atomic<int64_t> filter_rows;
+    std::atomic<int> analyze_fail_cnt;
+    BthreadCond binlog_cond;
+    NetworkSocket* client_conn = nullptr;
+    bool  binlog_prepare_success = false;
+    bool  need_get_binlog_region = true;
 };
 }
 

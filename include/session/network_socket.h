@@ -34,9 +34,11 @@ const uint32_t SELF_BUF_DEFAULT_SIZE        = 4096;
 
 class NetworkSocket;
 class QueryContext;
+class BinlogContext;
 class DataBuffer;
 class ExecNode;
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
+typedef std::shared_ptr<BinlogContext> SmartBinlogContext;
 
 enum SocketType {
     SERVER_SOCKET = 0,
@@ -71,8 +73,9 @@ struct NetworkSocket {
     void on_commit_rollback();
     void update_old_txn_info();
     bool transaction_has_write();
+    bool need_send_binlog();
     uint64_t get_global_conn_id();
-
+    SmartBinlogContext get_binlog_ctx();
     // Socket basic infomation.
     bool                shutdown;
     int                 fd;           // Socket fd.
@@ -113,12 +116,13 @@ struct NetworkSocket {
     std::string     username;
     std::shared_ptr<UserInfo>       user_info;      // userinfo for current connection
     std::shared_ptr<QueryContext>   query_ctx;      // Current query.
+    SmartBinlogContext              binlog_ctx;     // for binlog
+    bool                            open_binlog = false;
 
     int64_t         conn_id = -1;            // The client connection ID in Mysql Client-Server Protocol
 
     // Transaction related members
     int64_t         primary_region_id = -1;  // used for txn like Percolator
-    bool            primary_region_exec_failed = false;
     bool            autocommit = true;       // The autocommit flag set by SET AUTOCOMMIT=0/1
     uint64_t        txn_id = 0;              // ID of the current transaction, 0 means out-transaction query
     uint64_t        new_txn_id = 0;          // For implicit commit commands (i.e. BEGIN after another BEGIN)

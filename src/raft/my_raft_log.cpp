@@ -23,12 +23,14 @@ static pthread_once_t g_register_once = PTHREAD_ONCE_INIT;
 
 struct MyRaftExtension {
     MyRaftLogStorage my_raft_log_storage;
+    MyRaftLogStorage my_bin_log_storage;
     MyRaftMetaStorage my_raft_meta_storage;
 };
 
 static void register_once_or_die() {
     static MyRaftExtension* s_ext = new MyRaftExtension;
     braft::log_storage_extension()->RegisterOrDie("myraftlog", &s_ext->my_raft_log_storage);
+    braft::log_storage_extension()->RegisterOrDie("mybinlog", &s_ext->my_bin_log_storage);
 #ifdef BAIDU_INTERNAL
     braft::stable_storage_extension()->RegisterOrDie("myraftmeta", &s_ext->my_raft_meta_storage);
 #else

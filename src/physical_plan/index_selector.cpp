@@ -450,6 +450,11 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         if (info_ptr == nullptr) {
             continue;
         }
+
+        if (info_ptr->index_hint_status == pb::IHS_DISABLE) {
+            DB_DEBUG("index[%s] is disabled", info_ptr->name.c_str());
+            continue;
+        }
         IndexInfo& index_info = *info_ptr;
         pb::IndexType index_type = index_info.type;
         auto index_state = index_info.state;

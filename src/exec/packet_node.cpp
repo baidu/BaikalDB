@@ -16,6 +16,7 @@
 #include "full_export_node.h"
 #include "runtime_state.h"
 #include "network_socket.h"
+#include "scan_node.h"
 
 namespace baikaldb {
 DEFINE_int32(expect_bucket_count, 100, "expect_bucket_count");
@@ -27,6 +28,10 @@ int PacketNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _op_type = node.derive_node().packet_node().op_type();
+    std::vector<std::string> database_names;
+    std::vector<std::string> table_names;
+    database_names.reserve(5);
+    table_names.reserve(5);
     for (auto& expr : node.derive_node().packet_node().projections()) {
         ExprNode* projection = nullptr;
         ret = ExprNode::create_tree(expr, &projection);
@@ -35,11 +40,23 @@ int PacketNode::init(const pb::PlanNode& node) {
             return ret;
         }
         _projections.push_back(projection);
+        database_names.push_back(expr.database());
+        table_names.push_back(expr.table());
     }
+    auto db_iter = database_names.begin();
+    auto table_iter = table_names.begin();
     for (auto& name : node.derive_node().packet_node().col_names()) {
         ResultField field;
         field.name = name;
         field.org_name = name;
+        if (db_iter != database_names.end()) {
+            field.db = *db_iter;
+            db_iter++;
+        }
+        if (table_iter != table_names.end()) {
+            field.table = *table_iter;
+            table_iter++;
+        }
         _fields.push_back(field);
     }
     return 0;
@@ -91,6 +108,51 @@ int PacketNode::handle_explain(RuntimeState* state) {
         for (auto& name : names) {
             row.push_back(m[name]);
         }
+        pack_vector_row(row);
+    }
+    pack_eof();
+    return 0;
+}
+
+int PacketNode::handle_show_cost(RuntimeState* state) {
+    _fields.clear();
+    std::vector<std::map<std::string, std::string>> explains;
+    show_explain(explains);
+    std::vector<std::map<std::string, std::string>> path_infos;
+    std::vector<ExecNode*> scan_nodes;
+    get_node(pb::SCAN_NODE, scan_nodes);
+    for (auto& scan_node_ptr : scan_nodes) {
+        ScanNode* scan_node = static_cast<ScanNode*>(scan_node_ptr);
+        scan_node->show_cost(path_infos);
+    }
+
+    if (path_infos.size() <= 0) {
+        std::map<std::string, std::string> path_info;
+        path_info["cost"] = "no cost info";
+        path_infos.push_back(path_info);
+    }
+
+    std::vector<std::vector<std::string>> rows;
+    bool fill_name = true;
+    for (auto& path_info : path_infos) {
+        std::vector<std::string> row;
+        for (auto& pair : path_info) {
+            if (fill_name) {
+                ResultField field;
+                field.name = pair.first;
+                field.type = MYSQL_TYPE_STRING;
+                _fields.push_back(field);
+            }
+            row.push_back(pair.second);
+        }
+        fill_name = false;
+        rows.push_back(row);
+    }
+
+    pack_head();
+    pack_fields();
+
+    for (auto& row : rows) {
         pack_vector_row(row);
     }
     pack_eof();
@@ -234,6 +296,10 @@ int PacketNode::open(RuntimeState* state) {
         if (state->is_full_export) {
             state->set_eos();
         }
+        return 0;
+    }
+    if (state->explain_type == EXPLAIN_SHOW_COST) {
+        handle_show_cost(state);
         return 0;
     }
     state->set_num_affected_rows(ret);

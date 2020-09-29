@@ -29,6 +29,7 @@ const std::string SNAPSHOT_DATA_FILE = "region_data_snapshot.sst";
 const std::string SNAPSHOT_META_FILE = "region_meta_snapshot.sst";
 const std::string SNAPSHOT_DATA_FILE_WITH_SLASH = "/" + SNAPSHOT_DATA_FILE;
 const std::string SNAPSHOT_META_FILE_WITH_SLASH = "/" + SNAPSHOT_META_FILE;
+const size_t SST_FILE_LENGTH = 128 * 1024 * 1024;
 
 class RocksdbFileSystemAdaptor;
 class Region;
@@ -62,6 +63,8 @@ struct SnapshotContext {
     const rocksdb::Snapshot* snapshot = nullptr;
     IteratorContext* data_context = nullptr;
     IteratorContext* meta_context = nullptr;
+    int64_t data_index = 0;
+    bool need_copy_data = true;
 };
 
 typedef std::shared_ptr<SnapshotContext> SnapshotContextPtr;
@@ -159,51 +162,14 @@ protected:
     SstWriterAdaptor(int64_t region_id, const std::string& path, const rocksdb::Options& option);
 
 private:
-    int parse_from_iobuf(const butil::IOBuf& data, std::vector<std::string>& keys, std::vector<std::string>& values) {
-        size_t pos = 0;
-        while (pos < data.size()) {
-            if ((data.size() - pos) < sizeof(size_t)) {
-                DB_FATAL("read key size from iobuf fail, region_id: %ld", _region_id);
-                return -1;
-            }
-            size_t key_size = 0;
-            data.copy_to((void*)&key_size, sizeof(size_t), pos);
-            
-            pos += sizeof(size_t);
-            std::string key;
-            if ((data.size() - pos) < key_size) {
-                DB_FATAL("read key from iobuf fail, region_id: %ld, key_size: %ld", 
-                        _region_id, key_size);
-                return -1;
-            }
-            data.copy_to(&key, key_size, pos);
-
-            pos += key_size;
-            keys.push_back(key);
-            if ((data.size() - pos) < sizeof(size_t)) {
-                DB_FATAL("read value size from iobuf fail, region_id: %ld", _region_id);
-                return -1;
-            }
-            size_t value_size = 0;
-            data.copy_to((void*)&value_size, sizeof(size_t), pos);
-
-            pos += sizeof(size_t);
-            std::string value;
-            if ((data.size() - pos) < value_size) {
-                DB_FATAL("read value from iobuf fail, region_id: %ld, value_size: %ld", 
-                        _region_id, value_size);
-                return -1;
-            }
-            data.copy_to(&value, value_size, pos);
-            pos += value_size;
-            values.push_back(value);
-        }
-        return 0;
-    }
+    bool finish_sst();
+    int parse_from_iobuf(const butil::IOBuf& data, std::vector<std::string>& keys, std::vector<std::string>& values);
     int64_t _region_id;
     SmartRegion _region_ptr;
     std::string _path;
+    int _sst_idx = 0;
     size_t _count = 0;
+    size_t _data_size = 0;
     bool _closed = true;
     bool _is_meta = false;
     std::unique_ptr<SstFileWriter> _writer;

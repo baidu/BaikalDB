@@ -190,17 +190,13 @@ int Tokenizer::simple_seg_gbk(std::string word, uint32_t word_count, std::map<st
     while (fast_pos < word.size()) {
         if ((word[slow_pos] & 0x80) != 0) {
             slow_pos++;
-        } else {
-            if (isupper(word[slow_pos])) {
-                word[slow_pos] = ::tolower(word[slow_pos]);
-            }
         }
         slow_pos++;
         if ((word[fast_pos] & 0x80) != 0) {
             fast_pos++;
         } else {
-            if (isupper(word[slow_pos])) {
-                word[slow_pos] = ::tolower(word[slow_pos]);
+            if (isupper(word[fast_pos])) {
+                word[fast_pos] = ::tolower(word[fast_pos]);
             }
         }
         fast_pos++;

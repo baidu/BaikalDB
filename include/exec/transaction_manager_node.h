@@ -26,13 +26,6 @@ public:
     }
     virtual ~TransactionManagerNode() {
     }
-    static int add_commit_log_entry(
-            uint64_t txn_id, 
-            int32_t  seq_id,
-            ExecNode* commit_fetch,
-            std::map<int64_t, pb::RegionInfo>& region_infos);
-
-    static int remove_commit_log_entry(uint64_t txn_id);
     void set_op_type(pb::OpType op_type) {
         _op_type = op_type;
     }

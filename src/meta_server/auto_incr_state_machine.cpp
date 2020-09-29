@@ -216,7 +216,7 @@ int AutoIncrStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
             }
         }
     }
-    _have_data = true;
+    set_have_data(true);
     return 0;
 }
 

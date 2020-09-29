@@ -22,6 +22,7 @@
 #include "mysql_wrapper.h"
 #include "logical_planner.h"
 #include "physical_planner.h"
+#include "binlog_context.h"
 
 namespace baikaldb {
 
@@ -47,12 +48,15 @@ const std::string SQL_SHOW_CREATE_TABLE          = "show create table";
 const std::string SQL_SHOW_FULL_COLUMNS          = "show full columns";
 const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
 const std::string SQL_SHOW_ABNORMAL_REGIONS      = "show abnormal regions";
+const std::string SQL_SHOW_COST                  = "show cost";
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
 const std::string SQL_SHOW_WARNINGS              = "show warnings";
 const std::string SQL_SHOW_REGION                = "show region";
 const std::string SQL_SHOW_SOCKET                = "show socket";
 const std::string SQL_SHOW_PROCESSLIST           = "show processlist";
+const std::string SQL_SHOW_META                  = "show meta";
+const std::string SQL_SHOW_NAMESPACE             = "show namespace";
 
 enum QUERY_TYPE {
     SQL_UNKNOWN_NUM                         = 0,
@@ -130,6 +134,7 @@ private:
     bool _handle_client_query_show_full_columns(SmartSocket client);
     bool _handle_client_query_show_table_status(SmartSocket client);
     bool _handle_client_query_show_abnormal_regions(SmartSocket client);
+    bool _handle_client_query_show_cost(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
     bool _handle_client_query_show_socket(SmartSocket client);
     bool _handle_client_query_show_processlist(SmartSocket client);

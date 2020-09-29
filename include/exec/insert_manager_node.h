@@ -38,12 +38,16 @@ public:
         }
         if (_sub_query_node != nullptr) {
             delete _sub_query_node;
+            _sub_query_node = nullptr;
         }
     }
     virtual int init(const pb::PlanNode& node) override;
     virtual int open(RuntimeState* state) override;
     virtual void close(RuntimeState* state) override {
         ExecNode::close(state);
+        if (_sub_query_node != nullptr) {
+            _sub_query_node->close(state);
+        }
         for (auto expr : _update_exprs) {
             expr->close();
         }
@@ -99,8 +103,9 @@ public:
     }
 
     int subquery_open(RuntimeState* state);
-    void set_has_sub_query(bool flag) {
-        _has_sub_query = flag;
+
+    void set_sub_query_node(ExecNode* sub_query_node) {
+        _sub_query_node = sub_query_node;
     }
 
     void set_sub_query_runtime_state(RuntimeState* state) {
@@ -113,6 +118,7 @@ public:
     void set_table_id(int64_t table_id) {
         _table_id = table_id;
     }
+    void process_binlog(RuntimeState* state, bool save_data);
 
 private:
     void update_record(SmartRecord record);
@@ -122,7 +128,6 @@ private:
     bool        _is_replace = false;
     bool        _need_ignore = false;
     bool        _on_dup_key_update = false;
-    bool        _has_sub_query = false;
     pb::TupleDescriptor* _tuple_desc = nullptr;
     pb::TupleDescriptor* _values_tuple_desc = nullptr;
     std::unique_ptr<MemRow> _dup_update_row; // calc for on_dup_key_update

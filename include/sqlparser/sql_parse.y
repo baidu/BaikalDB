@@ -560,6 +560,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IndexOptionList
     IndexOption
     IndexType
+    PartitionOpt
+    PartitionRangeList
+    PartitionRange
 
 %type <item> OnDuplicateKeyUpdate 
 %type <item> 
@@ -3787,8 +3790,54 @@ TableOption:
         option->uint_value = ((LiteralExpr*)$3)->_u.int64_val;
         $$ = option;
     }
+    | PARTITION BY PartitionOpt
+    {
+        TableOption* option = (TableOption*)$3;
+        option->type = TABLE_OPT_PARTITION;
+        $$ = option;
+    }
     ;
 
+PartitionRange:
+    PARTITION VALUES LESS THEN '(' Expr ')'
+    {
+        $$ = $6;
+    }
+    ;
+
+PartitionRangeList:
+    PartitionRange
+    {
+        Node* list = new_node(Node);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | PartitionRangeList PartitionRange
+    {
+        Node* list = $1;
+        list->children.push_back((ExprNode*)$2, parser->arena);
+        $$ = list;
+    }
+    | PartitionRangeList ','  PartitionRange
+    {
+        Node* list = $1;
+        list->children.push_back((ExprNode*)$3, parser->arena);
+        $$ = list;
+    }
+    ;
+
+PartitionOpt:
+    RANGE '(' Expr ')' '(' PartitionRangeList ')'
+    {
+        PartitionOption* option = new_node(PartitionOption);
+        option->type = PARTITION_RANGE;
+        option->expr = $3;
+        for (int i = 0; i < $6->children.size(); i++) {
+            option->range.push_back((ExprNode*)$6->children[i], parser->arena);
+        }
+        $$ = option;
+    }
+    ;
 EqOpt:
     {}
     | EQ_OP

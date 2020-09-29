@@ -63,6 +63,7 @@ private:
     int open_trace(RuntimeState* state);
     int handle_trace(RuntimeState* state);
     int handle_trace2(RuntimeState* state);
+    int handle_show_cost(RuntimeState* state);
     void pack_trace2(std::vector<std::map<std::string, std::string>>& info, const pb::TraceNode& trace_node,
         int64_t& total_scan_rows, int64_t& total_index_filter, int64_t& total_get_primary, int64_t& total_where_filter);
     int handle_explain(RuntimeState* state);

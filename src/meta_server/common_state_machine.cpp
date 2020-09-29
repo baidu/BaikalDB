@@ -54,6 +54,24 @@ void MetaServerClosure::Run() {
     delete this;
 }
 
+void TsoClosure::Run() {
+    if (!status().ok()) {
+        if (response) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_leader(butil::endpoint2str(common_state_machine->get_leader()).c_str());
+        }
+        DB_FATAL("meta server closure fail, error_code:%d, error_mas:%s",
+                status().error_code(), status().error_cstr());
+    }
+    if (sync_cond) {
+        sync_cond->decrease_signal();
+    }
+    if (done != nullptr) {
+        done->Run();
+    }
+    delete this;
+}
+
 int CommonStateMachine::init(const std::vector<braft::PeerId>& peers) {
     braft::NodeOptions options;
     options.election_timeout_ms = FLAGS_election_timeout_ms; 
@@ -111,7 +129,7 @@ void CommonStateMachine::process(google::protobuf::RpcController* controller,
     _node.apply(task);
 }
 
-void CommonStateMachine::on_leader_start() {
+void CommonStateMachine::start_check_bns() {
     //bns ，自动探测是否迁移
     if (FLAGS_meta_server_bns.find(":") == std::string::npos) {
         if (!_check_start) {
@@ -122,6 +140,9 @@ void CommonStateMachine::on_leader_start() {
             _check_start = true;
         }
     }
+}
+void CommonStateMachine::on_leader_start() {
+    start_check_bns();
     _is_leader.store(true);
 }
 

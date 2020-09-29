@@ -16,6 +16,7 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
 #include "auto_incr_state_machine.h"
+#include "tso_state_machine.h"
 #include "meta_state_machine.h"
 #include "cluster_manager.h"
 #include "privilege_manager.h"
@@ -44,6 +45,9 @@ DEFINE_string(holmes_meta_bns, "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.al
 DEFINE_string(holmes_product_meta_bns, "group.opera-online-baikalMeta-000-bj.HOLMES.all", "");
 DEFINE_string(dmp_meta_bns, "group.opera-online-baikalMeta-000-bj.DMP.all", "");
 DEFINE_string(coffline_meta_bns, "group.opera-coffline-baikalMeta-000-bj.FENGCHAO.all", "");
+DEFINE_string(detect_meta_bns, "group.opera-detect-baikalMeta-000-bj.FENGCHAO.all", "");
+DEFINE_string(pinpai_meta_bns, "group.opera-pinpai-baikalMeta-000-cm.FENGCHAO.all", "");
+DEFINE_string(qa_meta_bns, "group.opera-qa-qabaikalMeta-000-ct.FENGCHAO.all", "");
 #endif
 
 const std::string MetaServer::CLUSTER_IDENTIFY(1, 0x01);
@@ -101,6 +105,18 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     }
     DB_WARNING("auot_incr_state_machine init success");
 
+    _tso_state_machine = new (std::nothrow)TSOStateMachine(peer_id);
+    if (_tso_state_machine == NULL) {
+        DB_FATAL("new _tso_state_machine fail");
+        return -1;
+    }
+    ret = _tso_state_machine->init(peers);
+    if (ret != 0) {
+        DB_FATAL(" _tso_state_machine init fail");
+        return -1;
+    }
+    DB_WARNING("_tso_state_machine init success");
+
     SchemaManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     PrivilegeManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     ClusterManager::get_instance()->set_meta_state_machine(_meta_state_machine);
@@ -118,6 +134,12 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     _meta_interact_map["dmp"]->init_internal(FLAGS_dmp_meta_bns);
     _meta_interact_map["coffline"] = new MetaServerInteract;
     _meta_interact_map["coffline"]->init_internal(FLAGS_coffline_meta_bns);
+    _meta_interact_map["detect"] = new MetaServerInteract;
+    _meta_interact_map["detect"]->init_internal(FLAGS_detect_meta_bns);
+    _meta_interact_map["pinpai"] = new MetaServerInteract;
+    _meta_interact_map["pinpai"]->init_internal(FLAGS_pinpai_meta_bns);
+    _meta_interact_map["qa"] = new MetaServerInteract;
+    _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
 #endif
     _flush_bth.run([this]() {flush_memtable_thread();});
     _apply_region_bth.run([this]() {apply_region_thread();});
@@ -215,7 +237,10 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_MODIFY_RESOURCE_TAG
             || request->op_type() == pb::OP_ADD_INDEX
             || request->op_type() == pb::OP_DROP_INDEX
-            || request->op_type() == pb::OP_DELETE_DDLWORK) {
+            || request->op_type() == pb::OP_DELETE_DDLWORK
+            || request->op_type() == pb::OP_LINK_BINLOG
+            || request->op_type() == pb::OP_UNLINK_BINLOG
+            || request->op_type() == pb::OP_SET_INDEX_HINT_STATUS) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,
@@ -449,6 +474,10 @@ void MetaServer::raft_control(google::protobuf::RpcController* controller,
         _auto_incr_state_machine->raft_control(controller, request, response, done_guard.release());
         return;
     }
+    if (request->region_id() == 2) {
+         _tso_state_machine->raft_control(controller, request, response, done_guard.release());
+        return;
+    }
     response->set_region_id(request->region_id());
     response->set_errcode(pb::INPUT_PARAM_ERROR);
     response->set_errmsg("unmatch region id");
@@ -522,12 +551,32 @@ void MetaServer::console_heartbeat(google::protobuf::RpcController* controller,
     }
 }
 
+void MetaServer::tso_service(google::protobuf::RpcController* controller,
+                                  const pb::TsoRequest* request,
+                                  pb::TsoResponse* response,
+                                  google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+    uint64_t log_id = 0;
+    if (cntl->has_log_id()) {
+        log_id = cntl->log_id();
+    }
+    RETURN_IF_NOT_INIT(_init_success, response, log_id);
+    if (_tso_state_machine != nullptr) {
+        _tso_state_machine->process(controller, request, response, done_guard.release());
+    }
+}
+
 static std::string bns_to_plat(const std::string& bns) {
     static std::map<std::string, std::string> mapping = {
         {"e0", "e0"},
         {"holmes", "holmes"},
         {"hmkv", "holmes"},
         {"coffline", "coffline"},
+        {"detect", "detect"},
+        {"pinpai", "pinpai"},
+        {"qa", "qa"},
     };
     std::vector<std::string> vec;
     boost::split(vec, bns, boost::is_any_of(".-"));
@@ -645,11 +694,16 @@ void MetaServer::shutdown_raft() {
     }   
     if (_auto_incr_state_machine != nullptr) {
         _auto_incr_state_machine->shutdown_raft();
-    }    
+    }
+    if (_tso_state_machine != nullptr) {
+        _tso_state_machine->shutdown_raft();
+    }
 }
 
 bool MetaServer::have_data() {
-    return _meta_state_machine->have_data() && _auto_incr_state_machine->have_data();
+    return _meta_state_machine->have_data() 
+           && _auto_incr_state_machine->have_data()
+           && _tso_state_machine->have_data();
 }
 }//namespace
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

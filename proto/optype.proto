@@ -35,6 +35,14 @@ enum OpType {
     OP_TXN_COMPLETE                         = 26; // 手动完成特定事务处理
     // fake op
     OP_UNION                                = 51;
+    
+    // for binlog
+    OP_READ_BINLOG                          = 60; //read     binlog
+    OP_PREWRITE_BINLOG                      = 61; //prewrite binlog
+    OP_COMMIT_BINLOG                        = 62; //commit   binlog
+    OP_ROLLBACK_BINLOG                      = 63; //rollback binlog
+    OP_FAKE_BINLOG                          = 64; //fake     binlog
+
     // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
     OP_ADD_PHYSICAL                         = 115; //建物理机房
@@ -73,7 +81,7 @@ enum OpType {
     OP_RESTORE_REGION                       = 148; //恢复store误删的region
     OP_OPEN_UNSAFE_DECISION                 = 149; //开启删表和log_index=0时自动删除region逻辑10分钟
     OP_SET_INSTANCE_MIGRATE                 = 150; //手工置实例状态为MIGRATE，迁移用
-    OP_PREPARE_V2                           = 151; 
+    OP_PREPARE_V2                           = 151; // deprecated
     OP_ADD_ID_FOR_AUTO_INCREMENT            = 152; //添加自增主键
     OP_DROP_ID_FOR_AUTO_INCREMENT           = 153; //删除自增主键
     OP_CLOSE_LOAD_BALANCE                   = 154;
@@ -95,4 +103,11 @@ enum OpType {
     OP_DROP_TABLE_TOMBSTONE                 = 170; //清理TABLE的残留墓碑
     OP_RECOVERY_ALL_REGION                  = 171; //恢复region状态
     OP_UPDATE_STATISTICS                    = 172; //update statistics
+    OP_GEN_TSO                              = 173; // 获取时间戳
+    OP_RESET_TSO                            = 174; // 重置时间戳
+    OP_UPDATE_TSO                           = 175; // 更新时间戳
+    OP_QUERY_TSO_INFO                       = 176; 
+    OP_LINK_BINLOG                          = 177; //创建binlog关联
+    OP_UNLINK_BINLOG                        = 178; //清除binlog关联
+    OP_SET_INDEX_HINT_STATUS                 = 179; //设置索引提示状态
 };

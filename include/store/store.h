@@ -78,6 +78,11 @@ public:
                        pb::StoreRes* response,
                        google::protobuf::Closure* done);
 
+    virtual void query_binlog(google::protobuf::RpcController* controller,
+                       const pb::StoreReq* request,
+                       pb::StoreRes* response,
+                       google::protobuf::Closure* done);
+
     //删除region和region中的数据
     virtual void remove_region(google::protobuf::RpcController* controller,
                                const pb::RemoveRegion* request,
@@ -139,6 +144,12 @@ public:
     void snapshot_thread();
     void txn_clear_thread();
     
+    void binlog_scan_thread();
+
+    void binlog_timeout_check_thread();
+
+    void binlog_fake_thread();
+
     void whether_split_thread();
 
     void process_merge_request(int64_t table_id, int64_t region_id);
@@ -150,8 +161,10 @@ public:
     //得到region的split_index, 在rocksdb做compact filter时使用
     int64_t get_split_index_for_region(int64_t region_id); 
     void set_can_add_peer_for_region(int64_t region_id);    
-    int get_used_size_per_region(const std::vector<int64_t>& region_ids, 
-                                 uint64_t* region_sizes, int64_t* region_num_lines);
+    int get_used_size_per_region(const std::vector<int64_t>& region_ids, uint64_t* region_sizes);
+
+    int64_t get_tso();
+    int64_t get_last_commit_ts();
    
     RocksWrapper* get_db() {
         return _rocksdb;
@@ -233,6 +246,13 @@ public:
         DB_WARNING("snapshot bth join");
         _txn_clear_bth.join();
         DB_WARNING("txn_clear bth join");
+        _binlog_scan_bth.join();
+        DB_WARNING("binlog scan bth join");
+        _binlog_timeout_check_bth.join();
+        DB_WARNING("binlog timeout check bth join");
+        _binlog_fake_bth.join();
+        DB_WARNING("fake binlog bth join");
+
 
         _rocksdb->close();
         DB_WARNING("rockdb close, quit success");
@@ -276,6 +296,8 @@ private:
     //metaServer交互类
     MetaServerInteract _meta_server_interact;
     
+    MetaServerInteract _tso_server_interact;
+    
     //发送心跳的线程
     Bthread _heart_beat_bth;
     //判断是否需要分裂的线程
@@ -293,6 +315,12 @@ private:
     Bthread _snapshot_bth;
     // thread for transaction monitor and clear
     Bthread _txn_clear_bth;
+    // binlog定时扫描线程
+    Bthread _binlog_scan_bth;
+    // binlog没有及时commit或rollback的事务定时检查
+    Bthread _binlog_timeout_check_bth;
+    // 定时fake binlog线程
+    Bthread _binlog_fake_bth;
 
     std::atomic<int32_t> _split_num;    
     bool _shutdown = false;
@@ -305,6 +333,7 @@ private:
     ExecutionQueue _remove_region_queue;
 
     bool _has_prepared_tran = true;
+    BthreadCond _get_tso_cond {-1};
 public:
     bool exist_prepared_log(int64_t region_id, uint64_t txn_id) {
         if (prepared_txns.find(region_id) != prepared_txns.end()
@@ -323,5 +352,11 @@ public:
     std::set<int64_t>   doing_snapshot_regions;
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
+
+    //for fake binlog tso
+    TimeCost gen_tso_time;
+    int64_t  tso_physical = 0;
+    int64_t  tso_logical  = 0;
+    int64_t  tso_count    = 0;
 };
 }

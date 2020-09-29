@@ -18,6 +18,7 @@
 #include "insert_node.h"
 #include "network_socket.h"
 #include "type_utils.h"
+#include "binlog_context.h"
 #include <set>
 
 namespace baikaldb {
@@ -121,8 +122,6 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
             return -1;
         }
     }
-    _sub_query_node = _children.back();
-    _children.pop_back();
     ret = _sub_query_node->open(_sub_query_runtime_state);
     if (ret < 0) {
         return ret;
@@ -156,10 +155,37 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
 }
 
 
+void InsertManagerNode::process_binlog(RuntimeState* state, bool save_data) {
+    if (state->open_binlog() && _table_info->is_linked) {
+        auto client = state->client_conn();
+        auto binlog_ctx = client->get_binlog_ctx();
+        binlog_ctx->set_partition_record(_insert_scan_records[0]);
+        binlog_ctx->set_table_info(_table_info);
+        if (save_data) {
+            pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
+            auto mutation = binlog_value->add_mutations();
+            mutation->set_table_id(_table_id);
+            if (_del_scan_records.size() == 0) {
+                mutation->add_sequence(pb::MutationType::INSERT);
+            } else {
+                mutation->add_sequence(pb::MutationType::UPDATE);
+            }
+            for (auto& record : _insert_scan_records) {
+                std::string* row = mutation->add_insert_rows();
+                record->encode(*row);
+            }
+            for (auto& record : _del_scan_records) {
+                std::string* row = mutation->add_deleted_rows();
+                record->encode(*row);
+            }
+        }
+    }
+}
+
 int InsertManagerNode::open(RuntimeState* state) {
     TimeCost cost;
     int ret = 0;
-    if (_has_sub_query) {
+    if (_sub_query_node != nullptr) {
         ret = subquery_open(state);
         if (ret < 0) {
             return ret;
@@ -170,7 +196,7 @@ int InsertManagerNode::open(RuntimeState* state) {
     }
     // no global index for InsertNode
     if (_children[0]->node_type() == pb::INSERT_NODE) {
-        if (_has_sub_query) {
+        if (_sub_query_node != nullptr) {
             DMLNode* dml_node = static_cast<DMLNode*>(_children[0]);
             ret = get_region_infos(state, dml_node, _origin_records,
                 _del_scan_records, _region_infos);
@@ -184,7 +210,7 @@ int InsertManagerNode::open(RuntimeState* state) {
     if (ret < 0) {
         return -1;    
     }
-    int64_t pre_insert_cost = cost.get_time();
+    //int64_t pre_insert_cost = cost.get_time();
     //DB_WARNING("insert pre process time_cost: %ld, log_id: %lu", pre_insert_cost, state->log_id());
     for (auto expr : _update_exprs) {
         ret = expr->open();
@@ -208,6 +234,11 @@ int InsertManagerNode::open(RuntimeState* state) {
         ret =  insert_on_dup_key_update(state);
     } else {
         ret =  basic_insert(state);
+    }
+    if (ret >=0) {
+        process_binlog(state, true);
+    } else {
+        process_binlog(state, false);
     }
     return ret;
 }

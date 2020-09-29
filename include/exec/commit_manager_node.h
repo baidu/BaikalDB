@@ -54,6 +54,9 @@ public:
             new_begin_node = _children[3];
         }
         client_conn->seq_id++;
+        if (client_conn->open_binlog) {
+            state->set_open_binlog(true);
+        }
         ret = exec_prepared_node(state, prepare_node, client_conn->seq_id);
         if (ret < 0) {
             DB_WARNING("TransactionNote: prepare failed, rollback txn_id: %lu log_id:%lu", state->txn_id, state->log_id());
@@ -69,6 +72,9 @@ public:
         if (state->optimize_1pc() == false) {
             client_conn->seq_id++;
             ret = exec_commit_node(state, commit_node);
+            if (ret < 0) {
+                ret = exec_rollback_node(state, rollback_node);
+            }
         } else {
             DB_WARNING("TransactionNote: optimize_1pc, no commit: txn_id: %lu log_id:%lu", state->txn_id, state->log_id());
         }

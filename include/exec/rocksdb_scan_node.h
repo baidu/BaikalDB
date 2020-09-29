@@ -78,6 +78,18 @@ public:
     const std::vector<int64_t>& index_ids() {
         return _index_ids;
     }
+
+    int32_t get_partition_field() {
+        return _table_info->partition_info.partition_field();
+    }
+
+    int64_t get_partition_num() {
+        return _table_info->partition_num;
+    }
+
+    std::vector<int64_t>& get_partition() {
+        return _partitions;
+    }
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -153,6 +165,7 @@ private:
     std::map<int64_t, pb::PossibleIndex> _region_primary;
     std::map<int32_t, int32_t> _index_slot_field_map;
     pb::StorageType _storage_type = pb::ST_UNKNOWN;
+    std::vector<int64_t> _partitions {0};
 };
 }
 
