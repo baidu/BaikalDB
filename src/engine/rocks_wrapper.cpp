@@ -48,6 +48,7 @@ DEFINE_int32(min_write_buffer_number_to_merge, 2, "min_write_buffer_number_to_me
 DEFINE_int32(level0_file_num_compaction_trigger, 5, "Number of files to trigger level-0 compaction");
 DEFINE_int32(max_bytes_for_level_base, 1024 * 1024 * 1024, "total size of level 1.");
 DEFINE_int32(max_bytes_for_level_multiplier, 10, "max_bytes_for_level_multiplier.");
+DEFINE_bool(enable_bottommost_compression, false, "enable zstd for bottommost_compression");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::DATA_CF = "data";
@@ -144,6 +145,13 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.level0_file_num_compaction_trigger = FLAGS_level0_file_num_compaction_trigger;
     _data_cf_option.max_bytes_for_level_base = FLAGS_max_bytes_for_level_base;
     _data_cf_option.max_bytes_for_level_multiplier = FLAGS_max_bytes_for_level_multiplier;
+
+    if (FLAGS_enable_bottommost_compression) {
+        _data_cf_option.bottommost_compression_opts.enabled = true;
+        _data_cf_option.bottommost_compression = rocksdb::kZSTD;
+        _data_cf_option.bottommost_compression_opts.max_dict_bytes = 1 << 14; // 16KB
+        _data_cf_option.bottommost_compression_opts.zstd_max_train_bytes = 1 << 18; // 256KB
+    }
 
     //todo
     //prefix: 0x01-0xFF,分别用来存储不同的meta信息
