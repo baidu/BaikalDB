@@ -536,5 +536,5 @@ private:
     int64_t                         _write_ttl_timestamp_us = 0; //ttl写入时间
 };
 
-typedef std::shared_ptr<Transaction> SmartTransaction;
+//typedef std::shared_ptr<Transaction> SmartTransaction;
 }
