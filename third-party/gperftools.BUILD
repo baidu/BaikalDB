@@ -14,7 +14,7 @@ genrule(
         "cp -r $${gperf} build",
         "(cd build" +
         " && ./autogen.sh >/dev/null 2>&1" +
-        " && ./configure -q --enable-frame-pointers --disable-libunwind" +
+        " && ./configure -q --enable-frame-pointers --disable-libunwind --disable-dependency-tracking" +
         " && make --silent libtcmalloc_and_profiler.la)",
         "cp build/src/gperftools/tcmalloc.h $(location src/gperftools/tcmalloc.h)",
         "cp build/.libs/libtcmalloc_and_profiler.a  $(location .libs/libtcmalloc_and_profiler.a)",
