@@ -22,9 +22,11 @@ jobs:
       uses: vsco/bazelisk-action@1.1
     - name: Build
       run: bazelisk build //:all
-    - name: Login to GitHub Container Registry
-      run: echo ${{ secrets.CR_PAT }} | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
-    - name: Build the Docker image
-      run: docker build . -f Dockerfile.github-action --tag ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA
-    - name: Push the Docker Image
-      run: docker push ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA
+    - name: List Output
+      run: find ./bazel-bin/
+    # - name: Login to GitHub Container Registry
+    #   run: echo ${{ secrets.CR_PAT }} | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
+    # - name: Build the Docker image
+    #   run: docker build . -f Dockerfile.github-action --tag ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA
+    # - name: Push the Docker Image
+    #   run: docker push ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA
