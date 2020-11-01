@@ -29,12 +29,16 @@ RUN apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # copy artifacts 
-COPY --from=builder /app/src/bazel-out/k8-opt/bin/baikaldb /app/bin/baikaldb
-COPY --from=builder /app/src/bazel-out/k8-opt/bin/baikalMeta /app/bin/baikalMeta
-COPY --from=builder /app/src/bazel-out/k8-opt/bin/baikalStore /app/bin/baikalStore
+COPY --from=builder /app/src/bazel-bin/baikaldb /app/bin/baikaldb
+COPY --from=builder /app/src/bazel-bin/baikalMeta /app/bin/baikalMeta
+COPY --from=builder /app/src/bazel-bin/baikalStore /app/bin/baikalStore
 COPY ./conf /app/conf
+COPY ./src/tools/script /app/script
+COPY ./entrypoint.sh /app/entrypoint.sh
 
 # set entrypoint
 ENV PATH /app/bin:$PATH
 WORKDIR /app/
-ENTRYPOINT [ "/app/bin/baikaldb" ]
+RUN mkdir -p /app/log/
+ENTRYPOINT [ "/app/entrypoint.sh" ]
+CMD [ "db" ]

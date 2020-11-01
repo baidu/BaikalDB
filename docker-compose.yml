@@ -1,0 +1,20 @@
+version: "3.8"
+services:
+  meta:
+    image: ghcr.io/raptium/baikaldb:496549e5502895ff337039063747d4cb10a76687
+    command: meta
+    ports:
+      - "8010:8010"
+  store:
+    image: ghcr.io/raptium/baikaldb:496549e5502895ff337039063747d4cb10a76687
+    command: store
+    depends_on: 
+      - meta
+  db: 
+    image: ghcr.io/raptium/baikaldb:496549e5502895ff337039063747d4cb10a76687
+    command: db
+    depends_on: 
+      - meta
+      - store
+    ports: 
+      - "28282:28282"
