@@ -15,7 +15,7 @@ jobs:
       uses: actions/cache@v2.1.2
       with:
         path: ${HOME}/.cache/bazel
-        key: bazel-%{{ hashFiles('.bazelversion') }}
+        key: bazel-${{ hashFiles('.bazelversion') }}
     - name: Install Dependencies
       run: sudo apt-get update && sudo apt-get install -y build-essential autoconf automake libtool flex bison libssl-dev libz-dev
     - name: Install Bazelisk
