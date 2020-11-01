@@ -18,7 +18,7 @@ jobs:
     - name: Install Dependencies
       run: apt-get update && apt-get install -y build-essential autoconf automake libtool flex bison libssl-dev libz-dev
     - name: Install Bazelisk
-      uses: vsco/bazelisk-action@v1.0.0
+      uses: vsco/bazelisk-action@1.1
     - name: Build
       run: bazelisk build //:all
     - name: Login to GitHub Container Registry
