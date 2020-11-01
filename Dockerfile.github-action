@@ -1,0 +1,19 @@
+# create executing image
+FROM ubuntu:20.04
+
+# install runtime dependencies
+RUN apt-get update
+RUN apt-get install -y \
+    libssl1.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# copy artifacts 
+COPY ./bazel-out/k8-opt/bin/baikaldb /app/bin/baikaldb
+COPY ./bazel-out/k8-opt/bin/baikalMeta /app/bin/baikalMeta
+COPY ./bazel-out/k8-opt/bin/baikalStore /app/bin/baikalStore
+COPY ./conf /app/conf
+
+# set entrypoint
+ENV PATH /app/bin:$PATH
+WORKDIR /app/
+ENTRYPOINT [ "/app/bin/baikaldb" ]
