@@ -391,6 +391,7 @@ MAX { un_reserved_keyword(yylval, yyscanner, parser); return MAX; }
 MID { un_reserved_keyword(yylval, yyscanner, parser); return MID; }
 MIN { un_reserved_keyword(yylval, yyscanner, parser); return MIN; }
 NOW { un_reserved_keyword(yylval, yyscanner, parser); return NOW; }
+UTC_TIMESTAMP { un_reserved_keyword(yylval, yyscanner, parser); return UTC_TIMESTAMP; }
 POSITION { un_reserved_keyword(yylval, yyscanner, parser); return POSITION; }
 SESSION_USER { un_reserved_keyword(yylval, yyscanner, parser); return SESSION_USER; }
 STD { un_reserved_keyword(yylval, yyscanner, parser); return STD; }

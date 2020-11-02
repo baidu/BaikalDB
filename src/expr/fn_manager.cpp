@@ -152,6 +152,7 @@ void FunctionManager::register_operators() {
     register_object_ret("from_unixtime", from_unixtime, pb::TIMESTAMP);
     register_object_ret("now", now, pb::DATETIME);
     register_object_ret("sysdate", now, pb::DATETIME);
+    register_object_ret("utc_timestamp", utc_timestamp, pb::DATETIME);
     register_object_ret("date_format", date_format, pb::STRING);
     register_object_ret("timediff", timediff, pb::TIME);
     register_object_ret("timestampdiff", timestampdiff, pb::INT64);

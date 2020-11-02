@@ -438,6 +438,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     MID
     MIN
     NOW
+    UTC_TIMESTAMP
     POSITION
     SESSION_USER
     STD
@@ -1901,6 +1902,11 @@ FunctionCallNonKeyword:
         fun->fn_name = $1;
         $$ = fun; 
     }
+    | UTC_TIMESTAMP '(' ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        $$ = fun;
+    }
     | FunctionNameDateArithMultiForms '(' Expr ',' Expr ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
@@ -2397,6 +2403,7 @@ AllIdent:
     | MID
     | MIN
     | NOW
+    | UTC_TIMESTAMP
     | POSITION
     | SESSION_USER
     | STD

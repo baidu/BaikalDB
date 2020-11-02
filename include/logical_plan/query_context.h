@@ -42,7 +42,7 @@ struct QueryStat {
     uint64_t    version;
     int32_t     send_buf_size;
     int32_t     partition_key;
-    
+
     int32_t     sql_length;
     bool        hit_cache;
     timeval     start_stamp;
@@ -114,7 +114,7 @@ public:
     QueryContext() {
         enable_2pc = FLAGS_default_2pc;
     }
-    QueryContext(std::shared_ptr<UserInfo> user, std::string db) : 
+    QueryContext(std::shared_ptr<UserInfo> user, std::string db) :
             cur_db(db),
             user_info(user) {
         enable_2pc = FLAGS_default_2pc;
@@ -166,7 +166,7 @@ public:
         return plan.add_nodes();
     }
     int create_plan_tree();
-    
+
 public:
     std::string         sql;
     std::vector<std::string> comments;
@@ -181,7 +181,7 @@ public:
     bool                is_full_export = false;
     ExplainType         explain_type = EXPLAIN_NULL;
 
-    uint8_t             mysql_cmd;      // Command number in mysql protocal.
+    uint8_t             mysql_cmd = COM_SLEEP;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
     int32_t             thread_idx;
     int64_t             row_ttl_duration = 0; // used for /*{"duration": xxx}*/ insert ...
@@ -210,8 +210,8 @@ public:
     bool                need_destroy_tree = false;
     int64_t             prepared_table_id = -1;
 
-    // user can scan data in specific region by comments 
-    // /*{"region_id":$region_id}*/ preceding a Select statement 
+    // user can scan data in specific region by comments
+    // /*{"region_id":$region_id}*/ preceding a Select statement
     int64_t             debug_region_id = -1;
 
     // in autocommit mode, two phase commit is disabled by default (for better formance)

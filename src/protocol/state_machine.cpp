@@ -407,11 +407,13 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     sql = iter->second->sql;
                 }
             }
+            uint64_t out[2];
+            butil::MurmurHash3_x64_128(stat_info->sample_sql.str().c_str(), stat_info->sample_sql.str().size(), 0x1234, out);
             RE2::GlobalReplace(&sql, "\\s+", " ");
             DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row[%d] bufsize=[%d] "
                     "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] stmt_name=[%s] "
-                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sqllen=[%d] sql=[%s] id=[%ld]",
+                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%llu] sqllen=[%d] sql=[%s] id=[%ld]",
                     stat_info->family.c_str(),
                     stat_info->table.c_str(),
                     op_type,
