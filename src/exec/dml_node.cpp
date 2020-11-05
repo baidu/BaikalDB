@@ -20,6 +20,12 @@ namespace baikaldb {
 DEFINE_bool(disable_writebatch_index, false,
     "disable the indexing of transaction writebatch, if true the uncommitted data cannot be read");
 
+DECLARE_string(resource_tag);
+static bool is_holmes() {
+    static bool is = FLAGS_resource_tag == "holmes";
+    return is;
+}
+
 int DMLNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
     ret = ExecNode::expr_optimize(ctx);
@@ -202,7 +208,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         if (_is_replace) {
             old_record = record->clone(true);
         }
-        ret = _txn->get_update_primary(_region_id, *_pri_info, old_record, _field_ids, GET_LOCK, true);
+        // TODO 临时导入holmes-url表
+        if (_table_id == 62 && is_holmes()) {
+            ret = -2;
+        } else {
+            ret = _txn->get_update_primary(_region_id, *_pri_info, old_record, _field_ids, GET_LOCK, true);
+        }
         if (ret == -3) {
             //DB_WARNING_STATE(state, "key not in this region:%ld, %s", _region_id, record->to_string().c_str());
             return 0;

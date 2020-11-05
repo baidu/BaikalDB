@@ -51,18 +51,28 @@ int BinlogContext::get_binlog_regions(uint64_t log_id) {
         DB_WARNING("wrong state log_id:%lu", log_id);
         return -1;
     }
-    if (!_table_info->is_linked || _table_info->link_field.empty()) {
+    if (!_table_info->is_linked) {
         DB_WARNING("table %ld not link to binlog table log_id:%lu", _table_info->id, log_id);
         return -1;      
     }
-    FieldInfo& link_filed = _table_info->link_field[0];
+    int ret = 0;
+    if (_table_info->partition_num == 1) {
+        ret = _factory->get_binlog_regions(_table_info->id, _binlog_region);
+    } else {
+        if (_table_info->link_field.empty()) {
+            DB_WARNING("table %ld not link to binlog table log_id:%lu", _table_info->id, log_id);
+            return -1;      
+        }   
 
-    auto field_desc = _partition_record->get_field_by_idx(link_filed.pb_idx);
-    ExprValue value = _partition_record->get_value(field_desc);
-    int ret = _factory->get_binlog_regions(_table_info->id, value, _binlog_region);
+        FieldInfo& link_filed = _table_info->link_field[0];
+        auto field_desc = _partition_record->get_field_by_idx(link_filed.pb_idx);
+        ExprValue value = _partition_record->get_value(field_desc);
+        ret = _factory->get_binlog_regions(_table_info->id, _binlog_region, value);
+    }
+
     if (ret < 0) {
-        DB_WARNING("get binlog region failed table_id: %ld value: %s log_id:%lu",
-            _table_info->id, value.get_string().c_str(), log_id);
+        DB_WARNING("get binlog region failed table_id: %ld log_id:%lu",
+            _table_info->id, log_id);
         return -1;
     }
     return 0;

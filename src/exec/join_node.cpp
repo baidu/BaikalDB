@@ -316,7 +316,7 @@ int JoinNode::open(RuntimeState* state) {
                                         NULL,
                                         NULL,
                                         NULL,
-                                        NULL, field_range_type);
+                                        NULL, field_range_type, "");
         if (!_is_explain) {
             //路由选择,
             //这一块做完索引选择之后如果命中二级索引需要重构mem_row的结构，mem_row已经在run_time

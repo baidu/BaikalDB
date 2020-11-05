@@ -168,6 +168,11 @@ public:
     pb::PlanNodeType node_type() {
         return _node_type;
     }
+    bool is_filter_node() {
+        return _node_type == pb::TABLE_FILTER_NODE ||
+            _node_type == pb::WHERE_FILTER_NODE ||
+            _node_type == pb::HAVING_FILTER_NODE;
+    }
     std::map<int64_t, pb::RegionInfo>& region_infos() {
         return _region_infos;
     }

@@ -147,7 +147,7 @@ int RegionControl::remove_snapshot_path(int64_t drop_region_id) {
 }
 int RegionControl::clear_all_infos_for_region(int64_t drop_region_id) {
     DB_WARNING("region_id: %ld, clear_all_infos_for_region do compact in queue", drop_region_id);
-    compact_data_in_queue(drop_region_id);
+    //compact_data_in_queue(drop_region_id);
     remove_data(drop_region_id);
     remove_meta(drop_region_id);
     remove_snapshot_path(drop_region_id);

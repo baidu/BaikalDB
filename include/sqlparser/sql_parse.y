@@ -44,15 +44,15 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %}
 
 %defines
-%output="sql_parse.yacc.cc"
-%name-prefix="sql_"
+%output "sql_parse.yacc.cc"
+%name-prefix "sql_"
 %error-verbose
 %lex-param {yyscan_t yyscanner}
 %lex-param {SqlParser* parser}
 %parse-param {yyscan_t yyscanner}
 %parse-param {SqlParser* parser}
 
-%token_table
+%token-table
 %pure-parser
 %verbose
 
@@ -514,6 +514,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DefaultValue
     ShowLikeOrWhereOpt
     FulltextSearchModifierOpt
+    SubSelect
 
 %type <item> 
     ColumnNameListOpt 
@@ -612,32 +613,33 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DeallocPrepareStmt
 
 %type <assign> Assignment
-%type <integer> 
+%type <integer>
     PriorityOpt 
-    IgnoreOptional 
+    IgnoreOptional
     QuickOptional
-    Order 
-    IndexHintType 
-    IndexHintScope 
-    JoinType 
-    IfNotExists 
+    Order
+    IndexHintType
+    IndexHintScope
+    JoinType
+    IfNotExists
     IfExists
-    IntegerType 
-    BooleanType 
-    FixedPointType 
-    FloatingPointType 
-    BitValueType 
-    OptFieldLen 
-    FieldLen 
+    IntegerType
+    BooleanType
+    FixedPointType
+    FloatingPointType
+    BitValueType
+    OptFieldLen
+    FieldLen
     OptBinary
-    IsOrNot 
-    InOrNot 
-    LikeOrNot 
-    BetweenOrNot 
-    SelectStmtCalcFoundRows 
-    SelectStmtSQLCache 
-    SelectStmtStraightJoin 
-    DistinctOpt  
+    IsOrNot
+    InOrNot
+    AnyOrAll
+    LikeOrNot
+    BetweenOrNot
+    SelectStmtCalcFoundRows
+    SelectStmtSQLCache
+    SelectStmtStraightJoin
+    DistinctOpt
     DefaultFalseDistinctOpt
     DefaultTrueDistinctOpt
     BuggyDefaultFalseDistinctOpt
@@ -1555,12 +1557,7 @@ SelectStmtFromTable:
     ;
 
 SelectStmt:
-    '(' SelectStmt ')' {
-        SelectStmt* select = (SelectStmt*)$2;
-        select->is_in_braces = true;
-        $$ = select;
-    }
-    | SelectStmtBasic OrderByOptional LimitClause SelectLockOpt {
+    SelectStmtBasic OrderByOptional LimitClause SelectLockOpt {
         SelectStmt* select = (SelectStmt*)$1;
         select->order = $2;
         select->limit = $3;
@@ -1691,6 +1688,19 @@ FieldAsName:
     }
     | AS STRING_LIT {
         $$ = ((LiteralExpr*)$2)->_u.str_val;
+    }
+    ;
+
+SubSelect:
+    '(' SelectStmt ')' {
+        SubqueryExpr* sub_query = new_node(SubqueryExpr);
+        sub_query->select_stmt = (SelectStmt*)$2;
+        $$ = sub_query;
+    }
+    | '(' UnionStmt ')' {
+        SubqueryExpr* sub_query = new_node(SubqueryExpr);
+        sub_query->union_stmt = (UnionStmt*)$2;
+        $$ = sub_query;
     }
     ;
 
@@ -2535,6 +2545,19 @@ SimpleExpr:
     }
     | FunctionCall {
     }
+    | SubSelect { 
+    }
+    | EXISTS SubSelect {
+        SubqueryExpr* sub_query_expr = (SubqueryExpr*)$2;
+        sub_query_expr->is_exists = true;
+        $$ = sub_query_expr;
+    }
+    | AnyOrAll SubSelect {
+        SubqueryExpr* sub_query_expr = (SubqueryExpr*)$2;
+        sub_query_expr->cmp_type = (parser::CompareType)$1;
+        sub_query_expr->is_cmp_expr = true;
+        $$ = sub_query_expr;
+    }
     | '-' SimpleExpr %prec NEG {
         $$ = FuncExpr::new_unary_op_node(FT_UMINUS, $2, parser->arena);
     }
@@ -2726,8 +2749,25 @@ PredicateOp:
         fun->is_not = $2;
         $$ = fun;
     }
-    //| Expr EXISTS SubSelect {
-    //}
+    | RowExpr InOrNot SubSelect {
+        FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
+        fun->is_not = $2;
+        fun->has_subquery = true;
+        $$ = fun;
+    }
+    | SimpleExpr InOrNot SubSelect {
+        FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
+        fun->is_not = $2;
+        fun->has_subquery = true;
+        $$ = fun;
+    }
+    /*
+    | SimpleExpr LikeOrNot SubSelect LikeEscapeOpt %prec LIKE {
+        FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_LIKE, $1, $3, $4, parser->arena);
+        fun->is_not = $2;
+        fun->has_subquery = true;
+        $$ = fun;
+    }*/
     | SimpleExpr LikeOrNot SimpleExpr LikeEscapeOpt %prec LIKE {
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_LIKE, $1, $3, $4, parser->arena);
         fun->is_not = $2;
@@ -2758,6 +2798,17 @@ InOrNot:
     | NOT IN {
         $$ = true;
     }
+    ;
+AnyOrAll:
+    ANY {
+		$$ = parser::CMP_ANY;
+	}
+    | SOME {
+		$$ = parser::CMP_SOME;
+	}
+    | ALL {
+		$$ = parser::CMP_ALL;
+	}
     ;
 LikeOrNot:
     LIKE {
@@ -4404,11 +4455,27 @@ AlterSpec:
         spec->new_constraints.push_back((Constraint*)$3, parser->arena);
         $$ = spec;
     }
+    | ADD VIRTUAL ConstraintKeywordOpt ConstraintElem
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->is_virtual_index = true;
+        spec->new_constraints.push_back((Constraint*)$4, parser->arena);
+        $$ = spec;
+    }
     | DROP INDEX IndexName
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_DROP_INDEX;
         spec->index_name = $3;
+        $$ = spec;
+    }
+    | DROP VIRTUAL INDEX IndexName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_INDEX;
+        spec->is_virtual_index = true;
+        spec->index_name = $4;
         $$ = spec;
     }
     ;

@@ -39,6 +39,9 @@ int IndexSelector::analyze(QueryContext* ctx) {
         sort_node->set_limit(limit_node->other_limit());
     }
     for (auto& scan_node_ptr : scan_nodes) {
+        if (static_cast<ScanNode*>(scan_node_ptr)->engine() == pb::INFORMATION_SCHEMA) {
+            continue;
+        }
         ExecNode* parent_node_ptr = scan_node_ptr->get_parent();
         if (parent_node_ptr == NULL) {
             continue;
@@ -61,7 +64,8 @@ int IndexSelector::analyze(QueryContext* ctx) {
                             join_node,
                             &ctx->has_recommend,
                             &index_has_null,
-                            field_range_type);
+                            field_range_type,
+                            ctx->stat_info.sample_sql.str());
         } else {
             ret = index_selector(ctx->tuple_descs(),
                            static_cast<ScanNode*>(scan_node_ptr), 
@@ -70,7 +74,8 @@ int IndexSelector::analyze(QueryContext* ctx) {
                            join_node,
                            &ctx->has_recommend,
                            &index_has_null,
-                           field_range_type);
+                           field_range_type, 
+                           ctx->stat_info.sample_sql.str());
         }
         if (index_has_null) {
             ctx->return_empty = true;
@@ -220,7 +225,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
     }
 }
 
-void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, FieldRange>& field_range_map, int64_t table_id) {
+void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, FieldRange>& field_range_map, 
+    int64_t table_id, FulltextInfoNode* fulltext_index_node) {
+    bool new_fulltext_flag = true;
     std::vector<ExprNode*> or_exprs;
     expr->flatten_or_expr(&or_exprs);
     for (auto sub_expr : or_exprs) {
@@ -234,6 +241,8 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
             return;
         }
     }
+    std::vector<int64_t> index_ids; 
+    index_ids.reserve(2);
     {
         // or 只能全部是倒排索引才能选择。
         // 倒排索引 or 普通索引时，不选择倒排索引（针对该 expr，不排除其他 expr 选择该倒排索引）。
@@ -241,15 +250,32 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
         if (table_info_ptr == nullptr) {
             return;
         }
+        int64_t index_id = 0;
         for (auto& sub_expr : or_exprs) {
             int32_t field_id = static_cast<SlotRef*>(sub_expr->children(0))->field_id();
-            if (table_info_ptr->reverse_fields.count(field_id) == 0) {
+            // 所有字段都有arrow索引，才建立 or节点。
+            // TODO 删除所有pb类型之后 删除该逻辑
+            new_fulltext_flag = new_fulltext_flag && is_field_has_arrow_reverse_index(table_id, field_id, &index_id);
+            index_ids.push_back(index_id);
+            if (table_info_ptr->reverse_fields.count(field_id) == 0 &&
+                table_info_ptr->arrow_reverse_fields.count(field_id) == 0) {
                 DB_DEBUG("table_id %ld field_id %ld not all reverse list", table_id, field_id);
                 return;
             }
         }
     }
+    auto& inner_node = boost::get<FulltextInfoNode::FulltextChildType>(fulltext_index_node->info);
+    if (new_fulltext_flag) {
+        inner_node.children.emplace_back(new FulltextInfoNode);
+        auto& back_node = inner_node.children.back();
+        FulltextInfoNode::FulltextChildType or_node;
+        back_node->info = or_node;
+        back_node->type = pb::FNT_OR;
+    }
+
+    size_t index_ids_index = 0;
     for (auto sub_expr : or_exprs) {
+
         int32_t field_id = static_cast<SlotRef*>(sub_expr->children(0))->field_id();
         field_range_map[field_id].like_values.push_back(sub_expr->children(1)->get_value(nullptr));
         field_range_map[field_id].conditions.insert(expr);
@@ -257,11 +283,28 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
         if (static_cast<ScalarFnCall*>(sub_expr)->fn().fn_op() == parser::FT_EXACT_LIKE) {
             field_range_map[field_id].is_exact_like = true;
         }
+
+        if (new_fulltext_flag) {
+            auto& back_node = inner_node.children.back();
+            range::FieldRange fulltext_or_range;
+            fulltext_or_range.left_row_field_ids.push_back(field_id);
+            fulltext_or_range.is_exact_like = true;
+            fulltext_or_range.type = OR_LIKE;
+            fulltext_or_range.conditions.insert(expr);
+            fulltext_or_range.like_values.push_back(sub_expr->children(1)->get_value(nullptr));
+
+            auto& or_node = boost::get<FulltextInfoNode::FulltextChildType>(back_node->info);
+            or_node.children.emplace_back(new FulltextInfoNode);
+            or_node.children.back()->info = std::make_pair(index_ids[index_ids_index++], std::move(fulltext_or_range));
+            or_node.children.back()->type = pb::FNT_TERM;
+        }
+        
     }
     return;
 }
 
-void IndexSelector::hit_match_against_field_range(ExprNode* expr, std::map<int32_t, FieldRange>& field_range_map) {
+void IndexSelector::hit_match_against_field_range(ExprNode* expr, 
+    std::map<int32_t, FieldRange>& field_range_map, FulltextInfoNode* fulltext_index_node, int64_t table_id) {
     SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0)->children(0));
     int32_t field_id = slot_ref->field_id();
     if (!expr->children(1)->is_constant()) {
@@ -276,18 +319,34 @@ void IndexSelector::hit_match_against_field_range(ExprNode* expr, std::map<int32
     field_range_map[field_id].type = type;
     field_range_map[field_id].like_values.push_back(value);
     field_range_map[field_id].conditions.insert(expr);
+
+    int64_t index_id = 0;
+    if (is_field_has_arrow_reverse_index(table_id, field_id, &index_id)) {
+        range::FieldRange fulltext_match_range;
+        fulltext_match_range.left_row_field_ids.push_back(field_id);
+        fulltext_match_range.type = type;
+        fulltext_match_range.conditions.insert(expr);
+        fulltext_match_range.like_values.push_back(value);
+
+        auto& inner_node = boost::get<FulltextInfoNode::FulltextChildType>(fulltext_index_node->info);
+        inner_node.children.emplace_back(new FulltextInfoNode);
+        inner_node.children.back()->info = std::make_pair(index_id, std::move(fulltext_match_range));
+        inner_node.children.back()->type = pb::FNT_TERM;
+    }
+    
     return;
 }
 
 void IndexSelector::hit_field_range(ExprNode* expr, 
-        std::map<int32_t, FieldRange>& field_range_map, bool* index_predicate_is_null, int64_t table_id) {
+        std::map<int32_t, FieldRange>& field_range_map, bool* index_predicate_is_null, 
+            int64_t table_id, FulltextInfoNode* fulltext_index_node) {
     if (expr->node_type() == pb::OR_PREDICATE) { 
-        return hit_field_or_like_range(expr, field_range_map, table_id);
+        return hit_field_or_like_range(expr, field_range_map, table_id, fulltext_index_node);
     }
     if (expr->node_type() == pb::FUNCTION_CALL) {
         int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
         if (fn_op == parser::FT_MATCH_AGAINST) {
-            return hit_match_against_field_range(expr, field_range_map);
+            return hit_match_against_field_range(expr, field_range_map, fulltext_index_node, table_id);
         }
     }
     if (expr->children_size() < 2) {
@@ -355,24 +414,42 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             return;
         }
         case pb::LIKE_PREDICATE: {
+            range::FieldRange fulltext_and_range;
             field_range_map[field_id].like_values.push_back(values[0]);
+            fulltext_and_range.like_values.push_back(values[0]);
             if (static_cast<ScalarFnCall*>(expr)->fn().fn_op() == parser::FT_EXACT_LIKE) {
                 field_range_map[field_id].is_exact_like = true;
+                fulltext_and_range.is_exact_like = true;
             }
             field_range_map[field_id].conditions.insert(expr);
+            fulltext_and_range.conditions.insert(expr);
             bool is_eq = false;
             bool is_prefix = false;
             ExprValue prefix_value(pb::STRING);
             static_cast<LikePredicate*>(expr)->hit_index(&is_eq, &is_prefix, &(prefix_value.str_val));
             if (is_eq) {
                 field_range_map[field_id].eq_in_values.push_back(prefix_value);
+                fulltext_and_range.eq_in_values.push_back(prefix_value);
                 field_range_map[field_id].type = LIKE_EQ;
+                fulltext_and_range.type = LIKE_EQ;
             } else if (is_prefix) {
                 field_range_map[field_id].eq_in_values.push_back(prefix_value);
+                fulltext_and_range.eq_in_values.push_back(prefix_value);
                 field_range_map[field_id].type = LIKE_PREFIX;
+                fulltext_and_range.type = LIKE_PREFIX;
             } else {
                 field_range_map[field_id].type = LIKE;
+                fulltext_and_range.type = LIKE;
             }
+            int64_t index_id = 0;
+            if (is_field_has_arrow_reverse_index(table_id, field_id, &index_id)) {
+                auto& inner_node = boost::get<FulltextInfoNode::FulltextChildType>(fulltext_index_node->info);
+                inner_node.children.emplace_back(new FulltextInfoNode);
+                fulltext_and_range.left_row_field_ids.push_back(field_id);
+                inner_node.children.back()->info = std::make_pair(index_id, std::move(fulltext_and_range));
+                inner_node.children.back()->type = pb::FNT_TERM;
+            }
+
             return;
          }
         default:
@@ -387,7 +464,8 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                                     JoinNode* join_node,
                                     bool* has_recommend,
                                     bool* index_has_null,
-                                    std::map<int32_t, int>& field_range_type) {
+                                    std::map<int32_t, int>& field_range_type,
+                                    const std::string& sample_sql) {
     int64_t table_id = scan_node->table_id();
     int32_t tuple_id = scan_node->tuple_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
@@ -405,12 +483,18 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
     // 重构思路：先计算单个field的range范围，然后index根据field的范围情况进一步计算
     // field_id => range映射
     std::map<int32_t, FieldRange> field_range_map;
+    FulltextInfoTree fulltext_index_tree;
+    //最外一层 and
+    fulltext_index_tree.root.reset(new FulltextInfoNode);
+    FulltextInfoNode::FulltextChildType and_node;
+    fulltext_index_tree.root->info = and_node;
+    fulltext_index_tree.root->type = pb::FNT_AND;
     // expr => field_ids
     std::map<ExprNode*, std::unordered_set<int32_t>> expr_field_map;
     if (conjuncts != nullptr) {
         for (auto expr : *conjuncts) {
             bool index_predicate_is_null = false;
-            hit_field_range(expr, field_range_map, &index_predicate_is_null, table_id);
+            hit_field_range(expr, field_range_map, &index_predicate_is_null, table_id, fulltext_index_tree.root.get());
             if (index_predicate_is_null) {
                 if (index_has_null != nullptr) {
                     *index_has_null = true;
@@ -476,6 +560,9 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         access_path->tuple_id = tuple_id;
         access_path->table_id = table_id;
         access_path->index_id = index_id;
+        if (index_info.index_hint_status == pb::IHS_VIRTUAL) {
+            access_path->is_virtual = true;
+        }
         Property sort_property;
         if (sort_node != nullptr) {
             sort_property = sort_node->sort_property();
@@ -490,7 +577,8 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
             }
         }
     }
-    return scan_node->select_index_in_baikaldb(); 
+    scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
+    return scan_node->select_index_in_baikaldb(sample_sql); 
 }
 
 }

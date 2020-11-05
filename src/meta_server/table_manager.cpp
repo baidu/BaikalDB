@@ -896,6 +896,22 @@ void TableManager::update_dists(const pb::MetaManagerRequest& request,
         });
 }
 
+void TableManager::update_ttl_duration(const pb::MetaManagerRequest& request,
+                                const int64_t apply_index, 
+                                braft::Closure* done) {
+    update_table_internal(request, apply_index, done, 
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+            // 只能修改有ttl的表
+            if (mem_schema_pb.ttl_duration() == 0 || request.table_info().ttl_duration() == 0) {
+                DB_WARNING("update fail, resuest.ttl_duration:%ld mem_schema_pb.ttl_duration:%ld",
+                    request.table_info().ttl_duration(), mem_schema_pb.ttl_duration());
+                return;
+            }
+            mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+            mem_schema_pb.set_ttl_duration(request.table_info().ttl_duration());
+        });
+}
+
 void TableManager::add_field(const pb::MetaManagerRequest& request,
                              const int64_t apply_index,
                              braft::Closure* done) {
@@ -1405,7 +1421,7 @@ int TableManager::load_statistics_snapshot(const std::string& value) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.count(stat_pb.table_id()) < 1) {
             DB_FATAL("cant find table id:%ld", stat_pb.table_id());
-            return -1;
+            return 0;
         }
         _table_info_map[stat_pb.table_id()].statistics_version = stat_pb.version();
     }
@@ -2286,18 +2302,16 @@ void TableManager::update_startkey_regionid_map(int64_t table_id, std::map<int64
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map;
 
-    for (auto& partition_startkey_regiondesc_map : startkey_regiondesc_map) {
-        auto partition_id = partition_startkey_regiondesc_map.first;
-        auto min_start_key_iter = min_start_key.find(partition_id);
+    for (auto& key_id_pair : key_id_map) {
+        auto partition_id = key_id_pair.first;
         auto max_end_key_iter = max_end_key.find(partition_id);
-        auto key_id_map_iter = key_id_map.find(partition_id);
-        if (min_start_key_iter == min_start_key.end() ||
-            max_end_key_iter == max_end_key.end() ||
-            key_id_map_iter == key_id_map.end()) {
+        auto min_start_key_iter = min_start_key.find(partition_id);
+        if (max_end_key_iter == max_end_key.end() ||
+            min_start_key_iter == min_start_key.end()) {                
             DB_WARNING("unknown partition %ld", partition_id);
         } else {
             partition_update_startkey_regionid_map(table_id, min_start_key_iter->second, max_end_key_iter->second, 
-                key_id_map_iter->second, partition_startkey_regiondesc_map.second);
+                key_id_pair.second, startkey_regiondesc_map[partition_id]);           
         }
     }
 }
@@ -3609,24 +3623,27 @@ void TableManager::link_binlog(const pb::MetaManagerRequest& request, const int6
     // 验证普通表使用的分区字段
     pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
     bool get_field_info = false;
-    if (request.table_info().has_link_field()) {
-        for (const auto& field_info : mem_schema_pb.fields()) {
-            if (field_info.field_name() == request.table_info().link_field().field_name()) {
-                mem_schema_pb.mutable_link_field()->CopyFrom(field_info);
-                get_field_info = true;
-                break;
+    if (binlog_table_mem.is_partition) {
+        if (request.table_info().has_link_field()) {
+            for (const auto& field_info : mem_schema_pb.fields()) {
+                if (field_info.field_name() == request.table_info().link_field().field_name()) {
+                    mem_schema_pb.mutable_link_field()->CopyFrom(field_info);
+                    get_field_info = true;
+                    break;
+                }
             }
-        }
-        if (!get_field_info) {
-            DB_WARNING("link field info error, request:%s", request.DebugString().c_str());
-            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "link field info error");
+            if (!get_field_info) {
+                DB_WARNING("link field info error, request:%s", request.DebugString().c_str());
+                IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "link field info error");
+                return;
+            }
+        } else {
+            DB_WARNING("table no link field info, request:%s", request.DebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "no link field info");
             return;
         }
-    } else {
-        DB_WARNING("table no link field info, request:%s", request.DebugString().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "no link field info");
-        return;
     }
+    
     if (!binlog_table_mem.is_binlog) {
         DB_WARNING("table is not binlog, request:%s", request.DebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is not binlog");

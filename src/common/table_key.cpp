@@ -26,6 +26,131 @@ int TableKey::extract_index(IndexInfo& index, TableRecord* record, int& pos) {
     return record->decode_key(index, *this, pos);
 }
 
+std::string TableKey::decode_start_key_string(pb::PrimitiveType field_type, int& pos) const {
+    std::string start_key_string;
+    switch (field_type) {
+        case pb::INT8: {
+            if (pos + sizeof(int8_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_i8(pos));
+            }
+            pos += sizeof(int8_t);
+        } break;
+        case pb::INT16: {
+            if (pos + sizeof(int16_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_i16(pos));
+            }
+            pos += sizeof(int16_t);
+        } break;
+        case pb::TIME:
+        case pb::INT32: {
+            if (pos + sizeof(int32_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_i32(pos));
+            }
+            pos += sizeof(int32_t);
+        } break;
+        case pb::UINT8: {
+            if (pos + sizeof(uint8_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_u8(pos));
+            }
+            pos += sizeof(uint8_t);
+        } break;
+        case pb::UINT16: {
+            if (pos + sizeof(uint16_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_u16(pos));
+            }
+            pos += sizeof(uint16_t);
+        } break;
+        case pb::UINT32:
+        case pb::TIMESTAMP:
+        case pb::DATE: {
+            if (pos + sizeof(uint32_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_u32(pos));
+            }
+            pos += sizeof(uint32_t);
+        } break;
+        case pb::INT64: {
+            if (pos + sizeof(int64_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_i64(pos));
+            }
+            pos += sizeof(int64_t);
+        } break;
+        case pb::UINT64: 
+        case pb::DATETIME: {
+            if (pos + sizeof(uint64_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_u64(pos));
+            }
+            pos += sizeof(uint64_t);
+        } break;
+        case pb::FLOAT: {
+            if (pos + sizeof(float) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_float(pos));
+            }
+            pos += sizeof(float);
+        } break;
+        case pb::DOUBLE: {
+            if (pos + sizeof(double) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_double(pos));
+            }
+            pos += sizeof(double);
+        } break;
+        case pb::STRING: {
+            if (pos >= (int)size()) {
+                start_key_string = "";
+            } else {
+                extract_string(pos, start_key_string);
+            }
+            pos += (start_key_string.size() + 1);
+        } break;
+        case pb::BOOL: {
+            if (pos + sizeof(uint8_t) > size()) {
+                start_key_string = "decode fail";
+            } else {
+                start_key_string = std::to_string(extract_boolean(pos));
+            }
+            pos += sizeof(uint8_t);
+        } break;
+        default: {
+            DB_WARNING("unsupport type:%d", field_type);
+            start_key_string = "unsupport type";
+            break;
+        }
+    }
+    return start_key_string;
+}
+
+std::string TableKey::decode_start_key_string(IndexInfo& index) const {
+    std::string start_key_string;
+    int pos = 0;
+    for (auto& field : index.fields) {
+        start_key_string += decode_start_key_string(field.type, pos);
+        start_key_string += ",";
+    }
+    if (start_key_string.size() > 0) {
+        start_key_string.pop_back();
+    }
+    return start_key_string;
+}
+
 //TODO: secondary key
 int TableKey::decode_field(Message* message,
         const Reflection* reflection,

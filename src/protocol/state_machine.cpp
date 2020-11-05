@@ -1004,6 +1004,8 @@ bool StateMachine::_query_process(SmartSocket client) {
                 ret = _handle_client_query_show_abnormal_regions(client);
             } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_COST)) {
                 ret = _handle_client_query_show_cost(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_VIRTUAL_INDEX)) {
+                ret = _handle_client_query_show_virtual_index(client);
             } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_COLLATION)) {
                 ret = _handle_client_query_show_collation(client);
             } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_WARNINGS)) {
@@ -1171,7 +1173,12 @@ bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
         DB_FATAL("use db fail, %s", sql.c_str());
         return false;
     }
-    if (std::find(dbs.begin(), dbs.end(), db) == dbs.end()) {
+    std::string db_name = db;
+    std::transform(db_name.begin(), db_name.end(), db_name.begin(), ::tolower);
+    if (db_name != "information_schema") {
+        db_name = db;
+    }
+    if (std::find(dbs.begin(), dbs.end(), db_name) == dbs.end()) {
         _wrapper->make_err_packet(client, ER_DBACCESS_DENIED_ERROR, 
                 "Access denied for user '%s' to database '%s'", 
                 client->user_info->username.c_str(), db.c_str());
@@ -1179,8 +1186,8 @@ bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
         return false;
     }
     // Set current database.
-    client->query_ctx->cur_db = db;
-    client->current_db = db;
+    client->query_ctx->cur_db = db_name;
+    client->current_db = db_name;
     // Set ok package.
     _wrapper->make_simple_ok_packet(client);
     client->state = STATE_READ_QUERY_RESULT;
@@ -1274,11 +1281,27 @@ bool StateMachine::_handle_client_query_show_full_tables(SmartSocket client) {
 
     std::string namespace_ = client->user_info->namespace_;
     std::string current_db = client->current_db;
+
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+    if (split_vec.size() == 5) {
+        current_db = remove_quote(split_vec[4].c_str(), '`');
+    } else if (split_vec.size() == 3) {
+    } else {
+        client->state = STATE_ERROR;
+        return false;
+    }
+
     if (current_db == "") {
         DB_WARNING("no database selected");
         _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
         client->state = STATE_READ_QUERY_RESULT;
         return false;
+    }
+    if (current_db == "information_schema") {
+        namespace_ = "INTERNAL";
     }
 
     // Make fields.
@@ -1300,7 +1323,6 @@ bool StateMachine::_handle_client_query_show_full_tables(SmartSocket client) {
 
     // Make rows.
     std::vector< std::vector<std::string> > rows;
-    SchemaFactory* factory = SchemaFactory::get_instance();
     std::vector<std::string> tables =  factory->get_table_list(
             namespace_, current_db, client->user_info.get());
     //DB_NOTICE("db:%s table.size:%d", current_db.c_str(), tables.size());
@@ -1344,6 +1366,9 @@ bool StateMachine::_handle_client_query_show_tables(SmartSocket client) {
         _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
         client->state = STATE_READ_QUERY_RESULT;
         return false;
+    }
+    if (db == "information_schema") {
+        namespace_ = "INTERNAL";
     }
 
     // Make fields.
@@ -1447,7 +1472,11 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         return false;
     }
     SchemaFactory* factory = SchemaFactory::get_instance();
-    std::string full_name = client->user_info->namespace_ + "." + db + "." + table;
+    std::string namespace_ = client->user_info->namespace_;
+    if (db == "information_schema") {
+        namespace_ = "INTERNAL";
+    }
+    std::string full_name = namespace_ + "." + db + "." + table;
     int64_t table_id = -1;
     if (factory->get_table_id(full_name, table_id) != 0) {
         client->state = STATE_ERROR;
@@ -1497,6 +1526,9 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         }  else {
             oss << "  " << index_map[index_info.type] << " ";
         }
+        if (index_info.index_hint_status == pb::IHS_VIRTUAL) {
+            oss << "VIRTUAL ";
+        }
         if (index_info.type != pb::I_PRIMARY) {
             std::vector<std::string> split_vec;
             boost::split(split_vec, index_info.name,
@@ -1532,7 +1564,8 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         {pb::ROCKSDB, "Rocksdb"},
         {pb::REDIS, "Redis"},
         {pb::ROCKSDB_CSTORE, "Rocksdb_cstore"},
-        {pb::BINLOG, "Binlog"}
+        {pb::BINLOG, "Binlog"},
+        {pb::INFORMATION_SCHEMA, "MEMORY"}
     };
     oss << ") ENGINE=" << engine_map[info.engine];
     oss << " DEFAULT CHARSET=" << charset_map[info.charset];
@@ -1667,8 +1700,12 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
         client->state = STATE_ERROR;
         return false;
     }
+    std::string namespace_ = client->user_info->namespace_;
+    if (db == "information_schema") {
+        namespace_ = "INTERNAL";
+    }
     SchemaFactory* factory = SchemaFactory::get_instance();
-    std::string full_name = client->user_info->namespace_ + "." + db + "." + table;
+    std::string full_name = namespace_ + "." + db + "." + table;
     int64_t table_id = -1;
     if (factory->get_table_id(full_name, table_id) != 0) {
         client->state = STATE_ERROR;
@@ -1865,6 +1902,9 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
         client->state = STATE_READ_QUERY_RESULT;
         return false;
     }
+    if (db == "information_schema") {
+        namespace_ = "INTERNAL";
+    }
 
     // Make rows.
     std::vector< std::vector<std::string> > rows;
@@ -1883,7 +1923,7 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
         return false;
     }
     for (auto table : tables) {
-        std::string full_name = client->user_info->namespace_ + "." + db + "." + table;
+        std::string full_name = namespace_ + "." + db + "." + table;
         int64_t table_id = -1;
         if (factory->get_table_id(full_name, table_id) != 0) {
             client->state = STATE_ERROR;
@@ -2052,6 +2092,87 @@ bool StateMachine::_handle_client_query_show_cost(SmartSocket client) {
     }
 
     std::vector<std::string> names = { "name_space", "database_name", "table_name" };
+
+    std::vector<ResultField> fields;
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        fields.push_back(field);
+    }
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+void StateMachine::_parse_sample_sql(std::string sample_sql, std::string& database, std::string& table, std::string& sql) {
+    // Remove comments.
+    re2::RE2::Options option;
+    option.set_utf8(false);
+    option.set_case_sensitive(false);
+    option.set_perl_classes(true);
+
+    re2::RE2 reg("family_table_tag_optype_plat=\\[(.*)\t(.*)\t.*\t.*\t.*sql=\\[(.*)\\]", option);
+
+    if (!RE2::Extract(sample_sql, reg, "\\1", &database)) {
+        DB_WARNING("extract commit error.");
+    }
+    if (!RE2::Extract(sample_sql, reg, "\\2", &table)) {
+        DB_WARNING("extract commit error.");
+    }
+    if (!RE2::Extract(sample_sql, reg, "\\3", &sql)) {
+        DB_WARNING("extract commit error.");
+    }
+
+    DB_WARNING("sample_sql: %s, database: %s, table: %s, sql: %s", sample_sql.c_str(), database.c_str(), table.c_str(), sql.c_str());
+}
+
+bool StateMachine::_handle_client_query_show_virtual_index(SmartSocket client) {
+    if (client == nullptr || client->query_ctx == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+    
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+    if (split_vec.size() != 3) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::vector<std::string> database_table;
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    VirtualIndexMap sample = factory->get_virtual_index_info();
+    std::vector< std::vector<std::string> > rows;
+    for (auto& iter : sample.index_id_sample_sqls_map) {
+        std::string index_name = sample.index_id_name_map[iter.first];
+        for (auto& sample_sql : iter.second) {
+            std::vector<std::string> row;
+            std::string database;
+            std::string table;
+            std::string sql;
+            _parse_sample_sql(sample_sql, database, table, sql);
+            uint64_t out[2];
+            butil::MurmurHash3_x64_128(sample_sql.c_str(), sample_sql.size(), 0x1234, out);
+            std::string sign = std::to_string(out[0]);
+            row.push_back(database);
+            row.push_back(table);
+            row.push_back(index_name);
+            row.push_back(sign);
+            row.push_back(sql);
+            rows.push_back(row);
+        }
+    }
+
+    std::vector<std::string> names = { "database_name", "table_name", "virtual_index_name", "sign", "sql" };
 
     std::vector<ResultField> fields;
     for (auto& name : names) {

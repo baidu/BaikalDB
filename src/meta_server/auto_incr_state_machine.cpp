@@ -192,7 +192,7 @@ void AutoIncrStateMachine::update(const pb::MetaManagerRequest& request,
 }
 
 void AutoIncrStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
-    DB_WARNING("start on shnapshot save");
+    DB_WARNING("start on snapshot save");
     std::string max_id_string;
     save_auto_increment(max_id_string);
     Bthread bth(&BTHREAD_ATTR_SMALL);
@@ -203,7 +203,7 @@ void AutoIncrStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft
 }
 
 int AutoIncrStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
-    DB_WARNING("start on shnapshot load");
+    DB_WARNING("start on snapshot load");
     std::vector<std::string> files;
     reader->list_files(&files);
     for (auto& file : files) {

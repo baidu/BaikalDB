@@ -282,14 +282,13 @@ void QueryTableManager::process_console_heartbeat(const pb::ConsoleHeartBeatRequ
             pb::ConsoleHeartBeatResponse* response, uint64_t log_id) {
     TimeCost step_time_cost; 
     std::unordered_map<int64_t, int64_t> report_table_map;
-    std::unordered_map<int64_t, std::tuple<int64_t, int64_t, std::string, int64_t>> region_version_map;
+    std::unordered_map<int64_t, pb::RegionHeartBeat> region_version_map;
 
     for (auto& table : request->table_versions()) {
         report_table_map[table.table_id()] = table.version();
     }
     for (auto& region : request->region_versions()) {
-        region_version_map[region.region_id()] = std::make_tuple(region.version(),
-                     region.conf_version(), region.leader(), region.num_table_lines());
+        region_version_map[region.region_id()] = region;
     }    
     int64_t parse_time = step_time_cost.get_time();
     step_time_cost.reset();
@@ -358,6 +357,7 @@ void QueryTableManager::get_primary_key_string(int64_t table_id, std::string& pr
         primary_key_string.erase(primary_key_string.size() - 1);
     }
 }
+
 void QueryTableManager::decode_key(int64_t table_id, const TableKey& start_key, std::string& start_key_string) {
     pb::SchemaInfo table_info;
     auto ret = TableManager::get_instance()->get_table_info(table_id, table_info);
@@ -372,139 +372,12 @@ void QueryTableManager::decode_key(int64_t table_id, const TableKey& start_key, 
         }
         for (int idx = 0; idx < index_info.field_names_size(); ++idx) {
             pb::PrimitiveType field_type = get_field_type(table_id, index_info.field_ids(idx), table_info);
-            switch (field_type) {
-                case pb::INT8: {
-                    if (pos + sizeof(int8_t) > start_key.size()) {
-                        DB_WARNING("int8_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_i8(pos));
-                    start_key_string += ",";
-                    pos += sizeof(int8_t);
-                } break;
-                case pb::INT16: {
-                    if (pos + sizeof(int16_t) > start_key.size()) {
-                        DB_WARNING("int16_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_i16(pos));
-                    start_key_string += ",";
-                    pos += sizeof(int16_t);
-                } break;
-                case pb::TIME:
-                case pb::INT32: {
-                    if (pos + sizeof(int32_t) > start_key.size()) {
-                        DB_WARNING("int32_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_i32(pos));
-                    start_key_string += ",";
-                    pos += sizeof(int32_t);
-                } break;
-                case pb::UINT8: {
-                    if (pos + sizeof(uint8_t) > start_key.size()) {
-                        DB_WARNING("uint8_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_u8(pos));
-                    start_key_string += ",";
-                    pos += sizeof(uint8_t);
-                } break;
-                case pb::UINT16: {
-                    if (pos + sizeof(uint16_t) > start_key.size()) {
-                        DB_WARNING("uint16_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_u16(pos));
-                    start_key_string += ",";
-                    pos += sizeof(uint16_t);
-                } break;
-                case pb::UINT32:
-                case pb::TIMESTAMP:
-                case pb::DATE: {
-                    if (pos + sizeof(uint32_t) > start_key.size()) {
-                        DB_WARNING("uint32_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_u32(pos));
-                    start_key_string += ",";
-                    pos += sizeof(uint32_t);
-                } break;
-                case pb::INT64: {
-                    if (pos + sizeof(int64_t) > start_key.size()) {
-                        DB_WARNING("int64_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_i64(pos));
-                    start_key_string += ",";
-                    pos += sizeof(int64_t);
-                } break;
-                case pb::UINT64: 
-                case pb::DATETIME: {
-                    if (pos + sizeof(uint64_t) > start_key.size()) {
-                        DB_WARNING("int64_t pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_u64(pos));
-                    start_key_string += ",";
-                    pos += sizeof(uint64_t);
-                } break;
-                case pb::FLOAT: {
-                    if (pos + sizeof(float) > start_key.size()) {
-                        DB_WARNING("float pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_float(pos));
-                    pos += sizeof(float);
-                } break;
-                case pb::DOUBLE: {
-                    if (pos + sizeof(double) > start_key.size()) {
-                        DB_WARNING("double pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_double(pos));
-                    pos += sizeof(double);
-                } break;
-                case pb::STRING: {
-                    if (pos >= (int)start_key.size()) {
-                        DB_WARNING("string pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    std::string str;
-                    start_key.extract_string(pos, str);
-                    start_key_string += str;
-                    pos += (str.size() + 1);
-                } break;
-                case pb::BOOL: {
-                    if (pos + sizeof(uint8_t) > start_key.size()) {
-                        DB_WARNING("string pos out of bound: %d %zu", pos, start_key.size());
-                        start_key_string += "decode fail";
-                        return;
-                    }
-                    start_key_string += std::to_string(start_key.extract_boolean(pos));
-                    pos += sizeof(uint8_t);
-                } break;
-                default: {
-                    DB_WARNING("unsupport type:%d", field_type);
-                    start_key_string += "unsupport type";
-                    return;
-                }
-            }
+            start_key_string += start_key.decode_start_key_string(field_type, pos);
+            start_key_string += ",";
         }
     }
     if (start_key_string.size() > 1) {
-        start_key_string.erase(start_key_string.size() - 1);
+        start_key_string.pop_back();
     }
 }
 

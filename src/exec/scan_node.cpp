@@ -21,6 +21,7 @@
 #include "slot_ref.h"
 #include "runtime_state.h"
 #include "rocksdb_scan_node.h"
+#include "information_schema_scan_node.h"
 #include "redis_scan_node.h"
 
 namespace baikaldb {
@@ -302,17 +303,17 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
             return 0;
         }
 
-        if (!outer_path->is_covering_index && !outer_path->is_sort_index) {
+        if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
             outer_path->is_possible = false;
             return -1;
         }
 
-        if (!inner_path->is_covering_index && !inner_path->is_sort_index) {
+        if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
             inner_path->is_possible = false;
             return -2;
         }
 
-        if (outer_path->is_covering_index == inner_path->is_covering_index &&
+        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
             inner_path->is_possible = false;
             return -2;
@@ -323,12 +324,12 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
             return 0;
         }
 
-        if (!outer_path->is_covering_index && !outer_path->is_sort_index) {
+        if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
             outer_path->is_possible = false;
             return -1;
         }
 
-        if (outer_path->is_covering_index == inner_path->is_covering_index &&
+        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
             outer_path->is_possible = false;
             return -1;
@@ -338,12 +339,12 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
             return 0;
         }
 
-        if (!inner_path->is_covering_index && !inner_path->is_sort_index) {
+        if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
             inner_path->is_possible = false;
             return -2;
         }
 
-        if (outer_path->is_covering_index == inner_path->is_covering_index &&
+        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
             inner_path->is_possible = false;
             return -2;
@@ -412,7 +413,7 @@ int64_t ScanNode::pre_process_select_index() {
             possible_cnt++;
             possible_index = outer_loop_iter->second->index_id;
         }
-        if (outer_loop_iter->second->is_covering_index) {
+        if (outer_loop_iter->second->is_cover_index()) {
             cover_index_cnt++;
         }
     }
@@ -433,7 +434,7 @@ int64_t ScanNode::pre_process_select_index() {
 
 }
 
-int64_t ScanNode::select_index_in_baikaldb() {
+int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
     auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
     if (table_ptr == nullptr) {
         DB_FATAL("table info not exist : %ld", _table_id);
@@ -455,9 +456,22 @@ int64_t ScanNode::select_index_in_baikaldb() {
         }
     } 
 
+    if (_paths[select_idx]->is_virtual) {
+        // 虚拟索引需要重新选择
+        _router_index_id = -1;
+        _router_index = nullptr;
+        _multi_reverse_index.clear();
+        _paths[select_idx]->is_possible = false; // 确保下次不再选择该虚拟索引
+        std::string& name = _paths[select_idx]->index_info_ptr->short_name;
+        SchemaFactory::get_instance()->update_virtual_index_info(select_idx, name, sample_sql);
+        return select_index_in_baikaldb(sample_sql);
+    }
+
     //DB_WARNING("idx:%ld table:%ld", select_idx, _table_id);
     std::unordered_set<ExprNode*> other_condition;
     if (_multi_reverse_index.size() > 0) {
+        //有倒排索引，创建倒排索引树
+        create_fulltext_index_tree();
         std::unordered_set<ExprNode*> need_cut_condition;
         select_idx = _multi_reverse_index[0];
         for (auto index_id : _multi_reverse_index) {
@@ -500,6 +514,7 @@ int64_t ScanNode::select_index_in_baikaldb() {
         get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
         static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index(other_condition);
     }
+
     return select_idx;
 }
 
@@ -509,12 +524,12 @@ ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node) {
         switch (engine) {
             case pb::ROCKSDB:
             case pb::BINLOG:
-                return new RocksdbScanNode;
             case pb::ROCKSDB_CSTORE:
-                return new RocksdbScanNode(pb::ROCKSDB_CSTORE);
+                return new RocksdbScanNode;
+            case pb::INFORMATION_SCHEMA:
+                return new InformationSchemaScanNode;
             case pb::REDIS:
                 return new RedisScanNode;
-                break;
         }
     } else {
         return new RocksdbScanNode;
@@ -558,11 +573,89 @@ int ScanNode::choose_arrow_pb_reverse_index() {
 
         if (filter_type == pb::ST_PROTOBUF_OR_FORMAT1) {
             remove_indexs_func(pb_indexs);
+            _fulltext_use_arrow = true;
         } else if (filter_type == pb::ST_ARROW) {
             remove_indexs_func(arrow_indexs);
         }
     }
     return 0;   
+}
+
+int ScanNode::create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextIndex* root) {
+    if (node == nullptr) {
+        return 0;
+    }
+    switch(node->type) {
+        case pb::FNT_TERM : {
+            auto& inner_node_pair = boost::get<FulltextInfoNode::LeafNodeType>(node->info);
+            auto& inner_node = inner_node_pair.second;
+            root->set_fulltext_node_type(pb::FNT_TERM);
+            auto possible_index = root->mutable_possible_index();
+            possible_index->set_index_id(inner_node_pair.first);
+            SmartRecord record_template = SchemaFactory::get_instance()->new_record(_table_id);
+
+            if (inner_node.like_values.size() != 1) {
+                DB_WARNING("like values size not equal one");
+                return -1;
+            }
+            record_template->set_value(record_template->get_field_by_tag(
+                inner_node.left_row_field_ids[0]), inner_node.like_values[0]);
+            std::string str;
+            record_template->encode(str);
+            auto range = possible_index->add_ranges();
+            auto range_type = inner_node.type;
+            range->set_left_pb_record(str);
+            range->set_right_pb_record(str);
+            range->set_left_field_cnt(1);
+            range->set_right_field_cnt(1);
+            range->set_left_open(false);
+            range->set_right_open(false);
+            if (range_type == range::MATCH_LANGUAGE) {
+                range->set_match_mode(pb::M_NARUTAL_LANGUAGE);
+            } else if (range_type == range::MATCH_BOOLEAN) {
+                range->set_match_mode(pb::M_BOOLEAN);
+            }
+            break;
+        }
+        case pb::FNT_AND : 
+        case pb::FNT_OR : {
+            auto& inner_node = boost::get<FulltextInfoNode::FulltextChildType>(node->info);
+            if (inner_node.children.size() == 1) {
+                if (create_fulltext_index_tree(inner_node.children[0].get(), root) != 0) {
+                    return -1;
+                }
+            } else if (inner_node.children.size()  > 1) {
+                root->set_fulltext_node_type(node->type);
+                for (const auto& child : inner_node.children) {
+                    auto child_iter = root->add_nested_fulltext_indexes();
+                    if (create_fulltext_index_tree(child.get(), child_iter) == -1) {
+                        return -1;
+                    }
+                }
+            }
+            break;
+        }
+        default : {
+            DB_WARNING("unknown node type");
+            break;
+        }
+    }
+    return 0;
+}
+
+int ScanNode::create_fulltext_index_tree() {
+    _fulltext_index_pb.reset(new pb::FulltextIndex);
+    if (create_fulltext_index_tree(_fulltext_index_tree.root.get(), _fulltext_index_pb.get()) != 0) {
+        DB_WARNING("create fulltext index tree error.");
+        return -1;
+    } else {
+        if (_fulltext_use_arrow) {
+            pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
+            auto fulltext_index_iter = pb_scan_node->mutable_fulltext_index();
+            fulltext_index_iter->CopyFrom(*_fulltext_index_pb);
+        }
+    }
+    return 0;
 }
 }
 

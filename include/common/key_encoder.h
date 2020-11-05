@@ -138,7 +138,7 @@ public:
     ///3. if neg, then flip all bits
     static uint32_t encode_f32(float in) {
         uint32_t res = *reinterpret_cast<uint32_t*>(&in);
-        if (in > 0) {
+        if (in >= 0.0) {
             return (res | SIGN_MASK_32);
         } else {
             return ~res;
@@ -156,7 +156,7 @@ public:
 
     static uint64_t encode_f64(double in) {
         uint64_t res = *reinterpret_cast<uint64_t*>(&in);
-        if (in > 0) {
+        if (in >= 0.0) {
             return (res | SIGN_MASK_64);
         } else {
             return ~res;

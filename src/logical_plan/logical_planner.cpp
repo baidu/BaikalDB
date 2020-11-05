@@ -118,10 +118,6 @@ int LogicalPlanner::create_in_predicate(const parser::FuncExpr* func_item,
     func->set_name(func_item->fn_name.value);
     func->set_fn_op(func_item->func_type);
     parser::ExprNode* arg1 = (parser::ExprNode*)func_item->children[0];
-    if (arg1->expr_type == parser::ET_ROW_EXPR) {
-        DB_WARNING("un-support RowExpr in, [%s]", func_item->to_string().c_str());
-        //return -1;
-    }
     
     if (0 != create_expr_tree(arg1, expr, use_alias, can_agg)) {
         DB_WARNING("create child 1 expr failed");
@@ -395,6 +391,15 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         const std::string& alias, bool is_derived_table) {
     std::string _namespace = _ctx->user_info->namespace_;
     std::string _username =  _ctx->user_info->username;
+    // information_schema忽略大小写
+    std::string database_name = database;
+    std::transform(database_name.begin(), database_name.end(), database_name.begin(), ::tolower);
+    if (database_name == "information_schema") {
+        _namespace = "INTERNAL";
+        _ctx->has_information_schema = true;
+    } else {
+        database_name = database;
+    }
     
     if (is_derived_table) {
         return add_derived_table(database, table, alias);
@@ -403,7 +408,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
     DatabaseInfo db;
     if (_database_info.count(database) == 0) {
         int64_t databaseid = -1;
-        if (0 != _factory->get_database_id(_namespace + "." + database, databaseid)) {
+        if (0 != _factory->get_database_id(_namespace + "." + database_name, databaseid)) {
             DB_WARNING("unknown _namespace:%s database: %s", _namespace.c_str(), database.c_str());
             _ctx->stat_info.error_code = ER_BAD_DB_ERROR;
             _ctx->stat_info.error_msg << "database " << database << " not exist";
@@ -427,7 +432,11 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
 
     if (_table_info.count(alias_full_name) == 0) {
         int64_t tableid = -1;
-        if (0 != _factory->get_table_id(_namespace + "." + database + "." + table, tableid)) {
+        std::string table_name = table;
+        if (_ctx->has_information_schema) {
+            std::transform(table_name.begin(), table_name.end(), table_name.begin(), ::toupper);
+        }
+        if (0 != _factory->get_table_id(_namespace + "." + database_name + "." + table_name, tableid)) {
             DB_WARNING("unknown table: %s.%s", database.c_str(), table.c_str());
             _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
             _ctx->stat_info.error_msg << "table: " << database << "." << table << " not exist";
@@ -1709,6 +1718,7 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root) {
         scan->set_tuple_id(join_root->join_node.left_tuple_ids(0));
         scan->set_table_id(join_root->join_node.left_table_ids(0));
         scan->set_engine(_factory->get_table_engine(scan->table_id()));
+        DB_WARNING("get_table_engine :%d", scan->engine());
         for (auto index_id : join_root->use_indexes) {
             scan->add_use_indexes(index_id);
         }
@@ -1752,6 +1762,7 @@ int LogicalPlanner::create_scan_nodes() {
         scan->set_tuple_id(tuple_desc.tuple_id());
         scan->set_table_id(tuple_desc.table_id());
         scan->set_engine(_factory->get_table_engine(scan->table_id()));
+        DB_WARNING("get_table_engine :%d", scan->engine());
     }
     return 0;
 }

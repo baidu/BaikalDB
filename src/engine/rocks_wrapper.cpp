@@ -235,19 +235,6 @@ int32_t RocksWrapper::init(const std::string& path) {
             return -1;
         }
     }
-    if (0 == _column_families.count(BIN_LOG_CF)) {
-        //create bin_log column_familiy
-        rocksdb::ColumnFamilyHandle* bin_log_handle;
-        s = _txn_db->CreateColumnFamily(_binlog_cf_option, BIN_LOG_CF, &bin_log_handle);
-        if (s.ok()) {
-            DB_WARNING("create column family success, column family:%s", BIN_LOG_CF.c_str());
-            _column_families[BIN_LOG_CF] = bin_log_handle;
-        } else {
-            DB_FATAL("create column family fail, column family:%s, err_message:%s",
-                    BIN_LOG_CF.c_str(), s.ToString().c_str());
-            return -1;
-        }
-    }
     if (0 == _column_families.count(DATA_CF)) {
         //create data column_family
         rocksdb::ColumnFamilyHandle* data_handle;
@@ -270,6 +257,19 @@ int32_t RocksWrapper::init(const std::string& path) {
         } else {
             DB_FATAL("create column family fail, column family:%s, err_message:%s",
                     METAINFO_CF.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    }
+    if (0 == _column_families.count(BIN_LOG_CF)) {
+        //create bin_log column_familiy
+        rocksdb::ColumnFamilyHandle* bin_log_handle;
+        s = _txn_db->CreateColumnFamily(_binlog_cf_option, BIN_LOG_CF, &bin_log_handle);
+        if (s.ok()) {
+            DB_WARNING("create column family success, column family:%s", BIN_LOG_CF.c_str());
+            _column_families[BIN_LOG_CF] = bin_log_handle;
+        } else {
+            DB_FATAL("create column family fail, column family:%s, err_message:%s",
+                    BIN_LOG_CF.c_str(), s.ToString().c_str());
             return -1;
         }
     }

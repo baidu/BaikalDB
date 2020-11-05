@@ -212,6 +212,7 @@ public:
     bool                need_destroy_tree = false;
     int64_t             prepared_table_id = -1;
     bool                has_derived_table = false;
+    bool                has_information_schema = false;
     // field: column_id
     std::map<std::string, int32_t> field_column_id_mapping;
     // tuple_id: field: slot_id

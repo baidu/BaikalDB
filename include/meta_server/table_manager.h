@@ -161,6 +161,7 @@ public:
     void update_schema_conf(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_statistics(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_dists(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void update_ttl_duration(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_resource_tag(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
 
     void add_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);

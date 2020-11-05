@@ -129,6 +129,10 @@ enum IndexHint {
         }
         pos_index.set_is_covering_index(is_covering_index);
     }
+
+    bool is_cover_index() {
+        return is_covering_index || index_type == pb::I_PRIMARY;
+    }
     
 public:
     //TODO 先mock一个，后面从schema读取
@@ -161,6 +165,7 @@ public:
     bool is_covering_index = true;
     bool is_possible = false;
     bool is_sort_index = false;
+    bool is_virtual = false;
     SmartTable table_info_ptr;
     SmartIndex index_info_ptr;
     SmartIndex pri_info_ptr;

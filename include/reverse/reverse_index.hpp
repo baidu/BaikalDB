@@ -23,37 +23,11 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
     int8_t status = 0;
     TimeCost timer;
 
-    // if (_merge_success_flag) {
-    //     std::swap(_merge_prefix, _reverse_prefix);
-    // }
-    // _merge_success_flag = false;
-
-    //reverse_prefix 和sync_prefix_*没有加锁同步，极端情况下，会有不一致
-    //等待一段时间，确保sync_prefix_*加1成功
-    usleep(200);
-    //wait all of the _merge_prefix key put in rocksdb and
-    //all read merge_prefix over
-
-    // if (_merge_prefix == 0) { 
-    //     while (_sync_prefix_0 != 0) {
-    //         bthread_usleep(200);
-    //     }
-    // } else { 
-    //     while (_sync_prefix_1 != 0) {
-    //             bthread_usleep(200);
-    //         }
-    // }
-
-
     _level_1_scan_count = 0;
 
     //DB_NOTICE("region %ld table %ld merge %d wait time %lu", 
     //                    _region_id, _index_id, _reverse_prefix, timer.get_time());
-    uint8_t prefix = 0;
-    prefix = _merge_prefix;
-    if (_prefix_0_succ) {
-       prefix = _reverse_prefix;
-    } 
+    uint8_t prefix = _reverse_prefix;
     
     //1. create prefix key (regionid+tableid+_reverse_prefix)
     std::string key;
@@ -74,6 +48,7 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
         return -1;
     }
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(roptions, data_cf));
+    usleep(200);
     iter->Seek(key);
     bool end_flag = is_prefix_end(iter, prefix);
     if (_is_over_cache) {
@@ -81,10 +56,6 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
     }
     int64_t seek_time = timer.get_time();
     if (end_flag) {
-        _merge_success_flag = true;
-        if (prefix == 0) {
-            _prefix_0_succ = true;
-        }
         DB_DEBUG("seek end merge dowith time:%ld, seek time:%ld, region_id:%ld, cache:%s, "
                 "seg_cache:%s, prefix:%d,level_1_scan_count:%ld", 
                 timer.get_time(), seek_time, _region_id, 
@@ -113,21 +84,6 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
         }
     }
     
-    _merge_success_flag = true;
-    /*
-    //remove range
-    rocksdb::WriteOptions write_options;
-    auto res = _rocksdb->remove_range(write_options, data_cf, key, end_key);
-    if (!res.ok()) {
-        DB_FATAL("merge remove_range error: code=%d, msg=%s, region_id: %ld", 
-            res.code(), res.ToString().c_str(), _region_id);
-        _merge_success_flag = false;
-    }
-    */
-    if (prefix == 0) {
-        _prefix_0_succ = true;
-    }
-
     DB_WARNING("merge dowith time:%ld, seek time:%ld, region_id:%ld, index_id:%ld, cache:%s, "
     "seg_cache:%s, prefix:%d,level_1_scan_count:%ld", 
             timer.get_time(), seek_time, _region_id, _index_id, 
@@ -673,6 +629,11 @@ int ReverseIndex<Schema>::_insert_one_reverse_node(
     key.append(term);
     key.append(1, '\0');
     key.append(node->key());
+    int64_t  time = butil::gettimeofday_us();
+    uint64_t time_encode = KeyEncoder::to_endian_u64(KeyEncoder::encode_i64(time));
+    key.append(1, '\0');
+    key.append((char*)&time_encode, sizeof(uint64_t));
+
     // 2. create value
     std::string value;
     if (!node->SerializeToString(&value)) {
@@ -724,7 +685,7 @@ int MutilReverseIndex<Schema>::search(
     bool_executor_type type = NODE_COPY;
     _son_exe_vec.resize(son_size);
     bool type_init = false; 
-    for (int i = 0; i < son_size; ++i) {
+    for (uint32_t i = 0; i < son_size; ++i) {
         reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i], modes[i],
             std::vector<ExprNode*>(), is_fast);
         _son_exe_vec[i] = reverse_indexes[i]->get_executor();
@@ -737,7 +698,7 @@ int MutilReverseIndex<Schema>::search(
     if (bool_or) {
         _exe = new OrBooleanExecutor<Schema>(type, nullptr);
         _exe->set_merge_func(Schema::merge_or);
-        for (int i = 0; i < son_size; ++i) {
+        for (uint32_t i = 0; i < son_size; ++i) {
             if (_son_exe_vec[i]) {
                 _exe->add((BooleanExecutor<Schema>*)_son_exe_vec[i]);
             }
@@ -745,7 +706,7 @@ int MutilReverseIndex<Schema>::search(
     } else {
         _exe = new AndBooleanExecutor<Schema>(type, nullptr);
         _exe->set_merge_func(Schema::merge_or);
-        for (int i = 0; i < son_size; ++i) {
+        for (uint32_t i = 0; i < son_size; ++i) {
             if (_son_exe_vec[i]) {
                 _exe->add((BooleanExecutor<Schema>*)_son_exe_vec[i]);
             }
@@ -754,6 +715,96 @@ int MutilReverseIndex<Schema>::search(
     return 0;
 }
 
+template <typename Schema>
+int MutilReverseIndex<Schema>::search(
+    rocksdb::Transaction* txn,
+    const IndexInfo& index_info,
+    const TableInfo& table_info,
+    std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
+    bool is_fast, const pb::FulltextIndex& fulltext_index_info) {
+
+    _index_info = index_info;
+    _table_info = table_info;
+    _txn = txn;
+    _is_fast = is_fast;
+    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
+    _reverse_index_map = reverse_index_map;    
+    _reverse_indexes.reserve(5);
+    init_operator_executor(fulltext_index_info, _exe);
+    return 0;
+}
+
+template <typename Schema>
+int MutilReverseIndex<Schema>::init_operator_executor(
+    const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor<Schema>*& exe) {
+
+    if (fulltext_index_info.fulltext_node_type() == pb::FNT_AND) {
+        exe = new AndBooleanExecutor<Schema>(_type, nullptr);
+        exe->set_merge_func(Schema::merge_or);
+        for (const auto& child : fulltext_index_info.nested_fulltext_indexes()) {
+            if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
+                OperatorBooleanExecutor<Schema>* child_exe = nullptr;
+                if (init_operator_executor(child, child_exe) == 0) {
+                    exe->add(child_exe);
+                }
+            } else {
+                BooleanExecutor<Schema>* child_exe = nullptr;
+                if (init_term_executor(child, child_exe) == 0) {
+                    exe->add(child_exe);
+                }
+            }
+        }
+    } else if (fulltext_index_info.fulltext_node_type() == pb::FNT_OR) {
+        exe = new OrBooleanExecutor<Schema>(_type, nullptr);
+        exe->set_merge_func(Schema::merge_or);
+        for (const auto& child : fulltext_index_info.nested_fulltext_indexes()) {
+
+            if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
+                OperatorBooleanExecutor<Schema>* child_exe = nullptr;
+                if (init_operator_executor(child, child_exe) == 0) {
+                    exe->add(child_exe);
+                }
+            } else {
+                BooleanExecutor<Schema>* child_exe = nullptr;
+                if (init_term_executor(child, child_exe) == 0) {
+                    exe->add(child_exe);
+                }
+            }
+        }
+    } else {
+        DB_WARNING("unknown node type[%s].", fulltext_index_info.ShortDebugString().c_str());
+    }
+    return 0;
+}
+
+template <typename Schema>
+int MutilReverseIndex<Schema>::init_term_executor(
+    const pb::FulltextIndex& fulltext_index_info, BooleanExecutor<Schema>*& exe) {
+
+    auto index_id = fulltext_index_info.possible_index().index_id();
+    auto reverse_iter = static_cast<ReverseIndex<Schema>*>(_reverse_index_map[index_id]);
+    //析构用，可以重复。
+    _reverse_indexes.push_back(reverse_iter);
+    SmartRecord record = SchemaFactory::get_instance()->new_record(_table_info.id);
+    record->decode(fulltext_index_info.possible_index().ranges(0).left_pb_record());
+    auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+    if (index_info == nullptr || index_info->id == -1) {
+        DB_WARNING("no index_info found for index id: %ld", index_id);
+        return -1;
+    }
+    std::string word;
+    int ret = record->get_reverse_word(*index_info, word);
+    if (ret < 0) {
+        DB_WARNING("index_info to word fail for index_id: %ld", index_id);
+        return ret;
+    }
+    reverse_iter->create_executor(_txn, _index_info, _table_info, word, 
+        fulltext_index_info.possible_index().ranges(0).match_mode(),
+        std::vector<ExprNode*>(), _is_fast);
+    exe = static_cast<BooleanExecutor<Schema>*>(reverse_iter->get_executor());
+    reverse_iter->print_reverse_statistic_log();
+    return 0;
+}
 } // end of namespace
 
 

@@ -104,7 +104,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
         return 0;
     }
     // 多个in条件合并,只有in条件都是常量才处理
-    if (preds.in_preds.size() > 1) {
+    if (preds.in_preds.size() > 0) {
         DB_NOTICE("enter in_preds");
         // 取交集
         std::map<std::string, ExprNode*> and_map;
@@ -130,14 +130,47 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
             }
             out_map.swap(and_map);
             out_map.clear();
-            cut_preds.insert(preds.in_preds[j]);
+            cut_preds.emplace(preds.in_preds[j]);
         }
         if (and_map.empty()) {
             return -1;
         }
         std::set<ExprNode*> keep;
         for (auto& pair : and_map) {
-            keep.insert(pair.second);
+            auto v = pair.second->get_value(nullptr);
+            bool need_keep = true;
+            for (auto expr : preds.lt_le_preds) {
+                replace_slot(v, expr);
+                int ret = expr->open();
+                if (ret < 0) {
+                    DB_WARNING("expr open fail:%d", ret);
+                    return ret;
+                }
+                auto value = expr->get_value(nullptr);
+                if (value.is_null() || value.get_numberic<bool>() == false) {
+                    need_keep = false;
+                }
+                cut_preds.emplace(expr);
+            }
+            for (auto expr : preds.gt_ge_preds) {
+                replace_slot(v, expr);
+                int ret = expr->open();
+                if (ret < 0) {
+                    DB_WARNING("expr open fail:%d", ret);
+                    return ret;
+                }
+                auto value = expr->get_value(nullptr);
+                if (value.is_null() || value.get_numberic<bool>() == false) {
+                    need_keep = false;
+                }
+                cut_preds.emplace(expr);
+            }
+            if (need_keep) {
+                keep.emplace(pair.second);
+            }
+        }
+        if (keep.size() == 0) {
+            return -1;
         }
         // 反过来删
         for (uint32_t i = preds.in_preds[0]->children_size() - 1; i >= 1; i--) {
@@ -156,14 +189,14 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
         std::sort(preds.lt_le_preds.begin(), preds.lt_le_preds.end(), SlotPredicate::lt_le_less);
         lt_le = preds.lt_le_preds[0];
         for (size_t i = 1; i < preds.lt_le_preds.size(); i++) {
-            cut_preds.insert(preds.lt_le_preds[i]);
+            cut_preds.emplace(preds.lt_le_preds[i]);
         }
     }
     if (preds.gt_ge_preds.size() > 0) {
         std::sort(preds.gt_ge_preds.begin(), preds.gt_ge_preds.end(), SlotPredicate::gt_ge_less);
         gt_ge = preds.gt_ge_preds[0];
         for (size_t i = 1; i < preds.gt_ge_preds.size(); i++) {
-            cut_preds.insert(preds.gt_ge_preds[i]);
+            cut_preds.emplace(preds.gt_ge_preds[i]);
         }
     }
     // a < 50 and a > 60 => false
@@ -185,7 +218,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
                 func->set_fn_op(parser::FT_EQ);
                 lt_le->init(node);
                 lt_le->expr_optimize();
-                cut_preds.insert(gt_ge);
+                cut_preds.emplace(gt_ge);
                 return 0;
             } else {
                 return -1;
@@ -202,6 +235,7 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
     }
+    // sign => pred
     std::map<int64_t, SlotPredicate> pred_map;
     for (auto& expr : _conjuncts) {
         //类型推导

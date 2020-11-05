@@ -48,6 +48,8 @@ TEST(test_hll, case_all) {
     int cnts[] = {50, 100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000, 8000000, 9000000, 10000000, 50000000};
     double max = 0.0;
     int last = 0;
+    double sum = 0;
+    int64_t hll_cnt = 0;
     for (int cnt = 50; cnt < 1000000; cnt++) {
         for (int i = last; i < cnt; ++i) {
             ExprValue tmp(pb::INT64);
@@ -56,7 +58,9 @@ TEST(test_hll, case_all) {
         }
         last = cnt;
         uint64_t tmp = hll_estimate(hll);
-        std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << tmp * 1.0 / cnt << std::endl;
+        hll_cnt ++;
+        std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << fabs(tmp * 1.0 / cnt - 1) << std::endl;
+        sum += fabs(tmp * 1.0 / cnt - 1);
         if (fabs(1-tmp * 1.0 / cnt) > max) {
             max = fabs(1-tmp * 1.0 / cnt);
         }
@@ -64,6 +68,7 @@ TEST(test_hll, case_all) {
             cnt += 10;
         }
     }
+    std::cout << "avg:" << sum / hll_cnt << std::endl;
     std::cout << "max:" << max << std::endl;
 }
 

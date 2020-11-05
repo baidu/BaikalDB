@@ -28,6 +28,7 @@ enum ExprNodeType {
     ROW_EXPR = 22;
     HLL_LITERAL = 23;
     HEX_LITERAL = 24;
+    SUB_QUERY_EXPR = 25;
 };
 
 message Function {

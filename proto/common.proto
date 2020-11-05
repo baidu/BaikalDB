@@ -80,6 +80,7 @@ enum Engine {
     REDIS = 2;
     ROCKSDB_CSTORE = 3;
     BINLOG = 4;
+    INFORMATION_SCHEMA = 5;
 };
 
 message SlotDescriptor {

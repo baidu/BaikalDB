@@ -17,8 +17,30 @@
 #include "exec_node.h"
 #include "access_path.h"
 #include "table_record.h"
+#include <boost/variant.hpp>
 
 namespace baikaldb {
+
+template<typename NodeType, typename LeafType>
+struct FulltextNode {
+    struct FulltextChildType {
+        std::vector<std::shared_ptr<FulltextNode>> children;
+    };
+    using LeafNodeType = LeafType;
+    boost::variant<FulltextChildType, LeafType> info;
+    NodeType type;
+};
+
+template<typename NodeType, typename LeafType>
+struct FulltextTree {
+    std::shared_ptr<FulltextNode<NodeType, LeafType>> root;
+};
+
+using IndexFieldRange = std::pair<int64_t, range::FieldRange>;
+
+using FulltextInfoTree = FulltextTree<pb::FulltextNodeType, IndexFieldRange>;
+using FulltextInfoNode = FulltextNode<pb::FulltextNodeType, IndexFieldRange>;
+
 class ScanNode : public ExecNode {
 public:
     ScanNode() {
@@ -91,7 +113,7 @@ public:
     void show_cost(std::vector<std::map<std::string, std::string>>& path_infos);
     int64_t select_index(); 
     int64_t select_index_by_cost(); 
-    int64_t select_index_in_baikaldb();
+    int64_t select_index_in_baikaldb(const std::string& sample_sql);
     int choose_arrow_pb_reverse_index();
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 
@@ -114,6 +136,13 @@ public:
 
     void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
 
+    void set_fulltext_index_tree(const FulltextInfoTree& tree) {
+        _fulltext_index_tree = tree;
+    }
+
+    int create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextIndex* root);
+    int create_fulltext_index_tree();
+
 // 两两比较，根据一些简单规则干掉次优索引
     int64_t pre_process_select_index();
     
@@ -131,6 +160,9 @@ protected:
     int32_t _possible_index_cnt = 0;
     int32_t _cover_index_cnt = 0;
     std::map<int32_t, double> _filed_selectiy; //缓存，避免重复的filed_id多次调用代价接口
+    FulltextInfoTree _fulltext_index_tree; //目前只有两层，第一层为and，第二层为or。
+    std::unique_ptr<pb::FulltextIndex> _fulltext_index_pb;
+    bool _fulltext_use_arrow = false;
 };
 }
 

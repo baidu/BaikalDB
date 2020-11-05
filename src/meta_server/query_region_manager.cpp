@@ -151,7 +151,7 @@ void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb:
 }
 
 void QueryRegionManager::check_region_and_update(const std::unordered_map<int64_t, 
-            std::tuple<int64_t,int64_t, std::string, int64_t>>&  region_version_map,
+            pb::RegionHeartBeat>&  region_version_map,
             pb::ConsoleHeartBeatResponse* response) {
     RegionManager* manager = RegionManager::get_instance();
     std::vector<SmartRegionInfo> region_infos;
@@ -168,13 +168,15 @@ void QueryRegionManager::check_region_and_update(const std::unordered_map<int64_
         bool need_update_stat = false;
         auto search = region_version_map.find(region_id);
         if (search != region_version_map.end()) {
-            if (region_info->version() > std::get<0>(search->second)) {
+            if (region_info->version() > search->second.version()) {
                 need_update_region = true;
-            } else if (region_info->conf_version() > std::get<1>(search->second)) {
+            } else if (region_info->conf_version() > search->second.conf_version()) {
                 need_update_region = true;
-            } else if (leader.compare(std::get<2>(search->second)) != 0) {
+            } else if (leader.compare(search->second.leader()) != 0) {
                 need_update_region = true;
-            } else if (region_info->num_table_lines() != std::get<3>(search->second)){
+            } else if (region_info->num_table_lines() != search->second.num_table_lines()){
+                need_update_stat = true;
+            } else if (region_info->used_size() != search->second.used_size()){
                 need_update_stat = true;
             }
         } else {

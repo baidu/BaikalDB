@@ -67,12 +67,6 @@ int DeleteNode::open(RuntimeState* state) {
     }
 
     bool eos = false;
-    AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
-    int i = 0;
-    for (auto& pair : state->reverse_index_map()) {
-        pair.second->sync(ams[i]);
-        i++;
-    }
     SmartRecord record = _factory->new_record(*_table_info);
     int64_t tmp_num_increase_rows = 0;
     do {

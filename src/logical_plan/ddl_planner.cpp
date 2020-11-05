@@ -63,12 +63,16 @@ int DDLPlanner::plan() {
             return -1;
         }
     } else if (_ctx->stmt_type == parser::NT_ALTER_TABLE) {
-        if (0 != parse_alter_table(request)) {
+        int ret = parse_alter_table(request);
+        if (ret == -1) {
             DB_WARNING("parser alter table command failed");
             return -1;
-        }
+        } 
         error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
-        
+        if (ret == -2) {
+            // 虚拟索引操作, 不再向meta发请求
+            return 0;
+        }
     } else {
         DB_WARNING("unsupported DDL command: %d", _ctx->stmt_type);
         return -1;
@@ -501,6 +505,10 @@ int DDLPlanner::parse_drop_database(pb::DataBaseInfo& database) {
     return 0;
 }
 
+
+// return 0  : succ  
+// return -1 : fail
+// return -2 : virtual index op
 int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     parser::AlterTableStmt* stmt = (parser::AlterTableStmt*)(_ctx->stmt);
     if (stmt->table_name == nullptr) {
@@ -609,7 +617,6 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     } else if (spec->spec_type == parser::ALTER_SPEC_ADD_INDEX) {
         alter_request.set_op_type(pb::OP_ADD_INDEX);
         int constraint_len = spec->new_constraints.size();
-
         for (int idx = 0; idx < constraint_len; ++idx) {
             parser::Constraint* constraint = spec->new_constraints[idx];
             if (constraint == nullptr) {
@@ -621,6 +628,12 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 return -1;
             }
         }
+        // 添加虚拟索引
+        if (spec->is_virtual_index) {
+            std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
+            SchemaFactory::get_instance()->update_virtual_index(table_full_name, table->indexs(0));
+            return -2;
+        }
         DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
 
     } else if (spec->spec_type == parser::ALTER_SPEC_DROP_INDEX) {
@@ -629,8 +642,15 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             DB_WARNING("index_name is null.");
             return -1;
         }
+
         pb::IndexInfo* index = table->add_indexs();
         index->set_index_name(spec->index_name.value);
+        // 删除虚拟索引
+        if (spec->is_virtual_index) {
+            std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
+            SchemaFactory::get_instance()->drop_virtual_index(table_full_name, table->indexs(0));
+            return -2;
+        }
         DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
     } else {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
@@ -732,6 +752,7 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
             DB_WARNING("only support uniqe、key index type");
             return -1;
     }
+
     if (constraint->name.empty()) {
         DB_WARNING("lack of index name");
         return -1;
@@ -762,7 +783,7 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
             }
             
             auto storage_type_iter = root.FindMember("storage_type");
-            pb::StorageType pb_storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
+            pb::StorageType pb_storage_type = pb::ST_ARROW;
             if (storage_type_iter != root.MemberEnd()) {
                 std::string storage_type = storage_type_iter->value.GetString();
                 StorageType_Parse(storage_type, &pb_storage_type);

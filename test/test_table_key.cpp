@@ -19,7 +19,9 @@
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <algorithm>
 
 namespace baikaldb {
 
@@ -130,6 +132,84 @@ TEST(test_append_double, case_all) {
         double diff = key.extract_double(pos) - double_vals[idx];
         EXPECT_EQ(true, diff < 1e-9);
         pos += sizeof(double);
+    }
+}
+
+TEST(test_sort_float, case_all) {
+    srand((unsigned)time(NULL));
+    std::vector<float> float_vals;
+    std::vector<std::string> str_vals;
+
+    auto append_data = [&float_vals, &str_vals](float val) {
+        MutTableKey mut_key;
+        mut_key.append_float(val);
+        float_vals.push_back(val);
+        str_vals.push_back(mut_key.data());
+    };
+    append_data(0);
+    append_data(-0);
+    append_data(0.0);
+    append_data(-1e-26);
+    append_data(1e-26);
+    append_data(-1e26);
+    append_data(1e-26);
+    append_data(-3.4E+38);
+    append_data(3.4E+38);
+
+    for (uint32_t idx = 0; idx < 100000; ++idx) {
+        float val = (rand() - RAND_MAX/2 + 0.0f)/RAND_MAX;
+        MutTableKey mut_key;
+        mut_key.append_float(val);
+        float_vals.push_back(val);
+        str_vals.push_back(mut_key.data());
+    }
+    std::sort(float_vals.begin(), float_vals.end());
+    std::sort(str_vals.begin(), str_vals.end());
+    for (uint32_t idx = 0; idx < float_vals.size(); ++idx) {
+        TableKey key(str_vals[idx]);
+        //float diff = key.extract_float(0) - float_vals[idx];
+        //printf("size:%d %lf %lf\n", str_vals[idx].size(), key.extract_float(0), float_vals[idx]);
+        EXPECT_EQ(key.extract_float(0), float_vals[idx]);
+    }
+}
+
+TEST(test_sort_double, case_all) {
+    srand((unsigned)time(NULL));
+    std::vector<double> double_vals;
+    std::vector<std::string> str_vals;
+
+    auto append_data = [&double_vals, &str_vals](double val) {
+        MutTableKey mut_key;
+        mut_key.append_double(val);
+        double_vals.push_back(val);
+        str_vals.push_back(mut_key.data());
+    };
+    append_data(0);
+    append_data(-0);
+    append_data(0.0);
+    append_data(-1e-26);
+    append_data(1e-26);
+    append_data(-1e26);
+    append_data(1e-26);
+    append_data(-3.4E+38);
+    append_data(3.4E+38);
+    append_data(-1.7E+308);
+    append_data(1.7E+308);
+
+    for (uint32_t idx = 0; idx < 100000; ++idx) {
+        double val = (rand() - RAND_MAX/2 + 0.0f)/RAND_MAX;
+        MutTableKey mut_key;
+        mut_key.append_double(val);
+        double_vals.push_back(val);
+        str_vals.push_back(mut_key.data());
+    }
+    std::sort(double_vals.begin(), double_vals.end());
+    std::sort(str_vals.begin(), str_vals.end());
+    for (uint32_t idx = 0; idx < double_vals.size(); ++idx) {
+        TableKey key(str_vals[idx]);
+        //double diff = key.extract_double(0) - double_vals[idx];
+        //printf("size:%d %lf %lf\n", str_vals[idx].size(), key.extract_double(0), double_vals[idx]);
+        EXPECT_EQ(key.extract_double(0), double_vals[idx]);
     }
 }
 

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 #include "expr.h"
-#include "unordered_map"
+#include "dml.h"
+#include <unordered_map>
 
 namespace parser {
 static std::unordered_map<int, std::string> FUNC_STR_MAP = {
@@ -140,7 +141,11 @@ void FuncExpr::to_stream(std::ostream& os) const {
         case FT_BIT_NOT:
         case FT_LOGIC_NOT:
         case FT_UMINUS:
-            os << FUNC_STR_MAP[func_type] << children[0];
+            if (((ExprNode*)children[0])->expr_type != ET_SUB_QUERY_EXPR) {
+                os << FUNC_STR_MAP[func_type] << children[0];
+            } else {
+                os << "NOT " << children[0];
+            }
             return;
         default:
             break;
@@ -222,6 +227,22 @@ void FuncExpr::to_stream(std::ostream& os) const {
     }
     os << ")";
 };
+
+void SubqueryExpr::to_stream(std::ostream& os) const {
+    static const char* cmp_type_str[] = {"ANY", "SOME", "ALL"};
+    if (is_exists) {
+        os << "EXISTS";
+    } else if (is_cmp_expr) {
+        os << cmp_type_str[cmp_type];
+    }
+    os << " (";
+    if (select_stmt != nullptr) {
+        select_stmt->to_stream(os);
+    } else if (union_stmt != nullptr) {
+        union_stmt->to_stream(os);
+    }
+    os << ")";
+}
 
 void ColumnName::to_stream(std::ostream& os) const {
     if (db.value != nullptr) {

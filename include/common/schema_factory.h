@@ -162,7 +162,7 @@ class Partition {
 public:
     virtual int init(const pb::PartitionInfo& partition_info, int64_t table_id, int64_t partition_num) = 0;
     virtual int64_t calc_partition(SmartRecord record) = 0;
-    virtual int64_t calc_partition(ExprValue& field_value) = 0;
+    virtual int64_t calc_partition(const ExprValue& field_value) = 0;
     virtual std::string to_str() = 0;
 };
 
@@ -180,7 +180,7 @@ public:
         return 0;
     };
     int64_t calc_partition(SmartRecord record);
-    int64_t calc_partition(ExprValue& field_value) {
+    int64_t calc_partition(const ExprValue& field_value) {
         if (field_value.is_numberic()) {
             return field_value.get_numberic<int64_t>() % _partition_num; 
         } else {
@@ -220,7 +220,7 @@ public:
         return 0;
     };
     int64_t calc_partition(SmartRecord record);
-    int64_t calc_partition(ExprValue& field_value) {
+    int64_t calc_partition(const ExprValue& field_value) {
         size_t range_index = 0;
         for (; range_index < _range_expr.size(); ++range_index) {
             if (field_value.compare(_range_expr[range_index]) <= 0) {
@@ -285,12 +285,11 @@ struct TableInfo {
     bool is_linked = false;
     // 该表关联的 binlog 表id
     uint64_t binlog_id = 0;
-    // 该表是否为 binlog 表
-    bool is_binlog = false;
     std::shared_ptr<Partition> partition_ptr = nullptr;
     // 普通表 使用该字段和 binlog 表进行关联
     std::vector<FieldInfo> link_field;
-    std::unordered_set<int64_t>    reverse_fields;
+    std::unordered_map<int64_t, int64_t>    reverse_fields;
+    std::unordered_map<int64_t, int64_t>    arrow_reverse_fields;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {
@@ -300,6 +299,15 @@ struct TableInfo {
             }
         }
         return nullptr;
+    }
+
+    int32_t get_field_id_by_short_name(const std::string& short_name) {
+        for (auto& info : fields) {
+            if (info.short_name == short_name) {
+                return info.id;
+            }
+        }
+        return -1;
     }
 };
 
@@ -447,6 +455,11 @@ public:
     void update_show_db(const DataBaseVec& db_infos);
     void update_statistics(const StatisticsVec& statistics);
     int update_statistics_internal(SchemaMapping& background, const std::map<int64_t, SmartStatistics>& mapping);
+    void update_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info);
+
+    int update_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info);
+    void drop_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info);
+    int drop_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info);
     int64_t get_statis_version(int64_t table_id);
     int64_t get_total_rows(int64_t table_id);
     // 从直方图中计算取值区间占比，如果计算小于某值的比率，则lower填null；如果计算大于某值的比率，则upper填null
@@ -489,6 +502,7 @@ public:
     std::vector<std::string> get_db_list(const std::set<int64_t>& db);
     std::vector<std::string> get_table_list(
             std::string namespace_, std::string db_name, UserInfo* user);
+    std::vector<SmartTable> get_table_list(std::string namespace_, UserInfo* user);
 
     // table_name is full name (namespace.database.table)
     int get_table_id(const std::string& table_name, int64_t& table_id);
@@ -518,6 +532,9 @@ public:
     int get_schema_conf_str(const int64_t table_id, const std::string& switch_name, std::string& value);
     int64_t get_ttl_duration(int64_t table_id);
     
+    int get_all_region_by_table_id(int64_t table_id, 
+            std::map<std::string, pb::RegionInfo>* region_infos,
+            const std::vector<int64_t>& partitions = std::vector<int64_t>{0});
     int get_region_by_key(int64_t main_table_id, 
             IndexInfo& index,
             const pb::PossibleIndex* primary,
@@ -678,7 +695,7 @@ public:
         return table_info->partition_num > 1;
     }
 
-    int get_partition_num(int64_t table_id, ExprValue& value, int64_t& partition_num) {
+    int get_partition_index(int64_t table_id, const ExprValue& value, int64_t& partition_index) {
         DoubleBufferedTable::ScopedPtr table_ptr;
         if (_double_buffer_table.Read(&table_ptr) != 0) {
             DB_WARNING("read double_buffer_table error.");
@@ -690,11 +707,16 @@ public:
             return -1;
         }
         auto table_info = table_info_mapping.at(table_id);
-        if (table_info->partition_ptr != nullptr) {
-            partition_num = table_info->partition_ptr->calc_partition(value);
-        } else {
+        if (table_info->partition_num == 1) {
             //非分区表，返回0分区
-            partition_num = 0;
+            partition_index = 0;
+            return 0;
+        }
+        if (table_info->partition_ptr != nullptr) {
+            partition_index = table_info->partition_ptr->calc_partition(value);
+        } else {
+            DB_WARNING("get partition number error.");
+            return -1;
         }
         return 0;
     }
@@ -718,7 +740,7 @@ public:
         return -1;
     }
 
-    int get_binlog_regions(int64_t binlog_id, int64_t partition_num, std::map<int64_t, pb::RegionInfo>& region_infos);
+    int get_binlog_regions(int64_t binlog_id, int64_t partition_index, std::map<int64_t, pb::RegionInfo>& region_infos);
 
     int has_open_binlog(int64_t table_id) {
         DoubleBufferedTable::ScopedPtr table_ptr;
@@ -738,9 +760,16 @@ public:
         return false;
     }
 
-int get_binlog_regions(int64_t table_id, ExprValue& value, pb::RegionInfo& region_info, 
-    PartitionRegionSelect prs = PRS_RANDOM);
+    int get_binlog_regions(int64_t table_id, pb::RegionInfo& region_info, const ExprValue& value = ExprValue{}, 
+        PartitionRegionSelect prs = PRS_RANDOM);
 
+    void update_virtual_index_info(const int64_t virtual_index_id, const std::string& virtual_index_name, const std::string& sample_sql) {
+        _virtual_index_info << VirtualIndexMap(virtual_index_id, virtual_index_name, sample_sql);
+    }
+
+    VirtualIndexMap get_virtual_index_info() {
+        return _virtual_index_info.reset();
+    }
 private:
     SchemaFactory() {
         _is_init = false;
@@ -791,6 +820,8 @@ private:
     std::string _physical_room;
     std::string _logical_room;
     int64_t     _last_updated_index = 0;
+    bvar::Adder<VirtualIndexMap> _virtual_index_info; // 虚拟索引使用
+
 };
 }
 

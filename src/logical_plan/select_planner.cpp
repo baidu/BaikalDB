@@ -125,7 +125,7 @@ bool SelectPlanner::is_full_export() {
     if (_ctx->explain_type != EXPLAIN_NULL) {
         return false;
     }
-    if (_ctx->has_derived_table) {
+    if (_ctx->has_derived_table || _ctx->has_information_schema) {
         return false;
     }
     if (_select->where != nullptr) {
