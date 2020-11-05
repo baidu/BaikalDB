@@ -447,6 +447,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->old_txn_id,
                     stat_info->old_seq_id,
                     ctx->get_runtime_state()->optimize_1pc(),
+		    out[0],
                     sql.length(),
                     sql.c_str(),
                     client->last_insert_id);

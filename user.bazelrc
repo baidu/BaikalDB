@@ -1,6 +1,7 @@
+#import tools/bazel.rc
 build --copt -DHAVE_ZLIB=1
 # bazel build with glog
 build --define=with_glog=true
 build -c opt
-# unittest 
+# unittest
 # test --define=unittest=true
