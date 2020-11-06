@@ -624,6 +624,7 @@ cc_library(
         "@boost//:unordered",
         "@boost//:thread",
         "@boost//:asio",
+        "@boost//:variant",
         "//external:bvar",
         "//external:bthread",
         "//external:brpc",
