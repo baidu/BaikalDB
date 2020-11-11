@@ -66,6 +66,7 @@ ExprValue locate(const std::vector<ExprValue>& input);
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);
 ExprValue from_unixtime(const std::vector<ExprValue>& input);
 ExprValue now(const std::vector<ExprValue>& input);
+ExprValue utc_timestamp(const std::vector<ExprValue>& input);
 ExprValue date_format(const std::vector<ExprValue>& input);
 ExprValue timediff(const std::vector<ExprValue>& input);
 ExprValue timestampdiff(const std::vector<ExprValue>& input);

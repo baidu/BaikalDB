@@ -698,6 +698,9 @@ ExprValue from_unixtime(const std::vector<ExprValue>& input) {
 ExprValue now(const std::vector<ExprValue>& input) {
     return ExprValue::Now();
 }
+ExprValue utc_timestamp(const std::vector<ExprValue>& input) {
+    return ExprValue::UTC_TIMESTAMP();
+}
 ExprValue date_format(const std::vector<ExprValue>& input) {
     if (input.size() != 2) {
         return ExprValue::Null();

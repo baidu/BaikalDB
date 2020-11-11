@@ -43,7 +43,7 @@ struct QueryStat {
     uint64_t    version;
     int32_t     send_buf_size;
     int32_t     partition_key;
-    
+
     int32_t     sql_length;
     bool        hit_cache;
     timeval     start_stamp;
@@ -116,7 +116,7 @@ public:
     QueryContext() {
         enable_2pc = FLAGS_default_2pc;
     }
-    QueryContext(std::shared_ptr<UserInfo> user, std::string db) : 
+    QueryContext(std::shared_ptr<UserInfo> user, std::string db) :
             cur_db(db),
             user_info(user) {
         enable_2pc = FLAGS_default_2pc;
@@ -168,7 +168,7 @@ public:
         return plan.add_nodes();
     }
     int create_plan_tree();
-    
+
 public:
     std::string         sql;
     std::vector<std::string> comments;
@@ -221,8 +221,8 @@ public:
     std::map<int64_t, std::shared_ptr<QueryContext>> derived_table_ctx_mapping;
     bool                open_binlog = false;
 
-    // user can scan data in specific region by comments 
-    // /*{"region_id":$region_id}*/ preceding a Select statement 
+    // user can scan data in specific region by comments
+    // /*{"region_id":$region_id}*/ preceding a Select statement
     int64_t             debug_region_id = -1;
 
     // in autocommit mode, two phase commit is disabled by default (for better formance)

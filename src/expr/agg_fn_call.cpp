@@ -212,7 +212,7 @@ int AggFnCall::initialize(MemRow* dst) {
     switch (_agg_type) {
         case COUNT_STAR:
         case COUNT:
-            dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
+            dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(pb::INT64));
             return 0;
         case SUM:
             dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());

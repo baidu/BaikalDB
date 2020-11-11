@@ -367,10 +367,21 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 || ctx->mysql_cmd == COM_STMT_EXECUTE) {
         if (op_type == pb::OP_SELECT) {
             select_time_cost << stat_info->total_time;
-        } else if (op_type == pb::OP_INSERT || 
+            if (select_by_users.find(client->username) == dml_by_users.end()) {
+                select_by_users[client->username].reset(new bvar::LatencyRecorder("select_" + client->username));
+            }
+            (*select_by_users[client->username]) << stat_info->total_time;
+        } else if (op_type == pb::OP_INSERT ||
                 op_type == pb::OP_UPDATE ||
                 op_type == pb::OP_DELETE) {
             dml_time_cost << stat_info->total_time;
+            if (dml_by_users.find(client->username) == dml_by_users.end()) {
+                dml_by_users[client->username].reset(new bvar::LatencyRecorder("dml_" + client->username));
+            }
+            (*dml_by_users[client->username]) << stat_info->total_time;
+        }
+        if (stat_info->error_code != 1000) {
+            sql_error << 1;
         }
     }
 
@@ -407,10 +418,13 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     sql = iter->second->sql;
                 }
             }
-            DB_NOTICE("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
+            uint64_t out[2];
+            butil::MurmurHash3_x64_128(stat_info->sample_sql.str().c_str(), stat_info->sample_sql.str().size(), 0x1234, out);
+            RE2::GlobalReplace(&sql, "\\s+", " ");
+            DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row[%d] bufsize=[%d] "
                     "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] stmt_name=[%s] "
-                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sqllen=[%d] sql=[%s]",
+                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%llu] sqllen=[%d] sql=[%s] id=[%ld]",
                     stat_info->family.c_str(),
                     stat_info->table.c_str(),
                     op_type,
@@ -444,8 +458,10 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->old_txn_id,
                     stat_info->old_seq_id,
                     ctx->get_runtime_state()->optimize_1pc(),
+		    out[0],
                     sql.length(),
-                    sql.c_str());
+                    sql.c_str(),
+                    client->last_insert_id);
         }
     } else {
         if ('\x0e' == ctx->mysql_cmd) {
@@ -1100,6 +1116,10 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
         // Remove ignore character.
         boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
         boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
+    }
+    re2::RE2 ignore_reg("(\\/\\*.*?\\*\\/)", option);
+    if (RE2::GlobalReplace(&(ctx->sql), reg, " ")) {
+        DB_WARNING("global replace sql.");
     }
 }
 
