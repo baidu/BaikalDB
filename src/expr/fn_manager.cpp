@@ -173,6 +173,7 @@ void FunctionManager::register_operators() {
     register_object_ret("sec_to_time", sec_to_time, pb::TIME);
     register_object_ret("weekday", weekday, pb::UINT32);
     register_object_ret("datediff", datediff, pb::UINT32);
+    register_object_ret("date_add", date_add, pb::DATETIME);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);

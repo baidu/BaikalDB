@@ -86,6 +86,7 @@ ExprValue week(const std::vector<ExprValue>& input);
 ExprValue time_to_sec(const std::vector<ExprValue>& input);
 ExprValue sec_to_time(const std::vector<ExprValue>& input);
 ExprValue datediff(const std::vector<ExprValue>& input);
+ExprValue date_add(const std::vector<ExprValue>& input);
 ExprValue weekday(const std::vector<ExprValue>& input);
 // hll functions
 ExprValue hll_add(const std::vector<ExprValue>& input);
