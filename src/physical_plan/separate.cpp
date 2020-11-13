@@ -167,72 +167,8 @@ int Separate::separate_select(QueryContext* ctx) {
         }
         return separate_simple_select(ctx);
     } else {
-        int ret = separate_join(ctx, scan_nodes, dual_scan_nodes);
-        if (ret == 0 && join_nodes.size() == 1) {
-            return separate_left_join(ctx);
-        } else {
-            return ret;
-        }
+        return separate_join(ctx, scan_nodes, dual_scan_nodes);
     }
-}
-int Separate::separate_left_join(QueryContext* ctx) {
-    ExecNode* plan = ctx->root;
-    JoinNode* join_node = static_cast<JoinNode*>(plan->get_node(pb::JOIN_NODE));
-    if (join_node->join_type() != pb::LEFT_JOIN) {
-        return 0;
-    }
-    PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
-    LimitNode* limit_node = static_cast<LimitNode*>(plan->get_node(pb::LIMIT_NODE));
-    AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
-    if (agg_node != nullptr) {
-        return 0;
-    }
-    SelectManagerNode* manager_node = static_cast<SelectManagerNode*>(plan->get_node(pb::SELECT_MANAGER_NODE));
-    SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
-    if (sort_node != nullptr) {
-        RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(plan->get_node(pb::SCAN_NODE));
-        if (scan_node == nullptr) {
-            return 0;
-        }
-        int32_t tuple_id = static_cast<ScanNode*>(scan_node)->tuple_id();
-        for (auto& expr :  sort_node->sort_property().slot_order_exprs) {
-            std::unordered_set<int32_t> related_tuple_ids;
-            expr->get_all_tuple_ids(related_tuple_ids);
-            for (auto& related_tuple_id : related_tuple_ids) {
-               if (related_tuple_id != tuple_id) {
-                   DB_WARNING("related_tuple_id not match");
-                   return 0;
-               }
-            }
-        }
-        manager_node->init_sort_info(sort_node);
-        // add_child会把子节点的父节点修改，所以一定要在调用这个add_child之前把父节点保存
-        ExecNode* parent = sort_node->get_parent();
-        ExecNode* child = sort_node->children(0);
-        parent->clear_children();
-        parent->add_child(child);
-
-        child = manager_node->children(0);
-        manager_node->clear_children();
-        manager_node->add_child(sort_node);
-        sort_node->clear_children();
-        sort_node->add_child(child);
-        return 0;
-    }
-    if (limit_node != nullptr) {
-        ExecNode* parent = limit_node->get_parent();
-        ExecNode* child = limit_node->children(0);
-        parent->clear_children();
-        parent->add_child(child);
-
-        parent = manager_node->get_parent();
-        parent->clear_children();
-        parent->add_child(limit_node);
-        limit_node->clear_children();
-        limit_node->add_child(manager_node);
-        return 0;
-    }
-    return 0;
 }
 //普通的select请求，考虑agg_node, sort_node, limit_node下推问题
 int Separate::separate_simple_select(QueryContext* ctx) {
