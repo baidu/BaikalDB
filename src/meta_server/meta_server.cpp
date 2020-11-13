@@ -47,6 +47,7 @@ DEFINE_string(dmp_meta_bns, "group.opera-online-baikalMeta-000-bj.DMP.all", "");
 DEFINE_string(coffline_meta_bns, "group.opera-coffline-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(detect_meta_bns, "group.opera-detect-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(pinpai_meta_bns, "group.opera-pinpai-baikalMeta-000-cm.FENGCHAO.all", "");
+DEFINE_string(aladdin_meta_bns, "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(qa_meta_bns, "group.opera-qa-qabaikalMeta-000-ct.FENGCHAO.all", "");
 #endif
 
@@ -138,6 +139,8 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     _meta_interact_map["detect"]->init_internal(FLAGS_detect_meta_bns);
     _meta_interact_map["pinpai"] = new MetaServerInteract;
     _meta_interact_map["pinpai"]->init_internal(FLAGS_pinpai_meta_bns);
+    _meta_interact_map["aladdin"] = new MetaServerInteract;
+    _meta_interact_map["aladdin"]->init_internal(FLAGS_aladdin_meta_bns);
     _meta_interact_map["qa"] = new MetaServerInteract;
     _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
 #endif
@@ -233,6 +236,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_SPLIT_LINES
             || request->op_type() == pb::OP_UPDATE_SCHEMA_CONF
             || request->op_type() == pb::OP_UPDATE_DISTS
+            || request->op_type() == pb::OP_UPDATE_TTL_DURATION
             || request->op_type() == pb::OP_UPDATE_STATISTICS
             || request->op_type() == pb::OP_MODIFY_RESOURCE_TAG
             || request->op_type() == pb::OP_ADD_INDEX
@@ -576,6 +580,7 @@ static std::string bns_to_plat(const std::string& bns) {
         {"coffline", "coffline"},
         {"detect", "detect"},
         {"pinpai", "pinpai"},
+        {"aladdin", "aladdin"},
         {"qa", "qa"},
     };
     std::vector<std::string> vec;

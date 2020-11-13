@@ -41,7 +41,7 @@ public:
     void get_region_peer_status(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_remove_region_request(std::string instance_address, int64_t region_id);
     void check_region_and_update(
-            const std::unordered_map<int64_t, std::tuple<int64_t,int64_t, std::string, int64_t>>&  
+            const std::unordered_map<int64_t, pb::RegionHeartBeat>&  
             region_version_map,
             pb::ConsoleHeartBeatResponse* response);
 private:

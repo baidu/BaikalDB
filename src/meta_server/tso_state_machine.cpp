@@ -404,7 +404,7 @@ void TSOStateMachine::on_leader_stop() {
 }
 
 void TSOStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
-    DB_WARNING("start on shnapshot save");
+    DB_WARNING("start on snapshot save");
     std::string sto_str = std::to_string(_tso_obj.last_save_physical);
     Bthread bth(&BTHREAD_ATTR_SMALL);
     std::function<void()> save_snapshot_function = [this, done, writer, sto_str]() {
@@ -432,7 +432,7 @@ void TSOStateMachine::save_snapshot(braft::Closure* done,
 }
 
 int TSOStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
-    DB_WARNING("start on shnapshot load");
+    DB_WARNING("start on snapshot load");
     std::vector<std::string> files;
     reader->list_files(&files);
     for (auto& file : files) {

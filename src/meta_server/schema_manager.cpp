@@ -104,6 +104,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_UPDATE_SPLIT_LINES: 
     case pb::OP_UPDATE_SCHEMA_CONF: 
     case pb::OP_UPDATE_DISTS:
+    case pb::OP_UPDATE_TTL_DURATION:
     case pb::OP_MODIFY_RESOURCE_TAG: 
     case pb::OP_ADD_INDEX:
     case pb::OP_DROP_INDEX: 
@@ -152,6 +153,13 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
             if (ret < 0) {
                 return;
             } 
+        }
+        if (request->op_type() == pb::OP_UPDATE_TTL_DURATION 
+                && request->table_info().ttl_duration() == 0) {
+            // 只能修改有ttl的表
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "ttl_duration must > 0", request->op_type(), log_id);
+            return;
         }
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;

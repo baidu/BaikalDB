@@ -138,6 +138,7 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
         return -1;
     } else {
         first_log_index = *(int64_t*)string_first_log_index.c_str();
+        DB_WARNING("region_id: %ld is old, first_log_index:%ld", _region_id, first_log_index);
     }
     // read log data
     char log_data_key[LOG_DATA_KEY_SIZE];
@@ -439,27 +440,6 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
         std::unique_lock<bthread_mutex_t> lck(_mutex);
         _term_map.truncate_prefix(first_index_kept);
     }
-    //替换为remove_range
-    char start_key[LOG_DATA_KEY_SIZE];
-    _encode_log_data_key(start_key, LOG_DATA_KEY_SIZE, 0);
-    char end_key[LOG_DATA_KEY_SIZE];
-    _encode_log_data_key(end_key, LOG_DATA_KEY_SIZE, first_index_kept);
-   
-    auto status = _db->remove_range(rocksdb::WriteOptions(), 
-                _raftlog_handle, 
-                rocksdb::Slice(start_key, LOG_DATA_KEY_SIZE), 
-                rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE),
-                true);
-    if (!status.ok()) {
-        DB_WARNING("tuncate log entry fail, region_id: %ld, truncate to first index kept:%ld from first log index:%ld",
-                 _region_id, first_index_kept, _first_log_index.load());
-        return -1;
-    } else {
-        DB_WARNING("tuncate log entry success, region_id: %ld, truncate to first index kept:%ld from first log index:%ld",
-                    _region_id, first_index_kept, _first_log_index.load());
-    }
-    //RaftLogCompactionFilter::get_instance()->update_first_index_map(_region_id, first_index_kept);
-    
     CanAddPeerSetter::get_instance()->set_can_add_peer(_region_id);
     //write first_log_index to rocksdb, real delete when compaction
     char key_buf[LOG_META_KEY_SIZE]; 
@@ -468,14 +448,45 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     rocksdb::WriteOptions write_option;
     //write_option.sync = true;
     //write_option.disableWAL = true;
-    status = _db->put(write_option, 
+    auto status = _db->put(write_option, 
                       _raftlog_handle,
                       rocksdb::Slice(key_buf, LOG_META_KEY_SIZE),
                       rocksdb::Slice((char*)&first_index_kept, sizeof(int64_t)));
     if (!status.ok()) {
-        DB_WARNING("update first log index to rocksdb fail, region_id: %ld, err_mes:%s",
-                        _region_id, status.ToString().c_str());
+        DB_WARNING("update first log index to rocksdb fail, region_id: %ld, err_mes:%s"
+                "truncate to first index kept:%ld from first log index:%ld",
+                        _region_id, status.ToString().c_str(),
+                        first_index_kept, _first_log_index.load());
+        return -1;
+    } else {
+        DB_WARNING("tuncate log entry success to write log_meta, region_id: %ld, "
+                "truncate to first index kept:%ld from first log index:%ld",
+                _region_id, first_index_kept, _first_log_index.load());
     }
+
+    //替换为remove_range
+    char start_key[LOG_DATA_KEY_SIZE];
+    _encode_log_data_key(start_key, LOG_DATA_KEY_SIZE, 0);
+    char end_key[LOG_DATA_KEY_SIZE];
+    _encode_log_data_key(end_key, LOG_DATA_KEY_SIZE, first_index_kept);
+   
+    status = _db->remove_range(rocksdb::WriteOptions(), 
+                _raftlog_handle, 
+                rocksdb::Slice(start_key, LOG_DATA_KEY_SIZE), 
+                rocksdb::Slice(end_key, LOG_DATA_KEY_SIZE),
+                true);
+    if (!status.ok()) {
+        DB_WARNING("tuncate log entry fail, err_mes:%s, region_id: %ld, "
+                "truncate to first index kept:%ld from first log index:%ld",
+                 _region_id, status.ToString().c_str(), first_index_kept, _first_log_index.load());
+        return -1;
+    } else {
+        DB_WARNING("tuncate log entry success, region_id: %ld, "
+                "truncate to first index kept:%ld from first log index:%ld",
+                    _region_id, first_index_kept, _first_log_index.load());
+    }
+    //RaftLogCompactionFilter::get_instance()->update_first_index_map(_region_id, first_index_kept);
+    
     return 0;
 }
 

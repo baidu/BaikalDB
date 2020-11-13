@@ -75,12 +75,7 @@ int UpdateNode::open(RuntimeState* state) {
     //     txn->rollback();
     // });
     bool eos = false;
-    AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
-    int i = 0;
-    for (auto& pair : state->reverse_index_map()) {
-        pair.second->sync(ams[i]);
-        i++;
-    }
+
     SmartRecord record = _factory->new_record(*_table_info);
     do {
         RowBatch batch;

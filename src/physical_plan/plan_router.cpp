@@ -122,7 +122,7 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
     const std::function<pb::TupleDescriptor*(int32_t)>& get_tuple_desc,
     bool has_join) {
-    pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
+    //pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     int64_t main_table_id = scan_node->table_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance(); 
 
@@ -281,7 +281,7 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     ExecNode* filter_node = plan->get_node(pb::WHERE_FILTER_NODE);
-    ExecNode* having_node = plan->get_node(pb::HAVING_FILTER_NODE);
+    //ExecNode* having_node = plan->get_node(pb::HAVING_FILTER_NODE);
 
     if (scan_nodes.size() != 0) {
         bool has_join = scan_nodes.size() > 1;
@@ -315,10 +315,10 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
                             static_cast<SlotRef*>(expr->children(0))->field_id() == scan_node->get_partition_field() &&
                             expr->children(1)->is_literal()) {
                             auto lietral_value = static_cast<Literal*>(expr->children(1))->get_value(nullptr);
-                            int64_t partition_num = 0;
-                            if (SchemaFactory::get_instance()->get_partition_num(table_id, lietral_value, partition_num) == 0) {
-                                scan_node->get_partition().push_back(partition_num);
-                                DB_DEBUG("get partition num %ld", partition_num);
+                            int64_t partition_index = 0;
+                            if (SchemaFactory::get_instance()->get_partition_index(table_id, lietral_value, partition_index) == 0) {
+                                scan_node->get_partition().push_back(partition_index);
+                                DB_DEBUG("get partition num %ld", partition_index);
                                 get_partition = true;
                             } else {
                                 DB_WARNING("get table %ld partition number error.", table_id)

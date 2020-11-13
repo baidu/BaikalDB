@@ -14,7 +14,7 @@
 #include "histogram.h"
 
 namespace baikaldb {
-
+DEFINE_int32(histogram_split_threshold_percent, 50, "histogram_split_threshold default 0.5");
 SampleSorter::SampleSorter(std::vector<std::shared_ptr<RowBatch> >& batch_vector, ExprNode* sort_expr) {
     _slot_order_exprs.push_back(sort_expr);
     _is_asc.push_back(true);
@@ -85,8 +85,9 @@ void SampleSorter::insert_distinct_value(const ExprValue& value, const int& cnt)
     } else {
         // 已存在桶
         auto& back_bucket_info = _bucket_infos.back();
-        if (cnt >= _expect_bucket_size || back_bucket_info.bucket_size >= _expect_bucket_size) {
-            // 当前_cur_value cnt 大于 _expect_bucket_size 或者上一个桶已经超过阈值，为该值开辟新桶
+        int bucket_split_count = _expect_bucket_size * FLAGS_histogram_split_threshold_percent / 100;
+        if (cnt >= bucket_split_count || back_bucket_info.bucket_size >= bucket_split_count || (cnt + back_bucket_info.bucket_size) >= _expect_bucket_size) {
+            // 当前_cur_value cnt 大于 bucket_split_count 或者上一个桶已经超过阈值，为该值开辟新桶
             BucketInfo bucket_info;
             bucket_info.distinct_cnt = 1;
             bucket_info.bucket_size = cnt;

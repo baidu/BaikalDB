@@ -215,17 +215,21 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
     for (auto tid : _binlog_table_ids) {
         if (factory->get_binlog_id(tid, binlog_id) != 0) {
             DB_FATAL("config binlog error. %lld", tid);
-            return false;
+            continue;
         }
         DB_NOTICE("insert binlog table id %ld", binlog_id);
         if (_binlog_id != -1) {
             if (binlog_id != _binlog_id) {
-                DB_FATAL("tables has different binlog id");
-                return false;
+                DB_FATAL("tables has different binlog id %ld", tid);
+                continue;
             }
         } else {
             _binlog_id = binlog_id;
         }
+    }
+    if (_binlog_id == -1) {
+        DB_FATAL("get binlog id error.");
+        return false;
     }
 
     if (response.has_idc_info()) {

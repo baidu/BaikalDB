@@ -149,6 +149,9 @@ public:
         return _data;
     }
 
+    std::string decode_start_key_string(pb::PrimitiveType field_type, int& pos) const;
+    std::string decode_start_key_string(IndexInfo& index) const;
+
     int decode_field(Message* message,
             const Reflection* reflection,
             const FieldDescriptor* field, 

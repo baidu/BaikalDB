@@ -21,7 +21,8 @@ enum ExprType {
     ET_COLUMN,
     ET_LITETAL,
     ET_FUNC,
-    ET_ROW_EXPR
+    ET_ROW_EXPR,
+    ET_SUB_QUERY_EXPR
 };
 struct ExprNode : public Node {
     ExprType expr_type;
@@ -71,7 +72,7 @@ enum FuncType {
     FT_MATCH_AGAINST,
     FT_BETWEEN,
     /* use in on dup key update */
-    FT_VALUES
+    FT_VALUES,
     /*
     // bulit-in agg func
     FT_COUNT,
@@ -93,6 +94,7 @@ enum FuncType {
     FT_SUBSTRING,
     FT_TRIM
     */
+    FT_BOOL
 };
 
 struct FuncExpr : public ExprNode {
@@ -101,6 +103,7 @@ struct FuncExpr : public ExprNode {
     bool is_not = false;
     bool distinct = false;
     bool is_star = false;
+    bool has_subquery = false;
     FuncExpr() {
         fn_name = nullptr;
         expr_type = ET_FUNC;
@@ -113,6 +116,28 @@ struct FuncExpr : public ExprNode {
     static FuncExpr* new_unary_op_node(FuncType t, Node* arg1, butil::Arena& arena);
     static FuncExpr* new_binary_op_node(FuncType t, Node* arg1, Node* arg2, butil::Arena& arena);
     static FuncExpr* new_ternary_op_node(FuncType t, Node* arg1, Node* arg2, Node* arg3, butil::Arena& arena);
+};
+
+struct SelectStmt;
+struct UnionStmt;
+enum CompareType {
+    CMP_ANY,
+    CMP_SOME,
+    CMP_ALL
+};
+struct SubqueryExpr : public ExprNode {
+    SelectStmt* select_stmt = nullptr;
+    UnionStmt*  union_stmt = nullptr;
+    CompareType cmp_type = CMP_ANY;
+    bool is_exists = false;
+    bool is_cmp_expr = false;
+    SubqueryExpr() {
+        expr_type = ET_SUB_QUERY_EXPR;
+    }
+    virtual void print() const override {
+        std::cout << this << std::endl;
+    }
+    virtual void to_stream(std::ostream& os) const override;
 };
 
 struct ColumnName : public ExprNode {

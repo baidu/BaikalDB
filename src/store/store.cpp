@@ -271,12 +271,6 @@ void Store::init_region(google::protobuf::RpcController* controller,
         response->set_errmsg("store has shutdown");
         return;
     }
-    if (_rocksdb->is_any_stall()) {
-        DB_WARNING("rocksdb is stall"); 
-        response->set_errcode(pb::CANNOT_ADD_PEER);
-        response->set_errmsg("rocksdb is stall");
-        return;
-    }
     uint64_t log_id = 0;
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
@@ -286,6 +280,13 @@ void Store::init_region(google::protobuf::RpcController* controller,
     int64_t region_id = region_info.region_id();
     const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
     const char* remote_side = remote_side_tmp.c_str();
+
+    if (_rocksdb->is_any_stall()) {
+        DB_WARNING("rocksdb is stall, log_id%ld, remote_side:%s", log_id, remote_side); 
+        response->set_errcode(pb::CANNOT_ADD_PEER);
+        response->set_errmsg("rocksdb is stall");
+        return;
+    }
 
     //新增table信息
     if (!_factory->exist_tableid(table_id)) {
@@ -772,7 +773,9 @@ void Store::delay_remove_region_thread() {
         }
         traverse_copy_region_map([this](SmartRegion& region) {
             if (region->removed() && 
-                region->removed_time_cost() > FLAGS_region_delay_remove_timeout_s * 1000 * 1000LL) {
+                //加个随机数，删除均匀些
+                region->removed_time_cost() > (FLAGS_region_delay_remove_timeout_s + 
+                    (butil::fast_rand() % FLAGS_region_delay_remove_timeout_s)) * 1000 * 1000LL) {
                 region->shutdown();
                 region->join();
                 int64_t drop_region_id = region->get_region_id();
@@ -802,6 +805,10 @@ void Store::flush_memtable_thread() {
         status = _rocksdb->flush(flush_options, _rocksdb->get_raft_log_handle());
         if (!status.ok()) {
             DB_WARNING("flush log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        }
+        status = _rocksdb->flush(flush_options, _rocksdb->get_bin_log_handle());
+        if (!status.ok()) {
+            DB_WARNING("flush bin_log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
         }
     }
 }
@@ -1430,9 +1437,9 @@ int Store::drop_region_from_store(int64_t drop_region_id, bool need_delay_drop) 
     }
     // 防止一直更新时间导致物理删不掉
     if (!region->removed()) {
-        region->set_removed(true);
         region->shutdown();
         region->join();
+        region->set_removed(true);
         DB_WARNING("region node close for removed, region_id: %ld", drop_region_id);
     }
     if (!need_delay_drop) {

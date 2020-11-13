@@ -85,9 +85,26 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
         is_new.push_back(new_add);
         put_keys.push_back(construct_region_key(region_id));
         put_values.push_back(region_value);
+        {
+            auto min_start_key_iter = min_start_key.find(partition_id);
+            if (min_start_key_iter == min_start_key.end()) {
+                min_start_key[partition_id] = region_info.start_key();
+            } else {
+                if (min_start_key_iter->second >= region_info.start_key()) {
+                    min_start_key_iter->second = region_info.start_key();
+                }
+            }
+
+            auto max_end_key_iter = max_end_key.find(partition_id);
+            if (max_end_key_iter == max_end_key.end()) {
+                max_end_key[partition_id] = region_info.end_key();
+            } else {
+                if (end_key_compare(max_end_key_iter->second, region_info.end_key()) <= 0) {
+                    max_end_key_iter->second = region_info.end_key();
+                }
+            }
+        }
         if (!key_init) {
-            min_start_key[partition_id] = region_info.start_key();
-            max_end_key[partition_id] = region_info.end_key();
             g_table_id = table_id;
             key_init = true;
         } else {
@@ -96,10 +113,6 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
                         g_table_id, table_id);
                 return;
             }
-            min_start_key[partition_id] = (min_start_key[partition_id] < region_info.start_key())?
-                            min_start_key[partition_id] : region_info.start_key();
-            max_end_key[partition_id] = (end_key_compare(max_end_key[partition_id], region_info.end_key()) > 0)?
-                          max_end_key[partition_id] : region_info.end_key();
         }
         if (region_info.start_key() != region_info.end_key() || 
            (region_info.start_key().empty() && region_info.end_key().empty())) {

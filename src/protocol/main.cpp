@@ -23,6 +23,7 @@
 #include "network_server.h"
 #include "fn_manager.h"
 #include "schema_factory.h"
+#include "information_schema.h"
 
 namespace baikaldb {
 
@@ -57,10 +58,10 @@ int main(int argc, char **argv) {
         DB_FATAL("SchemaFactory init failed");
         return -1;
     }
-    // if (baikaldb::SQLParser::get_instance()->init() != 0) {
-    //     DB_FATAL("SQLParser init failed");
-    //     return -1;
-    // }
+    if (baikaldb::InformationSchema::get_instance()->init() != 0) {
+        DB_FATAL("InformationSchema init failed");
+        return -1;
+    }
     if (baikaldb::MetaServerInteract::get_instance()->init() != 0) {
         DB_FATAL("meta server interact init failed");
         return -1;

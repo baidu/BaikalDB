@@ -60,7 +60,6 @@ public:
     virtual bool valid() = 0;
     virtual void clear() = 0;
     virtual int get_next(SmartRecord record) = 0;
-    virtual void sync(AtomicManager<std::atomic<long>>& am) = 0;
 
     //获取1、2level倒排集合和3level倒排，用于Parser获取底层数据
     /*
@@ -195,8 +194,6 @@ public:
                         _is_over_cache(is_over_cache),
                         _is_seg_cache(is_seg_cache),
                         _cached_list_length(cached_list_length) {
-        _sync_prefix_0 = 0;
-        _sync_prefix_1 = 0;
         if (is_over_cache) {
             _cache.init(cache_size);
         }
@@ -260,14 +257,7 @@ public:
                     std::vector<ExprNode*> conjuncts, 
         //            BooleanExecutorBase*& exe,
                     bool is_fast = false);
-    //读写和merge同步
-    void sync(AtomicManager<std::atomic<long>>& am) {
-        if (_reverse_prefix == 0) {
-            am.set(&_sync_prefix_0);
-        } else {
-            am.set(&_sync_prefix_1);
-        }
-    }
+
     void set_second_level_length(int length) {
         _second_level_length = length;
     }
@@ -328,15 +318,10 @@ private:
 private:
     int64_t             _region_id;
     int64_t             _index_id;
-    uint8_t             _merge_prefix = 0;
     uint8_t             _reverse_prefix = 1;
-    std::atomic<long>    _sync_prefix_0;
-    std::atomic<long>    _sync_prefix_1;
     int                 _second_level_length;
     RocksWrapper*       _rocksdb;
     KeyRange            _key_range;
-    bool                _prefix_0_succ = false;
-    bool                _merge_success_flag = true;
     int64_t             _level_1_scan_count = 0;
     // todo: replace thread_local because bthread will switch thread
     static thread_local Schema* _schema;
@@ -376,6 +361,18 @@ public:
             const std::vector<std::string>& search_datas,
             const std::vector<pb::MatchMode>& modes,
             bool is_fast, bool bool_or); 
+
+    int search(
+            rocksdb::Transaction* txn,
+            const IndexInfo& index_info,
+            const TableInfo& table_info,
+            std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
+            bool is_fast, const pb::FulltextIndex& fulltext_index_info);
+
+    int init_operator_executor(const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor<Schema>*& exe);
+
+    int init_term_executor(const pb::FulltextIndex& fulltext_index_info, BooleanExecutor<Schema>*& exe);
+
     bool valid() {
         if (_exe != NULL) {
             while (true) {
@@ -434,6 +431,10 @@ private:
     std::vector<ReverseIndex<Schema>*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;
     int32_t _weight_field_id = 0;
+    std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
+    bool _is_fast = false;
+    rocksdb::Transaction* _txn = nullptr;
+    bool_executor_type _type = ReverseTrait<ReverseList>::executor_type;
 };
 } // end of namespace
 

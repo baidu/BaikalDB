@@ -727,6 +727,7 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
             }
             if (txn != nullptr) {
                 txn->set_seq_id(seq_id);
+                txn->set_in_process(false);
             }
         }
         break;
@@ -782,8 +783,17 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
                         _region_id, txn_id, seq_id, log_id, remote_side);
                     return;
                 }
+            } else if (op_type == pb::OP_PREPARE && txn != nullptr && !txn->has_write()) {
+                bool optimize_1pc = txn_info.optimize_1pc();
+                _txn_pool.read_only_txn_process(_region_id, txn, op_type, optimize_1pc);
+                txn->set_in_process(false);
+                response->set_affected_rows(0);
+                response->set_errcode(pb::SUCCESS);
+                DB_WARNING("TransactionNote: no write DML when commit/rollback, remote_side:%s "
+                        "region_id: %ld, txn_id: %lu, op_type: %s log_id:%lu optimize_1pc:%d",
+                        remote_side, _region_id, txn_id, pb::OpType_Name(op_type).c_str(), log_id, optimize_1pc);
+                return;
             }
-
             butil::IOBuf data;
             butil::IOBufAsZeroCopyOutputStream wrapper(&data);
             if (!request->SerializeToZeroCopyStream(&wrapper)) {
@@ -2911,6 +2921,7 @@ void Region::validate_and_add_version(const pb::StoreReq& request,
     _last_split_time_cost.reset();
     _approx_info.last_version_region_size = _approx_info.region_size;
     _approx_info.last_version_table_lines = _approx_info.table_lines;
+    _approx_info.last_version_time_cost.reset();
 
     // 分裂后的老region需要删除范围
     _reverse_remove_range = true;
@@ -3120,7 +3131,7 @@ void Region::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* don
         DB_WARNING("Error while adding extra_fs to writer, region_id: %ld", _region_id);
         return;
     }
-    DB_WARNING("region_id: %ld shnapshot save complete, time_cost: %ld", 
+    DB_WARNING("region_id: %ld snapshot save complete, time_cost: %ld", 
                 _region_id, time_cost.get_time());
     reset_snapshot_status();
 }
@@ -3497,7 +3508,7 @@ int Region::ingest_sst(const std::string& data_sst_file, const std::string& meta
     }
     return 0;
 }
-
+/*
 int Region::clear_data() {
     //删除preapred 但没有committed的事务
     _txn_pool.clear();
@@ -3508,7 +3519,7 @@ int Region::clear_data() {
     compact_data_in_queue();
     return 0;
 }
-
+*/
 void Region::compact_data_in_queue() {
     _num_delete_lines = 0;
     RegionControl::compact_data_in_queue(_region_id);
@@ -4174,6 +4185,8 @@ void Region::write_local_rocksdb_for_split() {
                     DB_FATAL("ingest sst fail, path:%s, region_id: %ld", path.c_str(), _region_id);
                     return;
                 }
+            } else {
+                butil::DeleteFile(butil::FilePath(path), false);
             }
             write_sst_lines += num_write_lines;
             if (index_info.type == pb::I_PRIMARY || _is_global_index) {
@@ -5359,8 +5372,6 @@ void Region::write_local_rocksdb_for_ddl() {
                 break;
             case pb::I_FULLTEXT:
                 {
-                    AtomicManager<std::atomic<long>> ams;
-                    _reverse_index_map[index_info_to_modify.id]->sync(ams);
                     MutTableKey pk_key;
                     ret = record->encode_key(pk_info, pk_key, -1, false, false);
                     if (ret < 0) {
@@ -5610,7 +5621,7 @@ bool Region::can_use_approximate_split() {
     if (FLAGS_use_approximate_size_to_split && 
             get_num_table_lines() > FLAGS_min_split_lines &&
             get_last_split_time_cost() > 60 * 60 * 1000 * 1000LL &&
-            _approx_info.region_size > 512 * 1024 * 1024) {
+            _approx_info.region_size > 512 * 1024 * 1024LL) {
         if (_approx_info.last_version_region_size > 0 && 
                 _approx_info.last_version_table_lines > 0 && 
                 _approx_info.region_size > 0 &&
@@ -5620,6 +5631,8 @@ bool Region::can_use_approximate_split() {
             // avg_size差不多时才能做
             // 严格点判断，减少分裂后不做compaction导致的再次分裂问题
             if (avg_size / last_avg_size < 1.2) {
+                return true;
+            } else if (_approx_info.region_size > 1024 * 1024 * 1024LL) {
                 return true;
             } else {
                 return false;

@@ -21,6 +21,7 @@
 #include "user_info.h"
 #include "password.h"
 #include "table_record.h"
+#include "information_schema.h"
 
 using google::protobuf::FileDescriptor;
 namespace baikaldb {
@@ -285,6 +286,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.indices.clear();
         tbl_info.dists.clear();
         tbl_info.reverse_fields.clear();
+        tbl_info.arrow_reverse_fields.clear();
     }
     TableInfo& tbl_info = *tbl_info_ptr;
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
@@ -327,9 +329,6 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             DB_WARNING("unknown partition type.");
             return -1;
         }
-    }
-    if (table.has_is_binlog()) {
-        tbl_info.is_binlog = table.is_binlog();
     }
     if (table.has_binlog_info()) {
         auto& binlog_info = table.binlog_info();
@@ -516,7 +515,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             break;
         }
     }
-    if (pk_index == nullptr) {
+    if (pk_index == nullptr && index_cnt > 0) {
         DB_FATAL("find pk_index failed: %ld, %ld", database_id, table_id);
         return -1;
     }
@@ -547,7 +546,6 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 index_id, fullname.c_str());
         }
     }
-    
 
     db_info_mapping[database_id] = db_info;
     table_info_mapping[table_id] = tbl_info_ptr;
@@ -628,7 +626,11 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
         if (idx_info.type == pb::I_FULLTEXT || idx_info.type == pb::I_RECOMMEND) {
             DB_NOTICE("table %ld index %ld insert reverse field %ld", 
                 table_info.id, idx_info.id, info->id);
-            table_info.reverse_fields.insert(info->id);
+            if (idx_info.storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
+                table_info.reverse_fields[info->id] = idx_info.id;
+            } else {
+                table_info.arrow_reverse_fields[info->id] = idx_info.id;
+            }
         }
     }
     if (idx_info.has_nullable) {
@@ -1046,6 +1048,8 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
         user_info->table[tbl.table_id()] = tbl.table_rw();
         user_info->all_database.insert(tbl.database_id());
     }
+    user_info->all_database.insert(InformationSchema::get_instance()->db_id());
+    user_info->database[InformationSchema::get_instance()->db_id()] = pb::READ;
     //TODO ip and bns access control
     user_info->need_auth_addr = user.need_auth_addr();
     if (user_info->need_auth_addr) {
@@ -1078,6 +1082,13 @@ void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
         info.namespace_ = db_info.namespace_name();
         _show_db_info[info.id] = info;
     }
+    //特殊处理information_schema
+    DatabaseInfo info;
+    info.id = InformationSchema::get_instance()->db_id();
+    info.version = 1;
+    info.name = "information_schema";
+    info.namespace_ = "INTERNAL";
+    _show_db_info[info.id] = info;
 }
 
 void SchemaFactory::update_statistics(const StatisticsVec& statistics) {
@@ -1105,6 +1116,155 @@ int SchemaFactory::update_statistics_internal(SchemaMapping& background, const s
         } else {
             table_statistics_mapping[iter->first] = iter->second;
         }
+    }
+
+    return 1;
+}
+
+void SchemaFactory::update_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info) {
+    
+    std::function<int(SchemaMapping& schema_mapping, const std::string& table_full_name, const pb::IndexInfo& index_info)> func =
+        std::bind(&SchemaFactory::update_virtual_index_internal, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+    _double_buffer_table.Modify(func, table_full_name, index_info);
+}
+
+int SchemaFactory::update_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info) {
+    auto& table_info_mapping = background.table_info_mapping;
+    auto& index_info_mapping = background.index_info_mapping;
+    auto& table_name_id_mapping = background.table_name_id_mapping;
+
+    if (table_name_id_mapping.count(table_full_name) == 0) {
+        DB_WARNING("can not find table_name: %s", table_full_name.c_str());
+        return 0;
+    }
+
+    int64_t table_id = table_name_id_mapping[table_full_name];
+
+    if (table_info_mapping.count(table_id) == 0) {
+        DB_WARNING("can not find table_id: %ld", table_id);
+        return 0;
+    }
+
+    TableInfo& tbl_info = *table_info_mapping[table_id];
+
+    if (index_info_mapping.count(table_id) == 0) {
+        DB_WARNING("can not find pk table_id: %ld", table_id);
+        return 0;
+    }
+
+    SmartIndex pk_ptr = index_info_mapping[table_id];
+
+    // 1、构造主键信息，update_index函数里面只用到了pk_index中的field_ids，所以只构造该字段
+    pb::IndexInfo pk_index; 
+    for (auto& field : pk_ptr->fields) {
+        DB_WARNING("pk field name: %s, field id: %d", field.name.c_str(), field.id);
+        pk_index.add_field_ids(field.id);
+    }
+
+    if (index_info.index_type() != pb::I_KEY && index_info.index_type() != pb::I_UNIQ) {
+        return 0;
+    }
+
+    pb::IndexInfo virtual_index = index_info;
+
+    // 2、构造虚拟索引pb结构
+    // 2.1、获取虚拟索引index_id，去最大table_id或index_id 加 10000，确保虚拟index_id不影响正常流程
+    int64_t max_table_id = 0;
+    for (auto iter : table_info_mapping) {
+        max_table_id = max_table_id > iter.first ? max_table_id : iter.first;
+    }
+    int64_t max_index_id = 0;
+    for (auto& iter : index_info_mapping) {
+        max_index_id = max_index_id > iter.first ? max_index_id : iter.first;
+    }
+
+    int64_t virtual_index_id = (max_table_id > max_index_id ? max_table_id : max_index_id) + 10000;
+    virtual_index.set_index_id(virtual_index_id);
+
+    // 2.2、暂时不支持GLOBAL INDEX
+    virtual_index.set_is_global(false);
+
+    // 2.3、state 为 IS_PUBLIC，这样才可以当真实索引去选择
+    virtual_index.set_state(pb::IS_PUBLIC);
+
+    // 2.4、构造field_ids
+    for (auto& short_name : virtual_index.field_names()) {
+        int field_id = tbl_info.get_field_id_by_short_name(short_name);
+        if (field_id <= 0) {
+            DB_WARNING("get field id faild, field name: %s, table_id: %ld", short_name, table_id);
+            return 0;
+        }
+        virtual_index.add_field_ids(field_id);
+    }
+    // 2.5、设置为虚拟索引
+    virtual_index.set_hint_status(pb::IHS_VIRTUAL);
+
+    // 3、兼容心跳更新索引流程
+    update_index(tbl_info, virtual_index, &pk_index, background);
+
+    DB_WARNING("virtual_index: %s", virtual_index.ShortDebugString().c_str());
+
+    tbl_info.indices.push_back(virtual_index.index_id());
+
+    SmartIndex index_ptr =  index_info_mapping[virtual_index_id];
+
+    return 1;
+}
+
+void SchemaFactory::drop_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info) {
+    // 清理统计信息
+    _virtual_index_info.reset();
+    std::function<int(SchemaMapping& schema_mapping, const std::string& table_full_name, const pb::IndexInfo& index_info)> func =
+        std::bind(&SchemaFactory::drop_virtual_index_internal, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+    _double_buffer_table.Modify(func, table_full_name, index_info);
+}
+
+int SchemaFactory::drop_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info) {
+    auto& table_info_mapping = background.table_info_mapping;
+    auto& index_info_mapping = background.index_info_mapping;
+    auto& table_name_id_mapping = background.table_name_id_mapping;
+    auto& index_name_id_mapping = background.index_name_id_mapping;
+
+    if (table_name_id_mapping.count(table_full_name) == 0) {
+        DB_WARNING("can not find table_name: %s", table_full_name.c_str());
+        return 0;
+    }
+
+    int64_t table_id = table_name_id_mapping[table_full_name];
+
+    if (table_info_mapping.count(table_id) == 0) {
+        DB_WARNING("can not find table_id: %ld", table_id);
+        return 0;
+    }
+
+    TableInfo& tbl_info = *table_info_mapping[table_id];
+
+    std::string index_full_name = table_full_name + "." + index_info.index_name();
+
+    if (index_name_id_mapping.count(index_full_name) == 0) {
+        DB_WARNING("cant find index_name :%s", index_full_name.c_str());
+        return 0;
+    }
+
+    int64_t index_id = index_name_id_mapping[index_full_name];
+
+    auto index_iter = index_info_mapping.find(index_id);
+    if (index_iter != index_info_mapping.end()) {
+        if (index_iter->second->index_hint_status != pb::IHS_VIRTUAL) {
+            // 非虚拟索引
+            DB_WARNING("index_name: %s, index_id:% ld is not virtual index", index_full_name, index_id);
+            return 0;
+        }
+        index_info_mapping.erase(index_iter);
+        index_name_id_mapping.erase(index_full_name);
+        for (auto it = tbl_info.indices.begin(); it != tbl_info.indices.end(); it++) {
+            if (*it == index_id) {
+                tbl_info.indices.erase(it); //用erase比较安全
+                break;
+            }
+        }
+        DB_WARNING("delete virtual index info: index_id: %lld index_name: %s.", 
+            index_id, index_full_name.c_str());
     }
 
     return 1;
@@ -1401,6 +1561,25 @@ std::vector<std::string> SchemaFactory::get_table_list(
     }
     return vec;
 }
+
+std::vector<SmartTable> SchemaFactory::get_table_list(std::string namespace_, UserInfo* user) {
+    std::vector<SmartTable> vec; 
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return vec; 
+    }
+    vec.reserve(table_ptr->table_info_mapping.size());
+    for (auto& table_pair : table_ptr->table_info_mapping) {
+        auto& table_info = table_pair.second;
+        if (user->database.count(table_info->db_id) == 1 ||
+                user->table.count(table_info->id) == 1) {
+            vec.emplace_back(table_info);
+        }
+    }
+    return vec;
+}
+
 void SchemaFactory::get_all_table_version(std::unordered_map<int64_t, int64_t>& table_id_version_map) {
     DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {
@@ -1708,6 +1887,35 @@ int SchemaFactory::get_index_id(int64_t table_id,
     index_id = index_name_id_mapping.at(full_index_name);
     return 0;
 }
+int SchemaFactory::get_all_region_by_table_id(int64_t table_id, 
+        std::map<std::string, pb::RegionInfo>* region_infos,
+        const std::vector<int64_t>& partitions) {
+    DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+    if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+        DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
+        return -1; 
+    }
+
+    auto it = table_region_mapping_ptr->find(table_id);
+    if (it == table_region_mapping_ptr->end()) {
+        DB_WARNING("index id[%ld] not in table_region_mapping", table_id);
+        return -1;
+    }
+    auto frontground = it->second;
+    auto& key_region_mapping = frontground->key_region_mapping;
+    for (auto partition : partitions) {
+        auto iter = key_region_mapping.find(partition);
+        if (iter == key_region_mapping.end()) {
+            DB_WARNING("partition %ld schema not update.", partition);
+            return -1;
+        }
+        for (auto& pair : iter->second) {
+            int64_t region_id = pair.second;
+            frontground->get_region_info(region_id, (*region_infos)[pair.first]);
+        }
+    }
+    return 0;
+}
 int SchemaFactory::get_region_by_key(IndexInfo& index, 
         const pb::PossibleIndex* primary,
         std::map<int64_t, pb::RegionInfo>& region_infos,
@@ -1739,8 +1947,13 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
     auto& key_region_mapping = frontground->key_region_mapping;
     if (primary == nullptr) {
         // 获取全部region
-        for (const auto& map : key_region_mapping) {
-            for (auto& pair : map.second) {
+        for (auto partition : partitions) {
+            auto iter = key_region_mapping.find(partition);
+            if (iter == key_region_mapping.end()) {
+                DB_WARNING("partition %ld schema not update.", partition);
+                return -1;
+            }
+            for (auto& pair : iter->second) {
                 int64_t region_id = pair.second;
                 frontground->get_region_info(region_id, region_infos[region_id]);
             }
@@ -2056,7 +2269,7 @@ int64_t RangePartition::calc_partition(SmartRecord record) {
     return range_index;
 }
 
-int SchemaFactory::get_binlog_regions(int64_t table_id, ExprValue& value, pb::RegionInfo& region_info, 
+int SchemaFactory::get_binlog_regions(int64_t table_id, pb::RegionInfo& region_info, const ExprValue& value, 
     PartitionRegionSelect prs) {
     //获取binlog id
     int64_t binlog_id = 0;
@@ -2064,8 +2277,8 @@ int SchemaFactory::get_binlog_regions(int64_t table_id, ExprValue& value, pb::Re
         DB_WARNING("get binlog id error.");
         return -1;   
     }
-    int64_t partition_num = 0;
-    if (get_partition_num(binlog_id, value, partition_num) == 0) {
+    int64_t partition_index = 0;
+    if (get_partition_index(binlog_id, value, partition_index) == 0) {
         DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
         if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
             DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
@@ -2078,7 +2291,7 @@ int SchemaFactory::get_binlog_regions(int64_t table_id, ExprValue& value, pb::Re
         }
         auto& key_region_mapping = it->second->key_region_mapping;
         auto& region_info_mapping = it->second->region_info_mapping;
-        auto region_map_iter = key_region_mapping.find(partition_num);
+        auto region_map_iter = key_region_mapping.find(partition_index);
         if (region_map_iter != key_region_mapping.end()) {
             auto& region_map = region_map_iter->second;
             auto region_map_size = region_map.size();
@@ -2104,7 +2317,7 @@ int SchemaFactory::get_binlog_regions(int64_t table_id, ExprValue& value, pb::Re
             region_info = region_info_ptr->second.region_info;
             return 0;
         } else {
-            DB_WARNING("not find table %ld partition %ld region info.", binlog_id, partition_num);
+            DB_WARNING("not find table %ld partition %ld region info.", binlog_id, partition_index);
             return -1;
         }
     } else {
@@ -2113,7 +2326,7 @@ int SchemaFactory::get_binlog_regions(int64_t table_id, ExprValue& value, pb::Re
     }
 }
 
-int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_num, std::map<int64_t, pb::RegionInfo>& region_infos) {
+int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_index, std::map<int64_t, pb::RegionInfo>& region_infos) {
         DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
         if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
             DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
@@ -2127,7 +2340,7 @@ int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_num, 
         }
         auto& key_region_mapping = it->second->key_region_mapping;
         auto& region_info_mapping = it->second->region_info_mapping;
-        auto region_map_iter = key_region_mapping.find(partition_num);
+        auto region_map_iter = key_region_mapping.find(partition_index);
         if (region_map_iter != key_region_mapping.end()) {
             auto& region_map = region_map_iter->second;
             for (auto& region_info : region_map) {
@@ -2138,7 +2351,7 @@ int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_num, 
             }
             return 0;
         } else {
-            DB_WARNING("not find table %ld partition %ld region info.", binlog_id, partition_num);
+            DB_WARNING("not find table %ld partition %ld region info.", binlog_id, partition_index);
             return -1;
         }
     }

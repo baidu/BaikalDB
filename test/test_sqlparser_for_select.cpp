@@ -2733,4 +2733,139 @@ TEST(test_parser, case_from_subselect) {
         ASSERT_TRUE(select_stmt->limit != nullptr);
     }
 }
+
+TEST(test_parser, case_exists_subselect) {
+    //test exists subquery clause
+    {
+        parser::SqlParser parser;
+        std::string sql_exists_subselect = "SELECT a,b FROM t1 WHERE EXISTS (SELECT a,b from t2) ORDER BY a LIMIT 10";
+        parser.parse(sql_exists_subselect);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->where->expr_type == parser::ET_SUB_QUERY_EXPR);
+        parser::SubqueryExpr* table_where = (parser::SubqueryExpr*)select_stmt->where;
+        ASSERT_TRUE(typeid(*(table_where->select_stmt)) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt1 = table_where->select_stmt;
+        ASSERT_TRUE(select_stmt1->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_exists_subselect = "SELECT a,b FROM t1 WHERE NOT EXISTS (SELECT a,b from t2) ORDER BY a LIMIT 10";
+        parser.parse(sql_exists_subselect);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ExprNode* sub_query_expr = (ExprNode*)(select_stmt->where->children[0]);
+        ASSERT_TRUE(sub_query_expr->expr_type == parser::ET_SUB_QUERY_EXPR);
+        parser::SubqueryExpr* table_where = (parser::SubqueryExpr*)sub_query_expr;
+        ASSERT_TRUE(typeid(*(table_where->select_stmt)) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt1 = table_where->select_stmt;
+        ASSERT_TRUE(select_stmt1->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+    }
+}
+
+TEST(test_parser, case_anyorall_subselect) {
+    //test anyorall subquery clause
+    {
+        parser::SqlParser parser;
+        std::string sql_anyorall_subselect = "SELECT a,b FROM t1 WHERE a > all (SELECT a from t2) ORDER BY a LIMIT 10";
+        parser.parse(sql_anyorall_subselect);
+        printf("error %s\n", parser.syntax_err_str.c_str());
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        std::cout << select_stmt->where->children[1]->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_anyorall_subselect = "SELECT a,b FROM t1 WHERE a > any (SELECT a from t2) ORDER BY a LIMIT 10";
+        parser.parse(sql_anyorall_subselect);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        std::cout << select_stmt->where->children[1]->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+    }
+   {
+        parser::SqlParser parser;
+        std::string sql_anyorall_subselect = "SELECT a,b FROM t1 WHERE a > some (SELECT a from t2) ORDER BY a LIMIT 10";
+        parser.parse(sql_anyorall_subselect);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        std::cout << select_stmt->where->children[1]->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+    }
+}
+
+TEST(test_parser, case_in_subselect) {
+    //test exists subquery clause
+    {
+        parser::SqlParser parser;
+        std::string sql_in_subselect = "SELECT a,b FROM t1 WHERE a in (SELECT a from t2) ORDER BY a LIMIT 10";
+        parser.parse(sql_in_subselect);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        std::cout << select_stmt->where->children[1]->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql_in_subselect = "SELECT a,b FROM t1 WHERE (a,b) in (SELECT a,b from t2) ORDER BY a LIMIT 10";
+        parser.parse(sql_in_subselect);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->where->children.size() == 2);
+        std::cout << select_stmt->where->children[1]->to_string() << std::endl;
+        ASSERT_TRUE(select_stmt->fields.size() == 2);
+        ASSERT_TRUE(select_stmt->order != nullptr);
+        ASSERT_TRUE(select_stmt->limit != nullptr);
+    }
+}
 }  // namespace baikal

@@ -98,11 +98,12 @@ struct BinlogDesc {
 struct ApproximateInfo {
     int64_t table_lines = 0;
     uint64_t region_size = 0;
+    TimeCost time_cost;
     //上次分裂的大小，分裂后不做compaction，则新的大小不会变化
     //TODO：是否持久化存储，重启后，新老大小差不多则可以做compaction
     uint64_t last_version_region_size = 0;
     uint64_t last_version_table_lines = 0;
-    TimeCost time_cost;
+    TimeCost last_version_time_cost;
 };
 
 class region;
@@ -321,7 +322,7 @@ public:
         return _region_control.get_status();
     }
 
-    int clear_data();
+    //int clear_data();
     void compact_data_in_queue();
     int ingest_snapshot_sst(const std::string& dir); 
     int ingest_sst(const std::string& data_sst_file, const std::string& meta_sst_file); 
@@ -752,15 +753,14 @@ public:
         return shared_from_this();
     }
     uint64_t get_approx_size() const {
-        //超过10分钟，或者超过10%的数据量diff则需要重新获取
-        if (_approx_info.time_cost.get_time() > 10 * 60 * 1000 * 1000LL) {
+        //分裂后一段时间每超过10分钟，或者超过10%的数据量diff则需要重新获取
+        if (_approx_info.time_cost.get_time() > 10 * 60 * 1000 * 1000LL && 
+            _approx_info.last_version_time_cost.get_time() < 2 * 60 * 60 * 1000 * 1000LL) {
             return UINT64_MAX;
         } else {
             int64_t diff_lines = abs(_num_table_lines.load() - _approx_info.table_lines);
-            if (diff_lines > 0) {
-                if (_num_table_lines.load() / diff_lines < 10) {
-                    return UINT64_MAX;
-                }
+            if (diff_lines * 10 > _num_table_lines.load()) {
+                return UINT64_MAX;
             }
         }
         return _approx_info.region_size;

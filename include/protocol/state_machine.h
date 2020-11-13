@@ -49,6 +49,7 @@ const std::string SQL_SHOW_FULL_COLUMNS          = "show full columns";
 const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
 const std::string SQL_SHOW_ABNORMAL_REGIONS      = "show abnormal regions";
 const std::string SQL_SHOW_COST                  = "show cost";
+const std::string SQL_SHOW_VIRTUAL_INDEX         = "show virtual index";
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
 const std::string SQL_SHOW_WARNINGS              = "show warnings";
@@ -124,7 +125,7 @@ private:
     int _get_json_attributes(std::shared_ptr<QueryContext> ctx);
     bool _query_process(SmartSocket sock);
     void _parse_comment(std::shared_ptr<QueryContext> ctx);
-
+    void _parse_sample_sql(std::string sample_sql, std::string& database, std::string& table, std::string& sql);
     bool _handle_client_query_use_database(SmartSocket client);
     bool _handle_client_query_select_database(SmartSocket client);
     bool _handle_client_query_show_databases(SmartSocket client);
@@ -135,6 +136,7 @@ private:
     bool _handle_client_query_show_table_status(SmartSocket client);
     bool _handle_client_query_show_abnormal_regions(SmartSocket client);
     bool _handle_client_query_show_cost(SmartSocket client);
+    bool _handle_client_query_show_virtual_index(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
     bool _handle_client_query_show_socket(SmartSocket client);
     bool _handle_client_query_show_processlist(SmartSocket client);
