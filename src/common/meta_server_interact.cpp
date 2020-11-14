@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,9 +20,13 @@ DEFINE_int32(meta_request_timeout, 30000,
             "meta as server request timeout, default:30000ms");
 DEFINE_int32(meta_connect_timeout, 5000, 
             "meta as server connect timeout, default:5000ms");
-DEFINE_string(meta_server_bns, "127.0.0.1:8110, 127.0.0.1:8111, 127.0.0.1:8112", "meta server bns");
+DEFINE_string(meta_server_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "meta server bns");
 
 int MetaServerInteract::init() {
+    return init_internal(FLAGS_meta_server_bns);
+}
+
+int MetaServerInteract::init_internal(const std::string& meta_bns) {
     _master_leader_address.ip = butil::IP_ANY;                                             
     _master_leader_address.port = 0; 
     _connect_timeout = FLAGS_meta_connect_timeout;
@@ -31,12 +35,12 @@ int MetaServerInteract::init() {
     brpc::ChannelOptions channel_opt;
     channel_opt.timeout_ms = FLAGS_meta_request_timeout;
     channel_opt.connect_timeout_ms = FLAGS_meta_connect_timeout;
-    std::string meta_server_addr = FLAGS_meta_server_bns;
+    std::string meta_server_addr = meta_bns;
     //bns
-    if (FLAGS_meta_server_bns.find(":") == std::string::npos) {
-        meta_server_addr = std::string("bns://") + FLAGS_meta_server_bns;
+    if (meta_bns.find(":") == std::string::npos) {
+        meta_server_addr = std::string("bns://") + meta_bns;
     } else {
-        meta_server_addr = std::string("list://") + FLAGS_meta_server_bns;
+        meta_server_addr = std::string("list://") + meta_bns;
     }
     if (_bns_channel.Init(meta_server_addr.c_str(), "rr", &channel_opt) != 0) {
         DB_FATAL("meta server bns pool init fail. bns_name:%s", meta_server_addr.c_str());

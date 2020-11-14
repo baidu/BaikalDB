@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,17 +23,66 @@
 namespace baikaldb {
 class ExprNode {
 public:
-    ExprNode() : _is_constant(true) {}
+    ExprNode() {}
     virtual ~ExprNode() {
         for (auto& e : _children) {
             delete e;
             e = nullptr;
         }
     }
+
     virtual int init(const pb::ExprNode& node) {
         _node_type = node.node_type();
         _col_type = node.col_type();
         return 0;
+    }
+    virtual void children_swap() {}
+
+    bool is_literal() {
+        switch (_node_type) {
+            case pb::NULL_LITERAL:
+            case pb::BOOL_LITERAL:
+            case pb::INT_LITERAL:
+            case pb::DOUBLE_LITERAL:
+            case pb::STRING_LITERAL:
+            case pb::HLL_LITERAL:
+            case pb::DATE_LITERAL:
+            case pb::DATETIME_LITERAL:
+            case pb::TIME_LITERAL:
+            case pb::TIMESTAMP_LITERAL:
+            case pb::PLACE_HOLDER_LITERAL:
+                return true;
+            default:
+                return false;
+        }
+        return false;
+    }
+    bool has_place_holder() {
+        if (is_place_holder()) {
+            return true;
+        }
+        for (auto c : _children) {
+            if (c->has_place_holder()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    virtual bool is_place_holder() {
+        return false;
+    }
+    bool is_slot_ref() {
+        return _node_type == pb::SLOT_REF;
+    }
+    bool is_constant() const {
+        return _is_constant;
+    }
+    bool is_row_expr() {
+        return _node_type == pb::ROW_EXPR;
+    }
+    int expr_optimize() {
+        const_pre_calc();
+        return type_inferer();
     }
     //类型推导，只在baikal执行
     virtual int type_inferer() {
@@ -45,20 +94,6 @@ public:
             }
         }
         return 0;
-    }
-
-    bool is_literal() {
-        switch (_node_type) {
-            case pb::NULL_LITERAL:
-            case pb::BOOL_LITERAL:
-            case pb::INT_LITERAL:
-            case pb::DOUBLE_LITERAL:
-            case pb::STRING_LITERAL:
-                return true;
-            default:
-                return false;
-        }
-        return false;
     }
     //常量表达式预计算,eg. id * 2 + 2 * 4 => id * 2 + 8
     //TODO 考虑做各种左右变化,eg. id + 2 - 4 => id - 2; id * 2 + 4 > 4 / 2 => id > -1
@@ -82,7 +117,13 @@ public:
         for (auto e : _children) {
             e->close();
         }
-    } 
+    }
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        for (size_t idx = 0; idx < _children.size(); ++idx) {
+            _children[idx]->find_place_holder(placeholders);
+        }
+    }
+
     ExprNode* get_slot_ref(int32_t tuple_id, int32_t slot_id);
     ExprNode* get_parent(ExprNode* child);
     void add_child(ExprNode* expr_node) {
@@ -103,6 +144,11 @@ public:
         }
     }
 
+    void replace_child(size_t idx, ExprNode* expr) {
+        delete _children[idx];
+        _children[idx] = expr;
+    }
+
     void del_child(size_t idx) {
         _children.erase(_children.begin() + idx);
     }
@@ -121,8 +167,9 @@ public:
     void set_col_type(pb::PrimitiveType col_type) {
         _col_type = col_type;
     }
-    bool is_constant() const {
-        return _is_constant;
+
+    void clear_filter_index() {
+        _index_ids.clear();
     }
 
     void add_filter_index(int64_t index_id) {
@@ -138,25 +185,49 @@ public:
         return false;
     }
 
+    void flatten_or_expr(std::vector<ExprNode*>* or_exprs) {
+        if (node_type() != pb::OR_PREDICATE) {
+            or_exprs->push_back(this);
+            return;
+        }
+        for (auto c : _children) {
+            c->flatten_or_expr(or_exprs);
+        }
+    }
+
     virtual void transfer_pb(pb::ExprNode* pb_node);
     static void create_pb_expr(pb::Expr* expr, ExprNode* root);
     static int create_tree(const pb::Expr& expr, ExprNode** root);
-    static void destory_tree(ExprNode* root) {
+    static void destroy_tree(ExprNode* root) {
         delete root;
     }
     void get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids);
     void get_all_slot_ids(std::unordered_set<int32_t>& slot_ids);
+    void get_all_field_ids(std::unordered_set<int32_t>& field_ids);
+    int32_t tuple_id() const {
+        return _tuple_id;
+    }
+
+    void set_slot_col_type(int32_t tuple_id, int32_t slot_id, pb::PrimitiveType col_type);
+
+    pb::PrimitiveType get_slot_col_type(int32_t slot_id);
+
+    int32_t slot_id() const {
+        return _slot_id;
+    }
 protected:
     pb::ExprNodeType _node_type;
-    pb::PrimitiveType _col_type;
+    pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
-    bool     _is_constant;
-
+    bool     _is_constant = true;
+    int32_t _tuple_id = -1;
+    int32_t _slot_id = -1;
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用
     std::unordered_set<int64_t> _index_ids;
     
-private:
+public:
     static int create_expr_node(const pb::ExprNode& node, ExprNode** expr_node);
+private:
     static int create_tree(const pb::Expr& expr, int* idx, ExprNode* parent, ExprNode** root);
 };
 }

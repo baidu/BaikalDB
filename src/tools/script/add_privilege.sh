@@ -6,11 +6,11 @@
 curl -d '{
     "op_type":"OP_ADD_PRIVILEGE",
     "user_privilege" : {
-        "username" : "root",
-        "password" : "root",
-        "namespace_name" : "TEST_NAMESPACE",
+        "username" : "******",
+        "password" : "******",
+        "namespace_name" : "TEST",
         "privilege_database" : [{
-                                    "database" : "TestDb",
+                                    "database" : "TEST",
                                     "database_rw" : 2                        
                                 }]
     }

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -247,9 +247,10 @@ const typename Schema::PostingNodeT* AndBooleanExecutor<Schema>::find_next() {
             this->_curr_node_ptr = (PostingNodeT*)this->_sub_clauses[0]->current_node();
             this->_curr_id_ptr = this->_sub_clauses[0]->current_id();
         }
-        for (int i = 1; i < this->_sub_clauses.size(); ++i) {
+        for (size_t i = 1; i < this->_sub_clauses.size(); ++i) {
             this->_merge_func(*this->_curr_node_ptr, *this->_sub_clauses[i]->current_node(), this->_arg);
         }
+
         return this->_curr_node_ptr;
     }
 }
@@ -302,6 +303,9 @@ const typename Schema::PostingNodeT* OrBooleanExecutor<Schema>::next() {
         }
         this->_init_flag = false;
     }
+    if (_miter != nullptr) {
+        _miter->next();
+    }
     return find_next();
 }
 
@@ -344,11 +348,15 @@ const typename Schema::PostingNodeT* OrBooleanExecutor<Schema>::find_next() {
         this->_curr_node_ptr = (PostingNodeT*)(*min_iter)->current_node();
         this->_curr_id_ptr = (*min_iter)->current_id();
     }
-    (*min_iter)->next();
 
-    for (IteratorT sub = ++min_iter; sub != clauses.end(); ++sub) {
+    _miter = *min_iter;
+
+    for (IteratorT sub = clauses.begin(); sub != clauses.end(); ++sub) {
+        if (sub == min_iter) {
+            continue;
+        }
         if ((*sub)->current_id() != NULL) {
-            if (Schema::compare_id_func(*((*sub)->current_id()), *this->_curr_id_ptr) == 0) { 
+            if (Schema::compare_id_func(*((*sub)->current_id()), *this->_curr_id_ptr) == 0) {
                 this->_merge_func(*this->_curr_node_ptr, *(*sub)->current_node(), this->_arg);
                 (*sub)->next();
             }

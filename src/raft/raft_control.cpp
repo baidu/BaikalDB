@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,13 @@
 #include "raft_control.h"
 #include <algorithm>
 #include "update_region_status.h"
-
+#ifdef BAIDU_INTERNAL
+namespace raft {
+#else
+namespace braft {
+#endif
+DECLARE_int32(raft_election_heartbeat_factor);
+}
 namespace baikaldb {
 class RaftControlDone : public braft::Closure {
 public:
@@ -113,7 +119,7 @@ void common_raft_control(google::protobuf::RpcController* controller,
             new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
         node->snapshot(snapshot_done);
         return;
-    }   
+    }
     case pb::ShutDown : { 
         RaftControlDone* shutdown_done = 
                 new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
@@ -219,6 +225,16 @@ void _set_peer(google::protobuf::RpcController* controller,
     }
     std::vector<braft::PeerId> inner_peers;
     auto status = node->list_peers(&inner_peers);
+    if (!status.ok() && status.error_code() == 1) {
+        response->set_errcode(pb::NOT_LEADER);
+        response->set_leader(butil::endpoint2str(node->leader_id().addr).c_str());
+        DB_WARNING("node:%s %s list peers fail, not leader, status:%d %s, log_id: %lu", 
+                    node->node_id().group_id.c_str(),
+                    node->node_id().peer_id.to_string().c_str(),
+                    status.error_code(), status.error_cstr(),
+                    log_id);
+        return;
+    }
     if (!status.ok()) {
         response->set_errcode(pb::PEER_NOT_EQUAL);
         response->set_errmsg("node list peer fail");
@@ -261,11 +277,7 @@ void _set_peer(google::protobuf::RpcController* controller,
         if (0 == _diff_peers(old_peers, new_peers, &peer)) {
             RaftControlDone* set_peer_done =
                 new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
-#ifdef BAIDU_INTERNAL
-            node->add_peer(old_peers, peer, set_peer_done);
-#else
             node->add_peer(peer, set_peer_done);
-#endif
         } else {
             response->set_errcode(pb::INPUT_PARAM_ERROR);
             response->set_errmsg("diff peer fail when add peer");
@@ -278,13 +290,40 @@ void _set_peer(google::protobuf::RpcController* controller,
         }
     } else if (old_peers.size() == new_peers.size() + 1) {
         if (0 == _diff_peers(old_peers, new_peers, &peer)) {
-            RaftControlDone* set_peer_done =
-                new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
-#ifdef BAIDU_INTERNAL
-            node->remove_peer(old_peers, peer, set_peer_done);
-#else
-            node->remove_peer(peer, set_peer_done);
-#endif
+            bool self_faulty = false;
+            bool other_faulty = false;
+            braft::NodeStatus status;
+            node->get_status(&status);
+            for (auto iter : status.stable_followers) {
+                if (iter.first == peer) {
+                    if (iter.second.consecutive_error_times > braft::FLAGS_raft_election_heartbeat_factor) {
+                        self_faulty = true;
+                        break;
+                    }
+                } else {
+                    if (iter.second.consecutive_error_times > braft::FLAGS_raft_election_heartbeat_factor) {
+                        DB_WARNING("node:%s %s peer:%s is faulty,log_id:%lu",
+                            node->node_id().group_id.c_str(),
+                            node->node_id().peer_id.to_string().c_str(),
+                            iter.first.to_string().c_str(),
+                            log_id);
+                        other_faulty = true;
+                    }
+                }
+            }
+            if (self_faulty || (!self_faulty && !other_faulty)) {
+                RaftControlDone* set_peer_done =
+                    new RaftControlDone(cntl, request, response, done_guard.release(), node, auto_reset);
+                node->remove_peer(peer, set_peer_done);
+            } else {
+                response->set_errcode(pb::INPUT_PARAM_ERROR);
+                response->set_errmsg("other peer is faulty");
+                DB_FATAL("node:%s %s set peer fail,log_id:%lu",
+                            node->node_id().group_id.c_str(),
+                            node->node_id().peer_id.to_string().c_str(),
+                            log_id);
+                return;
+            }
         } else {
             response->set_errcode(pb::INPUT_PARAM_ERROR);
             response->set_errmsg("diff peer fail when remove peer");
@@ -373,5 +412,4 @@ int _diff_peers(const std::vector<braft::PeerId>& old_peers,
 }
 
 }//namespace
-
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

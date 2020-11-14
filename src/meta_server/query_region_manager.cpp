@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,75 @@
 #include "table_manager.h"
 #include "query_table_manager.h"
 
+#include <cstdint>
+
 namespace baikaldb {
+
+DECLARE_int64(store_heart_beat_interval_us);
+DECLARE_int32(store_dead_interval_times);
+DECLARE_int32(region_faulty_interval_times);
+
+void QueryRegionManager::construct_query_region(const pb::RegionInfo* region_info, 
+                     pb::QueryRegion* query_region_info) {
+    int64_t table_id = region_info->table_id();
+    query_region_info->set_region_id(region_info->region_id());
+    query_region_info->set_table_id(table_id);
+    query_region_info->set_table_name(region_info->table_name());
+    query_region_info->set_partition_id(region_info->partition_id());
+    query_region_info->set_replica_num(region_info->replica_num());
+    query_region_info->set_version(region_info->version());
+    query_region_info->set_conf_version(region_info->conf_version());
+    query_region_info->set_parent(region_info->parent());
+    query_region_info->set_num_table_lines(region_info->num_table_lines());
+    time_t t = region_info->timestamp();
+    struct tm t_result;
+    localtime_r(&t, &t_result);
+    char s[100];
+    strftime(s, sizeof(s), "%F %T", &t_result);
+    query_region_info->set_create_time(s);
+    std::string start_key_string;
+    std::string end_key_string;
+    std::string raw_start_key = str_to_hex(std::string(region_info->start_key()));;
+    QueryTableManager* qtmanager = QueryTableManager::get_instance();
+    if (region_info->start_key() == "") {
+        start_key_string = "-oo";
+    } else {
+        qtmanager->decode_key(table_id, TableKey(region_info->start_key()), start_key_string);
+    }
+    if (region_info->end_key() == "") {
+        end_key_string = "+oo";
+    } else {
+        qtmanager->decode_key(table_id, TableKey(region_info->end_key()), end_key_string);
+    }
+    query_region_info->set_start_key(start_key_string);
+    query_region_info->set_end_key(end_key_string);
+    query_region_info->set_raw_start_key(raw_start_key);
+    std::string peers;
+    for (auto& peer : region_info->peers()) {
+        peers = peers + peer + ", ";
+    }
+    if (peers.size() > 2) {
+        peers.pop_back();
+        peers.pop_back();
+    } else {
+        peers.clear();
+    }
+    query_region_info->set_peers(peers);
+    query_region_info->set_leader(region_info->leader());
+    query_region_info->set_status(region_info->status());
+    query_region_info->set_used_size(region_info->used_size());
+    query_region_info->set_log_index(region_info->log_index());
+    if (!region_info->has_deleted()) {
+        query_region_info->set_deleted(false);
+    } else {
+        query_region_info->set_deleted(region_info->deleted());
+    }   
+    query_region_info->set_can_add_peer(region_info->can_add_peer());
+    std::string primary_key_string;
+    qtmanager->get_primary_key_string(table_id, primary_key_string);
+    query_region_info->set_primary_key(primary_key_string);
+}
+
 void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb::QueryResponse* response) {
     RegionManager* manager = RegionManager::get_instance();
     std::vector<int64_t> query_region_ids;
@@ -34,7 +102,7 @@ void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb:
     
     int64_t region_id = 0; 
     if (request->str_region_id().size() > 0) {
-        region_id = std::stol(request->str_region_id());
+        region_id = strtoll(request->str_region_id().c_str(), NULL, 10);
     }
     if (region_id != 0) {
         query_region_ids.push_back(region_id);
@@ -63,61 +131,9 @@ void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb:
 
     std::map<std::string, std::multimap<std::string, pb::QueryRegion>> table_regions;
     for (auto& region_info : region_infos) {
-        int64_t table_id = region_info->table_id();
         pb::QueryRegion query_region_info;
-        query_region_info.set_region_id(region_info->region_id());
-        query_region_info.set_table_name(region_info->table_name());
-        query_region_info.set_partition_id(region_info->partition_id());
-        query_region_info.set_replica_num(region_info->replica_num());
-        query_region_info.set_version(region_info->version());
-        query_region_info.set_conf_version(region_info->conf_version());
-        //query_region_info.set_resource_tag(table_resource_tag);
-        query_region_info.set_parent(region_info->parent());
-        time_t t = region_info->timestamp();
-        struct tm t_result;
-        localtime_r(&t, &t_result);
-        char s[100];
-        strftime(s, sizeof(s), "%F %T", &t_result);
-        query_region_info.set_create_time(s);
+        construct_query_region(region_info.get(), &query_region_info);
 
-        std::string start_key_string;
-        std::string end_key_string;
-        if (region_info->start_key() == "") {
-            start_key_string = "-oo";
-        } else {
-            QueryTableManager::get_instance()->decode_key(table_id, TableKey(region_info->start_key()), start_key_string);
-        }
-        if (region_info->end_key() == "") {
-            end_key_string = "+oo";
-        } else {
-            QueryTableManager::get_instance()->decode_key(table_id, TableKey(region_info->end_key()), end_key_string);
-        }
-        query_region_info.set_start_key(start_key_string);
-        query_region_info.set_end_key(end_key_string);
-        std::string peers;
-        for (auto& peer : region_info->peers()) {
-            peers = peers + peer + ", ";
-        }
-        if (peers.size() > 2) {
-            peers.pop_back();
-            peers.pop_back();
-        } else {
-            peers.clear();
-        }
-        query_region_info.set_peers(peers);
-        query_region_info.set_leader(region_info->leader());
-        query_region_info.set_status(region_info->status());
-        query_region_info.set_used_size(region_info->used_size());
-        query_region_info.set_log_index(region_info->log_index());
-        if (!region_info->has_deleted()) {
-             query_region_info.set_deleted(false);
-        } else {
-            query_region_info.set_deleted(region_info->deleted());
-        }   
-        query_region_info.set_can_add_peer(region_info->can_add_peer());
-        std::string primary_key_string;
-        QueryTableManager::get_instance()->get_primary_key_string(table_id, primary_key_string);
-        query_region_info.set_primary_key(primary_key_string);
         std::multimap<std::string, pb::QueryRegion> id_regions;
         if (table_regions.find(region_info->table_name()) != table_regions.end()) {
             id_regions = table_regions[region_info->table_name()];
@@ -133,37 +149,95 @@ void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb:
         }
     }
 }
+
+void QueryRegionManager::check_region_and_update(const std::unordered_map<int64_t, 
+            pb::RegionHeartBeat>&  region_version_map,
+            pb::ConsoleHeartBeatResponse* response) {
+    RegionManager* manager = RegionManager::get_instance();
+    std::vector<SmartRegionInfo> region_infos;
+    TimeCost step_time_cost;     
+    manager->traverse_region_map([&region_infos](SmartRegionInfo& region_info) {
+            region_infos.push_back(region_info);
+        });
+    int64_t mutex_time = step_time_cost.get_time();
+    step_time_cost.reset();
+    for (auto& region_info : region_infos) {
+        int64_t region_id = region_info->region_id();
+        std::string leader = region_info->leader();
+        bool need_update_region = false;
+        bool need_update_stat = false;
+        auto search = region_version_map.find(region_id);
+        if (search != region_version_map.end()) {
+            if (region_info->version() > search->second.version()) {
+                need_update_region = true;
+            } else if (region_info->conf_version() > search->second.conf_version()) {
+                need_update_region = true;
+            } else if (leader.compare(search->second.leader()) != 0) {
+                need_update_region = true;
+            } else if (region_info->num_table_lines() != search->second.num_table_lines()){
+                need_update_stat = true;
+            } else if (region_info->used_size() != search->second.used_size()){
+                need_update_stat = true;
+            }
+        } else {
+            need_update_region = true;
+        }
+        if (need_update_region) {
+            auto change_info = response->add_region_change_infos(); 
+            *(change_info->mutable_region_info()) = *(region_info.get());
+        } else if (need_update_stat){
+            auto change_info = response->add_region_change_infos(); 
+            change_info->set_region_id(region_id);
+            change_info->set_used_size(region_info->used_size());
+            change_info->set_num_table_lines(region_info->num_table_lines());
+        }
+    }
+    DB_NOTICE("mutex_time:%ld process_time:%ld", mutex_time, step_time_cost.get_time());
+}
+
 void QueryRegionManager::get_region_info(const pb::QueryRequest* request,
                                             pb::QueryResponse* response) {
     RegionManager* manager = RegionManager::get_instance();
-    BAIDU_SCOPED_LOCK(manager->_region_mutex);
     if (!request->has_region_id()) {
-        for (auto& region_info_pair : manager->_region_info_map) {
+        std::vector<SmartRegionInfo> region_infos;
+        manager->traverse_region_map([&region_infos](SmartRegionInfo& region_info) {
+            region_infos.push_back(region_info);
+        });
+        for (auto& region_info : region_infos) {
             auto region_pb = response->add_region_infos();
-            *region_pb = *(region_info_pair.second);
+            *region_pb = *region_info;
         }    
     } else {
         int64_t region_id = request->region_id();
-        if (manager->_region_info_map.find(region_id) != manager->_region_info_map.end()) {
+        SmartRegionInfo region_ptr = manager->_region_info_map.get(region_id);
+        if (region_ptr != nullptr) {
             auto region_pb = response->add_region_infos();
-            *region_pb = *(manager->_region_info_map[region_id]);
+            *region_pb = *region_ptr;
         } else {
             response->set_errmsg("region info not exist");
-            response->set_errcode(pb::INPUT_PARAM_ERROR);
+            response->set_errcode(pb::REGION_NOT_EXIST);
         }    
     }    
 }
 void QueryRegionManager::get_region_info_per_instance(const std::string& instance, 
                                                  pb::QueryResponse* response) {
     RegionManager* manager = RegionManager::get_instance();
-    BAIDU_SCOPED_LOCK(manager->_region_mutex); 
-    if (manager->_instance_region_map.find(instance) == manager->_instance_region_map.end()) {
-        return;
+    std::unordered_map<int64_t, std::set<int64_t>> table_region_map;
+    {
+        BAIDU_SCOPED_LOCK(manager->_instance_region_mutex);
+        auto iter = manager->_instance_region_map.find(instance); 
+        if (iter == manager->_instance_region_map.end()) {
+            return;
+        }
+        table_region_map = iter->second;
     }
-    for (auto& table_region_ids : manager->_instance_region_map[instance]) {
+    for (auto& table_region_ids : table_region_map) {
         for (auto& region_id : table_region_ids.second) {
-            auto region_pb = response->add_region_infos();
-            *region_pb = *(manager->_region_info_map[region_id]);
+            SmartRegionInfo region_ptr = manager->_region_info_map.get(region_id);
+            if (region_ptr != nullptr) {
+                auto region_pb = response->add_region_infos();
+                *region_pb = *region_ptr;
+            }
         }
     }
 }
@@ -173,7 +247,7 @@ void QueryRegionManager::get_region_count_per_instance(
             int64_t& region_leader_count) {
     RegionManager* manager = RegionManager::get_instance();
     {
-        BAIDU_SCOPED_LOCK(manager->_region_mutex);
+        BAIDU_SCOPED_LOCK(manager->_instance_region_mutex);
         if (manager->_instance_region_map.find(instance) != manager->_instance_region_map.end()) {
             for (auto& table_region_ids : manager->_instance_region_map[instance]) {
                 region_count += table_region_ids.second.size();
@@ -189,6 +263,97 @@ void QueryRegionManager::get_region_count_per_instance(
         }
     }
 }
+void QueryRegionManager::get_peer_ids_per_instance(
+            const std::string& instance,
+            std::set<int64_t>& peer_ids) {
+    RegionManager* manager = RegionManager::get_instance();
+    std::unordered_map<int64_t, std::set<int64_t>> table_region_map;
+    {
+        BAIDU_SCOPED_LOCK(manager->_instance_region_mutex);
+        auto iter = manager->_instance_region_map.find(instance);
+        if (iter == manager->_instance_region_map.end()) {
+            return;
+        }
+        table_region_map = iter->second;
+    }
+
+    for (auto& table_region_ids : table_region_map) {
+        for (auto& region_id : table_region_ids.second) {
+            peer_ids.insert(region_id);
+        } 
+    }
+}
+
+void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request, pb::QueryResponse* response) {
+    RegionManager* manager = RegionManager::get_instance();
+    std::map<int64_t, std::string> table_id_name_map;
+
+    if (request->has_resource_tag()) {
+        TableManager::get_instance()->get_table_by_resource_tag(request->resource_tag(), table_id_name_map);
+    } else {
+        TableManager::get_instance()->get_table_by_resource_tag("", table_id_name_map);
+    }
+    
+    auto func = [&table_id_name_map, response](const int64_t region_id, RegionPeerState& region_state) {
+        bool healthy = true;
+
+        int64_t table_id = 0;
+        std::vector<pb::PeerStateInfo> region_peer_status_vec;
+        for (auto& pair : region_state.legal_peers_state) {
+            if (pair.second.has_table_id()) {
+                table_id = pair.second.table_id();
+                if (table_id_name_map.count(table_id) == 0) {
+                    return;
+                }
+            } else {
+                return;
+            }
+
+            if (pair.second.peer_status() == pb::STATUS_NORMAL 
+                && (butil::gettimeofday_us() - pair.second.timestamp() >
+                FLAGS_store_heart_beat_interval_us * FLAGS_region_faulty_interval_times)) {
+                pair.second.set_peer_status(pb::STATUS_NOT_HEARTBEAT);
+                healthy = false;
+            } else if (pair.second.peer_status() != pb::STATUS_NORMAL) {
+                healthy = false;
+            }
+        }
+        if (!healthy || !region_state.ilegal_peers_state.empty()) {
+            for (auto& pair : region_state.legal_peers_state) {
+                pair.second.set_region_id(region_id);
+                pair.second.set_peer_id(pair.first);
+                region_peer_status_vec.push_back(pair.second);
+            }  
+        }
+        for (auto& pair : region_state.ilegal_peers_state) {
+            if (pair.second.has_table_id()) {
+                table_id = pair.second.table_id();
+                if (table_id_name_map.count(table_id) == 0) {
+                    return;
+                }
+            } else {
+                return;
+            }
+            pair.second.set_peer_id(pair.first);
+            pair.second.set_region_id(region_id);
+            region_peer_status_vec.push_back(pair.second);
+        }
+
+        if (!region_peer_status_vec.empty()) {
+            pb::RegionStateInfo* region_info = response->add_region_status_infos();
+            region_info->set_table_id(region_peer_status_vec[0].table_id());
+            region_info->set_region_id(region_peer_status_vec[0].region_id());
+            region_info->set_table_name(table_id_name_map[table_id]);
+            region_info->set_is_healthy(healthy);
+            for (auto peer_status : region_peer_status_vec) {
+                pb::PeerStateInfo* peer_info = region_info->add_peer_status_infos();
+                *peer_info = peer_status;
+            }       
+        }
+    };
+    manager->region_peer_state_map().traverse_with_key_value(func);
+}
+
 void QueryRegionManager::send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response) {
     std::string old_leader = request->old_leader();
     boost::trim(old_leader);

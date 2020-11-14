@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,17 +15,16 @@
 #pragma once
 
 #include <unordered_map>
+#include <map>
 #include <bvar/bvar.h>
-#include <boost/regex.hpp>
 #include "network_socket.h"
 #include "epoll_info.h"
 #include "mysql_wrapper.h"
 #include "logical_planner.h"
 #include "physical_planner.h"
+#include "binlog_context.h"
 
 namespace baikaldb {
-
-const uint32_t PACKET_LEN_MAX = 0x00ffffff;
 
 const std::string SQL_SELECT                     = "select";
 const std::string SQL_SHOW                       = "show";
@@ -41,20 +40,24 @@ const std::string SQL_ROLLBACK                   = "rollback";
 const std::string SQL_START_TRANSACTION          = "start";
 const std::string SQL_COMMIT                     = "commit";
 const std::string SQL_SHOW_VARIABLES             = "show variables";
-const std::string SQL_VERSION_COMMENT            = "select @@version_comment limit 1";
-const std::string SQL_SESSION_AUTO_INCREMENT     = "select @@session.auto_increment_increment";
-const std::string SQL_SESSION_AUTO_AUTOCOMMIT    = "select @@session.autocommit";
-const std::string SQL_SESSION_TX_ISOLATION       = "select @@session.tx_isolation";
 const std::string SQL_SELECT_DATABASE            = "select database()";
 const std::string SQL_SHOW_DATABASES             = "show databases";
 const std::string SQL_SHOW_TABLES                = "show tables";
+const std::string SQL_SHOW_FULL_TABLES           = "show full tables";
 const std::string SQL_SHOW_CREATE_TABLE          = "show create table";
 const std::string SQL_SHOW_FULL_COLUMNS          = "show full columns";
+const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
+const std::string SQL_SHOW_ABNORMAL_REGIONS      = "show abnormal regions";
+const std::string SQL_SHOW_COST                  = "show cost";
+const std::string SQL_SHOW_VIRTUAL_INDEX         = "show virtual index";
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
 const std::string SQL_SHOW_WARNINGS              = "show warnings";
-const std::string SQL_SELECT_1                   = "select 1";
 const std::string SQL_SHOW_REGION                = "show region";
+const std::string SQL_SHOW_SOCKET                = "show socket";
+const std::string SQL_SHOW_PROCESSLIST           = "show processlist";
+const std::string SQL_SHOW_META                  = "show meta";
+const std::string SQL_SHOW_NAMESPACE             = "show namespace";
 
 enum QUERY_TYPE {
     SQL_UNKNOWN_NUM                         = 0,
@@ -94,15 +97,6 @@ enum QUERY_TYPE {
 class StateMachine {
 public:
     ~StateMachine() {
-        for (auto& minute_pair : database_request_count_minute) {
-            delete minute_pair.second;
-        }
-        for (auto& hour_pair : database_request_count_hour) {
-            delete hour_pair.second;
-        }
-        for (auto& day_pair : database_request_count_day) {
-            delete day_pair.second;
-        }
     }
 
     static StateMachine* get_instance() {
@@ -114,32 +108,40 @@ public:
     void client_free(SmartSocket socket, EpollInfo* epoll_info);
 
 private:
-    StateMachine() {
+    StateMachine(): dml_time_cost("dml_time_cost"),
+                    select_time_cost("select_time_cost") {
         _wrapper = MysqlWrapper::get_instance();
     }
 
     StateMachine& operator=(const StateMachine& other);
 
     int _auth_read(SmartSocket sock);
+    int _read_packet_header(SmartSocket sock);
     int _read_packet(SmartSocket sock);
     int _query_read(SmartSocket sock);
+    int _query_read_stmt_execute(SmartSocket sock);
+    int _query_read_stmt_long_data(SmartSocket sock);
     int _get_query_type(std::shared_ptr<QueryContext> ctx);
     int _get_json_attributes(std::shared_ptr<QueryContext> ctx);
     bool _query_process(SmartSocket sock);
     void _parse_comment(std::shared_ptr<QueryContext> ctx);
-
+    void _parse_sample_sql(std::string sample_sql, std::string& database, std::string& table, std::string& sql);
     bool _handle_client_query_use_database(SmartSocket client);
-    bool _handle_client_query_version_commit(SmartSocket client);
-    bool _handle_client_query_session_auto_increment(SmartSocket client);
-    bool _handle_client_query_session_auto_autocommit(SmartSocket client);
-    bool _handle_client_query_session_tx_isolation(SmartSocket client);
     bool _handle_client_query_select_database(SmartSocket client);
     bool _handle_client_query_show_databases(SmartSocket client);
+    bool _handle_client_query_show_full_tables(SmartSocket client);
     bool _handle_client_query_show_tables(SmartSocket client);
     bool _handle_client_query_show_create_table(SmartSocket client);
     bool _handle_client_query_show_full_columns(SmartSocket client);
+    bool _handle_client_query_show_table_status(SmartSocket client);
+    bool _handle_client_query_show_abnormal_regions(SmartSocket client);
+    bool _handle_client_query_show_cost(SmartSocket client);
+    bool _handle_client_query_show_virtual_index(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
+    bool _handle_client_query_show_socket(SmartSocket client);
+    bool _handle_client_query_show_processlist(SmartSocket client);
     bool _handle_client_query_common_query(SmartSocket client);
+
     bool _handle_client_query_select_1(SmartSocket client);
     bool _handle_client_query_show_collation(SmartSocket client);
     bool _handle_client_query_show_warnings(SmartSocket client);
@@ -155,17 +157,21 @@ private:
                                         std::vector<std::vector<std::string> >& rows);
 
     int _query_result_send(SmartSocket sock);
+    int _query_more(SmartSocket client, bool shutdown);
+    bool _has_more_result(SmartSocket client);
     int _send_result_to_client_and_reset_status(EpollInfo* epoll_info, SmartSocket client);
     int _reset_network_socket_client_resource(SmartSocket client);
     void _print_query_time(SmartSocket client);
 
-    std::mutex                                        bvar_mutex;
-    std::unordered_map<std::string, bvar::Adder<int>> database_request_count;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_minute;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_hour;
-    std::unordered_map<std::string, bvar::Window<bvar::Adder<int>>* > database_request_count_day;
+    bvar::LatencyRecorder dml_time_cost;
+    bvar::LatencyRecorder select_time_cost;
 
     MysqlWrapper*   _wrapper = nullptr;
+
+public:
+    bvar::Adder<BvarMap> sql_agg_cost;
+    // 索引推荐统计信息，一直积累，不清理
+    bvar::Adder<BvarMap> index_recommend_st;
 };
 
 } // namespace baikal

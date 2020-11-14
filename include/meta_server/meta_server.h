@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,10 +21,12 @@
 #endif
 #include "proto/meta.interface.pb.h"
 #include "common.h"
+#include "meta_server_interact.hpp"
 
 namespace baikaldb {
 class MetaStateMachine;
 class AutoIncrStateMachine;
+class TSOStateMachine;
 class MetaServer : public pb::MetaService {
 public:
     static const std::string CLUSTER_IDENTIFY;
@@ -41,6 +43,8 @@ public:
     static const std::string DATABASE_SCHEMA_IDENTIFY;
     static const std::string TABLE_SCHEMA_IDENTIFY;
     static const std::string REGION_SCHEMA_IDENTIFY;
+    static const std::string DDLWORK_IDENTIFY;
+    static const std::string STATISTICS_IDENTIFY;
     
     static const std::string MAX_IDENTIFY;
 
@@ -80,15 +84,54 @@ public:
                                   pb::BaikalHeartBeatResponse* response,
                                   google::protobuf::Closure* done); 
 
+    virtual void baikal_other_heartbeat(google::protobuf::RpcController* controller,
+                                  const pb::BaikalOtherHeartBeatRequest* request,
+                                  pb::BaikalOtherHeartBeatResponse* response,
+                                  google::protobuf::Closure* done); 
+
+    virtual void console_heartbeat(google::protobuf::RpcController* controller,
+                                  const pb::ConsoleHeartBeatRequest* request,
+                                  pb::ConsoleHeartBeatResponse* response,
+                                  google::protobuf::Closure* done);
+
+    virtual void tso_service(google::protobuf::RpcController* controller,
+                                  const pb::TsoRequest* request,
+                                  pb::TsoResponse* response,
+                                  google::protobuf::Closure* done);
+
+    virtual void migrate(google::protobuf::RpcController* controller,
+            const pb::MigrateRequest* /*request*/,
+            pb::MigrateResponse* response,
+            google::protobuf::Closure* done);
+
+    void flush_memtable_thread();
+    void apply_region_thread();
+
     void shutdown_raft();
-    
+    bool have_data();
+    void close() {
+        _flush_bth.join();
+        _apply_region_bth.join();
+    }
+
 private:
+    MetaServerInteract* meta_proxy(const std::string& plat) {
+        if (_meta_interact_map.count(plat) == 1) {
+            return _meta_interact_map[plat];
+        }
+        return MetaServerInteract::get_instance();
+    }
     MetaServer() {}
     
     MetaStateMachine* _meta_state_machine = NULL;
     AutoIncrStateMachine* _auto_incr_state_machine = NULL;
-
+    TSOStateMachine*      _tso_state_machine = NULL;
+    std::map<std::string, MetaServerInteract*> _meta_interact_map;
+    Bthread _flush_bth;
+    //region区间修改等信息应用raft
+    Bthread _apply_region_bth;
     bool _init_success = false;
+    bool _shutdown = false;
 }; //class
 
 }//namespace baikaldb

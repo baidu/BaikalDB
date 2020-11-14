@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 #include "limit_node.h"
 #include "runtime_state.h"
+#include "query_context.h"
  
 namespace baikaldb {
 int LimitNode::init(const pb::PlanNode& node) {
@@ -23,8 +24,110 @@ int LimitNode::init(const pb::PlanNode& node) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
-    _offset = node.derive_node().limit_node().offset();
+    const pb::LimitNode& limit_node = node.derive_node().limit_node();
+    _offset = limit_node.offset();
+
+    if (limit_node.has_offset_expr()) {
+        ret = ExprNode::create_tree(limit_node.offset_expr(), &_offset_expr);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    if (limit_node.has_count_expr()) {
+        ret = ExprNode::create_tree(limit_node.count_expr(), &_count_expr);
+        if (ret < 0) {
+            return ret;
+        }
+    }
     return 0;
+}
+
+int LimitNode::expr_optimize(QueryContext* ctx) {
+    int ret = 0;
+    ret = ExecNode::expr_optimize(ctx);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
+        return ret;
+    }
+    if (_offset_expr != nullptr) {
+        // cal offset_expr value
+        ret = _offset_expr->type_inferer();
+        if (ret < 0) {
+            DB_WARNING("offset_expr type_inferer fail:%d", ret);
+            return ret;
+        }
+        if (_offset_expr->is_constant()) {
+            ret = _offset_expr->open();
+            if (ret < 0) {
+                DB_WARNING("expr open fail:%d", ret);
+                return ret;
+            }
+            ExprValue value = _offset_expr->get_value(nullptr);
+            _offset_expr->close();
+            if (value.is_int()) {
+                _offset = value.get_numberic<int64_t>();
+                // place holder 没替换前不做expr_optimize
+            } else {
+                DB_WARNING("invalid offset_expr type: %d", _offset_expr->node_type());
+                return -1;
+            }
+        } else {
+            DB_WARNING("invalid offset_expr type: %d", _offset_expr->node_type());
+            return -1;
+        }
+    }
+    if (_count_expr != nullptr) {
+        // cal offset_expr value
+        ret = _count_expr->type_inferer();
+        if (ret < 0) {
+            DB_WARNING("count_expr type_inferer fail:%d", ret);
+            return ret;
+        }
+        //常量表达式计算
+        _count_expr->const_pre_calc();
+        if (_count_expr->is_constant()) {
+            ret = _count_expr->open();
+            if (ret < 0) {
+                DB_WARNING("expr open fail:%d", ret);
+                return ret;
+            }
+            ExprValue value = _count_expr->get_value(nullptr);
+            _count_expr->close();
+            if (value.is_int()) {
+                _limit = value.get_numberic<int64_t>();
+            } else {
+                DB_WARNING("invalid count_expr type: %d", _count_expr->node_type());
+                return -1;
+            }
+        } else {
+            DB_WARNING("invalid count_expr type: %d", _count_expr->node_type());
+            return -1;
+        }
+    }
+    if (_limit == 0) {
+        DB_WARNING("limit is 0");
+        ctx->return_empty = true;
+    }
+    // DB_WARNING("offset and count: %ld, %ld", _offset, _limit);
+    return 0;
+}
+
+void LimitNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
+    pb::DerivePlanNode* derive = pb_node->mutable_derive_node();
+    pb::LimitNode* limit = derive->mutable_limit_node();
+    limit->set_offset(_offset);
+    return;
+}
+
+void LimitNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    if (_offset_expr) {
+        _offset_expr->find_place_holder(placeholders);
+    }
+    if (_count_expr) {
+        _count_expr->find_place_holder(placeholders);
+    }
 }
 
 int LimitNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {

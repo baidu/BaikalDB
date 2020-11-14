@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,8 +30,9 @@ void QueryDatabaseManager::get_database_info(const pb::QueryRequest* request,
             int64_t id = manager->_database_id_map[database];
             *(response->add_database_infos()) = manager->_database_info_map[id];
         } else {
-             response->set_errmsg("namespace not exist");
+             response->set_errmsg("database not exist");
              response->set_errcode(pb::INPUT_PARAM_ERROR);
+             DB_FATAL("namespace: %s database: %s not exist", namespace_name.c_str(), database.c_str()); 
         }
     }
 }

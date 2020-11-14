@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,33 +19,44 @@
 namespace baikaldb {
 class FilterNode : public ExecNode {
 public:
-    FilterNode() : _child_row_idx(0), _child_eos(false) {
+    FilterNode() {
     }
-    virtual  ~FilterNode() {
+    virtual ~FilterNode() {
         for (auto conjunct : _conjuncts) {
-            ExprNode::destory_tree(conjunct);
+            ExprNode::destroy_tree(conjunct);
         }
     }
     virtual int init(const pb::PlanNode& node);
 
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
+
+    virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
 
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return &_conjuncts;
     }
+
     void add_conjunct(ExprNode* conjunct) {
         _conjuncts.push_back(conjunct);
     }
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual void transfer_pb(pb::PlanNode* pb_node);
-    //virtual void print_exec_node() {
-    //    ExecNode::print_exec_node();
-    //    pb::PlanNode pb_node;
-    //    transfer_pb(&pb_node);
-    //    DB_WARNING("filter node:%s", pb_node.DebugString().c_str());
-    //}
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
+
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ExecNode::find_place_holder(placeholders);
+        for (auto& expr : _conjuncts) {
+            expr->find_place_holder(placeholders);
+        }
+    }
+    void modifiy_pruned_conjuncts_by_index(const std::unordered_set<ExprNode*>& other_condition) {
+        // 先清理，后续transfer pb会填充 _pruned_conjuncts
+        mutable_pb_node()->mutable_derive_node()->mutable_filter_node()->clear_conjuncts();
+        _pruned_conjuncts.clear();
+        _pruned_conjuncts.insert(_pruned_conjuncts.end(), other_condition.begin(), other_condition.end());
+    }
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 private:
     bool need_copy(MemRow* row);
 
@@ -53,8 +64,8 @@ private:
     std::vector<ExprNode*> _conjuncts;
     std::vector<ExprNode*> _pruned_conjuncts;
     RowBatch _child_row_batch;
-    size_t  _child_row_idx;
-    bool    _child_eos;
+    size_t  _child_row_idx = 0;
+    bool    _child_eos = false;
 };
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,9 +24,15 @@ public:
     MetaStateMachine(const braft::PeerId& peerId):
                 CommonStateMachine(0, "meta_raft", "/meta_server", peerId),
                 _bth(&BTHREAD_ATTR_SMALL),
-                _healthy_check_start(false) {}
+                _healthy_check_start(false) {
+        bthread_mutex_init(&_load_balance_mutex, NULL);            
+        bthread_mutex_init(&_migrate_mutex, NULL);            
+    }
     
-    virtual ~MetaStateMachine() {}
+    virtual ~MetaStateMachine() {
+        bthread_mutex_destroy(&_load_balance_mutex);
+        bthread_mutex_destroy(&_migrate_mutex);
+    }
 
     void store_heartbeat(google::protobuf::RpcController* controller,             
                          const pb::StoreHeartBeatRequest* request,                
@@ -37,7 +43,17 @@ public:
                          const pb::BaikalHeartBeatRequest* request,                
                          pb::BaikalHeartBeatResponse* response,                    
                          google::protobuf::Closure* done); 
+
+    void baikal_other_heartbeat(google::protobuf::RpcController* controller,             
+                         const pb::BaikalOtherHeartBeatRequest* request,                
+                         pb::BaikalOtherHeartBeatResponse* response,                    
+                         google::protobuf::Closure* done); 
     
+    void console_heartbeat(google::protobuf::RpcController* controller,             
+                         const pb::ConsoleHeartBeatRequest* request,                
+                         pb::ConsoleHeartBeatResponse* response,                    
+                         google::protobuf::Closure* done); 
+
     void healthy_check_function();
     
     // state machine method
@@ -51,14 +67,49 @@ public:
 
     virtual void on_leader_stop();
 
+    int64_t snapshot_index(std::string& snapshot_path);
+    int64_t applied_index() { return _applied_index; }
+
     //经过3个周期后才可以做决策
     bool whether_can_decide();
 
-    void set_close_load_balance(bool close) {
-        _close_load_balance = close;
+    void set_global_load_balance(bool open) {
+        BAIDU_SCOPED_LOCK(_load_balance_mutex);
+        _global_load_balance = open;
+        _resource_load_balance.clear();
     }
-    bool get_close_load_balance() {
-        return _close_load_balance;
+    void set_load_balance(const std::string& resource_tag, bool open) {
+        BAIDU_SCOPED_LOCK(_load_balance_mutex);
+        _resource_load_balance[resource_tag] = open;
+    }
+    bool get_load_balance(const std::string& resource_tag) {
+        BAIDU_SCOPED_LOCK(_load_balance_mutex);
+        if (_resource_load_balance.find(resource_tag) != _resource_load_balance.end()) {
+                return _resource_load_balance[resource_tag];
+        }
+        return _global_load_balance;
+    }
+    void set_global_migrate(bool open) {
+        BAIDU_SCOPED_LOCK(_migrate_mutex);
+        _global_migrate = open;
+        _resource_migrate.clear();
+    }
+    void set_migrate(const std::string& resource_tag, bool open) {
+        BAIDU_SCOPED_LOCK(_migrate_mutex);
+        _resource_migrate[resource_tag] = open;
+    }
+    bool get_migrate(const std::string& resource_tag) {
+        BAIDU_SCOPED_LOCK(_migrate_mutex);
+        if (_resource_migrate.find(resource_tag) != _resource_migrate.end()) {
+            return _resource_migrate[resource_tag];
+        }
+        return _global_migrate;
+    }
+    void set_unsafe_decision(bool open) {
+        _unsafe_decision = open;
+    }
+    bool get_unsafe_decision() {
+        return _unsafe_decision;
     }
 private:
     void save_snapshot(braft::Closure* done,
@@ -68,7 +119,16 @@ private:
     int64_t _leader_start_timestmap;
     Bthread _bth;    
     bool _healthy_check_start;
-    bool _close_load_balance = true;
+    bthread_mutex_t         _load_balance_mutex;
+    bool _global_load_balance = true;
+    std::map<std::string, bool> _resource_load_balance;
+    
+    bthread_mutex_t         _migrate_mutex;
+    bool _global_migrate = true;
+    std::map<std::string, bool> _resource_migrate;
+
+    bool _unsafe_decision = false;
+    int64_t _applied_index = 0;
 };
 
 } //namespace baikaldb

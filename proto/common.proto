@@ -26,6 +26,15 @@ enum ErrCode {
     CANNOT_ADD_PEER = 19;
     PEER_NOT_EQUAL  = 20;
     CONNECT_FAIL    = 21;
+    CANCELLED = 22;
+    DDL_UNIQUE_KEY_FAIL = 23;
+    TXN_IS_EXISTING     = 24;
+    TXN_IS_ROLLBACK     = 25;
+    BACKUP_SAME_LOG_INDEX = 26;
+    BACKUP_ERROR = 27;
+    RETRY_LATER  = 28;
+    LESS_THAN_OLDEST_TS  = 29;
+    IN_PROCESS   = 30;
 };
 
 enum PrimitiveType {
@@ -47,12 +56,32 @@ enum PrimitiveType {
     TIMESTAMP = 15;
     DATE = 16;
     HLL = 17;
+    TIME = 18;
+    PLACE_HOLDER = 19;
+    HEX = 20;
 };
 
-//message ColumnType {
-//    required PrimitiveType primitive_type = 1;
-//    optional uint32 len = 2;
-//};
+enum SchemaType {
+    DYNAMIC = 1;
+    STATIC = 2;
+};
+
+message SchemaConf {
+    optional bool need_merge                = 1;
+    optional bool storage_compute_separate  = 2; 
+    optional bool select_index_by_cost      = 3;
+    optional int64 op_version               = 4;
+    optional string op_desc                 = 5;
+    optional float filter_ratio             = 6;
+};
+
+enum Engine {
+    ROCKSDB = 1;
+    REDIS = 2;
+    ROCKSDB_CSTORE = 3;
+    BINLOG = 4;
+    INFORMATION_SCHEMA = 5;
+};
 
 message SlotDescriptor {
     required int32 slot_id = 1;  //从1开始
@@ -60,6 +89,8 @@ message SlotDescriptor {
     required int32 tuple_id = 3;
     optional int64 table_id = 4; //从表中获取才填
     optional int32 field_id = 5; //从表中获取才填
+    optional int32 ref_cnt  = 6; //引用这个slot的数量，用来给FULLTEXT做索引覆盖查询
+
 };
 
 //tuple可以与table对应，也可以是中间表达式和聚合结果
@@ -67,4 +98,15 @@ message TupleDescriptor {
     required int32 tuple_id = 1;
     optional int64 table_id = 2; //与表映射才填
     repeated SlotDescriptor slots = 3; 
+};
+message ExprValue {
+    required PrimitiveType type       = 1;
+    optional bool          bool_val   = 2;
+    optional int32         int32_val  = 3;
+    optional uint32        uint32_val = 4;
+    optional int64         int64_val  = 5;
+    optional uint64        uint64_val = 6;
+    optional float         float_val  = 7;
+    optional double        double_val = 8;
+    optional bytes         string_val = 9;
 };

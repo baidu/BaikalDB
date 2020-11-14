@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,16 +13,17 @@
 // limitations under the License.
 
 #include "expr.h"
-#include "unordered_map"
+#include "dml.h"
+#include <unordered_map>
 
 namespace parser {
 static std::unordered_map<int, std::string> FUNC_STR_MAP = {
     {FT_COMMON, ""},
     {FT_AGG, ""},
     // ~ ! -
-    {FT_BIT_NOT, " ~ "},
-    {FT_LOGIC_NOT, " ! "},
-    {FT_UMINUS, " - "},
+    {FT_BIT_NOT, "~"},
+    {FT_LOGIC_NOT, "!"},
+    {FT_UMINUS, "-"},
     // + - * /
     {FT_ADD, " + "},
     {FT_MINUS, " - "},
@@ -52,6 +53,7 @@ static std::unordered_map<int, std::string> FUNC_STR_MAP = {
     {FT_IS_UNKNOWN, "IS UNKNOWN"},
     {FT_IN, "IN"},
     {FT_LIKE, "LIKE"},
+    {FT_EXACT_LIKE, "EXACT_LIKE"},
     {FT_BETWEEN, "BETWEEN"},
     {FT_VALUES, "values"}
 };
@@ -92,6 +94,8 @@ static std::unordered_map<int, const char*> FUNC_FN_NAME_MAP = {
     {FT_IS_UNKNOWN, "is_unknown"},
     {FT_IN, "in"},
     {FT_LIKE, "like"},
+    {FT_EXACT_LIKE, "exact_like"},
+    {FT_MATCH_AGAINST, "match_against"},
     {FT_BETWEEN, "between"}
 };
 
@@ -132,6 +136,20 @@ FuncExpr* FuncExpr::new_ternary_op_node(
 void FuncExpr::to_stream(std::ostream& os) const {
     static const char* not_str[] = {"", " NOT"};
     static const char* true_str[] = {"TRUE", "FALSE"};
+    // unary特殊处理，不加括号
+    switch (func_type) {
+        case FT_BIT_NOT:
+        case FT_LOGIC_NOT:
+        case FT_UMINUS:
+            if (((ExprNode*)children[0])->expr_type != ET_SUB_QUERY_EXPR) {
+                os << FUNC_STR_MAP[func_type] << children[0];
+            } else {
+                os << "NOT " << children[0];
+            }
+            return;
+        default:
+            break;
+    }
     os << "(";
     switch (func_type) {
         case FT_COMMON: {
@@ -152,11 +170,6 @@ void FuncExpr::to_stream(std::ostream& os) const {
             os << ")";
             break;
         }
-        case FT_BIT_NOT:
-        case FT_LOGIC_NOT:
-        case FT_UMINUS:
-            os << FUNC_STR_MAP[func_type] << children[0];
-            break;
         case FT_ADD:
         case FT_MINUS:
         case FT_MULTIPLIES:
@@ -188,10 +201,20 @@ void FuncExpr::to_stream(std::ostream& os) const {
             os << children[0] << " IS" << not_str[is_not] << " UNKNOWN";
             break;
         case FT_IN:
-            os << children[0] << not_str[is_not] << " IN " << children[1]; 
+            if (print_sample) {
+                os << children[0] << not_str[is_not] << " IN (?)"; 
+            } else {
+                os << children[0] << not_str[is_not] << " IN " << children[1]; 
+            }
             break;
         case FT_LIKE:
             os << children[0] << not_str[is_not] << " LIKE " << children[1]; 
+            break;
+        case FT_EXACT_LIKE:
+            os << children[0] << not_str[is_not] << " EXACT_LIKE " << children[1]; 
+            break;
+        case FT_MATCH_AGAINST:
+            os << "MATCH" << children[0] << " AGAINST " << "(" << children[1] << " " << children[2] << ")"; 
             break;
         case FT_BETWEEN:
             os << children[0] << not_str[is_not] << 
@@ -205,6 +228,22 @@ void FuncExpr::to_stream(std::ostream& os) const {
     os << ")";
 };
 
+void SubqueryExpr::to_stream(std::ostream& os) const {
+    static const char* cmp_type_str[] = {"ANY", "SOME", "ALL"};
+    if (is_exists) {
+        os << "EXISTS";
+    } else if (is_cmp_expr) {
+        os << cmp_type_str[cmp_type];
+    }
+    os << " (";
+    if (select_stmt != nullptr) {
+        select_stmt->to_stream(os);
+    } else if (union_stmt != nullptr) {
+        union_stmt->to_stream(os);
+    }
+    os << ")";
+}
+
 void ColumnName::to_stream(std::ostream& os) const {
     if (db.value != nullptr) {
         os << db << ".";
@@ -216,6 +255,45 @@ void ColumnName::to_stream(std::ostream& os) const {
 }
 
 void LiteralExpr::to_stream(std::ostream& os) const {
+    if (print_sample) {
+        os << "?";
+        return;
+    }
+    static const char* true_str[] = {"FALSE", "TRUE"};
+    switch (literal_type) {
+        case LT_INT:
+            os << _u.int64_val;
+            break;
+        case LT_DOUBLE:
+            os << _u.double_val;
+            break;
+        case LT_STRING:
+            os << "'" << _u.str_val.value << "'";
+            break;
+        case LT_HEX:
+            os << "'" << _u.str_val.value << "'";
+            break;
+        case LT_BOOL:
+            os << true_str[_u.bool_val];
+            break;
+        case LT_NULL:
+            os << "NULL";
+            break;
+        case LT_PLACE_HOLDER:
+            os << "?";
+            break;
+        default:
+            break;
+    }
+}
+
+std::string LiteralExpr::to_string() const {
+    std::ostringstream os;        
+    if (print_sample) {
+        os << "?";
+        return os.str();
+    }
+    static const char* true_str[] = {"FALSE", "TRUE"};
     switch (literal_type) {
         case LT_INT:
             os << _u.int64_val;
@@ -226,15 +304,22 @@ void LiteralExpr::to_stream(std::ostream& os) const {
         case LT_STRING:
             os << _u.str_val.value;
             break;
+        case LT_HEX:
+            os << _u.str_val.value;
+            break;
         case LT_BOOL:
-            os << _u.bool_val;
+            os << true_str[_u.bool_val];
             break;
         case LT_NULL:
             os << "NULL";
             break;
+        case LT_PLACE_HOLDER:
+            os << "?";
+            break;
         default:
             break;
     }
+    return os.str();
 }
 
 }

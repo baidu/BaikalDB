@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <store.h>
+#include <boost/filesystem.hpp>
+#include <sys/vfs.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/scoped_array.hpp>
 #include <boost/filesystem.hpp>
@@ -20,44 +22,53 @@
 #include <gflags/gflags.h>
 #include "rocksdb/utilities/memory_util.h"
 #include "mut_table_key.h"
+#include "closure.h"
 #include "my_raft_log_storage.h"
+#include "log_entry_reader.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/utilities/write_batch_with_index.h"
-
-namespace bthread {
-DECLARE_int32(bthread_concurrency); //bthread.cpp
-}
+#include "concurrency.h"
+#include "mut_table_key.h"
+#include "my_raft_log_storage.h"
+//#include <jemalloc/jemalloc.h>
 
 namespace baikaldb {
-DECLARE_int32(store_heart_beat_interval_us);
+DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(balance_periodicity);
 DECLARE_string(stable_uri);
 DECLARE_string(snapshot_uri);
-DECLARE_string(save_applied_index_path);
-DEFINE_int32(reverse_merge_interval_us, 2 * 1000 * 1000,  "reverse_merge_interval(2 s)");
+DEFINE_int64(reverse_merge_interval_us, 2 * 1000 * 1000,  "reverse_merge_interval(2 s)");
+DEFINE_int64(ttl_remove_interval_s, 24 * 3600,  "ttl_remove_interval_s(24h)");
+DEFINE_int64(delay_remove_region_interval_s, 600,  "delay_remove_region_interval");
 //DEFINE_int32(update_status_interval_us, 2 * 1000 * 1000,  "update_status_interval(2 s)");
 DEFINE_int32(store_port, 8110, "Server port");
 DEFINE_string(db_path, "./rocks_db", "rocksdb path");
 DEFINE_string(resource_tag, "", "resource tag");
 DEFINE_int32(update_used_size_interval_us, 10 * 1000 * 1000, "update used size interval (10 s)");
-DEFINE_int64(capacity, 100 * 1024 * 1024 * 1024LL, "store memory size, defalut:100G");
-DEFINE_int32(split_threshold , 150, "split_thread, defalut: 150 * region_size / 100");
-DEFINE_int32(byte_size_per_record, 500, "byte size per record, 100");
+DEFINE_int32(init_region_concurrency, 10, "init region concurrency when start");
+DEFINE_int32(split_threshold , 150, "split_threshold, defalut: 150% * region_size / 100");
+DEFINE_int64(min_split_lines, 200000, "min_split_lines, protected when wrong param put in table");
 DEFINE_int64(flush_region_interval_us, 10 * 60 * 1000 * 1000LL, 
             "flush region interval, defalut(10 min)");
-DEFINE_int64(transaction_clear_interval_ms, 1000LL,
-            "transaction clear interval, defalut(1s)");
+DEFINE_int64(transaction_clear_interval_ms, 5000LL,
+            "transaction clear interval, defalut(5s)");
+DEFINE_int64(binlog_scan_interval_ms, 3000LL,
+            "binlog scan interval, defalut(3s)");
+DEFINE_int64(binlog_timeout_check_ms, 10 * 1000LL,
+            "binlog timeout check interval, defalut(10s)");
+DEFINE_int64(binlog_fake_ms, 30 * 1000LL,
+            "fake binlog interval, defalut(30s)");
+DECLARE_int64(flush_memtable_interval_us);
 DEFINE_int32(max_split_concurrency, 2, "max split region concurrency, default:2");
-DEFINE_string(quit_gracefully_file, "./quit_gracefully", "quit gracefully file");
-const std::string Store::SCHEMA_IDENTIFY(1, 0x02);
-const std::string Store::REGION_SCHEMA_IDENTIFY(1, 0x05);
-
-Store::~Store() {
-    // if (_db_status_run) {
-    //     _db_status_thread.join();
-    //     _db_status_run = false;
-    // }
-}
+DEFINE_int64(none_region_merge_interval_us, 5 * 60 * 1000 * 1000LL, 
+             "none region merge interval, defalut(5 min)");
+DEFINE_int64(region_delay_remove_timeout_s, 3600 * 24LL, 
+             "region_delay_remove_time_s, defalut(1d)");
+DEFINE_bool(use_approximate_size_to_split, false, 
+             "if approximate_size > 512M, then split");
+DEFINE_int64(gen_tso_interval_us, 500 * 1000LL, "gen_tso_interval_us, defalut(500ms)");
+DEFINE_int64(gen_tso_count, 100, "gen_tso_count, defalut(500)");
+Store::~Store() {}
 
 int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     butil::EndPoint addr;
@@ -68,11 +79,16 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         DB_FATAL("meta server interact init fail");
         return -1;
     }
-    //int ret = get_physical_room(_address, _physical_room);
-    //if (ret < 0) {
-    //    DB_FATAL("get physical room fail");
-    //    return -1;
-    //}
+    if (_tso_server_interact.init() != 0) {
+        DB_FATAL("tso server interact init fail");
+        return -1;
+    }
+
+    int ret = get_physical_room(_address, _physical_room);
+    if (ret < 0) {
+        DB_FATAL("get physical room fail");
+        return -1;
+    }
     boost::trim(FLAGS_resource_tag);
     _resource_tag = FLAGS_resource_tag;
     // init rocksdb handler
@@ -86,77 +102,67 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         DB_FATAL("rocksdb init failed: code:%d", res);
         return -1;
     }
-
-    _region_handle = _rocksdb->get_meta_info_handle();
     // init val 
     _factory = SchemaFactory::get_instance();
-    _rocksdb->get_db()->GetAllPreparedTransactions(&_recovered_txns);
-    for (auto iter = _recovered_txns.begin(); iter != _recovered_txns.end(); ) {
-        DB_WARNING("recovered_txn: %s", (*iter)->GetName().c_str());
-        if ((*iter)->GetWriteBatch()->GetWriteBatch()->Count() == 0) {
-            DB_WARNING("rollback no_write transaction: %s", (*iter)->GetName().c_str());
-            (*iter)->Rollback();
-            iter = _recovered_txns.erase(iter);
-            continue;
-        }
-        iter++;
+    std::vector<rocksdb::Transaction*> recovered_txns;
+    _rocksdb->get_db()->GetAllPreparedTransactions(&recovered_txns);
+    if (recovered_txns.empty()) {
+        DB_WARNING("has no prepared transcation");
+        _has_prepared_tran = false;
     }
+    for (auto txn : recovered_txns) {
+        std::string txn_name = txn->GetName().c_str();
+        std::vector<std::string> split_vec;
+        boost::split(split_vec, txn_name, boost::is_any_of("_"));
+        int64_t region_id = boost::lexical_cast<int64_t>(split_vec[0]);
+        uint64_t txn_id = boost::lexical_cast<uint64_t>(split_vec[1]);
+        prepared_txns[region_id].insert(txn_id);
+        DB_WARNING("rollback transaction, txn: %s, region_id: %ld, txn_id: %lu", 
+                    txn->GetName().c_str(), region_id, txn_id);
+        txn->Rollback();
+        delete txn;
+    }
+    recovered_txns.clear();
 
-    int64_t used_size_sum = 0;
+    _meta_writer = MetaWriter::get_instance();
+    _meta_writer->init(_rocksdb, _rocksdb->get_meta_info_handle());
+    
+    LogEntryReader* reader = LogEntryReader::get_instance();
+    reader->init(_rocksdb, _rocksdb->get_raft_log_handle());
+
     pb::StoreHeartBeatRequest request;
     pb::StoreHeartBeatResponse response;
     //1、构造心跳请求, 重启时的心跳包除了实例信息外，其他都为空
-    _construct_heart_beat_request(request);
-    //重启时region信息为空，所以需要特殊处理一下used_size
-    request.mutable_instance_info()->set_used_size(used_size_sum);
+    construct_heart_beat_request(request);
     DB_WARNING("heart beat request:%s when init store", request.ShortDebugString().c_str());
-    
+    TimeCost step_time_cost;
     //2、发送请求
     if (_meta_server_interact.send_request("store_heartbeat", request, response) == 0) {
         DB_WARNING("heart beat response:%s when init store", response.ShortDebugString().c_str());
-        //处理心跳, 重启拉到的第一个心跳包只有schema信息
-        _process_heart_beat_response(response);
+        //同步处理心跳, 重启拉到的第一个心跳包只有schema信息
+        _factory->update_tables_double_buffer_sync(response.schema_change_info());
     } else {
         DB_FATAL("send heart beat request to meta server fail");
         return -1;
     }
+    int64_t heartbeat_process_time = step_time_cost.get_time();
+    step_time_cost.reset();
     DB_WARNING("get schema info from meta server success");
 
     //系统重启之前有哪些reigon
-    rocksdb::ReadOptions read_options;
-    read_options.prefix_same_as_start = true;
-    std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _region_handle));
-    
-    std::string region_prefix = SCHEMA_IDENTIFY;
-    region_prefix += REGION_SCHEMA_IDENTIFY;
-
-    bool all_has_applied_path = true;
-    for (iter->Seek(region_prefix); iter->Valid(); iter->Next()) {
-        pb::RegionInfo region_info;
-        if (!region_info.ParseFromString(iter->value().ToString())) {
-            DB_FATAL("parse from pb fail when load region snapshot, key:%s", 
-                      iter->value().ToString().c_str());
-            return -1;
-        }
+    std::vector<pb::RegionInfo> region_infos;
+    ret = _meta_writer->parse_region_infos(region_infos);
+    if (ret < 0) {
+        DB_FATAL("read region_infos from rocksdb fail");
+        return ret;
+    }
+    for (auto& region_info : region_infos) {
         DB_WARNING("region_info:%s when init store", region_info.ShortDebugString().c_str());
         int64_t region_id = region_info.region_id();
-        TableInfo table_info = _factory->get_table_info(region_info.table_id());
-        if (table_info.id == -1) {
-            if (_drop_region_from_rocksdb(region_id) != 0) {
-                DB_FATAL("drop region from rocksdb fail, region_id: %ld", region_id);
-                continue;
-            }
-            std::string applied_path = FLAGS_save_applied_index_path + "/region_" + std::to_string(region_id);
-            boost::filesystem::path remove_path(applied_path); 
-            boost::filesystem::remove_all(remove_path);
-            //删除region 数据
-            _remove_region_data(region_id);
-            //删除snapshot目录
-            _remove_snapshot_path(region_id);
-            //删除log_entry
-            _remove_log_entry(region_id);
-            DB_FATAL("drop region from store, region_id: %ld, region_info:%s, table_id:%ld", 
-                        region_id, region_info.ShortDebugString().c_str(), table_info.id);
+        if (region_info.version() == 0) {
+            DB_WARNING("region_id: %ld version is 0, dropped. region_info: %s",
+                    region_id, region_info.ShortDebugString().c_str() );
+            RegionControl::clear_all_infos_for_region(region_id);
             continue;
         }
         //construct region
@@ -183,100 +189,68 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         //std::unique_lock<std::mutex> region_lock(_region_mutex);
         _region_mapping.set(region_id, region);
         init_region_ids.push_back(region_id);
-        //判断是否存在applied_index文件
-        std::string applied_path = FLAGS_save_applied_index_path + "/region_" + 
-                                    std::to_string(region_id);
-        if (!boost::filesystem::exists(boost::filesystem::path(applied_path))) {
-            all_has_applied_path = false;        
-        }
     }
-    //判断上次是否是优雅退出
-    //为了兼容之前的服务，即使没有quit_gracefully文件，如果applied_path目录下region_*目录的数量
-    //等于region数量，也认为是优雅退出
-    if (boost::filesystem::exists( boost::filesystem::path(FLAGS_quit_gracefully_file))) {
-        //优雅退出, 删除优雅退出标志文件
-        DB_WARNING("last quit is gracefully");
-        boost::filesystem::remove(boost::filesystem::path(FLAGS_quit_gracefully_file));
-    } else if (all_has_applied_path) {
-        DB_WARNING("last quit is gracefully");
+    int64_t new_region_process_time = step_time_cost.get_time();
+    //重启的region跟新建的region或者正常运行情况下的region有两点区别
+    //1、重启region的on_snapshot_load不受并发数的限制
+    //2、重启region的on_snapshot_load不加载sst文件
+    traverse_region_map([](SmartRegion& region) {
+        region->set_restart(true);
+    });
+    ret = _meta_writer->parse_doing_snapshot(doing_snapshot_regions);
+    if (ret < 0) {
+        DB_FATAL("read doing snapshot regions from rocksdb fail");
+        return ret;
     } else {
-        //非优雅退出
-        //如果store没有优雅退出，则不需要判断reigon是否有applied文件，必须走snapshot+log_entry删除
-        //删除applied_path下左右的文件
-        DB_WARNING("last quit is not gracefully");
-        boost::filesystem::path applied_path(FLAGS_save_applied_index_path);
-        if (boost::filesystem::exists(applied_path)) {
-            boost::filesystem::remove_all(applied_path); 
+        for (auto region_id : doing_snapshot_regions) {
+            DB_WARNING("region_id: %ld is doing snapshot load when store stop", region_id);
         }
-
-        // rollback all recovered transactions
-        for (auto txn : _recovered_txns) {
-            DB_WARNING("rollback transaction, txn: %s", txn->GetName().c_str());
-            txn->Rollback();
-            delete txn;
-        }
-        _recovered_txns.clear();
-
-        if (0 != _rocksdb->delete_column_family(RocksWrapper::DATA_CF)) {
-            DB_WARNING("delete data column_family failed");
-            return -1;
-        }
-        if (0 != _rocksdb->create_column_family(RocksWrapper::DATA_CF)) {
-            DB_WARNING("create data column_family failed");
-            return -1; 
-        }
-        DB_WARNING("re-create data column_family success");
-
-        //数据已全部删除，不再需要clear_data
-        traverse_region_map([](SmartRegion& region) {
-            region->set_need_clear_data(false);
-        });
     }
+
     start_db_statistics();
-    DB_WARNING("store init_before_listen success");
+    DB_WARNING("store init_before_listen success heartbeat_process_time:%ld new_region_process_time:%ld",
+           heartbeat_process_time, new_region_process_time);
     return 0;
 }
 
 int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
-    //重启region
     //开始上报心跳线程
-    _heart_beat_bth.run([this]() {report_heart_beat();});
-    
+    _heart_beat_bth.run([this]() {heart_beat_thread();});
+    TimeCost step_time_cost; 
+    ConcurrencyBthread init_bth(FLAGS_init_region_concurrency);
     //从本地的rocksdb中恢复该机器上有哪些实例
     for (auto& region_id : init_region_ids) {
-        SmartRegion region = get_region(region_id);
-        if (region == NULL) {
-            DB_FATAL("no region is store, region_id: %ld", region_id);
-            continue;
-        }
-        //region raft node init
-        int ret = region->init(false, 0);
-        if (ret < 0) {
-            //_drop_region_from_rocksdb(region_id);
-            //{
-            //    std::unique_lock<std::mutex> lock(_region_mutex);
-            //    _region_mapping.erase(region_id);
-            //}
-            DB_FATAL("region init fail when store init, region_id: %ld", region_id);
-            continue;
-        }
+        auto init_call = [this, region_id]() {
+            SmartRegion region = get_region(region_id);
+            if (region == NULL) {
+                DB_FATAL("no region is store, region_id: %ld", region_id);
+                return;
+            }
+            //region raft node init
+            int ret = region->init(false, 0);
+            if (ret < 0) {
+                DB_FATAL("region init fail when store init, region_id: %ld", region_id);
+                return;
+            }
+        };
+        init_bth.run(init_call);
     }
-    DB_WARNING("remove FLAGS_save_applied_index_path");
-    boost::filesystem::path applied_path(FLAGS_save_applied_index_path);
-    if (boost::filesystem::exists(applied_path)) {
-        boost::filesystem::remove_all(applied_path);
-    }
+    init_bth.join();
     
-    _split_check_bth.run([this]() {update_and_whether_split_for_region();});
+    _split_check_bth.run([this]() {whether_split_thread();});
     _merge_bth.run([this]() {reverse_merge_thread();});
-    _flush_bth.run([this]() {flush_region_thread();});
+    _ttl_bth.run([this]() {ttl_remove_thread();});
+    _delay_remove_region_bth.run([this]() {delay_remove_region_thread();});
+    _flush_bth.run([this]() {flush_memtable_thread();});
     _snapshot_bth.run([this]() {snapshot_thread();});
     _txn_clear_bth.run([this]() {txn_clear_thread();});
-    // //计算store状态统计信息的线程
-    // _db_status_run = true;
-    // _db_status_thread.run([this]() {update_store_status();});
-
-    DB_WARNING("store init_after_listen success, init success");
+    _binlog_scan_bth.run([this]() {binlog_scan_thread();});
+    _binlog_timeout_check_bth.run([this]() {binlog_timeout_check_thread();});
+    _binlog_fake_bth.run([this]() {binlog_fake_thread();});
+    _has_prepared_tran = true;
+    prepared_txns.clear();
+    doing_snapshot_regions.clear();
+    DB_WARNING("store init_after_listen success, init success init_region_time:%ld", step_time_cost.get_time());
     return 0;
 }
 
@@ -304,12 +278,21 @@ void Store::init_region(google::protobuf::RpcController* controller,
     const pb::RegionInfo& region_info = request->region_info();
     int64_t table_id = region_info.table_id();
     int64_t region_id = region_info.region_id();
-    const char* remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
+    const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
+    const char* remote_side = remote_side_tmp.c_str();
+
+    if (_rocksdb->is_any_stall()) {
+        DB_WARNING("rocksdb is stall, log_id%ld, remote_side:%s", log_id, remote_side); 
+        response->set_errcode(pb::CANNOT_ADD_PEER);
+        response->set_errmsg("rocksdb is stall");
+        return;
+    }
 
     //新增table信息
-    if (_factory->whether_exist_tableid(table_id) != 0) {
+    if (!_factory->exist_tableid(table_id)) {
         if (request->has_schema_info()) {
             update_schema_info(request->schema_info());
+            bthread_usleep(200 * 1000); // 延迟更新了
         } else {
             DB_FATAL("table info missing when add region, table_id:%lu, region_id: %ld, log_id:%lu",
                        table_id, region_info.region_id(), log_id);
@@ -319,19 +302,18 @@ void Store::init_region(google::protobuf::RpcController* controller,
         }
     }
     auto orgin_region = get_region(region_id);
-    if (orgin_region != NULL) {
+    // 已经软删，遇到需要新建就马上删除让位
+    if (orgin_region != nullptr && orgin_region->removed()) {
+        drop_region_from_store(region_id, false);
+    }
+    orgin_region = get_region(region_id);
+    if (orgin_region != nullptr) {
         //自动化处理，直接删除这个region
         DB_FATAL("region id has existed when add region, region_id: %ld, log_id:%lu, remote_side:%s",
-                        region_id, log_id,  remote_side);
+                region_id, log_id,  remote_side);
         response->set_errcode(pb::REGION_ALREADY_EXIST);
         response->set_errmsg("region id has existed and drop fail when init region");
         return;
-        //if (_drop_region_from_store(region_id) != 0) {
-        //    DB_FATAL("drop region fail when init region, region_id: %ld", region_id);
-        //    response->set_errcode(pb::INPUT_PARAM_ERROR);
-        //    response->set_errmsg("region id has existed and drop fail when init region");
-        //    return;
-        //}
     }
     //construct region
     braft::GroupId groupId(std::string("region_") 
@@ -362,9 +344,12 @@ void Store::init_region(google::protobuf::RpcController* controller,
     //写内存
     set_region(region);
     //region raft node init
+    Concurrency::get_instance()->init_region_concurrency.increase_wait();
     int ret = region->init(true, request->snapshot_times());
+    Concurrency::get_instance()->init_region_concurrency.decrease_broadcast();
     if (ret < 0) {
-        _drop_region_from_rocksdb(region_id);
+        //删除该region相关的全部信息
+        RegionControl::clear_all_infos_for_region(region_id);
         erase_region(region_id);
         DB_FATAL("region init fail when add region, region_id: %ld, log_id:%lu",
                     region_id, log_id);
@@ -374,11 +359,13 @@ void Store::init_region(google::protobuf::RpcController* controller,
     }
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("add region success");
-    if (request->has_split_start() && request->split_start() == true) {
+    if (request->region_info().version() == 0) {
         Bthread bth(&BTHREAD_ATTR_SMALL);
-        std::function<void()> check_split_complete_fun = 
-            [this, region_id] () { _check_split_complete(region_id);};
-        bth.run(check_split_complete_fun);
+        std::function<void()> check_region_legal_fun = 
+            [this, region_id] () { check_region_legal_complete(region_id);};
+        bth.run(check_region_legal_fun);
+        DB_WARNING("init region verison is 0, should check region legal. region_id: %ld, log_id: %lu", 
+                    region_id, log_id);
     }
     DB_WARNING("init region sucess, region_id: %ld, log_id:%lu, time_cost:%ld remote_side: %s",
                 region_id, log_id, time_cost.get_time(), remote_side);
@@ -414,11 +401,7 @@ void Store::query(google::protobuf::RpcController* controller,
                   const pb::StoreReq* request,
                   pb::StoreRes* response,
                   google::protobuf::Closure* done) {
-    //TRACEPRINTF("recv req region %ld", request->region_id());
     bthread_usleep(20);
-    //TRACEPRINTF("recv req region for sleep");
-    //DB_NOTICE("%d recv req region_id: %ld", bthread::FLAGS_bthread_concurrency, request->region_id());
-    TimeCost cost;
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl =
             static_cast<brpc::Controller*>(controller);
@@ -427,8 +410,9 @@ void Store::query(google::protobuf::RpcController* controller,
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
+    //DB_WARNING("region_id: %ld before get_region, logid:%lu, remote_side: %s", request->region_id(), log_id, remote_side);
     SmartRegion region = get_region(request->region_id());
-    if (region == NULL) {
+    if (region == nullptr || region->removed()) {
         response->set_errcode(pb::REGION_NOT_EXIST);
         response->set_errmsg("region_id not exist in store");
         DB_FATAL("region_id: %ld not exist in store, logid:%lu, remote_side: %s",
@@ -439,7 +423,34 @@ void Store::query(google::protobuf::RpcController* controller,
                   request,
                   response,
                   done_guard.release());
-    //DB_NOTICE("select region_id: %ld time:%ld", request->region_id(), cost.get_time());
+}
+
+void Store::query_binlog(google::protobuf::RpcController* controller,
+                  const pb::StoreReq* request,
+                  pb::StoreRes* response,
+                  google::protobuf::Closure* done) {
+    bthread_usleep(20);
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+            static_cast<brpc::Controller*>(controller);
+    uint64_t log_id = 0;
+    const char* remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
+    if (cntl->has_log_id()) {
+        log_id = cntl->log_id();
+    }
+    //DB_WARNING("region_id: %ld before get_region, logid:%lu, remote_side: %s", request->region_id(), log_id, remote_side);
+    SmartRegion region = get_region(request->region_id());
+    if (region == nullptr || region->removed()) {
+        response->set_errcode(pb::REGION_NOT_EXIST);
+        response->set_errmsg("region_id not exist in store");
+        DB_FATAL("region_id: %ld not exist in store, logid:%lu, remote_side: %s",
+                request->region_id(), log_id, remote_side);
+        return;
+    }
+    region->query_binlog(controller,
+                  request,
+                  response,
+                  done_guard.release());
 }
 
 void Store::remove_region(google::protobuf::RpcController* controller,
@@ -464,9 +475,50 @@ void Store::remove_region(google::protobuf::RpcController* controller,
             response->set_errmsg("input param error");
             return;
     }
-    _drop_region_from_store(request->region_id());
+    DB_WARNING("call remove region_id: %ld, need_delay_drop:%d", 
+            request->region_id(), request->need_delay_drop());
+    drop_region_from_store(request->region_id(), request->need_delay_drop());
     response->set_errcode(pb::SUCCESS);
 }
+
+void Store::restore_region(google::protobuf::RpcController* controller,
+                              const baikaldb::pb::RegionIds* request,
+                              pb::StoreRes* response,
+                              google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    TimeCost cost;
+    auto call = [](SmartRegion region) {
+        // 需要等table info才能init成功
+        region->wait_table_info();
+        // 恢复相当于重启region
+        region->set_restart(true);
+        region->init(false, 0);
+        region->set_removed(false);
+        DB_WARNING("restore region_id: %ld success ", region->get_region_id());
+    };
+    if (request->region_ids_size() == 0) {
+        traverse_copy_region_map([request, call](SmartRegion& region) {
+            if (region->removed()) {
+                if (!request->has_table_id()) {
+                    call(region);
+                } else if (request->table_id() == region->get_table_id()) {
+                    call(region);
+                }
+            }
+        });
+    } else {
+        for (auto region_id : request->region_ids()) {
+            auto region = get_region(region_id);
+            if (region != nullptr && region->removed()) {
+                call(region);
+            }
+        }
+    }
+    DB_WARNING("restore region success cost:%ld", cost.get_time());
+}
+
 void Store::add_peer(google::protobuf::RpcController* controller,
                        const pb::AddPeer* request,
                        pb::StoreRes* response, 
@@ -481,7 +533,7 @@ void Store::add_peer(google::protobuf::RpcController* controller,
         return;
     }
     SmartRegion region = get_region(request->region_id());
-    if (region == NULL) {
+    if (region == nullptr || region->removed()) {
         DB_FATAL("region_id: %ld not exist, may be removed", request->region_id());
         response->set_errcode(pb::REGION_NOT_EXIST);
         response->set_errmsg("region not exist");
@@ -489,6 +541,7 @@ void Store::add_peer(google::protobuf::RpcController* controller,
     }
     region->add_peer(request, response, done_guard.release());
 }
+
 void Store::get_applied_index(google::protobuf::RpcController* controller,
                               const baikaldb::pb::GetAppliedIndex* request,
                               pb::StoreRes* response,
@@ -497,142 +550,446 @@ void Store::get_applied_index(google::protobuf::RpcController* controller,
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
     SmartRegion region = get_region(request->region_id());
-    if (region == NULL) {
+    if (region == nullptr) {
         DB_FATAL("region_id: %ld not exist, may be removed", request->region_id());
         response->set_errcode(pb::REGION_NOT_EXIST);
         response->set_errmsg("region not exist");
         return;
     }
     response->set_applied_index(region->get_log_index());
+    response->set_leader(butil::endpoint2str(region->get_leader()).c_str());
+}
+
+void Store::compact_region(google::protobuf::RpcController* controller,
+                              const baikaldb::pb::RegionIds* request,
+                              pb::StoreRes* response,
+                              google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    TimeCost cost;
+    if (request->region_ids_size() == 0) {
+        auto cf = _rocksdb->get_data_handle();
+        if (request->compact_raft_log()) {
+            cf = _rocksdb->get_raft_log_handle();
+        } else if (request->has_compact_type()) {
+            auto type = request->compact_type();
+            if (type == 1) { // data_cf
+                cf = _rocksdb->get_data_handle();
+            } else if (type == 2) { // meta_cf
+                cf = _rocksdb->get_meta_info_handle();
+            } else { // raft_log_cf
+                cf = _rocksdb->get_raft_log_handle();
+            }
+        }
+        rocksdb::CompactRangeOptions compact_options;
+        compact_options.exclusive_manual_compaction = false;
+        auto res = _rocksdb->compact_range(compact_options, cf, nullptr, nullptr);
+        if (!res.ok()) {
+            DB_WARNING("compact_range error: code=%d, msg=%s", 
+                    res.code(), res.ToString().c_str());
+        }
+    } else {
+        for (auto region_id : request->region_ids()) {
+            RegionControl::compact_data(region_id);
+        }
+    }
+    DB_WARNING("compact_db cost:%ld", cost.get_time());
+}
+
+void Store::snapshot_region(google::protobuf::RpcController* controller,
+                            const baikaldb::pb::RegionIds* request,
+                            pb::StoreRes* response,
+                            google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    std::vector<int64_t> region_ids;
+    if (request->region_ids_size() == 0) {
+        traverse_region_map([&region_ids](SmartRegion& region) {
+            region_ids.push_back(region->get_region_id());
+        });
+    } else {
+        for (auto region_id : request->region_ids()) {
+            region_ids.push_back(region_id);
+        }
+    }
+    auto snapshot_fun = [this, region_ids]() {
+        for (auto& region_id: region_ids) {
+            SmartRegion region = get_region(region_id);
+            if (region == nullptr) {
+                DB_FATAL("region_id: %ld not exist, may be removed", region_id);
+            } else {
+                region->do_snapshot();
+            }
+        }
+        DB_WARNING("all region sync_do_snapshot finish");
+    };
+    Bthread bth(&BTHREAD_ATTR_SMALL);
+    bth.run(snapshot_fun);
+}
+
+void Store::query_region(google::protobuf::RpcController* controller,
+                            const baikaldb::pb::RegionIds* request,
+                            pb::StoreRes* response,
+                            google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    std::map<int64_t, std::string> id_leader_map;
+    response->set_leader(_address);
+    if (request->region_ids_size() == 0) {
+        traverse_region_map([&id_leader_map](SmartRegion& region) {
+            id_leader_map[region->get_region_id()] = 
+                butil::endpoint2str(region->get_leader()).c_str();
+        });
+        for (auto& id_pair : id_leader_map) {
+            auto ptr_region_leader = response->add_region_leaders();
+            ptr_region_leader->set_region_id(id_pair.first);
+            ptr_region_leader->set_leader(id_pair.second);
+        }
+        response->set_region_count(response->region_leaders_size());
+        return;
+    }
+
+    for (auto region_id : request->region_ids()) {
+        SmartRegion region = get_region(region_id);
+        if (region == nullptr) {
+            DB_FATAL("region_id: %ld not exist, may be removed", region_id);
+        } else {
+            auto ptr_region_info = response->add_regions();
+            region->copy_region(ptr_region_info);
+            ptr_region_info->set_leader(butil::endpoint2str(region->get_leader()).c_str());
+            ptr_region_info->set_log_index(region->get_log_index());
+        }
+    }
+    response->set_region_count(response->regions_size());
+}
+void Store::query_illegal_region(google::protobuf::RpcController* controller,
+                            const baikaldb::pb::RegionIds* request,
+                            pb::StoreRes* response,
+                            google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    std::map<int64_t, std::string> id_leader_map;
+    response->set_leader(_address);
+    if (request->region_ids_size() == 0) {
+        traverse_region_map([&id_leader_map](SmartRegion& region) {
+            if (region->get_leader().ip == butil::IP_ANY) {
+                id_leader_map[region->get_region_id()] = 
+                    butil::endpoint2str(region->get_leader()).c_str();
+            }
+        });
+        for (auto& id_pair : id_leader_map) {
+            auto ptr_region_leader = response->add_region_leaders();
+            ptr_region_leader->set_region_id(id_pair.first);
+            ptr_region_leader->set_leader(id_pair.second);
+        }
+        response->set_region_count(response->region_leaders_size());
+        return;
+    }
+
+    for (auto region_id : request->region_ids()) {
+        SmartRegion region = get_region(region_id);
+        if (region == nullptr) {
+            DB_FATAL("region_id: %ld not exist, may be removed", region_id);
+        } else {
+            if (region->get_leader().ip == butil::IP_ANY) {
+                auto ptr_region_info = response->add_regions();
+                region->copy_region(ptr_region_info);
+                ptr_region_info->set_leader(butil::endpoint2str(region->get_leader()).c_str());
+            }
+        }
+    }
+    response->set_region_count(response->regions_size());
 }
 //store上报心跳到meta_server
-void Store::report_heart_beat() {
+void Store::heart_beat_thread() {
     //static int64_t count = 0;
-    while (_is_running) {
+    while (!_shutdown) {
         send_heart_beat();
-        bthread_usleep(FLAGS_store_heart_beat_interval_us);
+        bthread_usleep_fast_shutdown(FLAGS_store_heart_beat_interval_us, _shutdown);
     }
 }
+
 void Store::send_heart_beat() {
     pb::StoreHeartBeatRequest request;
     pb::StoreHeartBeatResponse response;
     //1、构造心跳请求
-    _construct_heart_beat_request(request);
-    SELF_TRACE("heart beat request(instance_info):%s, need_leader_balance: %d, need_peer_balance: %d", 
-                request.instance_info().ShortDebugString().c_str(), 
-                request.need_leader_balance(), 
-                request.need_peer_balance());
-    std::string str_schema;
-    for (auto& schema_info : request.schema_infos()) {
-        str_schema += schema_info.ShortDebugString() + ", ";
-    }
-    SELF_TRACE("heart beat request(schema_infos):%s", str_schema.c_str());
-    int count = 0;
-    std::string str_leader;
-    for (auto& leader_region : request.leader_regions()) {
-        str_leader += leader_region.ShortDebugString() + ", ";
-        ++count;
-        if (count % 10 == 0) {
-            SELF_TRACE("heart beat request(leader_regions):%s", str_leader.c_str());
-            str_leader.clear();
-        }
-    }
-    if (!str_leader.empty()) {
-        SELF_TRACE("heart beat request(leader_regions):%s", str_leader.c_str());
-    }
-    count = 0;
-    std::string str_peer;
-    for (auto& peer_info : request.peer_infos()) {
-        str_peer += peer_info.ShortDebugString() + ", ";
-        ++count;
-        if (count % 10 == 0) {
-            SELF_TRACE("heart beat request(peer_infos):%s", str_peer.c_str());
-            str_peer.clear();
-        }
-    }
-    if (!str_peer.empty()) {
-        SELF_TRACE("heart beat request(peer_infos):%s", str_peer.c_str());
-    }
+    construct_heart_beat_request(request);
+    print_heartbeat_info(request);
     //2、发送请求
     if (_meta_server_interact.send_request("store_heartbeat", request, response) != 0) {
         DB_WARNING("send heart beat request to meta server fail");
     } else {
         //处理心跳
-        _process_heart_beat_response(response);
+        process_heart_beat_response(response);
     }
-    SELF_TRACE("heart beat response:%s", response.ShortDebugString().c_str());
+    DB_WARNING("heart beat");
 }
+
 void Store::reverse_merge_thread() {
-    while (_is_running) {
+    while (!_shutdown) {
+        TimeCost cost;
         traverse_copy_region_map([](SmartRegion& region) {
-            region->reverse_merge();
+            if (!region->is_binlog_region()) {
+                region->reverse_merge();
+            }
         });
-        bthread_usleep(FLAGS_reverse_merge_interval_us);
+        /*
+        uint64_t epoch = 1;
+        size_t sz = sizeof(epoch);
+        mallctl("epoch", &epoch, &sz, &epoch, sz);
+        size_t allocated, active, mapped;
+        sz = sizeof(size_t);
+        mallctl("stats.allocated", &allocated, &sz, NULL, 0);
+        mallctl("stats.active", &active, &sz, NULL, 0);
+        mallctl("stats.mapped", &mapped, &sz, NULL, 0);
+        DB_WARNING("all merge cost: %ld allocated/active/mapped: %zu/%zu/%zu", 
+                cost.get_time(), allocated, active, mapped);
+        */
+        bthread_usleep_fast_shutdown(FLAGS_reverse_merge_interval_us, _shutdown);
     }
 }
 
-void Store::flush_region_thread() {
-   int64_t sleep_time_count = FLAGS_flush_region_interval_us / 10000; //10ms为单位        
-    while (_is_running) {
-        int time = 0;
-        while (time < sleep_time_count) {
-            if (!_is_running) {
-                return;
+void Store::ttl_remove_thread() {
+    while (!_shutdown) {
+        bthread_usleep_fast_shutdown(FLAGS_ttl_remove_interval_s * 1000 * 1000, _shutdown);
+        if (_shutdown) {
+            return;
+        }
+        traverse_copy_region_map([](SmartRegion& region) {
+            region->ttl_remove_expired_data();
+        });
+    }
+}
+
+void Store::delay_remove_region_thread() {
+    while (!_shutdown) {
+        bthread_usleep_fast_shutdown(FLAGS_delay_remove_region_interval_s * 1000 * 1000, _shutdown);
+        if (_shutdown) {
+            return;
+        }
+        traverse_copy_region_map([this](SmartRegion& region) {
+            if (region->removed() && 
+                //加个随机数，删除均匀些
+                region->removed_time_cost() > (FLAGS_region_delay_remove_timeout_s + 
+                    (butil::fast_rand() % FLAGS_region_delay_remove_timeout_s)) * 1000 * 1000LL) {
+                region->shutdown();
+                region->join();
+                int64_t drop_region_id = region->get_region_id();
+                DB_WARNING("region node remove permanently, region_id: %ld", drop_region_id);
+                RegionControl::clear_all_infos_for_region(drop_region_id);
+                erase_region(drop_region_id);
             }
-            bthread_usleep(10000);
-            ++time;
+        });
+    }
+}
+
+void Store::flush_memtable_thread() {
+    while (!_shutdown) {
+        bthread_usleep_fast_shutdown(FLAGS_flush_memtable_interval_us, _shutdown);
+        if (_shutdown) {
+            return;
         }
         rocksdb::FlushOptions flush_options;
-        auto status = _rocksdb->flush(flush_options, _region_handle);
+        auto status = _rocksdb->flush(flush_options, _rocksdb->get_meta_info_handle());
         if (!status.ok()) {
-            DB_WARNING("flush region handle info to rocksdb fail, err_msg:%s", status.ToString().c_str());
+            DB_WARNING("flush meta info to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        }
+        status = _rocksdb->flush(flush_options, _rocksdb->get_data_handle());
+        if (!status.ok()) {
+            DB_WARNING("flush data to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        }
+        status = _rocksdb->flush(flush_options, _rocksdb->get_raft_log_handle());
+        if (!status.ok()) {
+            DB_WARNING("flush log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        }
+        status = _rocksdb->flush(flush_options, _rocksdb->get_bin_log_handle());
+        if (!status.ok()) {
+            DB_WARNING("flush bin_log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
         }
     }
 }
 
 void Store::snapshot_thread() {
     BthreadCond concurrency_cond(-5); // -n就是并发跑n个bthread
-    while (_is_running) {
-        bthread_usleep(10 * 1000 * 1000);
+    while (!_shutdown) {
         traverse_copy_region_map([&concurrency_cond](SmartRegion& region) {
-            concurrency_cond.increase();
-            concurrency_cond.wait();
+            concurrency_cond.increase_wait();
             SnapshotClosure* done = new SnapshotClosure(concurrency_cond, region.get());
             // 每个region自己会控制是否做snapshot
             region->snapshot(done);
         });
+        bthread_usleep_fast_shutdown(10 * 1000 * 1000, _shutdown);
     }
     // 等待全部snapshot都结束
     concurrency_cond.wait(-5);
 }
 
 void Store::txn_clear_thread() {
-    while (_is_running) {
-        bthread_usleep(FLAGS_transaction_clear_interval_ms * 1000);
+    while (!_shutdown) {
         traverse_copy_region_map([](SmartRegion& region) {
             // clear prepared and expired transactions
             region->clear_transactions();
         });
+        bthread_usleep_fast_shutdown(FLAGS_transaction_clear_interval_ms * 1000, _shutdown);
+
     }
 }
 
-// void Store::update_store_status() {
-//     while (_db_status_run) {
-//         std::string data_stat;
-//         std::string raft_log_stat;
+void Store::binlog_scan_thread() {
+    while (!_shutdown) {
+        traverse_copy_region_map([](SmartRegion& region) {
+            if (region->is_binlog_region()) {
+                region->binlog_scan();
+            }
+        });
+        bthread_usleep_fast_shutdown(FLAGS_binlog_scan_interval_ms * 1000, _shutdown);
+    }
+}
 
-//         bool ret = false;
-//         ret = _rocksdb->get_db()->GetProperty(_rocksdb->get_data_handle(), "rocksdb.stats", &data_stat);
-//         if (ret) {
-//             DB_WARNING("store data status: %s", data_stat.c_str());
-//         }
-//         ret = _rocksdb->get_db()->GetProperty(_rocksdb->get_raft_log_handle(), "rocksdb.stats", &raft_log_stat);
-//         if (ret) {
-//             DB_WARNING("store raftlog status: %s", raft_log_stat.c_str());
-//         }
-//         bthread_usleep(FLAGS_update_status_interval_us);
-//     }
-// }
+void Store::binlog_timeout_check_thread() {
+    while (!_shutdown) {
+        traverse_copy_region_map([this](SmartRegion& region) {
+            if (region->is_binlog_region()) {
+                int64_t ts = get_tso();
+                if (ts < 0) {
+                    return;
+                }
+                region->binlog_timeout_check(ts);
+            }
+        });
+        bthread_usleep_fast_shutdown(FLAGS_binlog_timeout_check_ms * 1000, _shutdown);
+    }
+}
+
+void Store::binlog_fake_thread() {
+    while (!_shutdown) {
+        BthreadCond cond(-40);
+        traverse_copy_region_map([this, &cond](SmartRegion& region) {
+            if (region->is_binlog_region() && region->is_leader()) {
+                int64_t ts = get_tso();
+                if (ts < 0) {
+                    return;
+                }
+                region->binlog_fake(ts, cond);
+            }
+        });
+
+        cond.wait(-40);
+        bthread_usleep_fast_shutdown(FLAGS_binlog_fake_ms * 1000, _shutdown);
+    }
+}
+
+int64_t Store::get_tso() {
+    _get_tso_cond.increase_wait();
+    ON_SCOPE_EXIT(([this]() {
+        _get_tso_cond.decrease_broadcast();
+    }));
+
+    if (tso_physical != 0 && tso_logical != 0 && tso_count > 0 && gen_tso_time.get_time() < FLAGS_gen_tso_interval_us) {
+        return (tso_physical << tso::logical_bits) + tso_logical + FLAGS_gen_tso_count - (tso_count--);
+    }
+
+    pb::TsoRequest request;
+    pb::TsoResponse response;
+    request.set_op_type(pb::OP_GEN_TSO);
+    request.set_count(FLAGS_gen_tso_count);
+
+    //发送请求，收到响应
+    if (_tso_server_interact.send_request("tso_service", request, response) == 0) {
+        //处理响应
+        if (response.errcode() != pb::SUCCESS) {
+            DB_FATAL("store get tso fail request:%s, response:%s", 
+                       request.ShortDebugString().c_str(), 
+                       response.ShortDebugString().c_str());            
+            return -1;
+        }
+        DB_WARNING("store get tso request:%s, response:%s", 
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    } else {
+        DB_WARNING("store get tso request:%s, response:%s", 
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        return -1;
+    }
+
+    gen_tso_time.reset();
+    tso_count = FLAGS_gen_tso_count;
+    tso_physical = response.start_timestamp().physical();
+    tso_logical  = response.start_timestamp().logical();
+    return (tso_physical << tso::logical_bits) + tso_logical + FLAGS_gen_tso_count - (tso_count--);
+}
+
+int64_t Store::get_last_commit_ts() {
+    pb::TsoRequest request;
+    pb::TsoResponse response;
+    request.set_op_type(pb::OP_GEN_TSO);
+    request.set_count(1);
+
+    //发送请求，收到响应
+    if (_tso_server_interact.send_request("tso_service", request, response) == 0) {
+        //处理响应
+        if (response.errcode() != pb::SUCCESS) {
+            DB_FATAL("store get tso fail request:%s, response:%s", 
+                       request.ShortDebugString().c_str(), 
+                       response.ShortDebugString().c_str());            
+            return -1;
+        }
+        DB_WARNING("store get tso request:%s, response:%s", 
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    } else {
+        DB_WARNING("store get tso request:%s, response:%s", 
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        return -1;
+    }
+    gen_tso_time.reset();
+    auto&  tso = response.start_timestamp();
+    int64_t timestamp = (tso.physical() << tso::logical_bits) + tso.logical();
+    return timestamp;
+}
+
+void Store::process_merge_request(int64_t table_id, int64_t region_id) {
+    //请求meta查询空region的下一个region
+    //构造请求
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    SmartRegion ptr_region = get_region(region_id);
+    if (ptr_region == NULL) {
+        return;
+    }
+    request.set_op_type(pb::OP_MERGE_REGION);
+    pb::RegionMergeRequest* region_merge = request.mutable_region_merge();
+    region_merge->set_src_region_id(region_id);
+    region_merge->set_src_start_key(ptr_region->get_start_key());
+    region_merge->set_src_end_key(ptr_region->get_end_key());
+    region_merge->set_table_id(table_id);
+
+    //发送请求，收到响应
+    if (_meta_server_interact.send_request("meta_manager", request, response) == 0) {
+        //处理响应
+        if (response.errcode() != pb::SUCCESS) {
+            DB_FATAL("store process merge fail request:%s, response:%s", 
+                       request.ShortDebugString().c_str(), 
+                       response.ShortDebugString().c_str());            
+            return;
+        }
+        SmartRegion region = get_region(region_id);
+        if (region == NULL) {
+            DB_FATAL("region id:%ld has been deleted", region_id);
+            return;
+        }
+        DB_WARNING("store process merge request:%s, response:%s", 
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        region->start_process_merge(response.merge_response());
+    } else {
+        DB_WARNING("store process merge request:%s, response:%s", 
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        DB_FATAL("send merge request to metaserver fail");
+    }
+}
+
 void Store::process_split_request(int64_t table_id, int64_t region_id, bool tail_split, std::string split_key) {
     ++_split_num;
     //构造请求 
@@ -686,6 +1043,7 @@ int64_t Store::get_split_index_for_region(int64_t region_id) {
     }
     return region->get_split_index();
 }
+
 void Store::set_can_add_peer_for_region(int64_t region_id) {
     SmartRegion region = get_region(region_id);
     if (region == NULL) {
@@ -695,40 +1053,6 @@ void Store::set_can_add_peer_for_region(int64_t region_id) {
     region->set_can_add_peer();
 }
 
-// void GetCachePointersFromTableFactory(const rocksdb::TableFactory* factory, 
-//         std::unordered_set<const rocksdb::Cache*>& cache_set) {
-
-//     const rocksdb::BlockBasedTableFactory* bbtf 
-//         = dynamic_cast<const rocksdb::BlockBasedTableFactory*>(factory);
-//     if (bbtf != nullptr) {
-//         const auto bbt_opts = bbtf->table_options();
-//         cache_set.insert(bbt_opts.block_cache.get());
-//         cache_set.insert(bbt_opts.block_cache_compressed.get());
-//     }
-// }
-
-// void GetCachePointers(const rocksdb::DB* db, std::unordered_set<const rocksdb::Cache*>& cache_set) {
-//     cache_set.clear();
-
-//     // Cache from DBImpl
-//     rocksdb::StackableDB* sdb = dynamic_cast<rocksdb::StackableDB*>(db);
-//     rocksdb::DBImpl* db_impl = dynamic_cast<rocksdb::DBImpl*>(sdb ? sdb->GetBaseDB() : db);
-//     if (db_impl != nullptr) {
-//         cache_set.insert(db_impl->TEST_table_cache());
-//     }
-
-//     // Cache from DBOptions
-//     cache_set.insert(db->GetDBOptions().row_cache.get());
-
-//     // Cache from table factories
-//     std::unordered_map<std::string, const ImmutableCFOptions*> iopts_map;
-//     if (db_impl != nullptr) {
-//         db_impl->TEST_GetAllImmutableCFOptions(&iopts_map);
-//     }
-//     for (auto pair : iopts_map) {
-//         GetCachePointersFromTableFactory(pair.second->table_factory, cache_set);
-//     }
-// }
 void Store::print_properties(const std::string& name) {
     auto db = _rocksdb->get_db();
     uint64_t value_data = 0;
@@ -757,68 +1081,135 @@ void Store::monitor_memory() {
     */
 }
 
-void Store::update_and_whether_split_for_region() {
+void Store::whether_split_thread() {
     static int64_t count = 0;
-    while (_is_running) {
+    while (!_shutdown) {
         std::vector<int64_t> region_ids;
         traverse_region_map([&region_ids](SmartRegion& region) {
             region_ids.push_back(region->get_region_id());
         });
-        boost::scoped_array<int64_t> region_sizes(new(std::nothrow)int64_t[region_ids.size()]);
+        boost::scoped_array<uint64_t> region_sizes(new(std::nothrow)uint64_t[region_ids.size()]);
         int ret = get_used_size_per_region(region_ids, region_sizes.get());
         if (ret != 0) {
-            DB_WARNING("get userd size per region fail");
+            DB_WARNING("get used size per region fail");
             return; 
         }
-        //for (size_t i = 0; i < region_ids.size(); ++i) {
-        //    SELF_TRACE("region_id: %ld, region_size:%lu", region_ids[i], region_sizes[i]);
-        //}
         for (size_t i = 0; i < region_ids.size(); ++i) {
             SmartRegion ptr_region = get_region(region_ids[i]);
             if (ptr_region == NULL) {
                 continue;
             }
+            if (ptr_region->is_binlog_region()) {
+                continue;
+            }
+            if (ptr_region->removed()) {
+                DB_WARNING("region_id: %ld has be removed", region_ids[i]);
+                continue;
+            }
+            //分区region，不分裂、不merge
+            if (ptr_region->get_partition_num() > 1) {
+                DB_NOTICE("partition region %ld not split.", region_ids[i]);
+                continue;
+            }
+            //设置计算存储分离开关
+            ptr_region->set_separate_switch(_factory->get_separate_switch(ptr_region->get_table_id()));
             //update region_used_size
             ptr_region->set_used_size(region_sizes[i]);
             
             //判断是否需要分裂，分裂的标准是used_size > 1.5 * region_capacity
-            int64_t region_capacity = 0;
-            int ret = _factory->get_region_capacity(ptr_region->get_table_id(), region_capacity);
+            int64_t region_capacity = 10000000;
+            int ret = _factory->get_region_capacity(ptr_region->get_global_index_id(), region_capacity);
             if (ret != 0) {
                 DB_FATAL("table info not exist, region_id: %ld", region_ids[i]);
                 continue;
             }
+            region_capacity = std::max(FLAGS_min_split_lines, region_capacity);
+            //DB_WARNING("region_id: %ld, split_capacity: %ld", region_ids[i], region_capacity);
             std::string split_key;
-            //如果是尾部分裂
+            //如果是尾部分
             if (ptr_region->is_leader() 
-                    && ptr_region->is_tail() 
-                    && (int64_t)region_sizes[i] >= region_capacity
                     && ptr_region->get_status() == pb::IDLE
                     && _split_num.load() < FLAGS_max_split_concurrency) {
-                process_split_request(ptr_region->get_table_id(), region_ids[i], true, split_key);
+                if (ptr_region->is_tail() 
+                    && ptr_region->get_num_table_lines() >= region_capacity) {
+                    process_split_request(ptr_region->get_global_index_id(), region_ids[i], true, split_key);
+                    continue;
+                } else if (!ptr_region->is_tail() 
+                    && ptr_region->get_num_table_lines() >= FLAGS_split_threshold * region_capacity / 100) {
+                    if (0 != ptr_region->get_split_key(split_key)) {
+                        DB_WARNING("get_split_key failed: region=%ld", region_ids[i]);
+                        continue;
+                    }
+                    process_split_request(ptr_region->get_global_index_id(), region_ids[i], false, split_key);
+                    continue;
+                } else if (ptr_region->can_use_approximate_split()) {
+                    DB_WARNING("start split by approx size:%ld region_id: %ld num_table_lines:%ld",
+                            region_sizes[i], region_ids[i], ptr_region->get_num_table_lines());
+                    //split或add peer后，预估的空间有段时间不够准确
+                    //由于已经有num_table_lines判断，region_sizes判断不需要太及时
+                    //TODO split可以根据前后版本的大小进一步预估，add peer可以根据发来的sst预估
+                    if (ptr_region->is_tail()) {
+                        process_split_request(ptr_region->get_global_index_id(), region_ids[i], true, split_key);
+                        continue;
+                    } else {
+                        if (0 != ptr_region->get_split_key(split_key)) {
+                            DB_WARNING("get_split_key failed: region=%ld", region_ids[i]);
+                            continue;
+                        }
+                        process_split_request(ptr_region->get_global_index_id(), region_ids[i], false, split_key);
+                        continue;
+                    }
+                }
+            }
+            
+            if (!_factory->get_merge_switch(ptr_region->get_table_id())) {
                 continue;
             }
-            if (ptr_region->is_leader() 
-                    && !ptr_region->is_tail() 
-                    && (int64_t)region_sizes[i] >= FLAGS_split_threshold * region_capacity / 100
-                    && ptr_region->get_status() == pb::IDLE
-                    && _split_num.load() < FLAGS_max_split_concurrency) {
-                if (0 != ptr_region->get_split_key(split_key)) {
-                    DB_WARNING("get_split_key failed: region=%ld", region_ids[i]);
+            //简化特殊处理，首尾region不merge
+            if (ptr_region->is_tail() || ptr_region->is_head()) {
+                continue;
+            }
+            
+            //空region超过两个心跳周期之后触发删除，主从均执行
+            if (ptr_region->empty()) {
+                if (ptr_region->get_status() == pb::IDLE
+                    && ptr_region->get_timecost() > FLAGS_store_heart_beat_interval_us * 2) {
+                    //删除region
+                    DB_WARNING("region:%ld has been merged, drop it", region_ids[i]);
+                    //空region通过心跳上报，由meta触发删除，不在此进行
+                    //drop_region_from_store(region_ids[i]);
+                }
+                continue;
+            }
+                   
+            //region无数据，超过5min触发回收
+            if (ptr_region->is_leader()
+                    && ptr_region->get_num_table_lines() == 0
+                    && ptr_region->get_status() == pb::IDLE) {
+                if (ptr_region->get_log_index() != ptr_region->get_log_index_lastcycle()) {
+                    ptr_region->reset_log_index_lastcycle();
+                    DB_WARNING("region:%ld is none, log_index:%ld reset time", 
+                               region_ids[i], ptr_region->get_log_index());
                     continue;
                 }
-                process_split_request(ptr_region->get_table_id(), region_ids[i], false, split_key);
+                if (ptr_region->get_log_index() == ptr_region->get_log_index_lastcycle()
+                   && ptr_region->get_lastcycle_timecost() > FLAGS_none_region_merge_interval_us) {
+                    DB_WARNING("region:%ld is none, log_index:%ld, process merge", 
+                              region_ids[i], ptr_region->get_log_index());
+                    process_merge_request(ptr_region->get_global_index_id(), region_ids[i]);
+                    continue;
+                }
             }
         }
         SELF_TRACE("upate used size count:%ld", ++count);
-        bthread_usleep(FLAGS_update_used_size_interval_us);
+        bthread_usleep_fast_shutdown(FLAGS_update_used_size_interval_us, _shutdown);
     }
 }
 
 void Store::start_db_statistics() {
     Bthread bth(&BTHREAD_ATTR_SMALL);
     std::function<void()> dump_options = [this] () {
-        while (get_is_running()) {
+        while (!_shutdown) {
             TimeCost cost;
             auto db_options = get_db()->get_db_options();
             std::string str = db_options.statistics->ToString();
@@ -847,101 +1238,73 @@ void Store::start_db_statistics() {
     bth.run(dump_options);
 }
 
-int Store::get_used_size_per_region(const std::vector<int64_t>& region_ids,
-                                                int64_t* region_sizes) {
+int Store::get_used_size_per_region(const std::vector<int64_t>& region_ids, uint64_t* region_sizes) {
+
+    std::vector<rocksdb::Range> ranges;
+    std::vector<uint64_t> approx_sizes;
+
     for (size_t i = 0; i < region_ids.size(); ++i) {
         auto region = get_region(region_ids[i]);
-        int64_t table_id = 0;
         if (region == NULL) {
             DB_WARNING("region_id: %ld not exist", region_ids[i]);
             region_sizes[i] = 0;
             continue;
-        } else {
-            table_id = region->get_table_id();
         }
-        int64_t byte_size_per_record = 1;
-        if (_factory->get_byte_size_per_record(table_id, byte_size_per_record) != 0) {
-            DB_WARNING("table_id:%ld get byte size per record fail, region_id: %ld",
-                    table_id, region_ids[i]);
-            region_sizes[i] = 0;
-            continue;
-        }
-        int64_t num_table_lines = region->get_num_table_lines();
-        int32_t num_prepared = region->num_prepared();
-        int32_t num_began = region->num_began();
 
-        region_sizes[i] = num_table_lines * byte_size_per_record;
-        SELF_TRACE("region_id: %ld, num_table_lines:%ld, region_used_size:%ld, "
-                    "num_prepared:%d, num_began:%d",
-                    region_ids[i], num_table_lines, region_sizes[i], 
-                    num_prepared, num_began);
+        region_sizes[i] = region->get_approx_size();
+        if (region_sizes[i] == UINT64_MAX) {
+            ranges.emplace_back(region->get_rocksdb_range());
+            approx_sizes.emplace_back(UINT64_MAX);
+        }
     }
 
-    /*boost::scoped_array<uint64_t> approximate_sizes(new(std::nothrow)uint64_t[region_ids.size()]);
     auto data_cf = _rocksdb->get_data_handle();
     if (nullptr == data_cf) {
         return -1;
     }
-    int64_t region_count = region_ids.size();
-    boost::scoped_array<rocksdb::Range> ranges(new (std::nothrow)rocksdb::Range[region_count]);
-    if (ranges.get() == nullptr) {
-        DB_FATAL("update_used_size failed");
-        return -1;
+    if (!ranges.empty() && approx_sizes.size() == ranges.size()) {
+        _rocksdb->get_db()->GetApproximateSizes(data_cf, &ranges[0], ranges.size(), &approx_sizes[0], uint8_t(3));
+        size_t idx = 0;
+        for (size_t i = 0; i < region_ids.size(); ++i) {
+            if (region_sizes[i] == UINT64_MAX && idx < approx_sizes.size()) {
+                auto region = get_region(region_ids[i]);
+                if (region == NULL) {
+                    DB_WARNING("region_id: %ld not exist", region_ids[i]);
+                    region_sizes[i] = 0;
+                    continue;
+                }
+                region_sizes[i] = approx_sizes[idx++];
+                region->set_approx_size(region_sizes[i]);
+                DB_NOTICE("region_id: %ld, size:%lu region_num_line:%ld", 
+                        region_ids[i], region_sizes[i], region->get_num_table_lines());
+            }
+        }
     }
-    std::vector<std::string> start_keys;
-    std::vector<std::string> end_keys;
-    for (size_t i = 0; i < region_ids.size(); ++i) {
-        MutTableKey start;
-        MutTableKey end;
-        int64_t table_max = -1;
-        start.append_i64(region_ids[i]);
-        end.append_i64(region_ids[i]);
-        end.append_i64(table_max);
-        ranges[i].start = start.data();
-        ranges[i].limit =  end.data();
-        SELF_TRACE("region_id: %ld, range_start:%s, rang_end:%s", 
-                    region_ids[i], rocksdb::Slice(start.data()).ToString(true).c_str(), 
-                    rocksdb::Slice(end.data()).ToString(true).c_str());
-    }
-
-    for (size_t i = 0; i < region_ids.size(); ++i) {
-        ranges[i].start = start_keys[i];
-        ranges[i].limit =  end_keys[i];
-    }
-    _rocksdb->get_db()->GetApproximateSizes(data_cf, ranges.get(), region_count, approximate_sizes.get(), uint8_t(3));
-    for (size_t i = 0; i < region_ids.size(); ++i) {
-        SELF_TRACE("region_id: %ld, size:%lu", region_ids[i], approximate_sizes[i]);
-    }*/
     return 0;
 }
 
 void Store::update_schema_info(const pb::SchemaInfo& request) {
     //锁住的是update_table和table_info_mapping, table_info锁的位置不能改
-    int ret = _factory->update_table(request);
-    if (ret != 0) {
-        DB_FATAL("reload schema fail when add table, schema_info:%s", 
-                    request.ShortDebugString().c_str());
-        return;
-    }
+    _factory->update_table(request);
 }
 
-void Store::_check_split_complete(int64_t region_id) {
-    DB_WARNING("start to check whether split complete, region_id: %ld", region_id);
+void Store::check_region_legal_complete(int64_t region_id) {
+    DB_WARNING("start to check whether split or add peer complete, region_id: %ld", region_id);
     auto region = get_region(region_id);
     if (region == NULL) {
         DB_WARNING("region_id: %ld not exist", region_id);
         return;
     }
     //检查并且置为失败
-    if (region->check_split_complete()) {
-        DB_WARNING("split complete. region_id: %ld", region_id); 
+    if (region->check_region_legal_complete()) {
+        DB_WARNING("split or add_peer complete. region_id: %ld", region_id); 
     } else {
-        DB_FATAL("split not complete, timeout. reigon_id:%ld", region_id);
-        _drop_region_from_store(region_id);
+        DB_WARNING("split or add_peer not complete, timeout. region_id: %ld", region_id);
+        drop_region_from_store(region_id, false);
     }
 }
 
-void Store::_construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
+void Store::construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
     static int64_t count = 0;
     request.set_need_leader_balance(false);
     ++count;
@@ -958,7 +1321,15 @@ void Store::_construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
     instance_info->set_address(_address);
     instance_info->set_physical_room(_physical_room);
     instance_info->set_resource_tag(_resource_tag);
-    instance_info->set_capacity(FLAGS_capacity);
+    // 读取硬盘参数
+    struct statfs sfs;
+    statfs(FLAGS_db_path.c_str(), &sfs);
+    int64_t disk_capacity = sfs.f_blocks * sfs.f_bsize;
+    int64_t left_size = sfs.f_bavail * sfs.f_bsize;
+    _disk_total.set_value(disk_capacity);
+    _disk_used.set_value(disk_capacity - left_size);
+    instance_info->set_capacity(disk_capacity);
+    instance_info->set_used_size(disk_capacity - left_size);
 
     //构造schema version信息
     std::unordered_map<int64_t, int64_t> table_id_version_map;
@@ -968,25 +1339,24 @@ void Store::_construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
         schema->set_table_id(table_info.first);
         schema->set_version(table_info.second);
     }
-
-    int64_t total_used_size = 0;
-    //构造所有region的version信息
-    traverse_region_map([&total_used_size, &request, need_peer_balance](SmartRegion& region) {
-        region->construct_heart_beat_request(request, need_peer_balance);
-        total_used_size += region->get_used_size();
+    //记录正在doing的table_id，所有region不上报ddlwork进展
+    std::set<int64_t> ddl_wait_doing_table_ids;
+    traverse_copy_region_map([&ddl_wait_doing_table_ids](SmartRegion& region) {
+        if (region->is_wait_ddl()) {
+            ddl_wait_doing_table_ids.insert(region->get_global_index_id());
+        }
     });
-    instance_info->set_used_size(total_used_size);
+
+    //构造所有region的version信息
+    traverse_copy_region_map([&request, need_peer_balance, &ddl_wait_doing_table_ids](SmartRegion& region) {
+        region->construct_heart_beat_request(request, need_peer_balance, ddl_wait_doing_table_ids);
+    });
+
 }
 
-void Store::_process_heart_beat_response(const pb::StoreHeartBeatResponse& response) {
+void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& response) {
     for (auto& schema_info : response.schema_change_info()) {
         update_schema_info(schema_info);
-    }
-    if (response.schema_change_info_size() > 0) {
-        // 只要有表更新就把region中的信息全部更新一遍
-        traverse_region_map([](SmartRegion& region) {
-                region->update_resource_table();
-                });
     }
     for (auto& add_peer_request : response.add_peers()) {
         SmartRegion region = get_region(add_peer_request.region_id());
@@ -994,7 +1364,7 @@ void Store::_process_heart_beat_response(const pb::StoreHeartBeatResponse& respo
             DB_FATAL("region_id: %ld not exist, may be removed", add_peer_request.region_id());
             continue;
         }
-        region->add_peer(add_peer_request);
+        region->add_peer(add_peer_request, region, _add_peer_queue);
     }
     std::unordered_map<int64_t, int64_t> table_trans_leader_count;
     for (int i = 0; i < response.trans_leader_table_id_size(); ++i) {
@@ -1029,148 +1399,172 @@ void Store::_process_heart_beat_response(const pb::StoreHeartBeatResponse& respo
             table_trans_leader_count[table_id]--;
         }
     }
-    //删除region数据，该region已不在raft组内
-    for (auto& delete_region_id : response.delete_region_ids()) {
-        DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld",
-                   delete_region_id);
-        _drop_region_from_store(delete_region_id);        
+    const auto& delete_region_ids = response.delete_region_ids();
+    auto remove_func = [this, delete_region_ids]() {
+        //删除region数据，该region已不在raft组内
+        for (auto& delete_region_id : delete_region_ids) {
+            if (_shutdown) {
+                return;
+            }
+            DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld",
+                    delete_region_id);
+            drop_region_from_store(delete_region_id, true);
+        }
+    };
+    _remove_region_queue.run(remove_func);
+
+    std::set<int64_t> ddlwork_table_ids;
+    for (auto& ddlwork_info : response.ddlwork_infos()) {
+        ddlwork_table_ids.insert(ddlwork_info.table_id());
+        traverse_copy_region_map([&ddlwork_info](SmartRegion& region) {
+            if (region->get_global_index_id() == ddlwork_info.table_id()) {
+                DB_DEBUG("DDL_LOG region_id [%lld] table_id: %lld start ddl work.", 
+                    region->get_region_id(), ddlwork_info.table_id());
+                region->ddlwork_process(ddlwork_info);
+            }
+        });
     }
+    traverse_copy_region_map([&ddlwork_table_ids](SmartRegion& region) {
+        region->ddlwork_finish_check_process(ddlwork_table_ids);
+    });
 }
 
-int Store::_drop_region_from_store(int64_t drop_region_id) {
-    if (_drop_region_from_rocksdb(drop_region_id) != 0) {
-        DB_FATAL("drop region from rocksdb fail, region_id: %ld", drop_region_id);
-        return -1;
-    }
-    DB_WARNING("drop region from store, region_id: %ld", drop_region_id);
+int Store::drop_region_from_store(int64_t drop_region_id, bool need_delay_drop) {
     SmartRegion region = get_region(drop_region_id);
-    if (region == NULL) {
+    if (region == nullptr) {
         DB_FATAL("region_id: %ld not exist, may be removed", drop_region_id);
         return -1;
     }
-    pb::RegionInfo region_info;
-    region->set_removed(true);
-    region->get_region_info(region_info);
-    region_info.set_deleted(true);
-    _factory->update_region(region_info);
-    region->shutdown();
-    region->join();
-    DB_WARNING("region node close, region_id: %ld", drop_region_id);
-    if (region->clear_data() != 0) {
-        DB_FATAL("region_id: %ld clear data faile", drop_region_id);
-        return -1;
+    // 防止一直更新时间导致物理删不掉
+    if (!region->removed()) {
+        region->shutdown();
+        region->join();
+        region->set_removed(true);
+        DB_WARNING("region node close for removed, region_id: %ld", drop_region_id);
     }
-    DB_WARNING("region clear data, region_id: %ld", drop_region_id);
-    //删除snapshot目录
-    _remove_snapshot_path(drop_region_id);
-    //删除log_entry
-    if (_remove_log_entry(drop_region_id) == 0) {
-        DB_WARNING("region remove log entry, region_id: %ld", drop_region_id);
+    if (!need_delay_drop) {
+        RegionControl::clear_all_infos_for_region(drop_region_id);
         erase_region(drop_region_id);
-        return 0; 
+    }
+    DB_WARNING("region node removed, region_id: %ld, need_delay_drop:%d", drop_region_id, need_delay_drop);
+    return 0; 
+}
+
+void Store::print_heartbeat_info(const pb::StoreHeartBeatRequest& request) {
+    SELF_TRACE("heart beat request(instance_info):%s, need_leader_balance: %d, need_peer_balance: %d", 
+                request.instance_info().ShortDebugString().c_str(), 
+                request.need_leader_balance(), 
+                request.need_peer_balance());
+    std::string str_schema;
+    for (auto& schema_info : request.schema_infos()) {
+        str_schema += schema_info.ShortDebugString() + ", ";
+    }
+    SELF_TRACE("heart beat request(schema_infos):%s", str_schema.c_str());
+    int count = 0;
+    std::string str_leader;
+    for (auto& leader_region : request.leader_regions()) {
+        str_leader += leader_region.ShortDebugString() + ", ";
+        ++count;
+        if (count % 10 == 0) {
+            SELF_TRACE("heart beat request(leader_regions):%s", str_leader.c_str());
+            str_leader.clear();
+        }
+    }
+    if (!str_leader.empty()) {
+        SELF_TRACE("heart beat request(leader_regions):%s", str_leader.c_str());
+    }
+    count = 0;
+    std::string str_peer;
+    for (auto& peer_info : request.peer_infos()) {
+        str_peer += peer_info.ShortDebugString() + ", ";
+        ++count;
+        if (count % 10 == 0) {
+            SELF_TRACE("heart beat request(peer_infos):%s", str_peer.c_str());
+            str_peer.clear();
+        }
+    }
+    if (!str_peer.empty()) {
+        SELF_TRACE("heart beat request(peer_infos):%s", str_peer.c_str());
+    }
+}
+
+void Store::backup_region(google::protobuf::RpcController* controller,
+    const pb::BackUpReq* request,
+    pb::BackUpRes* response,
+    google::protobuf::Closure* done) {
+    
+    auto backup_type = SstBackupType::UNKNOWN_BACKUP;
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =static_cast<brpc::Controller*>(controller);
+
+    const std::string& req_info = cntl->http_request().unresolved_path();
+    DB_NOTICE("backup request[%s]", req_info.c_str());
+
+    std::vector<std::string> request_vec;
+    boost::split(request_vec, req_info, boost::is_any_of("/"));
+
+    if (request_vec.size() < 3) {
+        DB_WARNING("backup request info error[%s]", req_info.c_str());
+        cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    if (request_vec[2] == "data") {
+        backup_type = SstBackupType::DATA_BACKUP;
     } else {
-        return -1;
+        DB_WARNING("region_%lld noknown backup request [%s].", request_vec[2].c_str());
+        cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        return;
     }
-}
-int Store::_remove_log_entry(int64_t drop_region_id) {
-    MutTableKey log_meta_key;
-    log_meta_key.append_i64(drop_region_id).append_u8((uint8_t)MyRaftLogStorage::LOG_META_IDENTIFY);
-    rocksdb::WriteOptions options;
-    auto status = _rocksdb->remove(options, 
-                                   _rocksdb->get_raft_log_handle(), 
-                                   log_meta_key.data());
-    if (!status.ok()) {
-        DB_WARNING("remove log meta key error: code=%d, msg=%s, region_id: %ld",
-            status.code(), status.ToString().c_str(), drop_region_id);
-        return -1;
-    }
-    DB_WARNING("region remove snapshot path, region_id: %ld", drop_region_id);
-    MutTableKey log_data_key_start;
-    MutTableKey log_data_key_end;
-    log_data_key_start.append_i64(drop_region_id);
-    log_data_key_start.append_u8((uint8_t)MyRaftLogStorage::LOG_DATA_IDENTIFY);
-    log_data_key_start.append_i64(0);
 
-    log_data_key_end.append_i64(drop_region_id);
-    log_data_key_end.append_u8((uint8_t)MyRaftLogStorage::LOG_DATA_IDENTIFY);
-    log_data_key_end.append_u64(0xFFFFFFFFFFFFFFFF);
-    status = _rocksdb->remove_range(options, 
-                                    _rocksdb->get_raft_log_handle(),
-                                    log_data_key_start.data(), 
-                                    log_data_key_end.data());
-    if (!status.ok()) {
-        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
-            status.code(), status.ToString().c_str(), drop_region_id);
-        return -1;
-    }
-    return 0;
-}
-
-void Store::_remove_snapshot_path(int64_t drop_region_id) {
-    std::string snapshot_path_str(FLAGS_snapshot_uri, FLAGS_snapshot_uri.find("//") + 2);
-    snapshot_path_str += "/region_" + std::to_string(drop_region_id);
-    std::string stable_path_str(FLAGS_stable_uri, FLAGS_stable_uri.find("//") + 2);
-    stable_path_str += "/region_" + std::to_string(drop_region_id);
+    int64_t region_id = -1;
     try {
-        boost::filesystem::path snapshot_path(snapshot_path_str);
-        boost::filesystem::path stable_path(stable_path_str);
-        boost::filesystem::remove_all(snapshot_path);
-        boost::filesystem::remove_all(stable_path);
-    } catch (boost::filesystem::filesystem_error& e) {
-        DB_FATAL("remove error:%s, region_id: %ld", e.what(), drop_region_id);
-    }
-    DB_WARNING("drop snapshot directorey, region_id: %ld", drop_region_id);
-}
-
-void Store::_remove_region_data(int64_t drop_region_id) {
-    rocksdb::WriteOptions options;
-
-    MutTableKey start_key;
-    MutTableKey end_key;
-    start_key.append_i64(drop_region_id);
-
-    end_key.append_i64(drop_region_id);
-    end_key.append_u64(0xFFFFFFFFFFFFFFFF);
-    auto data_cf = _rocksdb->get_data_handle();
-
-    if (data_cf == nullptr) {
-        DB_WARNING("get rocksdb data column family failed, region_id: %ld", drop_region_id);
+        region_id = std::stol(request_vec[1]);
+    } catch (std::exception& exp) {
+        DB_WARNING("backup parse region id exp[%s]", exp.what());
+        cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
         return;
     }
-    TimeCost cost;
-    auto res = _rocksdb->remove_range(options, data_cf, 
-            start_key.data(), end_key.data());
-    if (!res.ok()) {
-        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld", 
-            res.code(), res.ToString().c_str(), drop_region_id);
+    SmartRegion region = get_region(region_id);
+    if (region == nullptr) {
+        DB_WARNING("backup no region in store, region_id: %ld", region_id);
+        cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
         return;
     }
-    DB_WARNING("remove_range cost:%ld, region_id: %ld", cost.get_time(), drop_region_id);
-}
+    //request_vec[3]=="1"，表示需要ingest最新的sst.
+    bool ingest_store_latest_sst = request_vec.size() > 3 && request_vec[3] == "1";
 
-int Store::_drop_region_from_rocksdb(int64_t region_id) {
-    std::string region_key = SCHEMA_IDENTIFY;
-    region_key += REGION_SCHEMA_IDENTIFY;
-    region_key.append((char*)&region_id, sizeof(int64_t));
-    rocksdb::WriteBatch batch;
-    rocksdb::WriteOptions options;
-    //options.sync = true;
-    //options.disableWAL = true;
-    batch.Delete(_region_handle, region_key);
-    auto status = _rocksdb->write(options, &batch);
-    if (!status.ok()) {
-        DB_WARNING("drop region fail, region_id: %ld", region_id);
-        return -1;
+    if (request_vec[0] == "download") {
+        DB_NOTICE("backup download sst region[%lld]", region_id)
+        region->process_download_sst(cntl, request_vec, backup_type);
+    } else if (request_vec[0] == "upload") {
+        DB_NOTICE("backup upload sst region[%lld]", region_id)
+        region->process_upload_sst(cntl, ingest_store_latest_sst);
     }
-    //rocksdb::FlushOptions flush_options;
-    //status = _rocksdb->flush(flush_options, _region_handle);
-    //if (!status.ok()) {
-    //    DB_WARNING("drop region_id: %ld info to rocksdb fail when flush, err_msg:%s",
-    //                region_id, status.ToString().c_str());
-    //    return -1;
-    //}
-
-    return 0;
 }
 
+void Store::backup(google::protobuf::RpcController* controller,
+    const pb::BackupRequest* request,
+    pb::BackupResponse* response,
+    google::protobuf::Closure* done) {
+
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl = static_cast<brpc::Controller*>(controller);
+    auto region_id = request->region_id();
+    SmartRegion region = get_region(region_id);
+    if (region == nullptr) {
+        DB_WARNING("backup no region in store, region_id: %ld", region_id);
+        return;
+    }
+    if (request->backup_op() == pb::BACKUP_DOWNLOAD) {
+        DB_NOTICE("backup download sst region[%lld]", region_id)
+        region->process_download_sst_streaming(cntl, request, response);
+    } else if (request->backup_op() == pb::BACKUP_UPLOAD) {
+        DB_NOTICE("backup upload sst region[%lld]", region_id)
+        region->process_upload_sst_streaming(cntl, request->ingest_store_latest_sst(), 
+            request, response);
+    } else {
+        DB_WARNING("unknown sst backup streaming op.");
+    }
+}
 } //namespace

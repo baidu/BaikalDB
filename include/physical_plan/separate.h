@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,15 +17,27 @@
 #include "exec_node.h"
 #include "query_context.h"
 #include "schema_factory.h"
+#include "insert_manager_node.h"
+#include "insert_node.h"
+#include "update_manager_node.h"
+#include "update_node.h"
+#include "delete_manager_node.h"
+#include "delete_node.h"
 
 namespace baikaldb {
 
 class FetcherNode;
 class PacketNode;
 class TransactionNode;
+class SelectManagerNode;
 
 class Separate {
 public:
+enum NodeMode {
+    BOTH,
+    PRIMARY,
+    GLOBAL
+};
     /* 分裂原则：
      * insert、delete、update、truncate 分裂packet
      * 无scan不分裂
@@ -37,17 +49,38 @@ public:
     int analyze(QueryContext* ctx);
 
 private:
-    int seperate_for_join(const std::vector<ExecNode*>& join_nodes);
-    int separate_begin(QueryContext* ctx, TransactionNode* txn_node);
-    int separate_commit(QueryContext* ctx, TransactionNode* txn_node);
-    int separate_rollback(QueryContext* ctx, TransactionNode* txn_node);
-    int separate_autocommit_dml_1pc(QueryContext* ctx, PacketNode* packet_node, 
-        std::map<int64_t, pb::RegionInfo>&);
-    int separate_autocommit_dml_2pc(QueryContext* ctx, PacketNode* packet_node, 
-        std::map<int64_t, pb::RegionInfo>&);
+    int separate_union(QueryContext* ctx);
+    int separate_insert(QueryContext* ctx);
+    int separate_update(QueryContext* ctx);
+    int separate_delete(QueryContext* ctx);
+    int separate_single_txn(PacketNode* packet_node);
+    int separate_truncate(QueryContext* ctx);
+    int separate_kill(QueryContext* ctx);
+    int separate_commit(QueryContext* ctx);
+    int separate_rollback(QueryContext* ctx);
+    int separate_begin(QueryContext* ctx);
+    int separate_select(QueryContext* ctx);
+    int separate_simple_select(QueryContext* ctx);
+    int separate_join(QueryContext* ctx, const std::vector<ExecNode*>& scan_nodes,
+                        const std::vector<ExecNode*>& dual_scan_nodes);
 
-    FetcherNode* create_fetcher_node(pb::OpType op_type);
+    int separate_global_insert(InsertManagerNode* manager_node, InsertNode* insert_node);
+    int separate_global_delete(DeleteManagerNode* manager_node, DeleteNode* delete_node, ExecNode* scan_node);
+    int separate_global_update(UpdateManagerNode* manager_node, UpdateNode* update_node, ExecNode* scan_node);
+    //mode:0, 生成所有index的node
+    //mode:1, 只生成主键的node
+    //mode:2, 只生成全局索引表的node
+    int create_lock_node(int64_t table_id, pb::LockCmdType lock_type, NodeMode mode, ExecNode* manager_node);
+    //生成指定索引的node, update时适用
+    int create_lock_node(int64_t table_id, pb::LockCmdType lock_type, NodeMode mode, 
+            const std::vector<int64_t>& global_affected_indexs,
+            const std::vector<int64_t>& local_affected_indexs, 
+            ExecNode* manager_node);
+
     TransactionNode* create_txn_node(pb::TxnCmdType cmd_type);
+    SelectManagerNode* create_select_manager_node();
+    bool need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id);
+    bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id);
 };
 }
 

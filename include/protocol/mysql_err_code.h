@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -904,6 +904,7 @@ enum MysqlErrCode : int32_t {
     ER_MAKE_RESULT_PACKET                                        = 10002,
     ER_GEN_PLAN_FAILED                                           = 10003,
     ER_EXEC_PLAN_FAILED                                          = 10004,
-    ER_QUERY_EXCEED_QUOTA                                        = 10005
+    ER_QUERY_EXCEED_QUOTA                                        = 10005,
+    ER_SQL_TOO_BIG                                               = 10006
 };
 } // end of namespace baikaldb

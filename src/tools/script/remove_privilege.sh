@@ -5,12 +5,12 @@
 curl -d '{
     "op_type":"OP_DROP_PRIVILEGE",
     "user_privilege" : {
-        "username" : "root",
-        "password" : "root",
-        "namespace_name" : "TEST_NAMESPACE",
+        "username" : "******",
+        "password" : "******",
+        "namespace_name" : "TEST",
         "privilege_table" : [{
-                                    "database" : "TestDb",
-                                    "table_name" : "TestTb"                           
+                                    "database" : "TEST",
+                                    "table_name" : "wordinfo"                           
                                 }]
     }
 }' http://$1/MetaService/meta_manager

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,12 @@
  
 #include <string>
 #include "rocksdb/db.h"
+#include "rocksdb/convenience.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/cache.h"
+#include "rocksdb/listener.h"
 #include "rocksdb/options.h"
+#include "rocksdb/status.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/transaction_db.h"
@@ -42,6 +45,7 @@ enum GetMode {
 class RocksWrapper {
 public:
     static const std::string RAFT_LOG_CF;
+    static const std::string BIN_LOG_CF;
     static const std::string DATA_CF;
     static const std::string METAINFO_CF;
 
@@ -55,6 +59,16 @@ public:
 
     rocksdb::Status write(const rocksdb::WriteOptions& options, rocksdb::WriteBatch* updates) {
         return _txn_db->Write(options, updates);  
+    }
+    rocksdb::Status write(const rocksdb::WriteOptions& options, 
+                            rocksdb::ColumnFamilyHandle* column_family,
+                            const std::vector<std::string>& keys,
+                            const std::vector<std::string>& values) {
+        rocksdb::WriteBatch batch;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            batch.Put(column_family, keys[i], values[i]);
+        }
+        return _txn_db->Write(options, &batch);
     }
 
     rocksdb::Status get(const rocksdb::ReadOptions& options,
@@ -100,7 +114,14 @@ public:
     rocksdb::Status remove_range(const rocksdb::WriteOptions& options,
             rocksdb::ColumnFamilyHandle* column_family, 
             const rocksdb::Slice& begin, 
-            const rocksdb::Slice& end) {
+            const rocksdb::Slice& end,
+            bool delete_files_in_range) {
+        if (delete_files_in_range) {
+            auto s = rocksdb::DeleteFilesInRange(_txn_db, column_family, &begin, &end, false);
+            if (!s.ok()) {
+                return s;
+            }
+        }
         return _txn_db->DeleteRange(options, column_family, begin, end);
     }
     
@@ -122,6 +143,8 @@ public:
     }
 
     rocksdb::ColumnFamilyHandle* get_raft_log_handle();
+    
+    rocksdb::ColumnFamilyHandle* get_bin_log_handle();
 
     rocksdb::ColumnFamilyHandle* get_data_handle();
 
@@ -145,9 +168,26 @@ public:
     rocksdb::Cache* get_cache() {
         return _cache;
     }
-
+    const rocksdb::Snapshot* get_snapshot() {
+        return _txn_db->GetSnapshot();
+    }
+    void relase_snapshot(const rocksdb::Snapshot* snapshot) {
+        _txn_db->ReleaseSnapshot(snapshot);
+    }
     void close() {
         delete _txn_db;
+    }
+    void set_is_stall(const std::string& cf_name, bool is_stall) {
+        if (cf_name == RAFT_LOG_CF) {
+            _log_cf_is_stall = is_stall;
+        } else if (cf_name == DATA_CF) {
+            _data_cf_is_stall = is_stall;
+        } else if (cf_name == METAINFO_CF) {
+           _meta_cf_is_stall = is_stall;
+        }
+    }
+    bool is_any_stall() {
+        return _data_cf_is_stall || _log_cf_is_stall || _meta_cf_is_stall;
     }
 private:
 
@@ -163,7 +203,11 @@ private:
     std::map<std::string, rocksdb::ColumnFamilyHandle*> _column_families;
 
     rocksdb::ColumnFamilyOptions _log_cf_option;
+    rocksdb::ColumnFamilyOptions _binlog_cf_option;
     rocksdb::ColumnFamilyOptions _data_cf_option;
     rocksdb::ColumnFamilyOptions _meta_info_option;
+    bool _log_cf_is_stall = false;
+    bool _data_cf_is_stall = false;
+    bool _meta_cf_is_stall = false;
 };
 }

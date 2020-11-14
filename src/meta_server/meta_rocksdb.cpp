@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -61,6 +61,15 @@ int MetaRocksdb::put_meta_info(const std::vector<std::string>& keys,
     if (!status.ok()) {
         DB_WARNING("put batch to rocksdb fail, err_msg: %s",
                     status.ToString().c_str());
+        return -1;
+    }
+    return 0;
+}
+
+int MetaRocksdb::get_meta_info(const std::string& key, std::string* value) {
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _handle, rocksdb::Slice(key), value);
+    if (!status.ok()) {
         return -1;
     }
     return 0;

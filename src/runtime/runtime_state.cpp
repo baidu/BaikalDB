@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,22 +13,19 @@
 // limitations under the License.
 
 #include "runtime_state.h"
+#include "runtime_state_pool.h"
 #include "query_context.h"
 #include "network_socket.h"
 
 namespace baikaldb {
-
+DEFINE_int32(per_txn_max_num_locks, 1000000, "max num locks per txn default 100w");
 RuntimeState::~RuntimeState() {}
-
-int RuntimeState::init(const pb::StoreReq& req, TransactionPool* pool) {
-    return init(req, req.plan(), req.tuples(), pool);
-}
 
 int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
-        TransactionPool* pool) {
-
+        TransactionPool* pool,
+        bool store_compute_separate, bool is_binlog_region) {
     for (auto& tuple : tuples) {
         _tuple_descs.push_back(tuple);
     }
@@ -40,8 +37,13 @@ int RuntimeState::init(const pb::StoreReq& req,
         }
     }
     _region_id = req.region_id();
+    _region_version = req.region_version();
     if (req.has_not_check_region()) {
         _need_check_region = !req.not_check_region();
+    }
+    if (is_binlog_region) {
+        // binlog region 不检查
+        _need_check_region = false;
     }
     int64_t limit = req.plan().nodes(0).limit();
     //DB_WARNING("limit:%ld", limit);
@@ -59,17 +61,42 @@ int RuntimeState::init(const pb::StoreReq& req,
         // if (txn_info.has_autocommit()) {
         //     _autocommit = txn_info.autocommit();
         // }
+        if (txn_info.has_primary_region_id()) {
+            set_primary_region_id(txn_info.primary_region_id());
+        }
     }
     if (pool == nullptr) {
         DB_WARNING("error: txn pool is null: %ld", _region_id);
         return -1;
     }
+    is_separate = store_compute_separate;
+    _log_id = req.log_id();
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
+    use_ttl = _txn_pool->use_ttl();
+    if (_txn != nullptr) {
+        _txn->set_region_info(&(_resource->region_info));
+        _txn->set_ddl_state(_resource->ddl_param_ptr);
+    }
     return 0;
 }
 
 int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
+    _num_increase_rows = 0; 
+    _num_affected_rows = 0; 
+    _num_returned_rows = 0; 
+    _num_scan_rows     = 0; 
+    _num_filter_rows   = 0; 
+    set_client_conn(ctx->client_conn);
+    if (_client_conn == nullptr) {
+        return -1;
+    }
+    txn_id = _client_conn->txn_id;
+    _log_id = ctx->stat_info.log_id;
+    // prepare 复用runtime
+    if (_is_inited) {
+        return 0;
+    }
     _send_buf = send_buf;
     _tuple_descs = ctx->tuple_descs();
     if (_tuple_descs.size() > 0) {
@@ -79,13 +106,13 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
             return -1;
         }
     }
-    if (_client_conn == nullptr) {
-        return -1;
+    if (ctx->open_binlog) {
+        _open_binlog = true;
     }
-    txn_id = _client_conn->txn_id;
+    _is_inited = true;
     return 0;
 }
-
+/*
 int RuntimeState::init(const pb::CachePlan& commit_plan) {
     txn_id = _client_conn->txn_id;
     seq_id = _client_conn->seq_id;
@@ -96,6 +123,15 @@ int RuntimeState::init(const pb::CachePlan& commit_plan) {
         return -1;
     }
     return 0;
+}
+*/
+void RuntimeState::conn_id_cancel(uint64_t db_conn_id) {
+    if (_pool != nullptr) {
+        auto s = _pool->get(db_conn_id);
+        if (s != nullptr) {
+            s->cancel();
+        }
+    }
 }
 }
 

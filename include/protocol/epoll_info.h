@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,8 +16,7 @@
 
 #include <sys/epoll.h>
 #include <sys/types.h>
-#include <sys/select.h>
-#include <boost/thread.hpp>
+#include <mutex>
 #include "common.h" 
 
 namespace baikaldb {
@@ -46,7 +45,7 @@ public:
 
 private:
     SmartSocket         _fd_mapping[CONFIG_MPL_EPOLL_MAX_SIZE]; // fd -> NetworkSocket.
-    int                 _max_fd;
+    std::mutex          _mutex; // 保护_fd_mapping里的shared_ptr
     int                 _epfd;
     struct epoll_event  _events[CONFIG_MPL_EPOLL_MAX_SIZE];
     size_t              _event_size;

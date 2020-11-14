@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -69,6 +69,13 @@ public:
         return *this;
     }
 
+    MutTableKey& replace_i32(int32_t val, size_t pos) { // cstore
+       uint32_t encode = KeyEncoder::to_endian_u32(KeyEncoder::encode_i32(val));
+       size_t len = sizeof(uint32_t);
+       _data.replace(pos, len, (char*)&encode, sizeof(uint32_t));
+       return *this;
+    }
+
     MutTableKey& append_u32(uint32_t val) {
         uint32_t encode = KeyEncoder::to_endian_u32(val);
         _data.append((char*)&encode, sizeof(uint32_t));
@@ -112,6 +119,16 @@ public:
         return *this;
     }
 
+    MutTableKey& append_string_prefix(const std::string& val) {
+        _data.append(val);
+        return *this;
+    }
+
+    MutTableKey& append_char(const char* data, size_t size) {
+        _data.append(data, size);
+        return *this;
+    }
+
     MutTableKey& append_value(ExprValue& value) {
         switch (value.type) {
             case pb::BOOL:
@@ -121,6 +138,7 @@ public:
             case pb::INT16:
                 return append_i16(value._u.int16_val);
             case pb::INT32:
+            case pb::TIME:
                 return append_i32(value._u.int32_val);
             case pb::INT64:
                 return append_i64(value._u.int64_val);

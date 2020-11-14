@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,7 +34,6 @@
 #include <braft/local_storage.pb.h>
 #endif
 #include "index_term_map.h"
-#include "common.h"
 
 namespace baikaldb {
 
@@ -54,24 +53,24 @@ struct LogHead {
 
 // Implementation of LogStorage based on RocksDB
 class MyRaftLogStorage : public braft::LogStorage {
-
+typedef std::vector<std::pair<rocksdb::SliceParts, rocksdb::SliceParts>> SlicePartsVec;
 public:
 
     /* raft_log_cf data format
      * Key:RegionId(8 bytes) + 0x01 Value: _first_log_index
      *
-     * Key:RegionId(8 bytes) + 0x02 + Index(8 bytes)                                      
-     * Value : LogHead + data                                                              
-     * LogHead: term(8 bytes) + EntryType(int)                                            
-     * data: DATA(IOBuf) / ConfigurationPBMeta(pb)                                        
+     * Key:RegionId(8 bytes) + 0x02 + Index(8 bytes)
+     * Value : LogHead + data
+     * LogHead: term(8 bytes) + EntryType(int)
+     * data: DATA(IOBuf) / ConfigurationPBMeta(pb)
      */ 
     static const size_t LOG_META_KEY_SIZE = sizeof(int64_t) + 1;
     static const size_t LOG_DATA_KEY_SIZE = sizeof(int64_t) + 1 + sizeof(int64_t);
-    static const char LOG_META_IDENTIFY = 0x01;                                      
-    static const char LOG_DATA_IDENTIFY = 0x02;    
+    static const uint8_t LOG_META_IDENTIFY = 0x01;                                      
+    static const uint8_t LOG_DATA_IDENTIFY = 0x02;    
     const static size_t LOG_HEAD_SIZE = sizeof(int64_t) + sizeof(int);
     ~MyRaftLogStorage();
-    MyRaftLogStorage():_db(NULL), _handle(NULL) {
+    MyRaftLogStorage():_db(NULL), _raftlog_handle(NULL), _binlog_handle(NULL) {
         bthread_mutex_init(&_mutex, NULL);
     }
     // init logstorage, check consistency and integrity
@@ -97,7 +96,8 @@ public:
     int append_entry(const braft::LogEntry* entry) override;
 
     // append entries to log, return append success number
-    int append_entries(const std::vector<braft::LogEntry*>& entries) override;
+    int append_entries(const std::vector<braft::LogEntry*>& entries 
+            , braft::IOMetric* metric) override;
 
     // delete logs from storage's head, [first_log_index, first_index_kept) will be discarded
     int truncate_prefix(const int64_t first_index_kept) override;
@@ -117,10 +117,16 @@ public:
 private:
 
     MyRaftLogStorage(int64_t region_id, RocksWrapper* db,
-                        rocksdb::ColumnFamilyHandle* handle);
+                        rocksdb::ColumnFamilyHandle* raftlog_handle,
+                        rocksdb::ColumnFamilyHandle* binlog_handle);
 
-    int _build_key_value(rocksdb::SliceParts* key, rocksdb::SliceParts* value,
+    int get_binlog_entry(rocksdb::Slice& raftlog_value_slice, std::string& binlog_value);
+
+    int _build_key_value(SlicePartsVec& kv_raftlog_vec, SlicePartsVec& kv_binlog_vec,
                         const braft::LogEntry* entry, butil::Arena& arena);
+
+    int _construct_slice_array(void* head_buf, const butil::IOBuf& binlog_buf, rocksdb::SliceParts* raftlog_value, 
+                            rocksdb::SliceParts* binlog_key, rocksdb::SliceParts* binlog_value, butil::Arena& arena);
 
     rocksdb::Slice* _construct_slice_array(
                 void* head_buf, 
@@ -148,7 +154,9 @@ private:
     int64_t _region_id; 
     
     RocksWrapper* _db; 
-    rocksdb::ColumnFamilyHandle* _handle;
+    rocksdb::ColumnFamilyHandle* _raftlog_handle;
+    rocksdb::ColumnFamilyHandle* _binlog_handle;
+    bool _is_binlog_region = false;
 
     IndexTermMap _term_map;
     bthread_mutex_t _mutex; // for term_map     

@@ -38,7 +38,7 @@ COPTS  = [
     "-Iinclude/exec",
     "-Iinclude/expr",
     "-Iinclude/meta_server",
-    "-Iinclude/new_logical_plan",
+    "-Iinclude/logical_plan",
     "-Iinclude/raft",
     "-Iinclude/raft_store",
     "-Iinclude/raft_meta",
@@ -46,7 +46,6 @@ COPTS  = [
     "-Iinclude/store",
     "-Iinclude/session",
     "-Iinclude/mem_row",
-    "-DNEW_PARSER",
     "-mpclmul",
     "-ggdb",
     "-pipe",
@@ -57,6 +56,10 @@ COPTS  = [
     "-g", 
     "-fno-omit-frame-pointer", 
     "-Wno-strict-aliasing",
+    "-Wno-unused-parameter",
+    "-Wno-parentheses",
+    "-Wno-deprecated-declarations",
+    "-UNDEBUG",
 ]
 
 cc_library(
@@ -83,6 +86,7 @@ cc_library(
         "//external:bthread",
         "//external:json2pb",
         "//external:braft",
+        "//external:arrow",
         ":cc_baikaldb_internal_proto",
     ],
     visibility = ["//visibility:public"],
@@ -112,8 +116,10 @@ cc_library(
         "//external:bthread",
         "//external:json2pb",
         "//external:braft",
+        "//external:arrow",
         ":cc_baikaldb_internal_proto",
         ":common",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -142,8 +148,10 @@ cc_library(
         "//external:bthread",
         "//external:json2pb",
         "//external:braft",
+        "//external:arrow",
         ":cc_baikaldb_internal_proto",
         ":common",
+        ":reverse",
         ":raft_dummy",
     ],
     visibility = ["//visibility:public"],
@@ -166,7 +174,9 @@ cc_library(
     deps = [
         ":cc_baikaldb_internal_proto",
         "//external:bthread",
+        "//external:brpc",
         "@boost//:lexical_cast",
+        ":common",
     ],
     visibility = ["//visibility:public"],
 )
@@ -195,18 +205,20 @@ cc_library(
         "//external:rocksdb",
         "//external:brpc",
         "//external:butil",
+        "//external:arrow",
         "@boost//:lexical_cast",
         "@boost//:filesystem",
         "@boost//:algorithm",
         "//external:braft",
         ":cc_baikaldb_internal_proto",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
 
 cc_library(
-    name = "new_expr",
-    srcs = glob(["src/new_expr/*.cpp"]),
+    name = "expr",
+    srcs = glob(["src/expr/*.cpp"]),
     hdrs = glob([
         "include/**/*.h",
         "include/**/*.hpp",
@@ -219,8 +231,12 @@ cc_library(
     deps = [
         ":cc_baikaldb_internal_proto",
         "@boost//:regex",
+        "@boost//:date_time",
         "@boost//:lexical_cast",
+        "//external:brpc",
         "//external:bthread",
+        "//external:rocksdb",
+        "//external:re2",
     ],
     visibility = ["//visibility:public"],
 )
@@ -245,15 +261,19 @@ cc_library(
         "@boost//:unordered",
         "@boost//:thread",
         "@boost//:asio",
+        "@boost//:variant",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
-        ":new_expr",
+        "//external:arrow",
+        ":expr",
         ":session",
         ":protocol",
         ":runtime", 
+        ":engine", 
         ":physical_plan",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -278,21 +298,24 @@ cc_library(
         "@boost//:unordered",
         "@boost//:thread",
         "@boost//:asio",
+        "@boost//:variant",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
-        ":new_expr",
+        "//external:arrow",
+        ":expr",
         ":session",
         ":engine",
         ":runtime",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
 
 cc_library(
-    name = "new_logical_plan",
-    srcs = glob(["src/new_logical_plan/*.cpp"]),
+    name = "logical_plan",
+    srcs = glob(["src/logical_plan/*.cpp"]),
 
     hdrs = glob([
         "include/**/*.h",
@@ -301,16 +324,22 @@ cc_library(
 
     copts = COPTS,
     includes = [
-        "include/new_logical_plan/",
+        "include/logical_plan/",
     ],
     deps = [
         ":cc_baikaldb_internal_proto",
         "@boost//:unordered",
         "@boost//:thread",
+        "@boost//:asio",
+        "@boost//:variant",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
+        "//external:arrow",
+        "//external:re2",
+        ":common",
+        ":reverse",
         ":sqlparser",
     ],
     visibility = ["//visibility:public"],
@@ -333,9 +362,13 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:unordered",
         "@boost//:thread",
+        "@boost//:variant",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
+        "//external:arrow",
+        "//external:re2",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -356,11 +389,14 @@ cc_library(
     deps = [
         ":cc_baikaldb_internal_proto",
         "@boost//:unordered",
+        "@boost//:variant",
         "@boost//:thread",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
+        "//external:arrow",
         ":exec2",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -383,6 +419,9 @@ cc_library(
         "@boost//:lexical_cast",
         "//external:braft",
         "//external:rocksdb",
+        "//external:rapidjson",
+        "//external:arrow",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -404,8 +443,12 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:lexical_cast",
         "//external:braft",
+        "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
+        "//external:arrow",
+        ":common",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -468,6 +511,8 @@ cc_library(
     ],
     deps = [
         "//external:butil",
+        "//external:brpc",
+        ":cc_baikaldb_internal_proto",
     ],
     visibility = ["//visibility:public"],
 )
@@ -498,6 +543,7 @@ cc_library(
         "//external:rocksdb",
         "//external:rapidjson",
         ":engine",
+        ":common",
     ],
     visibility = ["//visibility:public"],
 )
@@ -508,13 +554,23 @@ cc_binary(
     includes = [
         "include/meta_server",
         "include/engine",
+        "include/common",
+    ],
+    copts = [
+        "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
+        "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
     ],
     deps = [
         ":meta_server",
+        ":cc_baikaldb_internal_proto",
         ":common",
+        ":engine",
         ":raft",
         ":raft_meta",
+        "@boost//:filesystem",
+        "//external:tcmalloc_and_profiler",
     ],
+    linkstatic = True,
 )
 
 cc_binary(
@@ -522,6 +578,10 @@ cc_binary(
     srcs = ["src/store/main.cpp"],
     includes = [
         "include/store",
+    ],
+    copts = [
+        "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
+        "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
     ],
     deps = [
         ":store",
@@ -533,12 +593,13 @@ cc_binary(
         ":raft_store",
         ":sqlparser",
         ":reverse",
-        ":new_expr",
+        ":expr",
         ":exec",
         ":runtime",
         ":physical_plan",
-        ":new_logical_plan",
+        ":logical_plan",
         ":mem_row",
+        "//external:tcmalloc_and_profiler",
     ],
     linkstatic = True,
 )
@@ -563,11 +624,13 @@ cc_library(
         "@boost//:unordered",
         "@boost//:thread",
         "@boost//:asio",
+        "@boost//:variant",
         "//external:bvar",
         "//external:bthread",
         "//external:brpc",
         "//external:rocksdb",
         "//external:rapidjson",
+        "//external:re2",
         ":common",
         ":session",
     ],
@@ -621,6 +684,9 @@ cc_library(
         "@boost//:asio",
         "//external:bthread",
         "//external:rocksdb",
+        "//external:arrow",
+        ":common",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -628,7 +694,10 @@ cc_library(
 cc_binary(
     name = "baikaldb",
     srcs = ["src/protocol/main.cpp"],
-    copts = COPTS,
+    copts = COPTS + [
+        "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
+        "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
+    ],
     deps = [
         ":protocol2",
         ":common",
@@ -637,14 +706,16 @@ cc_binary(
         ":store",
         ":sqlparser",
         ":reverse",
-        ":new_expr",
+        ":expr",
         ":exec2",
         ":raft_dummy",
         ":runtime",
         ":physical_plan2",
-        ":new_logical_plan",
+        ":logical_plan",
         ":mem_row",
+        "//external:tcmalloc_and_profiler",
     ],
+    linkstatic = True,
 )
 
 cc_library(
@@ -663,7 +734,10 @@ cc_library(
         ":cc_baikaldb_internal_proto",
         "@boost//:lexical_cast",
         "//external:bthread",
+        "//external:brpc",
         "//external:rocksdb",
+        "//external:arrow",
+        ":reverse",
     ],
     visibility = ["//visibility:public"],
 )
@@ -683,9 +757,12 @@ cc_library(
     deps = [
         ":cc_baikaldb_internal_proto",
         "@boost//:lexical_cast",
+        "//external:brpc",
         "//external:bthread",
         "//external:rocksdb",
+        "//external:arrow",
         "//external:rapidjson",
+        ":common",
     ],
     visibility = ["//visibility:public"],
 )

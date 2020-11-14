@@ -8,9 +8,9 @@ echo -e "修改列名\n"
 curl -d '{
     "op_type":"OP_RENAME_FIELD",
     "table_info": {
-        "table_name": "TestTb_new",
-        "database": "TestDb",
-        "namespace_name": "TEST_NAMESPACE",
+        "table_name": "wordinfo_new",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ {
                         "field_name" : "wordid",
                         "new_field_name": "id" 

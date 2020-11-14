@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@ ExprValue minus_double(const std::vector<ExprValue>& input);
     BINARY_OP_DEFINE(NAME, double); \
     BINARY_OP_DEFINE(NAME, string); \
     BINARY_OP_DEFINE(NAME, datetime); \
+    BINARY_OP_DEFINE(NAME, time); \
     BINARY_OP_DEFINE(NAME, date); \
     BINARY_OP_DEFINE(NAME, timestamp); 
 // + - * /

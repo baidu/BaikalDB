@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,7 +30,8 @@ public:
             //DB_WARNING("has no join, not predicate")
             return 0;
         }
-        if (0 != plan->predicate_pushdown()) {
+        std::vector<ExprNode*> empty_exprs;
+        if (0 != plan->predicate_pushdown(empty_exprs)) {
             DB_WARNING("predicate push down fail");
             return -1;
         }

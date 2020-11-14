@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "runtime_state.h"
 #include "sort_node.h"
+#include "runtime_state.h"
+#include "query_context.h"
 
 namespace baikaldb {
 int SortNode::init(const pb::PlanNode& node) {
@@ -73,21 +74,21 @@ int SortNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
-int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int SortNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         return ret;
     }
     pb::TupleDescriptor* tuple_desc = nullptr;
     if (_tuple_id >= 0) {
-        tuple_desc =  &(*tuple_descs)[_tuple_id];
+        tuple_desc =  ctx->get_tuple_desc(_tuple_id);
     }
     int slot_idx = 0;
     int idx = 0;
     for (auto expr : _order_exprs) {
         //类型推导
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             return ret;
         }
@@ -103,36 +104,52 @@ int SortNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
                 DB_WARNING("slot_idx:%d < slot_size:%d", slot_idx, tuple_desc->slots_size());
             }
         }
-        //常量表达式计算
-        expr->const_pre_calc();
+        if (tuple_desc != nullptr && expr->node_type() == pb::SLOT_REF) {
+            for (int i = 0; i < tuple_desc->slots_size(); i++) {
+                auto& slot = tuple_desc->slots(i);
+                if (slot.slot_id() == expr->slot_id()) {
+                    expr->set_col_type(slot.slot_type());
+                    _slot_order_exprs[idx]->set_col_type(expr->col_type());
+                }
+            }
+        }
         idx++;
+    }
+    for (auto expr : _slot_order_exprs) {
+        if (expr->node_type() == pb::AGG_EXPR) {
+            ret = expr->expr_optimize();
+            if (ret < 0) {
+                return ret;
+            }
+        }
     }
     return 0;
 }
 
 int SortNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
     for (auto expr : _order_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     for (auto expr : _slot_order_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     if (state->sort_use_index()) {
-        DB_WARNING("sort use index, limit:%ld", _limit);
+        DB_WARNING_STATE(state, "sort use index, limit:%ld", _limit);
         return 0;
     }
     _mem_row_desc = state->mem_row_desc();
@@ -143,10 +160,14 @@ int SortNode::open(RuntimeState* state) {
     bool eos = false;
     int count = 0;
     do {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            return 0;
+        }
         std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
         ret = _children[0]->get_next(state, batch.get(), &eos);
         if (ret < 0) {
-            DB_WARNING("child->get_next fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
             return ret;
         }
         //照理不会出现拿到0行数据
@@ -157,12 +178,23 @@ int SortNode::open(RuntimeState* state) {
         fill_tuple(batch.get());
         _sorter->add_batch(batch);
     } while (!eos);
-    DB_WARNING("sort_size:%d", count);
+    //DB_WARNING_STATE(state, "sort_size:%d", count);
+    TimeCost sort_time;
     _sorter->sort();
+    LOCAL_TRACE_DESC <<  "sort time cost:" << sort_time.get_time() << " rows:" << count;  
     return 0;
 }
 
 int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+    
+    if (state->is_cancelled()) {
+        DB_WARNING_STATE(state, "cancelled");
+        *eos = true;
+        return 0;
+    }
     if (reached_limit()) {
         *eos = true;
         return 0;
@@ -175,7 +207,7 @@ int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         ret = _sorter->get_next(batch, eos);
     }
     if (ret < 0) {
-        DB_WARNING("_sorter->get_next fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "_sorter->get_next fail, ret:%d", ret);
         return ret;
     }
     _num_rows_returned += batch->size();
@@ -189,12 +221,14 @@ int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
 }
 
 void SortNode::close(RuntimeState* state) {
+    ExecNode::close(state);
     for (auto expr : _order_exprs) {
         expr->close();
     }
     for (auto expr : _slot_order_exprs) {
         expr->close();
     }
+    _sorter = nullptr;
 }
 
 int SortNode::fill_tuple(RowBatch* batch) {
@@ -213,6 +247,16 @@ int SortNode::fill_tuple(RowBatch* batch) {
     }
     batch->reset();
     return 0;
+}
+
+void SortNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _order_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+    for (auto& expr : _slot_order_exprs) {
+        expr->find_place_holder(placeholders);
+    }
 }
 }
 

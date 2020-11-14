@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ int32_t MemRowDescriptor::init(std::vector<pb::TupleDescriptor>& tuple_desc) {
         tuple_proto->set_name("tuple_" + std::to_string(tuple_id));
         tuples.push_back(tuple_id);
 
+        //DB_WARNING("desc:%s", tuple.ShortDebugString().c_str());
         int slot_cnt = tuple.slots_size();
         for (int idx = 0; idx < slot_cnt; ++idx) {
             const pb::SlotDescriptor& slot = tuple.slots(idx);

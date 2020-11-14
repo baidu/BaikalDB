@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,15 +19,29 @@ namespace baikaldb {
 class LimitNode : public ExecNode {
 public:
     LimitNode() : _offset(0), _num_rows_skipped(0) {}
+    virtual ~LimitNode() {
+        ExprNode::destroy_tree(_offset_expr);
+        ExprNode::destroy_tree(_count_expr);
+    }
     virtual int init(const pb::PlanNode& node);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
+    virtual void close(RuntimeState* state) {
+        ExecNode::close(state);
+        _num_rows_skipped = 0;
+    }
+    virtual int expr_optimize(QueryContext* ctx);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
+
     int64_t other_limit() {
         return _offset + _limit;
     }
-
 private:
     int64_t _offset;
     int64_t _num_rows_skipped;
+
+    ExprNode*   _offset_expr = nullptr;
+    ExprNode*   _count_expr  = nullptr;
 };
 }
 

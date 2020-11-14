@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 namespace parser {
 
 static const char* priority_str[] = {"", " LOW_PRIORITY", " DELAYED", " HIGH_PRIORITY"};
+static const char* for_lock_str[] = {"", " FOR UPDATE", " IN SHARED MODE"};
 enum PriorityEnum {
     PE_NO_PRIORITY = 0,
     PE_LOW_PRIORITY = 1,
@@ -86,14 +87,20 @@ struct TableName : public Node {
 };
 
 struct TableSource : public Node {
-    TableName*  table_name;
+    TableName*  table_name = nullptr;
     String  as_name;
+    DmlNode* derived_table = nullptr;
     Vector<IndexHint*> index_hints;
     TableSource() {
         node_type = NT_TABLE_SOURCE;
     }
     virtual void to_stream(std::ostream& os) const override {
-        os << " " << table_name;
+        if (derived_table != nullptr) {
+            os << " " << derived_table;
+        }
+        if (table_name != nullptr) {
+            os << " " << table_name;
+        }
         if (!as_name.empty()) {
             os << " AS " << as_name.value;
         }
@@ -120,6 +127,18 @@ struct JoinNode : public Node {
     bool is_straight = false;
     JoinNode() {
         node_type = NT_JOIN;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (left != nullptr) {
+            left->set_print_sample(print_sample_);
+        }
+        if (right != nullptr) {
+            right->set_print_sample(print_sample_);
+        }
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         static const char* natural_str[] = {"", " NATURE"};
@@ -151,6 +170,12 @@ struct ByItem : public Node {
     ByItem() {
         node_type = NT_BY_ITEM;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         static const char* desc_str[] = {" ASC", " DESC"};
         os << expr << desc_str[is_desc];
@@ -161,6 +186,12 @@ struct GroupByClause : public Node {
     Vector<ByItem*> items;
     GroupByClause() {
         node_type = NT_GROUP_BY;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < items.size(); i++) {
+            items[i]->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         for (int i = 0; i < items.size(); i++) {
@@ -177,6 +208,12 @@ struct OrderByClause : public Node {
     OrderByClause() {
         node_type = NT_ORDER_BY;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < items.size(); i++) {
+            items[i]->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         for (int i = 0; i < items.size(); i++) {
             os << " " << items[i];
@@ -188,10 +225,21 @@ struct OrderByClause : public Node {
 };
 
 struct LimitClause : public Node {
-    int offset = 0;
-    int count = 0;
+    ExprNode* offset;
+    ExprNode* count;
     LimitClause() {
-       node_type = NT_LIMIT; 
+       node_type = NT_LIMIT;
+       offset = nullptr;
+       count = nullptr;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (offset != nullptr) {
+            offset->set_print_sample(print_sample_);
+        }
+        if (count != nullptr) {
+            count->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         os << " " << offset << ", " << count;
@@ -225,6 +273,12 @@ struct SelectField : public Node {
         node_type = NT_SELECT_FEILD;
         as_name = nullptr;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         os << " " << expr << wild_card;
         if (!as_name.empty()) {
@@ -239,67 +293,14 @@ struct Assignment : public Node {
     Assignment() {
         node_type = NT_ASSIGNMENT;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         os << name << " = " << expr;
-    }
-};
-
-struct InsertStmt : public DmlNode {
-    PriorityEnum priority;
-    bool is_replace = false;
-    bool is_ignore = false;
-    TableName* table_name = nullptr;
-    Vector<ColumnName*> columns;
-    Vector<RowExpr*> lists;
-    Vector<Assignment*> on_duplicate;
-    InsertStmt() {
-        node_type = NT_INSERT;
-    }
-    static InsertStmt* New(butil::Arena& arena) {
-        InsertStmt* insert = new(arena.allocate(sizeof(InsertStmt)))InsertStmt();
-        insert->columns.reserve(10, arena);
-        insert->lists.reserve(10, arena);
-        insert->on_duplicate.reserve(10, arena);
-        return insert;
-    }
-    virtual void to_stream(std::ostream& os) const override {
-        static const char* desc_str[] = {" INSERT", " REPLACE"};
-        static const char* ignore_str[] = {"", " IGNORE"};
-        os << desc_str[is_replace];
-        os << priority_str[priority] << ignore_str[is_ignore] << " INTO ";
-        if (table_name != nullptr) {
-            table_name->to_stream(os);
-        }
-        if (columns.size() > 0) {
-            os << "(";
-        }
-        for (int i = 0; i < columns.size(); ++i) {
-            columns[i]->to_stream(os);
-            if (i != columns.size() - 1) {
-                os << ", ";
-            }
-        }
-        if (columns.size() > 0) {
-            os << ")";
-        }
-        os << " VALUES";
-        for (int i = 0; i < lists.size(); ++i) {
-            os << " ";
-            lists[i]->to_stream(os);
-            if (i != lists.size() - 1) {
-                os << ",";
-            }
-        }
-        if (on_duplicate.size() != 0) {
-            os << " ON DUPLICATE KEY UPDATE";
-        }
-        for (int i = 0; i < on_duplicate.size(); ++i) {
-            os << " ";
-            on_duplicate[i]->to_stream(os);
-            if (i != on_duplicate.size() - 1) {
-                os << ",";
-            }
-        }
     }
 };
 
@@ -325,6 +326,21 @@ struct DeleteStmt : public DmlNode {
     DeleteStmt() {
         node_type = NT_DELETE;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (from_table != nullptr) {
+            from_table->set_print_sample(print_sample_);
+        }
+        if (where != nullptr) {
+            where->set_print_sample(print_sample_);
+        }
+        if (order != nullptr) {
+            order->set_print_sample(print_sample_);
+        }
+        if (limit != nullptr) {
+            limit->set_print_sample(print_sample_);
+        }
+    }
     virtual void to_stream(std::ostream& os) const override {
         static const char* ignore_str[] = {"", " IGNORE"};
         static const char* quick_str[] = {"", " QUICK"};
@@ -340,7 +356,7 @@ struct DeleteStmt : public DmlNode {
                 }
             }
         }
-        os << " FROM";
+        os << " FROM ";
         from_table->to_stream(os);
         if (where != nullptr) {
             os << " WHERE ";
@@ -367,6 +383,24 @@ struct UpdateStmt : public DmlNode {
     LimitClause* limit = nullptr;
     UpdateStmt() {
         node_type = NT_UPDATE;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (table_refs != nullptr) {
+            table_refs->set_print_sample(print_sample_);
+        }
+        if (where != nullptr) {
+            where->set_print_sample(print_sample_);
+        }
+        for (int i = 0; i < set_list.size(); i++) {
+            set_list[i]->set_print_sample(print_sample_);
+        }
+        if (order != nullptr) {
+            order->set_print_sample(print_sample_);
+        }
+        if (limit != nullptr) {
+            limit->set_print_sample(print_sample_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         static const char* ignore_str[] = {"", " IGNORE"};
@@ -422,22 +456,53 @@ struct SelectStmt : public DmlNode {
     ExprNode* having = nullptr;
     OrderByClause* order = nullptr;
     LimitClause* limit = nullptr;
-    SelectLock lock;
+    bool is_in_braces = false;
+    SelectLock lock = SL_NONE;
     SelectStmt() {
         node_type = NT_SELECT;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < fields.size(); i++) {
+            fields[i]->set_print_sample(print_sample_);
+        }
+        if (table_refs != nullptr) {
+            table_refs->set_print_sample(print_sample_);
+        }
+        if (where != nullptr) {
+            where->set_print_sample(print_sample_);
+        }
+        if (group != nullptr) {
+            group->set_print_sample(print_sample_);
+        }
+        if (having != nullptr) {
+            having->set_print_sample(print_sample_);
+        }
+        if (order != nullptr) {
+            order->set_print_sample(print_sample_);
+        }
+        if (limit != nullptr) {
+            limit->set_print_sample(print_sample_);
+        }
+    }
+
     virtual void to_stream(std::ostream& os) const override {
-        static const char* for_lock_str[] = {"", " FOR UPDATE", " IN SHARED MODE"};
+        if (is_in_braces) {
+            os << "(";
+        }
         os << "SELECT";
         select_opt->to_stream(os);
         for (int i = 0; i < fields.size(); ++i) {
+            if (i != 0) {
+                os << ",";
+            }
             os << fields[i];
         }
         if (table_refs != nullptr) {
             os << " FROM" << table_refs;
         }
         if (where != nullptr) {
-            os << " WHERE" << where;
+            os << " WHERE " << where;
         }
         if (group != nullptr) {
             os << " GROUP BY" << group;
@@ -452,6 +517,130 @@ struct SelectStmt : public DmlNode {
             os << " LIMIT" << limit;
         }
         os << for_lock_str[lock];
+        if (is_in_braces) {
+            os << ")";
+        }
+    }
+};
+
+struct UnionStmt : public DmlNode {
+    bool distinct = false;   // 只支持全部去重
+    Vector<SelectStmt*> select_stmts;
+    OrderByClause* order = nullptr;
+    LimitClause* limit = nullptr;
+    SelectLock lock = SL_NONE;
+    bool is_in_braces = false;
+    UnionStmt() {
+        node_type = NT_UNION;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        for (int i = 0; i < select_stmts.size(); i++) {
+            select_stmts[i]->set_print_sample(print_sample_);
+        }
+    }
+
+    virtual void to_stream(std::ostream& os) const override {
+        if (is_in_braces) {
+            os << "(";
+        }
+         for (int i = 0; i < select_stmts.size(); i++) {
+            select_stmts[i]->to_stream(os);
+            if (i < select_stmts.size() -1) {
+                if (distinct) {
+                    os << " UNION ";
+                } else {
+                    os << " UNION ALL ";
+                }
+            }
+        }
+        if (order != nullptr) {
+            os << " ORDER BY" << order;
+        }
+        if (limit != nullptr) {
+            os << " LIMIT" << limit;
+        }
+        os << for_lock_str[lock];
+        if (is_in_braces) {
+            os << ")";
+        }
+    }
+};
+
+struct InsertStmt : public DmlNode {
+    PriorityEnum priority;
+    bool is_replace = false;
+    bool is_ignore = false;
+    TableName* table_name = nullptr;
+    DmlNode* subquery_stmt = nullptr;
+    Vector<ColumnName*> columns;
+    Vector<RowExpr*> lists;
+    Vector<Assignment*> on_duplicate;
+    InsertStmt() {
+        node_type = NT_INSERT;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < lists.size(); i++) {
+            lists[i]->set_print_sample(print_sample_);
+        }
+        for (int i = 0; i < on_duplicate.size(); i++) {
+            on_duplicate[i]->set_print_sample(print_sample_);
+        }
+    }
+    static InsertStmt* New(butil::Arena& arena) {
+        InsertStmt* insert = new(arena.allocate(sizeof(InsertStmt)))InsertStmt();
+        insert->columns.reserve(10, arena);
+        insert->lists.reserve(10, arena);
+        insert->on_duplicate.reserve(10, arena);
+        return insert;
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        static const char* desc_str[] = {" INSERT", " REPLACE"};
+        static const char* ignore_str[] = {"", " IGNORE"};
+        os << desc_str[is_replace];
+        os << priority_str[priority] << ignore_str[is_ignore] << " INTO ";
+        if (table_name != nullptr) {
+            table_name->to_stream(os);
+        }
+        if (columns.size() > 0) {
+            os << "(";
+        }
+        for (int i = 0; i < columns.size(); ++i) {
+            columns[i]->to_stream(os);
+            if (i != columns.size() - 1) {
+                os << ", ";
+            }
+        }
+        if (columns.size() > 0) {
+            os << ")";
+        }
+        if (subquery_stmt != nullptr) {
+            os << " ";
+            subquery_stmt->to_stream(os);
+            return ;
+        }
+        os << " VALUES";
+        if (print_sample) {
+            os << " (?) ";
+        } else {
+            for (int i = 0; i < lists.size(); ++i) {
+                os << " ";
+                lists[i]->to_stream(os);
+                if (i != lists.size() - 1) {
+                    os << ",";
+                }
+            }
+        }
+        if (on_duplicate.size() != 0) {
+            os << " ON DUPLICATE KEY UPDATE";
+        }
+        for (int i = 0; i < on_duplicate.size(); ++i) {
+            os << " ";
+            on_duplicate[i]->to_stream(os);
+            if (i != on_duplicate.size() - 1) {
+                os << ",";
+            }
+        }
     }
 };
 
@@ -489,6 +678,14 @@ struct ShowStmt : public DmlNode {
     bool is_full = false;
     bool is_global = false;
     ExprNode* where = nullptr;
+};
+
+struct ExplainStmt : public DmlNode {
+    StmtNode* stmt = nullptr;
+    String format;
+    ExplainStmt() {
+        node_type = NT_EXPLAIN;
+    }
 };
 
 } 

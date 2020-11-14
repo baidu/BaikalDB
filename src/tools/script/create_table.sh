@@ -8,8 +8,8 @@ echo -e "创建table\n"
 curl -d '{
     "op_type":"OP_CREATE_TABLE",
     "table_info": {
-        "table_name": "TestTb",
-        "database": "TestDb",
+        "table_name": "ideacontent",
+        "database": "TestDB",
         "namespace_name": "TEST_NAMESPACE",
         "fields": [ {
                         "field_name" : "account_id",

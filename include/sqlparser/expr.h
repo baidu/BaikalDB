@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,8 @@ enum ExprType {
     ET_COLUMN,
     ET_LITETAL,
     ET_FUNC,
-    ET_ROW_EXPR
+    ET_ROW_EXPR,
+    ET_SUB_QUERY_EXPR
 };
 struct ExprNode : public Node {
     ExprType expr_type;
@@ -61,15 +62,17 @@ enum FuncType {
     FT_LOGIC_AND,
     FT_LOGIC_OR,
     FT_LOGIC_XOR,
-    // is like in null ture
+    // is like in null true
     FT_IS_NULL,
     FT_IS_TRUE,
     FT_IS_UNKNOWN,
     FT_IN,
     FT_LIKE,
+    FT_EXACT_LIKE,
+    FT_MATCH_AGAINST,
     FT_BETWEEN,
     /* use in on dup key update */
-    FT_VALUES
+    FT_VALUES,
     /*
     // bulit-in agg func
     FT_COUNT,
@@ -91,6 +94,7 @@ enum FuncType {
     FT_SUBSTRING,
     FT_TRIM
     */
+    FT_BOOL
 };
 
 struct FuncExpr : public ExprNode {
@@ -99,6 +103,7 @@ struct FuncExpr : public ExprNode {
     bool is_not = false;
     bool distinct = false;
     bool is_star = false;
+    bool has_subquery = false;
     FuncExpr() {
         fn_name = nullptr;
         expr_type = ET_FUNC;
@@ -111,6 +116,28 @@ struct FuncExpr : public ExprNode {
     static FuncExpr* new_unary_op_node(FuncType t, Node* arg1, butil::Arena& arena);
     static FuncExpr* new_binary_op_node(FuncType t, Node* arg1, Node* arg2, butil::Arena& arena);
     static FuncExpr* new_ternary_op_node(FuncType t, Node* arg1, Node* arg2, Node* arg3, butil::Arena& arena);
+};
+
+struct SelectStmt;
+struct UnionStmt;
+enum CompareType {
+    CMP_ANY,
+    CMP_SOME,
+    CMP_ALL
+};
+struct SubqueryExpr : public ExprNode {
+    SelectStmt* select_stmt = nullptr;
+    UnionStmt*  union_stmt = nullptr;
+    CompareType cmp_type = CMP_ANY;
+    bool is_exists = false;
+    bool is_cmp_expr = false;
+    SubqueryExpr() {
+        expr_type = ET_SUB_QUERY_EXPR;
+    }
+    virtual void print() const override {
+        std::cout << this << std::endl;
+    }
+    virtual void to_stream(std::ostream& os) const override;
 };
 
 struct ColumnName : public ExprNode {
@@ -134,7 +161,9 @@ enum LiteralType {
     LT_DOUBLE,
     LT_STRING,
     LT_BOOL,
-    LT_NULL
+    LT_NULL,
+    LT_PLACE_HOLDER,
+    LT_HEX
 };
 
 struct LiteralExpr : public ExprNode {
@@ -160,16 +189,22 @@ struct LiteralExpr : public ExprNode {
             case LT_STRING:
                 std::cout << _u.str_val.value;
                 break;
+            case LT_HEX:
+                std::cout << _u.str_val.value;
+                break;
             case LT_BOOL:
                 std::cout << _u.bool_val;
                 break;
             case LT_NULL:
                 std::cout << "NULL";
                 break;
+            case LT_PLACE_HOLDER:
+                std::cout << "?(" << _u.int64_val << ")";
         }
         std::cout << std::endl;
     }
     virtual void to_stream(std::ostream& os) const override;
+    virtual std::string to_string() const override;
 
     static LiteralExpr* make_int(const char* str, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
@@ -185,19 +220,61 @@ struct LiteralExpr : public ExprNode {
         return lit;
     }
 
+
+    static LiteralExpr* make_bit(const char* str, size_t len, butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        std::string out_str;
+        out_str.reserve(len / 8 + 1);
+        size_t pos = len % 8;
+        if (pos != 0) {
+            out_str.append(1, bit_to_char(str, pos));
+        }
+        for (; pos < len; pos += 8) {
+            out_str.append(1, bit_to_char(str + pos, 8));
+        }
+        lit->_u.str_val.strdup(out_str.c_str(), out_str.size(), arena);
+        lit->literal_type = LT_HEX;
+        return lit;
+    }
+
+    static LiteralExpr* make_hex(const char* str, size_t len, butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        std::string out_str;
+        out_str.reserve(len / 2 + 1);
+        size_t pos = len % 2;
+        if (pos != 0) {
+            out_str.append(1, hex_to_char(str, pos));
+        }
+        for (; pos < len; pos += 2) {
+            out_str.append(1, hex_to_char(str + pos, 2));
+        }
+        lit->_u.str_val.strdup(out_str.c_str(), out_str.size(), arena);
+        lit->literal_type = LT_HEX;
+        return lit;
+    }
+
     static LiteralExpr* make_string(const char* str, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_STRING;
         // trim ' "
-        lit->_u.str_val.strdup(str + 1, strlen(str) - 2, arena);
+        if (str[0] == '"' || str[0] == '\'') {
+            //处理sql "query in ('\x00text', 'text')" ，strlen(str)=1
+            auto str_len = strlen(str);
+            auto cut_num = (str_len == 1 || str[str_len - 1] != str[0]) ? 1 : 2;
+            lit->_u.str_val.strdup(str + 1, str_len - cut_num, arena);
+        } else {
+            lit->_u.str_val.strdup(str, strlen(str), arena);
+        }
         return lit;
     }
+
     static LiteralExpr* make_string(String value, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_STRING;
         lit->_u.str_val = value;
         return lit;
     }
+
     static LiteralExpr* make_true(butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_BOOL;
@@ -208,7 +285,7 @@ struct LiteralExpr : public ExprNode {
     static LiteralExpr* make_false(butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_BOOL;
-        lit->_u.bool_val = true;
+        lit->_u.bool_val = false;
         return lit;
     }
     static LiteralExpr* make_null(butil::Arena& arena) {
@@ -216,7 +293,15 @@ struct LiteralExpr : public ExprNode {
         lit->literal_type = LT_NULL;
         return lit;
     }
+
+    static LiteralExpr* make_place_holder(int place_holder_id, butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        lit->literal_type = LT_PLACE_HOLDER;
+        lit->_u.int64_val = place_holder_id;
+        return lit;
+    }
 };
+
 struct RowExpr : public ExprNode {
     RowExpr() {
         expr_type = ET_ROW_EXPR;

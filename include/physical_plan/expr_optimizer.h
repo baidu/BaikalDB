@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,15 +31,21 @@ public:
         if (packet_node == nullptr) {
             return -1;
         }
-        int ret = plan->expr_optimize(ctx->mutable_tuple_descs());
-        if (ret == -2) {
-            DB_WARNING("filter always false");
-            ctx->return_empty = true;
-            return 0;
-        } else {
-            return ret;
+        int ret = 0;
+        if (packet_node->op_type() == pb::OP_UNION) {
+            analyze_union(ctx, packet_node);
         }
+        
+        if (ctx->has_derived_table) {
+            ret = analyze_derived_table(ctx, packet_node);
+            if (ret < 0) {
+                return ret;
+            }
+        }
+        return plan->expr_optimize(ctx);
     }
+    static void analyze_union(QueryContext* ctx, PacketNode* packet_node);
+    static int analyze_derived_table(QueryContext* ctx, PacketNode* packet_node);
 };
 }
 

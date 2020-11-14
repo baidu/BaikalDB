@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,16 +16,23 @@
 
 #include <string>
 #include <vector>
-#ifdef BAIDU_INTERNAL
-#include <webfoot_naming.h>
-#include "naming.pb.h"
-#endif
 #include "common.h"
 
 namespace baikaldb {
 #define ERROR_SET_RESPONSE(response, errcode, err_message, op_type, log_id) \
     do {\
         DB_FATAL("request op_type:%d, %s ,log_id:%lu",\
+                op_type, err_message, log_id);\
+        if (response != NULL) {\
+            response->set_errcode(errcode);\
+            response->set_errmsg(err_message);\
+            response->set_op_type(op_type);\
+        }\
+    }while (0);
+
+#define ERROR_SET_RESPONSE_WARN(response, errcode, err_message, op_type, log_id) \
+    do {\
+        DB_WARNING("request op_type:%d, %s ,log_id:%lu",\
                 op_type, err_message, log_id);\
         if (response != NULL) {\
             response->set_errcode(errcode);\
@@ -45,7 +52,7 @@ namespace baikaldb {
 #define RETURN_IF_NOT_INIT(init, response, log_id) \
     do {\
         if (!init) {\
-            DB_FATAL("have not init, log_id:%lu", log_id);\
+            DB_WARNING("have not init, log_id:%lu", log_id);\
             response->set_errcode(pb::HAVE_NOT_INIT);\
             response->set_errmsg("have not init");\
             return;\

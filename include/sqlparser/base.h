@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <unordered_map>
 
 #ifdef BAIDU_INTERNAL
 #include <base/arena.h>
@@ -50,8 +51,10 @@ enum NodeType {
     NT_UPDATE,
     NT_DELETE,
     NT_SELECT,
+    NT_UNION,
     NT_TRUNCATE,
     NT_SHOW,
+    NT_EXPLAIN,
     /*EXPR*/
     NT_EXPR,
 
@@ -66,75 +69,34 @@ enum NodeType {
     NT_TYPE_OPT,     // TypeOption (unsigned, zerofill) 
     NT_FIELD_TYPE,   // TypeOption (unsigned, zerofill) 
     NT_DROP_TABLE,
+    NT_RESTORE_TABLE,
     NT_DATABASE_OPT,
     NT_CREATE_DATABASE,
     NT_DROP_DATABASE,
+    NT_ALTER_TABLE,
+    NT_ALTER_SEPC,
 
     NT_START_TRANSACTION,
     NT_COMMIT_TRANSACTION,
     NT_ROLLBACK_TRANSACTION,
     NT_SET_CMD,
-    NT_VAR_ASSIGN
+    NT_VAR_ASSIGN,
+    NT_NEW_PREPARE,
+    NT_EXEC_PREPARE,
+    NT_DEALLOC_PREPARE,
+    NT_KILL
 };
-
-struct String {
-    char* value;
-    void strdup(const char* str, int len, butil::Arena& arena) {
-        value = (char*)arena.allocate(len + 1);
-        memcpy(value, str, len);
-        value[len] = '\0';
-    }
-    void strdup(const char* str, butil::Arena& arena) {
-        strdup(str, strlen(str), arena);
-    }
-    void append(const char* str, butil::Arena& arena) {
-        int len = strlen(str);
-        int old_len = strlen(value);
-        char* value_new = (char*)arena.allocate(len + old_len + 1);
-        memcpy(value_new, value, old_len);
-        memcpy(value_new, str, len);
-        value_new[len + old_len] = '\0';
-        value = value_new;
-    }
-    // cannot have constructor in union
-    void set_null() {
-        value = nullptr;
-    }
-    const char* c_str() const {
-        return value;
-    }
-    bool empty() const {
-        return (value == nullptr || value[0] == '\0');
-    }
-    std::string to_lower() const {
-        std::string tmp = value;
-        std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::tolower);
-        return tmp;
-    }
-    // shallow copy
-    String& operator=(std::nullptr_t n) {
-        value = nullptr;
-        return *this;
-    }
-    String& operator=(char* str) {
-        value = str;
-        return *this;
-    }
-    String& operator=(const char* str) {
-        value = (char*)str;
-        return *this;
-    }
-};
-inline std::ostream& operator<<(std::ostream& os, const String& str) {
-    if (str.value == nullptr) {
-        return os;
-    }
-    os << str.value;
-    return os;
-}
 
 struct Node {
+    virtual ~Node() {}
     NodeType node_type = NT_BASE;
+    bool print_sample = false;
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        for (int i = 0; i < children.size(); i++) {
+            children[i]->set_print_sample(print_sample_);
+        }
+    }
     // children 可以用来作为子树，函数参数，列表等功能
     Vector<Node*> children;
     virtual void print() const {
@@ -146,7 +108,7 @@ struct Node {
     //   os.str();
     virtual void to_stream(std::ostream& os) const {}
 
-    std::string to_string() const {
+    virtual std::string to_string() const {
         std::ostringstream os;
         to_stream(os);
         return os.str();

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,12 @@
 #include <boost/make_shared.hpp>
 #include "network_socket.h"
 #include "query_context.h"
+#include "exec_node.h"
+#include "binlog_context.h"
 
 namespace baikaldb {
 static UserInfo dummy;
+bvar::Adder<int64_t> NetworkSocket::bvar_prepare_count{"bvar_prepare_count"};
 
 NetworkSocket::NetworkSocket() {
     //send_buf = boost::make_shared<DataBuffer>();
@@ -30,9 +33,7 @@ NetworkSocket::NetworkSocket() {
                     SEND_BUF_DEFAULT_SIZE, SELF_BUF_DEFAULT_SIZE);
     }
 
-    in_pool = false;
     send_buf_offset = 0;
-    header_offset = 0;
     header_read_len = 0;
     fd = -1;
     port = 0;
@@ -40,18 +41,67 @@ NetworkSocket::NetworkSocket() {
     use_times = 0;
     is_authed = false;
     is_counted = false;
+    has_multi_packet = false;
     packet_id = 0;
     packet_len = 0;
+    current_packet_len = 0;
     packet_read_len = 0;
     is_handshake_send_partly = 0;
+    last_insert_id = 0;
     has_error_packet = false;
     is_auth_result_send_partly = 0;
     query_ctx.reset(new QueryContext);
     user_info.reset(new UserInfo);
-    //user_info = &dummy;
+    pb::ExprNode str_node;
+    str_node.set_node_type(pb::STRING_LITERAL);
+    str_node.set_col_type(pb::STRING);
+    str_node.set_num_children(0);
+    str_node.mutable_derive_node()->set_string_val("utf8");
+    session_vars["character_set_database"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("utf8_general_ci");
+    session_vars["collation_database"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("REPEATABLE-READ");
+    session_vars["tx_isolation"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("Source distribution");
+    session_vars["version_comment"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("/home/mysql/mysql/share/mysql/english/");
+    session_vars["language"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("OFF");
+    session_vars["query_cache_type"] = str_node;
+    str_node.mutable_derive_node()->set_string_val(" ");
+    session_vars["sql_mode"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("CST");
+    session_vars["system_time_zone"] = str_node;
+    str_node.mutable_derive_node()->set_string_val("SYSTEM");
+    session_vars["time_zone"] = str_node;
+
+    pb::ExprNode int_node;
+    int_node.set_node_type(pb::INT_LITERAL);
+    int_node.set_col_type(pb::INT64);
+    int_node.set_num_children(0);
+    int_node.mutable_derive_node()->set_int_val(28800);
+    session_vars["interactive_timeout"] = int_node;
+    int_node.mutable_derive_node()->set_int_val(0);
+    session_vars["lower_case_table_names"] = int_node;
+    int_node.mutable_derive_node()->set_int_val(268435456);
+    session_vars["max_allowed_packet"] = int_node;
+    int_node.mutable_derive_node()->set_int_val(16384);
+    session_vars["net_buffer_length"] = int_node;
+    int_node.mutable_derive_node()->set_int_val(60);
+    session_vars["net_write_timeout"] = int_node;
+    int_node.mutable_derive_node()->set_int_val(335544320);
+    session_vars["query_cache_size"] = int_node;
+    int_node.mutable_derive_node()->set_int_val(28800);
+    session_vars["wait_timeout"] = int_node;
+    int_node.mutable_derive_node()->set_int_val(1);
+    session_vars["auto_increment_increment"] = int_node;
+    session_vars["autocommit"] = int_node;
+
+    bthread_mutex_init(&region_lock, nullptr);
 }
 
 NetworkSocket::~NetworkSocket() {
+    //DB_WARNING_CLIENT(this, "NetworkSocket close");
     if (fd > 0) {
         close(fd);
     }
@@ -60,57 +110,11 @@ NetworkSocket::~NetworkSocket() {
     delete send_buf;
     self_buf = nullptr;
     send_buf = nullptr;
-}
 
-void NetworkSocket::reset_send_buf() {
-    //send_buf.reset();
-    //send_buf = boost::make_shared<DataBuffer>();
-    //send_buf_offset = 0;
-}
-
-bool NetworkSocket::reset() {
-    if (fd > 0) {
-        if (close(fd) != 0) {
-            DB_FATAL("Failed to close fd.socket_type:[%u],errinfo:[%s]",
-                            socket_type, strerror(errno));
-            return false;
-        }
+    for (auto& pair : cache_plans) {
+        delete pair.second.root;
     }
-    send_buf->byte_array_clear();
-    self_buf->byte_array_clear();
-    has_error_packet = false;
-
-    ip.clear();
-    port = 0;
-    memset(&addr, 0, sizeof(addr));
-    fd = -1;
-    in_pool = false;
-    socket_type = CLIENT_SOCKET;
-    use_times = 0;
-    send_buf_offset = 0;
-    header_read_len = 0;
-    header_offset = 0;
-    is_authed = false;
-    is_counted = false;
-    packet_id = 0;
-    packet_len = 0;
-    packet_read_len = 0;
-    is_handshake_send_partly = 0;
-    is_auth_result_send_partly = 0;
-    current_db.clear();
-    username.clear();
-
-    query_ctx.reset(new QueryContext);
-    user_info.reset(new UserInfo);
-    autocommit = true;
-    //multi_state_txn = false;
-    txn_id = 0;
-    new_txn_id = 0;
-    seq_id = 0;
-    need_rollback_seq.clear();
-    region_infos.clear();
-    cache_plans.clear();
-    return true;
+    bthread_mutex_destroy(&region_lock);
 }
 
 bool NetworkSocket::transaction_has_write() {
@@ -119,7 +123,7 @@ bool NetworkSocket::transaction_has_write() {
         return true;
     }
     for (auto& pair : cache_plans) {
-        pb::OpType type = pair.second.op_type();
+        pb::OpType type = pair.second.op_type;
         if (type == pb::OP_INSERT || type == pb::OP_DELETE || type == pb::OP_UPDATE) {
             return true;
         }
@@ -127,28 +131,63 @@ bool NetworkSocket::transaction_has_write() {
     return false;
 }
 
+bool NetworkSocket::need_send_binlog() {
+    if (!open_binlog) {
+        return false;
+    }
+    for (auto& pair : cache_plans) {
+        pb::OpType type = pair.second.op_type;
+        if (type == pb::OP_INSERT || type == pb::OP_DELETE || type == pb::OP_UPDATE) {
+            return true;
+        }
+    }
+    return false;    
+}
+
+SmartBinlogContext NetworkSocket::get_binlog_ctx() {
+    if (binlog_ctx == nullptr) {
+        binlog_ctx.reset(new BinlogContext);
+    }
+    return binlog_ctx;
+}
+
 void NetworkSocket::on_begin(uint64_t txn_id) {
     this->txn_id = txn_id;
+    this->primary_region_id = -1;
 }
 
 void NetworkSocket::on_commit_rollback() {
+    update_old_txn_info();
     txn_id = 0;
     new_txn_id = 0;
     seq_id = 0;
+    open_binlog = false;
     need_rollback_seq.clear();
     //multi_state_txn = !autocommit;
-    region_infos.clear();
+    for (auto& pair : cache_plans) {
+        delete pair.second.root;
+    }
     cache_plans.clear();
+    region_infos.clear();
+    binlog_ctx.reset();
+}
+
+void NetworkSocket::update_old_txn_info() {
+    // for print log
+    if (query_ctx->stat_info.old_txn_id == 0) {
+        query_ctx->stat_info.old_txn_id = txn_id;
+        query_ctx->stat_info.old_seq_id = seq_id;
+    }
 }
 
 bool NetworkSocket::reset_when_err() {
     packet_len = 0;
+    current_packet_len = 0;
     packet_read_len = 0;
     packet_id = 0;
-
+    has_multi_packet = false;
     send_buf_offset = 0;
     header_read_len = 0;
-    header_offset = 0;
     is_auth_result_send_partly = 0;
     is_handshake_send_partly = 0;
     self_buf->byte_array_clear();
@@ -158,42 +197,24 @@ bool NetworkSocket::reset_when_err() {
     return 0;
 }
 
-SocketPool::~SocketPool() {
-    while (_pool.size() > 0) {
-        //SmartSocket sock = _pool.front();
-        //sock = _pool.front();
-        _pool.pop_front();
-        //delete sock;
-    }
-    pthread_mutex_destroy(&_pool_mutex);
+uint64_t NetworkSocket::get_global_conn_id() {
+    uint64_t instance_part = server_instance_id & 0x7FFFFF;
+    return (instance_part << 40 | (conn_id & 0xFFFFFFFFFFUL));
 }
 
-SmartSocket SocketPool::fetch(SocketType type) {
-    // Fetch socket from poll.
-    SmartSocket sock;
-    pthread_mutex_lock(&_pool_mutex);
-    if (!_pool.empty()) {
-        sock = _pool.front();
-        _pool.pop_front();
-        sock->use_times++;
-    } else {
-        // Create a new socket.
-        sock = SmartSocket(new NetworkSocket());
-        if (sock == nullptr) {
-            DB_FATAL("Failed to new NetworkSocket.");
-            pthread_mutex_unlock(&_pool_mutex);
-            return SmartSocket();
-        }
+SmartSocket SocketFactory::create(SocketType type) {
+    SmartSocket sock = SmartSocket(new NetworkSocket());
+    if (sock == nullptr) {
+        DB_FATAL("Failed to new NetworkSocket.");
+        return SmartSocket();
     }
     sock->conn_id = _cur_conn_id++;
-    pthread_mutex_unlock(&_pool_mutex);
     sock->shutdown = false;
     // Set socket attribute.
     if (type == SERVER_SOCKET) {
         sock->socket_type = SERVER_SOCKET;
         int ret = socket(AF_INET, SOCK_STREAM, 0);
         if (ret < 0) {
-            free(sock);
             DB_FATAL("Failed to set server socket.");
             return SmartSocket();
         }
@@ -202,37 +223,9 @@ SmartSocket SocketPool::fetch(SocketType type) {
         sock->socket_type = CLIENT_SOCKET;
         sock->packet_id = 0;
     }
-    sock->in_pool = false;
     sock->last_active = time(nullptr);
     gettimeofday(&(sock->connect_time), nullptr);
     return sock;
 }
 
-void SocketPool::free(SmartSocket sock) {
-    if (nullptr == sock) {
-        return;
-    }
-    if (sock->use_times > NETWORK_SOCKET_MAX_USE_TIMES) {
-        DB_FATAL("network_socket sock->fd=%d sock->is_client=%d use times=%d going to free",
-                        sock->fd, sock->socket_type, sock->use_times);
-        sock.reset();
-    } else {
-        if (!sock->reset()) {
-            sock.reset();
-            return;
-        }
-        sock->mutex.unlock();
-        pthread_mutex_lock(&_pool_mutex);
-        //boost::mutex::scoped_lock op_lock(_pool_mutex);
-        if (sock->in_pool) {
-            pthread_mutex_unlock(&_pool_mutex);
-            return;
-        }
-        _pool.push_back(sock);
-        sock->in_pool = true;
-        pthread_mutex_unlock(&_pool_mutex);
-    }
-    return;
-}
-
-} // namespace baikal
+} // namespace baikaldb

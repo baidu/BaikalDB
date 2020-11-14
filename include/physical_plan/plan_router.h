@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,10 +15,10 @@
 #pragma once
 
 #include "exec_node.h"
-#include "scan_node.h"
+#include "rocksdb_scan_node.h"
 #include "insert_node.h"
-#include "fetcher_node.h"
 #include "truncate_node.h"
+#include "kill_node.h"
 #include "query_context.h"
 #include "transaction_node.h"
 #include "schema_factory.h"
@@ -29,15 +29,28 @@ public:
     /* 通过主键索引获取所在的regions
      */
     int analyze(QueryContext* ctx);
-    int scan_plan_router(ScanNode* scan_node);
+    int scan_plan_router(RocksdbScanNode* scan_node,  
+        const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
+        const std::function<pb::TupleDescriptor*(int32_t)>& get_tuple_desc,
+        bool has_join);
 private:
     template<typename T>
     int insert_node_analyze(T* node, QueryContext* ctx); 
 
-    int scan_node_analyze(ScanNode* scan_node, QueryContext* ctx);
+    int scan_node_analyze(RocksdbScanNode* scan_node, 
+        QueryContext* ctx, bool has_join);
+    
     int truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ctx);
+    int kill_node_analyze(KillNode* kill_node, QueryContext* ctx);
     int transaction_node_analyze(TransactionNode* txn_node, QueryContext* ctx);
+    int select_index(pb::ScanNode* scan_node, std::vector<int>& multi_reverse_index);
 };
+
+class PartitionAnalyze {
+public:
+    int analyze(QueryContext* ctx);
+};
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

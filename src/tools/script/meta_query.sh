@@ -34,21 +34,21 @@ echo -e '\n'
 echo -e "查询某个或者全部的namespace"
 curl -d '{
     "op_type" : "QUERY_NAMESPACE",
-    "namespace_name" : "TEST_NAMESPACE"
+    "namespace_name" : "Test"
 }' http://$1/MetaService/query
 
 echo -e '\n'
 echo -e "查询某个或者全部的database"
 curl -d '{
     "op_type" : "QUERY_DATABASE",
-    "database" : "TestDb"
+    "database" : "TEST"
 }' http://$1/MetaService/query
 
 echo -e '\n'
 echo -e "查询某个或者全部的table"
 curl -d '{
     "op_type" : "QUERY_SCHEMA",
-    "table_name" : "TestTb"
+    "table_name" : "ideacontent"
 }' http://$1/MetaService/query
 
 echo -e '\n'

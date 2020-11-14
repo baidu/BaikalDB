@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ int DeleteNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _table_id =  node.derive_node().delete_node().table_id();
+    _global_index_id = _table_id;
     for (auto& slot : node.derive_node().delete_node().primary_slots()) {
         _primary_slots.push_back(slot);
     }
@@ -36,20 +37,29 @@ int DeleteNode::init(const pb::PlanNode& node) {
 }
 
 int DeleteNode::open(RuntimeState* state) { 
+    int num_affected_rows = 0;
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([this, &num_affected_rows](TraceLocalNode& local_node) {
+            local_node.set_affect_rows(num_affected_rows);
+            local_node.append_description() << " increase_rows:" << _num_increase_rows;
+    }));
+    
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
+    }
+    if (_is_explain) {
+        return 0;
     }
     ret = init_schema_info(state);
     if (ret == -1) {
-        DB_WARNING("init schema failed fail:%d", ret);
+        DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
-    Transaction* txn = state->txn();
+    auto txn = state->txn();
     if (txn == nullptr) {
-        DB_WARNING("txn is nullptr: region:%ld", _region_id);
+        DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
         return -1;
     }
     if (FLAGS_disable_writebatch_index) {
@@ -57,20 +67,22 @@ int DeleteNode::open(RuntimeState* state) {
     }
 
     bool eos = false;
-    int num_affected_rows = 0;
-    AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
-    int i = 0;
-    for (auto& pair : state->reverse_index_map()) {
-        pair.second->sync(ams[i]);
-        i++;
-    }
     SmartRecord record = _factory->new_record(*_table_info);
+    int64_t tmp_num_increase_rows = 0;
     do {
         RowBatch batch;
         ret = _children[0]->get_next(state, &batch, &eos);
         if (ret < 0) {
-            DB_WARNING("children:get_next fail:%d", ret);
+            DB_WARNING_STATE(state, "children:get_next fail:%d", ret);
             return ret;
+        }
+
+        // 不在事务模式下，采用小事务提交防止内存暴涨
+        // 最后一个batch和原txn放在一起，这样对小事务可以和原来保持一致
+        if (state->txn_id == 0 && !eos) {
+            _txn = state->create_batch_txn();
+        } else {
+            _txn = state->txn();
         }
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             MemRow* row = batch.get_row().get();
@@ -83,14 +95,31 @@ int DeleteNode::open(RuntimeState* state) {
             }
             ret = delete_row(state, record);
             if (ret < 0) {
-                DB_WARNING("delete_row fail");
+                DB_WARNING_STATE(state, "delete_row fail");
                 return -1;
             }
             num_affected_rows += ret;
         }
+        _txn->batch_num_increase_rows = _num_increase_rows - tmp_num_increase_rows;
+        if (state->need_txn_limit) {
+            bool is_limit = TxnLimitMap::get_instance()->check_txn_limit(state->txn_id, batch.size());
+            if (is_limit) {
+                DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%d", 
+                    state->region_id(), state->txn_id, batch.size());
+                return -1;
+            }
+        }
+        if (state->txn_id == 0 && !eos) {
+            if (state->is_separate) {
+                //batch单独走raft,raft on_apply中commit
+                state->raft_func(state, _txn);
+            } else {
+                _txn->commit();
+            }
+        }
+        
+        tmp_num_increase_rows = _num_increase_rows;
     } while (!eos);
-    // auto_rollback.release();
-    // txn->commit();
     state->set_num_increase_rows(_num_increase_rows);
     return num_affected_rows;
 }

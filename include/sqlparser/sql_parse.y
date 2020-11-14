@@ -1,21 +1,22 @@
 %{
-// Copyright 2013 The ql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSES/QL-LICENSE file.
-// Copyright 2015 PingCAP, Inc.
-// Modifications copyright (C) 2018, Baidu.com, Inc.
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// See the License for the specific language governing permissions and
+// Copyright 2013 The ql Authors. All rights reserved.  
+// Use of this source code is governed by a BSD-style   
+// license that can be found in the LICENSES/QL-LICENSE file.   
+// Copyright 2015 PingCAP, Inc. 
+// Modifications copyright (C) 2018-present, Baidu.com, Inc.    
+// Licensed under the Apache License, Version 2.0 (the "License");  
+// you may not use this file except in compliance with the License. 
+// You may obtain a copy of the License at  
+//  
+//     http://www.apache.org/licenses/LICENSE-2.0   
+//  
+// Unless required by applicable law or agreed to in writing, software  
+// distributed under the License is distributed on an "AS IS" BASIS,    
+// See the License for the specific language governing permissions and  
 // limitations under the License.
 
 #include <stdio.h>
+#include <iostream>
 #define YY_DECL
 #include "parser.h"
 using parser::SqlParser;
@@ -43,15 +44,15 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %}
 
 %defines
-%output="sql_parse.yacc.cc"
-%name-prefix="sql_"
+%output "sql_parse.yacc.cc"
+%name-prefix "sql_"
 %error-verbose
 %lex-param {yyscan_t yyscanner}
 %lex-param {SqlParser* parser}
 %parse-param {yyscan_t yyscanner}
 %parse-param {SqlParser* parser}
 
-%token_table
+%token-table
 %pure-parser
 %verbose
 
@@ -59,18 +60,18 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 {
     int integer;
     Node* item;  // item can be used as list/array
-    ExprNode* expr;
-    StmtNode* stmt;
-    Assignment* assign;
-    String string;
+    ExprNode*       expr;
+    StmtNode*       stmt;
+    Assignment*     assign;
+    String          string;
     Vector<String>* string_list;
-    IndexHint* index_hint;
+    IndexHint*      index_hint;
     SelectStmtOpts* select_opts;
-    SelectField* select_field;
-    GroupByClause* group_by;
-    OrderByClause* order_by;
-    ByItem* by_item;
-    LimitClause* limit;
+    SelectField*    select_field;
+    GroupByClause*  group_by;
+    OrderByClause*  order_by;
+    ByItem*         by_item;
+    LimitClause*    limit;
 }
 
 %token 
@@ -155,6 +156,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     KILL
     LEFT
     LIKE
+    EXACT_LIKE
     LIMIT
     LINES
     LOAD
@@ -164,6 +166,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LONGBLOB
     LONGTEXT
     LOW_PRIORITY
+    MATCH
     MAXVALUE
     MEDIUMBLOB
     MEDIUMINT
@@ -261,6 +264,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     /* The following tokens belong to UnReservedKeyword. */
     ACTION
     AFTER
+    AGAINST
     ALWAYS
     ALGORITHM
     ANY
@@ -329,6 +333,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     INVOKER
     JSON
     KEY_BLOCK_SIZE
+    LANGUAGE
     LOCAL
     LESS
     LEVEL
@@ -364,6 +369,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     QUERIES
     QUICK
     RECOVER
+    RESTORE 
     REDUNDANT
     RELOAD
     REPEATABLE
@@ -413,6 +419,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     WARNINGS
     WEEK
     YEAR
+    HLL
 
     /* The following tokens belong to builtin functions. */
     ADDDATE
@@ -440,6 +447,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SUBDATE
     SUBSTR
     SUBSTRING
+    TIMESTAMPADD
+    TIMESTAMPDIFF
     SUM
     SYSDATE
     SYSTEM_USER
@@ -447,10 +456,11 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     VARIANCE
     VAR_POP
     VAR_SAMP
+    USER_AGG
 
 %token EQ_OP ASSIGN_OP  MOD_OP  GE_OP  GT_OP LE_OP LT_OP NE_OP AND_OP OR_OP NOT_OP LS_OP RS_OP CHINESE_DOT
 %token <string> IDENT 
-%token <expr> STRING_LIT INTEGER_LIT DECIMAL_LIT
+%token <expr> STRING_LIT INTEGER_LIT DECIMAL_LIT PLACE_HOLDER_LIT
 
 %type <string> 
     AllIdent 
@@ -464,6 +474,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DBName
     FunctionNameCurtime
     FunctionaNameCurdate
+    FunctionaNameDateRelate
     FunctionNameDateArithMultiForms
     FunctionNameDateArith
     FunctionNameSubstring
@@ -480,6 +491,10 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ColumnName
     ExprList
     Expr
+    ElseOpt
+    NumLiteral
+    SignedLiteral
+    Literal
     SimpleExpr
     FunctionCall
     Operators
@@ -498,6 +513,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TrimDirection
     DefaultValue
     ShowLikeOrWhereOpt
+    FulltextSearchModifierOpt
+    SubSelect
 
 %type <item> 
     ColumnNameListOpt 
@@ -509,6 +526,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IndexHintList 
     TableNameList
     SelectFieldList
+    WhenClauseList
+    WhenClause
 
 %type <item> 
     TableElementList 
@@ -536,6 +555,15 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DatabaseOptionListOpt
     DatabaseOptionList
     VarAssignItem
+    AlterSpecList
+    AlterSpec
+    ColumnDefList
+    IndexOptionList
+    IndexOption
+    IndexType
+    PartitionOpt
+    PartitionRangeList
+    PartitionRange
 
 %type <item> OnDuplicateKeyUpdate 
 %type <item> 
@@ -558,13 +586,20 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SelectStmtFromDual
     SelectStmtFromTable
     SelectStmt
+    UnionSelect
+    UnionClauseList
+    UnionStmt
     TruncateStmt 
     ShowStmt
     ShowTargetFilterable
+    ExplainStmt
+    ExplainableStmt
+    KillStmt
 
 %type <stmt> 
     CreateTableStmt
     DropTableStmt
+    RestoreTableStmt
     CreateDatabaseStmt
     DropDatabaseStmt
     StartTransactionStmt
@@ -572,41 +607,48 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RollbackTransactionStmt
     SetStmt
     VarAssignList
+    AlterTableStmt
+    NewPrepareStmt
+    ExecPrepareStmt
+    DeallocPrepareStmt
 
 %type <assign> Assignment
-%type <integer> 
+%type <integer>
     PriorityOpt 
-    IgnoreOptional 
+    IgnoreOptional
     QuickOptional
-    Order 
-    IndexHintType 
-    IndexHintScope 
-    JoinType 
-    IfNotExists 
+    Order
+    IndexHintType
+    IndexHintScope
+    JoinType
+    IfNotExists
     IfExists
-    IntegerType 
-    BooleanType 
-    FixedPointType 
-    FloatingPointType 
-    BitValueType 
-    OptFieldLen 
-    FieldLen 
+    IntegerType
+    BooleanType
+    FixedPointType
+    FloatingPointType
+    BitValueType
+    OptFieldLen
+    FieldLen
     OptBinary
-    IsOrNot 
-    InOrNot 
-    LikeOrNot 
-    BetweenOrNot 
-    SelectStmtCalcFoundRows 
-    SelectStmtSQLCache 
-    SelectStmtStraightJoin 
-    DistinctOpt  
-    DefaultFalseDistinctOpt 
+    IsOrNot
+    InOrNot
+    AnyOrAll
+    LikeOrNot
+    BetweenOrNot
+    SelectStmtCalcFoundRows
+    SelectStmtSQLCache
+    SelectStmtStraightJoin
+    DistinctOpt
+    DefaultFalseDistinctOpt
+    DefaultTrueDistinctOpt
     BuggyDefaultFalseDistinctOpt
     SelectLockOpt
     GlobalScope
     OptFull
+    UnionOpt
 
-%type <string_list> IndexNameList 
+%type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
 %type <select_opts> SelectStmtOpts
 %type <select_field> SelectField
@@ -616,7 +658,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %type <limit> LimitClause;
 
 %nonassoc empty
-
 %nonassoc lowerThanSetKeyword
 %nonassoc lowerThanKey
 %nonassoc KEY
@@ -659,13 +700,22 @@ Statement:
     | TruncateStmt
     | CreateTableStmt
     | SelectStmt
+    | UnionStmt
     | DropTableStmt
+    | RestoreTableStmt
     | CreateDatabaseStmt
     | DropDatabaseStmt
     | StartTransactionStmt
     | CommitTransactionStmt
     | RollbackTransactionStmt
     | SetStmt
+    | ShowStmt
+    | AlterTableStmt
+    | NewPrepareStmt
+    | ExecPrepareStmt
+    | DeallocPrepareStmt
+    | ExplainStmt
+    | KillStmt
     ;
 
 InsertStmt:
@@ -731,9 +781,67 @@ IntoOpt:
 InsertValues:
     '(' ColumnNameListOpt ')' values_sym ValueList {
         InsertStmt* insert = (InsertStmt*)$5;
-        for (int i = 0; i < $2->children.size(); i++) {
-            insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
         }
+        $$ = insert;
+    }
+    | '(' ColumnNameListOpt ')' SelectStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
+        }
+        insert->subquery_stmt = (SelectStmt*)$4;
+        $$ = insert;
+    }
+    | '(' ColumnNameListOpt ')' '(' SelectStmt ')' {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
+        }
+        SelectStmt* select = (SelectStmt*)$5;
+        select->is_in_braces = true;
+        insert->subquery_stmt = select;
+        $$ = insert;
+    }
+    | '(' ColumnNameListOpt ')' UnionStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->children.size(); i++) {
+                insert->columns.push_back((ColumnName*)($2->children[i]), parser->arena);
+            }
+        }
+        insert->subquery_stmt = (UnionStmt*)$4;
+        $$ = insert;
+    }
+    | '(' SelectStmt ')' {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        SelectStmt* select = (SelectStmt*)$2;
+        select->is_in_braces = true;
+        insert->subquery_stmt = select;
+        $$ = insert;
+    }
+    | SelectStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        insert->subquery_stmt = (SelectStmt*)$1;
+        $$ = insert;
+    }
+    | '(' UnionStmt ')' {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        UnionStmt* union_stmt = (UnionStmt*)$2;
+        union_stmt->is_in_braces = true;
+        insert->subquery_stmt = union_stmt;
+        $$ = insert;
+    }
+    | UnionStmt {
+        InsertStmt* insert = InsertStmt::New(parser->arena);
+        insert->subquery_stmt = (UnionStmt*)$1;
         $$ = insert;
     }
     | values_sym ValueList {
@@ -789,14 +897,14 @@ EqAssign:
     ;
 
 ValueList:
-    RowExpr {
+    '(' ExprList ')' {
         InsertStmt* insert = InsertStmt::New(parser->arena);
-        insert->lists.push_back((RowExpr*)$1, parser->arena);
+        insert->lists.push_back((RowExpr*)$2, parser->arena);
         $$ = insert;
     }
-    | ValueList ',' RowExpr {
+    | ValueList ',' '(' ExprList ')' {
         InsertStmt* insert = (InsertStmt*)$1;
-        insert->lists.push_back((RowExpr*)$3, parser->arena);
+        insert->lists.push_back((RowExpr*)$4, parser->arena);
         $$ = insert;
     }
     ;
@@ -815,8 +923,13 @@ RowExprList:
     }
     ;
 RowExpr:
-    '(' ExprList ')' {
+    '(' ExprList ',' Expr ')' {
+        $2->children.push_back($4, parser->arena);
         $$ = (RowExpr*)$2;
+    }
+    | ROW '(' ExprList ',' Expr ')' {
+        $3->children.push_back($5, parser->arena);
+        $$ = (RowExpr*)$3;
     }
     ;
 ExprList:
@@ -1010,6 +1123,22 @@ TableFactor:
         }
         $$ = table_source;
     }
+    | '(' SelectStmt ')' TableAsName {
+        TableSource* table_source = new_node(TableSource);
+        SelectStmt* select = (SelectStmt*)$2;
+        select->is_in_braces = true;
+        table_source->derived_table = select;
+        table_source->as_name = $4;
+        $$ = table_source;
+    }
+    | '(' UnionStmt ')' TableAsName {
+        TableSource* table_source = new_node(TableSource);
+        UnionStmt* union_stmt = (UnionStmt*)$2;
+        union_stmt->is_in_braces = true;
+        table_source->derived_table = union_stmt;
+        table_source->as_name = $4;
+        $$ = table_source;
+    }
     | '(' TableRefs ')' {
         $$ = $2; 
     }
@@ -1025,7 +1154,10 @@ TableAsNameOpt:
     ;
 
 TableAsName:
-    AllIdent {
+    {
+        $$ = nullptr;                
+    }
+    | AllIdent {
         $$ = $1;
     }
     | AS AllIdent {
@@ -1231,18 +1363,73 @@ LimitClause:
     {
         $$ = nullptr;
     }
-    | LIMIT INTEGER_LIT {
+    | LIMIT SimpleExpr {
+        if ($2->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* count = (LiteralExpr*)$2;
+        if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
         LimitClause* limit = new_node(LimitClause);
-        limit->count = ((LiteralExpr*)$2)->_u.int64_val;
+        limit->count = count;
+        limit->offset = LiteralExpr::make_int("0", parser->arena);
         $$ = limit;
     }
-    | LIMIT INTEGER_LIT ',' INTEGER_LIT {
+    | LIMIT SimpleExpr ',' SimpleExpr {
+        if ($2->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* offset = (LiteralExpr*)$2;
+        if (offset->literal_type != parser::LT_INT && offset->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+
+        if ($4->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* count = (LiteralExpr*)$4;
+        if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
         LimitClause* limit = new_node(LimitClause);
-        limit->offset = ((LiteralExpr*)$2)->_u.int64_val;
-        limit->count = ((LiteralExpr*)$4)->_u.int64_val;
+        limit->offset = offset;
+        limit->count = count;
+        $$ = limit;
+    }
+    | LIMIT SimpleExpr OFFSET SimpleExpr {
+        if ($2->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* count = (LiteralExpr*)$2;
+        if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+
+        if ($4->expr_type != parser::ET_LITETAL) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LiteralExpr* offset = (LiteralExpr*)$4;
+        if (offset->literal_type != parser::LT_INT && offset->literal_type != parser::LT_PLACE_HOLDER) {
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
+            return -1;
+        }
+        LimitClause* limit = new_node(LimitClause);
+        limit->offset = offset;
+        limit->count = count;
         $$ = limit;
     }
     ;
+
 WhereClause:
     WHERE Expr {
         $$ = $2;
@@ -1504,6 +1691,89 @@ FieldAsName:
     }
     ;
 
+SubSelect:
+    '(' SelectStmt ')' {
+        SubqueryExpr* sub_query = new_node(SubqueryExpr);
+        sub_query->select_stmt = (SelectStmt*)$2;
+        $$ = sub_query;
+    }
+    | '(' UnionStmt ')' {
+        SubqueryExpr* sub_query = new_node(SubqueryExpr);
+        sub_query->union_stmt = (UnionStmt*)$2;
+        $$ = sub_query;
+    }
+    ;
+
+// See https://dev.mysql.com/doc/refman/5.7/en/union.html
+UnionStmt:
+    UnionClauseList UNION UnionOpt SelectStmtBasic OrderByOptional LimitClause SelectLockOpt {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        union_stmt->select_stmts.push_back((SelectStmt*)$4, parser->arena);
+        union_stmt->order = $5;
+        union_stmt->limit = $6;        
+        union_stmt->lock = (SelectLock)$7;
+        $$ = union_stmt;
+    }
+    | UnionClauseList UNION UnionOpt SelectStmtFromTable OrderByOptional LimitClause SelectLockOpt {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        union_stmt->select_stmts.push_back((SelectStmt*)$4, parser->arena);
+        union_stmt->order = $5;
+        union_stmt->limit = $6;        
+        union_stmt->lock = (SelectLock)$7;
+        $$ = union_stmt;
+    }
+    | UnionClauseList UNION UnionOpt '(' SelectStmt ')' OrderByOptional LimitClause SelectLockOpt {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        SelectStmt* select = (SelectStmt*)$5;
+        select->is_in_braces = true;
+        union_stmt->select_stmts.push_back(select, parser->arena);
+        union_stmt->order = $7;
+        union_stmt->limit = $8;
+        union_stmt->lock = (SelectLock)$9;
+        $$ = union_stmt;
+    }
+    ;
+
+UnionClauseList:
+    UnionSelect {
+        UnionStmt* union_stmt = new_node(UnionStmt);
+        union_stmt->select_stmts.push_back((SelectStmt*)$1, parser->arena);
+        $$ = union_stmt;
+    }
+    | UnionClauseList UNION UnionOpt UnionSelect {
+        UnionStmt* union_stmt = (UnionStmt*)$1;
+        if (!union_stmt->distinct) {
+            union_stmt->distinct = $3;
+        }
+        union_stmt->select_stmts.push_back((SelectStmt*)$4, parser->arena);
+        $$ = union_stmt;
+    }
+    ;
+
+UnionSelect:
+    SelectStmt {
+        $$ = $1;
+    }
+    | '(' SelectStmt ')' {
+        SelectStmt* select = (SelectStmt*)$2;
+        select->is_in_braces = true;
+        $$ = select;
+    }
+    ;
+
+UnionOpt:
+    DefaultTrueDistinctOpt
+    ;
+
 /*Expr*/
 Expr:
     Operators { $$ = $1;}
@@ -1553,94 +1823,94 @@ FunctionNameSubstring:
 
 TimestampUnit:
     MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | WEEK {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | MONTH {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | QUARTER {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | YEAR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     ;
 
 TimeUnit:
     MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | HOUR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     } 
     | WEEK {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MONTH {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | QUARTER {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | YEAR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | SECOND_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MINUTE_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | MINUTE_SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR_SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | HOUR_MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_MICROSECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_SECOND {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_MINUTE {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | DAY_HOUR {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     | YEAR_MONTH {
-        $$ = LiteralExpr::make_string($1, parser->arena);
+        $$ = LiteralExpr::make_string($1.to_lower_inplace(), parser->arena);
     }
     ;
 
@@ -1658,11 +1928,15 @@ TrimDirection:
 
 FunctionNameCurtime:
     CURTIME | CURRENT_TIME
-;
+    ;
 
 FunctionaNameCurdate:
     CURDATE | CURRENT_DATE
-;
+    ;
+
+FunctionaNameDateRelate:
+    DAY | MONTH | YEAR
+    ;
 
 FunctionCallNonKeyword: 
     FunctionNameCurtime '(' FuncDatetimePrecListOpt ')' {
@@ -1687,6 +1961,25 @@ FunctionCallNonKeyword:
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
         $$ = fun; 
+    }
+    | FunctionaNameDateRelate '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | WEEK '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;      
+    }
+    | WEEK '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;         
     }
     | SYSDATE '(' FuncDatetimePrecListOpt ')' {
         FuncExpr* fun = new_node(FuncExpr);
@@ -1785,6 +2078,14 @@ FunctionCallNonKeyword:
         fun->children.push_back($7, parser->arena);
         $$ = fun;
     }
+    | TIMESTAMPADD '(' TimestampUnit ',' Expr ',' Expr ')' {
+        $$ = nullptr;
+    }
+    | TIMESTAMPDIFF '(' TimestampUnit ',' Expr ',' Expr ')' {
+        FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_COMMON, $3, $5, $7, parser->arena);
+        fun->fn_name = "timestampdiff";
+        $$ = fun;
+    }
     | TRIM '(' Expr ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
@@ -1814,6 +2115,13 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
+    | MOD '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "mod";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;
+    }
     ;
 FunctionCallKeyword:
     VALUES '(' ColumnName ')' {
@@ -1821,6 +2129,31 @@ FunctionCallKeyword:
         fun->fn_name = "values";
         fun->func_type = FT_VALUES;
         fun->children.push_back($3, parser->arena);
+        $$ = fun; 
+    }
+    | LEFT '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "left";
+        fun->func_type = FT_COMMON;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun; 
+    }
+    | RIGHT '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "right";
+        fun->func_type = FT_COMMON;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun; 
+    }
+    | IF '(' Expr ',' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "if";
+        fun->func_type = FT_COMMON;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        fun->children.push_back($7, parser->arena);
         $$ = fun; 
     }
     ;
@@ -1881,12 +2214,12 @@ SumExpr:
         fun->children.push_back($4, parser->arena);
         $$ = fun;
     }
-    | COUNT '(' DistinctKwd Expr ')' {
+    | COUNT '(' DistinctKwd ExprList ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->func_type = FT_AGG;
         fun->fn_name = $1;
         fun->distinct = true;
-        fun->children.push_back($4, parser->arena);
+        fun->children = $4->children;
         $$ = fun;
     }
     | COUNT '(' ALL Expr ')' {
@@ -1937,6 +2270,13 @@ SumExpr:
         fun->children.push_back($4, parser->arena);
         $$ = fun;
     }
+    | USER_AGG '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->func_type = FT_AGG;
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
     ;
 
 DistinctKwd:
@@ -1956,6 +2296,13 @@ DistinctOpt:
 DefaultFalseDistinctOpt:
     {
         $$ = false;
+    }
+    | DistinctOpt
+    ;
+
+DefaultTrueDistinctOpt:
+    {
+        $$ = true;
     }
     | DistinctOpt
     ;
@@ -2040,6 +2387,7 @@ AllIdent:
     | INVOKER
     | JSON
     | KEY_BLOCK_SIZE
+    | LANGUAGE
     | LOCAL
     | LESS
     | LEVEL
@@ -2075,6 +2423,7 @@ AllIdent:
     | QUERIES
     | QUICK
     | RECOVER
+    | RESTORE
     | REDUNDANT
     | RELOAD
     | REPEATABLE
@@ -2150,6 +2499,8 @@ AllIdent:
     | SUBDATE
     | SUBSTR
     | SUBSTRING
+    | TIMESTAMPADD
+    | TIMESTAMPDIFF 
     | SUM
     | SYSDATE
     | SYSTEM_USER
@@ -2157,9 +2508,17 @@ AllIdent:
     | VARIANCE
     | VAR_POP
     | VAR_SAMP
+    | MOD
     ;
 
-SimpleExpr:
+NumLiteral:
+    INTEGER_LIT {
+    }
+    | DECIMAL_LIT {
+    }
+    ;
+
+Literal:
     NULLX {
         $$ = LiteralExpr::make_null(parser->arena);
     }
@@ -2169,12 +2528,36 @@ SimpleExpr:
     | FALSE {
         $$ = LiteralExpr::make_false(parser->arena);
     }
-    | INTEGER_LIT {}
-    | DECIMAL_LIT {}
-    | STRING_LIT {}
-    | ColumnName {}
-    | RowExpr {}
-    | FunctionCall {}
+    | NumLiteral {
+    }
+    | STRING_LIT {
+    }
+    ;
+
+SimpleExpr:
+    Literal {
+    }
+    | PLACE_HOLDER_LIT {
+    }
+    | ColumnName {
+    }
+    | RowExpr {
+    }
+    | FunctionCall {
+    }
+    | SubSelect { 
+    }
+    | EXISTS SubSelect {
+        SubqueryExpr* sub_query_expr = (SubqueryExpr*)$2;
+        sub_query_expr->is_exists = true;
+        $$ = sub_query_expr;
+    }
+    | AnyOrAll SubSelect {
+        SubqueryExpr* sub_query_expr = (SubqueryExpr*)$2;
+        sub_query_expr->cmp_type = (parser::CompareType)$1;
+        sub_query_expr->is_cmp_expr = true;
+        $$ = sub_query_expr;
+    }
     | '-' SimpleExpr %prec NEG {
         $$ = FuncExpr::new_unary_op_node(FT_UMINUS, $2, parser->arena);
     }
@@ -2187,10 +2570,87 @@ SimpleExpr:
     | NOT_OP SimpleExpr {
         $$ = FuncExpr::new_unary_op_node(FT_LOGIC_NOT, $2, parser->arena);
     }
+    | MATCH '(' ColumnNameList ')' AGAINST '(' SimpleExpr FulltextSearchModifierOpt ')' {
+        RowExpr* row = new_node(RowExpr);
+        row->children.reserve($3->children.size(), parser->arena);
+        for (int i = 0; i < $3->children.size(); i++) {
+            row->children.push_back($3->children[i], parser->arena);
+        }
+        $$ = FuncExpr::new_ternary_op_node(FT_MATCH_AGAINST, row, $7, $8, parser->arena);
+    }
     | '~' SimpleExpr {
         $$ = FuncExpr::new_unary_op_node(FT_BIT_NOT, $2, parser->arena);
     }
     | '(' Expr ')' {
+        $$ = $2;
+    }
+    | CASE Expr WhenClauseList ElseOpt END {
+        FuncExpr* fun = new_node(FuncExpr);  
+        fun->fn_name = "case_expr_when";
+        fun->children.push_back($2, parser->arena);
+        for (int i = 0; i < $3->children.size(); i++) {
+            fun->children.push_back($3->children[i], parser->arena);
+        }
+        if ($4 != nullptr) {      
+            fun->children.push_back($4, parser->arena);
+        }
+        $$ = fun;
+    }
+    | CASE WhenClauseList ElseOpt END {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "case_when";
+        for (int i = 0; i < $2->children.size(); i++) {
+            fun->children.push_back($2->children[i], parser->arena);
+        }   
+        if ($3 != nullptr) {       
+            fun->children.push_back($3, parser->arena);
+        }
+        $$ = fun;
+    }
+    ;
+
+FulltextSearchModifierOpt:
+    {
+        $$ = LiteralExpr::make_string("IN NATURAL LANGUAGE MODE", parser->arena);
+    }
+    | IN NATURAL LANGUAGE MODE {
+        $$ = LiteralExpr::make_string("IN NATURAL LANGUAGE MODE", parser->arena);
+    }
+    | IN BOOLEAN MODE {
+        $$ = LiteralExpr::make_string("IN BOOLEAN MODE", parser->arena);
+    }
+    ;
+
+WhenClauseList:
+    WhenClause {
+        Node* list = new_node(Node);
+        list->children.reserve(10, parser->arena);
+        for (int i = 0; i < $1->children.size(); i++) {
+            list->children.push_back($1->children[i], parser->arena);
+        }
+        $$ = list;
+    }
+    | WhenClauseList WhenClause {
+        for (int i = 0; i < $2->children.size(); i++) {
+            $1->children.push_back($2->children[i], parser->arena);
+        }
+        $$ = $1;
+    }
+    ;
+WhenClause:
+    WHEN Expr THEN Expr {
+        Node* list = new_node(Node);
+        list->children.reserve(2, parser->arena);
+        list->children.push_back($2, parser->arena);
+        list->children.push_back($4, parser->arena);
+        $$ = list;
+    }
+    ;
+ElseOpt:
+    {
+        $$ = nullptr;
+    }
+    | ELSE Expr {
         $$ = $2;
     }
     ;
@@ -2289,11 +2749,32 @@ PredicateOp:
         fun->is_not = $2;
         $$ = fun;
     }
-    //| Expr EXISTS SubSelect {
-    //}
+    | RowExpr InOrNot SubSelect {
+        FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
+        fun->is_not = $2;
+        fun->has_subquery = true;
+        $$ = fun;
+    }
+    | SimpleExpr InOrNot SubSelect {
+        FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
+        fun->is_not = $2;
+        fun->has_subquery = true;
+        $$ = fun;
+    }
+    /*
+    | SimpleExpr LikeOrNot SubSelect LikeEscapeOpt %prec LIKE {
+        FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_LIKE, $1, $3, $4, parser->arena);
+        fun->is_not = $2;
+        fun->has_subquery = true;
+        $$ = fun;
+    }*/
     | SimpleExpr LikeOrNot SimpleExpr LikeEscapeOpt %prec LIKE {
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_LIKE, $1, $3, $4, parser->arena);
         fun->is_not = $2;
+        $$ = fun;
+    }
+    | SimpleExpr EXACT_LIKE SimpleExpr LikeEscapeOpt %prec LIKE {
+        FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_EXACT_LIKE, $1, $3, $4, parser->arena);
         $$ = fun;
     }
     | SimpleExpr BetweenOrNot SimpleExpr AND SimpleExpr {
@@ -2317,6 +2798,17 @@ InOrNot:
     | NOT IN {
         $$ = true;
     }
+    ;
+AnyOrAll:
+    ANY {
+		$$ = parser::CMP_ANY;
+	}
+    | SOME {
+		$$ = parser::CMP_SOME;
+	}
+    | ALL {
+		$$ = parser::CMP_ALL;
+	}
     ;
 LikeOrNot:
     LIKE {
@@ -2435,6 +2927,24 @@ ColumnDef:
     }
     ;
 
+ColumnDefList:
+    ColumnDef
+    {
+        Node* list = new_node(Node);
+        if ($1 != nullptr) {
+            list->children.push_back($1, parser->arena);
+        }
+        $$ = list;
+    }
+    | ColumnDefList ',' ColumnDef
+    {
+        if ($3 != nullptr) {
+            $1->children.push_back($3, parser->arena);
+        }
+        $$ = $1;
+    }
+    ;
+
 ColumnOptionList:
     {
         $$ = new_node(Node);
@@ -2490,12 +3000,39 @@ ColumnOption:
         option->expr = $2;
         $$ = option;
     }
+    | ON UPDATE CURRENT_TIMESTAMP
+    {
+        FuncExpr* current_timestamp = new_node(FuncExpr);
+        current_timestamp->func_type = FT_COMMON;
+        current_timestamp->fn_name = "current_timestamp";
+        ColumnOption* option = new_node(ColumnOption);
+        option->type = COLUMN_OPT_ON_UPDATE;
+        option->expr = current_timestamp;
+        $$ = option;
+    }
     | COMMENT STRING_LIT
     {
         ColumnOption* option = new_node(ColumnOption);
         option->type = COLUMN_OPT_COMMENT;
         option->expr = $2;
         $$ = option;
+    }
+    ;
+
+SignedLiteral:
+    Literal {}
+    | '+' NumLiteral {
+        $$ = $2;
+    }
+    | '-' NumLiteral
+    {
+        LiteralExpr* literal = (LiteralExpr*)$2;
+        if (literal->literal_type == parser::LT_INT) {
+        	literal->_u.int64_val = 0 - literal->_u.int64_val;
+        } else {
+        	literal->_u.double_val = 0 - literal->_u.double_val;
+        }
+        $$ = literal;
     }
     ;
 
@@ -2507,7 +3044,7 @@ DefaultValue:
         current_timestamp->fn_name = "current_timestamp";
         $$ = (ExprNode*)current_timestamp;
     }
-    | Expr
+    | SignedLiteral
     {
         $$ = $1;
     }
@@ -2547,16 +3084,17 @@ ConstraintKeywordOpt:
     ;
 
 ConstraintElem:
-    PRIMARY KEY '(' ColumnNameList ')'
+    PRIMARY KEY '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_PRIMARY;
         for (int idx = 0; idx < $4->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$6;
         $$ = item;
     }
-    | FULLTEXT KeyOrIndexOpt IndexName '(' ColumnNameList ')'
+    | FULLTEXT KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_FULLTEXT;
@@ -2564,9 +3102,10 @@ ConstraintElem:
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | KeyOrIndex IndexName '(' ColumnNameList ')'
+    | KeyOrIndex IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
@@ -2574,9 +3113,10 @@ ConstraintElem:
         for (int idx = 0; idx < $4->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$6;
         $$ = item;
     }
-    | UNIQUE KeyOrIndexOpt IndexName '(' ColumnNameList ')'
+    | UNIQUE KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_UNIQ;
@@ -2584,6 +3124,31 @@ ConstraintElem:
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
+        item->index_option = (IndexOption*)$7;
+        $$ = item;
+    }
+    | KeyOrIndex GLOBAL IndexName '(' ColumnNameList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_INDEX;
+        item->global = true;
+        item->name = $3;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$7;
+        $$ = item;
+    }
+    | UNIQUE KeyOrIndexOpt GLOBAL IndexName '(' ColumnNameList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_UNIQ;
+        item->global = true;
+        item->name = $4;
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$8;
         $$ = item;
     }
     ;
@@ -2598,17 +3163,53 @@ IndexName:
     }
     ;
 
+IndexOptionList:
+    {
+        $$ = nullptr;
+    }
+    | IndexOptionList IndexOption {
+        if ($2 != nullptr) {
+            $$ = $2;
+        } else {
+            $$ = $1;
+        }
+    }
+    ;
+
+IndexOption:
+    KEY_BLOCK_SIZE EqOpt INTEGER_LIT {
+        $$ = nullptr;
+    }
+    | IndexType {
+        $$ = nullptr;
+    }
+    | COMMENT STRING_LIT {
+        IndexOption* op = new_node(IndexOption);
+        op->comment = ((LiteralExpr*)$2)->_u.str_val;
+        $$ = op;
+    }
+    ;
+
+IndexType:
+    USING BTREE {
+        $$ = nullptr;
+    }
+    | USING HASH {
+        $$ = nullptr;
+    }
+    ;
+
 /*************************************Type Begin***************************************/
 Type:
     NumericType
     {
         $$ = $1;
     }
-    |    StringType
+    | StringType
     {
         $$ = $1;
     }
-    |    DateAndTimeType
+    | DateAndTimeType
     {
         $$ = $1;
     }
@@ -2717,43 +3318,43 @@ IntegerType:
     {
         $$ = MYSQL_TYPE_TINY;
     }
-    |    SMALLINT
+    | SMALLINT
     {
         $$ = MYSQL_TYPE_SHORT;
     }
-    |    MEDIUMINT
+    | MEDIUMINT
     {
         $$ = MYSQL_TYPE_INT24;
     }
-    |    INT
+    | INT
     {
         $$ = MYSQL_TYPE_LONG;
     }
-    |    INT1
+    | INT1
     {
         $$ = MYSQL_TYPE_TINY;
     }
-    |     INT2
+    | INT2
     {
         $$ = MYSQL_TYPE_SHORT;
     }
-    |     INT3
+    | INT3
     {
         $$ = MYSQL_TYPE_INT24;
     }
-    |    INT4
+    | INT4
     {
         $$ = MYSQL_TYPE_LONG;
     }
-    |    INT8
+    | INT8
     {
         $$ = MYSQL_TYPE_LONGLONG;
     }
-    |    INTEGER
+    | INTEGER
     {
         $$ = MYSQL_TYPE_LONG;
     }
-    |    BIGINT
+    | BIGINT
     {
         $$ = MYSQL_TYPE_LONGLONG;
     }
@@ -2775,7 +3376,7 @@ FixedPointType:
     {
         $$ = MYSQL_TYPE_NEWDECIMAL;
     }
-    |    NUMERIC
+    | NUMERIC
     {
         $$ = MYSQL_TYPE_NEWDECIMAL;
     }
@@ -2876,7 +3477,7 @@ StringType:
         FieldType* field_type = (FieldType*)$1;
         field_type->charset = $3;
         field_type->collate = $4;
-        if (2 == true) {
+        if ($2 == true) {
             field_type->flag |= MYSQL_FIELD_FLAG_BINARY;
         }
         $$ = field_type;
@@ -2897,6 +3498,12 @@ StringType:
     {
         FieldType* field_type = new_node(FieldType);
         field_type->type = MYSQL_TYPE_JSON;
+        $$ = field_type;
+    }
+    | HLL 
+    {
+        FieldType* field_type = new_node(FieldType);
+        field_type->type = MYSQL_TYPE_HLL;
         $$ = field_type;
     }
     ;
@@ -3059,7 +3666,7 @@ FieldOpts:
     {
         $$ = new_node(Node);
     }
-    |    FieldOpts FieldOpt
+    | FieldOpts FieldOpt
     {
         $1->children.push_back($2, parser->arena);
         $$ = $1;
@@ -3234,8 +3841,54 @@ TableOption:
         option->uint_value = ((LiteralExpr*)$3)->_u.int64_val;
         $$ = option;
     }
+    | PARTITION BY PartitionOpt
+    {
+        TableOption* option = (TableOption*)$3;
+        option->type = TABLE_OPT_PARTITION;
+        $$ = option;
+    }
     ;
 
+PartitionRange:
+    PARTITION VALUES LESS THEN '(' Expr ')'
+    {
+        $$ = $6;
+    }
+    ;
+
+PartitionRangeList:
+    PartitionRange
+    {
+        Node* list = new_node(Node);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | PartitionRangeList PartitionRange
+    {
+        Node* list = $1;
+        list->children.push_back((ExprNode*)$2, parser->arena);
+        $$ = list;
+    }
+    | PartitionRangeList ','  PartitionRange
+    {
+        Node* list = $1;
+        list->children.push_back((ExprNode*)$3, parser->arena);
+        $$ = list;
+    }
+    ;
+
+PartitionOpt:
+    RANGE '(' Expr ')' '(' PartitionRangeList ')'
+    {
+        PartitionOption* option = new_node(PartitionOption);
+        option->type = PARTITION_RANGE;
+        option->expr = $3;
+        for (int i = 0; i < $6->children.size(); i++) {
+            option->range.push_back((ExprNode*)$6->children[i], parser->arena);
+        }
+        $$ = option;
+    }
+    ;
 EqOpt:
     {}
     | EQ_OP
@@ -3262,6 +3915,18 @@ RestrictOrCascadeOpt:
     {}
     | RESTRICT
     | CASCADE
+    ;
+
+// Restore Table(s) Statement
+RestoreTableStmt:
+    RESTORE TableOrTables TableNameList 
+    {
+        RestoreTableStmt* stmt = new_node(RestoreTableStmt);
+        for (int i = 0; i < $3->children.size(); i++) {
+            stmt->table_names.push_back((TableName*)$3->children[i], parser->arena);
+        }
+        $$ = stmt;
+    }
     ;
 
 // Create Database Statement
@@ -3371,6 +4036,17 @@ SetStmt:
     {
         $$ = $2;
     }
+//    | SET GLOBAL TRANSACTION TransactionChars
+//    {
+//        $$ = $4;
+//    }
+//    | SET SESSION TRANSACTION TransactionChars 
+//        $$ = $4;
+//    {
+//    }
+//    | SET TRANSACTION TransactionChars {
+//        $$ = $3;
+//    }
     ;
 
 VarAssignList:
@@ -3392,14 +4068,43 @@ VarAssignItem:
     {
         VarAssign* assign = new_node(VarAssign);
         assign->key = $1;
-        assign->value = $3;
+        if ($3 != nullptr && $3->expr_type == ET_COLUMN) {
+            ColumnName* col_name = (ColumnName*)$3;
+            if (col_name->name.to_lower() == "off") {
+                // SET XXX = OFF
+                // OFF to 0
+                assign->value = LiteralExpr::make_int("0", parser->arena);
+            } else {
+                assign->value = $3;
+            }
+        } else {
+            assign->value = $3;
+        }
+        $$ = assign;
+    }
+    | VarName EQ_OP ON
+    {
+        VarAssign* assign = new_node(VarAssign);
+        assign->key = $1;
+        assign->value = LiteralExpr::make_int("1", parser->arena);
         $$ = assign;
     }
     | VarName ASSIGN_OP Expr
     {
         VarAssign* assign = new_node(VarAssign);
         assign->key = $1;
-        assign->value = $3;
+        if ($3 != nullptr && $3->expr_type == ET_COLUMN) {
+            ColumnName* col_name = (ColumnName*)$3;
+            if (col_name->name.to_lower() == "off") {
+                // SET XXX = OFF
+                // OFF to 0
+                assign->value = LiteralExpr::make_int("0", parser->arena);
+            } else {
+                assign->value = $3;
+            }
+        } else {
+            assign->value = $3;
+        }
         $$ = assign;
     }
     | CharsetKw AllIdent
@@ -3437,8 +4142,77 @@ VarName:
         }
         $$ = str;
     }
+    | LOCAL AllIdent
+    {
+        String str;
+        if ($2.empty() == false) {
+            str.strdup("@@local.", parser->arena);
+            str.append($2.c_str(), parser->arena);
+        }
+        $$ = str;
+    }
     ;
 
+//TransactionChars:
+//    TransactionChar
+//    {
+//        SetStmt* set = new_node(SetStmt);
+//        set->var_list.push_back((VarAssign*)$1, parser->arena);
+//        $$ = set;
+//    }
+//    | TransactionChars ',' TransactionChar 
+//    {
+//        ((SetStmt*)$1)->var_list.push_back((VarAssign*)$3, parser->arena);
+//        $$ = $1;
+//    }
+//    ;
+//
+//TransactionChar: 
+//    ISOLATION LEVEL IsolationLevel 
+//    {
+//        VarAssign* assign = new_node(VarAssign);
+//        assign->key.strdup(""
+//        if ($3 != nullptr && $3->expr_type == ET_COLUMN) {
+//            ColumnName* col_name = (ColumnName*)$3;
+//            if (col_name->name.to_lower() == "off") {
+//                // SET XXX = OFF
+//                // OFF to 0
+//                assign->value = LiteralExpr::make_int("0", parser->arena);
+//            } else {
+//                assign->value = $3;
+//            }
+//        } else {
+//            assign->value = $3;
+//        }
+//        $$ = assign;
+//    }
+//    | READ WRITE
+//    {
+//    }
+//    | READ ONLY
+//    {
+//    }
+//    ;
+//
+//IsolationLevel:
+//    REPEATABLE READ
+//    {
+//        $$ = ast.RepeatableRead
+//    }
+//    | READ COMMITTED
+//    {
+//        $$ = ast.ReadCommitted
+//    }
+//    | READ UNCOMMITTED
+//    {
+//        $$ = ast.ReadUncommitted
+//    }
+//    | SERIALIZABLE
+//    {
+//        $$ = ast.Serializable
+//    }
+//    ;
+//
 ShowStmt:
     SHOW ShowTargetFilterable ShowLikeOrWhereOpt {
         $$ = nullptr;
@@ -3553,21 +4327,21 @@ ShowLikeOrWhereOpt: {
     ;
 GlobalScope:
     {
-        $$ = false
+        $$ = false;
     }
     | GLOBAL {
-        $$ = true
+        $$ = true;
     }
     | SESSION {
-        $$ = false
+        $$ = false;
     }
     ;
 OptFull:
     {
-        $$ = false
+        $$ = false;
     }
     | FULL {
-        $$ = true
+        $$ = true;
     }
     ;
 ShowDatabaseNameOpt:
@@ -3580,14 +4354,300 @@ ShowDatabaseNameOpt:
     ;
 ShowTableAliasOpt:
     FromOrIn TableName {
-        $$ = nullptr
+        $$ = nullptr;
     }
     ;
+
+AlterTableStmt:
+    ALTER IgnoreOptional TABLE TableName AlterSpecList
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->ignore = $2;
+        stmt->table_name = (TableName*)$4;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            stmt->alter_specs.push_back((AlterTableSpec*)($5->children[idx]), parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+
+AlterSpecList:
+    AlterSpec
+    {
+        Node* list = new_node(Node);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | AlterSpecList ',' AlterSpec
+    {
+        $1->children.push_back($3, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+ColumnKwdOpt:
+    {}
+    | COLUMN
+    ;
+
+AsOrToOpt:
+    {}
+    | AS
+    {}
+    | TO
+    {}
+
+AlterSpec:
+    TableOptionList
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_TABLE_OPTION;
+        for (int idx = 0; idx < $1->children.size(); ++idx) {
+            spec->table_options.push_back((TableOption*)($1->children[idx]), parser->arena);
+        }
+        $$ = spec;
+    }
+    | ADD ColumnKwdOpt ColumnDef
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_COLUMN;
+        spec->new_columns.push_back((ColumnDef*)$3, parser->arena);
+        $$ = spec;
+    }
+    | ADD ColumnKwdOpt '(' ColumnDefList ')'
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_COLUMN;
+        for (int idx = 0; idx < $4->children.size(); ++idx) {
+            spec->new_columns.push_back((ColumnDef*)($4->children[idx]), parser->arena);
+        }
+        $$ = spec;
+    }
+    | DROP ColumnKwdOpt AllIdent
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_COLUMN;
+        spec->column_name = $3;
+        $$ = spec;
+    }
+    | RENAME COLUMN AllIdent TO ColumnName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_RENAME_COLUMN;
+        spec->column_name = $3;
+
+        ColumnDef* new_column = new_node(ColumnDef);
+        new_column->name = (ColumnName*)$5;
+        spec->new_columns.push_back(new_column, parser->arena);
+        $$ = spec;
+    }
+    | RENAME AsOrToOpt TableName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_RENAME_TABLE;
+        spec->new_table_name = (TableName*)$3;
+        $$ = spec;
+    }
+    | ADD ConstraintKeywordOpt ConstraintElem
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->new_constraints.push_back((Constraint*)$3, parser->arena);
+        $$ = spec;
+    }
+    | ADD VIRTUAL ConstraintKeywordOpt ConstraintElem
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->is_virtual_index = true;
+        spec->new_constraints.push_back((Constraint*)$4, parser->arena);
+        $$ = spec;
+    }
+    | DROP INDEX IndexName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_INDEX;
+        spec->index_name = $3;
+        $$ = spec;
+    }
+    | DROP VIRTUAL INDEX IndexName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_INDEX;
+        spec->is_virtual_index = true;
+        spec->index_name = $4;
+        $$ = spec;
+    }
+    ;
+
+// Prepare Statement
+NewPrepareStmt:
+    PREPARE AllIdent FROM STRING_LIT
+    {
+        NewPrepareStmt* stmt = new_node(NewPrepareStmt);
+        stmt->name = $2;
+        stmt->sql = ((LiteralExpr*)$4)->_u.str_val;
+        $$ = stmt;
+    }
+    | PREPARE AllIdent FROM VarName
+    {
+        if ($4.starts_with("@@") ) {
+            sql_error(&@2, yyscanner, parser, "user variable cannot start with @@");
+            return -1;
+        }
+        if ($4.starts_with("@") == false) {
+            sql_error(&@2, yyscanner, parser, "only user variable is permitted in USING clause");
+            return -1;
+        }
+        NewPrepareStmt* stmt = new_node(NewPrepareStmt);
+        stmt->name = $2;
+        stmt->sql = $4;
+        $$ = stmt;
+    }
+    ;
+
+ExecPrepareStmt:
+    EXECUTE AllIdent
+    {
+        ExecPrepareStmt* stmt = new_node(ExecPrepareStmt);
+        stmt->name = $2;
+        $$ = stmt;
+    }
+    | EXECUTE AllIdent USING VarList
+    {
+        ExecPrepareStmt* stmt = new_node(ExecPrepareStmt);
+        stmt->name = $2;
+        for (int idx = 0; idx < $4->size(); ++idx) {
+            if ((*$4)[idx].starts_with("@@")) {
+                sql_error(&@2, yyscanner, parser, "user variable cannot start with @@");
+                return -1;
+            }
+            if ((*$4)[idx].starts_with("@") == false) {
+                sql_error(&@2, yyscanner, parser, "only user variable is permitted in USING clause");
+                return -1;
+            }
+            stmt->param_list.push_back((*$4)[idx], parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+    
+VarList:
+    VarName
+    {
+        Vector<String>* string_list = new_node(Vector<String>);
+        string_list->reserve(5, parser->arena);
+        string_list->push_back($1, parser->arena);
+        $$ = string_list;        
+    }
+    | VarList ',' VarName
+    {
+        $1->push_back($3, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+DeallocPrepareStmt:
+    DEALLOCATE PREPARE AllIdent
+    {
+        DeallocPrepareStmt* stmt = new_node(DeallocPrepareStmt);
+        stmt->name = $3;
+        $$ = stmt;
+    }
+    | DROP PREPARE AllIdent
+    {
+        DeallocPrepareStmt* stmt = new_node(DeallocPrepareStmt);
+        stmt->name = $3;
+        $$ = stmt;
+    }
+    ;
+
+ExplainSym:
+    EXPLAIN | DESCRIBE | DESC
+    ;
+
+ExplainStmt:
+    ExplainSym ExplainableStmt {
+        ExplainStmt* explain = new_node(ExplainStmt);
+        explain->stmt = $2;
+        explain->format = "row";
+        $$ = explain;
+    }
+    | ExplainSym FORMAT EQ_OP STRING_LIT ExplainableStmt {
+        ExplainStmt* explain = new_node(ExplainStmt);
+        explain->format = ((LiteralExpr*)$4)->_u.str_val;
+        explain->stmt = $5;
+        $$ = explain;
+    }
+    ;
+
+KillStmt:
+    KILL INTEGER_LIT {
+        KillStmt* k = new_node(KillStmt);
+        k->conn_id = ((LiteralExpr*)$2)->_u.int64_val;
+        $$ = k;
+    }
+    | KILL CONNECTION INTEGER_LIT {
+        KillStmt* k = new_node(KillStmt);
+        k->conn_id = ((LiteralExpr*)$3)->_u.int64_val;
+        $$ = k;
+    }
+    | KILL QUERY INTEGER_LIT {
+        KillStmt* k = new_node(KillStmt);
+        k->conn_id = ((LiteralExpr*)$3)->_u.int64_val;
+        k->is_query = true;
+        $$ = k;
+    }
+    ;
+
+ExplainableStmt:
+    SelectStmt
+    | DeleteStmt
+    | UpdateStmt
+    | InsertStmt
+    | ReplaceStmt
+    ;
+
+//CreateUserStmt:
+//    CREATE USER IfNotExists UserSpecList {
+//        // See https://dev.mysql.com/doc/refman/5.7/en/create-user.html
+//    }
+//    ;
+//
+//UserSpecList:
+//    UserSpec {
+//    }
+//    | UserSpecList ',' UserSpec {
+//    }
+//    ;
+//
+//UserSpec:
+//    Username AuthOption {
+//    }
+//    ;
+//
+//Username:
+//    STRING_LIT {
+//    }
+//    | STRING_LIT '@' STRING_LIT {
+//    }
+//    ;
+//
+//AuthOption:
+//    {
+//        $$ = nil;
+//    }
+//    | IDENTIFIED BY STRING_LIT {
+//        $$ = $3;
+//    }
+//    | IDENTIFIED BY PASSWORD STRING_LIT {
+//        $$ = $4;
+//    }
+//    ;
 
 %%
 int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser *parser, const char *s) {    
     parser->error = parser::SYNTAX_ERROR;
-    //std::cout << sql_get_lineno(yyscanner) << ":" << sql_get_column(yyscanner) << std::endl;
     std::ostringstream os;
     os << s << ", in [" << yylloc->last_line;
     os << ":" << yylloc->first_column;

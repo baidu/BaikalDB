@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ void DatabaseManager::create_database(const pb::MetaManagerRequest& request, bra
     int64_t namespace_id = NamespaceManager::get_instance()->get_namespace_id(namespace_name);
     if (namespace_id == 0) {
         DB_WARNING("request namespace:%s not exist", namespace_name.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace already exist");
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace not exist");
         return;
     }
     if (_database_id_map.find(database_name) != _database_id_map.end()) {
@@ -162,6 +162,14 @@ int DatabaseManager::load_database_snapshot(const std::string& value) {
                 database_pb.namespace_id(), 
                 database_pb.database_id());
     return 0;
+}
+void DatabaseManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request, 
+                                               pb::BaikalHeartBeatResponse* response) {
+    BAIDU_SCOPED_LOCK(_database_mutex);
+    for (auto& db_info : _database_info_map) {
+        auto db = response->add_db_info();    
+        *db = db_info.second;
+    }
 }
 
 }//namespace 

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
 #include "common.h"
 #include <unordered_map>
 #include <cstdlib>
+#include <cctype>
+#include <sstream>
 
 #ifdef BAIDU_INTERNAL
 #include <pb_to_json.h>
@@ -28,11 +30,22 @@
 #include <boost/algorithm/string.hpp>
 #include <google/protobuf/descriptor.pb.h>
 #include "rocksdb/slice.h"
+#include "expr_value.h"
 
 using google::protobuf::FieldDescriptorProto;
 
 namespace baikaldb {
-
+DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
+DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
+DEFINE_int32(service_lock_concurrency, 40, "service_write concurrency, default:40");
+DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
+DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
+DEFINE_int32(baikal_heartbeat_concurrency, 10, "baikal heartbeat concurrency, default:10");
+DEFINE_int64(incremental_info_gc_time, 600 * 1000 * 1000, "time interval to clear incremental info");
+DECLARE_string(default_physical_room);
+DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
+DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
+DEFINE_bool(servitysinglelog, true, "diff servity message in seperate logfile");
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
         + (_end.tv_usec-_start.tv_usec); //macro second
@@ -84,9 +97,10 @@ SerializeStatus to_string (int32_t number, char *buf, size_t size, size_t& len) 
         return STMPS_SUCCESS;
     }
     len = 0;
+    bool negtive = false;
     if (number < 0) {
         number = -number;
-        buf[0] = '-';
+        negtive = true;
         len++;
     }
 
@@ -97,6 +111,9 @@ SerializeStatus to_string (int32_t number, char *buf, size_t size, size_t& len) 
     }
     if (len > size) {
         return STMPS_NEED_RESIZE;
+    }
+    if (negtive) {
+        buf[0] = '-';
     }
     int length = len;
     while (number > 0) {
@@ -178,9 +195,10 @@ SerializeStatus to_string (int64_t number, char *buf, size_t size, size_t& len) 
         return STMPS_SUCCESS;
     }
     len = 0;
+    bool negtive = false;
     if (number < 0) {
         number = -number;
-        buf[0] = '-';
+        negtive = true;
         len++;
     }
 
@@ -191,6 +209,9 @@ SerializeStatus to_string (int64_t number, char *buf, size_t size, size_t& len) 
     }
     if (len > size) {
         return STMPS_NEED_RESIZE;
+    }
+    if (negtive) {
+        buf[0] = '-';
     }
     int length = len;
     while (number > 0) {
@@ -253,24 +274,6 @@ std::string to_string(uint64_t number)
     return "";
 }
 
-
-std::string print_stacktrace()
-{
-    std::string res = "\n";
-    int size = 16;
-    void * array[16];
-    int stack_num = backtrace(array, size);
-    char ** stacktrace = backtrace_symbols(array, stack_num);
-    for (int i = 0; i < stack_num; ++i)
-    {
-        res += std::string(stacktrace[i]);
-        res += "\n";
-        //printf("%s\n", stacktrace[i]);
-    }
-    free(stacktrace);
-    return res;
-}
-
 std::string remove_quote(const char* str, char quote) {
     uint32_t len = strlen(str);
     if (len > 2 && str[0] == quote && str[len-1] == quote) {
@@ -281,7 +284,11 @@ std::string remove_quote(const char* str, char quote) {
 }
 
 std::string str_to_hex(const std::string& str) {
-    return rocksdb::Slice(str).ToString(true).c_str();
+    return rocksdb::Slice(str).ToString(true);
+}
+
+bool is_digits(const std::string& str) {
+    return std::all_of(str.begin(), str.end(), ::isdigit);
 }
 
 void stripslashes(std::string& str) {
@@ -329,6 +336,80 @@ void stripslashes(std::string& str) {
     str.resize(slow);
 }
 
+void update_op_version(pb::SchemaConf* p_conf, const std::string& desc) {
+    auto version = p_conf->has_op_version() ? p_conf->op_version() : 0;
+    p_conf->set_op_version(version + 1);
+    p_conf->set_op_desc(desc);
+}
+
+void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf) {
+        const google::protobuf::Reflection* src_reflection = schema_conf.GetReflection();
+        //const google::protobuf::Descriptor* src_descriptor = schema_conf.GetDescriptor();
+        const google::protobuf::Reflection* dst_reflection = p_conf->GetReflection();
+        const google::protobuf::Descriptor* dst_descriptor = p_conf->GetDescriptor();
+        const google::protobuf::FieldDescriptor* src_field = nullptr;
+        const google::protobuf::FieldDescriptor* dst_field = nullptr;
+
+        std::vector<const google::protobuf::FieldDescriptor*> src_field_list;
+        src_reflection->ListFields(schema_conf, &src_field_list);
+        for (int i = 0; i < (int)src_field_list.size(); ++i) {
+            src_field = src_field_list[i];
+            if (src_field == nullptr) {
+                continue;
+            }
+
+            dst_field = dst_descriptor->FindFieldByName(src_field->name());
+            if (dst_field == nullptr) {
+                continue;
+            }
+
+            if (src_field->cpp_type() != dst_field->cpp_type()) {
+                continue;
+            }
+
+            auto type = src_field->cpp_type();
+            switch (type) {
+                case google::protobuf::FieldDescriptor::CPPTYPE_INT32: {
+                    auto src_value = src_reflection->GetInt32(schema_conf, src_field);
+                    dst_reflection->SetInt32(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_UINT32: {
+                    auto src_value = src_reflection->GetUInt32(schema_conf, src_field);
+                    dst_reflection->SetUInt32(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_INT64: {
+                    auto src_value = src_reflection->GetInt64(schema_conf, src_field);
+                    dst_reflection->SetInt64(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_UINT64: {
+                    auto src_value = src_reflection->GetUInt64(schema_conf, src_field);
+                    dst_reflection->SetUInt64(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT: {
+                    auto src_value = src_reflection->GetFloat(schema_conf, src_field);
+                    dst_reflection->SetFloat(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE: {
+                    auto src_value = src_reflection->GetDouble(schema_conf, src_field);
+                    dst_reflection->SetDouble(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_BOOL: {
+                    auto src_value = src_reflection->GetBool(schema_conf, src_field);
+                    dst_reflection->SetBool(p_conf, dst_field, src_value);
+                } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_STRING: {
+                    auto src_value = src_reflection->GetString(schema_conf, src_field);
+                    dst_reflection->SetString(p_conf, dst_field, src_value);
+                } break;
+                default: {
+                    break;
+                }
+            }
+
+        }
+        DB_WARNING("%s schema conf UPDATE TO : %s", table_name.c_str(), schema_conf.ShortDebugString().c_str());
+}
+
 int primitive_to_proto_type(pb::PrimitiveType type) {
     using google::protobuf::FieldDescriptorProto;
     static std::unordered_map<int32_t, int32_t> _mysql_pb_type_mapping = {
@@ -346,6 +427,7 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::DATETIME,     FieldDescriptorProto::TYPE_FIXED64},
         { pb::TIMESTAMP,    FieldDescriptorProto::TYPE_FIXED32},
         { pb::DATE,         FieldDescriptorProto::TYPE_FIXED32},
+        { pb::TIME,         FieldDescriptorProto::TYPE_SFIXED32},
         { pb::HLL,          FieldDescriptorProto::TYPE_BYTES},
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL   }
     };
@@ -355,131 +437,159 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
     }
     return _mysql_pb_type_mapping[type];
 }
-
-std::string timestamp_to_str(time_t timestamp) {
-    char str_time[21] = {0};
-    struct tm tm;
-    localtime_r(&timestamp, &tm);  
-    // 夏令时影响
-    if (tm.tm_isdst == 1) {
-        timestamp = timestamp - 3600;
-        localtime_r(&timestamp, &tm);
+int get_physical_room(const std::string& ip_and_port_str, std::string& physical_room) {
+#ifdef BAIDU_INTERNAL
+    butil::EndPoint point;
+    int ret = butil::str2endpoint(ip_and_port_str.c_str(), &point);
+    if (ret != 0) {
+        DB_WARNING("instance:%s to endpoint fail, ret:%d", ip_and_port_str.c_str(), ret);
+        return ret;
     }
-    strftime(str_time, sizeof(str_time), "%Y-%m-%d %H:%M:%S", &tm);
-    return std::string(str_time);
+    std::string host;
+    ret = butil::endpoint2hostname(point, &host);
+    if (ret != 0) {
+        DB_WARNING("endpoint to hostname fail, ret:%d", ret);
+        return ret;
+    }
+    DB_DEBUG("host:%s", host.c_str());
+    auto begin = host.find(".");
+    auto end = host.find(":");
+    if (begin == std::string::npos) {
+        DB_WARNING("host:%s to physical room fail", host.c_str()); 
+        return -1;
+    }
+    if (end == std::string::npos) {
+        end = host.size();
+    }
+    physical_room = std::string(host, begin + 1, end - begin -1);
+    return 0;
+#else
+    physical_room = FLAGS_default_physical_room;  
+    return 0;
+#endif
 }
 
-time_t str_to_timestamp(const char* str_time) {
-    if (str_time == nullptr) {
+int get_instance_from_bns(int* ret,
+                          const std::string& bns_name,
+                          std::vector<std::string>& instances,
+                          bool need_alive) {
+#ifdef BAIDU_INTERNAL
+    instances.clear();
+    BnsInput input;
+    BnsOutput output;
+    input.set_service_name(bns_name);
+    input.set_type(0);
+    *ret = webfoot::get_instance_by_service(input, &output);
+    // bns service not exist
+    if (*ret == webfoot::WEBFOOT_RET_SUCCESS ||
+            *ret == webfoot::WEBFOOT_SERVICE_BEYOND_THRSHOLD) {
+        for (int i = 0; i < output.instance_size(); ++i) {
+            if (output.instance(i).status() == 0 || !need_alive) {
+                instances.push_back(output.instance(i).host_ip() + ":" 
+                        + boost::lexical_cast<std::string>(output.instance(i).port()));
+            }   
+        }   
         return 0;
+    }   
+    DB_WARNING("get instance from service fail, bns_name:%s, ret:%d",
+            bns_name.c_str(), *ret);
+    return -1; 
+#else
+    return -1;
+#endif
+}
+
+static unsigned char to_hex(unsigned char x)   {   
+    return  x > 9 ? x + 55 : x + 48;   
+}
+
+static unsigned char from_hex(unsigned char x) {   
+    unsigned char y = '\0';  
+    if (x >= 'A' && x <= 'Z') { 
+        y = x - 'A' + 10;  
+    } else if (x >= 'a' && x <= 'z') { 
+        y = x - 'a' + 10;  
+    } else if (x >= '0' && x <= '9') {
+        y = x - '0';  
     }
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-    sscanf(str_time, "%4d-%2d-%2d %2d:%2d:%2d",
-           &tm.tm_year, &tm.tm_mon, &tm.tm_mday,  
-           &tm.tm_hour, &tm.tm_min, &tm.tm_sec);
+    return y;  
+}  
 
-    tm.tm_year -= 1900;
-    tm.tm_mon--;
-    time_t ret = mktime(&tm);
-    return ret;
+std::string url_decode(const std::string& str) {
+    std::string strTemp = "";  
+    size_t length = str.length();  
+    for (size_t i = 0; i < length; i++)  {  
+        if (str[i] == '+') {
+            strTemp += ' ';
+        }  else if (str[i] == '%')  {  
+            unsigned char high = from_hex((unsigned char)str[++i]);  
+            unsigned char low = from_hex((unsigned char)str[++i]);  
+            strTemp += high * 16 + low;  
+        }  
+        else strTemp += str[i];  
+    }  
+    return strTemp;  
 }
 
-// encode DATETIME to string format
-// ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
-std::string datetime_to_str(uint64_t datetime) {
-    int year_month = ((datetime >> 46) & 0x1FFFF);
-    int year = year_month / 13;
-    int month = year_month % 13;
-    int day = ((datetime >> 41) & 0x1F);
-    int hour = ((datetime >> 36) & 0x1F);
-    int minute = ((datetime >> 30) & 0x3F);
-    int second = ((datetime >> 24) & 0x3F);
-    int macrosec = (datetime & 0xFFFFFF);
-
-    char buf[30] = {0};
-    sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-        year, month, day, hour, minute, second, macrosec);
-    return std::string(buf);
+std::vector<std::string> string_split(const std::string &s, char delim) {
+  std::stringstream ss(s);
+  std::string item;
+  std::vector<std::string> elems;
+  while (std::getline(ss, item, delim)) {
+    elems.push_back(item);
+    // elems.push_back(std::move(item));
+  }
+  return elems;
 }
 
-uint64_t str_to_datetime(const char* str_time) {
-    //YYYY-MM-DD HH:MM:SS.xxxxxx
-    const static size_t max_time_size = 26;
-    size_t len = std::min(strlen(str_time), (size_t)max_time_size);
-    char buf[max_time_size + 1] = {0};
-    memcpy(buf, str_time, len);
-    uint32_t idx = 0;
-    for (; idx < len; ++idx) {
-        if (buf[idx] == '.') {
+std::string string_trim(std::string& str) {
+    size_t first = str.find_first_not_of(' ');
+    if (first == std::string::npos)
+        return "";
+    size_t last = str.find_last_not_of(' ');
+    return str.substr(first, (last-first+1));
+}
+
+const std::string& rand_peer(pb::RegionInfo& info) {
+    if (info.peers_size() == 0) {
+        return info.leader();
+    }
+    uint32_t i = butil::fast_rand() % info.peers_size();
+    return info.peers(i);
+}
+
+void other_peer_to_leader(pb::RegionInfo& info) {
+    auto peer = rand_peer(info);
+    if (peer != info.leader()) {
+        info.set_leader(peer);
+        return;
+    }
+    for (auto& peer : info.peers()) {
+        if (peer != info.leader()) {
+            info.set_leader(peer);
             break;
         }
     }
-    if (idx < len) {
-        for (uint32_t i = idx + 1; i <= idx + 6 && i < max_time_size; ++i) {
-            if (buf[i] < '0' || buf[i] > '9') {
-                buf[i] = '0';
-            }
-        }
-    }
-
-    uint64_t year = 0;
-    uint64_t month = 0;
-    uint64_t day = 0;
-    uint64_t hour = 0;
-    uint64_t minute = 0;
-    uint64_t second = 0;
-    uint64_t macrosec = 0;
-
-    sscanf(buf, "%4lu-%2lu-%2lu %2lu:%2lu:%2lu.%6lu",
-        &year, &month, &day, &hour, &minute, &second, &macrosec);
-
-    //datetime中间计算时会转化成int64, 最高位必须为0
-    uint64_t datetime = 0;
-    uint64_t year_month = year * 13 + month;
-    datetime |= (year_month << 46);
-    datetime |= (day << 41);
-    datetime |= (hour << 36);
-    datetime |= (minute << 30);
-    datetime |= (second << 24);
-    datetime |= macrosec;
-    return datetime;
 }
 
-time_t datetime_to_timestamp(uint64_t datetime) {
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-
-    int year_month = ((datetime >> 46) & 0x1FFFF);
-    tm.tm_year = year_month / 13;
-    tm.tm_mon = year_month % 13;
-    tm.tm_mday = ((datetime >> 41) & 0x1F);
-    tm.tm_hour = ((datetime >> 36) & 0x1F);
-    tm.tm_min = ((datetime >> 30) & 0x3F);
-    tm.tm_sec = ((datetime >> 24) & 0x3F);
-    //int macrosec = (datetime & 0xFFFFFF);
-
-    tm.tm_year -= 1900;
-    tm.tm_mon--;
-    return mktime(&tm);
-}
-
-uint64_t timestamp_to_datetime(time_t timestamp) {
-    uint64_t datetime = 0;
-
-    struct tm tm = *localtime(&timestamp);
-    tm.tm_year += 1900;
-    tm.tm_mon++;
-    uint64_t year_month = tm.tm_year * 13 + tm.tm_mon;
-    uint64_t day = tm.tm_mday;
-    uint64_t hour = tm.tm_hour;
-    uint64_t min = tm.tm_min;
-    uint64_t sec = tm.tm_sec;
-    datetime |= (year_month << 46);
-    datetime |= (day << 41);
-    datetime |= (hour << 36);
-    datetime |= (min << 30);
-    datetime |= (sec << 24);
-    return datetime;
+std::string url_encode(const std::string& str) {
+    std::string strTemp = "";  
+    size_t length = str.length();  
+    for (size_t i = 0; i < length; i++) {  
+        if (isalnum((unsigned char)str[i]) ||   
+                (str[i] == '-') ||  
+                (str[i] == '_') ||   
+                (str[i] == '.') ||   
+                (str[i] == '~')) {
+            strTemp += str[i];  
+        } else if (str[i] == ' ') {
+            strTemp += "+";  
+        } else  {  
+            strTemp += '%';  
+            strTemp += to_hex((unsigned char)str[i] >> 4);  
+            strTemp += to_hex((unsigned char)str[i] % 16);  
+        }  
+    }  
+    return strTemp; 
 }
 }  // baikaldb

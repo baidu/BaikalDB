@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,9 +18,11 @@
 #include <sys/ioctl.h>
 #include <gflags/gflags.h>
 #include <signal.h>
+#include<execinfo.h>
 #include <stdio.h>
 #include <string>
 #include <boost/filesystem.hpp>
+//#include <gperftools/malloc_extension.h>
 #include "common.h"
 #include "my_raft_log.h"
 #include "store.h"
@@ -32,8 +34,36 @@ namespace baikaldb {
 DECLARE_int32(store_port);
 DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
 } // namespace baikaldb
+DEFINE_bool(stop_server_before_core, true, "stop_server_before_core");
+
+brpc::Server server;
+// 内存过大时，coredump需要几分钟，这期间会丢请求
+// 理论上应该采用可重入函数，但是堆栈不好获取
+// 考虑到core的概率不大，先这样处理
+void sigsegv_handler(int signum, siginfo_t* info, void* ptr) {
+    void* buffer[1000];
+    char** strings;
+    int nptrs = backtrace(buffer, 1000);
+    DB_FATAL("segment fault, backtrace() returned %d addresses", nptrs);
+    strings = backtrace_symbols(buffer, nptrs);
+    if (strings != NULL) {
+        for (int j = 0; j < nptrs; j++) {
+            DB_FATAL("%s", strings[j])
+        }
+    }
+    server.Stop(0);
+    // core的过程中依然会hang住baikaldb请求
+    // 先等一分钟，baikaldb反应过来
+    // 后续再调整
+    sleep(60);
+    abort();
+}
 
 int main(int argc, char **argv) {
+#ifdef BAIKALDB_REVISION
+    google::SetVersionString(BAIKALDB_REVISION);
+#endif
+
     google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     srand((unsigned)time(NULL));
@@ -44,9 +74,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "log init failed.");
         return -1;
     }
-    DB_WARNING("log file load success");
-    baikaldb::register_myraftlog_extension();
+    // 信号处理函数非可重入，可能会死锁
+    if (FLAGS_stop_server_before_core) {
+        struct sigaction act;
+        int sig = SIGSEGV;
+        sigemptyset(&act.sa_mask);
+        act.sa_sigaction = sigsegv_handler;
+        act.sa_flags = SA_SIGINFO;
+        if (sigaction(sig, &act, NULL) < 0) {
+            DB_FATAL("sigaction fail, %m");
+            exit(1);
+        }
+    }
+//    DB_WARNING("log file load success; GetMemoryReleaseRate:%f", 
+//            MallocExtension::instance()->GetMemoryReleaseRate());
+    baikaldb::register_myraft_extension();
     int ret = 0;
+    baikaldb::Tokenizer::get_instance()->init();
 #ifdef BAIDU_INTERNAL
     //init wordrank_client
     std::unique_ptr<drpc::NLPCClient> wordrank_client_ptr(new drpc::NLPCClient());
@@ -67,32 +111,32 @@ int main(int argc, char **argv) {
         DB_WARNING("init wordseg agent failed");
         return -1;
     }
+    DB_WARNING("init nlpc success")
 #endif
-    /*
-    std::ifstream extra_fs("test_file");
-    std::string word((std::istreambuf_iterator<char>(extra_fs)),
-            std::istreambuf_iterator<char>());
-    baikaldb::TimeCost tt1;
-    for (int i = 0; i < 1000000; i++) {
-        word+="1";
-        nlpc::ver_1_0_0::wordrank_outputPtr s_output = 
-            sofa::create<nlpc::ver_1_0_0::wordrank_output>();
-        baikaldb::word_seg(*baikaldb::wordrank_client, word, s_output);
-        if (i%1000==0) {
-            DB_WARNING("wordrank:%d",i);
+    /* 
+    auto call = []() {
+        std::ifstream extra_fs("test_file");
+        std::string word((std::istreambuf_iterator<char>(extra_fs)),
+                std::istreambuf_iterator<char>());
+        baikaldb::TimeCost tt1;
+        for (int i = 0; i < 1000000000; i++) {
+            //word+="1";
+            std::string word2 = word + "1";
+            std::map<std::string, float> term_map;
+            baikaldb::Tokenizer::get_instance()->wordrank(word2, term_map);
+            if (i%1000==0) {
+                DB_WARNING("wordrank:%d",i);
+            }
         }
+        DB_WARNING("wordrank:%ld", tt1.get_time());
+    };
+    baikaldb::ConcurrencyBthread cb(100);
+    for (int i = 0; i < 100; i++) {
+        cb.run(call);
     }
-    DB_WARNING("wordrank:%ld", tt1.get_time());
-    tt1.reset();
-    for (int i = 0; i < 1000; i++) {
-    nlpc::ver_1_0_0::wordseg_outputPtr s_output2 =
-        sofa::create<nlpc::ver_1_0_0::wordseg_output>();
-    baikaldb::word_seg2(*baikaldb::wordseg_client, word, s_output2);
-    }
-    DB_WARNING("wordseg:%ld", tt1.get_time());
+    cb.join();
     return 0;
     */
-    
     // init singleton
     baikaldb::FunctionManager::instance()->init();
     if (baikaldb::SchemaFactory::get_instance()->init() != 0) {
@@ -101,7 +145,6 @@ int main(int argc, char **argv) {
     }
 
     //add service
-    brpc::Server server;
     butil::EndPoint addr;
     addr.ip = butil::IP_ANY;
     addr.port = baikaldb::FLAGS_store_port;
@@ -143,6 +186,13 @@ int main(int argc, char **argv) {
     store->shutdown_raft();
     store->close();
     DB_WARNING("store close success");
+    // exit if server.join is blocked
+    baikaldb::Bthread bth;
+    bth.run([]() {
+            bthread_usleep(2 * 60 * 1000 * 1000);
+            DB_FATAL("store forse exit");
+            exit(-1);
+        });
     // 需要后关端口
     server.Stop(0);
     server.Join();

@@ -8,9 +8,9 @@ echo -e "修改列名\n"
 curl -d '{
     "op_type":"OP_ADD_FIELD",
     "table_info": {
-        "table_name": "TestTb",
-        "database": "TestDB",
-        "namespace_name": "TEST_NAMESPACE",
+        "table_name": "wordinfo_new",
+        "database": "TEST",
+        "namespace_name": "TEST",
         "fields": [ {
                         "field_name" : "test",
                         "mysql_type": 6 
@@ -30,3 +30,18 @@ curl -d '{
 }' http://$1/MetaService/query
 echo -e "\n"
 
+
+
+curl -d '{
+    "op_type":"OP_ADD_FIELD",
+    "table_info": {
+        "table_name": "quality_diary",
+        "database": "TEST",
+        "namespace_name": "TEST",
+        "fields": [ {
+                        "field_name" : "image_front_score",
+                        "mysql_type": 13
+                    }
+                    ]
+    }
+}' http://$1/MetaService/meta_manager

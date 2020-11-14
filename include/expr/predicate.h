@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,9 @@
 #pragma once
 
 #include <set>
-#include <boost/regex.hpp>
 #include "expr_value.h"
 #include "scalar_fn_call.h"
+#include "re2/re2.h"
 
 namespace baikaldb {
 class NotPredicate : public ScalarFnCall {
@@ -106,27 +106,22 @@ public:
 };
 
 class InPredicate : public ScalarFnCall {
-    enum MapType {
-        M_INT,
-        M_DOUBLE,
-        M_STRING,
-        M_DATETIME,
-        M_DATE,
-        M_TIMESTAMP,
-        M_NULL
-    };
 public:
-    InPredicate() : _has_in_null(false) {}
+    InPredicate() {}
     virtual int open();
-    virtual int type_inferer();
     virtual ExprValue get_value(MemRow* row);
 
 private:
-    MapType _map_type;
+    int singel_open();
+    int row_expr_open();
+    ExprValue make_key(ExprNode* e, MemRow* row);
+
+    pb::PrimitiveType _map_type;
+    std::vector<pb::PrimitiveType> _row_expr_types;
+    size_t _col_size;
     std::set<int64_t> _int_set;
     std::set<double> _double_set;
     std::set<std::string> _str_set;
-    bool _has_in_null;
 };
 
 class LikePredicate : public ScalarFnCall {
@@ -134,10 +129,12 @@ public:
     //todo liguoqiang
     virtual int open();
     void covent_pattern(const std::string& pattern);
+    void covent_exact_pattern(const std::string& pattern);
+    void hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_value);
     virtual ExprValue get_value(MemRow* row);
 
 private:
-    boost::regex _regex;
+    std::unique_ptr<re2::RE2> _regex_ptr;
     std::string _regex_pattern;
     char _escape_char = '\\';
 };

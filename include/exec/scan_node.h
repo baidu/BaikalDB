@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,117 +15,154 @@
 #pragma once
 
 #include "exec_node.h"
-#include "fetcher_node.h"
+#include "access_path.h"
 #include "table_record.h"
-#include "table_iterator.h"
-#include "transaction.h"
-#include "reverse_index.h"
-#include "reverse_interface.h"
+#include <boost/variant.hpp>
 
 namespace baikaldb {
-class ReverseIndexBase;
+
+template<typename NodeType, typename LeafType>
+struct FulltextNode {
+    struct FulltextChildType {
+        std::vector<std::shared_ptr<FulltextNode>> children;
+    };
+    using LeafNodeType = LeafType;
+    boost::variant<FulltextChildType, LeafType> info;
+    NodeType type;
+};
+
+template<typename NodeType, typename LeafType>
+struct FulltextTree {
+    std::shared_ptr<FulltextNode<NodeType, LeafType>> root;
+};
+
+using IndexFieldRange = std::pair<int64_t, range::FieldRange>;
+
+using FulltextInfoTree = FulltextTree<pb::FulltextNodeType, IndexFieldRange>;
+using FulltextInfoNode = FulltextNode<pb::FulltextNodeType, IndexFieldRange>;
+
 class ScanNode : public ExecNode {
 public:
-    ScanNode() : _tuple_id(0), _tuple_desc(nullptr), _mem_row_desc(nullptr), _idx(0) {
+    ScanNode() {
+    }
+    ScanNode(pb::Engine engine): _engine(engine) {
     }
     virtual ~ScanNode() {
-        for (auto expr : _index_conjuncts) {
-            ExprNode::destory_tree(expr);
-        }
-        delete _index_iter;
-        delete _table_iter;
     }
+    static ScanNode* create_scan_node(const pb::PlanNode& node);
     virtual int init(const pb::PlanNode& node);
-    virtual int predicate_pushdown();
-    bool need_pushdown(ExprNode* expr);
-    virtual int index_condition_pushdown();
     virtual int open(RuntimeState* state);
-    virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual int add_or_pushdown(baikaldb::ExprNode*, ExecNode** exec_node);
-    int64_t table_id() {
+    int64_t table_id() const {
         return _table_id;
     }
-    int32_t tuple_id() {
+    int32_t tuple_id() const {
         return _tuple_id;
     }
-    void clear_possible_indexes() {
-        _pb_node.mutable_derive_node()->mutable_scan_node()->clear_indexes();
+    void set_router_index_id(int64_t router_index_id) {
+        _router_index_id = router_index_id;
     }
-    bool contain_condition(ExprNode* expr) {
-        std::unordered_set<int32_t> related_tuple_ids;
-        expr->get_all_tuple_ids(related_tuple_ids);
-        if (related_tuple_ids.size() == 1 && *(related_tuple_ids.begin()) == _tuple_id) {
-            return true;
-        } 
+    int64_t router_index_id() const {
+        return _router_index_id;
+    }
+    void set_covering_index(bool covering_index) {
+        _is_covering_index = covering_index;
+    }
+    bool covering_index() const {
+        return _is_covering_index;
+    }
+    pb::PossibleIndex* router_index() const {
+        return _router_index;
+    }
+    pb::Engine engine() {
+        return _engine;
+    }
+    bool has_index() {
+        for (auto& pos_index : _pb_node.derive_node().scan_node().indexes()) {
+            for (auto& range : pos_index.ranges()) {
+                if (range.left_field_cnt() > 0) {
+                    return true;
+                }
+                if (range.right_field_cnt() > 0) {
+                    return true;
+                }
+                if (pos_index.has_sort_index()) {
+                    return true;
+                }
+            }
+        }
         return false;
     }
-    std::map<int64_t, pb::RegionInfo>* mutable_region_infos() {
-        return &_region_infos;
+    void clear_possible_indexes() {
+        _paths.clear();
+        _pb_node.mutable_derive_node()->mutable_scan_node()->clear_indexes();
     }
-    std::map<int64_t, pb::RegionInfo> region_infos() const {
-        return _region_infos;
+    bool need_copy(MemRow* row, std::vector<ExprNode*>& conjuncts) {
+        for (auto conjunct : conjuncts) {
+            ExprValue value = conjunct->get_value(row);
+            if (value.is_null() || value.get_numberic<bool>() == false) {
+                return false;
+            }
+        }
+        return true;
     }
-    void set_related_fetcher_node(FetcherNode* fetcher_node) {
-        _related_fetcher_node = fetcher_node;
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+        ExecNode::find_place_holder(placeholders);
     }
-    FetcherNode* get_related_fetcher_node() const {
-        return _related_fetcher_node;
-    }
-private:
-    int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
-    int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
-    int get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos);
-    int get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos);
-    int select_index(RuntimeState* state, const pb::PlanNode& node, std::vector<int>& multi_reverse_index); 
-    int choose_index(RuntimeState* state);
-    bool need_copy(MemRow* row);
 
-private:
-    int32_t _tuple_id;
-    pb::TupleDescriptor* _tuple_desc;
-    std::vector<int32_t> _field_ids;
-    MemRowDescriptor* _mem_row_desc;
-    FetcherNode* _related_fetcher_node = NULL;
-    SchemaFactory* _factory = nullptr;
-    int64_t _table_id = -1;
-    int64_t _index_id = -1;
-    int64_t _region_id;
-    bool _is_covering_index = true;
-    bool _use_get = false;
+    void show_cost(std::vector<std::map<std::string, std::string>>& path_infos);
+    int64_t select_index(); 
+    int64_t select_index_by_cost(); 
+    int64_t select_index_in_baikaldb(const std::string& sample_sql);
+    int choose_arrow_pb_reverse_index();
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 
-    //record all used indices here (LIKE & MATCH may use multiple indices)
-    std::vector<int64_t> _index_ids;
+    void add_access_path(const SmartPath& access_path) {
+        //如果使用倒排索引，则不使用代价进行索引选择
+        if ((access_path->index_type == pb::I_FULLTEXT || access_path->index_type == pb::I_RECOMMEND) 
+            && access_path->is_possible) {
+            _use_fulltext = true;
+        }
+        _paths[access_path->index_id] = access_path;
+    }
 
-    // 如果用了排序列做索引，就不需要排序了
-    bool _sort_use_index = false;
-    bool _scan_forward = true; //scan的方向
+    size_t access_path_size() const {
+        return _paths.size();
+    }
+
+    bool full_coverage(const std::unordered_set<int32_t>& smaller, const std::unordered_set<int32_t>& bigger);
+
+    int compare_two_path(SmartPath outer_path, SmartPath inner_path);
+
+    void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
+
+    void set_fulltext_index_tree(const FulltextInfoTree& tree) {
+        _fulltext_index_tree = tree;
+    }
+
+    int create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextIndex* root);
+    int create_fulltext_index_tree();
+
+// 两两比较，根据一些简单规则干掉次优索引
+    int64_t pre_process_select_index();
     
-    //被选择的索引
-    //std::vector<SmartRecord> _eq_records;
-    std::vector<SmartRecord> _left_records;
-    std::vector<SmartRecord> _right_records;
-    std::vector<int> _left_field_cnts;
-    std::vector<int> _right_field_cnts;
-    std::vector<bool> _left_opens;
-    std::vector<bool> _right_opens;
-    size_t _idx;
-    //后续做下推用
-    std::vector<ExprNode*> _index_conjuncts;
-    IndexIterator* _index_iter = nullptr;
-    TableIterator* _table_iter = nullptr;
-    ReverseIndexBase* _reverse_index = nullptr;
-
-    TableInfo*       _table_info;
-    IndexInfo*       _pri_info;
-    IndexInfo*       _index_info;
-    pb::RegionInfo*  _region_info;
-    std::vector<IndexInfo> _reverse_infos;
-    std::vector<std::string> _query_words;
-    std::vector<ReverseIndexBase*> _reverse_indexes;
-    MutilReverseIndex<CommonSchema> _m_index;
-    std::map<int64_t, pb::RegionInfo> _region_infos;
-    std::map<int32_t, int32_t> _index_slot_field_map;
+protected:
+    pb::Engine _engine = pb::ROCKSDB;
+    int32_t _tuple_id = 0;
+    int64_t _table_id = -1;
+    int64_t _router_index_id = -1;
+    std::map<int64_t, SmartPath> _paths;
+    std::vector<int64_t> _multi_reverse_index;
+    pb::TupleDescriptor* _tuple_desc = nullptr;
+    pb::PossibleIndex* _router_index = nullptr;
+    bool _is_covering_index = true;
+    bool _use_fulltext = false;
+    int32_t _possible_index_cnt = 0;
+    int32_t _cover_index_cnt = 0;
+    std::map<int32_t, double> _filed_selectiy; //缓存，避免重复的filed_id多次调用代价接口
+    FulltextInfoTree _fulltext_index_tree; //目前只有两层，第一层为and，第二层为or。
+    std::unique_ptr<pb::FulltextIndex> _fulltext_index_pb;
+    bool _fulltext_use_arrow = false;
 };
 }
 

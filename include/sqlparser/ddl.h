@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ enum MysqlType : unsigned char {
     MYSQL_TYPE_TIMESTAMP2, 
     MYSQL_TYPE_DATETIME2, 
     MYSQL_TYPE_TIME2,
+    MYSQL_TYPE_HLL          = 244,
     MYSQL_TYPE_JSON         = 245, 
     MYSQL_TYPE_NEWDECIMAL   = 246, 
     MYSQL_TYPE_ENUM         = 247, 
@@ -118,7 +119,8 @@ enum TableOptionType : unsigned char {
     TABLE_OPT_ROW_FORMAT,
     TABLE_OPT_STATS_PERSISTENT,
     TABLE_OPT_SHARD_ROW_ID,
-    TABLE_OPT_PACK_KEYS
+    TABLE_OPT_PACK_KEYS,
+    TABLE_OPT_PARTITION
 };
 
 enum DatabaseOptionType : unsigned char {
@@ -126,6 +128,27 @@ enum DatabaseOptionType : unsigned char {
     DATABASE_OPT_CHARSET,
     DATABASE_OPT_COLLATE
 };
+
+// https://dev.mysql.com/doc/refman/8.0/en/alter-table.html
+enum AlterSpecType : unsigned char {
+    ALTER_SPEC_ADD_COLUMN = 0,   // only support add column at the tail
+    ALTER_SPEC_ADD_INDEX,        // not supported yet
+    ALTER_SPEC_ADD_CONSTRAINT,
+    ALTER_SPEC_ADD_FULLTEXT,
+
+    ALTER_SPEC_DROP_COLUMN, 
+    ALTER_SPEC_DROP_INDEX,
+
+    ALTER_SPEC_RENAME_COLUMN,
+    ALTER_SPEC_RENAME_TABLE,
+    ALTER_SPEC_TABLE_OPTION
+};
+
+enum PartitionType : unsigned char {
+    PARTITION_HASH = 0,
+    PARTITION_RANGE
+};
+
 
 struct TypeOption : public Node {
     bool is_unsigned = false;
@@ -188,15 +211,15 @@ struct ColumnDef : public Node {
     }
 };
 
-// struct IndexOption : public Node {
-//     uint64_t block_size;
-//     baikaldb::pb::IndexType index_type;
-//     String comment;
+struct IndexOption : public Node {
+    //uint64_t block_size;
+    //just use comment
+    String comment;
 
-//     IndexOption() {
-//         node_type = NT_INDEX_OPT;
-//     }
-// };
+    IndexOption() {
+        node_type = NT_INDEX_OPT;
+    }
+};
 
 struct TableOption : public Node {
     TableOptionType type;
@@ -208,12 +231,19 @@ struct TableOption : public Node {
     }
 };
 
+struct PartitionOption : public TableOption {
+    PartitionType type;
+    ExprNode* expr = nullptr;
+    Vector<ExprNode*> range;
+};
+
 struct Constraint : public Node {
     ConstraintType  type;
     String          name;
     Vector<ColumnName*> columns;  // Used for PRIMARY KEY, KEY, UNIQUE, FULLTEXT
     // ReferenceDef*   refer = nullptr;    // Used for foreign key.
-    // IndexOption*    index_option = nullptr;
+    IndexOption* index_option = nullptr;
+    bool            global = false;
 
     Constraint() {
         node_type = NT_CONSTRAINT;
@@ -244,6 +274,14 @@ struct DropTableStmt : public DdlNode {
     }
 };
 
+struct RestoreTableStmt : public DdlNode {
+    Vector<TableName*> table_names;
+
+    RestoreTableStmt() {
+        node_type = NT_RESTORE_TABLE;
+    }
+};
+
 struct DatabaseOption : public Node {
     DatabaseOptionType  type;
     String              str_value;
@@ -266,9 +304,43 @@ struct CreateDatabaseStmt : public DdlNode {
 struct DropDatabaseStmt : public DdlNode {
     bool   if_exist = false;
     String db_name;
+
     DropDatabaseStmt() {
         node_type = NT_DROP_DATABASE;
         db_name = nullptr;
+    }
+};
+
+// current supported alter type:
+// ALTER_SPEC_ADD_COLUMN
+// ALTER_SPEC_DROP_COLUMN
+// ALTER_SPEC_RENAME_COLUMN
+// ALTER_SPEC_RENAME_TABLE
+// ALTER_SPEC_TABLE_OPTION (only AVG_ROW_LENGTH)
+struct AlterTableSpec : public Node {
+    AlterSpecType           spec_type;
+    String                  column_name;
+    Vector<TableOption*>    table_options;
+    TableName*              new_table_name = nullptr;
+    Vector<ColumnDef*>      new_columns;
+    //add constraint
+    Vector<Constraint*>     new_constraints;
+    String           index_name;
+    bool             is_virtual_index = false;
+
+    AlterTableSpec() {
+        node_type = NT_ALTER_SEPC;
+        column_name = nullptr;
+    }
+};
+
+struct AlterTableStmt : public DdlNode {
+    bool       ignore = false;
+    TableName* table_name = nullptr;
+    Vector<AlterTableSpec*> alter_specs;
+
+    AlterTableStmt() {
+        node_type = NT_ALTER_TABLE;
     }
 };
 }

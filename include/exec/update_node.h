@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,15 +25,13 @@ public:
     }
     virtual ~UpdateNode() {
         for (auto expr : _update_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node) override;
     virtual int open(RuntimeState* state) override;
     virtual void close(RuntimeState* state) override;
-    virtual void transfer_pb(pb::PlanNode* pb_node) override;
-
-private:
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node) override;
 };
 
 }

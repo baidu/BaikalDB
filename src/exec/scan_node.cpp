@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,34 +20,39 @@
 #include "scalar_fn_call.h"
 #include "slot_ref.h"
 #include "runtime_state.h"
-#include "parser.h"
+#include "rocksdb_scan_node.h"
+#include "information_schema_scan_node.h"
+#include "redis_scan_node.h"
 
 namespace baikaldb {
-int ScanNode::select_index(RuntimeState* state, 
-                           const pb::PlanNode& node, 
-                           std::vector<int>& multi_reverse_index) {
-    int i = 0;
-    //int index_size = node.derive_node().scan_node().indexes_size();
-    int sort_index = -1;
-
+int64_t ScanNode::select_index() {
     std::multimap<uint32_t, int> prefix_ratio_id_mapping;
-    for (auto& pos_index : node.derive_node().scan_node().indexes()) {
-        int64_t index_id = pos_index.index_id();
-        IndexInfo& info = state->resource()->get_index_info(index_id);
-        if (info.id == -1) {
+    std::unordered_set<int32_t> primary_fields;
+    primary_fields = _paths[_table_id]->hit_index_field_ids;
+    for (auto& pair : _paths) {
+        int64_t index_id = pair.first;
+        auto& path = pair.second;
+        auto& pos_index = path->pos_index;
+        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
             continue;
         }
-        int field_count = 0;
-        for (auto& range : pos_index.ranges()) {
-            if (range.has_left_field_cnt() && range.left_field_cnt() > 0) {
-                field_count = std::max(field_count, range.left_field_cnt());
-            }
-            if (range.has_right_field_cnt() && range.right_field_cnt() > 0) {
-                field_count = std::max(field_count, range.right_field_cnt());
-            }
+        IndexInfo& info = *info_ptr;
+        if (!path->is_possible && info.type != pb::I_PRIMARY) {
+            continue;
         }
-        float prefix_ratio = (field_count + 0.0) / info.fields.size();
-        uint16_t prefix_ratio_round = prefix_ratio * 10;
+        auto index_state = info.state;
+        if (index_state != pb::IS_PUBLIC) {
+            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+                index_id, pb::IndexState_Name(index_state).c_str());
+            continue;
+        }
+
+        int field_count = path->hit_index_field_ids.size();
+        if (info.fields.size() == 0) {
+            continue;
+        }
+        uint16_t prefix_ratio_round = field_count * 100 / info.fields.size();
         uint16_t index_priority = 0;
         if (info.type == pb::I_PRIMARY) {
             index_priority = 300;
@@ -58,140 +63,54 @@ int ScanNode::select_index(RuntimeState* state,
         } else {
             index_priority = 0;
         }
+        // 普通索引如果都包含在主键里，则不选
+        // 外部pre_process_select_index上线生效后此处可以不用判断，TODO
+        if (info.type == pb::I_UNIQ || info.type == pb::I_KEY) {
+            bool contain_by_primary = true;
+            for (int j = 0; j < field_count; j++) {
+                if (primary_fields.count(info.fields[j].id) == 0) {
+                    contain_by_primary = false;
+                    break;
+                }
+            }
+            if (contain_by_primary && !pos_index.has_sort_index() && field_count > 0) {
+                continue;
+            }
+        }
+        // sort index 权重调整到全命中unique或primary索引之后
+        if (pos_index.has_sort_index() && field_count > 0) {
+            prefix_ratio_round = 100;
+            index_priority = 150 + field_count;
+        } else if (pos_index.has_sort_index() && pos_index.sort_index().sort_limit() != -1) {
+            index_priority = 400;
+        }
         uint32_t prefix_ratio_index_score = (prefix_ratio_round << 16) | index_priority;
-        prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, i));
+        // ignore index用到最低优先级，其实只有primary会走到这里
+        if (path->hint == AccessPath::IGNORE_INDEX) {
+            prefix_ratio_index_score = 0;
+        }
+        prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, index_id));
 
         // 优先选倒排，没有就取第一个
         switch (info.type) {
             case pb::I_FULLTEXT:
-                multi_reverse_index.push_back(i);
+                _multi_reverse_index.push_back(index_id);
                 break;
             case pb::I_RECOMMEND:
-                return i;
-                break;
+                return index_id;
             default:
                 break;
         }
-        if (pos_index.has_sort_index()) {
-            sort_index = i;
-        }
-        ++i;
     }
-    if (sort_index != -1) {
-        return sort_index;
+    if (choose_arrow_pb_reverse_index() != 0) {
+        DB_WARNING("choose arrow pb reverse index error.");
+        return -1;
     }
     // ratio * 10(=0...9)相同的possible index中，按照PRIMARY, UNIQUE, KEY的优先级选择
     for (auto iter = prefix_ratio_id_mapping.crbegin(); iter != prefix_ratio_id_mapping.crend(); ++iter) {
         return iter->second;
     }
-    return 0;
-}
-
-int ScanNode::choose_index(RuntimeState* state) {
-    _table_info = &(state->resource()->table_info);
-    _pri_info = &(state->resource()->pri_info);
-
-    // 做完logical plan还没有索引
-    if (_pb_node.derive_node().scan_node().indexes_size() == 0) {
-        return 0;
-    }
-
-    std::vector<int> multi_reverse_index;
-    int idx = select_index(state, _pb_node, multi_reverse_index);
-    if (multi_reverse_index.size() == 1) {
-        idx = multi_reverse_index[0];
-    }
-    const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(idx);
-    _index_id = pos_index.index_id();
-    _index_info = &state->resource()->get_index_info(_index_id);
-    if (_index_info->id == -1) {
-        DB_WARNING("no index_info found for index id: %ld", _index_id);
-        return -1;
-    }
-    int ret = 0;
-    if (multi_reverse_index.size() > 1 || 
-            (multi_reverse_index.size() == 1 && pos_index.ranges_size() > 1)) {
-        for (auto id : multi_reverse_index) {
-            const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(id);
-            auto index_id = pos_index.index_id();
-            IndexInfo& index_info = state->resource()->get_index_info(index_id);
-            if (index_info.id == -1) {
-                DB_WARNING("no index_info found for index id: %ld", index_id);
-                return -1;
-            }
-            for (auto& range : pos_index.ranges()) {
-                SmartRecord record = _factory->new_record(*_table_info);
-                record->decode(range.left_pb_record());
-                std::string word;
-                ret = record->get_reverse_word(index_info, word);
-                if (ret < 0) {
-                    DB_WARNING("index_info to word fail for index_id: %ld", index_id);
-                    return ret;
-                }
-                _reverse_infos.push_back(index_info);
-                _query_words.push_back(word);
-            }
-            _index_ids.push_back(index_id);
-            DB_WARNING("use multi %d", _reverse_infos.size());
-        }
-        return 0;
-    }
-    _index_ids.push_back(_index_id);
-    if (pos_index.ranges_size() == 0) {
-        return -1;
-    }
-    DB_WARNING("use_index: %ld table_id: %ld left:%d, right:%d", 
-            _index_id, _table_id, pos_index.ranges(0).left_field_cnt(), pos_index.ranges(0).right_field_cnt());
-
-    bool is_eq = true;
-    for (auto& range : pos_index.ranges()) {
-        // 空指针容易出错
-        SmartRecord left_record = _factory->new_record(*_table_info);
-        SmartRecord right_record = _factory->new_record(*_table_info);
-        left_record->decode(range.left_pb_record());
-        right_record->decode(range.right_pb_record());
-        int left_field_cnt = range.left_field_cnt();
-        int right_field_cnt = range.right_field_cnt();
-        bool left_open = range.left_open();
-        bool right_open = range.right_open();
-        if (range.left_pb_record() != range.right_pb_record()) {
-            is_eq = false;
-        }
-        if (left_field_cnt != right_field_cnt) {
-            is_eq = false;
-        }
-        //DB_WARNING("left_open:%d right_open:%d", left_open, right_open);
-        if (left_open || right_open) {
-            is_eq = false;
-        }
-        _left_records.push_back(left_record);
-        _right_records.push_back(right_record);
-        _left_field_cnts.push_back(left_field_cnt);
-        _right_field_cnts.push_back(right_field_cnt);
-        _left_opens.push_back(left_open);
-        _right_opens.push_back(right_open);
-    }
-    if (_index_info->type == pb::I_PRIMARY || _index_info->type == pb::I_UNIQ) {
-        if (_left_field_cnts[_idx] == (int)_index_info->fields.size() && is_eq) {
-            //DB_WARNING("index use get ,index:%ld", _index_info.id);
-            _use_get = true;
-        }
-    }
-    for (auto& expr : pos_index.index_conjuncts()) {
-        ExprNode* index_conjunct = nullptr;
-        ret = ExprNode::create_tree(expr, &index_conjunct);
-        if (ret < 0) {
-            DB_WARNING("ExprNode::create_tree fail, ret:%d", ret);
-            return ret;
-        }
-        _index_conjuncts.push_back(index_conjunct);
-    }
-    if (pos_index.has_sort_index()) {
-        _sort_use_index = true;
-        _scan_forward = pos_index.sort_index().is_asc();
-    }
-    //DB_WARNING("start search");
-    return 0;
+    return _table_id;
 }
 
 int ScanNode::init(const pb::PlanNode& node) {
@@ -201,156 +120,10 @@ int ScanNode::init(const pb::PlanNode& node) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
-    _factory = SchemaFactory::get_instance();
     _tuple_id = node.derive_node().scan_node().tuple_id();
     _table_id = node.derive_node().scan_node().table_id();
-    return 0;
-}
-
-int ScanNode::predicate_pushdown() {
-    //DB_WARNING("node:%ld is pushdown", this);
-    if (_parent == NULL) {
-        DB_WARNING("parent is null");
-        return 0;
-    }
-    if (_parent->get_node_type() != pb::JOIN_NODE) {
-        DB_WARNING("parent is not join node,%d", _parent->get_node_type());
-        return 0;
-    }
-
-    std::vector<ExprNode*>* parent_conditions = _parent->mutable_conjuncts();
-    FilterNode* filter_node = NULL;
-    auto iter = parent_conditions->begin();
-    while (iter != parent_conditions->end()) {
-        if (!contain_condition(*iter)) {
-            ++iter;
-            //DB_WARNING("expr is not pushdown");
-            continue;
-        }
-        //生成filter节点
-        if (filter_node == NULL) {
-            pb::PlanNode pb_plan_node;
-            pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
-            pb_plan_node.set_num_children(1);
-            pb_plan_node.set_limit(-1);
-            filter_node = new FilterNode();
-            filter_node->init(pb_plan_node);
-            //修改plan树结构，在scan 和 join之间增加filter
-            _parent->replace_child(this, filter_node);
-            filter_node->add_child(this);
-        }
-        //下推
-        filter_node->add_conjunct(*iter);
-        //剪枝
-        iter = parent_conditions->erase(iter);
-        DB_WARNING("expr is push_down")
-    }
-    return ExecNode::predicate_pushdown();
-}
-
-bool ScanNode::need_pushdown(ExprNode* expr) {
-    pb::IndexType index_type = _index_info->type;
-    // get方式和主键无需下推
-    if (_use_get || index_type == pb::I_PRIMARY) {
-        return false;
-    }
-    // 该条件用于指定索引，在filternode里处理了
-    if (expr->contained_by_index(_index_ids)) {
-        return false;
-    }
-    if (index_type == pb::I_KEY || index_type == pb::I_UNIQ) {
-        // 普通索引只要全包含slot id就可以下推
-        std::unordered_set<int32_t> slot_ids;
-        expr->get_all_slot_ids(slot_ids);
-        for (auto slot_id : slot_ids) {
-            if (_index_slot_field_map.count(slot_id) == 0) {
-                return false;
-            }
-        }
-        return true;
-    }
-    // 倒排索引条件比较苛刻
-    if (expr->children_size() < 2) {
-        return false;
-    }
-    if (expr->children(0)->node_type() != pb::SLOT_REF) {
-        return false;
-    }
-    SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
-    if (_index_slot_field_map.count(slot_ref->slot_id()) == 0) {
-        return false;
-    } 
-    // 倒排里用field_id识别
-    slot_ref->set_field_id(_index_slot_field_map[slot_ref->slot_id()]);
-    switch (expr->node_type()) {
-        case pb::FUNCTION_CALL: { 
-#ifdef NEW_PARSER
-            if (static_cast<ScalarFnCall*>(expr)->fn().fn_op() == parser::FT_EQ) {
-                return true;
-            }
-#else
-            if (static_cast<ScalarFnCall*>(expr)->fn().fn_op() == OP_EQ) {
-                return true;
-            }
-#endif
-            break;
-        }
-        case pb::IN_PREDICATE:
-            return true;
-        default:
-            return false;
-    }
-    return false;
-}
-
-int ScanNode::index_condition_pushdown() {
-    //DB_WARNING("node:%ld is pushdown", this);
-    if (_parent == NULL) {
-        DB_WARNING("parent is null");
-        return 0;
-    }
-    if (_parent->get_node_type() != pb::WHERE_FILTER_NODE &&
-            _parent->get_node_type() != pb::TABLE_FILTER_NODE) {
-        DB_WARNING("parent is not filter node:%d", _parent->get_node_type());
-        return 0;
-    }
-    
-    std::vector<ExprNode*>* parent_conditions = _parent->mutable_conjuncts();
-    auto iter = parent_conditions->begin();
-    while (iter != parent_conditions->end()) {
-        if (need_pushdown(*iter)) {
-            _index_conjuncts.push_back(*iter);
-            iter = parent_conditions->erase(iter);
-            DB_WARNING("expr is push_down")
-        } else {
-            iter++;
-        }
-    }
-    return 0;
-}
-
-int ScanNode::add_or_pushdown(ExprNode* expr, 
-                              ExecNode** exec_node) {
-    if (!contain_condition(expr)) {
-        DB_WARNING("add or pushdwon fail");
-        return -1;
-    }
-    
-    if (_parent->node_type() == pb::TABLE_FILTER_NODE
-            || _parent->node_type() == pb::WHERE_FILTER_NODE) {
-        static_cast<FilterNode*>(_parent)->add_conjunct(expr);
-        *exec_node = _parent;
-    } else {
-        pb::PlanNode pb_plan_node;
-        pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
-        pb_plan_node.set_num_children(1);
-        pb_plan_node.set_limit(-1);
-        FilterNode* filter_node = new FilterNode();
-        filter_node->init(pb_plan_node);
-        _parent->replace_child(this, filter_node);
-        filter_node->add_child(this);
-        filter_node->add_conjunct(expr);
-        *exec_node = filter_node;
+    if (node.derive_node().scan_node().has_engine()) {
+        _engine = node.derive_node().scan_node().engine();
     }
     return 0;
 }
@@ -359,393 +132,530 @@ int ScanNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
-    }
-    ret = choose_index(state);
-    if (ret < 0) {
-        DB_WARNING("calc index fail:%d", ret);
-        return ret;
-    }
-    if (_index_info->type == pb::I_RECOMMEND) {
-        state->set_sort_use_index();
-    } 
-    if (_sort_use_index) {
-        state->set_sort_use_index();
     }
     _tuple_desc = state->get_tuple_desc(_tuple_id);
-    for (auto& slot : _tuple_desc->slots()) {
-        _field_ids.push_back(slot.field_id());
-    }
-    std::sort(_field_ids.begin(), _field_ids.end());
-
-    _mem_row_desc = state->mem_row_desc();
-    _region_id = state->region_id();
-    DB_WARNING("use_index: %ld table_id: %ld region_id: %ld", _index_id, _table_id, _region_id);
-    _region_info = &(state->resource()->region_info);
-    Transaction* txn = state->txn();
-    auto reverse_index_map = state->reverse_index_map();
-    for (auto& f : _pri_info->fields) {
-        auto slot_id = state->get_slot_id(_tuple_id, f.id);
-        if (slot_id > 0) {
-            _index_slot_field_map[slot_id] = f.id;
-        }
-    }
-    if (_index_info->type == pb::I_KEY || _index_info->type == pb::I_UNIQ) {
-        for (auto& f : _index_info->fields) {
-            auto slot_id = state->get_slot_id(_tuple_id, f.id);
-            if (slot_id > 0) {
-                _index_slot_field_map[slot_id] = f.id;
-            }
-        }
-    } else if (_index_info->type == pb::I_RECOMMEND) {
-        int32_t userid_field_id = get_field_id_by_name(_table_info->fields, "userid");
-        int32_t source_field_id = get_field_id_by_name(_table_info->fields, "source");
-        auto userid_slot_id = state->get_slot_id(_tuple_id, userid_field_id);
-        auto source_slot_id = state->get_slot_id(_tuple_id, source_field_id);
-        if (userid_slot_id > 0) {
-            _index_slot_field_map[userid_slot_id] = userid_field_id;
-        }
-        if (source_slot_id > 0) {
-            _index_slot_field_map[source_slot_id] = source_field_id;
-        }
-    }
-    for (auto& slot : _tuple_desc->slots()) {
-        if (_index_slot_field_map.count(slot.slot_id()) == 0) {
-            _is_covering_index = false;
-            break;
-        }
-    }
-    // 索引条件下推，减少主表查询次数
-    index_condition_pushdown();
-    for (auto expr : _index_conjuncts) {
-        ret = expr->open();
-        if (ret < 0) {
-            DB_WARNING("Expr::open fail:%d", ret);
-            return ret;
-        }
-    }
-    //DB_WARNING("_is_covering_index:%d", _is_covering_index);
-    if (_reverse_infos.size() > 0) {
-        for (auto& info : _reverse_infos) {
-            if (reverse_index_map.count(info.id) == 1) {
-                _reverse_indexes.push_back(reverse_index_map[info.id]);
-            } else {
-                DB_WARNING("index:%ld is not FULLTEXT", info.id);
-                return -1;
-            }
-        }
-        bool or_bool = true;
-        //DB_WARNING("_m_index search");
-        // reverse has in, need not or boolean
-        if (_reverse_indexes.size() > _index_ids.size()) {
-            or_bool = false;
-        }
-        DB_NOTICE("or_bool:%d", or_bool);
-        // 为了性能,多索引倒排查找不seek
-        _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                    _reverse_indexes, _query_words, true, or_bool);
-    } else if (reverse_index_map.count(_index_id) == 1) {
-        //倒排索引不允许是多字段
-        if (_index_info->fields.size() != 1) {
-            DB_WARNING("indexinfo get fail, index_id:%ld", _index_id);
-            return -1;
-        }
-        _reverse_index = reverse_index_map[_index_id];
-        std::string word;
-        ret = _left_records[_idx]->get_reverse_word(*_index_info, word);
-        if (ret < 0) {
-            DB_WARNING("index_info to word fail for index_id: %ld", _index_id);
-            return ret;
-        }
-        //DB_NOTICE("word:%s", str_to_hex(word).c_str());
-        bool dont_seek = _index_info->type == pb::I_RECOMMEND;
-        ret = _reverse_index->search(txn->get_txn(), *_pri_info, *_table_info, 
-                word, _index_conjuncts, dont_seek);
-        if (ret < 0) {
-            return ret;
-        }
-    }
-    for (auto id : _index_ids) {
-        state->add_scan_index(id);
-    }
-    return 0;
-}
-
-int ScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
-    if (_index_id == _table_id) {
-        if (_use_get) {
-            return get_next_by_table_get(state, batch, eos);
-        } else {
-            return get_next_by_table_seek(state, batch, eos);
-        }
-    } else {
-        if (_use_get) {
-            return get_next_by_index_get(state, batch, eos);
-        } else {
-            return get_next_by_index_seek(state, batch, eos);
-        }
-    }
     return 0;
 }
 
 void ScanNode::close(RuntimeState* state) {
     ExecNode::close(state);
-    for (auto expr : _index_conjuncts) {
-        expr->close();
-    }
+    clear_possible_indexes();
+    _multi_reverse_index.clear();
 }
-
-int ScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos) {
-    Transaction* txn = state->txn();
-    if (txn == nullptr) {
-        DB_WARNING("txn is nullptr");
-        return -1;
-    }
-    SmartRecord record;
-    while (1) {
-        if (reached_limit()) {
-            *eos = true;
-            return 0;
-        }
-        if (batch->is_full()) {
-            return 0;
-        }
-        if (_idx >= _left_records.size()) {
-            *eos = true;
-            return 0;
-        } else {
-            record = _left_records[_idx++];
-        }
-        int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, true);
-        if (ret < 0) {
-            DB_WARNING("get primary:%ld fail, not exist, ret:%d, record: %s", 
-                    _table_id, ret, record->to_string().c_str());
-            continue;
-        }
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        for (auto slot : _tuple_desc->slots()) {
-            auto field = record->get_field_by_tag(slot.field_id());
-            row->set_value(slot.tuple_id(), slot.slot_id(),
-                    record->get_value(field));
-        }
-        batch->move_row(std::move(row));
-        ++_num_rows_returned;
-    }
-}
-
-int ScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos) {
-    SmartRecord record;
-    while (1) {
-        if (reached_limit()) {
-            *eos = true;
-            return 0;
-        }
-        if (batch->is_full()) {
-            return 0;
-        }
-        if (_idx >= _left_records.size()) {
-            *eos = true;
-            return 0;
-        } else {
-            record = _left_records[_idx++];
-        }
-        Transaction* txn = state->txn();
-        int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, record, GET_ONLY, true);
-        if (ret < 0) {
-            DB_WARNING("get index:%ld fail, not exist, ret:%d, record: %s", 
-                    _table_id, ret, record->to_string().c_str());
-            continue;
-        }
-        if (!_is_covering_index) {
-            ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
-            if (ret < 0) {
-                DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s", 
-                        _table_id, ret, record->to_string().c_str());
-                continue;
+void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
+    std::map<std::string, std::string> explain_info = {
+        {"id", "1"},
+        {"select_type", "SIMPLE"},
+        {"table", "NULL"},
+        {"type", "NULL"},
+        {"possible_keys", "NULL"},
+        {"key", "NULL"},
+        {"key_len", "NULL"},
+        {"ref", "NULL"},
+        {"rows", "NULL"},
+        {"Extra", ""},
+        {"sort_index", "0"}
+    };
+    auto factory = SchemaFactory::get_instance();
+    explain_info["table"] = factory->get_table_info(_table_id).name;
+    if (!has_index()) {
+        explain_info["type"] = "ALL";
+    } else {
+        explain_info["possible_keys"] = "";
+        for (auto& pair : _paths) {
+            auto& path = pair.second;
+            if (path->is_possible) {
+                int64_t index_id = path->index_id;
+                explain_info["possible_keys"] += factory->get_index_info(index_id).short_name;
+                explain_info["possible_keys"] += ",";
             }
         }
-
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        for (auto slot : _tuple_desc->slots()) {
-            auto field = record->get_field_by_tag(slot.field_id());
-            row->set_value(slot.tuple_id(), slot.slot_id(),
-                    record->get_value(field));
+        if (!explain_info["possible_keys"].empty()) {
+            explain_info["possible_keys"].pop_back();
         }
-        batch->move_row(std::move(row));
-        ++_num_rows_returned;
+        
+        auto& pos_index = _pb_node.derive_node().scan_node().indexes(0);
+        int64_t index_id = pos_index.index_id();
+        auto index_info = factory->get_index_info(index_id);
+        auto pri_info = factory->get_index_info(_table_id);
+        explain_info["key"] = index_info.short_name;
+        explain_info["type"] = "range";
+        if (pos_index.ranges_size() == 1) {
+            int field_cnt = pos_index.ranges(0).left_field_cnt();
+            if (field_cnt == index_info.fields.size() && 
+                    pos_index.ranges(0).left_pb_record() == pos_index.ranges(0).right_pb_record()) {
+                explain_info["type"] = "eq_ref";
+                if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_PRIMARY) {
+                    explain_info["type"] = "const";
+                }
+            }
+        }
+        if (pos_index.has_sort_index()) {
+            explain_info["sort_index"] = "1";
+        }
+        std::set<int32_t> field_map;
+        for (auto& f : pri_info.fields) {
+            field_map.insert(f.id);
+        }
+        if (index_info.type == pb::I_KEY || index_info.type == pb::I_UNIQ) {
+            for (auto& f : index_info.fields) {
+                field_map.insert(f.id);
+            }
+        }
+        if (_tuple_desc != nullptr) {
+            bool is_covering_index = true;
+            for (auto slot : _tuple_desc->slots()) {
+                if (field_map.count(slot.field_id()) == 0) {
+                    is_covering_index = false;
+                    break;
+                }
+            }
+            if (is_covering_index) {
+                explain_info["Extra"] = "Using index;";
+            }
+        }
+    }
+    output.push_back(explain_info);
+}
+
+void ScanNode::show_cost(std::vector<std::map<std::string, std::string>>& path_infos) {
+    for (auto& pair : _paths) {
+        auto& path = pair.second;
+        std::map<std::string, std::string> path_info;
+        if (path->is_possible || path->index_type == pb::I_PRIMARY) {
+            path->show_cost(&path_info, _filed_selectiy);
+            path_infos.push_back(path_info);
+        }
     }
 }
 
-int ScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
-    SmartRecord record = _factory->new_record(*_table_info);
-    int64_t time = 0;
-    while (1) {
-        if (reached_limit()) {
-            *eos = true;
-            return 0;
+//干掉被另一个索引完全覆盖的
+
+int64_t ScanNode::select_index_by_cost() {
+    double min_cost = DBL_MAX;
+    int min_idx = 0;
+    bool multi_0_0 = false;
+    bool multi_1_0 = false;
+    bool enable_use_cost = true;
+    // 优化：只有一个possible时直接使用
+    for (auto& pair : _paths) {
+        auto& path = pair.second;
+        if (!path->is_possible && path->index_type == pb::I_PRIMARY) {
+            if (_possible_index_cnt > 0 && _cover_index_cnt > 0) {
+                // 如果primary_key非possible，并且有其他索引可选时，跳过primary key
+                continue;
+            }
+        } else if (!path->is_possible) {
+            continue;
         }
-        if (batch->is_full()) {
-            return 0;
+        
+        int64_t index_id = pair.first;
+        path->calc_cost(nullptr, _filed_selectiy);
+        if (path->cost < min_cost) {
+            min_cost = path->cost;
+            min_idx = index_id;
         }
-        if (_table_iter == nullptr || !_table_iter->valid()) {
-            if (_idx >= _left_records.size()) {
-                *eos = true;
-                return 0;
+        if (float_equal(path->selectivity, 0.0)) {
+            if (multi_0_0) {
+                enable_use_cost = false;
+                break;
             } else {
-                IndexRange range(_left_records[_idx].get(), 
-                        _right_records[_idx].get(), 
-                        _index_info,
-                        _pri_info,
-                        _region_info,
-                        _left_field_cnts[_idx], 
-                        _right_field_cnts[_idx], 
-                        _left_opens[_idx], 
-                        _right_opens[_idx]);
-                delete _table_iter;
-                _table_iter = state->txn()->scan_primary(range, _field_ids, true, _scan_forward);
-                if (_table_iter == nullptr) {
-                    DB_WARNING("open TableIterator fail, table_id:%ld", _index_id);
-                    return -1;
-                }
-                if (_is_covering_index) {
-                    _table_iter->set_mode(KEY_ONLY);
-                }
-                _idx++;
-                continue;
+                multi_0_0 = true;
+            }
+        } else if (float_equal(path->selectivity, 1.0)) {
+            if (multi_1_0) {
+                enable_use_cost = false;
+                break;
+            } else {
+                multi_1_0 = true;
             }
         }
-        record->clear();
-        int ret = _table_iter->get_next(record);
-        if (ret < 0) {
-            continue;
-        }
-        TimeCost cost;
-        //DB_WARNING("get_next:%lu", cost.get_time());
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        for (auto slot : _tuple_desc->slots()) {
-            auto field = record->get_field_by_tag(slot.field_id());
-            row->set_value(slot.tuple_id(), slot.slot_id(),
-                    record->get_value(field));
-        }
-        batch->move_row(std::move(row));
-        ++_num_rows_returned;
-        time += cost.get_time();
+        DB_DEBUG("idx:%ld cost:%f", index_id, path->cost);
+    }
+    //兜底方案，如果出现多个0.0或者1.0可能代价计算有问题，使用基于规则的索引选择
+    if (enable_use_cost) {
+        return min_idx;
+    } else {
+        return select_index();
     }
 }
 
-inline bool ScanNode::need_copy(MemRow* row) {
-    for (auto conjunct : _index_conjuncts) {
-        ExprValue value = conjunct->get_value(row);
-        if (value.is_null() || value.get_numberic<bool>() == false) {
+// 判断是否全覆盖，只有被全覆盖的索引可以被干掉
+bool ScanNode::full_coverage(const std::unordered_set<int32_t>& smaller, const std::unordered_set<int32_t>& bigger) {
+    for (int32_t field_id : smaller) {
+        if (bigger.count(field_id) == 0) {
             return false;
         }
     }
+
     return true;
 }
 
-int ScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
-    int ret = 0;
-    SmartRecord record = _factory->new_record(*_table_info);
-    while (1) {
-        if (reached_limit()) {
-            *eos = true;
+// 两个索引比较选择最优的，干掉另一个
+// return  0 没有干掉任何一个
+// return -1 outer被干掉
+// return -2 inner被干掉
+int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
+    if (outer_path->hit_index_field_ids.size() == inner_path->hit_index_field_ids.size()) {
+        if (!full_coverage(outer_path->hit_index_field_ids, inner_path->hit_index_field_ids)) {
             return 0;
         }
-        if (batch->is_full()) {
+
+        if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
+            outer_path->is_possible = false;
+            return -1;
+        }
+
+        if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
+            inner_path->is_possible = false;
+            return -2;
+        }
+
+        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
+            outer_path->is_sort_index == inner_path->is_sort_index) {
+            inner_path->is_possible = false;
+            return -2;
+        }
+
+    } else if (outer_path->hit_index_field_ids.size() < inner_path->hit_index_field_ids.size()) {
+        if (!full_coverage(outer_path->hit_index_field_ids, inner_path->hit_index_field_ids)) {
             return 0;
         }
-        if (_reverse_indexes.size() > 0) {
-            if (!_m_index.valid()) {
-                *eos = true; 
-                return 0;
+
+        if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
+            outer_path->is_possible = false;
+            return -1;
+        }
+
+        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
+            outer_path->is_sort_index == inner_path->is_sort_index) {
+            outer_path->is_possible = false;
+            return -1;
+        }
+    } else {
+        if (!full_coverage(inner_path->hit_index_field_ids, outer_path->hit_index_field_ids)) {
+            return 0;
+        }
+
+        if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
+            inner_path->is_possible = false;
+            return -2;
+        }
+
+        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
+            outer_path->is_sort_index == inner_path->is_sort_index) {
+            inner_path->is_possible = false;
+            return -2;
+        }
+    }
+
+    return 0;
+}
+
+void ScanNode::inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter) {
+    auto inner_loop_iter = outer_loop_iter;
+    while ((++inner_loop_iter) != _paths.end()) {
+        if (!inner_loop_iter->second->is_possible) {
+            continue;
+        }
+
+        if (inner_loop_iter->second->index_type != pb::I_PRIMARY && 
+            inner_loop_iter->second->index_type != pb::I_UNIQ &&
+            inner_loop_iter->second->index_type != pb::I_KEY) {
+            continue;
+        }
+
+        int ret = compare_two_path(outer_loop_iter->second, inner_loop_iter->second);
+        if (ret == -1) {
+            // outer被干掉，跳出循环
+            break;
+        }
+    }
+}
+
+// 两两比较，根据一些简单规则干掉次优索引
+int64_t ScanNode::pre_process_select_index() {
+    if (_paths.empty()) {
+        return 0;
+    }
+
+    if (_use_fulltext) {
+        return 0;
+    }
+
+    int possible_cnt = 0;
+    int cover_index_cnt = 0;
+    int64_t possible_index = 0;
+    for (auto outer_loop_iter = _paths.begin(); outer_loop_iter != _paths.end(); outer_loop_iter++) {
+        if (!outer_loop_iter->second->is_possible) {
+            continue;
+        }
+
+        if (outer_loop_iter->second->index_type != pb::I_PRIMARY && 
+            outer_loop_iter->second->index_type != pb::I_UNIQ &&
+            outer_loop_iter->second->index_type != pb::I_KEY) {
+            continue;
+        }
+
+        if (outer_loop_iter->second->index_type == pb::I_PRIMARY || 
+            outer_loop_iter->second->index_type == pb::I_UNIQ) {
+            if (outer_loop_iter->second->index_field_ids.size() 
+                == outer_loop_iter->second->hit_index_field_ids.size()) {
+                // 主键或唯一键全命中，直接选择
+                return outer_loop_iter->second->index_id;
             }
-        } else if (_reverse_index != nullptr) {
-            if (!_reverse_index->valid()) {
-                *eos = true;
-                return 0;
-            }
+        }
+
+        inner_loop_and_compare(outer_loop_iter);
+        if (outer_loop_iter->second->is_possible) {
+            possible_cnt++;
+            possible_index = outer_loop_iter->second->index_id;
+        }
+        if (outer_loop_iter->second->is_cover_index()) {
+            cover_index_cnt++;
+        }
+    }
+
+    _cover_index_cnt = cover_index_cnt;
+    _possible_index_cnt = possible_cnt;
+    // 仅有一个possible index直接选择这个索引
+    if (possible_cnt == 1) {
+        return possible_index;
+    }
+
+    // 没有possible index 选择 primary index
+    if (possible_cnt == 0) {
+        return _table_id;
+    }
+
+    return 0;
+
+}
+
+int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
+    auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
+    if (table_ptr == nullptr) {
+        DB_FATAL("table info not exist : %ld", _table_id);
+        return -1;
+    }
+    pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
+    _router_index_id = _table_id; 
+    _router_index = &_paths[_table_id]->pos_index;
+    // 预处理，使用倒排索引的sql不进行预处理，如果select_idx大于0则已经选出索引
+    int64_t select_idx = pre_process_select_index();
+
+    if (select_idx == 0) {
+        if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
+            && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext) {
+            DB_DEBUG("table %ld has statistics", _table_id);
+            select_idx = select_index_by_cost();
         } else {
-            if (_index_iter == nullptr || !_index_iter->valid()) {
-                if (_idx >= _left_records.size()) {
-                    *eos = true;
-                    return 0;
-                } else {
-                    IndexRange range(_left_records[_idx].get(), 
-                            _right_records[_idx].get(), 
-                            _index_info,
-                            _pri_info,
-                            _region_info,
-                            _left_field_cnts[_idx], 
-                            _right_field_cnts[_idx], 
-                            _left_opens[_idx], 
-                            _right_opens[_idx]);
-                    delete _index_iter;
-                    _index_iter = state->txn()->scan_secondary(range, true, _scan_forward);
-                    if (_index_iter == nullptr) {
-                        DB_WARNING("open IndexIterator fail, index_id:%ld", _index_id);
-                        return -1;
-                    }
-                    _idx++;
-                    continue;
+            select_idx = select_index();
+        }
+    } 
+
+    if (_paths[select_idx]->is_virtual) {
+        // 虚拟索引需要重新选择
+        _router_index_id = -1;
+        _router_index = nullptr;
+        _multi_reverse_index.clear();
+        _paths[select_idx]->is_possible = false; // 确保下次不再选择该虚拟索引
+        std::string& name = _paths[select_idx]->index_info_ptr->short_name;
+        SchemaFactory::get_instance()->update_virtual_index_info(select_idx, name, sample_sql);
+        return select_index_in_baikaldb(sample_sql);
+    }
+
+    //DB_WARNING("idx:%ld table:%ld", select_idx, _table_id);
+    std::unordered_set<ExprNode*> other_condition;
+    if (_multi_reverse_index.size() > 0) {
+        //有倒排索引，创建倒排索引树
+        create_fulltext_index_tree();
+        std::unordered_set<ExprNode*> need_cut_condition;
+        select_idx = _multi_reverse_index[0];
+        for (auto index_id : _multi_reverse_index) {
+            auto pos_index = pb_scan_node->add_indexes();
+            pos_index->CopyFrom(_paths[index_id]->pos_index);
+            need_cut_condition.insert(_paths[index_id]->need_cut_index_range_condition.begin(), 
+                    _paths[index_id]->need_cut_index_range_condition.end());
+        }
+        // 倒排多索引，直接上到其他过滤条件里
+        for (auto index_id : _multi_reverse_index) {
+            for (auto expr : _paths[index_id]->index_other_condition) {
+                if (need_cut_condition.count(expr) == 0) {
+                    other_condition.insert(expr);
+                }
+            }
+            for (auto expr : _paths[index_id]->other_condition) {
+                if (need_cut_condition.count(expr) == 0) {
+                    other_condition.insert(expr);
                 }
             }
         }
-        //TimeCost cost;
-        record->clear();
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        if (_reverse_indexes.size() > 0) {
-            ret = _m_index.get_next(record);
-            if (ret < 0) {
-                DB_WARNING("get index fail, maybe reach end");
-                continue;
-            }
-        } else if (_reverse_index != nullptr) {
-            ret = _reverse_index->get_next(record);
-            if (ret < 0) {
-                DB_WARNING("get index fail, maybe reach end");
-                continue;
-            }
-        } else {
-            ret = _index_iter->get_next(record);
-            if (ret < 0) {
-                //DB_WARNING("get index fail, maybe reach end");
-                continue;
-            }
+        _is_covering_index = _paths[select_idx]->is_covering_index;
+    } else {
+        auto pos_index = pb_scan_node->add_indexes();
+        pos_index->CopyFrom(_paths[select_idx]->pos_index);
+        int64_t index_id = _paths[select_idx]->index_id;
+        _is_covering_index = _paths[select_idx]->is_covering_index;
+        // 索引还有清理逻辑，在plan_router里;primary->mutable_ranges()->Clear();
+        if (SchemaFactory::get_instance()->is_global_index(index_id) || 
+                _paths[select_idx]->index_type == pb::I_PRIMARY) {
+            _router_index_id = index_id;
+            _router_index = pos_index;
         }
-        // 倒排索引直接下推到了布尔引擎，但是主键条件未下推，因此也需要再次过滤
-        // toto: 后续可以再次优化，把userid和source的条件干掉
-        // 索引谓词过滤
-        for (auto& pair : _index_slot_field_map) {
-            auto field = record->get_field_by_tag(pair.second);
-            row->set_value(_tuple_id, pair.first, record->get_value(field));
-        }
-        if (!need_copy(row.get())) {
-            continue;
-        }
-        //DB_NOTICE("get index: %ld", cost.get_time());
-        //cost.reset();
-        if (!_is_covering_index) {
-            Transaction* txn = state->txn();
-            ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
-            if (ret < 0) {
-                DB_FATAL("get primary:%ld fail, ret:%d, index primary may be not consistency: %s", 
-                        _table_id, ret, record->to_string().c_str());
-                continue;
-            }
-        }
-        //DB_NOTICE("get pri: %ld", cost.get_time());
-        //cost.reset();
-        //row->set_tuple(_tuple_id, _mem_row_desc);
-        for (auto slot : _tuple_desc->slots()) {
-            auto field = record->get_field_by_tag(slot.field_id());
-            row->set_value(slot.tuple_id(), slot.slot_id(),
-                    record->get_value(field));
-        }
-        batch->move_row(std::move(row));
-        ++_num_rows_returned;
-        //DB_NOTICE("MemRow set: %ld", cost.get_time());
+        other_condition = _paths[select_idx]->other_condition;
     }
+    DB_DEBUG("select_idx:%d _is_covering_index:%d index:%ld table:%ld", 
+            select_idx, _is_covering_index, select_idx, _table_id);
+    // modify filter conjuncts
+    if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+        get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
+        static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index(other_condition);
+    }
+
+    return select_idx;
+}
+
+ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node) {
+    if (node.derive_node().scan_node().has_engine()) {
+        pb::Engine engine = node.derive_node().scan_node().engine();
+        switch (engine) {
+            case pb::ROCKSDB:
+            case pb::BINLOG:
+            case pb::ROCKSDB_CSTORE:
+                return new RocksdbScanNode;
+            case pb::INFORMATION_SCHEMA:
+                return new InformationSchemaScanNode;
+            case pb::REDIS:
+                return new RedisScanNode;
+        }
+    } else {
+        return new RocksdbScanNode;
+    }
+    return nullptr;
+}
+
+int ScanNode::choose_arrow_pb_reverse_index() {
+    if (_multi_reverse_index.size() > 1) {
+        int pb_type_num = 0;
+        int arrow_type_num = 0;
+        std::vector<int> pb_indexs;
+        std::vector<int> arrow_indexs;
+        pb_indexs.reserve(4);
+        arrow_indexs.reserve(4);
+        pb::StorageType filter_type = pb::ST_UNKNOWN;
+        for (auto index_id : _multi_reverse_index) {
+            DB_DEBUG("reverse_filter index [%lld]", index_id);
+            pb::StorageType type = pb::ST_UNKNOWN;
+            if (SchemaFactory::get_instance()->get_index_storage_type(index_id, type) == -1) {
+                DB_FATAL("get index storage type error index [%lld]", index_id);
+                return -1;
+            }
+
+            if (type == pb::ST_PROTOBUF_OR_FORMAT1) {
+                pb_indexs.push_back(index_id);
+                ++pb_type_num;
+            } else if (type == pb::ST_ARROW) {
+                arrow_indexs.push_back(index_id);
+                ++arrow_type_num;
+            }
+        }
+        filter_type = pb_type_num <= arrow_type_num ? pb::ST_PROTOBUF_OR_FORMAT1 : pb::ST_ARROW;
+        DB_DEBUG("reverse_filter type[%s]", pb::StorageType_Name(filter_type).c_str());
+        auto remove_indexs_func = [this](std::vector<int>& to_remove_indexs) {
+            _multi_reverse_index.erase(std::remove_if(_multi_reverse_index.begin(), _multi_reverse_index.end(), [&to_remove_indexs](const int& index) {
+                return std::find(to_remove_indexs.begin(), to_remove_indexs.end(), index) 
+                    != to_remove_indexs.end() ? true : false;
+            }), _multi_reverse_index.end());
+        };
+
+        if (filter_type == pb::ST_PROTOBUF_OR_FORMAT1) {
+            remove_indexs_func(pb_indexs);
+            _fulltext_use_arrow = true;
+        } else if (filter_type == pb::ST_ARROW) {
+            remove_indexs_func(arrow_indexs);
+        }
+    }
+    return 0;   
+}
+
+int ScanNode::create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextIndex* root) {
+    if (node == nullptr) {
+        return 0;
+    }
+    switch(node->type) {
+        case pb::FNT_TERM : {
+            auto& inner_node_pair = boost::get<FulltextInfoNode::LeafNodeType>(node->info);
+            auto& inner_node = inner_node_pair.second;
+            root->set_fulltext_node_type(pb::FNT_TERM);
+            auto possible_index = root->mutable_possible_index();
+            possible_index->set_index_id(inner_node_pair.first);
+            SmartRecord record_template = SchemaFactory::get_instance()->new_record(_table_id);
+
+            if (inner_node.like_values.size() != 1) {
+                DB_WARNING("like values size not equal one");
+                return -1;
+            }
+            record_template->set_value(record_template->get_field_by_tag(
+                inner_node.left_row_field_ids[0]), inner_node.like_values[0]);
+            std::string str;
+            record_template->encode(str);
+            auto range = possible_index->add_ranges();
+            auto range_type = inner_node.type;
+            range->set_left_pb_record(str);
+            range->set_right_pb_record(str);
+            range->set_left_field_cnt(1);
+            range->set_right_field_cnt(1);
+            range->set_left_open(false);
+            range->set_right_open(false);
+            if (range_type == range::MATCH_LANGUAGE) {
+                range->set_match_mode(pb::M_NARUTAL_LANGUAGE);
+            } else if (range_type == range::MATCH_BOOLEAN) {
+                range->set_match_mode(pb::M_BOOLEAN);
+            }
+            break;
+        }
+        case pb::FNT_AND : 
+        case pb::FNT_OR : {
+            auto& inner_node = boost::get<FulltextInfoNode::FulltextChildType>(node->info);
+            if (inner_node.children.size() == 1) {
+                if (create_fulltext_index_tree(inner_node.children[0].get(), root) != 0) {
+                    return -1;
+                }
+            } else if (inner_node.children.size()  > 1) {
+                root->set_fulltext_node_type(node->type);
+                for (const auto& child : inner_node.children) {
+                    auto child_iter = root->add_nested_fulltext_indexes();
+                    if (create_fulltext_index_tree(child.get(), child_iter) == -1) {
+                        return -1;
+                    }
+                }
+            }
+            break;
+        }
+        default : {
+            DB_WARNING("unknown node type");
+            break;
+        }
+    }
+    return 0;
+}
+
+int ScanNode::create_fulltext_index_tree() {
+    _fulltext_index_pb.reset(new pb::FulltextIndex);
+    if (create_fulltext_index_tree(_fulltext_index_tree.root.get(), _fulltext_index_pb.get()) != 0) {
+        DB_WARNING("create fulltext index tree error.");
+        return -1;
+    } else {
+        if (_fulltext_use_arrow) {
+            pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
+            auto fulltext_index_iter = pb_scan_node->mutable_fulltext_index();
+            fulltext_index_iter->CopyFrom(*_fulltext_index_pb);
+        }
+    }
+    return 0;
 }
 }
 

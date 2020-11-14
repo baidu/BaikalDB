@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 
 #include "table_key.h"
 #include "mut_table_key.h"
-#include "schema_factory.h"
 #include "key_encoder.h"
 #include "table_record.h"
 
@@ -27,235 +26,22 @@ SmartRecord TableRecord::new_record(int64_t tableid) {
     return factory->new_record(tableid);
 }
 
-bool TableRecord::is_null(const FieldDescriptor* field) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        return true;
+std::string TableRecord::get_index_value(IndexInfo& index) {
+    std::string tmp;
+    for (auto& field : index.fields) {
+        auto tag_field = get_field_by_idx(field.pb_idx);
+        tmp += get_value(tag_field).get_string();
+        tmp += "-";
     }
-    return false;
-}
-
-int TableRecord::get_int32(const FieldDescriptor* field, int32_t& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%u", field->number());
-        return -2;
+    if (!tmp.empty()) {
+        tmp.pop_back();
     }
-    val = _reflection->GetInt32(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_int32(const FieldDescriptor* field, int32_t val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetInt32(_message, field, val);
-}
-
-int TableRecord::get_uint32(const FieldDescriptor* field, uint32_t& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%d", field->number());
-        return -2;
-    }
-    val = _reflection->GetUInt32(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_uint32(const FieldDescriptor* field, uint32_t val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetUInt32(_message, field, val);
-}
-
-int TableRecord::get_int64(const FieldDescriptor* field, int64_t& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%d", field->number());
-        return -2;
-    }
-    val = _reflection->GetInt64(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_int64(const FieldDescriptor* field, int64_t val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetInt64(_message, field, val);
-}
-
-int TableRecord::get_uint64(const FieldDescriptor* field, uint64_t& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%d", field->number());
-        return -2;
-    }
-    val = _reflection->GetUInt64(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_uint64(const FieldDescriptor* field, uint64_t val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetUInt64(_message, field, val);
-}
-
-int TableRecord::get_float(const FieldDescriptor* field, float& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%d", field->number());
-        return -2;
-    }
-    val = _reflection->GetFloat(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_float(const FieldDescriptor* field, float val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetFloat(_message, field, val);
-}
-
-int TableRecord::get_double(const FieldDescriptor* field, double& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%d", field->number());
-        return -2;
-    }
-    val = _reflection->GetDouble(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_double(const FieldDescriptor* field, double val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetDouble(_message, field, val);
-}
-
-int TableRecord::get_string(const FieldDescriptor* field, std::string& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%d", field->number());
-        return -2;
-    }
-    val = _reflection->GetString(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_string(const FieldDescriptor* field, std::string val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetString(_message, field, val);
-}
-
-int TableRecord::get_boolean(const FieldDescriptor* field, bool& val) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        DB_WARNING("missing field-value idx=%d", field->number());
-        return -2;
-    }
-    val = _reflection->GetBool(*_message, field);
-    return 0;
-}
-
-void TableRecord::set_boolean(const FieldDescriptor* field, bool val) {
-    const Reflection* _reflection = _message->GetReflection();
-    _reflection->SetBool(_message, field, val);
-}
-
-// by_tag default true
-ExprValue TableRecord::get_value(const FieldDescriptor* field) {
-    if (field == nullptr) {
-        return ExprValue::Null();
-    }
-    const Reflection* _reflection = _message->GetReflection();
-    if (!_reflection->HasField(*_message, field)) {
-        return ExprValue::Null();
-    }
-    auto type = field->cpp_type();
-    switch (type) {
-        case FieldDescriptor::CPPTYPE_INT32: {
-            ExprValue value(pb::INT32);
-            value._u.int32_val = _reflection->GetInt32(*_message, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT32: {
-            ExprValue value(pb::UINT32);
-            value._u.uint32_val = _reflection->GetUInt32(*_message, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_INT64: {
-            ExprValue value(pb::INT64);
-            value._u.int64_val = _reflection->GetInt64(*_message, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT64: {
-            ExprValue value(pb::UINT64);
-            value._u.uint64_val = _reflection->GetUInt64(*_message, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_FLOAT: {
-            ExprValue value(pb::FLOAT);
-            value._u.float_val = _reflection->GetFloat(*_message, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_DOUBLE: {
-            ExprValue value(pb::DOUBLE);
-            value._u.double_val = _reflection->GetDouble(*_message, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_BOOL: {
-            ExprValue value(pb::BOOL);
-            value._u.bool_val = _reflection->GetBool(*_message, field);
-            return value;
-        } break;
-        case FieldDescriptor::CPPTYPE_STRING: {
-            ExprValue value(pb::STRING);
-            value.str_val = _reflection->GetString(*_message, field);
-            return value;
-        } 
-        default: {
-            return ExprValue::Null();
-        }
-    }
-    return ExprValue::Null();
-}
-
-// by_tag default true
-int TableRecord::set_value(const FieldDescriptor* field, const ExprValue& value) {
-    const Reflection* _reflection = _message->GetReflection();
-    if (value.is_null()) {
-        _reflection->ClearField(_message, field);
-        return 0;
-    }
-    auto type = field->cpp_type();
-    switch (type) {
-        case FieldDescriptor::CPPTYPE_INT32: {
-            _reflection->SetInt32(_message, field, value.get_numberic<int32_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT32: {
-            _reflection->SetUInt32(_message, field, value.get_numberic<uint32_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_INT64: {
-            _reflection->SetInt64(_message, field, value.get_numberic<int64_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_UINT64: {
-            _reflection->SetUInt64(_message, field, value.get_numberic<uint64_t>());
-        } break;
-        case FieldDescriptor::CPPTYPE_FLOAT: {
-            _reflection->SetFloat(_message, field, value.get_numberic<float>());
-        } break;
-        case FieldDescriptor::CPPTYPE_DOUBLE: {
-            _reflection->SetDouble(_message, field, value.get_numberic<double>());
-        } break;
-        case FieldDescriptor::CPPTYPE_BOOL: {
-            _reflection->SetBool(_message, field, value.get_numberic<bool>());
-        } break;
-        case FieldDescriptor::CPPTYPE_STRING: {
-            _reflection->SetString(_message, field, value.get_string());
-        } break;
-        default: {
-            return -1;
-        }
-    }
-    return 0;
+    return tmp;
 }
 
 int TableRecord::get_reverse_word(IndexInfo& index_info, std::string& word) {
-    int ret = 0;
-    auto field = get_field_by_tag(index_info.fields[0].id);
+    //int ret = 0;
+    auto field = get_field_by_idx(index_info.fields[0].pb_idx);
     //DB_WARNING("index_info:%d id:%d", index_info.fields[0].type, index_info.fields[0].id);
     if (index_info.fields[0].type == pb::STRING) {
         return get_string(field, word);
@@ -284,7 +70,7 @@ int TableRecord::encode_field(const Reflection* _reflection,
         const FieldDescriptor* field, 
         const FieldInfo& field_info,
         MutTableKey& key, 
-        bool clear) {
+        bool clear, bool like_prefix) {
     switch (field_info.type) {
         case pb::INT8: {
             int32_t val = _reflection->GetInt32(*_message, field);
@@ -294,6 +80,7 @@ int TableRecord::encode_field(const Reflection* _reflection,
             int32_t val = _reflection->GetInt32(*_message, field);
             key.append_i16((int16_t)val);
         } break;
+        case pb::TIME:
         case pb::INT32: {
             int32_t val = _reflection->GetInt32(*_message, field);
             key.append_i32(val);
@@ -336,7 +123,11 @@ int TableRecord::encode_field(const Reflection* _reflection,
         case pb::STRING: {
             //TODO no string pk-field is supported
             std::string val = _reflection->GetString(*_message, field);;
-            key.append_string(val);
+            if (like_prefix) {
+                key.append_string_prefix(val);   
+            } else {
+                key.append_string(val);
+            }
         } break;
         default: {
             DB_WARNING("un-supported field type: %d, %d", field->number(), field_info.type);
@@ -350,124 +141,8 @@ int TableRecord::encode_field(const Reflection* _reflection,
     return 0;
 }
 
-//TODO: secondary key
-int TableRecord::decode_field(const Reflection* _reflection,
-        const FieldDescriptor* field, 
-        const FieldInfo& field_info,
-        const TableKey& key, 
-        int& pos) {
-    switch (field_info.type) {
-        case pb::INT8: {
-            if (pos + sizeof(int8_t) > key.size()) {
-                DB_WARNING("int8_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetInt32(_message, field, key.extract_i8(pos));
-            pos += sizeof(int8_t);
-        } break;
-        case pb::INT16: {
-            if (pos + sizeof(int16_t) > key.size()) {
-                DB_WARNING("int16_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetInt32(_message, field, key.extract_i16(pos));
-            pos += sizeof(int16_t);
-        } break;
-        case pb::INT32: {
-            if (pos + sizeof(int32_t) > key.size()) {
-                DB_WARNING("int32_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetInt32(_message, field, key.extract_i32(pos));
-            pos += sizeof(int32_t);
-        } break;
-        case pb::INT64: {
-            if (pos + sizeof(int64_t) > key.size()) {
-                DB_WARNING("int64_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetInt64(_message, field, key.extract_i64(pos));
-            pos += sizeof(int64_t);
-        } break;
-        case pb::UINT8: {
-            if (pos + sizeof(uint8_t) > key.size()) {
-                DB_WARNING("uint8_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetUInt32(_message, field, key.extract_u8(pos));
-            pos += sizeof(uint8_t);
-        } break;
-        case pb::UINT16: {
-            if (pos + sizeof(uint16_t) > key.size()) {
-                DB_WARNING("uint16_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetUInt32(_message, field, key.extract_u16(pos));
-            pos += sizeof(uint16_t);
-        } break;
-        case pb::TIMESTAMP:
-        case pb::DATE:
-        case pb::UINT32: {
-            if (pos + sizeof(uint32_t) > key.size()) {
-                DB_WARNING("uint32_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetUInt32(_message, field, key.extract_u32(pos));
-            pos += sizeof(uint32_t);
-        } break;
-        case pb::DATETIME:
-        case pb::UINT64: {
-            if (pos + sizeof(uint64_t) > key.size()) {
-                DB_WARNING("uint64_t pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetUInt64(_message, field, key.extract_u64(pos));
-            pos += sizeof(uint64_t);
-        } break;
-        case pb::FLOAT: {
-            if (pos + sizeof(float) > key.size()) {
-                DB_WARNING("float pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetFloat(_message, field, key.extract_float(pos));
-            pos += sizeof(float);
-        } break;
-        case pb::DOUBLE: {
-            if (pos + sizeof(double) > key.size()) {
-                DB_WARNING("double pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetDouble(_message, field, key.extract_double(pos));
-            pos += sizeof(double);
-        } break;
-        case pb::BOOL: {
-            if (pos + sizeof(uint8_t) > key.size()) {
-                DB_WARNING("bool pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            _reflection->SetBool(_message, field, key.extract_boolean(pos));
-            pos += sizeof(uint8_t);
-        } break;
-        case pb::STRING: {
-            //TODO no string pk-field is supported
-            if (pos >= (int)key.size()) {
-                DB_WARNING("string pos out of bound: %d %d %zu", field->number(), pos, key.size());
-                return -2;
-            }
-            std::string str;
-            key.extract_string(pos, str);
-            _reflection->SetString(_message, field, str);
-            pos += (str.size() + 1);
-        } break;
-        default: {
-            DB_WARNING("un-supported field type: %d, %d", field->number(), field_info.type);
-            return -1;
-        } break;
-    }
-    return 0;
-}
 
-int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, bool clear) {
+int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, bool clear, bool like_prefix) {
     uint8_t null_flag = 0;
     int pos = (int)key.size();
     if (index.type == pb::I_NONE) {
@@ -478,16 +153,16 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
         key.append_u8(null_flag);
     }
     uint32_t col_cnt = (field_cnt == -1)? index.fields.size() : field_cnt;
-    if (col_cnt > index.fields.size() || col_cnt > 8) {
+    if (col_cnt > index.fields.size() || (index.has_nullable && col_cnt > 8)) {
         DB_WARNING("field_cnt out of bound: %ld, %d, %lu", 
             index.id, col_cnt, index.fields.size());
         return -1;
     }
-    const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
     for (uint32_t idx = 0; idx < col_cnt; ++idx) {
+        bool last_field_like_prefix = like_prefix && idx == (col_cnt - 1);
         auto& info = index.fields[idx];
-        const FieldDescriptor* field = _descriptor->FindFieldByNumber(info.id);
+        const FieldDescriptor* field = get_field_by_idx(info.pb_idx);
         if (field == nullptr) {
             DB_WARNING("invalid field: %d", info.id);
             return -1;
@@ -498,19 +173,19 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
                 DB_WARNING("missing pk field: %d", field->number());
                 return -2;
             }
-            res = encode_field(_reflection, field, info, key, clear);
+            res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
         } else if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
             if (!_reflection->HasField(*_message, field)) {
                 // this field is null
                 //DB_DEBUG("missing index field: %u, set null-flag", idx);
                 if (!info.can_null) {
                     //DB_WARNING("encode not_null field");
-                    res = encode_field(_reflection, field, info, key, clear);
+                    res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
                 } else {
                     null_flag |= (0x01 << (7 - idx));
                 }
             } else {
-                res = encode_field(_reflection, field, info, key, clear);
+                res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
             }
         } else {
             DB_WARNING("invalid index type: %u", index.type);
@@ -539,11 +214,10 @@ int TableRecord::encode_primary_key(IndexInfo& index, MutTableKey& key, int fiel
     uint32_t col_cnt = (field_cnt == -1)? index.pk_fields.size() : field_cnt;
 
     int res = 0;
-    const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
     for (uint32_t idx = 0; idx < col_cnt; ++idx) {
         auto& info = index.pk_fields[idx];
-        const FieldDescriptor* field = _descriptor->FindFieldByNumber(info.id);
+        const FieldDescriptor* field = get_field_by_idx(info.pb_idx);
         if (field == nullptr) {
             DB_WARNING("invalid field: %d", info.id);
             return -1;
@@ -552,7 +226,7 @@ int TableRecord::encode_primary_key(IndexInfo& index, MutTableKey& key, int fiel
             DB_WARNING("missing pk field: %d", field->number());
             return -2;
         }
-        res = encode_field(_reflection, field, info, key, false);
+        res = encode_field(_reflection, field, info, key, false, false);
         if (0 != res) {
             DB_WARNING("encode index field error: %u, %d", idx, res);
             return -1;
@@ -583,14 +257,13 @@ int TableRecord::decode_key(IndexInfo& index, const TableKey& key, int& pos) {
         return -1;
     }
     uint8_t null_flag = 0;
-    const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
     if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
         null_flag = key.extract_u8(pos);
         pos += sizeof(uint8_t);
     }
     for (uint32_t idx = 0; idx < index.fields.size(); ++idx) {
-        const FieldDescriptor* field = _descriptor->FindFieldByNumber(index.fields[idx].id);
+        const FieldDescriptor* field = get_field_by_idx(index.fields[idx].pb_idx);
         if (field == nullptr) {
             DB_WARNING("invalid field: %d", index.fields[idx].id);
             return -1;
@@ -602,7 +275,7 @@ int TableRecord::decode_key(IndexInfo& index, const TableKey& key, int& pos) {
             //DB_DEBUG("field is null: %d", idx);
             continue;
         }
-        if (0 != decode_field(_reflection, field, index.fields[idx], key, pos)) {
+        if (0 != key.decode_field(_message, _reflection, field, index.fields[idx], pos)) {
             DB_WARNING("decode index field error");
             return -1;
         }
@@ -615,20 +288,174 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
         DB_WARNING("invalid secondary index type: %ld", index.id);
         return -1;
     }
-    const Descriptor* _descriptor = _message->GetDescriptor();
     const Reflection* _reflection = _message->GetReflection();
-    for (uint32_t idx = 0; idx < index.pk_fields.size(); ++idx) {
-        const FieldDescriptor* field = _descriptor->FindFieldByNumber(index.pk_fields[idx].id);
+    for (auto& field_info : index.pk_fields) {
+        const FieldDescriptor* field = get_field_by_idx(field_info.pb_idx);
         if (field == nullptr) {
-            DB_WARNING("invalid field: %d", index.pk_fields[idx].id);
+            DB_WARNING("invalid field: %d", field_info.id);
             return -1;
         }
-        if (0 != decode_field(_reflection, field, index.pk_fields[idx], key, pos)) {
+        if (0 != key.decode_field(_message, _reflection, field, field_info, pos)) {
             DB_WARNING("decode index field error: field_id: %d, type: %d", 
-                index.pk_fields[idx].id, index.pk_fields[idx].type);
+                field_info.id, field_info.type);
             return -1;
         }
     }
     return 0;
+}
+// for cstore
+// return -3 when equals to default value
+int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
+    const Reflection* _reflection = _message->GetReflection();
+    int32_t field_id = field_info.id;
+    pb::PrimitiveType field_type = field_info.type;
+    const FieldDescriptor* field = get_field_by_idx(field_info.pb_idx);
+    if (field == nullptr) {
+        DB_WARNING("invalid field: %d", field_id);
+        return -1;
+    }
+    if (!_reflection->HasField(*_message, field)) {
+        DB_DEBUG("missing field: %d", field->number());
+        return -2;
+    }
+    // skip default value
+    switch (field_type) {
+        case pb::INT8: {
+            int8_t val = _reflection->GetInt32(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.int8_val) {
+                    return -3;
+                }
+            }
+            out.append((char*)&val, sizeof(int8_t));
+        } break;
+        case pb::INT16: {
+            int16_t val = _reflection->GetInt32(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.int16_val) {
+                    return -3;
+                }
+            }
+            uint16_t encode = KeyEncoder::to_little_endian_u16(static_cast<uint16_t>(val));
+            out.append((char*)&encode, sizeof(uint16_t));
+        } break;
+        case pb::TIME:
+        case pb::INT32: {
+            int32_t val = _reflection->GetInt32(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.int32_val) {
+                    return -3;
+                }
+            }
+            uint32_t encode = KeyEncoder::to_little_endian_u32(static_cast<uint32_t>(val));
+            out.append((char*)&encode, sizeof(uint32_t));
+        } break;
+        case pb::INT64: {
+            int64_t val = _reflection->GetInt64(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.int64_val) {
+                    return -3;
+                }
+            }
+            uint64_t encode = KeyEncoder::to_little_endian_u64(static_cast<uint64_t>(val));
+            out.append((char*)&encode, sizeof(uint64_t));
+        } break;
+        case pb::UINT8: {
+            uint8_t val = _reflection->GetUInt32(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.uint8_val) {
+                    return -3;
+                }
+            }
+            out.append((char*)&val, sizeof(uint8_t));
+        } break;
+        case pb::UINT16: {
+            uint16_t val = _reflection->GetUInt32(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.uint16_val) {
+                    return -3;
+                }
+            }
+            uint16_t encode = KeyEncoder::to_little_endian_u16(val);
+            out.append((char*)&encode, sizeof(uint16_t));
+        } break;
+        case pb::TIMESTAMP:
+        case pb::DATE:
+        case pb::UINT32: {
+            uint32_t val = _reflection->GetUInt32(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.uint32_val) {
+                    return -3;
+                }
+            }
+            uint32_t encode = KeyEncoder::to_little_endian_u32(val);
+            out.append((char*)&encode, sizeof(uint32_t));
+        } break;
+        case pb::DATETIME:
+        case pb::UINT64: {
+            uint64_t val = _reflection->GetUInt64(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.uint64_val) {
+                    return -3;
+                }
+            }
+            uint64_t encode = KeyEncoder::to_little_endian_u64(val);
+            out.append((char*)&encode, sizeof(uint64_t));
+        } break;
+        case pb::FLOAT: {
+            float val = _reflection->GetFloat(*_message, field);
+            //if (!field_info.default_expr_value.is_null()) {
+            //    if (val == field_info.default_expr_value._u.float_val) {
+            //        return -3;
+            //    }
+            //}
+            uint32_t encode = KeyEncoder::to_little_endian_u32(*reinterpret_cast<uint32_t*>(&val));
+            out.append((char*)&encode, sizeof(uint32_t));
+        } break;
+        case pb::DOUBLE: {
+           double val = _reflection->GetDouble(*_message, field);
+           //if (!field_info.default_expr_value.is_null()) {
+           //    if (val == field_info.default_expr_value._u.double_val) {
+           //        return -3;
+           //    }
+           //}
+           uint64_t encode = KeyEncoder::to_little_endian_u64(*reinterpret_cast<uint64_t*>(&val));
+           out.append((char*)&encode, sizeof(uint64_t));
+        } break;
+        case pb::BOOL: {
+            uint8_t  val = _reflection->GetBool(*_message, field);
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value._u.bool_val) {
+                    return -3;
+                }
+            }
+            out.append((char*)&val, sizeof(uint8_t ));
+        } break;
+        case pb::STRING: {
+            std::string val = _reflection->GetString(*_message, field);;
+            if (!field_info.default_expr_value.is_null()) {
+                if (val == field_info.default_expr_value.str_val) {
+                    return -3;
+                }
+            }
+            out.append(val.data(), val.size());
+        } break;
+        default: {
+            DB_WARNING("un-supported field type: %d, %d", field->number(), field_type);
+            return -1;
+        } break;
+    }
+    return 0;
+}
+
+// for cstore
+int TableRecord::decode_field(const FieldInfo& field_info, const rocksdb::Slice& in) {
+    int32_t field_id = field_info.id;
+    const FieldDescriptor* field = get_field_by_idx(field_info.pb_idx);
+    if (field == nullptr) {
+        DB_WARNING("invalid field: %d", field_id);
+        return -1;
+    }
+    return MessageHelper::decode_field(field, field_info.type, _message, in);
 }
 }

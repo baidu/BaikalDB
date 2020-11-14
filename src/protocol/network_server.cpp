@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,8 +13,13 @@
 // limitations under the License.
 
 #include "network_server.h"
-#include "physical_planner.h"
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include "log.h"
 #include <gflags/gflags.h>
+#include <time.h>
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -25,262 +30,360 @@ namespace baikaldb {
 DEFINE_int32(backlog, 1024, "Size of waitting queue in listen()");
 DEFINE_int32(baikal_port, 28282, "Server port");
 DEFINE_int32(epoll_timeout, 2000, "Epoll wait timeout in epoll_wait().");
-DEFINE_int32(check_interval, 1, "interval for checking thread alive and conn idle timeout");
-DEFINE_int32(thread_idle_timeout, 100, "thread block(hang) threshold (second)");
+DEFINE_int32(check_interval, 10, "interval for conn idle timeout");
 DEFINE_int32(connect_idle_timeout_s, 1800, "connection idle timeout threshold (second)");
-DEFINE_int32(baikal_heartbeat_interval, 10 * 1000 * 1000, 
-        "connection idle timeout threshold (second)");
+DEFINE_int32(slow_query_timeout_s, 60, "slow query threshold (second)");
+DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
+DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
-DEFINE_string(recovery_db_path, "./db", "db path for transaction recovery, default: ./db");
+DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
-uint8_t NetworkServer::transaction_prefix = 0x01;
-
-// check thread idle state, task queue and connection idle state with a timer
-void* thread_check_func(void* param) {
-    NetworkServer* server = static_cast<NetworkServer*>(param);
-    server->thread_alive_check();
-    server->connection_timeout_check();
-    return nullptr;
-}
-
-void* thread_timer(void* param) {
-    NetworkServer* server = static_cast<NetworkServer*>(param);
-    boost::asio::io_service *ios = server->get_io_service();
-    // check thread idle state, task queue and connection idle state with a timer
-    InfiniteTimer thread_check_timer(FLAGS_check_interval, *ios,
-        thread_check_func, param, false);
-    // delete config and ip check
-    server->start_io_service();
-    DB_NOTICE("thread_timer exit()");
-    return nullptr;
-}
-
-// 1. read meta_db to get prepared (yet not committed) transactions left by last baikaldb instance
-// 2. try to commit transaction until success
-// 3. remove the transaction entry from the meta_db
-void NetworkServer::recovery_transactions() {
-    rocksdb::ReadOptions read_options;
-    read_options.total_order_seek = false;
-    read_options.prefix_same_as_start = true;
-    std::unique_ptr<rocksdb::Iterator> iter(_meta_db->new_iterator(read_options, _meta_handle));
-    MutTableKey txn_key;
-    txn_key.append_u8(transaction_prefix);
-    for (iter->Seek(txn_key.data()); iter->Valid(); iter->Next()) {
-        TableKey key(iter->key(), true);
-        int pos = 1;
-        uint64_t txn_id = key.extract_u64(pos);
-        uint64_t instance = txn_id >> 40;
-        if (instance == _instance_id) {
-            continue;
-        }
-        DB_WARNING("recover txn_id: %lu", txn_id);
-        pb::CachePlan commit_plan;
-        if (!commit_plan.ParseFromArray(iter->value().data(), iter->value().size())) {
-            DB_FATAL("TransactionError: parse recovery plan failed, txn_id: %lu", txn_id);
-            continue;
-        }
-        SmartSocket dummy_client = SmartSocket(new (std::nothrow)NetworkSocket);
-        dummy_client->query_ctx.reset(new (std::nothrow)QueryContext);
-        dummy_client->txn_id = txn_id;
-        dummy_client->seq_id = commit_plan.seq_id();
-        int ret = PhysicalPlanner::execute_recovered_commit(dummy_client.get(), commit_plan);
-        if (ret < 0) {
-            DB_FATAL("TransactionError: execute recovery plan failed, txn_id: %lu", txn_id);
-            continue;
-        }
-        TransactionNode::remove_commit_log_entry(txn_id);
-        DB_WARNING("TransactionNote: execute recovery plan, txn_id: %lu", txn_id);
-    }
-}
 
 void NetworkServer::report_heart_beat() {
     while (!_shutdown) {
+        TimeCost cost;
         pb::BaikalHeartBeatRequest request;
         pb::BaikalHeartBeatResponse response;
         //1、construct heartbeat request
-        construct_heart_beat_request(request);
-        for (auto& schema_info : request.schema_infos()) {
-            SELF_TRACE("heartbeat request(table version): table_id: %ld, table_version:%ld", 
-                        schema_info.table_id(), schema_info.version());
-            std::string region_version;
-            int count = 0;
-            for (auto& region_heart : schema_info.regions()) {
-                region_version += region_heart.ShortDebugString() + ", ";
-                ++count;
-                if (count % 50 == 0) {
-                    SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
-                    region_version.clear();
-                }
-            }
-            if (!region_version.empty()) {
-                SELF_TRACE("heartbeat request(region version): %s", region_version.c_str());
-            }
-        }
+        BaikalHeartBeat::construct_heart_beat_request(request);
+        int64_t construct_req_cost = cost.get_time();
+        cost.reset();
         //2、send heartbeat request to meta server
         if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
             //处理心跳
-            process_heart_beat_response(response);
-            int count = 0;
-            std::string str_response;
-            for (auto& schema_change_info : response.schema_change_info()) {
-                str_response += schema_change_info.ShortDebugString() + ", ";
-                ++count;
-                if (count % 5 == 0) {
-                    SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
-                    str_response.clear();
-                }
-            }
-            if (!str_response.empty()) {
-                SELF_TRACE("heartbeat response(schema version):%s", str_response.c_str());
-            }
-            for (auto& region_change_info : response.region_change_info()) {
-                SELF_TRACE("heartbeat response(region info):%s", 
-                            region_change_info.ShortDebugString().c_str());
-            }
-            for (auto& privilege_change_info : response.privilege_change_info()) {
-                SELF_TRACE("heartbeat response(privilege info):%s", 
-                            privilege_change_info.ShortDebugString().c_str());
-            }
+            BaikalHeartBeat::process_heart_beat_response(response);
+            DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
+                    construct_req_cost, cost.get_time());
         } else {
             DB_WARNING("send heart beat request to meta server fail");
         }
-        bthread_usleep(FLAGS_baikal_heartbeat_interval);
+        bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
     }
 }
 
-void NetworkServer::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request) {
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    for (auto& info_pair : factory->table_info_mapping()) {
-        auto req_info = request.add_schema_infos();
-        req_info->set_table_id(info_pair.second.id);
-        req_info->set_version(info_pair.second.version);
-        std::map<int64_t, pb::RegionInfo> region_infos;
-        IndexInfo index = factory->get_index_info(info_pair.second.id);
-        factory->get_region_by_key(index, NULL, region_infos);
-        for (auto& pair : region_infos) {
-            auto region = req_info->add_regions();
-            auto& region_info = pair.second;
-            region->set_region_id(region_info.region_id());
-            region->set_version(region_info.version());
-            region->set_conf_version(region_info.conf_version());
+void NetworkServer::report_other_heart_beat() {
+    while (!_shutdown) {
+        TimeCost cost;
+        pb::BaikalOtherHeartBeatRequest request;
+        pb::BaikalOtherHeartBeatResponse response;
+        //1、construct heartbeat request
+        construct_other_heart_beat_request(request);
+        int64_t construct_req_cost = cost.get_time();
+        cost.reset();
+        //2、send heartbeat request to meta server
+        if (MetaServerInteract::get_instance()->send_request("baikal_other_heartbeat", request, response) == 0) {
+            //处理心跳
+            process_other_heart_beat_response(response);
+            DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
+                    construct_req_cost, cost.get_time());
+        } else {
+            DB_WARNING("send heart beat request to meta server fail");
         }
+        bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
     }
 }
 
-void NetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatResponse& response) {
+void NetworkServer::get_field_distinct_cnt(int64_t table_id, std::set<int> fields, std::map<int64_t, int>& distinct_field_map) {
     SchemaFactory* factory = SchemaFactory::get_instance();
-    for (auto& info : response.schema_change_info()) {
-        factory->update_table(info);
-    }
-
-    factory->update_regions(response.region_change_info());
-
-    for (auto& info : response.privilege_change_info()) {
-        factory->update_user(info);
-    }
-}
-
-
-void NetworkServer::thread_alive_check() {
-    time_t time_now = time(NULL);
-    if (time_now == (time_t)-1) {
-        DB_WARNING("get current time failed.");
+    if (fields.size() <= 0) {
         return;
     }
-    for (uint32_t idx = 0; idx < _driver_thread_num; ++idx) {
-        double diff = difftime(time_now, _last_time[idx].second);
-        size_t task_size = MachineDriver::get_instance()->task_size();
-        if ((int32_t)diff >= FLAGS_thread_idle_timeout && task_size > 0) {
-            DB_WARNING("thread is hanging [idx=%d][tid=%d][task_size=%lu][idle_time=%lu(sec)]",
-                idx, _last_time[idx].first, task_size, (uint64_t)diff);
+    for (auto field_id : fields) {
+        int64_t distinct_cnt = factory->get_histogram_distinct_cnt(table_id, field_id);
+        if (distinct_cnt < 0) {
+            continue;
+        }
+        while (true) {
+            auto iter = distinct_field_map.find(distinct_cnt);
+            if (iter != distinct_field_map.end()) {
+                // 有重复, ++ 避免重复
+                distinct_cnt++;
+                continue;
+            }
+            distinct_field_map[distinct_cnt] = field_id;
+            break;
         }
     }
-    return;
+}
+
+void NetworkServer::fill_field_info(int64_t table_id, std::map<int64_t, int>& distinct_field_map, std::string type, std::ostringstream& os) {
+    if (distinct_field_map.size() <= 0) {
+        return;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    auto table_ptr = factory->get_table_info_ptr(table_id);
+    for (auto iter = distinct_field_map.rbegin(); iter != distinct_field_map.rend(); iter++) {
+        auto field_ptr = table_ptr->get_field_ptr(iter->second);
+        os << field_ptr->short_name << ":" << type << ":" << iter->first << " ";
+    }
+}
+
+// 推荐索引
+void NetworkServer::index_recommend(const std::string& sample_sql, int64_t table_id, int64_t index_id, std::string& index_info, std::string& desc) {
+    BvarMap sample = StateMachine::get_instance()->index_recommend_st.get_value();
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    
+    // 没有统计信息无法推荐索引
+    auto st_ptr = factory->get_statistics_ptr(table_id);
+    if (st_ptr == nullptr) {
+        desc = "no statistics info";
+        return;
+    }
+
+    auto iter = sample.internal_map.find(sample_sql);
+    if (iter == sample.internal_map.end()) {
+        return;
+    }
+
+    auto sum_iter = iter->second.find(index_id);
+    if (sum_iter == iter->second.end()) {
+        return;
+    }
+
+    // 没有条件不推荐索引
+    auto field_range_type = sum_iter->second.field_range_type;
+    if (field_range_type.size() <= 0) {
+        desc = "no condition";
+        return;
+    }
+
+    std::set<int> eq_field;
+    std::set<int> in_field;
+    std::set<int> range_field;
+
+    for (auto pair : field_range_type) {
+        if (pair.second == range::EQ) {
+            eq_field.insert(pair.first);
+        } else if (pair.second == range::IN) {
+            in_field.insert(pair.first);
+        } else if (pair.second == range::RANGE) {
+            range_field.insert(pair.first);
+        } else {
+            // 非 RANGE EQ IN 条件暂时无法推荐索引
+            desc = "not only range eq in";
+            return;
+        }
+    }
+
+    std::map<int64_t, int> eq_distinct_field_map;
+    std::map<int64_t, int> in_distinct_field_map;
+    std::map<int64_t, int> range_distinct_field_map;
+    get_field_distinct_cnt(table_id, eq_field, eq_distinct_field_map);
+    get_field_distinct_cnt(table_id, in_field, in_distinct_field_map);
+    get_field_distinct_cnt(table_id, range_field, range_distinct_field_map);
+    std::ostringstream os;
+    fill_field_info(table_id, eq_distinct_field_map, "EQ", os);
+    fill_field_info(table_id, in_distinct_field_map, "IN", os);
+    fill_field_info(table_id, range_distinct_field_map, "RANGE", os);
+    desc = os.str();
+
+    // 平均过滤行数小于100不用推荐索引
+    if (sum_iter->second.count == 0 || (sum_iter->second.filter_rows / sum_iter->second.count) < 100) {
+        desc = "filter rows < 100";
+        return;
+    }
+
+    // 过滤率小于10%不推荐索引
+    if (sum_iter->second.scan_rows == 0 || sum_iter->second.filter_rows * 1.0 / sum_iter->second.scan_rows < 0.1) {
+        desc = "filter ratio < 0.1";
+        return;
+    }
+
+    std::ostringstream recommend_index;
+    auto table_ptr = factory->get_table_info_ptr(table_id);
+    for (auto iter = eq_distinct_field_map.rbegin(); iter != eq_distinct_field_map.rend(); iter++) {
+        auto field_ptr = table_ptr->get_field_ptr(iter->second);
+        recommend_index << field_ptr->short_name << ",";
+    }
+
+    bool in_pre = false;
+    bool finish = false;
+    for (auto iter = in_distinct_field_map.rbegin(); iter != in_distinct_field_map.rend(); iter++) {
+        auto field_ptr = table_ptr->get_field_ptr(iter->second);
+        if (in_pre) {
+            if (range_distinct_field_map.size() <= 0) {
+                recommend_index << field_ptr->short_name;
+            } else {
+                auto range_iter = range_distinct_field_map.rbegin();
+                if (range_iter->first > iter->first) {
+                    auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
+                    recommend_index << range_field_ptr->short_name;
+                } else {
+                    recommend_index << field_ptr->short_name;
+                }
+            }
+            finish = true;
+            break;
+        }
+        recommend_index << field_ptr->short_name << ",";
+        in_pre = true;
+    }
+
+    if (finish) {
+        index_info = recommend_index.str();
+        return;
+    }
+
+    if (range_distinct_field_map.size() > 0) {
+        auto range_iter = range_distinct_field_map.rbegin();
+        auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
+        recommend_index << range_field_ptr->short_name;
+    }
+
+    index_info = recommend_index.str();
+}
+
+void NetworkServer::print_agg_sql() {
+    while (!_shutdown) {
+        BvarMap sample = StateMachine::get_instance()->sql_agg_cost.reset();
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        time_t timep;
+        struct tm tm;
+        time(&timep);
+        localtime_r(&timep, &tm);
+        
+        for (auto& pair : sample.internal_map) {
+            if (!pair.first.empty()) {
+                for (auto& pair2 : pair.second) {
+                    uint64_t out[2];
+                    int64_t version;
+                    std::string op_description;
+                    factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
+                    std::string recommend_index = "-";
+                    std::string field_desc = "-";
+                    index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
+                    butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
+                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter=[%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%llu\t%s\t%s] sql_agg: %s "
+                        "op_version_desc=[%ld\t%s\t%s\t%s]", 
+                        1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
+                        pair2.second.sum, pair2.second.count,
+                        pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
+                        pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
+                        out[0], FLAGS_hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),  
+                        version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str());
+                }
+            }
+        }
+        bthread_usleep_fast_shutdown(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL, _shutdown);
+    }
+}
+
+void NetworkServer::construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
+        auto& table_statistics_mapping = schema.table_statistics_mapping;
+        for (auto& info_pair : schema.table_info_mapping) {
+            if (info_pair.second->engine != pb::ROCKSDB &&
+                    info_pair.second->engine != pb::ROCKSDB_CSTORE) {
+                continue;
+            }
+            auto req_info = request.add_schema_infos();
+            req_info->set_table_id(info_pair.first);
+            int64_t version = 0;
+            auto iter = table_statistics_mapping.find(info_pair.first);
+            if (iter != table_statistics_mapping.end()) {
+                version = iter->second->version();
+            }
+            req_info->set_statis_version(version);
+        }
+    };
+    factory->schema_info_scope_read(schema_read_recallback);
+}
+
+void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (response.statistics().size() > 0) {
+        factory->update_statistics(response.statistics());
+    }
 }
 
 void NetworkServer::connection_timeout_check() {
-    time_t time_now = time(NULL);
-    if (time_now == (time_t)-1) {
-        DB_WARNING("get current time failed.");
-        return;
-    }
-    if (_epoll_info == NULL) {
-        DB_WARNING("_epoll_info not initialized yet.");
-        return;
-    }
-
-    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
-        SmartSocket sock = _epoll_info->get_fd_mapping(idx);
-        if (!sock) {
-            continue;
+    auto check_func = [this]() {
+        time_t time_now = time(NULL);
+        if (time_now == (time_t)-1) {
+            DB_WARNING("get current time failed.");
+            return;
         }
-        if (sock == NULL || sock->in_pool == true || sock->fd == 0) {
-            continue;
+        if (_epoll_info == NULL) {
+            DB_WARNING("_epoll_info not initialized yet.");
+            return;
         }
 
-        // 处理客户端Hang住的情况，server端没有发送handshake包或者auth_result包
-        timeval current;
-        gettimeofday(&current, NULL);
-        int64_t diff_us = (current.tv_sec - sock->connect_time.tv_sec) * 1000000
+        for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+            SmartSocket sock = _epoll_info->get_fd_mapping(idx);
+            if (sock == NULL || sock->is_free || sock->fd == -1) {
+                continue;
+            }
+
+            // 处理客户端Hang住的情况，server端没有发送handshake包或者auth_result包
+            timeval current;
+            gettimeofday(&current, NULL);
+            int64_t diff_us = (current.tv_sec - sock->connect_time.tv_sec) * 1000000
                 + (current.tv_usec - sock->connect_time.tv_usec);
-        if (!sock->is_authed && diff_us >= 1000000) {
+            if (!sock->is_authed && diff_us >= 1000000) {
+                // 待现有工作处理完成，需要获取锁
+                if (sock->mutex.try_lock() == false) {
+                    continue;
+                }
+                if (sock->is_free || sock->fd == -1) {
+                    DB_WARNING("sock is already free.");
+                    sock->mutex.unlock();
+                    continue;
+                }
+                DB_WARNING("close un_authed connection [fd=%d][ip=%s][port=%d].",
+                        sock->fd, sock->ip.c_str(), sock->port);
+                sock->shutdown = true;
+                MachineDriver::get_instance()->dispatch(sock, _epoll_info,
+                        sock->shutdown || _shutdown);
+                continue;
+            }
+            time_now = time(NULL);
+            if (sock->query_ctx != nullptr && 
+                    sock->query_ctx->mysql_cmd != COM_SLEEP) {
+                int query_time_diff = time_now - sock->query_ctx->stat_info.start_stamp.tv_sec;
+                if (query_time_diff > FLAGS_slow_query_timeout_s) {
+                    DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][sql=%s]",
+                            query_time_diff, sock->fd, sock->ip.c_str(), sock->port,
+                            time_now, sock->last_active,
+                            sock->user_info->username.c_str(),
+                            sock->query_ctx->stat_info.log_id,
+                            sock->query_ctx->sql.c_str());
+                    continue;
+                }
+            }
+            // 处理连接空闲时间过长的情况，踢掉空闲连接
+            double diff = difftime(time_now, sock->last_active);
+            if ((int32_t)diff < FLAGS_connect_idle_timeout_s) {
+                continue;
+            }
             // 待现有工作处理完成，需要获取锁
             if (sock->mutex.try_lock() == false) {
                 continue;
             }
-            DB_WARNING("close un_authed connection [fd=%d][ip=%s][port=%d].",
-                sock->fd, sock->ip.c_str(), sock->port);
+            if (sock->is_free || sock->fd == -1) {
+                DB_WARNING("sock is already free.");
+                sock->mutex.unlock();
+                continue;
+            }
+            DB_NOTICE("close idle connection [fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s]",
+                    sock->fd, sock->ip.c_str(), sock->port,
+                    time_now, sock->last_active,
+                    sock->user_info->username.c_str());
             sock->shutdown = true;
             MachineDriver::get_instance()->dispatch(sock, _epoll_info,
-                sock->shutdown || _shutdown);
-            continue;
+                    sock->shutdown || _shutdown);
         }
-        time_now = time(NULL);
-        // 处理连接空闲时间过长的情况，踢掉空闲连接
-        double diff = difftime(time_now, sock->last_active);
-        if ((int32_t)diff < FLAGS_connect_idle_timeout_s) {
-            continue;
-        }
-        // 待现有工作处理完成，需要获取锁
-        if (sock->mutex.try_lock() == false) {
-            continue;
-        }
-        DB_NOTICE("close idle connection [fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s]",
-            sock->fd, sock->ip.c_str(), sock->port,
-            time_now, sock->last_active,
-            sock->user_info->username.c_str());
-        sock->shutdown = true;
-        MachineDriver::get_instance()->dispatch(sock, _epoll_info,
-            sock->shutdown || _shutdown);
+    };
+    while (!_shutdown) {
+        check_func();
+        bthread_usleep_fast_shutdown(FLAGS_check_interval * 1000 * 1000LL, _shutdown);
     }
 }
 
 // Gracefully shutdown.
 void NetworkServer::graceful_shutdown() {
     _shutdown = true;
-    _ios.stop();
-    pthread_join(_timer_tid, nullptr);
-    _heartbeat_bth.join();
-
-    if (_epoll_info == nullptr) {
-        DB_WARNING("_epoll_info not initialized yet.");
-        return;
-    }
-    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
-        SmartSocket sock = _epoll_info->get_fd_mapping(idx);
-        if (!sock) {
-            continue;
-        }
-        if (sock == nullptr || sock->in_pool == true || sock->fd == 0) {
-            continue;
-        }
-
-        // 待现有工作处理完成，需要获取锁
-        sock->mutex.lock();
-        sock->shutdown = true;
-        MachineDriver::get_instance()->dispatch(sock, _epoll_info, true, false);
-    }
 }
 
 NetworkServer::NetworkServer():
@@ -330,43 +433,55 @@ int NetworkServer::fetch_instance_info() {
 bool NetworkServer::init() {
     // init val 
     _driver_thread_num = bthread::FLAGS_bthread_concurrency;
+    TimeCost cost;
     // 先把meta数据都获取到
     pb::BaikalHeartBeatRequest request;
     pb::BaikalHeartBeatResponse response;
     //1、构造心跳请求
-    construct_heart_beat_request(request);
+    BaikalHeartBeat::construct_heart_beat_request(request);
     //2、发送请求
     if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
         //处理心跳
-        process_heart_beat_response(response);
+        BaikalHeartBeat::process_heart_beat_response_sync(response);
         //DB_WARNING("req:%s  \nres:%s", request.DebugString().c_str(), response.DebugString().c_str());
     } else {
         DB_FATAL("send heart beat request to meta server fail");
         return false;
     }
+    DB_NOTICE("sync time2:%ld", cost.get_time());
     if (FLAGS_fetch_instance_id) {
         if (fetch_instance_info() != 0) {
             return false;
         }        
     }
     DB_WARNING("get instance_id: %lu", _instance_id);
-
-    _meta_db = RocksWrapper::get_instance();
-    if (!_meta_db) {
-        DB_FATAL("create meta database failed");
-        return false;
-    }
-    int32_t res = _meta_db->init(FLAGS_recovery_db_path);
-    if (res != 0) {
-        DB_FATAL("rocksdb init failed: code:%d", res);
-        return false;
-    }
-    _meta_handle = _meta_db->get_meta_info_handle();
     _is_init = true;
     return true;
 }
 
 void NetworkServer::stop() {
+    _heartbeat_bth.join();
+    _other_heartbeat_bth.join();
+
+    if (_epoll_info == nullptr) {
+        DB_WARNING("_epoll_info not initialized yet.");
+        return;
+    }
+    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+        SmartSocket sock = _epoll_info->get_fd_mapping(idx);
+        if (!sock) {
+            continue;
+        }
+        if (sock == nullptr || sock->fd == 0) {
+            continue;
+        }
+
+        // 待现有工作处理完成，需要获取锁
+        if (sock->mutex.try_lock()) {
+            sock->shutdown = true;
+            MachineDriver::get_instance()->dispatch(sock, _epoll_info, true, false);
+        }
+    }
     return;
 }
 
@@ -384,8 +499,8 @@ bool NetworkServer::start() {
 
 SmartSocket NetworkServer::create_listen_socket() {
     // Fetch a socket.
-    SocketPool* socket_pool = SocketPool::get_instance();
-    SmartSocket sock = socket_pool->fetch(SERVER_SOCKET);
+    SocketFactory* socket_pool = SocketFactory::get_instance();
+    SmartSocket sock = socket_pool->create(SERVER_SOCKET);
     if (sock == NULL) {
         DB_FATAL("Failed to fetch socket from poll.type:[%u]", SERVER_SOCKET);
         return SmartSocket();
@@ -426,14 +541,10 @@ int NetworkServer::make_worker_process() {
         DB_FATAL("Failed to init machine driver.");
         exit(-1);
     }
-    //create timer thread
-    int ret = pthread_create(&_timer_tid, nullptr, thread_timer, this);
-    if (ret != 0) {
-        DB_FATAL("start timer thread error");
-        return -1;
-    }
+    _conn_check_bth.run([this]() {connection_timeout_check();});
     _heartbeat_bth.run([this]() {report_heart_beat();});
-    _recover_bth.run([this]() {recovery_transactions();});
+    _other_heartbeat_bth.run([this]() {report_other_heart_beat();});
+    _agg_sql_bth.run([this]() {print_agg_sql();});
 
     // Create listen socket.
     _service = create_listen_socket();
@@ -454,7 +565,7 @@ int NetworkServer::make_worker_process() {
     }
     // Process epoll events.
     int listen_fd = _service->fd;
-    SocketPool* socket_pool = SocketPool::get_instance();
+    SocketFactory* socket_pool = SocketFactory::get_instance();
     while (!_shutdown) {
         int fd_cnt = _epoll_info->wait(FLAGS_epoll_timeout);
         if (_shutdown) {
@@ -488,9 +599,9 @@ int NetworkServer::make_worker_process() {
                     continue;
                 }
                 // Create NetworkSocket for new client socket.
-                SmartSocket client_socket = socket_pool->fetch(CLIENT_SOCKET);
+                SmartSocket client_socket = socket_pool->create(CLIENT_SOCKET);
                 if (client_socket == NULL) {
-                    DB_WARNING("Failed to fetch NetworkSocket from pool.fd:[%d]", client_fd);
+                    DB_WARNING("Failed to create NetworkSocket from pool.fd:[%d]", client_fd);
                     close(client_fd);
                     continue;
                 }
@@ -516,7 +627,7 @@ int NetworkServer::make_worker_process() {
                 // New connection will be handled immediately.
                 fd = client_fd;
                 //DB_NOTICE("Accept new connect [ip=%s, port=%d, client_fd=%d]",
-                DB_WARNING("Accept new connect [ip=%s, port=%d, client_fd=%d]",
+                DB_WARNING_CLIENT(client_socket, "Accept new connect [ip=%s, port=%d, client_fd=%d]",
                         ip_address,
                         client_socket->port,
                         client_socket->fd);
@@ -530,11 +641,10 @@ int NetworkServer::make_worker_process() {
                 continue;
             }
             if (fd != sock->fd) {
-                DB_WARNING("current [fd=%d][sock_fd=%d][in_pool=%d]"
+                DB_WARNING_CLIENT(sock, "current [fd=%d][sock_fd=%d]"
                     "[event=%d][fd_cnt=%d][state=%s]",
                     fd,
                     sock->fd,
-                    sock->in_pool,
                     event,
                     fd_cnt,
                     state2str(sock).c_str());
@@ -547,14 +657,14 @@ int NetworkServer::make_worker_process() {
             if (event & EPOLLHUP || event & EPOLLERR) {
                 if (sock->socket_type == CLIENT_SOCKET) {
                     if ((event & EPOLLHUP) && sock->shutdown == false) {
-                        DB_WARNING("CLIENT EPOLL event is EPOLLHUP, fd=%d event=0x%x",
+                        DB_WARNING_CLIENT(sock, "CLIENT EPOLL event is EPOLLHUP, fd=%d event=0x%x",
                                         fd, event);
                     } else if ((event & EPOLLERR) && sock->shutdown == false) {
-                        DB_WARNING("CLIENT EPOLL event is EPOLLERR, fd=%d event=0x%x",
+                        DB_WARNING_CLIENT(sock, "CLIENT EPOLL event is EPOLLERR, fd=%d event=0x%x",
                                         fd, event);
                     }
                 } else {
-                    DB_WARNING("socket type is wrong, fd %d event=0x%x", fd, event);
+                    DB_WARNING_CLIENT(sock, "socket type is wrong, fd %d event=0x%x", fd, event);
                 }
                 sock->shutdown = true;
             }
@@ -565,8 +675,8 @@ int NetworkServer::make_worker_process() {
                 if (sock->mutex.try_lock() == false) {
                     continue;
                 }
-                if (sock->in_pool == true || sock->fd == 0) {
-                    DB_WARNING("sock is already free.");
+                if (sock->is_free || sock->fd == -1) {
+                    DB_WARNING_CLIENT(sock, "sock is already free.");
                     sock->mutex.unlock();
                     continue;
                 }
@@ -646,5 +756,6 @@ bool NetworkServer::set_fd_flags(int fd) {
     }
     return true;
 }
+
 
 } // namespace baikal

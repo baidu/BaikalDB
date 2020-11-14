@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ private:
 
 private:
     MemRowCompare* _comp;
-    std::vector<std::shared_ptr<RowBatch> > _min_heap;
+    std::vector<std::shared_ptr<RowBatch>> _min_heap;
     size_t _idx;
 };
 }

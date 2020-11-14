@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ void AutoIncrStateMachine::on_apply(braft::Iterator& iter) {
         if (done && ((MetaServerClosure*)done)->response) {
             ((MetaServerClosure*)done)->response->set_op_type(request.op_type());
         }
-        DB_NOTICE("on applye, term:%ld, index:%ld, request op_type:%s", 
+        DB_DEBUG("on applye, term:%ld, index:%ld, request op_type:%s", 
                     iter.term(), iter.index(), 
                     pb::OpType_Name(request.op_type()).c_str());
         switch (request.op_type()) {
@@ -109,7 +109,7 @@ void AutoIncrStateMachine::drop_table_id(const pb::MetaManagerRequest& request,
     auto& increment_info = request.auto_increment();
     int64_t table_id = increment_info.table_id();
     if (_auto_increment_map.find(table_id) == _auto_increment_map.end()) {
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table id has exist");
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table id not exist");
         DB_WARNING("table_id: %ld not exist when drop table id for auto increment", table_id);
         return;
     }
@@ -143,7 +143,7 @@ void AutoIncrStateMachine::gen_id(const pb::MetaManagerRequest& request,
         ((MetaServerClosure*)done)->response->set_end_id(_auto_increment_map[table_id]);
         ((MetaServerClosure*)done)->response->set_errmsg("SUCCESS");
     }
-    DB_NOTICE("gen_id for auto_increment success, request:%s", 
+    DB_DEBUG("gen_id for auto_increment success, request:%s", 
                 request.ShortDebugString().c_str());
 }
 void AutoIncrStateMachine::update(const pb::MetaManagerRequest& request,
@@ -151,7 +151,7 @@ void AutoIncrStateMachine::update(const pb::MetaManagerRequest& request,
     auto& increment_info = request.auto_increment();
     int64_t table_id = increment_info.table_id();
     if (_auto_increment_map.find(table_id) == _auto_increment_map.end()) {
-        DB_WARNING("table id:%s has no auto_increment field", table_id);
+        DB_WARNING("table id:%ld has no auto_increment field", table_id);
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table has no auto increment");
         return;
     }
@@ -192,7 +192,7 @@ void AutoIncrStateMachine::update(const pb::MetaManagerRequest& request,
 }
 
 void AutoIncrStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
-    DB_WARNING("start on shnapshot save");
+    DB_WARNING("start on snapshot save");
     std::string max_id_string;
     save_auto_increment(max_id_string);
     Bthread bth(&BTHREAD_ATTR_SMALL);
@@ -203,7 +203,7 @@ void AutoIncrStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft
 }
 
 int AutoIncrStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
-    DB_WARNING("start on shnapshot load");
+    DB_WARNING("start on snapshot load");
     std::vector<std::string> files;
     reader->list_files(&files);
     for (auto& file : files) {
@@ -216,6 +216,7 @@ int AutoIncrStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
             }
         }
     }
+    set_have_data(true);
     return 0;
 }
 

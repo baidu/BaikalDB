@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,9 +17,11 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
+#include <sstream>
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
 #include "common.h"
+#include "datetime.h"
 #include "type_utils.h"
 
 namespace baikaldb {
@@ -43,6 +45,168 @@ struct ExprValue {
     explicit ExprValue(pb::PrimitiveType type_ = pb::NULL_TYPE) : type(type_) {
         _u.int64_val = 0;
     }
+    explicit ExprValue(const pb::ExprValue& value) {
+        type = value.type();
+        switch (type) {
+            case pb::BOOL:
+                _u.bool_val = value.bool_val();
+                break;
+            case pb::INT8:
+                _u.int8_val = value.int32_val();
+                break;
+            case pb::INT16:
+                _u.int16_val = value.int32_val();
+                break;
+            case pb::INT32:
+            case pb::TIME:
+                _u.int32_val = value.int32_val();
+                break;
+            case pb::INT64:
+                _u.int64_val = value.int64_val();
+                break;
+            case pb::UINT8:
+                _u.uint8_val = value.uint32_val();
+                break;
+            case pb::UINT16:
+                _u.uint16_val = value.uint32_val();
+                break;
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+                _u.uint32_val = value.uint32_val();
+                break;
+            case pb::UINT64:
+            case pb::DATETIME:
+                _u.uint64_val = value.uint64_val();
+                break;
+            case pb::FLOAT:
+                _u.float_val = value.float_val();
+                break;
+            case pb::DOUBLE:
+                _u.double_val = value.double_val();
+                break;
+            case pb::STRING:
+            case pb::HLL:
+            case pb::HEX:
+                str_val = value.string_val();
+                break;
+            default:
+                break;
+        }
+    }
+
+    int common_prefix_length(const ExprValue& other) const {
+        if (type != pb::STRING || other.type != pb::STRING) {
+            return 0;
+        }
+        int min_len = str_val.size();
+        if (min_len > (int)other.str_val.size()) {
+            min_len = other.str_val.size();
+        }
+        for (int i = 0; i < min_len; i++) {
+            if (str_val[i] != other.str_val[i]) {
+                return i;
+            }
+        }
+        return min_len;
+    }
+
+    double float_value(int prefix_len) {
+        uint64_t val = 0;
+        switch (type) {
+            case pb::BOOL:
+                return static_cast<double>(_u.bool_val);
+            case pb::INT8:
+                return static_cast<double>(_u.int8_val);
+            case pb::INT16:
+                return static_cast<double>(_u.int16_val);
+            case pb::INT32:
+                return static_cast<double>(_u.int32_val);
+            case pb::INT64:
+                return static_cast<double>(_u.int64_val);
+            case pb::UINT8:
+                return static_cast<double>(_u.uint8_val);
+            case pb::UINT16:
+                return static_cast<double>(_u.uint16_val );
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+                return static_cast<double>(_u.uint32_val);
+            case pb::UINT64:
+                return static_cast<double>(_u.uint64_val);
+            case pb::FLOAT:
+                return static_cast<double>(_u.float_val);
+            case pb::DOUBLE:
+                return _u.double_val;
+            case pb::TIME:
+            case pb::DATE:
+            case pb::DATETIME:
+                return static_cast<double>(cast_to(pb::TIMESTAMP)._u.uint32_val);
+            case pb::STRING:
+            case pb::HEX:
+                if (prefix_len >= (int)str_val.size()) {
+                    return 0.0;
+                }
+                for (int i = prefix_len; i < prefix_len + 8; i++) {
+                    if (i < (int)str_val.size()) {
+                        val += (val << 8) + uint8_t(str_val[i]);
+                    } else {
+                        val += val << 8;
+                    }
+                }
+                return static_cast<double>(val);
+            default:
+                return 0.0;
+        }
+    }
+    void to_proto(pb::ExprValue* value) {
+        value->set_type(type);
+        switch (type) {
+            case pb::BOOL:
+                value->set_bool_val(_u.bool_val);
+                break;
+            case pb::INT8:
+                value->set_int32_val(_u.int8_val);
+                break;
+            case pb::INT16:
+                value->set_int32_val(_u.int16_val);
+                break;
+            case pb::INT32:
+            case pb::TIME:
+                value->set_int32_val(_u.int32_val);
+                break;
+            case pb::INT64:
+                value->set_int64_val(_u.int64_val);
+                break;
+            case pb::UINT8:
+                value->set_uint32_val(_u.uint8_val);
+                break;
+            case pb::UINT16:
+                value->set_uint32_val(_u.uint16_val );
+                break;
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+                value->set_uint32_val(_u.uint32_val);
+                break;
+            case pb::UINT64:
+            case pb::DATETIME:
+                value->set_uint64_val(_u.uint64_val);
+                break;
+            case pb::FLOAT:
+                value->set_float_val(_u.float_val);
+                break;
+            case pb::DOUBLE:
+                value->set_double_val(_u.double_val);
+                break;
+            case pb::STRING:
+            case pb::HEX:
+                value->set_string_val(str_val);
+                break;
+            default:
+                break;
+        }
+    }
+
     template <class T>
     T get_numberic() const {
         switch (type) {
@@ -76,8 +240,22 @@ struct ExprValue {
                 } else {
                     return 0;
                 }
+            case pb::HEX: {
+                if (std::is_integral<T>::value || std::is_floating_point<T>::value) {
+                    uint64_t value = 0;
+                    for (char c : str_val) {
+                        value = value * 256 + (uint8_t)c;
+                    }
+                    return value;
+                } else {
+                    return 0;
+                }
+            }
             case pb::DATETIME: {
                 return _u.uint64_val;
+            }
+            case pb::TIME: {
+                return _u.int32_val;
             }
             case pb::TIMESTAMP: {
                 // internally timestamp is stored in uint32
@@ -130,6 +308,8 @@ struct ExprValue {
                     _u.uint64_val = timestamp_to_datetime(_u.uint32_val);
                 } else if (type == pb::DATE) {
                     _u.uint64_val = date_to_datetime(_u.uint32_val);
+                } else if (type == pb::TIME) {
+                    _u.uint64_val = time_to_datetime(_u.int32_val);
                 } else {
                     _u.uint64_val = get_numberic<uint64_t>();
                 }
@@ -147,6 +327,16 @@ struct ExprValue {
                     _u.uint32_val = datetime_to_date(cast_to(pb::DATETIME)._u.uint64_val);
                 } else {
                     _u.uint32_val = get_numberic<uint32_t>();
+                }
+                break;
+            }
+            case pb::TIME: {
+                if (is_numberic()) {
+                    _u.int32_val = get_numberic<int32_t>();
+                } else if (is_string()) {
+                    _u.int32_val = str_to_time(str_val.c_str());
+                } else {
+                    _u.int32_val = datetime_to_time(cast_to(pb::DATETIME)._u.uint64_val);
                 }
                 break;
             }
@@ -183,6 +373,7 @@ struct ExprValue {
             case pb::FLOAT:
             case pb::TIMESTAMP:
             case pb::DATE:
+            case pb::TIME:
                 butil::MurmurHash3_x64_128(&_u, 4, seed, out);
                 return out[0];
             case pb::INT64:
@@ -191,7 +382,8 @@ struct ExprValue {
             case pb::DATETIME: 
                 butil::MurmurHash3_x64_128(&_u, 8, seed, out);
                 return out[0];
-            case pb::STRING: {
+            case pb::STRING: 
+            case pb::HEX: {
                 butil::MurmurHash3_x64_128(str_val.c_str(), str_val.size(), seed, out);
                 return out[0];
             }
@@ -220,15 +412,24 @@ struct ExprValue {
                 return std::to_string(_u.uint32_val);
             case pb::UINT64:
                 return std::to_string(_u.uint64_val);
-            case pb::FLOAT:
-                return std::to_string(_u.float_val);
-            case pb::DOUBLE:
-                return std::to_string(_u.double_val);
+            case pb::FLOAT: {
+                std::ostringstream oss;
+                oss << _u.float_val;
+                return oss.str();
+            }
+            case pb::DOUBLE: {
+                std::ostringstream oss;
+                oss << _u.double_val;
+                return oss.str();
+            }
             case pb::STRING:
+            case pb::HEX:
             case pb::HLL:
                 return str_val;
             case pb::DATETIME:
                 return datetime_to_str(_u.uint64_val);
+            case pb::TIME:
+                return time_to_str(_u.int32_val);
             case pb::TIMESTAMP:
                 return timestamp_to_str(_u.uint32_val);
             case pb::DATE:
@@ -275,6 +476,7 @@ struct ExprValue {
                 return;
             case pb::NULL_TYPE:
                 *this = value;
+                return;
             default:
                 return;
         }
@@ -289,6 +491,7 @@ struct ExprValue {
             case pb::INT16:
                 return _u.int16_val - other._u.int16_val;
             case pb::INT32:
+            case pb::TIME:
                 return (int64_t)_u.int32_val - (int64_t)other._u.int32_val;
             case pb::INT64:
                 return _u.int64_val > other._u.int64_val ? 1 :
@@ -312,14 +515,54 @@ struct ExprValue {
                 return _u.double_val > other._u.double_val ? 1 : 
                     (_u.double_val < other._u.double_val ? -1 : 0);
             case pb::STRING:
+            case pb::HEX:
                 return str_val.compare(other.str_val);
+            case pb::NULL_TYPE:
+                return -1;
             default:
                 return 0;
         }
     }
 
+    int64_t compare_diff_type(ExprValue& other) {
+        if (type == other.type) {
+            return compare(other);
+        }
+        if (is_int() && other.is_int()) {
+            if (is_uint() || other.is_uint()) {
+                cast_to(pb::UINT64);
+                other.cast_to(pb::UINT64);
+            } else {
+                cast_to(pb::INT64);
+                other.cast_to(pb::INT64);
+            }
+        } else if (is_datetime() || other.is_datetime()) {
+            cast_to(pb::DATETIME);
+            other.cast_to(pb::DATETIME);
+        } else if (is_timestamp() || other.is_timestamp()) {
+            cast_to(pb::TIMESTAMP);
+            other.cast_to(pb::TIMESTAMP);
+        } else if (is_date() || other.is_date()) {
+            cast_to(pb::DATE);
+            other.cast_to(pb::DATE);
+        } else if (is_time() || other.is_time()) {
+            cast_to(pb::TIME);
+            other.cast_to(pb::TIME);
+        } else if (is_double() || other.is_double()) {
+            cast_to(pb::DOUBLE);
+            other.cast_to(pb::DOUBLE);
+        } else if (is_int() || other.is_int()) {
+            cast_to(pb::DOUBLE);
+            other.cast_to(pb::DOUBLE);
+        } else {
+            cast_to(pb::STRING);
+            other.cast_to(pb::STRING);
+        }
+        return compare(other);
+    }
+    
     bool is_null() const { 
-        return type == pb::NULL_TYPE;
+        return type == pb::NULL_TYPE || type == pb::INVALID_TYPE;
     }
 
     bool is_bool() const {
@@ -327,7 +570,7 @@ struct ExprValue {
     }
 
     bool is_string() const {
-        return type == pb::STRING;
+        return type == pb::STRING || type == pb::HEX;
     }
 
     bool is_double() const {
@@ -346,6 +589,10 @@ struct ExprValue {
         return type == pb::DATETIME;
     }
 
+    bool is_time() const {
+        return type == pb::TIME;
+    }
+
     bool is_timestamp() const {
         return type == pb::TIMESTAMP;
     }
@@ -361,8 +608,12 @@ struct ExprValue {
     bool is_numberic() const {
         return is_int() || is_bool() || is_double();
     }
+    
+    bool is_place_holder() const {
+        return type == pb::PLACE_HOLDER;
+    }
 
-    SerializeStatus serialize_to_mysql_packet(char* buf, size_t size, size_t& len) const;
+    SerializeStatus serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const;
 
     static ExprValue Null() {
         ExprValue ret(pb::NULL_TYPE);

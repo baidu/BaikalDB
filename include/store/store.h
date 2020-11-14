@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include <braft/util.h>
 #include <braft/storage.h>
 #endif
+#include <bvar/bvar.h>
 #include "common.h"
 #include "proto/meta.interface.pb.h"
 #include "proto/store.interface.pb.h"
@@ -37,18 +38,19 @@
 #include "table_record.h"
 #include "meta_server_interact.hpp"
 namespace baikaldb {
-DECLARE_string(quit_gracefully_file);
 DECLARE_int32(snapshot_load_num);
+DECLARE_int32(raft_write_concurrency);
+DECLARE_int32(service_write_concurrency);
 const static uint64_t split_thresh = 100 * 1024 * 1024;
 const static int max_region_map_count = 23;
 inline int map_idx(int64_t region_id) {
     return region_id % max_region_map_count;
 }
 
+
+
 class Store : public pb::StoreService {
 public:
-    const static std::string SCHEMA_IDENTIFY;
-    const static std::string REGION_SCHEMA_IDENTIFY;
     virtual ~Store();
     
     static Store* get_instance() {
@@ -76,11 +78,21 @@ public:
                        pb::StoreRes* response,
                        google::protobuf::Closure* done);
 
+    virtual void query_binlog(google::protobuf::RpcController* controller,
+                       const pb::StoreReq* request,
+                       pb::StoreRes* response,
+                       google::protobuf::Closure* done);
+
     //删除region和region中的数据
     virtual void remove_region(google::protobuf::RpcController* controller,
                                const pb::RemoveRegion* request,
                                pb::StoreRes* response,
                                google::protobuf::Closure* done);
+    //恢复延迟删除的region
+    virtual void restore_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
 
     virtual void add_peer(google::protobuf::RpcController* controller,
                             const pb::AddPeer* request,
@@ -90,30 +102,88 @@ public:
                                 const pb::GetAppliedIndex* request,
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done);
+    virtual void compact_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
+    virtual void snapshot_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
+    virtual void query_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
+    virtual void query_illegal_region(google::protobuf::RpcController* controller,
+                                        const pb::RegionIds* request,
+                                        pb::StoreRes* response,
+                                        google::protobuf::Closure* done);
+
+    virtual void backup_region(google::protobuf::RpcController* controller,
+                                const pb::BackUpReq* request,
+                                pb::BackUpRes* response,
+                                google::protobuf::Closure* done);
+
+    virtual void backup(google::protobuf::RpcController* controller,
+        const pb::BackupRequest* request,
+        pb::BackupResponse* response,
+        google::protobuf::Closure* done); 
+
     //上报心跳
-    void report_heart_beat();
+    void heart_beat_thread();
+
+    void send_heart_beat();
+
+    void start_db_statistics();
 
     void reverse_merge_thread();
-    
-    void flush_region_thread();
+    void ttl_remove_thread();
+    void delay_remove_region_thread();
+
+    void flush_memtable_thread();
     void snapshot_thread();
-
     void txn_clear_thread();
-
-    void update_store_status();
     
+    void binlog_scan_thread();
+
+    void binlog_timeout_check_thread();
+
+    void binlog_fake_thread();
+
+    void whether_split_thread();
+
+    void process_merge_request(int64_t table_id, int64_t region_id);
     //发送请求到metasever, 分配region_id 和 instance
     void process_split_request(int64_t table_id, int64_t region_id, bool tail_split, std::string split_key);
+   
     //将region_id的状态由DOING->IDLE, 在raft_control的done方法中调用
     void reset_region_status(int64_t region_id);
     //得到region的split_index, 在rocksdb做compact filter时使用
     int64_t get_split_index_for_region(int64_t region_id); 
     void set_can_add_peer_for_region(int64_t region_id);    
-    void update_and_whether_split_for_region();
+    int get_used_size_per_region(const std::vector<int64_t>& region_ids, uint64_t* region_sizes);
+
+    int64_t get_tso();
+    int64_t get_last_commit_ts();
    
+    RocksWrapper* get_db() {
+        return _rocksdb;
+    }
+    std::string address() const {
+        return _address;
+    }
+    ExecutionQueue& compact_queue() {
+        return _compact_queue;
+    }
+    
+    void sub_split_num() {
+        --_split_num;
+    }
+    bool has_prepared_tran () const {
+        return _has_prepared_tran;
+    }
     SmartRegion get_region(int64_t region_id) {
         if (_region_mapping.count(region_id) == 0) {
-            DB_WARNING("count error");
             return SmartRegion();
         } else {
             return _region_mapping.get(region_id);
@@ -135,104 +205,82 @@ public:
     void traverse_copy_region_map(const std::function<void(SmartRegion& region)>& call) {
         _region_mapping.traverse_copy(call);
     }
-    int get_used_size_per_region(const std::vector<int64_t>& region_ids, 
-                                 int64_t* region_sizes);
     void shutdown_raft() {
         _shutdown = true;
-        traverse_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](SmartRegion& region) {
             region->shutdown();
         });
         DB_WARNING("all region was shutdown");
-        traverse_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](SmartRegion& region) {
             region->join();
         });
         DB_WARNING("all region was join");
     }
-    //store优雅退出，保存每个region的applied_index, 下次重启时不再加载snapshot, log_index自动做过滤
+    bool is_shutdown() const {
+        return _shutdown;
+    }
     void close() {
-        _is_running = false;
+        _add_peer_queue.stop();
+        _remove_region_queue.stop();
+        _compact_queue.stop();
+        _shutdown = true;
         _heart_beat_bth.join();
         DB_WARNING("heart beat bth join");
+        _add_peer_queue.join();
+        DB_WARNING("_add_peer_queue join");
+        _remove_region_queue.join();
+        DB_WARNING("_remove_region_queue join");
+        _compact_queue.join();
+        DB_WARNING("_compact_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
         _merge_bth.join();
         DB_WARNING("merge bth check bth join");
+        _ttl_bth.join();
+        DB_WARNING("ttl bth check bth join");
+        _delay_remove_region_bth.join();
+        DB_WARNING("delay_remove_region_bth bth check bth join");
         _flush_bth.join();
         DB_WARNING("flush check bth join");
         _snapshot_bth.join();
         DB_WARNING("snapshot bth join");
         _txn_clear_bth.join();
         DB_WARNING("txn_clear bth join");
+        _binlog_scan_bth.join();
+        DB_WARNING("binlog scan bth join");
+        _binlog_timeout_check_bth.join();
+        DB_WARNING("binlog timeout check bth join");
+        _binlog_fake_bth.join();
+        DB_WARNING("fake binlog bth join");
 
-        traverse_region_map([](SmartRegion& region) {
-            region->get_prepared_txn_info();
-            region->get_txn_pool().close();
-        });
+
         _rocksdb->close();
-        DB_WARNING("rockdb close");
-
-        traverse_region_map([](SmartRegion& region) {
-            region->save_applied_index();
-        });
-        DB_WARNING("all region quit gracefully");
-        std::ofstream extra_fs(FLAGS_quit_gracefully_file, 
-                                std::ofstream::out | std::ofstream::trunc);
-        extra_fs.close();
-        DB_WARNING("touch quit_gracefully");
+        DB_WARNING("rockdb close, quit success");
     }
-    void sub_split_num() {
-        --_split_num;
-    }
-    // void snapshot_load_mutex_lock() {
-    //     _snapshot_load_mutex.lock();
-    // }
-    // void snapshot_load_mutex_unlock() {
-    //     _snapshot_load_mutex.unlock();
-    // }
-    void send_heart_beat();
-
-    void start_db_statistics();
-
-    bool get_is_running() {
-        return _is_running;
-    }
-    RocksWrapper* get_db() {
-        return _rocksdb;
-    }
-    std::string address() const {
-        return _address;
-    }
-
-    std::vector<rocksdb::Transaction*>& get_recovered_txns() {
-        return _recovered_txns;
+    MetaServerInteract& get_meta_server_interact() {
+        return _meta_server_interact;
     }
 private:
+    Store(): _split_num(0),
+             _disk_total("disk_total", 0),
+             _disk_used("disk_used", 0),
+             dml_time_cost("dml_time_cost"),
+             select_time_cost("select_time_cost") {}
+    
+    int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
+
     void update_schema_info(const pb::SchemaInfo& request);
 
-    //判断分裂在30S内是否完成，不完成，则自动删除该region
-    void _check_split_complete(int64_t region_id);
+    //判断分裂在3600S内是否完成，不完成，则自动删除该region
+    void check_region_legal_complete(int64_t region_id);
 
-    void _construct_heart_beat_request(pb::StoreHeartBeatRequest& request);
+    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request);
     
-    void _process_heart_beat_response(const pb::StoreHeartBeatResponse& response);
+    void process_heart_beat_response(const pb::StoreHeartBeatResponse& response);
 
-    int _drop_region_from_store(int64_t drop_region_id);
-    
-    int _drop_region_from_rocksdb(int64_t region_id);
-  
-    void _remove_region_data(int64_t drop_region_id);
-
-    void _remove_snapshot_path(int64_t drop_region_id);
-    
-    int _remove_log_entry(int64_t drop_region_id);
-    Store(): snapshot_load_currency(-FLAGS_snapshot_load_num), _split_num(0) {}
-   
     void monitor_memory();
     void print_properties(const std::string& name);
-
-public:
-    //全局做snapshot_load的并发控制
-    BthreadCond snapshot_load_currency;
+    void print_heartbeat_info(const pb::StoreHeartBeatRequest& request);
 private:
     std::string                             _address;
     std::string                             _physical_room;
@@ -240,42 +288,75 @@ private:
 
     RocksWrapper*                           _rocksdb;
     SchemaFactory*                          _factory;
-    rocksdb::ColumnFamilyHandle*            _region_handle; 
-    //region status,用在分裂和add_peer remove_peers时 
-    //只有leader有状态
+    MetaWriter*                             _meta_writer = nullptr;
+    
     // region_id => Region handler
-    //std::mutex                              _region_mutex[max_region_map_count];
-    //std::unordered_map<int64_t, SmartRegion>    _region_mapping[max_region_map_count];
     ThreadSafeMap<int64_t, SmartRegion> _region_mapping;
-    int _region_init_errno = 0;
 
-    //std::mutex                                  _snapshot_load_mutex;
     //metaServer交互类
     MetaServerInteract _meta_server_interact;
     
-    bool _is_running = true;
+    MetaServerInteract _tso_server_interact;
+    
     //发送心跳的线程
     Bthread _heart_beat_bth;
     //判断是否需要分裂的线程
     Bthread _split_check_bth;
     //全文索引定时merge线程
     Bthread _merge_bth;
+    //TTL定期删除过期数据
+    Bthread _ttl_bth;
+    //延迟删除region
+    Bthread _delay_remove_region_bth;
+
     //定时flush region meta信息，确保rocksdb的wal正常删除
     Bthread _flush_bth;
     //外部控制定时触发snapshot
     Bthread _snapshot_bth;
     // thread for transaction monitor and clear
     Bthread _txn_clear_bth;
+    // binlog定时扫描线程
+    Bthread _binlog_scan_bth;
+    // binlog没有及时commit或rollback的事务定时检查
+    Bthread _binlog_timeout_check_bth;
+    // 定时fake binlog线程
+    Bthread _binlog_fake_bth;
 
     std::atomic<int32_t> _split_num;    
-    // //计算store状态统计信息的线程
-    // bool _db_status_run = false;
-    // Bthread _db_status_thread;
     bool _shutdown = false;
+    bvar::Status<int64_t> _disk_total;
+    bvar::Status<int64_t> _disk_used;
 
     std::vector<rocksdb::Transaction*> _recovered_txns;
-// private:
-//     int _init_test_region(std::string start, std::string end, int64_t id);
-//     int _init_test_region(uint64_t start, uint64_t end, int count);
+    ExecutionQueue _add_peer_queue;
+    ExecutionQueue _compact_queue;
+    ExecutionQueue _remove_region_queue;
+
+    bool _has_prepared_tran = true;
+    BthreadCond _get_tso_cond {-1};
+public:
+    bool exist_prepared_log(int64_t region_id, uint64_t txn_id) {
+        if (prepared_txns.find(region_id) != prepared_txns.end()
+                && prepared_txns[region_id].find(txn_id) != prepared_txns[region_id].end()) {
+            return true;
+        } 
+        return false;
+    }
+    bool doing_snapshot_when_stop(int64_t region_id) {
+        if (doing_snapshot_regions.find(region_id) != doing_snapshot_regions.end()) {
+            return true;
+        }
+        return false;
+    }
+    std::unordered_map<int64_t, std::set<uint64_t>> prepared_txns;
+    std::set<int64_t>   doing_snapshot_regions;
+    bvar::LatencyRecorder dml_time_cost;
+    bvar::LatencyRecorder select_time_cost;
+
+    //for fake binlog tso
+    TimeCost gen_tso_time;
+    int64_t  tso_physical = 0;
+    int64_t  tso_logical  = 0;
+    int64_t  tso_count    = 0;
 };
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -77,6 +77,12 @@ public:
     void move_row(std::unique_ptr<MemRow> row) {
         _rows.push_back(std::move(row));
     }
+    void replace_row(std::unique_ptr<MemRow> row, size_t idx) {
+        if (size() < idx + 1) {
+            return;
+        }
+        _rows[idx] = std::move(row);
+    }
     std::unique_ptr<MemRow>& get_row() {
         return _rows[_idx];
     }
@@ -92,7 +98,6 @@ public:
     }
 
 private:
-    //先用shared_ptr来维护内存，后续看是否需要优化
     //采用unique_ptr来维护内存，减少内存占用
     //后续考虑直接用MemRow，因为MemRow内部也只有几个指针
     std::vector<std::unique_ptr<MemRow> > _rows;

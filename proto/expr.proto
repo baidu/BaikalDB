@@ -23,6 +23,12 @@ enum ExprNodeType {
     DATETIME_LITERAL = 17;
     DATE_LITERAL = 18;
     IS_TRUE_PREDICATE = 19;
+    TIME_LITERAL = 20;
+    PLACE_HOLDER_LITERAL = 21;
+    ROW_EXPR = 22;
+    HLL_LITERAL = 23;
+    HEX_LITERAL = 24;
+    SUB_QUERY_EXPR = 25;
 };
 
 message Function {
@@ -46,6 +52,7 @@ message DeriveExprNode {
     optional bool bool_val = 6;
     //与slot_id相同，只有avg AGG_EXPR与slot_id不同
     optional int32 intermediate_slot_id = 7;
+    optional int32 field_id = 8;
 };
 
 message ExprNode {
@@ -61,4 +68,7 @@ message Expr {
     repeated ExprNode nodes = 1;
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用
     repeated int64 index_ids = 2;
+    optional string database = 3;
+    optional string table = 4;
 };
+

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,8 @@ public:
     void get_user_info(const pb::QueryRequest* request,
                        pb::QueryResponse* response);
     void get_flatten_privilege(const pb::QueryRequest* request, pb::QueryResponse* response);
+    void process_console_heartbeat(const pb::ConsoleHeartBeatRequest* request,
+                                 pb::ConsoleHeartBeatResponse* response);
 private:
     QueryPrivilegeManager() {}
     void construct_query_response_for_privilege(const pb::UserPrivilege& user_privilege,

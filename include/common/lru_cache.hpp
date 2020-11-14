@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ int Cache<ItemKey, ItemType>::add(const ItemKey& key, const ItemType& value) {
         node = new LruNode<ItemKey, ItemType>();
         _lru_map[key] = node;
     }
-    while (_lru_map.size() >= _len_threshold && !_lru_list.empty()) {
+    while ((int64_t)_lru_map.size() >= _len_threshold && !_lru_list.empty()) {
         LruNode<ItemKey, ItemType>* head = (LruNode<ItemKey, ItemType>*)_lru_list.head();
         head->RemoveFromList();
         _lru_map.erase(head->key);

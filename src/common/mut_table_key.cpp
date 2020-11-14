@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,6 @@ MutTableKey& MutTableKey::append_index(const TableKey& key) {
 }
 
 int MutTableKey::append_index(IndexInfo& index, TableRecord* record, int field_cnt, bool clear) {
-    return record->encode_key(index, *this, field_cnt, clear);
+    return record->encode_key(index, *this, field_cnt, clear, false);
 }
 } // end of namespace baikaldb

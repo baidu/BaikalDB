@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <vector>
 #ifdef BAIDU_INTERNAL
 #include <pb_to_json.h>
 #else
@@ -47,15 +48,19 @@ TEST(test_hll, case_all) {
     int cnts[] = {50, 100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000, 8000000, 9000000, 10000000, 50000000};
     double max = 0.0;
     int last = 0;
+    double sum = 0;
+    int64_t hll_cnt = 0;
     for (int cnt = 50; cnt < 1000000; cnt++) {
         for (int i = last; i < cnt; ++i) {
             ExprValue tmp(pb::INT64);
             tmp._u.int64_val = i;
-            hll_add(hll, tmp.hash(0x1111110));
+            hll_add(hll, tmp.hash());
         }
         last = cnt;
-        int64_t tmp = hll_estimate(hll);
-        //std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << tmp * 1.0 / cnt << std::endl;
+        uint64_t tmp = hll_estimate(hll);
+        hll_cnt ++;
+        std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << fabs(tmp * 1.0 / cnt - 1) << std::endl;
+        sum += fabs(tmp * 1.0 / cnt - 1);
         if (fabs(1-tmp * 1.0 / cnt) > max) {
             max = fabs(1-tmp * 1.0 / cnt);
         }
@@ -63,16 +68,39 @@ TEST(test_hll, case_all) {
             cnt += 10;
         }
     }
+    std::cout << "avg:" << sum / hll_cnt << std::endl;
     std::cout << "max:" << max << std::endl;
-    //stripslashes(str);
-    //std::cout << "new:" << str << std::endl;
-    //EXPECT_STREQ(str.c_str(), "\\%a\t");
+}
 
-    //std::string str2 = "abc";
-    //std::cout << "orgin:" << str2 << std::endl;
-    //stripslashes(str2);
-    //std::cout << "new:" << str2 << std::endl;
-    //EXPECT_STREQ(str2.c_str(), "abc");
+TEST(test_hll_performace, case_all) {
+    std::vector<ExprValue> vec;
+    for (int i = 0; i < 5; i++) {
+        ExprValue hll = hll_init();
+        for (int cnt = 0; cnt < 1000; cnt++) {
+            ExprValue tmp(pb::INT64);
+            tmp._u.int64_val = butil::fast_rand();
+            hll_add(hll, tmp.hash());
+        }
+        vec.push_back(hll);
+    }
+    {
+        ExprValue merge_hll = hll_init();
+        std::cout << "old:" << std::endl;
+        TimeCost cost;
+        for (int i = 0; i < vec.size(); i++) {
+            hll_merge(merge_hll, vec[i]);
+        }
+        std::cout << hll_estimate(merge_hll) << "cost:" << cost.get_time() << std::endl;
+    }
+    {
+        ExprValue merge_hll = hll_init();
+        std::cout << "new:" << std::endl;
+        TimeCost cost;
+        for (int i = 0; i < vec.size(); i++) {
+            hll_merge_agg(merge_hll, vec[i]);
+        }
+        std::cout << hll_estimate(merge_hll) << "cost:" << cost.get_time() << std::endl;
+    }
 }
 
 }

@@ -8,10 +8,10 @@ echo -e "rename table\n"
 curl -d '{
     "op_type":"OP_RENAME_TABLE",
     "table_info": {
-        "table_name": "TestTb",
-        "new_table_name": "TestTb_new",
-        "database": "TestDb",
-        "namespace_name": "TEST_NAMESPACE"
+        "table_name": "wordinfo",
+        "new_table_name": "wordinfo_new",
+        "database": "TEST",
+        "namespace_name": "TEST"
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"

@@ -1,0 +1,39 @@
+syntax="proto2";
+package baikaldb.pb;
+
+enum BinlogType {
+    PREWRITE  = 0;
+    COMMIT    = 1;
+    ROLLBACK  = 2;
+    DDL       = 3;
+    FAKE      = 4;
+}
+  
+message Binlog {
+    optional BinlogType       type           = 1;
+    optional int64            start_ts       = 2;
+    optional int64            commit_ts      = 3;
+    optional bytes            prewrite_key   = 4;
+    optional PrewriteValue    prewrite_value = 5;
+    optional bytes            ddl_query      = 6;
+    optional bytes            stmts          = 7;
+}
+
+message PrewriteValue {
+    optional int64 schema_version    = 1;
+    repeated TableMutation mutations = 2;
+}
+ 
+enum MutationType {
+    INSERT = 0;
+    UPDATE = 1;
+    DELETE = 2;
+}
+ 
+message TableMutation {
+    optional int64 table_id        = 1;
+    repeated bytes insert_rows     = 2;
+    repeated bytes update_rows     = 3;
+    repeated bytes deleted_rows    = 4;
+    repeated MutationType sequence = 5;
+}

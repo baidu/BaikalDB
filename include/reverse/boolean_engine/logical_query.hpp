@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -83,7 +83,7 @@ template <typename Schema>
 void LogicalQuery<Schema>::and_or_add_subnode(
         const ExecutorNode<Schema>& node,
         OperatorBooleanExecutor<Schema>* result) {
-    for (int i = 0; i < node._sub_nodes.size(); ++i) {
+    for (size_t i = 0; i < node._sub_nodes.size(); ++i) {
         const ExecutorNode<Schema>* sub_node = node._sub_nodes[i];
         BooleanExecutor<Schema> *tmp= parse_executor_node(*sub_node);
         if (tmp) {
@@ -104,7 +104,7 @@ void LogicalQuery<Schema>::weight_add_subnode(
     if (tmp) {
         weight_result->add_must(tmp);
     }
-    for (int i = 1; i < node._sub_nodes.size(); ++i) {
+    for (size_t i = 1; i < node._sub_nodes.size(); ++i) {
         const ExecutorNode<Schema>* sub_node = node._sub_nodes[i];
         BooleanExecutor<Schema> *tmp= parse_executor_node(*sub_node);
         if (tmp) {

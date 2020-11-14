@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 #include "hll_common.h"
 
 namespace baikaldb {
-SerializeStatus ExprValue::serialize_to_mysql_packet(char* buf, size_t size, size_t& len) const {
+SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const {
     if (size < 1) {
         len = 1;
         return STMPS_NEED_RESIZE;

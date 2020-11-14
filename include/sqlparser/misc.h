@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -48,6 +48,41 @@ struct SetStmt : public StmtNode {
     Vector<VarAssign*> var_list;
     SetStmt() {
         node_type = NT_SET_CMD;
+    }
+};
+
+struct NewPrepareStmt : public StmtNode {
+    String  name;
+    String  sql;
+    NewPrepareStmt() {
+        node_type = NT_NEW_PREPARE;
+        name = nullptr;
+        sql = nullptr;
+    }
+};
+
+struct ExecPrepareStmt : public StmtNode {
+    String  name;
+    Vector<String> param_list;
+    ExecPrepareStmt() {
+        node_type = NT_EXEC_PREPARE;
+        name = nullptr;
+    }
+};
+
+struct DeallocPrepareStmt : public StmtNode {
+    String  name;
+    DeallocPrepareStmt() {
+        node_type = NT_DEALLOC_PREPARE;
+        name = nullptr;
+    }
+};
+
+struct KillStmt : public StmtNode {
+    int64_t conn_id = 0;
+    bool is_query = false;
+    KillStmt() {
+        node_type = NT_KILL;
     }
 };
 }

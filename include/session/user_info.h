@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <mutex>
 #include <set>
+#include <unordered_set>
 #include <map>
 #include <memory>
 #include <string>
@@ -87,6 +88,17 @@ public:
         }
     }
 
+    bool allow_addr(const std::string& ip) {
+        if (need_auth_addr) {
+            if (auth_ip_set.count(ip)) {
+                return true;
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
 public:
     std::string     username;
     std::string     password;
@@ -94,16 +106,20 @@ public:
 
     int64_t         namespace_id = 0;
     int64_t         version = 0;
-    uint8_t         scramble_password[21];
+    uint8_t         scramble_password[20];
 
     TimeCost        query_cost;
     std::mutex      conn_mutex;
     uint32_t        max_connection = 0;
     uint32_t        cur_connection = 0;
     uint32_t        query_quota = 0;
+    bool            need_auth_addr = false;
 
     std::atomic<uint32_t>    query_count;
     std::map<int64_t, pb::RW> database;
     std::map<int64_t, pb::RW> table;
+    // show databases使用
+    std::set<int64_t> all_database;
+    std::unordered_set<std::string> auth_ip_set;
 };
 } // namespace baikaldb

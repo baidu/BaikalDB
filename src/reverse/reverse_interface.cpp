@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,135 +26,6 @@
 #include "slot_ref.h"
 
 namespace baikaldb {
-//--common interface
-int CommonSchema::segment(
-                    const std::string& word, 
-                    const std::string& pk,
-                    SmartRecord record,
-                    pb::SegmentType segment_type,
-                    const std::map<std::string, int32_t>& name_field_id_map,
-                    pb::ReverseNodeType flag,
-                    std::map<std::string, ReverseNode>& res) {
-    // hit seg_cache, replace pk and flag
-    if (res.size() > 0) {
-        for (auto& pair : res) {
-            pair.second.set_key(pk);
-            pair.second.set_flag(flag);
-        }
-        return 0;
-    }
-    std::map<std::string, float> term_map;
-    int ret = 0;
-    switch (segment_type) {
-        case pb::S_NO_SEGMENT:
-            term_map[word] = 0;
-            break;
-        case pb::S_SIMPLE:
-            ret = simple_seg_gbk(word, term_map);
-            break;
-#ifdef BAIDU_INTERNAL
-        case pb::S_WORDRANK: 
-            ret = wordrank(word, term_map);
-            break;
-        case pb::S_WORDSEG_BASIC: 
-            ret = wordseg_basic(word, term_map);
-            break;
-#endif
-        default:
-            DB_WARNING("un-support segment:%d", segment_type);
-            ret = -1;
-            break;
-    }
-    if (ret < 0) {
-        DB_WARNING("[word:%s]segment error %d", word.c_str(), ret);
-        return -1;
-    }
-    for (auto& pair : term_map) {
-        ReverseNode node;
-        node.set_key(pk);
-        node.set_flag(flag);
-        node.set_weight(pair.second);
-        res[pair.first] = node;
-    }
-    return 0;
-}
-
-int CommonSchema::create_executor(const std::string& search_data, pb::SegmentType segment_type) {
-    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
-    //segment
-    TimeCost timer;
-    std::map<std::string, float> term_map;
-    int ret = 0;
-    switch (segment_type) {
-        case pb::S_NO_SEGMENT:
-            term_map[search_data] = 0;
-            break;
-        case pb::S_SIMPLE:
-            ret = simple_seg_gbk(search_data, term_map);
-            break;
-#ifdef BAIDU_INTERNAL
-        case pb::S_WORDRANK: 
-            ret = wordrank(search_data, term_map);
-            break;
-        case pb::S_WORDSEG_BASIC: 
-            ret = wordseg_basic(search_data, term_map);
-            break;
-#endif
-        default:
-            DB_WARNING("un-support segment:%d", segment_type);
-            ret = -1;
-            break;
-    }
-    if (ret < 0) {
-        DB_WARNING("[word:%s]segment error %d", search_data.c_str(), ret);
-        return -1;
-    }
-    for (auto& pair : term_map) {
-        _and_terms.push_back(pair.first);
-    }
-    _statistic.segment_time += timer.get_time();
-    timer.reset();
-    LogicalQuery<CommonSchema> logical_query(this);
-    if (_and_terms.size() == 0) {
-        _exe = NULL;
-        return 0;
-    }
-    ExecutorNode<CommonSchema>& root = logical_query._root;
-    if (_and_terms.size() == 1) {
-        root._type = TERM;
-        root._term = _and_terms[0];
-    } else {
-        root._type = AND;
-        root._merge_func = CommonSchema::merge_and;
-        for (uint32_t j = 0; j < _and_terms.size(); ++j) {
-            std::string& term = _and_terms[j];
-            ExecutorNode<CommonSchema>* node = new ExecutorNode<CommonSchema>();
-            node->_type = TERM;
-            node->_term = term;
-            root._sub_nodes.push_back(node);
-        }
-    }
-    _exe = logical_query.create_executor();
-    _statistic.create_exe_time += timer.get_time();
-    return 0;
-}
-
-int CommonSchema::next(SmartRecord record) {
-    if (!_cur_node) {
-        return -1;
-    }
-    const pb::CommonReverseNode& reverse_node = *_cur_node;
-    int ret = record->decode_key(_index_info, reverse_node.key());
-    if (ret < 0) {
-        return -1;
-    }
-    if (_weight_field_id > 0) {
-        record->set_float(record->get_field_by_tag(_weight_field_id), 
-            reverse_node.weight());
-    }
-    return 0;
-}
-
 //--xbs interface
 const char delim_term = ';';
 const char delim_score = ':';
@@ -402,7 +273,7 @@ static int init_filter_set(std::vector<ExprNode*> exprs, int32_t field_id, std::
     return 0;
 }
 
-int XbsSchema::create_executor(const std::string& search_data, pb::SegmentType segment_type) {
+int XbsSchema::create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type) {
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
     _pic_scores_field_id = get_field_id_by_name(_table_info.fields, "__pic_scores");
     _userid_field_id = get_field_id_by_name(_table_info.fields, "userid");
@@ -496,7 +367,7 @@ int XbsSchema::create_executor(const std::string& search_data, pb::SegmentType s
             }
         }
     }
-    DB_WARNING("sort ReverseNode time:%ld len:%u", cost.get_time(), _res.size());
+    //DB_WARNING("sort ReverseNode time:%ld len:%u", cost.get_time(), _res.size());
     _it = _res.begin();
     return 0;
 }
@@ -521,14 +392,16 @@ int XbsSchema::next(SmartRecord record) {
         return -1;
     }
     if (_weight_field_id > 0) {
-        record->set_float(record->get_field_by_tag(_weight_field_id), 
-            reverse_node.weight());
+        MessageHelper::set_float(record->get_field_by_tag(_weight_field_id),
+                record->get_raw_message(), reverse_node.weight());
     }
     if (_userid_field_id > 0) {
-        record->set_uint32(record->get_field_by_tag(_userid_field_id), reverse_node.userid());
+        MessageHelper::set_uint32(record->get_field_by_tag(_userid_field_id),
+                record->get_raw_message(), reverse_node.userid());
     }
     if (_source_field_id > 0) {
-        record->set_uint32(record->get_field_by_tag(_source_field_id), reverse_node.source());
+        MessageHelper::set_uint32(record->get_field_by_tag(_source_field_id),
+                record->get_raw_message(), reverse_node.source());
     }
     //int64_t decode_key_cost = cost.get_time();
     //cost.reset();

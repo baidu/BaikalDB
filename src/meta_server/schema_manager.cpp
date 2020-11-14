@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -94,11 +94,23 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_CREATE_TABLE:
     case pb::OP_RENAME_TABLE:
     case pb::OP_DROP_TABLE: 
+    case pb::OP_DROP_TABLE_TOMBSTONE: 
+    case pb::OP_RESTORE_TABLE: 
     case pb::OP_ADD_FIELD:
     case pb::OP_DROP_FIELD:
     case pb::OP_MODIFY_FIELD:
     case pb::OP_RENAME_FIELD:
-    case pb::OP_UPDATE_BYTE_SIZE: {
+    case pb::OP_UPDATE_BYTE_SIZE: 
+    case pb::OP_UPDATE_SPLIT_LINES: 
+    case pb::OP_UPDATE_SCHEMA_CONF: 
+    case pb::OP_UPDATE_DISTS:
+    case pb::OP_UPDATE_TTL_DURATION:
+    case pb::OP_MODIFY_RESOURCE_TAG: 
+    case pb::OP_ADD_INDEX:
+    case pb::OP_DROP_INDEX: 
+    case pb::OP_LINK_BINLOG:
+    case pb::OP_UNLINK_BINLOG:
+    case pb::OP_SET_INDEX_HINT_STATUS:{
         if (!request->has_table_info()) { 
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
                     "no schema_info", request->op_type(), log_id);
@@ -108,6 +120,18 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 && !request->table_info().has_byte_size_per_record()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no bye_size_per_record", request->op_type(), log_id);
+            return;
+        }
+        if (request->op_type() == pb::OP_UPDATE_SPLIT_LINES
+                && !request->table_info().has_region_split_lines()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no region_split_lines", request->op_type(), log_id);
+            return;
+        }        
+        if (request->op_type() == pb::OP_UPDATE_SCHEMA_CONF
+                && !request->table_info().has_schema_conf()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no schema_conf", request->op_type(), log_id);
             return;
         }
         if (request->op_type() == pb::OP_RENAME_TABLE
@@ -123,6 +147,20 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 return;
             }
         }
+        if (request->op_type() == pb::OP_UPDATE_DISTS) {
+            auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+            auto ret = whether_dists_legal(mutable_request, response, log_id);
+            if (ret < 0) {
+                return;
+            } 
+        }
+        if (request->op_type() == pb::OP_UPDATE_TTL_DURATION 
+                && request->table_info().ttl_duration() == 0) {
+            // 只能修改有ttl的表
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "ttl_duration must > 0", request->op_type(), log_id);
+            return;
+        }
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
@@ -136,15 +174,11 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
         return;
     } 
     case pb::OP_UPDATE_REGION: {
-        if (!request->has_region_info()) {
+        if (!request->has_region_info() && request->region_infos().size() == 0) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no split region info", request->op_type(), log_id);
             return;
         }
-        _meta_state_machine->process(controller, request, response, done_guard.release());
-        return;
-    }
-    case pb::OP_RESTORE_REGION: {
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
@@ -156,6 +190,32 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
         }
         auto ret = pre_process_for_split_region(request, response, log_id);
         if (ret < 0) {
+            return;
+        }
+        _meta_state_machine->process(controller, request, response, done_guard.release());
+        return;
+    }
+    case pb::OP_MERGE_REGION: {
+        if (!request->has_region_merge()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                               "no merge region info", request->op_type(), log_id);
+            return;
+        }
+        auto ret = pre_process_for_merge_region(request, response, log_id);
+        if (ret < 0) {
+            return;
+        }
+        return;
+    }
+    case pb::OP_UPDATE_INDEX_STATUS:
+    case pb::OP_DELETE_DDLWORK: {
+        _meta_state_machine->process(controller, request, response, done_guard.release());
+        return;
+    }
+    case pb::OP_UPDATE_STATISTICS: {
+        if (!request->has_statistics()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no statistics info", request->op_type(), log_id);
             return;
         }
         _meta_state_machine->process(controller, request, response, done_guard.release());
@@ -206,7 +266,7 @@ void SchemaManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatReq
     RegionManager::get_instance()->check_whether_illegal_peer(request, response);
     int64_t illegal_peer_time = step_time_cost.get_time();
     step_time_cost.get_time();
-    SELF_TRACE("process peer hearbeat, table_exist_time: %ld, ilegal_peer_time: %ld, log_id: %lu",
+    DB_NOTICE("process peer hearbeat, table_exist_time: %ld, ilegal_peer_time: %ld, log_id: %lu",
                 table_exist_time, illegal_peer_time, log_id);
 }
 
@@ -228,11 +288,13 @@ void SchemaManager::process_leader_heartbeat_for_store(const pb::StoreHeartBeatR
     int64_t leader_region_time = step_time_cost.get_time();
     step_time_cost.reset();
 
+    std::string resource_tag = request->instance_info().resource_tag();
     RegionManager::get_instance()->leader_load_balance(_meta_state_machine->whether_can_decide(), 
-            _meta_state_machine->get_close_load_balance(), request, response);
+            _meta_state_machine->get_load_balance(resource_tag), request, response);
     int64_t leader_balance_time = step_time_cost.get_time();
-    SELF_TRACE("process leader heartbeat, update_status_time: %ld, leader_region_time: %ld,"
+    DB_NOTICE("store: %s process leader heartbeat, update_status_time: %ld, leader_region_time: %ld,"
                 " leader_balance_time: %ld, log_id: %lu",
+                request->instance_info().address().c_str(),
                 update_status_time, leader_region_time, leader_balance_time, log_id); 
 } 
 
@@ -248,38 +310,55 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
     TimeCost step_time_cost; 
     std::set<std::int64_t> report_table_ids;
     std::unordered_map<int64_t, std::set<std::int64_t>> report_region_ids;
-    for (auto& schema_heart_beat : request->schema_infos()) {
-        int64_t table_id = schema_heart_beat.table_id();
-        report_table_ids.insert(table_id);
-        for (auto& region_info : schema_heart_beat.regions()) {
-            report_region_ids[table_id].insert(region_info.region_id());
-        }
-    }
-    int64_t prepare_time = step_time_cost.get_time();
+    int64_t prepare_time =0;
     step_time_cost.reset(); 
-    //判断上报的表是否已经更新或删除
-    TableManager::get_instance()->check_update_or_drop_table(request, response);
+    bool need_update_schema = false;
+    bool need_update_region = false;
+    int64_t last_updated_index = request->last_updated_index();
+    int64_t applied_index = _meta_state_machine->applied_index();
+    if (last_updated_index > 0) {
+        need_update_schema = TableManager::get_instance()->check_and_update_incremental(request, response, applied_index);
+        need_update_region = RegionManager::get_instance()->check_and_update_incremental(request, response, applied_index);
+        //DB_WARNING("update  update_incremental last_updated_index:%ld log_id: %lu", last_updated_index, log_id);
+    }
+    int64_t update_incremental_time = step_time_cost.get_time();
+    step_time_cost.reset(); 
+    if (last_updated_index == 0 || need_update_schema || need_update_region) {
+        for (auto& schema_heart_beat : request->schema_infos()) {
+            int64_t table_id = schema_heart_beat.table_id();
+            report_table_ids.insert(table_id);
+            report_region_ids[table_id] = std::set<std::int64_t>{};
+            for (auto& region_info : schema_heart_beat.regions()) {
+                report_region_ids[table_id].insert(region_info.region_id());
+            }
+        }      
+        prepare_time = step_time_cost.get_time(); 
+        step_time_cost.reset();
+    }
+    if (last_updated_index == 0 || need_update_schema) {
+        //DB_WARNING("DEBUG schema update all applied_index:%ld log_id: %lu", applied_index, log_id);
+        response->set_last_updated_index(applied_index);
+        //判断上报的表是否已经更新或删除
+        TableManager::get_instance()->check_update_or_drop_table(request, response); 
+        //判断是否有新增的表没有下推给baikaldb
+        std::vector<int64_t> new_add_region_ids;
+        TableManager::get_instance()->check_add_table(report_table_ids, new_add_region_ids, request->not_need_statistics(), response);
+        RegionManager::get_instance()->add_region_info(new_add_region_ids, response);      
+    }
     int64_t update_table_time = step_time_cost.get_time();
-    step_time_cost.reset();
-    //判断是否有新增的表没有下推给baikaldb
-    std::vector<int64_t> new_add_region_ids;
-    TableManager::get_instance()->check_add_table(report_table_ids, new_add_region_ids, response);
-    int64_t add_table_time = step_time_cost.get_time();
-    step_time_cost.reset();
-    RegionManager::get_instance()->add_region_info(new_add_region_ids, response);
-
-    //判断上报的region是否已经更新或删除
-    RegionManager::get_instance()->check_update_region(request, response);
+    step_time_cost.reset(); 
+    if (last_updated_index == 0 || need_update_region) {
+        //DB_WARNING("region update all applied_index:%ld log_id: %lu", applied_index, log_id);
+        response->set_last_updated_index(applied_index);
+        //判断上报的region是否已经更新或删除
+        RegionManager::get_instance()->check_update_region(request, response);
+        //判断是否有新增的region没有下推到baikaldb
+        TableManager::get_instance()->check_add_region(report_table_ids, report_region_ids, response);
+    }
     int64_t update_region_time = step_time_cost.get_time();
-    step_time_cost.reset();
-    //判断是否有新增的region没有下推到baikaldb
-    TableManager::get_instance()->check_add_region(report_table_ids, report_region_ids, response);
-    int64_t add_region_time = step_time_cost.get_time();
-    SELF_TRACE("process schema info for baikal heartbeat,"
-                " prepare_time: %ld, update_table_time: %ld, add_table_time: %ld,"
-                " update_region_time: %ld, add_region_time: %ld, log_id: %lu",
-                prepare_time, update_table_time, add_table_time, 
-                update_region_time, add_region_time, log_id);
+    DB_NOTICE("process schema info for baikal heartbeat, prepare_time: %ld, update_incremental_time:%ld,"
+                " update_table_time: %ld, update_region_time: %ld, log_id: %lu",
+                prepare_time, update_incremental_time, update_table_time, update_region_time, log_id);
 }
 
 int SchemaManager::check_and_get_for_privilege(pb::UserPrivilege& user_privilege) {
@@ -353,6 +432,12 @@ int SchemaManager::load_snapshot() {
 
     std::string region_prefix = MetaServer::SCHEMA_IDENTIFY;
     region_prefix += MetaServer::REGION_SCHEMA_IDENTIFY;
+
+    std::string ddl_prefix = MetaServer::SCHEMA_IDENTIFY;
+    ddl_prefix += MetaServer::DDLWORK_IDENTIFY;
+
+    std::string statistics_prefix = MetaServer::SCHEMA_IDENTIFY;
+    statistics_prefix += MetaServer::STATISTICS_IDENTIFY;
    
     for (; iter->Valid(); iter->Next()) {
         int ret = 0;
@@ -366,6 +451,10 @@ int SchemaManager::load_snapshot() {
             ret = NamespaceManager::get_instance()->load_namespace_snapshot(iter->value().ToString());
         } else if (iter->key().starts_with(max_id_prefix)) {
             ret = load_max_id_snapshot(max_id_prefix, iter->key().ToString(), iter->value().ToString());
+        } else if (iter->key().starts_with(ddl_prefix)) {
+            ret = TableManager::get_instance()->load_ddl_snapshot(iter->value().ToString());
+        } else if (iter->key().starts_with(statistics_prefix)) {
+            ret = TableManager::get_instance()->load_statistics_snapshot(iter->value().ToString());
         } else {
             DB_FATAL("unsupport schema info when load snapshot, key:%s", iter->key().data());
         }
@@ -376,66 +465,215 @@ int SchemaManager::load_snapshot() {
             return -1;
         }
     }
+    TableManager::get_instance()->check_startkey_regionid_map();
     return 0;
 }
 int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* request,
             pb::MetaManagerResponse* response,
             uint64_t log_id) {
+    auto& table_info = const_cast<pb::SchemaInfo&>(request->table_info());
     int partition_num = 1;
     if (request->table_info().has_partition_num()) {
         partition_num = request->table_info().partition_num(); 
     }
-    //校验split_key是否有序
-    if (request->table_info().split_keys_size() > 1) { 
-        for (auto i = 1; i < request->table_info().split_keys_size(); ++i) {
-            if (request->table_info().split_keys(i) <= request->table_info().split_keys(i - 1)) {
-                ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
-                            "split key not sorted", request->op_type(), log_id);
-                return -1;
+    std::set<std::string> indexs_name;
+    std::string primary_index_name;
+    //校验只有普通索引和uniq 索引可以设置全局属性
+    for (auto& index_info : request->table_info().indexs()) {
+        if (index_info.is_global() 
+                && index_info.index_type() != pb::I_UNIQ 
+                && index_info.index_type() != pb::I_KEY) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "global index only support I_UNIQ or I_KEY", request->op_type(), log_id);
+            return -1;
+        }
+        if (indexs_name.find(index_info.index_name()) != indexs_name.end()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "index name repeated", request->op_type(), log_id);
+            return -1;
+        }
+        if (index_info.index_type() == pb::I_PRIMARY || index_info.is_global()) {
+            primary_index_name = index_info.index_name();
+            DB_NOTICE("set primary index name %s", primary_index_name.c_str());
+        }
+        indexs_name.insert(index_info.index_name());
+    }
+    // 分区表多region时，设置多split_key
+    if (table_info.has_region_num()) {
+        int32_t region_num = table_info.region_num();
+        if (region_num > 1) {
+            auto split_keys = table_info.add_split_keys();
+            split_keys->set_index_name(primary_index_name);
+            for (auto index = 1; index < region_num; ++index) {
+                split_keys->add_split_keys(std::string(index+1, 0x01));
             }
         }
     }
-    std::vector<std::string> new_instances;
-    int count = partition_num * (request->table_info().split_keys_size() + 1);
+    //校验split_key是否有序
+    int32_t total_region_count = 0;
+    std::set<std::string> split_index_names;
+    for (auto& split_key : request->table_info().split_keys()) {
+        if (indexs_name.find(split_key.index_name()) == indexs_name.end()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "index_name for split key not exist", request->op_type(), log_id);
+            return -1;
+        }
+        for (auto i = 1; i < split_key.split_keys_size(); ++i) {
+            if (split_key.split_keys(i) <= split_key.split_keys(i - 1)) {
+                ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                        "split key not sorted", request->op_type(), log_id);
+                return -1; 
+            }
+        }
+        total_region_count += split_key.split_keys_size() + 1;
+        split_index_names.insert(split_key.index_name());
+    }
+    //全局二级索引或者主键索引没有指定split_key
+    for (auto& index_info : request->table_info().indexs()) {
+        if (index_info.index_type() == pb::I_PRIMARY || index_info.is_global()) {
+            if (split_index_names.find(index_info.index_name()) == split_index_names.end()) {
+                ++total_region_count;
+            }
+        }
+    }
+
+    for (auto i = 0; i < request->table_info().fields_size(); ++i) {
+        auto field = request->table_info().fields(i);
+        if (!field.has_mysql_type() || !field.has_field_name()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                            "missing field id (type or name)", request->op_type(), log_id);         
+            return -1;
+        }
+    }
+    auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+    std::string main_logical_room;
+    //用户指定了跨机房部署
+    auto ret = whether_dists_legal(mutable_request, response, log_id);
+    if (ret != 0) {
+        return ret;
+    }
+
+    main_logical_room = request->table_info().main_logical_room();
+    total_region_count = partition_num * total_region_count;
     std::string resource_tag = request->table_info().resource_tag();
     boost::trim(resource_tag);
-    for (auto i = 0; i < count; ++i) { 
+    mutable_request->mutable_table_info()->set_resource_tag(resource_tag);
+    DB_WARNING("create table should select instance count: %d", total_region_count);
+    for (auto i = 0; i < total_region_count; ++i) { 
         std::string instance;
         int ret = ClusterManager::get_instance()->select_instance_rolling(
                     resource_tag,
                     {},
+                    main_logical_room,    
                     instance);
         if (ret < 0) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                         "select instance fail", request->op_type(), log_id);
             return -1;
         }
-        new_instances.push_back(instance);
+        mutable_request->mutable_table_info()->add_init_store(instance);
     }
-    auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
-    for (auto& new_instance : new_instances) {
-        mutable_request->mutable_table_info()->add_init_store(new_instance);
-    }
-    mutable_request->mutable_table_info()->set_resource_tag(resource_tag);
     return 0;
 }
+
+int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* request,
+        pb::MetaManagerResponse* response,
+        uint64_t log_id) { 
+    TimeCost time_cost;
+    int64_t src_region_id = request->region_merge().src_region_id();
+    if (request->region_merge().src_end_key().empty()) {
+        DB_WARNING("src end key is empty request:%s log_id:%lu",
+                 request->ShortDebugString().c_str(), log_id); 
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                           "src end key is empty", request->op_type(), log_id);
+        return -1;
+    }
+    RegionManager* region_manager = RegionManager::get_instance();
+    auto src_region = region_manager->get_region_info(src_region_id);
+    if (src_region == nullptr) {
+        DB_WARNING("can`t find src region request:%s, src region_id:%ld, log_id:%lu",
+                 request->ShortDebugString().c_str(), src_region_id, log_id); 
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                           "can not find src region", request->op_type(), log_id);
+        return -1;
+    }
+    if (src_region->start_key() != request->region_merge().src_start_key()
+       || src_region->end_key() != request->region_merge().src_end_key()) {
+        DB_WARNING("src region_id:%ld has diff key (satrt_key, end_key), "
+                   "req:(%s, %s), local:(%s, %s)",  src_region_id,
+                   str_to_hex(request->region_merge().src_start_key()).c_str(), 
+                   str_to_hex(request->region_merge().src_end_key()).c_str(),
+                   str_to_hex(src_region->start_key()).c_str(),
+                   str_to_hex(src_region->end_key()).c_str());
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                           "src key diff with local", request->op_type(), log_id);
+        return -1;
+    }
+    int64_t table_id = request->region_merge().table_id();
+
+    int64_t partition_id = 0;
+    if (request->region_merge().has_partition_id()) {
+        partition_id = request->region_merge().partition_id();
+    }
+    int64_t dst_region_id = TableManager::get_instance()->get_next_region_id(
+                        table_id, request->region_merge().src_start_key(), 
+                        request->region_merge().src_end_key(), partition_id);
+    if (dst_region_id <= 0) {
+        DB_WARNING("can`t find dst merge region request: %s, src region id:%ld, log_id:%ld",
+                 request->ShortDebugString().c_str(), src_region_id, log_id);
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                           "dst merge region not exist", request->op_type(), log_id);
+        return -1;
+    }
+    auto dst_region = region_manager->get_region_info(dst_region_id);
+    if (dst_region == nullptr) {
+        DB_WARNING("can`t find dst merge region request: %s, src region id:%ld, "
+                 "dst region id:%ld, log_id:%lu",
+                 request->ShortDebugString().c_str(), 
+                 src_region_id, dst_region_id, log_id); 
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                           "dst merge region not exist", request->op_type(), log_id);
+        return -1;
+    }
+    pb::RegionMergeResponse* region_merge = response->mutable_merge_response();
+    region_merge->set_dst_instance(dst_region->leader());
+    region_merge->set_dst_start_key(dst_region->start_key());
+    region_merge->set_dst_end_key(dst_region->end_key());
+    region_merge->set_dst_region_id(dst_region->region_id());  
+    region_merge->set_version(dst_region->version());
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    DB_WARNING("find dst merge region instance:%s, table_id:%ld, src region id:%ld, "
+               "dst region_id:%ld, version:%ld, src(%s, %s), dst(%s, %s), "
+               "time_cost:%ld, log_id:%lu", 
+               response->mutable_merge_response()->dst_instance().c_str(), 
+               request->region_merge().table_id(), src_region_id,
+               dst_region_id, response->mutable_merge_response()->version(),
+               str_to_hex(src_region->start_key()).c_str(),
+               str_to_hex(src_region->end_key()).c_str(),
+               str_to_hex(dst_region->start_key()).c_str(),
+               str_to_hex(dst_region->end_key()).c_str(),
+               time_cost.get_time(), log_id);
+    return 0;
+}
+
 int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* request,
             pb::MetaManagerResponse* response,
             uint64_t log_id) { 
     int64_t region_id = request->region_split().region_id();
     auto ptr_region = RegionManager::get_instance()->get_region_info(region_id);
     if (ptr_region == nullptr) {
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                             "table id not exist", request->op_type(), log_id);
         return -1;
     }
-    if (ptr_region->peers_size() != ptr_region->replica_num()) {
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+    if (ptr_region->peers_size() < 2) {
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                             "region not stable, cannot split", 
                             request->op_type(), 
                             log_id);
-        DB_WARNING("region cannot split, region not stable, request: %s", 
-                    request->ShortDebugString().c_str());
+        DB_WARNING("region cannot split, region not stable, request: %s, region_id: %ld", 
+                    request->ShortDebugString().c_str(), region_id);
         return -1;
     }
     int64_t table_id = 0;
@@ -450,29 +688,35 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     } else {
         auto ret = TableManager::get_instance()->get_resource_tag(table_id, resource_tag);
         if (ret < 0) {
-            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+            ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                                 "table id not exist", request->op_type(), log_id);
             return -1;
         }
     }
     std::string source_instance = request->region_split().new_instance();
-    response->mutable_split_response()->set_new_instance(source_instance);
     if (!request->region_split().has_tail_split()
             || !request->region_split().tail_split()) {
+        response->mutable_split_response()->set_new_instance(source_instance);
         return 0;
     }
     //从cluster中选择一台实例, 只有尾分裂需要，其他分裂只做本地分裂
     std::string instance;
     auto ret = 0;
+    std::string main_logical_room;
+    TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
     if (_meta_state_machine->whether_can_decide()) {
         ret = ClusterManager::get_instance()->select_instance_min(resource_tag, 
                                                   std::set<std::string>{source_instance},
+                                                  //std::set<std::string>{},
                                                   table_id,
+                                                  main_logical_room,
                                                   instance);
     } else {
         DB_WARNING("meta state machine can not make decision");
         ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag, 
                                                     std::set<std::string>{source_instance},
+                                                    //std::set<std::string>{},
+                                                    main_logical_room,
                                                     instance);
     }
     if (ret < 0) {
@@ -510,7 +754,41 @@ int SchemaManager::load_max_id_snapshot(const std::string& max_id_prefix,
     } 
     return 0;
 }
-
+int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
+                        pb::MetaManagerResponse* response,
+                        uint64_t log_id) {
+    if (request->table_info().dists_size() == 0) {
+        return 0;
+    }
+    int64_t total_count = 0;
+    //检验逻辑机房是否存在
+    for (auto& dist : request->table_info().dists()) {
+        std::string logical_room = dist.logical_room();
+        if (ClusterManager::get_instance()->logical_room_exist(logical_room)) {
+            total_count += dist.count();
+            continue;
+        }
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                "logical room not exist, select instance fail",
+                request->op_type(), log_id);
+        return -1;
+    }
+    if (request->table_info().main_logical_room().size() == 0) {
+        for (auto& dist : request->table_info().dists()) {
+            if (dist.count() > 0) {
+                request->mutable_table_info()->set_main_logical_room(dist.logical_room());
+                break;
+            }
+        }
+    }
+    
+    if (total_count != request->table_info().replica_num()) {
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                "replica num not match", request->op_type(), log_id);
+        return -1;
+    }
+    return 0;
+}
 }//namespace 
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

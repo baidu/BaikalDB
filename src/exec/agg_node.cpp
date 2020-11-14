@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 #include "agg_node.h"
 #include "runtime_state.h"
+#include "query_context.h"
 
 namespace baikaldb {
 int AggNode::init(const pb::PlanNode& node) {
@@ -33,6 +34,7 @@ int AggNode::init(const pb::PlanNode& node) {
         }
         _group_exprs.push_back(group_expr);
     }
+    //DB_NOTICE("_group_exprs: %d %s", node.derive_node().agg_node().group_exprs_size(), node.DebugString().c_str());
     std::set<int> agg_slot_set;
     for (auto& expr : node.derive_node().agg_node().agg_funcs()) {
         if (expr.nodes_size() < 1 || expr.nodes(0).node_type() != pb::AGG_EXPR) {
@@ -59,27 +61,24 @@ int AggNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
-int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
+int AggNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
-    ret = ExecNode::expr_optimize(tuple_descs);
+    ret = ExecNode::expr_optimize(ctx);
     if (ret < 0) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
     }
     for (auto expr : _group_exprs) {
-        //类型推导
-        ret = expr->type_inferer();
+        ret = expr->expr_optimize();
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
-        //常量表达式计算
-        expr->const_pre_calc();
     }
     if (_agg_tuple_id < 0) {
         return 0;
     }
-    pb::TupleDescriptor* agg_tuple_desc = &(*tuple_descs)[_agg_tuple_id];
+    pb::TupleDescriptor* agg_tuple_desc = ctx->get_tuple_desc(_agg_tuple_id);
     //_intermediate_slot_id != _final_slot_id则type为pb::STRING
     //_final_slot_id type在AggExpr里会设置
     for (auto& slot : *agg_tuple_desc->mutable_slots()) {
@@ -99,23 +98,24 @@ int AggNode::expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs) {
 }
 
 int AggNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::open fail, ret:%d", ret);
+        DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
     for (auto expr : _group_exprs) {
         ret = expr->open();
         if (ret < 0) {
-            DB_WARNING("expr open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
     }
     for (auto agg : _agg_fn_calls) {
         ret = agg->open();
         if (ret < 0) {
-            DB_WARNING("agg open fail, ret:%d", ret);
+            DB_WARNING_STATE(state, "agg open fail, ret:%d", ret);
             return ret;
         }
     }
@@ -128,11 +128,15 @@ int AggNode::open(RuntimeState* state) {
     for (auto child : _children) {
         bool eos = false;
         do {
+            if (state->is_cancelled()) {
+                DB_WARNING_STATE(state, "cancelled");
+                return 0;
+            }
             TimeCost cost;
             RowBatch batch;
             ret = child->get_next(state, &batch, &eos);
             if (ret < 0) {
-                DB_WARNING("child->get_next fail, ret:%d", ret);
+                DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
                 return ret;
             }
             scan_time += cost.get_time();
@@ -146,9 +150,12 @@ int AggNode::open(RuntimeState* state) {
             //}
         } while (!eos);
     }
-    DB_WARNING("region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
+    LOCAL_TRACE_DESC << "agg time cost:" << agg_time << 
+        " scan time cost:" << scan_time << " rows:" << row_cnt;
+    DB_WARNING_STATE(state, "region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
         state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
-    // select count(*) from t; 无数据时返回0
+
+    // 兼容mysql: select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
         AggFnCall::initialize_all(_agg_fn_calls, row.get());
@@ -183,9 +190,19 @@ void AggNode::process_row_batch(RowBatch& batch) {
         MemRow* cur_row = row.get();
         encode_agg_key(cur_row, key);
         MemRow** agg_row = _hash_map.seek(key.data());
+        
         if (agg_row == nullptr) { //不存在则新建
             cur_row = row.release();
             agg_row = &cur_row;
+            // fix bug: 多个store agg，有无数据会造条空数据(L157)
+            // merge多个store时，去除这种造的数据
+            // 以便于 select id,count(*) from t where id>1;这种sql时id不会时造出来的null
+            if (_is_merger && _group_exprs.size() == 0) {
+                if (AggFnCall::all_is_initialize(_agg_fn_calls, *agg_row)) {
+                    delete cur_row;
+                    continue;
+                }
+            }
             AggFnCall::initialize_all(_agg_fn_calls, *agg_row);
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);
@@ -199,7 +216,16 @@ void AggNode::process_row_batch(RowBatch& batch) {
 }
 
 int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+        local_node.set_affect_rows(_num_rows_returned);
+    }));
+
     while (1) {
+        if (state->is_cancelled()) {
+            DB_WARNING_STATE(state, "cancelled");
+            *eos = true;
+            return 0;
+        }
         if (reached_limit() || _iter == _hash_map.end()) {
             *eos = true;
             return 0;
@@ -209,12 +235,14 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         }
         AggFnCall::finalize_all(_agg_fn_calls, _iter->second);
         batch->move_row(std::move(std::unique_ptr<MemRow>(_iter->second)));
+        _num_rows_returned++;
         _iter->second = nullptr;
         _iter++;
     }
 }
 
 void AggNode::close(RuntimeState* state) {
+    ExecNode::close(state);
     for (auto expr : _group_exprs) {
         expr->close();
     }
@@ -224,9 +252,10 @@ void AggNode::close(RuntimeState* state) {
     for (; _iter != _hash_map.end(); _iter++) {
         delete _iter->second;
     }
+    _hash_map.clear();
 }
-void AggNode::transfer_pb(pb::PlanNode* pb_node) {
-    ExecNode::transfer_pb(pb_node);
+void AggNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+    ExecNode::transfer_pb(region_id, pb_node);
     auto agg_node = pb_node->mutable_derive_node()->mutable_agg_node();
     agg_node->clear_group_exprs();
     for (auto expr : _group_exprs) {
@@ -235,6 +264,15 @@ void AggNode::transfer_pb(pb::PlanNode* pb_node) {
     agg_node->clear_agg_funcs();
     for (auto agg : _agg_fn_calls) {
         ExprNode::create_pb_expr(agg_node->add_agg_funcs(), agg);
+    }
+}
+void AggNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    ExecNode::find_place_holder(placeholders);
+    for (auto& expr : _group_exprs) {
+        expr->find_place_holder(placeholders);
+    }
+    for (auto& expr : _agg_fn_calls) {
+        expr->find_place_holder(placeholders);
     }
 }
 }

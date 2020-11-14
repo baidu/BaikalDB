@@ -7,13 +7,7 @@ echo -e "\n"
 echo -e "drop region\n"
 curl -d '{
     "op_type":"OP_DROP_REGION",
-    "drop_region_ids":[1, 2] 
+    "drop_region_ids":[2109836,2321095] 
 }' http://$1/MetaService/meta_manager
-echo -e "\n"
-
-#查询region
-curl -d '{
-    "op_type" : "QUERY_REGION"
-}' http://$1/MetaService/query
 echo -e "\n"
 

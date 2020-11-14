@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,29 +34,33 @@ public:
     }
     virtual ~AggNode() {
         for (auto expr : _group_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
         for (auto agg : _agg_fn_calls) {
-            ExprNode::destory_tree(agg);
+            ExprNode::destroy_tree(agg);
         }
     }
     virtual int init(const pb::PlanNode& node);
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
+    virtual int expr_optimize(QueryContext* ctx);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual void transfer_pb(pb::PlanNode* pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RowBatch& batch);
+    std::vector<ExprNode*>* mutable_group_exprs() {
+        return &_group_exprs;
+    }
+    std::vector<AggFnCall*>* mutable_agg_fn_calls() {
+        return &_agg_fn_calls;
+    }
 private:
-    //需要推导_group_tuple_id _agg_tuple_id内部slot的类型
+    //需要推导_agg_tuple_id内部slot的类型
     std::vector<ExprNode*> _group_exprs;
-    //int32_t _group_tuple_id;
     int32_t _agg_tuple_id;
     pb::TupleDescriptor* _group_tuple_desc;
     std::vector<AggFnCall*> _agg_fn_calls;
-    //std::vector<int32_t> _intermediate_slot_ids;
-    //std::vector<int32_t> _final_slot_ids;
     bool _is_merger = false;
     MemRowDescriptor* _mem_row_desc;
     //用于分组和get_next的定位,用map可与mysql保持一致

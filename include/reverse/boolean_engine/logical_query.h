@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ public:
     typedef int (*MergeFuncT)(PostingNodeT&, const PostingNodeT&, BoolArg*);
 
     ~ExecutorNode() {
-        for (int i = 0; i < _sub_nodes.size(); ++i) {
+        for (size_t i = 0; i < _sub_nodes.size(); ++i) {
             delete _sub_nodes[i];
         }
     }

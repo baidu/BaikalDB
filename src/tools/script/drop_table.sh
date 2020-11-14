@@ -6,9 +6,9 @@ echo -e "drop table\n"
 curl -d '{
    "op_type":"OP_DROP_TABLE",
     "table_info": {
-        "table_name": "TestTb",
-        "database": "TestDb",
-        "namespace_name": "TEST_NAMESPACE"
+        "table_name": "clue_history",
+        "database": "TEST",
+        "namespace_name": "TEST"
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"
@@ -21,8 +21,8 @@ curl -d '{
 curl -d '{
    "op_type":"OP_DROP_TABLE",
     "table_info": {
-        "table_name": "TestTb_test",
-        "database": "TestDb",
-        "namespace_name": "TEST_NAMESPACE"
+        "table_name": "ideacontent_test",
+        "database": "TEST",
+        "namespace_name": "TEST"
     }
 }' http://$1/MetaService/meta_manager

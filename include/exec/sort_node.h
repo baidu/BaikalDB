@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #include "exec_node.h"
 #include "sorter.h"
 #include "mem_row_compare.h"
+#include "property.h"
 
 namespace baikaldb {
 class SortNode : public ExecNode {
@@ -26,27 +27,32 @@ public:
     }
     virtual ~SortNode() {
         for (auto expr : _order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
         for (auto expr : _slot_order_exprs) {
-            ExprNode::destory_tree(expr);
+            ExprNode::destroy_tree(expr);
         }
     }
     virtual int init(const pb::PlanNode& node);
      
-    virtual int expr_optimize(std::vector<pb::TupleDescriptor>* tuple_descs);
-    
+    virtual int expr_optimize(QueryContext* ctx);
+    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual void transfer_pb(pb::PlanNode* pb_node) {
-        ExecNode::transfer_pb(pb_node);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
+        ExecNode::transfer_pb(region_id, pb_node);
         auto sort_node = pb_node->mutable_derive_node()->mutable_sort_node();
         sort_node->clear_order_exprs();
         for (auto expr : _order_exprs) {
             ExprNode::create_pb_expr(sort_node->add_order_exprs(), expr);
         }
+        sort_node->clear_slot_order_exprs();
+        for (auto expr : _slot_order_exprs) {
+            ExprNode::create_pb_expr(sort_node->add_slot_order_exprs(), expr);
+        }
     }
+    
     void transfer_fetcher_pb(pb::FetcherNode* pb_fetcher) {
         for (auto expr : _slot_order_exprs) {
             ExprNode::create_pb_expr(pb_fetcher->add_slot_order_exprs(), expr);
@@ -59,16 +65,48 @@ public:
         }
     }
 
-    std::vector<ExprNode*>& slot_order_exprs() {
-        return _slot_order_exprs;
+    Property sort_property() {
+        if (_monotonic) {
+            return Property{_slot_order_exprs, _is_asc, _limit};
+        } else {
+            return Property();
+        }
     }
 
     std::vector<bool>& is_asc() {
         return _is_asc;
     }
 
+    std::vector<bool>& is_null_first() {
+        return _is_null_first;
+    }
+
+    std::vector<ExprNode*>& order_exprs() {
+        return _order_exprs;
+    }
+    std::vector<ExprNode*>& slot_order_exprs() {
+        return _slot_order_exprs;
+    }
+
+    std::vector<ExprNode*>* mutable_order_exprs() {
+        return &_order_exprs;
+    }
+    std::vector<ExprNode*>* mutable_slot_order_exprs() {
+        return &_slot_order_exprs;
+    }
+
     bool is_monotonic() {
         return _monotonic;
+    }
+
+    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output) {
+        ExecNode::show_explain(output);
+        if (output.empty()) {
+            return;
+        }
+        if (output.back()["sort_index"] != "1") {
+            output.back()["Extra"] += "Using filesort";
+        }
     }
 
 private:

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ public:
     void process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request,
                                  pb::BaikalHeartBeatResponse* response);
     
-    void load_snapshot();
+    int load_snapshot();
     
     void set_meta_state_machine(MetaStateMachine* meta_state_machine) {
         _meta_state_machine = meta_state_machine;

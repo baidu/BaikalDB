@@ -6,9 +6,9 @@ echo -e "RemovePeer\n"
 echo 'param: address'
 curl -d '{
     "op_type" : "SetPeer",
-    "region_id" : 1467772,
-    "old_peers" : ["10.150.79.36:8210", "10.150.79.45:8210", "10.151.126.33:8210"],
-    "new_peers" : ["10.150.79.36:8210", "10.150.79.45:8210"]
+    "region_id" : 2260710,
+    "old_peers" : ["127.0.0.1:8219", " 127.0.0.1:8219", "127.0.0.1:8219"],
+    "new_peers" : ["127.0.0.1:8219", " 127.0.0.1:8219"]
 }' http://$1/StoreService/region_raft_control
 echo -e "\n" 
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 Baidu, Inc. All Rights Reserved.
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,14 +27,17 @@ enum ParseError {
 };
 
 struct SqlParser {
-    std::string sql;
     std::string charset;
     std::string collation;
     std::vector<StmtNode*> result;
     ParseError error = SUCC;
     std::string syntax_err_str;
     butil::Arena arena;
+    bool is_gbk = false;
+    bool has_5c = false;
+    int place_holder_id = 0;
     void parse(const std::string& sql);
+    void change_5c_to_7f(std::string& sql);
 };
 
 inline void print_stmt(Node* node, int ii = 0) {
