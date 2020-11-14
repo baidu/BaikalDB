@@ -1,0 +1,32 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Cache
+      uses: actions/cache@v2.1.2
+      with:
+        path: |
+          /home/runner/.cache/bazel
+          /home/runner/.cache/bazelisk
+        key: bazel-${{ hashFiles('.bazelversion') }}
+    - name: Install Dependencies
+      run: sudo apt-get update && sudo apt-get install -y build-essential autoconf automake libtool flex bison libssl-dev libz-dev
+    - name: Install Bazelisk
+      uses: vsco/bazelisk-action@1.1
+    - name: Build
+      run: bazelisk build //:all
+    - name: Copy Artifacts
+      run: mkdir -p ./output/ && cp ./bazel-bin/baikaldb ./output/ && cp ./bazel-bin/baikalMeta ./output/ && cp ./bazel-bin/baikalStore ./output/ 
+    - name: Login to GitHub Container Registry
+      run: echo ${{ secrets.CR_PAT }} | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
+    - name: Build the Docker image
+      run: docker build . -f Dockerfile.github-action --tag ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA
+    - name: Push the Docker Image
+      run: docker push ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA

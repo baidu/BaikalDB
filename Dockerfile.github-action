@@ -1,0 +1,22 @@
+# create executing image
+FROM ubuntu:20.04
+
+# install runtime dependencies
+RUN apt-get update
+RUN apt-get install -y \
+    libssl1.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# copy artifacts 
+COPY ./output/baikaldb /app/bin/baikaldb
+COPY ./output/baikalMeta /app/bin/baikalMeta
+COPY ./output/baikalStore /app/bin/baikalStore
+COPY ./conf /app/conf
+COPY ./src/tools/script /app/script
+COPY ./entrypoint.sh /app/entrypoint.sh
+
+# set entrypoint
+ENV PATH /app/bin:$PATH
+WORKDIR /app/
+RUN mkdir -p /app/log/
+ENTRYPOINT [ "/app/entrypoint.sh" ]
