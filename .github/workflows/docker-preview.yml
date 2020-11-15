@@ -32,5 +32,6 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
         registry: docker.pkg.github.com
         repository: baidu/baikaldb/preview
+        file: ./Dockerfile.github-action
         tag_with_ref: true
     
