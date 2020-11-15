@@ -24,9 +24,14 @@ jobs:
       run: bazelisk build //:all
     - name: Copy Artifacts
       run: mkdir -p ./output/ && cp ./bazel-bin/baikaldb ./output/ && cp ./bazel-bin/baikalMeta ./output/ && cp ./bazel-bin/baikalStore ./output/ 
-    - name: Login to GitHub Container Registry
-      run: echo ${{ secrets.CR_PAT }} | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
     - name: Build the Docker image
-      run: docker build . -f Dockerfile.github-action --tag ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA
-    - name: Push the Docker Image
-      run: docker push ghcr.io/${{ github.repository_owner }}/baikaldb:$GITHUB_SHA
+      run: docker build . -f Dockerfile.github-action --tag docker.pkg.github.com/baidu/BaikalDB/baikaldb:$GITHUB_SHA
+    - name: Push to GitHub Packages
+      uses: docker/build-push-action@v1
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: docker.pkg.github.com
+        repository: baidu/BaikalDB/baikaldb
+        tag_with_ref: true
+    
