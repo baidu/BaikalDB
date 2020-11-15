@@ -25,5 +25,13 @@ jobs:
       run: mkdir -p ./output/ && cp ./bazel-bin/baikaldb ./output/ && cp ./bazel-bin/baikalMeta ./output/ && cp ./bazel-bin/baikalStore ./output/ 
     - name: Build the Docker image
       run: docker build . -f Dockerfile.github-action --tag docker.pkg.github.com/baidu/baikaldb/preview:$GITHUB_SHA
-
+    - name: Push to GitHub Packages
+      uses: docker/build-push-action@v1
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: docker.pkg.github.com
+        repository: baidu/baikaldb/preview
+        dockerfile: ./Dockerfile.github-action
+        tag_with_ref: true
     
