@@ -109,5 +109,6 @@ enum OpType {
     OP_QUERY_TSO_INFO                       = 176; 
     OP_LINK_BINLOG                          = 177; //创建binlog关联
     OP_UNLINK_BINLOG                        = 178; //清除binlog关联
-    OP_SET_INDEX_HINT_STATUS                 = 179; //设置索引提示状态
+    OP_SET_INDEX_HINT_STATUS                = 179; //设置索引提示状态
+    OP_UPDATE_TTL_DURATION                  = 180; //修改ttl_duration，只有ttl表才能改
 };

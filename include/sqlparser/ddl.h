@@ -326,6 +326,7 @@ struct AlterTableSpec : public Node {
     //add constraint
     Vector<Constraint*>     new_constraints;
     String           index_name;
+    bool             is_virtual_index = false;
 
     AlterTableSpec() {
         node_type = NT_ALTER_SEPC;

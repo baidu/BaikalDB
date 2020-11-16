@@ -116,12 +116,6 @@ int InsertNode::open(RuntimeState* state) {
         }
     }
 
-    AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
-    int i = 0;
-    for (auto& pair : state->reverse_index_map()) {
-        pair.second->sync(ams[i]);
-        i++;
-    }
     for (auto& record : _records) {
         ret = insert_row(state, record);
         if (ret < 0) {

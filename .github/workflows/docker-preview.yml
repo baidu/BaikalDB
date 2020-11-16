@@ -1,0 +1,37 @@
+name: Docker Image CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Cache
+      uses: actions/cache@v2.1.2
+      with:
+        path: |
+          /home/runner/.cache/bazel
+          /home/runner/.cache/bazelisk
+        key: bazel-${{ hashFiles('.bazelversion') }}
+    - name: Install Dependencies
+      run: sudo apt-get update && sudo apt-get install -y build-essential autoconf automake libtool flex bison libssl-dev libz-dev
+    - name: Install Bazelisk
+      uses: vsco/bazelisk-action@1.1
+    - name: Build
+      run: bazelisk build //:all
+    - name: Copy Artifacts
+      run: mkdir -p ./output/ && cp ./bazel-bin/baikaldb ./output/ && cp ./bazel-bin/baikalMeta ./output/ && cp ./bazel-bin/baikalStore ./output/ 
+    - name: Build the Docker image
+      run: docker build . -f Dockerfile.github-action --tag docker.pkg.github.com/baidu/baikaldb/preview:$GITHUB_SHA
+    - name: Push to GitHub Packages
+      uses: docker/build-push-action@v1
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: docker.pkg.github.com
+        repository: baidu/baikaldb/preview
+        dockerfile: ./Dockerfile.github-action
+        tag_with_ref: true
+    

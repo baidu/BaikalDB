@@ -52,6 +52,7 @@ enum IndexState {
 enum IndexHintStatus {
     IHS_NORMAL = 1;
     IHS_DISABLE = 2;
+    IHS_VIRTUAL = 3; // 虚拟索引，只选择不使用，选出虚拟索引后需重选
 };
 
 enum Charset {
@@ -125,7 +126,7 @@ message SchemaInfo {
     //optional bool   need_merge              = 35; //merge switch
     repeated SplitKey split_keys            = 36;
     optional SchemaConf schema_conf         = 37; //一些可以随意修改的配置放在这里
-    optional int64 ttl_duration             = 38; //0表示无ttl，>0表示有ttl，建表时指定，后续不能修改
+    optional int64 ttl_duration             = 38; //0表示无ttl，>0表示有ttl，建表时指定
     optional BinlogInfo    binlog_info = 39;
     optional PartitionInfo partition_info = 40;
     optional bool is_binlog = 41;
@@ -503,6 +504,7 @@ message RegionHeartBeat {
     optional string leader               = 4;
     optional bool   need_update          = 5;
     optional int64  num_table_lines      = 6;
+    optional int64  used_size            = 7;
 };
 
 message BaikalSchemaHeartBeat {

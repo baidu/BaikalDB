@@ -34,6 +34,7 @@
 #include "query_privilege_manager.h"
 #include "query_table_manager.h"
 #include "query_region_manager.h"
+#include "sst_file_writer.h"
 
 namespace baikaldb {
 DECLARE_int64(store_heart_beat_interval_us);
@@ -367,6 +368,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->update_dists(request, iter.index(), done);
             break; 
         }
+        case pb::OP_UPDATE_TTL_DURATION: {
+            TableManager::get_instance()->update_ttl_duration(request, iter.index(), done);
+            break;
+        }
         case pb::OP_UPDATE_BYTE_SIZE: {
             TableManager::get_instance()->update_byte_size(request, iter.index(), done);
             break;
@@ -374,7 +379,7 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         case pb::OP_UPDATE_SPLIT_LINES: {
             TableManager::get_instance()->update_split_lines(request, iter.index(), done);
             break;
-        }        
+        }
         case pb::OP_UPDATE_SCHEMA_CONF: {
             TableManager::get_instance()->update_schema_conf(request, iter.index(), done);
             break;
@@ -448,7 +453,7 @@ int64_t MetaStateMachine::snapshot_index(std::string& snapshot_path) {
 }
 
 void MetaStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
-    DB_WARNING("start on shnapshot save");
+    DB_WARNING("start on snapshot save");
     DB_WARNING("max_namespace_id: %ld, max_database_id: %ld,"
                 " max_table_id:%ld, max_region_id:%ld when on snapshot save", 
                 NamespaceManager::get_instance()->get_max_namespace_id(),
@@ -480,11 +485,10 @@ void MetaStateMachine::save_snapshot(braft::Closure* done,
     
     rocksdb::Options option = RocksWrapper::get_instance()->get_options(
                 RocksWrapper::get_instance()->get_meta_info_handle());
-    rocksdb::SstFileWriter sst_writer(rocksdb::EnvOptions(), option,
-                                      RocksWrapper::get_instance()->get_meta_info_handle());
+    SstFileWriter sst_writer(option);
     DB_WARNING("snapshot path:%s", snapshot_path.c_str());
     //Open the file for writing 
-    auto s = sst_writer.Open(sst_file_path);
+    auto s = sst_writer.open(sst_file_path);
     if (!s.ok()) {
         DB_WARNING("Error while opening file %s, Error: %s", sst_file_path.c_str(),
                     s.ToString().c_str());
@@ -492,7 +496,7 @@ void MetaStateMachine::save_snapshot(braft::Closure* done,
         return;
     }
     for (; iter->Valid(); iter->Next()) {
-        auto res = sst_writer.Put(iter->key(), iter->value());
+        auto res = sst_writer.put(iter->key(), iter->value());
         if (!res.ok()) {
             DB_WARNING("Error while adding Key: %s, Error: %s",
                     iter->key().ToString().c_str(),
@@ -502,7 +506,7 @@ void MetaStateMachine::save_snapshot(braft::Closure* done,
         }
     }
     //close the file
-    s = sst_writer.Finish();
+    s = sst_writer.finish();
     if (!s.ok()) {
         DB_WARNING("Error while finishing file %s, Error: %s", sst_file_path.c_str(),
            s.ToString().c_str());
@@ -517,7 +521,7 @@ void MetaStateMachine::save_snapshot(braft::Closure* done,
 }
 
 int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
-    DB_WARNING("start on shnapshot load");
+    DB_WARNING("start on snapshot load");
     //先删除数据
     std::string remove_start_key(MetaServer::CLUSTER_IDENTIFY);
     rocksdb::WriteOptions options;

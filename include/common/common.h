@@ -184,7 +184,8 @@ private:
     bthread::ExecutionQueueId<std::function<void()>> _queue_id = {0};
 };
 // return when timeout or shutdown
-inline void bthread_usleep_fast_shutdown(int64_t interval_us, const bool& shutdown) {
+template<typename T>
+inline void bthread_usleep_fast_shutdown(int64_t interval_us, T& shutdown) {
     if (interval_us < 10000) {
         bthread_usleep(interval_us);
         return;
@@ -709,6 +710,47 @@ inline std::ostream& operator<<(std::ostream& os, const BvarMap& bm) {
         for (auto& pair2 : pair.second) {
             os << pair.first << " : " << pair2.first << " : " << pair2.second.sum << "," << pair2.second.count << std::endl;
         }
+    }
+    return os;
+}
+
+struct VirtualIndexMap {
+public:
+    VirtualIndexMap() {}
+    VirtualIndexMap(const int64_t virtual_index_id, const std::string& virtual_index_name, const std::string& sample_sql) {
+        index_id_name_map[virtual_index_id] = virtual_index_name;
+        index_id_sample_sqls_map[virtual_index_id] = {sample_sql};
+    }
+
+    VirtualIndexMap& operator+=(const VirtualIndexMap& other) {
+        for (auto& iter : other.index_id_name_map) {
+            index_id_name_map[iter.first] = iter.second;
+        }
+
+        for (auto& iter : other.index_id_sample_sqls_map) {
+            auto iter_local = index_id_sample_sqls_map.find(iter.first);
+            if (iter_local == index_id_sample_sqls_map.end()) {
+                index_id_sample_sqls_map[iter.first] = iter.second;
+            } else {
+                for (auto& sql : iter.second) {
+                    iter_local->second.insert(sql);
+                }
+            }
+        }
+        return *this;
+    }
+
+    VirtualIndexMap& operator-=(const VirtualIndexMap& other) {
+        return *this;
+    }
+public:
+    std::map<int64_t, std::string> index_id_name_map;
+    std::map<int64_t, std::set<std::string>> index_id_sample_sqls_map;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const VirtualIndexMap& vim) {
+    for (auto& pair : vim.index_id_name_map) {
+        os << pair.first << " : " << pair.second << std::endl;
     }
     return os;
 }

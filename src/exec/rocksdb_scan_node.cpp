@@ -130,6 +130,9 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
 
     const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(idx);
+    if (_pb_node.derive_node().scan_node().has_fulltext_index()) {
+        _new_fulltext_tree = true;
+    }
     _index_id = pos_index.index_id();
     _index_info = _factory->get_index_info_ptr(_index_id);
     if (_index_info == nullptr || _index_info->id == -1) {
@@ -457,6 +460,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
     auto reverse_index_map = state->reverse_index_map();
     //DB_WARNING_STATE(state, "_is_covering_index:%d", _is_covering_index);
     if (_reverse_infos.size() > 1) {
+        //TODO 为不影响原流程暂时保留，后续删除。
         for (auto& info : _reverse_infos) {
             if (reverse_index_map.count(info.id) == 1) {
                 _reverse_indexes.push_back(reverse_index_map[info.id]);
@@ -465,39 +469,59 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 return -1;
             }
         }
-        //DB_WARNING_STATE(state, "_m_index search");
-        // reverse has in, need not or boolean
-        //if (_reverse_indexes.size() > _index_ids.size()) {
-        //    or_bool = false;
-        //}
-        //DB_NOTICE("or_bool:%d", or_bool);
-        // 为了性能,多索引倒排查找不seek
 
-        if (_factory->get_index_storage_type(_index_id, _storage_type) == -1) {
-            DB_FATAL("get index storage type error.");
-            return -1;
-        }
+        if (_new_fulltext_tree) {
+            if (_factory->get_index_storage_type(_index_id, _storage_type) == -1) {
+                DB_FATAL("get index storage type error.");
+                return -1;
+            }
 
-        if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
-            std::vector<ReverseIndex<CommonSchema>*> common_reverse_indexes;
-            common_reverse_indexes.reserve(4);
-            for (auto index_ptr : _reverse_indexes) {
-                common_reverse_indexes.push_back(static_cast<ReverseIndex<CommonSchema>*>(index_ptr));
+            if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
+                _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                    reverse_index_map, true, _pb_node.derive_node().scan_node().fulltext_index());
+            } else if (_storage_type == pb::ST_ARROW) {
+                _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                    reverse_index_map, true, _pb_node.derive_node().scan_node().fulltext_index());
+            } else {
+                DB_FATAL("fulltext storage type error");
+                return -1;
             }
-            _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                common_reverse_indexes, _query_words, _match_modes, true, !_bool_and);
-        } else if (_storage_type == pb::ST_ARROW) {
-            std::vector<ReverseIndex<ArrowSchema>*> arrow_reverse_indexes;
-            arrow_reverse_indexes.reserve(4);
-            for (auto index_ptr : _reverse_indexes) {
-                arrow_reverse_indexes.push_back(static_cast<ReverseIndex<ArrowSchema>*>(index_ptr));
-            }
-            _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                arrow_reverse_indexes, _query_words, _match_modes, true, !_bool_and);
         } else {
-            DB_FATAL("fulltext storage type error");
-            return -1;
+            //DB_WARNING_STATE(state, "_m_index search");
+            // reverse has in, need not or boolean
+            //if (_reverse_indexes.size() > _index_ids.size()) {
+            //    or_bool = false;
+            //}
+            //DB_NOTICE("or_bool:%d", or_bool);
+            // 为了性能,多索引倒排查找不seek
+
+            if (_factory->get_index_storage_type(_index_id, _storage_type) == -1) {
+                DB_FATAL("get index storage type error.");
+                return -1;
+            }
+
+            if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
+                std::vector<ReverseIndex<CommonSchema>*> common_reverse_indexes;
+                common_reverse_indexes.reserve(4);
+                for (auto index_ptr : _reverse_indexes) {
+                    common_reverse_indexes.push_back(static_cast<ReverseIndex<CommonSchema>*>(index_ptr));
+                }
+                _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                    common_reverse_indexes, _query_words, _match_modes, true, !_bool_and);
+            } else if (_storage_type == pb::ST_ARROW) {
+                std::vector<ReverseIndex<ArrowSchema>*> arrow_reverse_indexes;
+                arrow_reverse_indexes.reserve(4);
+                for (auto index_ptr : _reverse_indexes) {
+                    arrow_reverse_indexes.push_back(static_cast<ReverseIndex<ArrowSchema>*>(index_ptr));
+                }
+                _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                    arrow_reverse_indexes, _query_words, _match_modes, true, !_bool_and);
+            } else {
+                DB_FATAL("fulltext storage type error");
+                return -1;
+            }
         }
+        
     } else if (_reverse_infos.size() ==1 && reverse_index_map.count(_index_id) == 1) {
         //倒排索引不允许是多字段
         if (_index_info->fields.size() != 1) {

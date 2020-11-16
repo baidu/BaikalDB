@@ -17,10 +17,7 @@ enum WatchOpType {
     WATCH_DATABASE        = 9;
     WATCH_CLUSTER         = 10;
     WATCH_SCHEMA          = 11;
-    WATCH_IMPORTTASK      = 12;
-    WATCH_IMPORTTASK2     = 13;
-    WATCH_TASKLIST        = 14;
-    SUBMIT_IMPORTTASK     = 15;
+    WATCH_REGION_WATT     = 12;
 };
 
 message ConsoleRequest {
@@ -66,6 +63,7 @@ message QueryParam {
     optional string      crud_database      = 22;
     optional string      platform           = 23;
     optional string      meta_server_bns    = 24;
+    optional string      baikaldb_bns       = 25;
 };
 
 message OverViewInfo {
@@ -256,6 +254,7 @@ message ShowxResponse {
 service ConsoleService {
     rpc watch(ConsoleRequest) returns (ConsoleResponse);
     rpc showx(ShowxRequest) returns (ShowxResponse);
-    rpc sql_alarm(ShowxRequest) returns (ShowxResponse);
+    rpc delete_database(ShowxRequest) returns (ShowxResponse);
+    rpc insert_database(ShowxRequest) returns (ShowxResponse);
 };
 

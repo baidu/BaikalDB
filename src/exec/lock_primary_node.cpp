@@ -119,12 +119,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
         return -1;
     }
-    AtomicManager<std::atomic<long>> ams[state->reverse_index_map().size()];
-    int i = 0;
-    for (auto& pair : state->reverse_index_map()) {
-        pair.second->sync(ams[i]);
-        i++;
-    }
+
     SmartRecord record_template = _factory->new_record(_table_id);
     std::vector<SmartRecord> put_records;
     std::vector<SmartRecord> delete_records;

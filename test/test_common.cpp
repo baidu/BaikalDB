@@ -200,17 +200,22 @@ TEST(test_ConcurrencyBthread, wait) {
     DB_NOTICE("all bth done");
 }
 TEST(test_bthread_usleep_fast_shutdown, bthread_usleep_fast_shutdown) {
-    bool shutdown = false;
+    std::atomic<bool> shutdown {false};
+    bool shutdown2 {false};
     Bthread bth;
     bth.run([&]() {
             DB_NOTICE("before sleep");
             TimeCost cost;
             bthread_usleep_fast_shutdown(1000000, shutdown);
             DB_NOTICE("after sleep %ld", cost.get_time());
-            ASSERT_LT(cost.get_time(), 300000);
+            ASSERT_LT(cost.get_time(), 100000);
             cost.reset();
-            bool shutdown2 = false;
             bthread_usleep_fast_shutdown(1000000, shutdown2);
+            DB_NOTICE("after sleep2 %ld", cost.get_time());
+            ASSERT_GE(cost.get_time(), 100000);
+            cost.reset();
+            bool shutdown3 = false;
+            bthread_usleep_fast_shutdown(1000000, shutdown3);
             DB_NOTICE("after sleep2 %ld", cost.get_time());
             ASSERT_GE(cost.get_time(), 1000000);
     });

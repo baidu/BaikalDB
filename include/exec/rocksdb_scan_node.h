@@ -166,6 +166,7 @@ private:
     std::map<int32_t, int32_t> _index_slot_field_map;
     pb::StorageType _storage_type = pb::ST_UNKNOWN;
     std::vector<int64_t> _partitions {0};
+    bool _new_fulltext_tree = false;
 };
 }
 

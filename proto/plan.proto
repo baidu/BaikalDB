@@ -96,6 +96,18 @@ message PossibleIndex {
     optional bool is_covering_index = 6;
 };
 
+enum FulltextNodeType {
+    FNT_OR = 1;
+    FNT_AND = 2;
+    FNT_TERM = 3; 
+};
+
+message FulltextIndex {
+    optional FulltextNodeType fulltext_node_type = 1;
+    optional PossibleIndex  possible_index = 2;
+    repeated FulltextIndex nested_fulltext_indexes = 3;
+};
+
 message ScanNode {
     required int32 tuple_id = 1;  //tuple中记录有读取列信息与table信息
     required int64 table_id = 2;
@@ -103,6 +115,7 @@ message ScanNode {
     repeated int64 use_indexes = 4;
     optional Engine engine = 5;
     repeated int64 ignore_indexes = 6;
+    optional FulltextIndex fulltext_index = 7;
 };
 
 message LimitNode {
