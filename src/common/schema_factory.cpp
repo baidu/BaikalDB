@@ -1194,7 +1194,7 @@ int SchemaFactory::update_virtual_index_internal(SchemaMapping& background, cons
     for (auto& short_name : virtual_index.field_names()) {
         int field_id = tbl_info.get_field_id_by_short_name(short_name);
         if (field_id <= 0) {
-            DB_WARNING("get field id faild, field name: %s, table_id: %ld", short_name, table_id);
+            DB_WARNING("get field id faild, field name: %s, table_id: %ld", short_name.c_str(), table_id);
             return 0;
         }
         virtual_index.add_field_ids(field_id);
@@ -1255,7 +1255,7 @@ int SchemaFactory::drop_virtual_index_internal(SchemaMapping& background, const 
     if (index_iter != index_info_mapping.end()) {
         if (index_iter->second->index_hint_status != pb::IHS_VIRTUAL) {
             // 非虚拟索引
-            DB_WARNING("index_name: %s, index_id:% ld is not virtual index", index_full_name, index_id);
+            DB_WARNING("index_name: %s, index_id:% ld is not virtual index", index_full_name.c_str(), index_id);
             return 0;
         }
         index_info_mapping.erase(index_iter);
