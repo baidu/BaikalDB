@@ -1033,6 +1033,34 @@ ExprValue date_add(const std::vector<ExprValue>& input) {
     return ret;
 }
 
+ExprValue date_sub(const std::vector<ExprValue>& input) {
+    if (input.size() < 3) {
+            return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    ExprValue arg1 = input[0];
+    ExprValue arg2 = input[1];
+    int32_t interval = arg2.cast_to(pb::INT32)._u.int32_val;
+    ExprValue ret = arg1.cast_to(pb::TIMESTAMP);
+    if (input[2].str_val == "second") {
+        ret._u.uint32_val -= interval;
+    } else if (input[2].str_val == "minute") {
+        ret._u.uint32_val -= interval * 60;
+    } else if (input[2].str_val == "hour") {
+        ret._u.uint32_val -= interval * 3600;
+    } else if (input[2].str_val == "day") {
+        ret._u.uint32_val -= interval * (24 * 3600);
+    } else {
+        // un-support
+        return ExprValue::Null();
+    }
+    return ret;
+}
+
 ExprValue hll_add(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();
