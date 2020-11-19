@@ -490,6 +490,7 @@ bool NetworkServer::start() {
         DB_FATAL("Network server is not initail.");
         return false;
     }
+    DB_WARNING("db server init success");
     if (0 != make_worker_process()) {
         DB_FATAL("Start event loop failed.");
         return false;
