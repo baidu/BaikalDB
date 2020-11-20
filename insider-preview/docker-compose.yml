@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  meta:
+    image: ghcr.io/baidu/baikaldb-preview:latest
+    command: meta
+    ports:
+      - "8010:8010"
+  store:
+    image: ghcr.io/baidu/baikaldb-preview:latest
+    command: store
+    ports:
+      - "8110:8110"
+    depends_on: 
+      - meta
+  db: 
+    image: ghcr.io/baidu/baikaldb-preview:latest
+    command: db
+    depends_on: 
+      - meta
+      - store
+    ports: 
+      - "28282:28282"

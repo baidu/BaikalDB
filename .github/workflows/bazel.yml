@@ -1,0 +1,23 @@
+name: Bazel Compile
+
+on:
+  [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Cache
+      uses: actions/cache@v2.1.2
+      with:
+        path: |
+          /home/runner/.cache/bazel
+          /home/runner/.cache/bazelisk
+        key: bazel-${{ hashFiles('.bazelversion') }}
+    - name: Install Dependencies
+      run: sudo apt-get update && sudo apt-get install -y build-essential autoconf automake libtool flex bison libssl-dev libz-dev
+    - name: Install Bazelisk
+      uses: vsco/bazelisk-action@1.1
+    - name: Build
+      run: bazelisk build //:all
