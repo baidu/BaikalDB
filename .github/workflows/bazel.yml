@@ -1,7 +1,7 @@
 name: Bazel Compile
 
 on:
-  [push]
+  [push,pull_request]
 
 jobs:
   build:
