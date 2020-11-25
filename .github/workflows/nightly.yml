@@ -1,0 +1,29 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: 0 16 * * *
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os:
+          - ubuntu-16.04
+          - ubuntu-18.04
+          - ubuntu-20.04
+          - centos-7
+          - centos-8
+    container:
+      image: ghcr.io/baikalgroup/baikal-dev:${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Bazel Cache
+        run: cd /work && cp -r /__w/BaikalDB/BaikalDB . && tar xfz bazelcache.tgz
+      - name: Build & Package
+        run: cd /work/BaikalDB && env HOME=/work USER=work bazelisk build //:all && bash ./ci/package.sh version=nightly os=${{ matrix.os }}
+      - uses: actions/upload-artifact@v2
+        with:
+          name: baikal-all-nightly-${{ matrix.os }}.tgz
+          path: /home/runner/work

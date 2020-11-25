@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os:
+          - ubuntu-16.04
+          - ubuntu-18.04
+          - ubuntu-20.04
+          - centos-7
+          - centos-8
+    container:
+      image: ghcr.io/baikalgroup/baikal-dev:${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+        with: 
+          ref: ${{ github.ref }}
+      - name: Install Bazel Cache
+        run: cd /work && cp -r /__w/BaikalDB/BaikalDB . && tar xfz bazelcache.tgz
+      - name: Build & Package
+        run: tag=`echo ${{ github.ref }} | awk -F"/" '{print $NF}'` && cd /work/BaikalDB && env HOME=/work USER=work bazelisk build //:all && bash ./ci/package.sh version=$tag os=${{ matrix.os }}
+      - name: vars
+        id: vars
+        env:
+          SHA_EXT: sha256sum
+        run: |
+          tag=`echo ${{ github.ref }} | awk -F"/" '{print $NF}'`
+          filename=`find /work/pack -type f -name *.tgz`
+          sha256sum $filename > $filename.$SHA_EXT
+          echo "::set-output name=tag::$tag"
+          echo "::set-output name=filepath::$filename"
+          echo "::set-output name=shafilepath::$filename.$SHA_EXT"
+      - name: upload release asset
+        run: |
+          bash ./ci/upload-release-asset.sh \
+            github_token=${{ secrets.GITHUB_TOKEN }} \
+            repo=${{ github.repository }} \
+            tag=${{ steps.vars.outputs.tag }} \
+            filepath=${{ steps.vars.outputs.filepath }}
+          bash ./ci/upload-release-asset.sh \
+            github_token=${{ secrets.GITHUB_TOKEN }} \
+            repo=${{ github.repository }} \
+            tag=${{ steps.vars.outputs.tag }} \
+            filepath=${{ steps.vars.outputs.shafilepath }}

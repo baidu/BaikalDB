@@ -5,40 +5,52 @@ on:
 
 jobs:
   build:
+    name: build package
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os:
+          - ubuntu-20.04
+    container:
+      image: ghcr.io/baikalgroup/baikal-dev:${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
-    - name: Cache
-      uses: actions/cache@v2.1.2
-      with:
-        path: |
-          /home/runner/.cache/bazel
-          /home/runner/.cache/bazelisk
-        key: bazel-${{ hashFiles('.bazelversion') }}
-    - name: Install Dependencies
-      run: sudo apt-get update && sudo apt-get install -y build-essential autoconf automake libtool flex bison libssl-dev libz-dev
-    - name: Install Bazelisk
-      uses: tullyliu/bazelisk-action@1.2
-    - name: Build
-      run: bazelisk build //:all
-    - name: Copy Artifacts
-      run: mkdir -p ./output/ && cp ./bazel-bin/baikaldb ./output/ && cp ./bazel-bin/baikalMeta ./output/ && cp ./bazel-bin/baikalStore ./output/ 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v1
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v1
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.CR_PAT }}
-    - name: Build and Push
-      id: docker_build
-      uses: docker/build-push-action@v2
-      with:
-        context: .
-        file: ./insider-preview/Dockerfile.preview
-        push: true
-        tags: |
+      - uses: actions/checkout@v2
+      - name: Install Bazel Cache
+        run: cd /work && cp -r /__w/BaikalDB/BaikalDB . && tar xfz bazelcache.tgz
+      - name: Build & Package
+        run: cd /work/BaikalDB && env HOME=/work USER=work bazelisk build //:all && bash ./ci/package.sh version=nightly os=${{ matrix.os }}
+      - uses: actions/upload-artifact@v2
+        with:
+          name: baikal-all-nightly-${{ matrix.os }}.tgz
+          path: /home/runner/work
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os:
+          - ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/download-artifact@v2
+        with:
+          name: baikal-all-nightly-${{ matrix.os }}.tgz
+      - name: Copy Artifacts
+        run: mkdir -p ./output/ && tar xfz baikal-all-nightly-${{ matrix.os }}.tgz -C ./output/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.CR_PAT }}
+      - name: Build and Push
+        id: docker_build
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./insider-preview/Dockerfile.preview
+          push: true
+          tags: |
             ghcr.io/${{ github.repository_owner }}/baikaldb-preview:latest
