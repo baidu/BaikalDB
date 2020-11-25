@@ -41,8 +41,8 @@ int main(int argc, char **argv) {
 #ifdef BAIKALDB_REVISION
     google::SetVersionString(BAIKALDB_REVISION);
 #endif
-    google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
+    google::ParseCommandLineFlags(&argc, &argv, true);
     // Initail log
     if (baikaldb::init_log(argv[0]) != 0) {
         fprintf(stderr, "log init failed.");

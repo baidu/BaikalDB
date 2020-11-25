@@ -64,8 +64,8 @@ int main(int argc, char **argv) {
     google::SetVersionString(BAIKALDB_REVISION);
 #endif
 
-    google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
+    google::ParseCommandLineFlags(&argc, &argv, true);
     srand((unsigned)time(NULL));
     boost::filesystem::path remove_path("init.success");
     boost::filesystem::remove_all(remove_path); 

@@ -457,15 +457,15 @@ int TSOStateMachine::load_tso(const std::string& tso_file) {
     try {
         _tso_obj.last_save_physical = std::stol(extra);
     } catch (std::invalid_argument&){
-        DB_WARNING("Invalid_argument: %s", extra);
+        DB_WARNING("Invalid_argument: %s", extra.c_str());
         return -1;
     }
     catch (std::out_of_range&){
-        DB_WARNING("Out of range: %s", extra);
+        DB_WARNING("Out of range: %s", extra.c_str());
         return -1;
     }
     catch (...) {
-        DB_WARNING("error happen: %s", extra);
+        DB_WARNING("error happen: %s", extra.c_str());
         return -1;
     }
     return 0;
