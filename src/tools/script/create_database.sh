@@ -4,8 +4,8 @@
 
 
 #创建database
-echo -e "创建database\n"
-curl -d '{
+echo -e "create database\n"
+curl -s -d '{
     "op_type":"OP_CREATE_DATABASE",
     "database_info": {
         "database":"TestDB",
@@ -13,4 +13,3 @@ curl -d '{
         "quota": 524288
     }
 }' http://$1/MetaService/meta_manager
-echo -e "\n"

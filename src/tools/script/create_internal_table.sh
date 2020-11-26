@@ -1,14 +1,13 @@
 #!/bin/
-curl -d '{
+curl -s -d '{
     "op_type":"OP_CREATE_NAMESPACE",
     "namespace_info":{
         "namespace_name": "INTERNAL",
         "quota": 1048576
     }
 }' http://$1/MetaService/meta_manager
-echo -e "\n"
 
-curl -d '{
+curl -s -d '{
     "op_type":"OP_CREATE_DATABASE",
     "database_info": {
         "database":"baikaldb",
@@ -16,9 +15,8 @@ curl -d '{
         "quota": 524288
     }
 }' http://$1/MetaService/meta_manager
-echo -e "\n"
 
-curl -d '{
+curl -s -d '{
     "op_type": "OP_CREATE_TABLE",
     "table_info": {
         "table_name": "__baikaldb_instance",
@@ -40,4 +38,3 @@ curl -d '{
                     ]
     }
 }' http://$1/MetaService/meta_manager
-echo -e "\n"

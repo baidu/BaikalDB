@@ -3,7 +3,8 @@
 #测试场景：完成的meta_server流程
 
 #创建用户
-curl -d '{
+echo -e "create user\n"
+curl -s -d '{
     "op_type":"OP_CREATE_USER",
     "user_privilege" : {
         "username" : "root",
@@ -17,10 +18,9 @@ curl -d '{
         "ip":["127.0.0.1", "127.0.0.2"]
     }
 }' http://$1/MetaService/meta_manager
-echo -e "\n"
 
 #查询权限
-curl -d '{
+curl -s -d '{
     "op_type" : "QUERY_USERPRIVILEG"
 }' http://$1/MetaService/query
 echo -e "\n"
