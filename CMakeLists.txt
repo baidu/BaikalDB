@@ -119,6 +119,18 @@ else ()
     include(arrow)
 endif ()
 
+#croaring
+if (WITH_SYSTEM_LIBS)
+    find_path(CROARING_INCLUDE_DIR NAMES roaring/roaring.h)
+    find_library(CROARING_LIBRARIES NAMES croaring)
+    if ((NOT CROARING_INCLUDE_DIR) OR (NOT CROARING_LIBRARIES))
+        message(FATAL_ERROR "Fail to find croaring")
+    endif ()
+    ADD_LIBRARY(croaring SHARED IMPORTED GLOBAL)
+else ()
+    include(croaring)
+endif ()
+
 #gflags
 if (WITH_SYSTEM_LIBS)
     find_path(GFLAGS_INCLUDE_DIR NAMES gflags/gflags.h)
@@ -287,6 +299,7 @@ SET(DEP_INC
 
         ${Boost_INCLUDE_DIR}
         ${ARROW_INCLUDE_DIR}
+        ${CROARING_INCLUDE_DIR}
         ${RAPIDJSON_INCLUDE_DIR}
 
         ${PROTOBUF_INCLUDE_DIR}
@@ -326,6 +339,7 @@ SET(DEP_LIB
         ${RE2_LIBRARIES}
 
         ${ARROW_LIBRARIES}
+        ${CROARING_LIBRARIES}
         ${Boost_LIBRARIES}
         #        ${BZ2_LIBRARIES}
         )
@@ -429,7 +443,7 @@ file(GLOB COMMON
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 
-set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow glog gflags protobuf re2 snappy rocksdb brpc braft)
+set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow croaring glog gflags protobuf re2 snappy rocksdb brpc braft)
 if (WITH_GPERF)
     set(COMMON_DEPS ${COMMON_DEPS} gperf)
 endif ()
