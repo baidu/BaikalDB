@@ -14,13 +14,63 @@
 
 #pragma once
 
+#include <stdarg.h>
+#include <gflags/gflags.h>
 #ifdef BAIDU_INTERNAL
 #include <com_log.h>
 #else
-#include <stdarg.h>
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 #endif
+
+extern int com_writelog(const char *name, const char *fmt, ...) __attribute__((format(printf,2,3)));
+#undef CHECK_LOG_FORMAT
+#ifdef CHECK_LOG_FORMAT
+void DB_WARNING(const char *fmt, ...) __attribute__((format(printf,1,2)));
+inline void DB_WARNING(const char *fmt, ...) {}
+void DB_FATAL(const char *fmt, ...) __attribute__((format(printf,1,2)));
+inline void DB_FATAL(const char *fmt, ...) {}
+void DB_DEBUG(const char *fmt, ...) __attribute__((format(printf,1,2)));
+inline void DB_DEBUG(const char *fmt, ...) {}
+void DB_TRACE(const char *fmt, ...) __attribute__((format(printf,1,2)));
+inline void DB_TRACE(const char *fmt, ...) {}
+void DB_NOTICE(const char *fmt, ...) __attribute__((format(printf,1,2)));
+inline void DB_NOTICE(const char *fmt, ...) {}
+
+void SELF_TRACE(const char *fmt, ...) __attribute__((format(printf,1,2)));
+inline void SELF_TRACE(const char *fmt, ...) {}
+void SQL_TRACE(const char *fmt, ...) __attribute__((format(printf,1,2)));
+inline void SQL_TRACE(const char *fmt, ...) {}
+
+template <typename T>
+void DB_WARNING_CLIENT(T sock, const char *fmt, ...) __attribute__((format(printf,2,3)));
+template <typename T>
+void DB_WARNING_CLIENT(T sock, const char *fmt, ...) {}
+template <typename T>
+void DB_FATAL_CLIENT(T sock, const char *fmt, ...) __attribute__((format(printf,2,3)));
+template <typename T>
+void DB_FATAL_CLIENT(T sock, const char *fmt, ...) {}
+template <typename T>
+void DB_DEBUG_CLIENT(T sock, const char *fmt, ...) __attribute__((format(printf,2,3)));
+template <typename T>
+void DB_DEBUG_CLIENT(T sock, const char *fmt, ...) {}
+template <typename T>
+void DB_TRACE_CLIENT(T sock, const char *fmt, ...) __attribute__((format(printf,2,3)));
+template <typename T> 
+void DB_TRACE_CLIENT(T sock, const char *fmt, ...) {}
+template <typename T>
+void DB_NOTICE_CLIENT(const char *fmt, ...) __attribute__((format(printf,1,2)));
+template <typename T>
+void DB_NOTICE_CLIENT(const char *fmt, ...) {}
+
+template <typename T>
+void DB_WARNING_STATE(T sock, const char *fmt, ...) __attribute__((format(printf,2,3)));
+template <typename T>
+void DB_WARNING_STATE(T sock, const char *fmt, ...) {}
+template <typename T>
+void DB_FATAL_STATE(T sock, const char *fmt, ...) __attribute__((format(printf,2,3)));
+template <typename T>
+void DB_FATAL_STATE(T sock, const char *fmt, ...) {}
+#endif //CHECK_LOG_FORMAT
 
 namespace baikaldb {
 DECLARE_bool(enable_debug);
@@ -28,39 +78,39 @@ DECLARE_bool(enable_self_trace);
 DECLARE_bool(servitysinglelog);
 
 #ifdef BAIDU_INTERNAL
+#ifndef CHECK_LOG_FORMAT
 #ifndef NDEBUG
 #define DB_DEBUG(_fmt_, args...) \
     do {\
-        com_writelog("DEBUG", "[%s:%d][%s][%llu]" _fmt_, \
+        com_writelog("DEBUG", "[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0);
+    } while (0)
 #else
 #define DB_DEBUG(_fmt_, args...) 
-#endif
-
+#endif //NDEBUG
 #define DB_TRACE(_fmt_, args...) \
     do {\
-        com_writelog("TRACE", "[%s:%d][%s][%llu]" _fmt_, \
+        com_writelog("TRACE", "[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0);
+    } while (0)
 
 #define DB_NOTICE(_fmt_, args...) \
     do {\
-        com_writelog("NOTICE", "[%s:%d][%s][%llu]" _fmt_, \
+        com_writelog("NOTICE", "[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0);
+    } while (0)
 
 #define DB_WARNING(_fmt_, args...) \
     do {\
-        com_writelog("WARNING", "[%s:%d][%s][%llu]" _fmt_, \
+        com_writelog("WARNING", "[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0);
+    } while (0)
 
 #define DB_FATAL(_fmt_, args...) \
     do {\
-        com_writelog("FATAL", "[%s:%d][%s][%llu]" _fmt_, \
+        com_writelog("FATAL", "[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0);
+    } while (0)
 #define SELF_TRACE(_fmt_, args...)
 /* 
 #define SELF_TRACE(_fmt_, args...) \
@@ -71,11 +121,13 @@ DECLARE_bool(servitysinglelog);
 */
 #define SQL_TRACE(_fmt_, args...) \
     do {\
-        com_writelog("MY_TRACE", "[%s:%d][%s][%llu]" _fmt_, \
+        com_writelog("MY_TRACE", "[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
-    } while (0);
+    } while (0)
 
-#else 
+#endif //CHECK_LOG_FORMAT
+
+#else //BAIDU_INTERNAL
 
 class SingleLogFileObject : public google::base::Logger {
   public:
@@ -136,11 +188,13 @@ inline void glog_error_writelog(const char* fmt, ...) {
     va_end(args);
     LOG(ERROR) << buf;
 }
+#ifndef CHECK_LOG_FORMAT
+
 #ifndef NDEBUG
 #define DB_DEBUG(_fmt_, args...) \
     do {\
         if (!FLAGS_enable_debug) break; \
-        ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
+        ::baikaldb::glog_info_writelog("[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 #else
@@ -150,44 +204,46 @@ inline void glog_error_writelog(const char* fmt, ...) {
 #define DB_TRACE(_fmt_, args...) \
     do {\
         if (!FLAGS_enable_self_trace) break; \
-        ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
+        ::baikaldb::glog_info_writelog("[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 
 #define DB_NOTICE(_fmt_, args...) \
     do {\
-        ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
+        ::baikaldb::glog_info_writelog("[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 
 #define DB_WARNING(_fmt_, args...) \
     do {\
-        ::baikaldb::glog_warning_writelog("[%s:%d][%s][%llu]" _fmt_, \
+        ::baikaldb::glog_warning_writelog("[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 
 #define DB_FATAL(_fmt_, args...) \
     do {\
-        ::baikaldb::glog_error_writelog("[%s:%d][%s][%llu]" _fmt_, \
+        ::baikaldb::glog_error_writelog("[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 
 #define SELF_TRACE(_fmt_, args...) \
     do {\
         if (!FLAGS_enable_self_trace) break; \
-        ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
+        ::baikaldb::glog_info_writelog("[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 
 #define SQL_TRACE(_fmt_, args...) \
     do {\
         if (!FLAGS_enable_self_trace) break; \
-        ::baikaldb::glog_info_writelog("[%s:%d][%s][%llu]" _fmt_, \
+        ::baikaldb::glog_info_writelog("[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0);
 
-#endif
+#endif //CHECK_LOG_FORMAT
+#endif //BAIDU_INTERNAL
 
+#ifndef CHECK_LOG_FORMAT
 #define DB_DEBUG_CLIENT(sock, _fmt_, args...) \
     do {\
         DB_DEBUG("user=%s fd=%d ip=%s port=%d errno=%d:" _fmt_, \
@@ -211,7 +267,7 @@ inline void glog_error_writelog(const char* fmt, ...) {
 
 #define DB_WARNING_CLIENT(sock, _fmt_, args...) \
     do {\
-        DB_WARNING("user=%s fd=%d ip=%s port=%d errno=%d log_id=%llu:" _fmt_, \
+        DB_WARNING("user=%s fd=%d ip=%s port=%d errno=%d log_id=%lu:" _fmt_, \
             sock->username.c_str(), sock->fd, sock->ip.c_str(), sock->port, \
             sock->query_ctx->stat_info.error_code, \
             sock->query_ctx->stat_info.log_id, ##args);\
@@ -223,6 +279,18 @@ inline void glog_error_writelog(const char* fmt, ...) {
             sock->username.c_str(), sock->fd, sock->ip.c_str(), sock->port, \
             sock->query_ctx->stat_info.error_code, ##args);\
     } while (0);
+
+#define DB_WARNING_STATE(state, _fmt_, args...) \
+    do {\
+        DB_WARNING("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
+                state->log_id(), state->region_id(), state->table_id(), ##args); \
+    } while (0);
+#define DB_FATAL_STATE(state, _fmt_, args...) \
+    do {\
+        DB_FATAL("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
+                state->log_id(), state->region_id(), state->table_id(), ##args); \
+    } while (0);
+#endif //BAIDU_INTERNAL
 
 inline int init_log(const char* bin_name) {
 #ifdef BAIDU_INTERNAL

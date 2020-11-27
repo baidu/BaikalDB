@@ -229,19 +229,43 @@ void FuncExpr::to_stream(std::ostream& os) const {
 };
 
 void SubqueryExpr::to_stream(std::ostream& os) const {
-    static const char* cmp_type_str[] = {"ANY", "SOME", "ALL"};
-    if (is_exists) {
-        os << "EXISTS";
-    } else if (is_cmp_expr) {
-        os << cmp_type_str[cmp_type];
-    }
-    os << " (";
-    if (select_stmt != nullptr) {
+    os << "(";
+    if (query_stmt != nullptr && query_stmt->node_type == parser::NT_SELECT) {
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)query_stmt;
         select_stmt->to_stream(os);
-    } else if (union_stmt != nullptr) {
+    } else if (query_stmt != nullptr && query_stmt->node_type == parser::NT_UNION) {
+        parser::UnionStmt* union_stmt = (parser::UnionStmt*)query_stmt;
         union_stmt->to_stream(os);
     }
     os << ")";
+}
+
+void CompareSubqueryExpr::to_stream(std::ostream& os) const {
+    static const char* cmp_type_str[] = {"ANY", "SOME", "ALL"};
+    left_expr->to_stream(os);
+    switch (func_type) {
+        case FT_EQ:
+        case FT_NE:
+        case FT_GT:
+        case FT_GE:
+        case FT_LT:
+        case FT_LE:
+            os << FUNC_STR_MAP[func_type];
+            break;
+        default:
+            break;
+    }
+    os << cmp_type_str[cmp_type] << " ";
+    right_expr->to_stream(os);
+}
+
+const char* CompareSubqueryExpr::get_func_name() const {
+    return type_to_name(func_type);
+}
+
+void ExistsSubqueryExpr::to_stream(std::ostream& os) const {
+    os << "EXISTS ";
+    query_expr->to_stream(os);
 }
 
 void ColumnName::to_stream(std::ostream& os) const {

@@ -53,7 +53,7 @@ RaftMetaStorage* MyRaftMetaStorage::new_instance(const std::string& uri) const {
     int64_t region_id = boost::lexical_cast<int64_t>(string_region_id);
     rocksdb::ColumnFamilyHandle* handle = rocksdb->get_raft_log_handle();
     if (handle == NULL) {
-        DB_FATAL("get raft log handle from rocksdb fail, region_id: %ld", 
+        DB_FATAL("get raft log handle from rocksdb fail,uri:%s, region_id: %ld", 
                     uri.c_str(), region_id);
         return NULL;
     }

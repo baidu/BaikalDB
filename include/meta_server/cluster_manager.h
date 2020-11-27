@@ -36,6 +36,7 @@ struct Instance {
     std::string resource_tag;
     std::string physical_room;
     std::string logical_room;
+    std::string version;
     InstanceStateInfo instance_status;
     Instance() {
        instance_status.state = pb::NORMAL;
@@ -48,7 +49,8 @@ struct Instance {
         used_size(instance_info.capacity()),
         resource_tag(instance_info.resource_tag()),
         physical_room(instance_info.physical_room()),
-        logical_room(instance_info.logical_room()) {
+        logical_room(instance_info.logical_room()),
+        version(instance_info.version()) {
         if (instance_info.has_used_size()) {
             used_size = instance_info.used_size();
         }
@@ -241,10 +243,10 @@ public:
         }
         return _instance_info[instance];
     }
-    void get_instance_by_resource_tags(std::map<std::string, std::vector<std::string>>& instances) {
+    void get_instance_by_resource_tags(std::map<std::string, std::vector<Instance>>& instances) {
         BAIDU_SCOPED_LOCK(_instance_mutex);
         for (auto& iter : _instance_info) {
-            instances[iter.second.resource_tag].push_back(iter.first);
+            instances[iter.second.resource_tag].emplace_back(iter.second);
         }
     }
     std::string get_resource_tag(const std::string& instance) {
@@ -290,6 +292,7 @@ public:
         _instance_info[instance].capacity = instance_info.capacity();
         _instance_info[instance].used_size = instance_info.used_size();
         _instance_info[instance].resource_tag = instance_info.resource_tag();
+        _instance_info[instance].version = instance_info.version();
         _instance_info[instance].instance_status.timestamp = butil::gettimeofday_us();
         if (_instance_info[instance].instance_status.state != pb::MIGRATE) {
             if (_instance_info[instance].instance_status.state != pb::NORMAL) {

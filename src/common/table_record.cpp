@@ -305,7 +305,7 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
 }
 // for cstore
 // return -3 when equals to default value
-int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
+int TableRecord::encode_field_for_cstore(const FieldInfo& field_info, std::string& out) {
     const Reflection* _reflection = _message->GetReflection();
     int32_t field_id = field_info.id;
     pb::PrimitiveType field_type = field_info.type;
@@ -445,6 +445,19 @@ int TableRecord::encode_field(const FieldInfo& field_info, std::string& out) {
             return -1;
         } break;
     }
+    return 0;
+}
+
+int TableRecord::field_to_string(const FieldInfo& field_info, std::string* out) {
+    const Reflection* reflection = _message->GetReflection();
+    int32_t field_id = field_info.id;
+    pb::PrimitiveType field_type = field_info.type;
+    const FieldDescriptor* field = get_field_by_idx(field_info.pb_idx);
+    if (field == nullptr) {
+        DB_WARNING("invalid field: %d", field_id);
+        return -1;
+    }
+    *out = get_value(field).cast_to(field_type).get_string();
     return 0;
 }
 

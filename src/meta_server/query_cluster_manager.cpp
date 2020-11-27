@@ -287,6 +287,7 @@ void QueryClusterManager::construct_query_response_for_instance(const Instance& 
     query_info.set_resource_tag(instance_info.resource_tag);
     query_info.set_physical_room(instance_info.physical_room);
     query_info.set_status(instance_info.instance_status.state);
+    query_info.set_version(instance_info.version);
     int64_t peer_count = 0;
     int64_t region_leader_count = 0;
     QueryRegionManager::get_instance()->get_region_count_per_instance(instance_info.address, 

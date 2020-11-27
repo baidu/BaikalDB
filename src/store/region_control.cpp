@@ -35,7 +35,7 @@ int RegionControl::remove_data(int64_t drop_region_id) {
     start_key.append_i64(drop_region_id);
 
     end_key.append_i64(drop_region_id);
-    end_key.append_u64(0xFFFFFFFFFFFFFFFF);
+    end_key.append_u64(UINT64_MAX);
 
     auto rocksdb = RocksWrapper::get_instance();
     auto data_cf = rocksdb->get_data_handle();
@@ -61,7 +61,7 @@ void RegionControl::compact_data(int64_t region_id) {
     start_key.append_i64(region_id);
 
     end_key.append_i64(region_id);
-    end_key.append_u64(0xFFFFFFFFFFFFFFFF);
+    end_key.append_u64(UINT64_MAX);
 
     auto rocksdb = RocksWrapper::get_instance();
     auto data_cf = rocksdb->get_data_handle();
@@ -111,7 +111,7 @@ int RegionControl::remove_log_entry(int64_t drop_region_id) {
     start_key.append_i64(drop_region_id);
 
     end_key.append_i64(drop_region_id);
-    end_key.append_u64(0xFFFFFFFFFFFFFFFF);
+    end_key.append_u64(UINT64_MAX);
     auto rocksdb = RocksWrapper::get_instance();
     auto status = rocksdb->remove_range(options,
                                     rocksdb->get_raft_log_handle(),
@@ -124,6 +124,24 @@ int RegionControl::remove_log_entry(int64_t drop_region_id) {
         return -1;
     }
     DB_WARNING("remove raft log entry, region_id: %ld, cost: %ld", drop_region_id, cost.get_time());
+    MutTableKey log_data_key;
+    log_data_key.append_i64(drop_region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(1);
+    rocksdb::ReadOptions opt;
+    opt.prefix_same_as_start = true;
+    opt.total_order_seek = false;
+    opt.fill_cache = false;
+    std::unique_ptr<rocksdb::Iterator> iter(rocksdb->new_iterator(opt, rocksdb->get_raft_log_handle()));
+    iter->Seek(log_data_key.data());
+    if (iter->Valid()) {
+        int64_t log_index = TableKey(iter->key()).extract_i64(sizeof(int64_t) + 1);
+        rocksdb::Slice value(iter->value());
+        LogHead head(value);
+        value.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE); 
+        pb::StoreReq req;
+        req.ParseFromArray(value.data(), value.size());
+        DB_WARNING("remove raft log entry, region_id: %ld, cost:%ld, log_index:%ld, type:%d, %s", 
+                drop_region_id, cost.get_time(), log_index, head.type, req.ShortDebugString().c_str());
+    }
     return 0;
 }
 
@@ -257,7 +275,7 @@ void RegionControl::add_peer(const pb::AddPeer& add_peer, SmartRegion region, Ex
             return;
         }
         DB_WARNING("start init_region, region_id: %ld, wait_time:%ld", 
-                region->get_region_id(), cost.get_time())
+                region->get_region_id(), cost.get_time());
         if (control.legal_for_add_peer(add_peer, NULL) != 0) {
             control.reset_region_status();
             return;
@@ -418,7 +436,7 @@ void RegionControl::construct_init_region_request(pb::InitRegion& init_request) 
 }
 
 int RegionControl::legal_for_add_peer(const pb::AddPeer& add_peer, pb::StoreRes* response) {
-    DB_WARNING("start legal_for_add_peer, region_id: %ld", _region_id)
+    DB_WARNING("start legal_for_add_peer, region_id: %ld", _region_id);
     //判断收到请求的合法性，包括该peer是否是leader，list_peer值跟add_peer的old_peer是否相等，该peer的状态是否是IDEL
     if (!_region->is_leader()) {
         DB_WARNING("node is not leader when add_peer, region_id: %ld", _region_id);

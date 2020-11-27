@@ -445,7 +445,7 @@ void Region::binlog_scan() {
 
     // 一轮扫描结束后，处理内存map，更新check point
     binlog_update_check_point();
-    DB_WARNING("region_id: %ld, binlog_scan map size: %d, min ts: %ld, max ts: %ld, check point ts: %ld, cost: %ld", 
+    DB_WARNING("region_id: %ld, binlog_scan map size: %lu, min ts: %ld, max ts: %ld, check point ts: %ld, cost: %ld", 
         _region_id, _binlog_param.ts_binlog_map.size(), _binlog_param.min_ts_in_map, _binlog_param.max_ts_in_map, 
         _binlog_param.check_point_ts, cost.get_time());
 }
@@ -534,7 +534,7 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
             _binlog_param.min_ts_in_map  = ts;
             DB_WARNING("region_id: %ld, ts: %ld, FAKE BINLOG reset check point and oldest ts", _region_id, ts);
         } else {
-            DB_WARNING("region_id :%ld, ts: %ld, binlog_type: %d, discard", _region_id, ts, type);
+            DB_WARNING("region_id :%ld, ts: %ld, binlog_type: %ld, discard", _region_id, ts, type);
         }
         return 0;
     }
@@ -555,13 +555,13 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
             DB_WARNING("region_id: %ld, ts: %ld, PREWRITE BINLOG", _region_id, ts);
         } else if (type == COMMIT_BINLOG || type == ROLLBACK_BINLOG) {
             if (start_ts < _binlog_param.min_ts_in_map) {
-                DB_FATAL("region_id: %ld, type: %d, start_ts: %ld < min ts: %ld", _region_id, type, start_ts, _binlog_param.min_ts_in_map);
+                DB_FATAL("region_id: %ld, type: %ld, start_ts: %ld < min ts: %ld", _region_id, type, start_ts, _binlog_param.min_ts_in_map);
                 return 0;
             }
 
             auto iter = _binlog_param.ts_binlog_map.find(start_ts);
             if (iter == _binlog_param.ts_binlog_map.end()) {
-                DB_FATAL("region_id: %ld, type: %d, start_ts: %ld can not find in map", _region_id, type, start_ts);
+                DB_FATAL("region_id: %ld, type: %ld, start_ts: %ld can not find in map", _region_id, type, start_ts);
                 return 0;
             } else {
                 _binlog_param.ts_binlog_map.erase(start_ts);
@@ -652,7 +652,7 @@ int Region::write_binlog_record(SmartRecord record) {
     rocksdb::WriteOptions write_options;
     auto s = _rocksdb->put(write_options, _data_cf, key.data(), value);
     if (!s.ok()) {
-        DB_FATAL("write binlog failed, region_id: %lld, status: %s", _region_id, s.ToString().c_str());
+        DB_FATAL("write binlog failed, region_id: %ld, status: %s", _region_id, s.ToString().c_str());
         return -1;
     }
     

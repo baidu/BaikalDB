@@ -171,7 +171,7 @@ void BinlogNetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatR
     auto& region_change_info = response.region_change_info();
     for (auto& region_info : region_change_info) {
         if (_binlog_id != region_info.table_id()) {
-            DB_WARNING("skip region info table_id %lld", region_info.table_id());
+            DB_WARNING("skip region info table_id %ld", region_info.table_id());
             continue;
         }
         *rv.Add() = region_info;
@@ -214,7 +214,7 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
     int64_t binlog_id = 0;
     for (auto tid : _binlog_table_ids) {
         if (factory->get_binlog_id(tid, binlog_id) != 0) {
-            DB_FATAL("config binlog error. %lld", tid);
+            DB_FATAL("config binlog error. %ld", tid);
             continue;
         }
         DB_NOTICE("insert binlog table id %ld", binlog_id);
@@ -242,7 +242,7 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
     auto& region_change_info = response.region_change_info();
     for (auto& region_info : region_change_info) {
         if (_binlog_id != region_info.table_id()) {
-            DB_NOTICE("skip region info table_id %lld", region_info.table_id());
+            DB_NOTICE("skip region info table_id %ld", region_info.table_id());
             continue;
         }
         *rv.Add() = region_info;

@@ -13,6 +13,11 @@
 // limitations under the License.
 
 #include "network_server.h"
+#ifdef BAIDU_INTERNAL
+#include <baidu/rpc/channel.h>
+#else
+#include <brpc/channel.h>
+#endif
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include <fcntl.h>
@@ -33,8 +38,9 @@ DEFINE_int32(epoll_timeout, 2000, "Epoll wait timeout in epoll_wait().");
 DEFINE_int32(check_interval, 10, "interval for conn idle timeout");
 DEFINE_int32(connect_idle_timeout_s, 1800, "connection idle timeout threshold (second)");
 DEFINE_int32(slow_query_timeout_s, 60, "slow query threshold (second)");
-DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
+DEFINE_int64(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
+DEFINE_int64(health_check_interval_us, 5 * 1000 * 1000, "health_check_interval_us");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
 
@@ -254,7 +260,7 @@ void NetworkServer::print_agg_sql() {
                     std::string field_desc = "-";
                     index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
                     butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
-                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter=[%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%llu\t%s\t%s] sql_agg: %s "
+                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter=[%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] sql_agg: %s "
                         "op_version_desc=[%ld\t%s\t%s\t%s]", 
                         1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
                         pair2.second.sum, pair2.second.count,
@@ -266,6 +272,64 @@ void NetworkServer::print_agg_sql() {
             }
         }
         bthread_usleep_fast_shutdown(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL, _shutdown);
+    }
+}
+
+static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
+        std::string addr, pb::Status old_status) {
+    std::unique_ptr<pb::StoreRes> response_guard(response);
+    std::unique_ptr<brpc::Controller> cntl_guard(cntl);
+    pb::Status new_status = pb::NORMAL;
+    if (cntl->Failed()) {
+        if (cntl->ErrorCode() == brpc::ERPCTIMEDOUT || 
+            cntl->ErrorCode() == ETIMEDOUT) {
+            new_status = pb::DEAD;
+            DB_WARNING("addr:%s is dead(hang), need rpc cancel, errcode:%d, error:%s", 
+                    addr.c_str(), cntl->ErrorCode(), cntl->ErrorText().c_str());
+        } else if (cntl->ErrorCode() != brpc::ENOMETHOD) {
+            new_status = pb::FAULTY;
+            DB_WARNING("addr:%s is faulty, errcode:%d, error:%s", 
+                    addr.c_str(), cntl->ErrorCode(), cntl->ErrorText().c_str());
+        }
+    }
+    if (old_status != new_status) {
+        SchemaFactory::get_instance()->update_instance(addr, new_status);
+    }
+}
+
+void NetworkServer::store_health_check() {
+    while (!_shutdown) {
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        std::unordered_map<std::string, InstanceDBStatus> info_map;
+        factory->get_all_instance_status(&info_map);
+        if (info_map.size() == 0) {
+            bthread_usleep_fast_shutdown(FLAGS_health_check_interval_us, _shutdown);
+            continue;
+        }
+        int64_t sleep_once = FLAGS_health_check_interval_us / info_map.size();
+        for (auto& pair : info_map) {
+            bthread_usleep_fast_shutdown(sleep_once, _shutdown);
+            if (_shutdown) {
+                break;
+            }
+            std::string addr = pair.first;
+            pb::Status old_status = pair.second.status;
+            brpc::Channel channel;
+            brpc::ChannelOptions option;
+            option.max_retry = 1;
+            option.connect_timeout_ms = 1000;
+            option.timeout_ms = 5000;
+            int ret = channel.Init(addr.c_str(), &option);
+            if (ret != 0) {
+                DB_WARNING("init failed, addr:%s, ret:%d", addr.c_str(), ret);
+                continue;
+            }
+            pb::HealthCheck req;
+            brpc::Controller* cntl = new brpc::Controller();
+            pb::StoreRes* res = new pb::StoreRes();
+            pb::StoreService_Stub(&channel).health_check(cntl, &req, res, 
+                    brpc::NewCallback(on_health_check_done, res, cntl, addr, old_status));
+        }
     }
 }
 
@@ -300,6 +364,22 @@ void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeart
 
 void NetworkServer::connection_timeout_check() {
     auto check_func = [this]() {
+        std::set<std::string> need_cancel_addrs;
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        std::unordered_map<std::string, InstanceDBStatus> info_map;
+        factory->get_all_instance_status(&info_map);
+        for (auto& pair : info_map) {
+            if (pair.second.status == pb::DEAD) {
+                need_cancel_addrs.emplace(pair.first);
+            }
+        }
+        //dead实例不会太多，设置个阈值，太多了则不做处理
+        size_t max_dead_cnt = std::min(info_map.size() / 10 + 1, (size_t)5);
+        if (need_cancel_addrs.size() > max_dead_cnt) {
+            DB_WARNING("too many dead instance, size: %lu/%lu", need_cancel_addrs.size(), info_map.size());
+            need_cancel_addrs.clear();
+        }
+
         time_t time_now = time(NULL);
         if (time_now == (time_t)-1) {
             DB_WARNING("get current time failed.");
@@ -341,6 +421,12 @@ void NetworkServer::connection_timeout_check() {
             time_now = time(NULL);
             if (sock->query_ctx != nullptr && 
                     sock->query_ctx->mysql_cmd != COM_SLEEP) {
+                if (need_cancel_addrs.size() > 0) {
+                    // cancel dead addr 
+                    sock->query_ctx->get_runtime_state()->cancel_rpc(need_cancel_addrs, sock->fd);
+                    DB_WARNING("%lu addrs is dead, cancel", need_cancel_addrs.size());
+                }
+
                 int query_time_diff = time_now - sock->query_ctx->stat_info.start_stamp.tv_sec;
                 if (query_time_diff > FLAGS_slow_query_timeout_s) {
                     DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][sql=%s]",
@@ -545,6 +631,7 @@ int NetworkServer::make_worker_process() {
     _heartbeat_bth.run([this]() {report_heart_beat();});
     _other_heartbeat_bth.run([this]() {report_other_heart_beat();});
     _agg_sql_bth.run([this]() {print_agg_sql();});
+    _health_check_bth.run([this]() {store_health_check();});
 
     // Create listen socket.
     _service = create_listen_socket();

@@ -94,7 +94,7 @@ public:
 
     void on_leader_start_recovery(Region* region);
 
-    void get_prepared_txn_info(std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn);
+    void get_prepared_txn_info(std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn, bool for_num_rows);
 
     void update_txn_num_rows_after_split(const std::vector<pb::TransactionInfo>& txn_infos);
 

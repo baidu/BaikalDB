@@ -21,8 +21,12 @@ namespace baikaldb {
 
 class UnionPlanner : public LogicalPlanner {
 public:
-    UnionPlanner(QueryContext* ctx) : 
+    UnionPlanner(QueryContext* ctx) :
         LogicalPlanner(ctx),
+        _union_stmt(nullptr) {}
+
+    UnionPlanner(QueryContext* ctx, const SmartPlanTableCtx& plan_state) : 
+        LogicalPlanner(ctx, plan_state),
         _union_stmt(nullptr) {}
 
     virtual ~UnionPlanner() {}
@@ -46,6 +50,7 @@ private:
             case pb::DOUBLE_LITERAL:
             case pb::STRING_LITERAL:
             case pb::HLL_LITERAL:
+            case pb::BITMAP_LITERAL:
             case pb::DATE_LITERAL:
             case pb::DATETIME_LITERAL:
             case pb::TIME_LITERAL:

@@ -297,12 +297,12 @@ bool DataBuffer::pack_length_coded_string(const std::string& str, bool is_null) 
     size_t length = str.size();
     if (is_null) {
         if (!byte_array_append_len(&null_byte, 1)) {
-            DB_FATAL("Failed to append len.value:[%s],len:[1]", null_byte);
+            DB_FATAL("Failed to append len.value:[%d],len:[1]", null_byte);
             return false;
         }
     } else if (length == 0) {
         if (!byte_array_append_len(&zero_byte, 1)) {
-            DB_FATAL("Failed to append len.value:[%s],len:[1]", zero_byte);
+            DB_FATAL("Failed to append len.value:[%d],len:[1]", zero_byte);
             return false;
         }
     } else {

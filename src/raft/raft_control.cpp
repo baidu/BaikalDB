@@ -164,7 +164,7 @@ void common_raft_control(google::protobuf::RpcController* controller,
         DB_FATAL("node:%s %s unsupport request type:%d, log_id:%lu",
                         node->node_id().group_id.c_str(),
                         node->node_id().peer_id.to_string().c_str(),
-                        log_id, request->op_type());
+                        request->op_type(), log_id);
         //UpdateRegionStatus::get_instance()->reset_region_status(request->region_id());
         return;
     }
@@ -247,7 +247,7 @@ void _set_peer(google::protobuf::RpcController* controller,
     }
     if (inner_peers.size() != old_peers.size()) {
         DB_WARNING("peer size is not equal when set peer, node:%s %s,"
-                    " inner_peer.size: %d, old_peer.size: %d, remote_side: %s, log_id: %lu", 
+                    " inner_peer.size: %lu, old_peer.size: %lu, remote_side: %s, log_id: %lu", 
                     node->node_id().group_id.c_str(),
                     node->node_id().peer_id.to_string().c_str(),
                     inner_peers.size(),

@@ -21,8 +21,11 @@ namespace baikaldb {
 class MyListener : public rocksdb::EventListener {
     virtual void OnStallConditionsChanged(const rocksdb::WriteStallInfo& info) {
         bool is_stall = info.condition.cur != rocksdb::WriteStallCondition::kNormal;
-        RocksWrapper::get_instance()->set_is_stall(info.cf_name, is_stall);
         DB_WARNING("OnStallConditionsChanged, cf:%s is_stall:%d", info.cf_name.c_str(), is_stall);
+    }
+    virtual void OnFlushCompleted(rocksdb::DB* /*db*/, const rocksdb::FlushJobInfo& info) {
+        RocksWrapper::get_instance()->set_flush_file_number(info.cf_name, info.file_number);
+        DB_WARNING("OnFlushCompleted, cf:%s file_number:%lu", info.cf_name.c_str(), info.file_number);
     }
 };
 }

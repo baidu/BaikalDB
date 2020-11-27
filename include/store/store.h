@@ -73,6 +73,11 @@ public:
                                      pb::RaftControlResponse* response,
                                      google::protobuf::Closure* done);
 
+    virtual void health_check(google::protobuf::RpcController* controller,
+                       const pb::HealthCheck* request,
+                       pb::StoreRes* response,
+                       google::protobuf::Closure* done);
+
     virtual void query(google::protobuf::RpcController* controller,
                        const pb::StoreReq* request,
                        pb::StoreRes* response,

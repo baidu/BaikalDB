@@ -220,7 +220,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
         if (pk_index.length > 0 && index_info.length > 0 && index_info.overlap) {
             rocksdb::Slice _value(key);
             if ((int)_value.size() < index_info.length) {
-                DB_FATAL("index:%ld value_size:%d len:%d", index_info.id, _value.size(), index_info.length);
+                DB_FATAL("index:%ld value_size:%lu len:%d", index_info.id, _value.size(), index_info.length);
                 return false;
             }
             _value.remove_prefix(index_info.length);
@@ -242,7 +242,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
         } else {
             if (index_info.length > 0) {
                 if ((int)key.size() < index_info.length) {
-                    DB_FATAL("index:%ld value_size:%d len:%d", index_info.id, key.size(), index_info.length);
+                    DB_FATAL("index:%ld value_size:%lu len:%d", index_info.id, key.size(), index_info.length);
                     return false;
                 }
                 // index_info为定长
@@ -266,7 +266,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
                     }
                 }
                 if ((int)key.size() < pos) {
-                    DB_FATAL("index:%ld value_size:%d pos:%d", index_info.id, key.size(), pos);
+                    DB_FATAL("index:%ld value_size:%lu pos:%d", index_info.id, key.size(), pos);
                     return false;
                 }
                 key.remove_prefix(pos);
@@ -578,13 +578,13 @@ int Transaction::get_update_primary(
                 TupleRecord tuple_record(value_slice);
                 // only decode the required field (field_ids stored in fields)
                 if (0 != tuple_record.decode_fields(fields, val)) {
-                    DB_WARNING("decode value failed: %d", pk_index.id);
+                    DB_WARNING("decode value failed: %ld", pk_index.id);
                     return -1;
                 }
             } else {
                 // cstore, get non-pk columns value from db.
                 if (0 != get_update_primary_columns(_key, mode, val, fields)) {
-                    DB_WARNING("get_update_primary_columns failed: %d", pk_index.id);
+                    DB_WARNING("get_update_primary_columns failed: %ld", pk_index.id);
                     return -1;
                 }
             }
@@ -972,7 +972,7 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
         }
         std::string value;
         bool update_by_delete_old = false;
-        int ret = record->encode_field(field_info, value);
+        int ret = record->encode_field_for_cstore(field_info, value);
         // if the field value is null or default_value
         if (ret != 0) {
             if (update_fields != nullptr) { // delete when update or replace

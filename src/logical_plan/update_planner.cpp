@@ -67,7 +67,7 @@ int UpdatePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    auto iter = _table_tuple_mapping.begin();
+    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
     int64_t table_id = iter->second.table_id;
     _ctx->prepared_table_id = table_id;
     if (!_ctx->is_prepared) {
@@ -86,11 +86,11 @@ int UpdatePlanner::parse_limit() {
 }
 
 int UpdatePlanner::create_update_node() {
-    if (_table_tuple_mapping.size() != 1) {
+    if (_plan_table_ctx->table_tuple_mapping.size() != 1) {
         DB_WARNING("no database name, specify database by USE cmd");
         return -1;
     }
-    auto iter = _table_tuple_mapping.begin();
+    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
     int64_t table_id = iter->second.table_id;
 
     pb::PlanNode* update_node = _ctx->add_plan_node();
@@ -121,7 +121,7 @@ int UpdatePlanner::create_update_node() {
 }
 
 int UpdatePlanner::parse_kv_list() {
-    int64_t table_id = _table_tuple_mapping.begin()->second.table_id;
+    int64_t table_id = _plan_table_ctx->table_tuple_mapping.begin()->second.table_id;
     auto table_info_ptr = _factory->get_table_info_ptr(table_id); 
     if (table_info_ptr == nullptr) {
         DB_WARNING("table:%ld is nullptr", table_id);
@@ -153,7 +153,7 @@ int UpdatePlanner::parse_kv_list() {
         update_field_ids.insert(field_info->id);
 
         pb::Expr value_expr;
-        if (0 != create_expr_tree(set_list[idx]->expr, value_expr, false, false)) {
+        if (0 != create_expr_tree(set_list[idx]->expr, value_expr, CreateExprOptions())) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
@@ -191,7 +191,7 @@ int UpdatePlanner::parse_where() {
     if (_update->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_update->where, _where_filters, false, false)) {
+    if (0 != flatten_filter(_update->where, _where_filters, CreateExprOptions())) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }

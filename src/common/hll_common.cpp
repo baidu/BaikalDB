@@ -64,7 +64,7 @@ static bool is_hll_object(const std::string& hll) {
         return false;
     }
     if (hll.size() < HLL_HDR_SIZE) {
-        DB_WARNING("hll has wrong size %d", hll.size());
+        DB_WARNING("hll has wrong size %lu", hll.size());
         return false;
     }
 
@@ -74,7 +74,7 @@ static bool is_hll_object(const std::string& hll) {
     }
     if (hdr->encoding == HLL_DENSE &&
         hll.size() != HLL_DENSE_SIZE) {
-        DB_WARNING("dense encode has wrong size %d", hll.size());
+        DB_WARNING("dense encode has wrong size %lu", hll.size());
         return false;
     }
     return true;
@@ -276,7 +276,7 @@ static int hll_sparse_set(std::string& hll, long index, uint8_t count) {
         first += span;
     }
     if (span == 0 || p >= end) {
-        DB_WARNING("Invalid format span:%d p:%p end:%p", span, p, end);
+        DB_WARNING("Invalid format span:%ld p:%p end:%p", span, p, end);
         return -1;
     }
     long is_zero = 0;

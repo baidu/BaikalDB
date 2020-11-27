@@ -22,7 +22,9 @@ enum ExprType {
     ET_LITETAL,
     ET_FUNC,
     ET_ROW_EXPR,
-    ET_SUB_QUERY_EXPR
+    ET_SUB_QUERY_EXPR,
+    ET_CMP_SUB_QUERY_EXPR,
+    ET_EXISTS_SUB_QUERY_EXPR
 };
 struct ExprNode : public Node {
     ExprType expr_type;
@@ -94,7 +96,6 @@ enum FuncType {
     FT_SUBSTRING,
     FT_TRIM
     */
-    FT_BOOL
 };
 
 struct FuncExpr : public ExprNode {
@@ -103,7 +104,7 @@ struct FuncExpr : public ExprNode {
     bool is_not = false;
     bool distinct = false;
     bool is_star = false;
-    bool has_subquery = false;
+    bool is_subquery = false;
     FuncExpr() {
         fn_name = nullptr;
         expr_type = ET_FUNC;
@@ -126,13 +127,35 @@ enum CompareType {
     CMP_ALL
 };
 struct SubqueryExpr : public ExprNode {
-    SelectStmt* select_stmt = nullptr;
-    UnionStmt*  union_stmt = nullptr;
-    CompareType cmp_type = CMP_ANY;
-    bool is_exists = false;
-    bool is_cmp_expr = false;
+    DmlNode* query_stmt = nullptr;
     SubqueryExpr() {
         expr_type = ET_SUB_QUERY_EXPR;
+    }
+    virtual void print() const override {
+        std::cout << this << std::endl;
+    }
+    virtual void to_stream(std::ostream& os) const override;
+};
+
+struct CompareSubqueryExpr: public ExprNode {
+    ExprNode* left_expr = nullptr;
+    SubqueryExpr* right_expr = nullptr;
+    CompareType cmp_type = CMP_ANY;
+    FuncType func_type = FT_COMMON;
+    CompareSubqueryExpr() {
+        expr_type = ET_CMP_SUB_QUERY_EXPR;
+    }
+    virtual void print() const override {
+        std::cout << this << std::endl;
+    }
+    virtual void to_stream(std::ostream& os) const override;
+    const char* get_func_name() const;
+};
+
+struct ExistsSubqueryExpr: public ExprNode {
+    SubqueryExpr* query_expr = nullptr;
+    ExistsSubqueryExpr() {
+        expr_type = ET_EXISTS_SUB_QUERY_EXPR;
     }
     virtual void print() const override {
         std::cout << this << std::endl;

@@ -13,12 +13,12 @@
 // limitations under the License.
 
 #include "fetcher_store.h"
-#include <gflags/gflags.h>
 #ifdef BAIDU_INTERNAL
 #include <baidu/rpc/channel.h>
 #else
 #include <brpc/channel.h>
 #endif
+#include <gflags/gflags.h>
 #include "binlog_context.h"
 #include "dml_node.h"
 #include "trace_state.h"
@@ -121,7 +121,9 @@ ErrorType FetcherStore::send_request(
     req.set_region_version(info.version());
     req.set_log_id(log_id);
     for (auto& desc : state->tuple_descs()) {
-        req.add_tuples()->CopyFrom(desc);
+        if (desc.has_tuple_id()){
+            req.add_tuples()->CopyFrom(desc);
+        }
     }
     pb::TransactionInfo* txn_info = req.add_txn_infos();
     txn_info->set_txn_id(state->txn_id);
@@ -178,7 +180,9 @@ ErrorType FetcherStore::send_request(
             pb_cache_plan->set_seq_id(plan_item.sql_id);
             ExecNode::create_pb_plan(old_region_id, pb_cache_plan->mutable_plan(), plan_item.root);
             for (auto& desc : plan_item.tuple_descs) {
-                pb_cache_plan->add_tuples()->CopyFrom(desc);
+                if (desc.has_tuple_id()){
+                    pb_cache_plan->add_tuples()->CopyFrom(desc);
+                }
             }
         }
     }
@@ -210,6 +214,10 @@ ErrorType FetcherStore::send_request(
             choose_opt_instance(info, addr);
         }
         req.set_select_without_leader(true);
+    } else if (retry_times == 0) {
+        // 重试前已经选择了normal的实例
+        // 或者store返回了正确的leader
+        choose_other_if_faulty(info, addr);
     }
     ret = channel.Init(addr.c_str(), &option);
     if (ret != 0) {
@@ -217,6 +225,9 @@ ErrorType FetcherStore::send_request(
                 addr.c_str(), ret, region_id, log_id);
         return E_FATAL;
     }
+
+    state->insert_callid(addr, region_id, cntl.call_id());
+
     int64_t entry_ms5 = butil::gettimeofday_ms() % 1000;
     TimeCost query_time;
     pb::StoreService_Stub(&channel).query(&cntl, &req, &res, NULL);
@@ -224,7 +235,7 @@ ErrorType FetcherStore::send_request(
     //DB_WARNING("fetch store req: %s", req.DebugString().c_str());
     //DB_WARNING("fetch store res: %s", res.DebugString().c_str());
     if (cost.get_time() > FLAGS_print_time_us || retry_times > 0) {
-        DB_WARNING("entry_ms:%d, %d, %d, %d, %d, lock:%ld, wait region_id: %ld version:%ld time:%ld rpc_time: %ld log_id:%lu txn_id: %lu, ip:%s", 
+        DB_WARNING("entry_ms:%ld, %ld, %ld, %ld, %ld, lock:%ld, wait region_id: %ld version:%ld time:%ld rpc_time: %ld log_id:%lu txn_id: %lu, ip:%s", 
                 entry_ms, entry_ms2, entry_ms3, entry_ms4, entry_ms5, client_lock_tm, region_id, 
                 info.version(), cost.get_time(), query_time.get_time(), log_id, state->txn_id,
                 butil::endpoint2str(cntl.remote_side()).c_str());
@@ -238,8 +249,7 @@ ErrorType FetcherStore::send_request(
                 cntl.ErrorCode() != EHOSTDOWN) {
             return E_FATAL;
         }
-        other_peer_to_leader(info);
-        //schema_factory->update_leader(info);
+        other_normal_peer_to_leader(info, addr);
         bthread_usleep(retry_times * FLAGS_retry_interval_us);
         return send_request(state, store_request, info, trace_node, old_region_id, region_id, log_id,
                   retry_times + 1, start_seq_id, current_seq_id, op_type);
@@ -250,6 +260,7 @@ ErrorType FetcherStore::send_request(
                 region_id, addr.c_str(), retry_times, res.leader().c_str(), log_id);
 
         if (res.leader() != "0.0.0.0:0") {
+            // store返回了leader，则相信store，不判断normal
             info.set_leader(res.leader());
             schema_factory->update_leader(info);
             if (state->txn_id != 0 ) {
@@ -257,7 +268,7 @@ ErrorType FetcherStore::send_request(
                 client_conn->region_infos[region_id].set_leader(res.leader());
             }
         } else {
-            other_peer_to_leader(info);
+            other_normal_peer_to_leader(info, addr);
         }
         // leader切换在秒级
         bthread_usleep(retry_times * FLAGS_retry_interval_us);
@@ -404,7 +415,7 @@ ErrorType FetcherStore::send_request(
     if (res.errcode() == pb::REGION_NOT_EXIST || res.errcode() == pb::INTERNAL_ERROR) {
         DB_WARNING("REGION_NOT_EXIST, region_id:%ld, retry:%d, new_leader:%s, log_id:%lu", 
                 region_id, retry_times, res.leader().c_str(), log_id);
-        other_peer_to_leader(info);
+        other_normal_peer_to_leader(info, addr);
         //bthread_usleep(retry_times * FLAGS_retry_interval_us);
         return send_request(state, store_request, info, trace_node, old_region_id, region_id, log_id, 
                    retry_times + 1, start_seq_id, current_seq_id, op_type);
@@ -477,7 +488,7 @@ ErrorType FetcherStore::send_request(
     }
     // TODO reduce mem used by streaming
     if ((!state->is_full_export) && (row_cnt > FLAGS_max_select_rows)) {
-        DB_FATAL("_row_cnt:%ld > max_select_rows", row_cnt, FLAGS_max_select_rows);
+        DB_FATAL("_row_cnt:%ld > %ld max_select_rows", row_cnt, FLAGS_max_select_rows);
         return E_BIG_SQL;
     }
     std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
@@ -500,7 +511,7 @@ ErrorType FetcherStore::send_request(
         region_batch[region_id] = batch;
     }
     if (cost.get_time() > FLAGS_print_time_us) {
-        DB_WARNING("parse region:%ld time:%ld rows:%u log_id:%lu ", 
+        DB_WARNING("parse region:%ld time:%ld rows:%lu log_id:%lu ", 
                 region_id, cost.get_time(), batch->size(), log_id);
     }
     return E_OK;
@@ -513,11 +524,16 @@ void FetcherStore::choose_opt_instance(pb::RegionInfo& info, std::string& addr) 
         return;
     }
     std::vector<std::string> candicate_peers;
+    std::vector<std::string> normal_peers;
     for (auto& peer: info.peers()) {
-        std::string logical_room = schema_factory->logical_room_for_instance(peer);
-        if (!logical_room.empty()  && logical_room == baikaldb_logical_room) {
+        auto status = schema_factory->get_instance_status(peer);
+        if (status.status != pb::NORMAL) {
+            continue;
+        } else if (!status.logical_room.empty() && status.logical_room == baikaldb_logical_room) {
             candicate_peers.push_back(peer);
-        }  
+        } else {
+            normal_peers.push_back(peer);
+        }
     }
     if (std::find(candicate_peers.begin(), candicate_peers.end(), addr) 
             != candicate_peers.end()) {
@@ -526,6 +542,63 @@ void FetcherStore::choose_opt_instance(pb::RegionInfo& info, std::string& addr) 
     if (candicate_peers.size() > 0) {
         uint32_t i = butil::fast_rand() % candicate_peers.size();
         addr = candicate_peers[i];
+        return;
+    }
+    if (std::find(normal_peers.begin(), normal_peers.end(), addr) 
+            != normal_peers.end()) {
+        return;
+    }
+    if (normal_peers.size() > 0) {
+        uint32_t i = butil::fast_rand() % normal_peers.size();
+        addr = normal_peers[i];
+    } else {
+        DB_DEBUG("all peer faulty, %ld", info.region_id());
+    }
+}
+
+void FetcherStore::choose_other_if_faulty(pb::RegionInfo& info, std::string& addr) {
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+    auto status = schema_factory->get_instance_status(addr);
+    if (status.status == pb::NORMAL) {
+        return;
+    }
+
+    std::vector<std::string> normal_peers;
+    for (auto& peer: info.peers()) {
+        auto status = schema_factory->get_instance_status(peer);
+        if (status.status == pb::NORMAL) {
+            normal_peers.push_back(peer);
+        }
+    }
+    if (normal_peers.size() > 0) {
+        uint32_t i = butil::fast_rand() % normal_peers.size();
+        addr = normal_peers[i];
+    } else {
+        DB_DEBUG("all peer faulty, %ld", info.region_id());
+    }
+}
+
+void FetcherStore::other_normal_peer_to_leader(pb::RegionInfo& info, std::string& addr) {
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+
+    std::vector<std::string> normal_peers;
+    for (auto& peer: info.peers()) {
+        auto status = schema_factory->get_instance_status(peer);
+        if (status.status == pb::NORMAL && peer != addr) {
+            normal_peers.push_back(peer);
+        }
+    }
+    if (normal_peers.size() > 0) {
+        uint32_t i = butil::fast_rand() % normal_peers.size();
+        info.set_leader(normal_peers[i]);
+    } else {
+        for (auto& peer : info.peers()) {
+            if (peer != addr) {
+                info.set_leader(peer);
+                break;
+            }
+        }
+        DB_DEBUG("all peer faulty, %ld", info.region_id());
     }
 }
 
@@ -626,12 +699,20 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
         option.connect_timeout_ms = FLAGS_fetcher_connect_timeout; 
         option.timeout_ms = FLAGS_fetcher_request_timeout;
         std::string addr = info.leader();
+        if (retry_times == 0) {
+            // 重试前已经选择了normal的实例
+            // 或者store返回了正确的leader
+            choose_other_if_faulty(info, addr);
+        }
         ret = channel.Init(addr.c_str(), &option);
         if (ret != 0) {
             DB_WARNING("binlog channel init failed, addr:%s, ret:%d, log_id:%lu", 
                     addr.c_str(), ret, log_id);
             return E_FATAL;
         }
+
+        state->insert_callid(addr, region_id, cntl.call_id());
+
         pb::StoreService_Stub(&channel).query_binlog(&cntl, &req, &res, NULL);
         if (cntl.Failed()) {
             DB_WARNING("binlog call failed  errcode:%d, error:%s, region_id:%ld log_id:%lu", 
@@ -642,7 +723,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
                     cntl.ErrorCode() != EHOSTDOWN) {
                 return E_FATAL;
             }
-            other_peer_to_leader(info);
+            other_normal_peer_to_leader(info, addr);
             bthread_usleep(FLAGS_retry_interval_us);
             continue;
         }
@@ -653,10 +734,11 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
                 region_id, retry_times, res.leader().c_str(), log_id);
 
             if (res.leader() != "0.0.0.0:0") {
+                // store返回了leader，则相信store，不判断normal
                 info.set_leader(res.leader());
                 SchemaFactory::get_instance()->update_leader(info);
             } else {
-                other_peer_to_leader(info);
+                other_normal_peer_to_leader(info, addr);
             }
             retry_times++;
             bthread_usleep(retry_times * FLAGS_retry_interval_us);

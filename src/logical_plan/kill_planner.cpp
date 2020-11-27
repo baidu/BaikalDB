@@ -36,7 +36,7 @@ int KillPlanner::plan() {
     kill->set_is_query(k->is_query);
 
     EpollInfo* epoll_info = NetworkServer::get_instance()->get_epoll_info();
-    DB_WARNING("kill %d", k->conn_id);
+    DB_WARNING("kill %ld", k->conn_id);
     for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
         SmartSocket sock = epoll_info->get_fd_mapping(idx);
         if (sock == NULL || sock->is_free || sock->fd == -1 || sock->ip == "") {

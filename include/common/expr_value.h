@@ -23,6 +23,7 @@
 #include "common.h"
 #include "datetime.h"
 #include "type_utils.h"
+#include "roaring.hh"
 
 namespace baikaldb {
 struct ExprValue {
@@ -39,11 +40,73 @@ struct ExprValue {
         uint64_t uint64_val;
         float float_val;
         double double_val;
+        Roaring* bitmap;
     } _u;
     std::string str_val;
 
     explicit ExprValue(pb::PrimitiveType type_ = pb::NULL_TYPE) : type(type_) {
         _u.int64_val = 0;
+        if (type_ == pb::BITMAP) {
+            _u.bitmap = new(std::nothrow) Roaring();
+        }
+    }
+
+    ExprValue(const ExprValue& other) {
+        type = other.type;
+        _u = other._u;
+        str_val = other.str_val;
+        if (type == pb::BITMAP) {
+            _u.bitmap = new(std::nothrow) Roaring();
+            *_u.bitmap = *other._u.bitmap;
+        }
+    }
+    ExprValue& operator=(const ExprValue& other) {
+        if (this != &other) {
+            if (type == pb::BITMAP) {
+                delete _u.bitmap;
+                _u.bitmap = nullptr;
+            }
+            type = other.type;
+            _u = other._u;
+            str_val = other.str_val;
+            if (type == pb::BITMAP) {
+                _u.bitmap = new(std::nothrow) Roaring();
+                *_u.bitmap = *other._u.bitmap;
+            }
+        }
+        return *this;
+    }
+
+    ExprValue(ExprValue&& other) noexcept {
+        type = other.type;
+        _u = other._u;
+        str_val = other.str_val;
+        if (type == pb::BITMAP) {
+            other._u.bitmap = nullptr;
+        }
+    }
+
+    ExprValue& operator=(ExprValue&& other) noexcept {
+        if (this != &other) {
+            if (type == pb::BITMAP) {
+                delete _u.bitmap;
+                _u.bitmap = nullptr;
+            }
+            type = other.type;
+            _u = other._u;
+            if (type == pb::BITMAP) {
+                other._u.bitmap = nullptr;
+            }
+            str_val = other.str_val;
+        }
+        return *this;
+    }
+
+    ~ExprValue() {
+        if (type == pb::BITMAP) {
+            delete _u.bitmap;
+            _u.bitmap = nullptr;
+        }
     }
     explicit ExprValue(const pb::ExprValue& value) {
         type = value.type();
@@ -90,6 +153,17 @@ struct ExprValue {
             case pb::HEX:
                 str_val = value.string_val();
                 break;
+            case pb::BITMAP: {
+                _u.bitmap = new(std::nothrow) Roaring();
+                if (value.string_val().size() > 0) {
+                    try {
+                        *_u.bitmap = Roaring::readSafe(value.string_val().c_str(), value.string_val().size());
+                    } catch (...) {
+                        DB_WARNING("bitmap read from string failed");
+                    }
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -200,6 +274,7 @@ struct ExprValue {
                 break;
             case pb::STRING:
             case pb::HEX:
+            case pb::BITMAP:
                 value->set_string_val(str_val);
                 break;
             default:
@@ -349,6 +424,17 @@ struct ExprValue {
             case pb::STRING:
                 str_val = get_string();
                 break;
+            case pb::BITMAP: {
+                _u.bitmap = new(std::nothrow) Roaring();
+                if (str_val.size() > 0) {
+                    try {
+                        *_u.bitmap = Roaring::readSafe(str_val.c_str(), str_val.size());
+                    } catch (...) {
+                        DB_WARNING("bitmap read from string failed");
+                    }
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -434,6 +520,16 @@ struct ExprValue {
                 return timestamp_to_str(_u.uint32_val);
             case pb::DATE:
                 return date_to_str(_u.uint32_val);
+            case pb::BITMAP: {
+                std::string final_str;
+                if (_u.bitmap != nullptr) {
+                    _u.bitmap->runOptimize();
+                    uint32_t expectedsize = _u.bitmap->getSizeInBytes();
+                    final_str.resize(expectedsize);
+                    _u.bitmap->write(&final_str[0]);
+                }
+                return final_str;
+            }
             default:
                 return "";
         }
@@ -570,7 +666,7 @@ struct ExprValue {
     }
 
     bool is_string() const {
-        return type == pb::STRING || type == pb::HEX;
+        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP;
     }
 
     bool is_double() const {
@@ -605,6 +701,10 @@ struct ExprValue {
         return type == pb::HLL;
     }
 
+    bool is_bitmap() const {
+        return type == pb::BITMAP;
+    }
+
     bool is_numberic() const {
         return is_int() || is_bool() || is_double();
     }
@@ -637,6 +737,10 @@ struct ExprValue {
         gettimeofday(&tv, NULL);
         tmp._u.uint64_val |= tv.tv_usec;
         return tmp;
+    }
+    static ExprValue Bitmap() {
+        ExprValue ret(pb::BITMAP);
+        return ret;
     }
 };
 }

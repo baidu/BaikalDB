@@ -177,17 +177,25 @@ public:
     void close() {
         delete _txn_db;
     }
-    void set_is_stall(const std::string& cf_name, bool is_stall) {
-        if (cf_name == RAFT_LOG_CF) {
-            _log_cf_is_stall = is_stall;
-        } else if (cf_name == DATA_CF) {
-            _data_cf_is_stall = is_stall;
-        } else if (cf_name == METAINFO_CF) {
-           _meta_cf_is_stall = is_stall;
+    bool is_any_stall() {
+        uint64_t value = 0;
+        _txn_db->GetAggregatedIntProperty("rocksdb.actual-delayed-write-rate", &value);
+        if (value > 0) {
+            return true;
+        }
+        _txn_db->GetAggregatedIntProperty("rocksdb.is-write-stopped", &value);
+        if (value > 0) {
+            return true;
+        }
+        return false;
+    }
+    void set_flush_file_number(const std::string& cf_name, uint64_t file_number) {
+        if (cf_name == DATA_CF) {
+            _flush_file_number = file_number;
         }
     }
-    bool is_any_stall() {
-        return _data_cf_is_stall || _log_cf_is_stall || _meta_cf_is_stall;
+    uint64_t flush_file_number() {
+        return _flush_file_number;
     }
 private:
 
@@ -206,8 +214,6 @@ private:
     rocksdb::ColumnFamilyOptions _binlog_cf_option;
     rocksdb::ColumnFamilyOptions _data_cf_option;
     rocksdb::ColumnFamilyOptions _meta_info_option;
-    bool _log_cf_is_stall = false;
-    bool _data_cf_is_stall = false;
-    bool _meta_cf_is_stall = false;
+    uint64_t _flush_file_number = 0;
 };
 }

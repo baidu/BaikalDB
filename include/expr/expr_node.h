@@ -46,6 +46,7 @@ public:
             case pb::DOUBLE_LITERAL:
             case pb::STRING_LITERAL:
             case pb::HLL_LITERAL:
+            case pb::BITMAP_LITERAL:
             case pb::DATE_LITERAL:
             case pb::DATETIME_LITERAL:
             case pb::TIME_LITERAL:
@@ -76,6 +77,9 @@ public:
     }
     bool is_constant() const {
         return _is_constant;
+    }
+    bool has_null() const {
+        return _has_null;
     }
     bool is_row_expr() {
         return _node_type == pb::ROW_EXPR;
@@ -219,7 +223,8 @@ protected:
     pb::ExprNodeType _node_type;
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
-    bool     _is_constant = true;
+    bool    _is_constant = true;
+    bool    _has_null = false;
     int32_t _tuple_id = -1;
     int32_t _slot_id = -1;
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用

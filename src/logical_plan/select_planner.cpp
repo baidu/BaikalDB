@@ -79,6 +79,17 @@ int SelectPlanner::plan() {
     if (0 != parse_limit()) {
         return -1;        
     }
+    // 非相关子查询优化
+    if (_ctx->expr_params.is_expr_subquery && !is_correlated_subquery()) {
+        if (is_full_export()) {
+            _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+            _ctx->stat_info.error_msg << "full table export not allow in subquery, report to baikaldb RD";
+            return -1;
+        }
+        if (0 != expr_subquery_rewrite()) {
+            return -1;
+        }
+    }
 
     create_scan_tuple_descs();
     create_agg_tuple_desc();
@@ -117,6 +128,9 @@ int SelectPlanner::plan() {
     if (0 != create_join_and_scan_nodes(_join_root)) {
         return -1;
     }
+    // for (uint32_t idx = 0; idx < _ctx->plan.nodes_size(); ++idx) {
+    //     DB_WARNING("plan_node: %s", _ctx->plan.nodes(idx).DebugString().c_str());
+    // }
     return 0;
 }
 
@@ -181,6 +195,72 @@ void SelectPlanner::get_slot_column_mapping() {
             }
         }
     }    
+}
+
+int SelectPlanner::expr_subquery_rewrite() {
+    if (_select_exprs.size() != 1 && _ctx->stat_info.error_code == ER_ERROR_FIRST) {
+        _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+        _ctx->stat_info.error_msg << "Operand should contain 1 column(s)s";
+        return -1;
+    }
+    pb::Expr expr = _select_exprs[0];
+    pb::Expr agg_expr;
+    // create agg expr node
+    pb::ExprNode* node = agg_expr.add_nodes();
+    node->set_node_type(pb::AGG_EXPR);
+    node->set_col_type(pb::INVALID_TYPE);
+    pb::Function* func = node->mutable_fn();
+    func->set_fn_op(_ctx->expr_params.func_type);
+    func->set_has_var_args(false);
+    node->set_num_children(1);
+    for (auto& old_node : expr.nodes()) {
+        agg_expr.add_nodes()->CopyFrom(old_node);
+    }
+    pb::DeriveExprNode* derive_node = node->mutable_derive_node();
+    std::vector<pb::SlotDescriptor> slots;
+    // > >=
+    if (_ctx->expr_params.func_type == parser::FT_GE
+        || _ctx->expr_params.func_type == parser::FT_GT) {
+        if (_ctx->expr_params.cmp_type == parser::CMP_ALL) {
+            // t1.id > all (select t2.id from t2) -> t1.id > (select max(t2.id) from t2)
+            bool new_slot = true;
+            slots = get_agg_func_slot(_select_names[0], "max", new_slot);
+            func->set_name("max");
+        } else {
+            // t1.id > any (select t2.id from t2) -> t1.id > (select min(t2.id) from t2)
+            bool new_slot = true;
+            slots = get_agg_func_slot(_select_names[0], "min", new_slot);
+            func->set_name("min");
+        }
+    // < <=
+    } else if (_ctx->expr_params.func_type == parser::FT_LE
+        || _ctx->expr_params.func_type == parser::FT_LT) {
+        if (_ctx->expr_params.cmp_type == parser::CMP_ALL) {
+            // t1.id < all (select t2.id from t2) -> t1.id < (select min(t2.id) from t2)
+            bool new_slot = true;
+            slots = get_agg_func_slot(_select_names[0], "min", new_slot);
+            func->set_name("min");
+        } else {
+            // t1.id < any (select t2.id from t2) -> t1.id < (select max(t2.id) from t2)
+            bool new_slot = true;
+            slots = get_agg_func_slot(_select_names[0], "max", new_slot);
+            func->set_name("max");
+        }
+    // =
+    } else if (_ctx->expr_params.func_type == parser::FT_EQ) {
+        // = any (xxx) 改写为 in (xxx)
+        return 0;
+    // !=
+    } else {
+        // != all (xxx) 改写为 not in (xxx)
+        return 0;
+    }
+    derive_node->set_tuple_id(slots[0].tuple_id());
+    derive_node->set_slot_id(slots[0].slot_id());
+    derive_node->set_intermediate_slot_id(slots[0].slot_id());
+    _select_exprs[0] = agg_expr;
+    _agg_funcs.emplace_back(agg_expr);
+    return 0;
 }
 
 void SelectPlanner::create_dual_scan_node() {
@@ -394,7 +474,10 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         DB_WARNING("field expr is nullptr");
         return -1;
     }
-    if (0 != create_expr_tree(field->expr, select_expr, false, true)) {
+    CreateExprOptions options;
+    options.can_agg = true;
+    options.is_select_field = true;
+    if (0 != create_expr_tree(field->expr, select_expr, options)) {
         DB_WARNING("create select expr failed");
         return -1;
     }
@@ -449,11 +532,30 @@ int SelectPlanner::parse_select_fields() {
     return 0;
 }
 
+bool SelectPlanner::is_correlated_subquery() {
+    bool result = false;
+    for (auto& expr : _where_filters) {
+        std::set<int32_t> tuple_ids;
+        for (int32_t idx = 0; idx < expr.nodes_size(); ++idx) {
+            auto& node = expr.nodes(idx);
+            if (node.has_derive_node() && node.derive_node().has_tuple_id()) {
+                tuple_ids.emplace(node.derive_node().tuple_id());
+            }
+        }
+        if (tuple_ids.size() > 1) {
+            result = true;
+            break;
+        }
+    }
+    _ctx->expr_params.is_correlated_subquery = result;
+    return result;
+}
+
 int SelectPlanner::parse_where() {
     if (_select->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_select->where, _where_filters, false, false)) {
+    if (0 != flatten_filter(_select->where, _where_filters, CreateExprOptions())) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }
@@ -464,7 +566,10 @@ int SelectPlanner::_parse_having() {
     if (_select->having == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_select->having, _having_filters, true, true)) {
+    CreateExprOptions options;
+    options.can_agg = true;
+    options.use_alias = true;
+    if (0 != flatten_filter(_select->having, _having_filters, options)) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }
@@ -476,6 +581,8 @@ int SelectPlanner::parse_groupby() {
         return 0;
     }
     parser::Vector<parser::ByItem*> by_items = _select->group->items;
+    CreateExprOptions options;
+    options.use_alias = true;
     for (int idx = 0; idx < by_items.size(); ++idx) {
         if (by_items[idx]->node_type != parser::NT_BY_ITEM) {
             DB_WARNING("un-supported group-by item type: %d", by_items[idx]->node_type);
@@ -483,7 +590,7 @@ int SelectPlanner::parse_groupby() {
         }
         // create group by expr node
         pb::Expr group_expr;
-        if (0 != create_expr_tree(by_items[idx]->expr, group_expr, true, false)) {
+        if (0 != create_expr_tree(by_items[idx]->expr, group_expr, options)) {
             DB_WARNING("create group expr failed");
             return -1;
         }
@@ -508,11 +615,11 @@ int SelectPlanner::parse_limit() {
         return 0;
     }
     parser::LimitClause* limit = _select->limit;
-    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, false, false)) {
+    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, CreateExprOptions())) {
         DB_WARNING("create limit offset expr failed");
         return -1;
     }
-    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, false, false)) {
+    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, CreateExprOptions())) {
         DB_WARNING("create limit count expr failed");
         return -1;
     }
@@ -545,7 +652,7 @@ void SelectPlanner::create_agg_tuple_desc() {
 
 // pb::SlotDescriptor& SelectPlanner::_get_group_expr_slot() {
 //     if (_group_tuple_id == -1) {
-//         _group_tuple_id = _tuple_cnt++;
+//         _group_tuple_id = _plan_table_ctx->tuple_cnt++;
 //     }
 //     _group_slots.push_back(pb::SlotDescriptor());
 //     pb::SlotDescriptor& slot = _group_slots.back();

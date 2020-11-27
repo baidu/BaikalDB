@@ -60,9 +60,42 @@ struct ScanTupleInfo {
     ScanTupleInfo() {}
 };
 
+struct CreateExprOptions {
+    CreateExprOptions() {}
+    bool use_alias = false;
+    bool can_agg = false;
+    bool is_select_field = false;
+    bool is_values = false;
+    bool need_most_one_row = false;
+};
+
+struct PlanTableContext {
+    int32_t              tuple_cnt = 0;
+    int32_t              derived_table_id = -1;
+    //table_name => db
+    std::unordered_map<std::string, std::unordered_set<std::string>> table_dbs_mapping;
+    //field_name=>db.table
+    std::unordered_map<std::string, std::unordered_set<std::string>> field_tbls_mapping;
+    //db => databaseinfo
+    std::unordered_map<std::string, DatabaseInfo>  database_info;
+    //db.table => tableinfo
+    std::unordered_map<std::string, SmartTable>    table_info;
+    //db.table.field => fieldinfo
+    std::unordered_map<std::string, FieldInfo*>    field_info;
+    //db.table => ScanTupleInfo
+    std::unordered_map<std::string, ScanTupleInfo>  table_tuple_mapping;
+};
+
+typedef std::shared_ptr<PlanTableContext> SmartPlanTableCtx;
+
 class LogicalPlanner {
 public:
-    LogicalPlanner(QueryContext* ctx) : _tuple_cnt(0), _ctx(ctx) {
+    LogicalPlanner(QueryContext* ctx) : _ctx(ctx) {
+        _factory = SchemaFactory::get_instance();
+        _plan_table_ctx.reset(new (std::nothrow)PlanTableContext);
+    }
+
+    LogicalPlanner(QueryContext* ctx, const SmartPlanTableCtx& plan_state) : _ctx(ctx), _plan_table_ctx(plan_state) {
         _factory = SchemaFactory::get_instance();
     }
 
@@ -71,6 +104,8 @@ public:
     }
 
     virtual int plan() = 0;
+
+    virtual bool is_correlated_subquery() { return false; }
 
     static int analyze(QueryContext* ctx);
    
@@ -86,7 +121,8 @@ public:
     }
 
 protected:
-    int gen_subquery_plan(parser::DmlNode* subquery);
+    int gen_subquery_plan(parser::DmlNode* subquery, const SmartPlanTableCtx& plan_state,
+             const ExprParams& expr_params);
     // add table used in SQL to the context
     // and then do validation using schema info
     int add_table(const std::string& database, const std::string& table,
@@ -96,31 +132,31 @@ protected:
         const std::string& alias);
 
     std::unordered_set<std::string> get_possible_databases(const std::string& table) {
-        if (_table_dbs_mapping.count(table) != 0) {
-            return _table_dbs_mapping[table];
+        if ( _plan_table_ctx->table_dbs_mapping.count(table) != 0) {
+            return _plan_table_ctx->table_dbs_mapping[table];
         }
         return std::unordered_set<std::string>();
     }
 
     std::unordered_set<std::string> get_possible_tables(std::string field) {
         std::transform(field.begin(), field.end(), field.begin(), ::tolower);
-        if (_field_tbls_mapping.count(field) != 0) {
-            return _field_tbls_mapping[field];
+        if ( _plan_table_ctx->field_tbls_mapping.count(field) != 0) {
+            return _plan_table_ctx->field_tbls_mapping[field];
         }
         return std::unordered_set<std::string>();
     }
 
     TableInfo* get_table_info_ptr(const std::string& table) {
-        auto iter = _table_info.find(table);
-        if (iter != _table_info.end()) {
+        auto iter = _plan_table_ctx->table_info.find(table);
+        if (iter != _plan_table_ctx->table_info.end()) {
             return iter->second.get();
         }
         return nullptr;
     }
 
     FieldInfo* get_field_info_ptr(const std::string& field) {
-        auto iter = _field_info.find(field);
-        if (iter != _field_info.end()) {
+        auto iter = _plan_table_ctx->field_info.find(field);
+        if (iter != _plan_table_ctx->field_info.end()) {
             return iter->second;
         }
         return nullptr;
@@ -169,7 +205,8 @@ protected:
     std::string get_field_alias_name(const parser::ColumnName* col);
 
     // make AND exprs to expr vector
-    int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters, bool use_alias, bool can_agg);
+    int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters,
+        const CreateExprOptions& options);
 
     void create_order_func_slot();
 
@@ -177,31 +214,40 @@ protected:
     std::vector<pb::SlotDescriptor>& get_agg_func_slot(
             const std::string& agg, const std::string& fn_name, bool& new_slot);
 
-    int create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, bool use_alias);
+    int create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, const CreateExprOptions& options);
 
     // (col between A and B) ==> (col >= A) and (col <= B)
-    int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, bool use_alias, bool can_agg);
+    int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, const CreateExprOptions& options);
     int create_values_expr(const parser::FuncExpr* item, pb::Expr& expr);
+
+
+    int exec_subquery_expr(QueryContext* sub_ctx);
+    int create_common_subquery_expr(const parser::SubqueryExpr* item, pb::Expr& expr,
+            const CreateExprOptions& options);
+    int create_compare_subquery_expr(const parser::CompareSubqueryExpr* item, pb::Expr& expr,
+            const CreateExprOptions& options);
+    int create_exists_subquery_expr(const parser::ExistsSubqueryExpr* item, pb::Expr& expr,
+            const CreateExprOptions& options);
 
     // TODO in next stage: fill full func name
     // fill arg_types, return_type(col_type) and has_var_args
     int create_scala_func_expr(const parser::FuncExpr* item, pb::Expr& expr, parser::FuncType op, 
-            bool use_alias, bool can_agg);
+            const CreateExprOptions& options);
 
-    int create_expr_tree(const parser::Node* item, pb::Expr& expr, bool use_alias, bool can_agg);
+    int create_expr_tree(const parser::Node* item, pb::Expr& expr, const CreateExprOptions& options);
 
     int create_orderby_exprs(parser::OrderByClause* order);
 
     //TODO: error_code
     //TODO: ColumnType len
-    int create_term_slot_ref_node(const parser::ColumnName* term, pb::Expr& expr, bool is_values = false);
+    int create_term_slot_ref_node(const parser::ColumnName* term, pb::Expr& expr, const CreateExprOptions& options);
 
     int create_alias_node(const parser::ColumnName* term, pb::Expr& expr);
 
     //TODO: primitive len for STRING, BOOL and NULL
     int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr);
     // (a,b)
-    int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr, bool use_alias, bool can_agg);
+    int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr, const CreateExprOptions& options);
 
     void create_scan_tuple_descs();
     void create_values_tuple_desc(); 
@@ -235,31 +281,23 @@ private:
     int create_n_ary_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
             pb::ExprNodeType type,
-            bool use_alias,
-            bool can_agg);
+            const CreateExprOptions& options);
     int create_in_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
             pb::ExprNodeType type,
-            bool use_alias,
-            bool can_agg);
+            const CreateExprOptions& options);
+    void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
 
     static std::atomic<uint64_t> _txn_id_counter;
 
 protected:
-    int32_t             _tuple_cnt;
-    QueryContext*       _ctx;
-    SchemaFactory*      _factory;
+    QueryContext*       _ctx = nullptr;
+    SmartPlanTableCtx      _plan_table_ctx;
+    SchemaFactory*      _factory = nullptr;
 
     std::vector<pb::TupleDescriptor>  _scan_tuples;
     pb::TupleDescriptor _values_tuple;  // INSERT ... ON DUPLICATE KEY UPDATE values() tuple
     ScanTupleInfo _values_tuple_info;
-
-    //table_name => db
-    std::unordered_map<std::string, std::unordered_set<std::string>> _table_dbs_mapping;
-    //field_name=>db.table
-    std::unordered_map<std::string, std::unordered_set<std::string>> _field_tbls_mapping;
-    
-    std::unordered_map<std::string, ScanTupleInfo>  _table_tuple_mapping;
 
     int32_t                 _agg_tuple_id = -1;
     int32_t                 _agg_slot_cnt = 1;
@@ -267,16 +305,8 @@ protected:
     std::vector<pb::Expr>   _distinct_agg_funcs;
     std::unordered_map<std::string, std::vector<pb::SlotDescriptor>> _agg_slot_mapping;
 
-    //db => databaseinfo
-    std::unordered_map<std::string, DatabaseInfo>  _database_info;
-    //db.table => tableinfo
-    std::unordered_map<std::string, SmartTable>    _table_info;
-
     // table names, the order in From clause is preserved
-    std::vector<std::string> _table_names;
-
-    //db.table.field => fieldinfo
-    std::unordered_map<std::string, FieldInfo*>    _field_info;
+    std::set<std::string> _table_names;
 
     // table_alias => db.table
     //std::unordered_map<std::string, std::string>  _table_alias_mapping;
@@ -295,6 +325,7 @@ protected:
     JoinMemTmp*                 _join_root = nullptr;
     int32_t                     _derived_table_id = -1;
     int32_t                     _column_id = 0;
+    std::string                 _current_table_name;
 };
 } //namespace baikal
 

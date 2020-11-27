@@ -222,6 +222,8 @@ int JoinNode::open(RuntimeState* state) {
         return -1;
     }
     if (_outer_equal_slot.size() == 0) {
+        state->error_code = ER_NOT_SUPPORTED_YET;
+        state->error_msg << "need equal condition in join, report to baikaldb RD";
         DB_WARNING("has no equal condition in join");
         return -1;
     }
@@ -571,7 +573,7 @@ int JoinNode::get_next_for_other_join(RuntimeState* state, RowBatch* batch, bool
         if (inner_mem_rows != NULL) {
             for (; _hash_mapped_index < inner_mem_rows->size(); ++_hash_mapped_index) {
                 if (reached_limit()) {
-                    DB_WARNING("when join, reach limit size:%u, time_cost:%ld", 
+                    DB_WARNING("when join, reach limit size:%lu, time_cost:%ld", 
                             batch->size(), get_next_time.get_time());
                     *eos = true;
                     return 0;
@@ -594,7 +596,7 @@ int JoinNode::get_next_for_other_join(RuntimeState* state, RowBatch* batch, bool
         } else {
             //fill NULL
             if (reached_limit()) {
-                DB_WARNING("when join, reach limit size:%u, time_cost:%ld", 
+                DB_WARNING("when join, reach limit size:%lu, time_cost:%ld", 
                             batch->size(), get_next_time.get_time());
                 *eos = true;
                 return 0;
@@ -643,7 +645,7 @@ int JoinNode::get_next_for_inner_join(RuntimeState* state, RowBatch* batch, bool
         if (outer_mem_rows != NULL) {
             for (; _hash_mapped_index < outer_mem_rows->size(); ++_hash_mapped_index) {
                 if (reached_limit()) {
-                    DB_WARNING("when join, reach limit size:%u, time_cost:%ld", 
+                    DB_WARNING("when join, reach limit size:%lu, time_cost:%ld", 
                                 batch->size(), get_next_time.get_time());
                     *eos = true;
                     return 0;

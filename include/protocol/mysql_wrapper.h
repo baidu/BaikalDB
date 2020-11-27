@@ -43,7 +43,7 @@ public:
     bool make_stmt_prepare_ok_packet(SmartSocket sock);
     bool make_err_packet(SmartSocket sock, MysqlErrCode err_code, const char* format, ...);
     bool make_eof_packet(DataBuffer* send_buf, const int packet_id);
-    bool make_string_packet(SmartSocket sock, const char* data, int len);
+    bool make_string_packet(SmartSocket sock, const char* data);
     bool make_field_packet(DataBuffer* array, const ResultField* field, const int packet_id);
     bool make_row_packet(
             DataBuffer* send_buf,
@@ -52,7 +52,7 @@ public:
 
     int handshake_send(SmartSocket sock);
     int auth_result_send(SmartSocket sock);
-    int fill_auth_failed_packet(SmartSocket sock, const char* msg, int len);
+    int fill_auth_failed_packet(SmartSocket sock, const char* msg);
     int protocol_get_char(uint8_t* data, int packet_len, uint32_t& offset, uint8_t* result);
     int real_read_header(SmartSocket sock, int want_len, int* real_read_len);
     int real_read(SmartSocket sock, int we_want, int* ret_read_len);

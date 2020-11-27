@@ -344,7 +344,7 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
             iter = _db->new_iterator(read_options, RocksWrapper::DATA_CF);
         }
         if (!iter) {
-            DB_FATAL("create iterator failed: %ld", field_id);
+            DB_FATAL("create iterator failed: %d", field_id);
             return -1;
         }
         if (_forward) {
@@ -402,7 +402,7 @@ bool Iterator::_fits_right_bound(const rocksdb::Slice& key) {
     if (_right_open) {
         fits = (cmp < 0);
     } else if (_upper_is_end) {
-        if (upper.size() == _prefix_len) {//无穷大  
+        if (upper.size() == (size_t)_prefix_len) {//无穷大  
             // https://github.com/facebook/rocksdb/issues/5100
             // rocksdb事务前缀搜索有bug
             fits = key.starts_with(upper);

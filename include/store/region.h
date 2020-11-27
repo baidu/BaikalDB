@@ -732,7 +732,7 @@ public:
             _region_ddl_info.mutable_ddlwork_infos(0)->set_errcode(errcode);
             _region_ddl_info.mutable_ddlwork_infos(0)->set_rollback(true);
         } else {
-            DB_FATAL("DDL_LOG region_%lld ddlwork_infos_size is zero, rollback failed.", _region_id);
+            DB_FATAL("DDL_LOG region_%ld ddlwork_infos_size is zero, rollback failed.", _region_id);
         }
         is_success = false;
     }
@@ -940,7 +940,8 @@ private:
     //计算存储分离开关，在store定时任务中更新，避免每次dml都访问schema factory
     bool                                _storage_compute_separate = false;
     bool                                _use_ttl = false; //init时更新，表的ttl后续不会改变
-    bool                                _reverse_remove_range = false; //split的数据，把拉链过滤一遍
+    bool                                _reverse_remove_range = false; //split的数据，把拉链过滤一遍  
+    bool                                _reverse_force_remove_range = true;// 改为true,重启之后过滤一边，后续升级需要删除 by YUZHENGQUAN 20201118
     //raft node
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;

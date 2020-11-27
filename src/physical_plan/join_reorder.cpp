@@ -122,7 +122,7 @@ int JoinReorder::analyze(QueryContext* ctx) {
     }
     last_node->predicate_pushdown(conditions);
     if (!conditions.empty()) {
-        DB_FATAL("join reorder predicate_pushdown fail, size:%u", conditions.size());
+        DB_FATAL("join reorder predicate_pushdown fail, size:%lu", conditions.size());
         return -1;
     }
     DB_WARNING("join has reordered");

@@ -281,8 +281,9 @@ void Store::init_region(google::protobuf::RpcController* controller,
     const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
     const char* remote_side = remote_side_tmp.c_str();
 
-    if (_rocksdb->is_any_stall()) {
-        DB_WARNING("rocksdb is stall, log_id%ld, remote_side:%s", log_id, remote_side); 
+    //只限制addpeer
+    if (_rocksdb->is_any_stall() && request->snapshot_times() == 0) {
+        DB_WARNING("addpeer rocksdb is stall, log_id%ld, remote_side:%s", log_id, remote_side); 
         response->set_errcode(pb::CANNOT_ADD_PEER);
         response->set_errmsg("rocksdb is stall");
         return;
@@ -395,6 +396,14 @@ void Store::region_raft_control(google::protobuf::RpcController* controller,
                          request,
                          response,
                          done_guard.release());
+}
+
+void Store::health_check(google::protobuf::RpcController* controller,
+                  const pb::HealthCheck* request,
+                  pb::StoreRes* response,
+                  google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    response->set_errcode(pb::SUCCESS);
 }
 
 void Store::query(google::protobuf::RpcController* controller,
@@ -775,7 +784,7 @@ void Store::delay_remove_region_thread() {
             if (region->removed() && 
                 //加个随机数，删除均匀些
                 region->removed_time_cost() > (FLAGS_region_delay_remove_timeout_s + 
-                    (butil::fast_rand() % FLAGS_region_delay_remove_timeout_s)) * 1000 * 1000LL) {
+                    (int64_t)(butil::fast_rand() % FLAGS_region_delay_remove_timeout_s)) * 1000 * 1000LL) {
                 region->shutdown();
                 region->join();
                 int64_t drop_region_id = region->get_region_id();
@@ -788,16 +797,38 @@ void Store::delay_remove_region_thread() {
 }
 
 void Store::flush_memtable_thread() {
+    static bvar::Status<uint64_t> rocksdb_num_snapshots("rocksdb_num_snapshots", 0);
+    static bvar::Status<int64_t> rocksdb_snapshot_difftime("rocksdb_snapshot_difftime", 0);
+    static bvar::Status<uint64_t> rocksdb_num_wals("rocksdb_num_wals", 0);
+    uint64_t last_file_number = 0;
     while (!_shutdown) {
         bthread_usleep_fast_shutdown(FLAGS_flush_memtable_interval_us, _shutdown);
         if (_shutdown) {
             return;
         }
-        rocksdb::FlushOptions flush_options;
-        auto status = _rocksdb->flush(flush_options, _rocksdb->get_meta_info_handle());
-        if (!status.ok()) {
-            DB_WARNING("flush meta info to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        uint64_t num_snapshots = 0;
+        _rocksdb->get_db()->GetAggregatedIntProperty("rocksdb.num-snapshots", &num_snapshots);
+        rocksdb_num_snapshots.set_value(num_snapshots);
+        uint64_t snapshot_time = 0;
+        _rocksdb->get_db()->GetAggregatedIntProperty("rocksdb.oldest-snapshot-time", &snapshot_time);
+        if (snapshot_time > 0) {
+            rocksdb_snapshot_difftime.set_value((int64_t)time(NULL) - (int64_t)snapshot_time);
         }
+        rocksdb::VectorLogPtr vec;
+        _rocksdb->get_db()->GetSortedWalFiles(vec);
+        rocksdb_num_wals.set_value(vec.size());
+
+        //data cf有新的flush数据才需要flush meta，gc wal
+        if (last_file_number != _rocksdb->flush_file_number()) {
+            last_file_number = _rocksdb->flush_file_number();
+            rocksdb::FlushOptions flush_options;
+            auto status = _rocksdb->flush(flush_options, _rocksdb->get_meta_info_handle());
+            if (!status.ok()) {
+                DB_WARNING("flush meta info to rocksdb fail, err_msg:%s", status.ToString().c_str());
+            }
+            DB_WARNING("flush meta info to rocksdb success, file_number:%lu", _rocksdb->flush_file_number());
+        }
+        /*
         status = _rocksdb->flush(flush_options, _rocksdb->get_data_handle());
         if (!status.ok()) {
             DB_WARNING("flush data to rocksdb fail, err_msg:%s", status.ToString().c_str());
@@ -810,6 +841,7 @@ void Store::flush_memtable_thread() {
         if (!status.ok()) {
             DB_WARNING("flush bin_log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
         }
+        */
     }
 }
 
@@ -1083,6 +1115,7 @@ void Store::monitor_memory() {
 
 void Store::whether_split_thread() {
     static int64_t count = 0;
+    (void)count;
     while (!_shutdown) {
         std::vector<int64_t> region_ids;
         traverse_region_map([&region_ids](SmartRegion& region) {
@@ -1216,6 +1249,7 @@ void Store::start_db_statistics() {
             std::vector<std::string> items;
             boost::split(items, str, boost::is_any_of("\n"));
             for (auto& item : items) {
+                (void)item;
                 SELF_TRACE("statistics: %s", item.c_str());
             }
             monitor_memory();
@@ -1330,6 +1364,9 @@ void Store::construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
     _disk_used.set_value(disk_capacity - left_size);
     instance_info->set_capacity(disk_capacity);
     instance_info->set_used_size(disk_capacity - left_size);
+#ifdef BAIKALDB_REVISION
+    instance_info->set_version(BAIKALDB_REVISION);
+#endif
 
     //构造schema version信息
     std::unordered_map<int64_t, int64_t> table_id_version_map;
@@ -1418,7 +1455,7 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
         ddlwork_table_ids.insert(ddlwork_info.table_id());
         traverse_copy_region_map([&ddlwork_info](SmartRegion& region) {
             if (region->get_global_index_id() == ddlwork_info.table_id()) {
-                DB_DEBUG("DDL_LOG region_id [%lld] table_id: %lld start ddl work.", 
+                DB_DEBUG("DDL_LOG region_id [%ld] table_id: %ld start ddl work.", 
                     region->get_region_id(), ddlwork_info.table_id());
                 region->ddlwork_process(ddlwork_info);
             }
@@ -1512,7 +1549,7 @@ void Store::backup_region(google::protobuf::RpcController* controller,
     if (request_vec[2] == "data") {
         backup_type = SstBackupType::DATA_BACKUP;
     } else {
-        DB_WARNING("region_%lld noknown backup request [%s].", request_vec[2].c_str());
+        DB_WARNING("noknown backup request [%s].", request_vec[2].c_str());
         cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
         return;
     }
@@ -1535,10 +1572,10 @@ void Store::backup_region(google::protobuf::RpcController* controller,
     bool ingest_store_latest_sst = request_vec.size() > 3 && request_vec[3] == "1";
 
     if (request_vec[0] == "download") {
-        DB_NOTICE("backup download sst region[%lld]", region_id)
+        DB_NOTICE("backup download sst region[%ld]", region_id);
         region->process_download_sst(cntl, request_vec, backup_type);
     } else if (request_vec[0] == "upload") {
-        DB_NOTICE("backup upload sst region[%lld]", region_id)
+        DB_NOTICE("backup upload sst region[%ld]", region_id);
         region->process_upload_sst(cntl, ingest_store_latest_sst);
     }
 }
@@ -1550,17 +1587,17 @@ void Store::backup(google::protobuf::RpcController* controller,
 
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl = static_cast<brpc::Controller*>(controller);
-    auto region_id = request->region_id();
+    int64_t region_id = request->region_id();
     SmartRegion region = get_region(region_id);
     if (region == nullptr) {
         DB_WARNING("backup no region in store, region_id: %ld", region_id);
         return;
     }
     if (request->backup_op() == pb::BACKUP_DOWNLOAD) {
-        DB_NOTICE("backup download sst region[%lld]", region_id)
+        DB_NOTICE("backup download sst region[%ld]", region_id);
         region->process_download_sst_streaming(cntl, request, response);
     } else if (request->backup_op() == pb::BACKUP_UPLOAD) {
-        DB_NOTICE("backup upload sst region[%lld]", region_id)
+        DB_NOTICE("backup upload sst region[%ld]", region_id);
         region->process_upload_sst_streaming(cntl, request->ingest_store_latest_sst(), 
             request, response);
     } else {

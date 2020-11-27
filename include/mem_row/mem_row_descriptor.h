@@ -48,6 +48,10 @@ public:
         return _id_tuple_mapping.size();
     }
 
+    const std::map<int32_t, const google::protobuf::Message*>& id_tuple_mapping() const {
+        return _id_tuple_mapping;
+    }
+
 private:
     google::protobuf::DescriptorPool          _pool;
     google::protobuf::DynamicMessageFactory*  _factory;

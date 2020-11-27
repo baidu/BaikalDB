@@ -77,7 +77,7 @@ braft::LogStorage* MyRaftLogStorage::new_instance(const std::string& uri) const 
     int64_t region_id = boost::lexical_cast<int64_t>(string_region_id);
     rocksdb::ColumnFamilyHandle* raftlog_handle = rocksdb->get_raft_log_handle();
     if (raftlog_handle == NULL) {
-        DB_FATAL("get raft log handle from rocksdb fail, region_id: %ld", 
+        DB_FATAL("get raft log handle from rocksdb fail,uri:%s, region_id: %ld", 
                     uri.c_str(), region_id);
         return NULL;
     }
@@ -85,7 +85,7 @@ braft::LogStorage* MyRaftLogStorage::new_instance(const std::string& uri) const 
     if (is_binlog) {
         binlog_handle = rocksdb->get_bin_log_handle();
         if (binlog_handle == NULL) {
-            DB_FATAL("get bin log handle from rocksdb fail, region_id: %ld", 
+            DB_FATAL("get bin log handle from rocksdb fail,uri:%s, region_id: %ld", 
                     uri.c_str(), region_id);
             return NULL;
         }
@@ -145,6 +145,8 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
     _encode_log_data_key(log_data_key, LOG_DATA_KEY_SIZE, first_log_index);
     rocksdb::ReadOptions opt;
     opt.prefix_same_as_start = true;
+    opt.total_order_seek = false;
+    opt.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(_db->new_iterator(opt, _raftlog_handle));
     iter->Seek(rocksdb::Slice(log_data_key, LOG_DATA_KEY_SIZE));
     
@@ -164,8 +166,13 @@ int MyRaftLogStorage::init(braft::ConfigurationManager* configuration_manager) {
             return -1;
         }
         if (expected_index != index) {
-            DB_FATAL("Found a hole in region_id: %ld, expected_index:%ld, real_index:%ld",
-                    _region_id, expected_index, index);
+            rocksdb::Slice value = iter->value();
+            LogHead head(value);
+            value.remove_prefix(LOG_HEAD_SIZE);
+            pb::StoreReq req;
+            req.ParseFromArray(value.data(), value.size());
+            DB_FATAL("Found a hole in region_id: %ld, expected_index:%ld, real_index:%ld, type:%d, %s",
+                    _region_id, expected_index, index, head.type, req.ShortDebugString().c_str());
             return -1;
         }
         //decode value
@@ -478,7 +485,7 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     if (!status.ok()) {
         DB_WARNING("tuncate log entry fail, err_mes:%s, region_id: %ld, "
                 "truncate to first index kept:%ld from first log index:%ld",
-                 _region_id, status.ToString().c_str(), first_index_kept, _first_log_index.load());
+                 status.ToString().c_str(), _region_id, first_index_kept, _first_log_index.load());
         return -1;
     } else {
         DB_WARNING("tuncate log entry success, region_id: %ld, "

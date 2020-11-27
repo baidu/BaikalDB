@@ -40,6 +40,8 @@ int main(int argc, char **argv) {
     signal(SIGTERM, (sighandler_t)baikaldb::handle_exit_signal);
 #ifdef BAIKALDB_REVISION
     google::SetVersionString(BAIKALDB_REVISION);
+    static bvar::Status<std::string> baikaldb_version("baikaldb_version", "");
+    baikaldb_version.set_value(BAIKALDB_REVISION);
 #endif
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     google::ParseCommandLineFlags(&argc, &argv, true);

@@ -19,7 +19,6 @@
 
 namespace baikaldb {
 DEFINE_int32(per_txn_max_num_locks, 1000000, "max num locks per txn default 100w");
-RuntimeState::~RuntimeState() {}
 
 int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
@@ -27,7 +26,10 @@ int RuntimeState::init(const pb::StoreReq& req,
         TransactionPool* pool,
         bool store_compute_separate, bool is_binlog_region) {
     for (auto& tuple : tuples) {
-        _tuple_descs.push_back(tuple);
+        if (tuple.tuple_id() >= (int)_tuple_descs.size()) {
+            _tuple_descs.resize(tuple.tuple_id() + 1);
+        }
+        _tuple_descs[tuple.tuple_id()] = tuple;
     }
     if (_tuple_descs.size() > 0) {
         int ret = _mem_row_desc.init(_tuple_descs);
@@ -91,6 +93,7 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     if (_client_conn == nullptr) {
         return -1;
     }
+    _addr_callids_map.clear();
     txn_id = _client_conn->txn_id;
     _log_id = ctx->stat_info.log_id;
     // prepare 复用runtime

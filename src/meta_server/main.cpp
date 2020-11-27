@@ -37,9 +37,11 @@ DECLARE_int32(meta_replica_number);
 int main(int argc, char **argv) {
 #ifdef BAIKALDB_REVISION
     google::SetVersionString(BAIKALDB_REVISION);
+    static bvar::Status<std::string> baikaldb_version("baikaldb_version", "");
+    baikaldb_version.set_value(BAIKALDB_REVISION);
 #endif
-    google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     google::ParseCommandLineFlags(&argc, &argv, true);
+    google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     boost::filesystem::path remove_path("init.success");
     boost::filesystem::remove_all(remove_path); 
     // Initail log

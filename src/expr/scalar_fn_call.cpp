@@ -104,7 +104,7 @@ int ScalarFnCall::open() {
         return ret;
     }
     if ((int)_children.size() < _fn.arg_types_size()) {
-        DB_WARNING("_children.size:%u < _fn.arg_types_size:%d", 
+        DB_WARNING("_children.size:%lu < _fn.arg_types_size:%d", 
                 _children.size(), _fn.arg_types_size());
         return -1;
     }

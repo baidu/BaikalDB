@@ -420,6 +420,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     WEEK
     YEAR
     HLL
+    BITMAP
 
     /* The following tokens belong to builtin functions. */
     ADDDATE
@@ -458,7 +459,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     VAR_SAMP
     USER_AGG
 
-%token EQ_OP ASSIGN_OP  MOD_OP  GE_OP  GT_OP LE_OP LT_OP NE_OP AND_OP OR_OP NOT_OP LS_OP RS_OP CHINESE_DOT
+%token EQ_OP ASSIGN_OP  MOD_OP  GE_OP  GT_OP LE_OP LT_OP NE_OP AND_OP OR_OP NOT_OP LS_OP RS_OP CHINESE_DOT 
 %token <string> IDENT 
 %token <expr> STRING_LIT INTEGER_LIT DECIMAL_LIT PLACE_HOLDER_LIT
 
@@ -498,6 +499,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SimpleExpr
     FunctionCall
     Operators
+    CompareSubqueryExpr
     WhereClause
     WhereClauseOptional
     PredicateOp
@@ -647,6 +649,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     GlobalScope
     OptFull
     UnionOpt
+    CompareOp
 
 %type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
@@ -665,7 +668,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %left tableRefPriority
 %left XOR OR
 %left AND
-%left EQ_OP NE_OP GE_OP GT_OP LE_OP LT_OP IS LIKE IN
+%left EQ_OP NE_OP GE_OP GT_OP LE_OP LT_OP IS LIKE IN 
 %left '|'
 %left '&'
 %left LS_OP RS_OP
@@ -1694,12 +1697,12 @@ FieldAsName:
 SubSelect:
     '(' SelectStmt ')' {
         SubqueryExpr* sub_query = new_node(SubqueryExpr);
-        sub_query->select_stmt = (SelectStmt*)$2;
+        sub_query->query_stmt = (SelectStmt*)$2;
         $$ = sub_query;
     }
     | '(' UnionStmt ')' {
         SubqueryExpr* sub_query = new_node(SubqueryExpr);
-        sub_query->union_stmt = (UnionStmt*)$2;
+        sub_query->query_stmt = (UnionStmt*)$2;
         $$ = sub_query;
     }
     ;
@@ -2508,7 +2511,6 @@ AllIdent:
     | VARIANCE
     | VAR_POP
     | VAR_SAMP
-    | MOD
     ;
 
 NumLiteral:
@@ -2548,15 +2550,9 @@ SimpleExpr:
     | SubSelect { 
     }
     | EXISTS SubSelect {
-        SubqueryExpr* sub_query_expr = (SubqueryExpr*)$2;
-        sub_query_expr->is_exists = true;
-        $$ = sub_query_expr;
-    }
-    | AnyOrAll SubSelect {
-        SubqueryExpr* sub_query_expr = (SubqueryExpr*)$2;
-        sub_query_expr->cmp_type = (parser::CompareType)$1;
-        sub_query_expr->is_cmp_expr = true;
-        $$ = sub_query_expr;
+        ExistsSubqueryExpr*  exists_expr = new_node(ExistsSubqueryExpr);
+        exists_expr->query_expr = (SubqueryExpr*)$2;
+        $$ = exists_expr;
     }
     | '-' SimpleExpr %prec NEG {
         $$ = FuncExpr::new_unary_op_node(FT_UMINUS, $2, parser->arena);
@@ -2656,7 +2652,10 @@ ElseOpt:
     ;
 
 Operators:
-    Expr '+' Expr {
+    CompareSubqueryExpr {
+        $$ = $1;
+    }
+    | Expr '+' Expr {
         $$ = FuncExpr::new_binary_op_node(FT_ADD, $1, $3, parser->arena);
     }
     | Expr '-' Expr {
@@ -2689,23 +2688,8 @@ Operators:
     | Expr '^' Expr {
         $$ = FuncExpr::new_binary_op_node(FT_BIT_XOR, $1, $3, parser->arena);
     }
-    | Expr EQ_OP Expr {
-        $$ = FuncExpr::new_binary_op_node(FT_EQ, $1, $3, parser->arena);
-    }
-    | Expr NE_OP Expr {
-        $$ = FuncExpr::new_binary_op_node(FT_NE, $1, $3, parser->arena);
-    }
-    | Expr GT_OP Expr {
-        $$ = FuncExpr::new_binary_op_node(FT_GT, $1, $3, parser->arena);
-    }
-    | Expr GE_OP Expr {
-        $$ = FuncExpr::new_binary_op_node(FT_GE, $1, $3, parser->arena);
-    } 
-    | Expr LT_OP Expr {
-        $$ = FuncExpr::new_binary_op_node(FT_LT, $1, $3, parser->arena);
-    }
-    | Expr LE_OP Expr {
-        $$ = FuncExpr::new_binary_op_node(FT_LE, $1, $3, parser->arena);
+    | Expr CompareOp Expr %prec EQ_OP {
+        $$ = FuncExpr::new_binary_op_node((FuncType)$2, $1, $3, parser->arena);
     }
     | Expr AND Expr {
         $$ = FuncExpr::new_binary_op_node(FT_LOGIC_AND, $1, $3, parser->arena);
@@ -2717,6 +2701,37 @@ Operators:
         $$ = FuncExpr::new_binary_op_node(FT_LOGIC_XOR, $1, $3, parser->arena);
     }
     ;
+
+CompareOp:
+    GE_OP {
+        $$ = FT_GE;
+    }
+    | GT_OP {
+        $$ = FT_GT;
+    }
+    | LE_OP {
+        $$ = FT_LE;
+    }
+    | LT_OP {
+        $$ = FT_LT;
+    }
+    | NE_OP {
+        $$ = FT_NE;
+    }
+    | EQ_OP {
+        $$ = FT_EQ;
+    }
+    ;
+
+CompareSubqueryExpr:
+    Expr CompareOp AnyOrAll SubSelect %prec EQ_OP {
+        CompareSubqueryExpr* comp_sub_query = new_node(CompareSubqueryExpr);
+        comp_sub_query->left_expr = $1;
+        comp_sub_query->func_type = (FuncType)$2;
+        comp_sub_query->cmp_type = (parser::CompareType)$3;
+        comp_sub_query->right_expr = (SubqueryExpr*)$4;
+        $$ = comp_sub_query;
+    }
 
 PredicateOp:
     Expr IsOrNot NULLX %prec IS {
@@ -2752,20 +2767,20 @@ PredicateOp:
     | RowExpr InOrNot SubSelect {
         FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
         fun->is_not = $2;
-        fun->has_subquery = true;
+        fun->is_subquery = true;
         $$ = fun;
     }
     | SimpleExpr InOrNot SubSelect {
         FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
         fun->is_not = $2;
-        fun->has_subquery = true;
+        fun->is_subquery = true;
         $$ = fun;
     }
     /*
     | SimpleExpr LikeOrNot SubSelect LikeEscapeOpt %prec LIKE {
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_LIKE, $1, $3, $4, parser->arena);
         fun->is_not = $2;
-        fun->has_subquery = true;
+        fun->is_subquery = true;
         $$ = fun;
     }*/
     | SimpleExpr LikeOrNot SimpleExpr LikeEscapeOpt %prec LIKE {
@@ -3504,6 +3519,11 @@ StringType:
     {
         FieldType* field_type = new_node(FieldType);
         field_type->type = MYSQL_TYPE_HLL;
+        $$ = field_type;
+    }
+    | BITMAP {
+        FieldType* field_type = new_node(FieldType);
+        field_type->type = MYSQL_TYPE_BITMAP;
         $$ = field_type;
     }
     ;

@@ -169,7 +169,6 @@ uint64_t time_to_datetime2(int32_t time) {
     return timestamp_to_datetime(now);
 }
 TEST(test_datetime_time, case_all) {
-    int day = 0;
     int hour = 0;
     int minute = 0;
     int second = 0;

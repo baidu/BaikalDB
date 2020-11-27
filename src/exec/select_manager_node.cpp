@@ -40,8 +40,8 @@ int SelectManagerNode::open(RuntimeState* state) {
     std::vector<ExecNode*> scan_nodes;
     get_node(pb::SCAN_NODE, scan_nodes);
     if (scan_nodes.size() != 1) {
-        DB_WARNING("select manager has more than one scan node, scan_node_size: %d, txn_id: %lu, log_id:%lu",
-                    state->txn_id, state->log_id());
+        DB_WARNING("select manager has more than one scan node, scan_node_size: %lu, txn_id: %lu, log_id:%lu",
+                    scan_nodes.size(), state->txn_id, state->log_id());
         return -1;
     }
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);

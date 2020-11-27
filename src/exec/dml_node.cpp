@@ -267,12 +267,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         IndexInfo& info = *info_ptr;
 
         auto index_state = info.state;
-        //DB_DEBUG("dml_insert_record prime+index string[%s] state[%s] index_id[%lld] index_name[%s] region_%lld", 
+        //DB_DEBUG("dml_insert_record prime+index string[%s] state[%s] index_id[%ld] index_name[%s] region_%ld", 
         //    record->to_string().c_str(), pb::IndexState_Name(index_state).c_str(), info.id, info.name.c_str(), _region_id);
 
         if (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
             index_state != pb::IS_WRITE_LOCAL) {
-            DB_DEBUG("index_selector skip index [%lld] state [%s] ", 
+            DB_DEBUG("index_selector skip index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -340,7 +340,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         auto index_state = info.state;
         if (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
             index_state != pb::IS_WRITE_LOCAL) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -433,7 +433,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
         }
         auto index_state = info.state;
         if (index_state == pb::IS_NONE) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }

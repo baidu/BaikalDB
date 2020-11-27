@@ -391,7 +391,7 @@ void ClusterManager::drop_instance(const pb::MetaManagerRequest& request, braft:
     auto ret = MetaRocksdb::get_instance()->delete_meta_info(
                 std::vector<std::string>{construct_instance_key(address)});
     if (ret < 0) {
-        DB_WARNING("drop instance:%s to rocksdb fail, err_mes:%s", request.ShortDebugString().c_str()); 
+        DB_WARNING("drop instance:%s to rocksdb fail ", request.ShortDebugString().c_str()); 
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
@@ -870,7 +870,7 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
     }
     _instance_regions_count_map[selected_instance][table_id]++;
     DB_WARNING("select instance min, resource_tag: %s, table_id: %ld, logical_room: %s,"
-                " average_count: %ld, candicate_instance_size: %d, selected_instance: %s",
+                " average_count: %ld, candicate_instance_size: %lu, selected_instance: %s",
                 resource_tag.c_str(), table_id, logical_room.c_str(), average_count, 
                 candicate_instances.size(), selected_instance.c_str());
     return 0;

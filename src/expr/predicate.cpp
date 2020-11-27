@@ -24,7 +24,7 @@ int InPredicate::open() {
         return ret;
     }
     if (_children.size() < 2) {
-        DB_WARNING("InPredicate _children.size:%u", _children.size());
+        DB_WARNING("InPredicate _children.size:%lu", _children.size());
         return -1;
     }
     if (children(0)->is_row_expr()) {
@@ -148,7 +148,7 @@ ExprValue InPredicate::get_value(MemRow* row) {
         if (_str_set.count(v.str_val) == 1) {
             return ExprValue::True();
         }
-        return ExprValue::False();
+        return _has_null ? ExprValue::Null() : ExprValue::False();
     }
     ExprValue value = _children[0]->get_value(row);
     if (value.is_null()) {
@@ -177,7 +177,7 @@ ExprValue InPredicate::get_value(MemRow* row) {
         default:
             break;
     }
-    return ExprValue::False();
+    return _has_null ? ExprValue::Null() : ExprValue::False();
 }
 
 int LikePredicate::open() {
@@ -188,7 +188,7 @@ int LikePredicate::open() {
         return ret;
     }
     if (children_size() < 2) {
-        DB_WARNING("LikePredicate _children.size:%u", _children.size());
+        DB_WARNING("LikePredicate _children.size:%lu", _children.size());
         return -1;
     }
     if (!children(1)->is_constant()) {

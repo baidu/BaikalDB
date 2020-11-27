@@ -49,6 +49,7 @@ const std::string SQL_SHOW_FULL_COLUMNS          = "show full columns";
 const std::string SQL_SHOW_TABLE_STATUS          = "show table status";
 const std::string SQL_SHOW_ABNORMAL_REGIONS      = "show abnormal regions";
 const std::string SQL_SHOW_COST                  = "show cost";
+const std::string SQL_SHOW_SCHEMA_CONF           = "show schema_conf";
 const std::string SQL_SHOW_VIRTUAL_INDEX         = "show virtual index";
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
@@ -58,6 +59,7 @@ const std::string SQL_SHOW_SOCKET                = "show socket";
 const std::string SQL_SHOW_PROCESSLIST           = "show processlist";
 const std::string SQL_SHOW_META                  = "show meta";
 const std::string SQL_SHOW_NAMESPACE             = "show namespace";
+const std::string SQL_DISABLE_INDEXS             = "show disable indexs";
 
 enum QUERY_TYPE {
     SQL_UNKNOWN_NUM                         = 0,
@@ -136,6 +138,7 @@ private:
     bool _handle_client_query_show_table_status(SmartSocket client);
     bool _handle_client_query_show_abnormal_regions(SmartSocket client);
     bool _handle_client_query_show_cost(SmartSocket client);
+    bool _handle_client_query_show_schema_conf(SmartSocket client);
     bool _handle_client_query_show_virtual_index(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
     bool _handle_client_query_show_socket(SmartSocket client);
@@ -148,7 +151,7 @@ private:
     bool _handle_client_query_show_variables(SmartSocket client);
     bool _handle_client_query_desc_table(SmartSocket client);
     bool _handle_client_query_template(SmartSocket client,
-        const std::string& field_name, int32_t data_type, const std::string& value);
+        const std::string& field_name, int32_t data_type, const std::vector<std::string>& value);
 
     //int _make_common_resultset_packet(SmartSocket sock, SmartTable table);
     //int _make_common_resultset_packet(SmartSocket sock, SmartResultSet result_set);

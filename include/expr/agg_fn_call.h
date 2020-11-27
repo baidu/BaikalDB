@@ -27,6 +27,13 @@ public:
         MAX,
         HLL_ADD_AGG,
         HLL_MERGE_AGG,
+        RB_OR_AGG,
+        RB_OR_CARDINALITY_AGG,
+        RB_AND_AGG,
+        RB_AND_CARDINALITY_AGG,
+        RB_XOR_AGG,
+        RB_XOR_CARDINALITY_AGG,
+        RB_BUILD_AGG,
         OTHER
     };
     AggFnCall() {
@@ -47,52 +54,72 @@ public:
         return row->get_value(_tuple_id, _final_slot_id);
     }
 
-    bool is_initialize(MemRow* dst);
+    bool is_initialize(const std::string& key, MemRow* dst);
     // 聚合函数逻辑
     // 初始化分配内存
-    int initialize(MemRow* dst);
+    int initialize(const std::string& key, MemRow* dst);
     // update每次更新一行
-    int update(MemRow* src, MemRow* dst);
+    int update(const std::string& key, MemRow* src, MemRow* dst);
     // merge表示store预聚合后，最终merge到一起
-    int merge(MemRow* src, MemRow* dst);
+    int merge(const std::string& key, MemRow* src, MemRow* dst);
     // 对于avg这种，需要最终计算结果
-    int finalize(MemRow* dst);
+    int finalize(const std::string& key, MemRow* dst);
 
-    static bool all_is_initialize(std::vector<AggFnCall*>& agg_calls, MemRow* dst) {
+    static bool all_is_initialize(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* dst) {
         for (auto call : agg_calls) {
-            if (!call->is_initialize(dst)) {
+            if (!call->is_initialize(key, dst)) {
                 return false;
             }
         }
         return true;
     }
 
-    static void initialize_all(std::vector<AggFnCall*>& agg_calls, MemRow* dst) {
+    static void initialize_all(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* dst) {
         for (auto call : agg_calls) {
-            call->initialize(dst);
+            call->initialize(key, dst);
         }
     }
-    static void update_all(std::vector<AggFnCall*>& agg_calls, MemRow* src, MemRow* dst) {
+    static void update_all(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* src, MemRow* dst) {
         for (auto call : agg_calls) {
-            call->update(src, dst);
+            call->update(key, src, dst);
         }
     }
-    static void merge_all(std::vector<AggFnCall*>& agg_calls, MemRow* src, MemRow* dst) {
+    static void merge_all(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* src, MemRow* dst) {
         for (auto call : agg_calls) {
-            call->merge(src, dst);
+            call->merge(key, src, dst);
         }
     }
-    static void finalize_all(std::vector<AggFnCall*>& agg_calls, MemRow* dst) {
+    static void finalize_all(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* dst) {
         for (auto call : agg_calls) {
-            call->finalize(dst);
+            call->finalize(key, dst);
+        }
+    }
+    bool is_bitmap_agg() const {
+        switch(_agg_type) {
+            case RB_OR_AGG:
+            case RB_OR_CARDINALITY_AGG:
+            case RB_AND_AGG:
+            case RB_AND_CARDINALITY_AGG:
+            case RB_XOR_AGG:
+            case RB_XOR_CARDINALITY_AGG:
+            case RB_BUILD_AGG:
+                return true;
+            default:
+                return false;
         }
     }
 private:
+    struct InterVal {
+        bool is_assign = false;
+        ExprValue  val;    
+    };
     AggType _agg_type;
     pb::Function _fn;
     int32_t _intermediate_slot_id;
     int32_t _final_slot_id;
     bool _is_distinct = false;
+    bool _is_merge = false;
+    std::map<std::string, InterVal> _intermediate_val_map;
     //聚合函数参数列表，count(*)参数为空
     //merge的时候，类型是slotref，size=1
     //std::vector<ExprNode*> _arg_exprs;

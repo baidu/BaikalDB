@@ -291,7 +291,7 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
             if (node->get_partition_num() > 1) {
                 has_partition = true;
                 if (has_join) {
-                    DB_WARNING("partition table can't join.")
+                    DB_WARNING("partition table can't join.");
                     return -1;
                 }
             }
@@ -321,7 +321,7 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
                                 DB_DEBUG("get partition num %ld", partition_index);
                                 get_partition = true;
                             } else {
-                                DB_WARNING("get table %ld partition number error.", table_id)
+                                DB_WARNING("get table %ld partition number error.", table_id);
                                 return -1;
                             }
                         } else {

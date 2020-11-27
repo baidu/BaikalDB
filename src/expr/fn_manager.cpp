@@ -188,6 +188,33 @@ void FunctionManager::register_operators() {
     register_object_ret("md5", md5, pb::STRING);
     register_object_ret("sha", md5, pb::STRING);
     register_object_ret("sha1", md5, pb::STRING);
+    // bitmap funcs
+    register_object_ret("rb_build", rb_build, pb::BITMAP);
+    register_object_ret("rb_and", rb_and, pb::BITMAP);
+    //register_object_ret("rb_and_cardinality", rb_and_cardinality, pb::UINT64);
+    register_object_ret("rb_or", rb_or, pb::BITMAP);
+    //register_object_ret("rb_or_cardinality", rb_or_cardinality, pb::UINT64);
+    register_object_ret("rb_xor", rb_xor, pb::BITMAP);
+    //register_object_ret("rb_xor_cardinality", rb_xor_cardinality, pb::UINT64);
+    register_object_ret("rb_andnot", rb_andnot, pb::BITMAP);
+    //register_object_ret("rb_andnot_cardinality", rb_andnot_cardinality, pb::UINT64);
+    register_object_ret("rb_cardinality", rb_cardinality, pb::UINT64);
+    register_object_ret("rb_empty", rb_empty, pb::BOOL);
+    register_object_ret("rb_equals", rb_equals, pb::BOOL);
+    //register_object_ret("rb_not_equals", rb_not_equals, pb::BOOL);
+    register_object_ret("rb_intersect", rb_intersect, pb::BOOL);
+    register_object_ret("rb_contains", rb_contains, pb::BOOL);
+    register_object_ret("rb_contains_range", rb_contains_range, pb::BOOL);
+    register_object_ret("rb_add", rb_add, pb::BITMAP);
+    register_object_ret("rb_add_range", rb_add_range, pb::BITMAP);
+    register_object_ret("rb_remove", rb_remove, pb::BITMAP);
+    register_object_ret("rb_remove_range", rb_remove_range, pb::BITMAP);
+    register_object_ret("rb_flip", rb_flip, pb::BITMAP);
+    register_object_ret("rb_flip_range", rb_flip_range, pb::BITMAP);
+    register_object_ret("rb_minimum", rb_minimum, pb::UINT32);
+    register_object_ret("rb_maximum", rb_maximum, pb::UINT32);
+    register_object_ret("rb_rank", rb_rank, pb::UINT32);
+    register_object_ret("rb_jaccard_index", rb_jaccard_index, pb::DOUBLE);
 }
 
 int FunctionManager::init() {
@@ -348,6 +375,7 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
             remainder = 0;
         }
         for (auto& c : types) {
+            (void)c;
             //case_when then子句index为奇数，else子句index为最后一位
             //case_when_expr then子句index为除第0位的偶数，else子句为最后一位
             if (index != 0 && (index % 2 == remainder || index + 1 == types.size())) {
@@ -359,7 +387,7 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
         if (!has_merged_type(target_types, ret_type)) {
             DB_WARNING("no merged type.");
         }
-        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str());
         fn.set_return_type(ret_type);
 
     } else if (fn.name() == "if") {
@@ -370,7 +398,7 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
             target_types.push_back(types[2]);
             has_merged_type(target_types, ret_type);
         }
-        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str());
         fn.set_return_type(ret_type);
     } else if (fn.name() == "ifnull" || fn.name() == "nullif") {
         std::vector<pb::PrimitiveType> target_types;
@@ -380,7 +408,7 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
             target_types.push_back(types[1]);
             has_merged_type(target_types, ret_type);
         }
-        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str())
+        DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str());
         fn.set_return_type(ret_type);
     }
 }

@@ -101,6 +101,18 @@ bind(
     actual = "@com_github_facebook_rocksdb//:rocksdb",
 )
 
+new_http_archive(
+    name = "com_github_RoaringBitmap_CRoaring",
+    url = "https://github.com/RoaringBitmap/CRoaring/archive/v0.2.66.tar.gz",
+    strip_prefix = "CRoaring-0.2.66",
+    build_file = "third-party/com_github_RoaringBitmap_CRoaring/BUILD",
+)
+
+bind(
+    name = "croaring",
+    actual = "@com_github_RoaringBitmap_CRoaring//:croaring",
+)
+
 # snappy
 new_http_archive(
     name = "com_github_google_snappy",

@@ -23,16 +23,6 @@
 #include "mem_row_descriptor.h"
 
 namespace baikaldb { 
-#define DB_WARNING_STATE(state, _fmt_, args...) \
-    do {\
-        DB_WARNING("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
-                state->log_id(), state->region_id(), state->table_id(), ##args); \
-    } while (0);
-#define DB_FATAL_STATE(state, _fmt_, args...) \
-    do {\
-        DB_FATAL("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
-                state->log_id(), state->region_id(), state->table_id(), ##args); \
-    } while (0);
 
 class RuntimeState;
 class QueryContext;

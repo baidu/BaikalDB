@@ -59,6 +59,7 @@ enum PrimitiveType {
     TIME = 18;
     PLACE_HOLDER = 19;
     HEX = 20;
+    BITMAP = 21;
 };
 
 enum SchemaType {

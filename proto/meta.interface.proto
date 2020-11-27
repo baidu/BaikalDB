@@ -288,6 +288,7 @@ message InstanceInfo {
     optional string physical_room   = 5;
     optional Status status          = 6;
     optional string logical_room    = 7;
+    optional string version         = 8;
 };
 
 message MovePhysicalRequest {
@@ -664,6 +665,7 @@ message QueryInstance {
     optional string        region_leader_ids            = 11;
     optional int64         region_count                 = 12;
     optional string        region_ids                   = 13;
+    optional string        version                      = 14;
 };
 
 message QueryRegion {

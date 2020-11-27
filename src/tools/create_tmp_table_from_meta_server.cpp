@@ -157,7 +157,7 @@ int create_table() {
         std::string index_name = split_keys.first;
         auto pb_split_keys = create_table_request.mutable_table_info()->add_split_keys();
         pb_split_keys->set_index_name(index_name);
-        int n = 0;
+        //int n = 0;
         for (auto& split_key : split_keys.second) {
            // if (n++%10==0) {
             pb_split_keys->add_split_keys(split_key);
@@ -180,7 +180,7 @@ int create_table() {
     }
     DB_WARNING("req:%s", create_table_request.ShortDebugString().c_str());
     for (auto& split_keys : index_split_keys) {
-        DB_WARNING("create index_name: %s split_key_size:%d", split_keys.first.c_str(), split_keys.second.size());
+        DB_WARNING("create index_name: %s split_key_size:%lu", split_keys.first.c_str(), split_keys.second.size());
     }
     DB_WARNING("res:%s", create_table_response.ShortDebugString().c_str());
 

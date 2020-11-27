@@ -61,7 +61,7 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
             break;
         }
     }
-    if (idx < fields.size() && idx <= eq_count) {
+    if (idx < fields.size() && (int)idx <= eq_count) {
         size_t order_idx = 0;
         for (; order_idx < order_exprs.size() && idx < fields.size(); order_idx++, idx++) {
             SlotRef* slot_ref = static_cast<SlotRef*>(order_exprs[order_idx]);

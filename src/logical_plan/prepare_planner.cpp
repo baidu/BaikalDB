@@ -67,7 +67,7 @@ int PreparePlanner::plan() {
             //     return -1;
             // }
             std::vector<pb::ExprNode> params;
-            for (size_t idx = 0; idx < exec->param_list.size(); ++idx) {
+            for (int idx = 0; idx < exec->param_list.size(); ++idx) {
                 std::string var_name(exec->param_list[idx].c_str());
                 auto var_iter = client->user_vars.find(var_name.substr(1));
                 if (var_iter != client->user_vars.end()) {

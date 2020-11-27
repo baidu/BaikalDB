@@ -142,7 +142,7 @@ MEDIUMINT { return MEDIUMINT; }
 MEDIUMTEXT { return MEDIUMTEXT; }
 MINUTE_MICROSECOND { un_reserved_keyword(yylval, yyscanner, parser); return MINUTE_MICROSECOND; }
 MINUTE_SECOND { un_reserved_keyword(yylval, yyscanner, parser); return MINUTE_SECOND; }
-MOD { return MOD; }
+MOD { un_reserved_keyword(yylval, yyscanner, parser); return MOD; }
 NOT { return NOT; }
 NO_WRITE_TO_BINLOG { return NO_WRITE_TO_BINLOG; }
 NULL { return NULLX; }
@@ -374,6 +374,7 @@ WARNINGS { un_reserved_keyword(yylval, yyscanner, parser); return WARNINGS; }
 WEEK { un_reserved_keyword(yylval, yyscanner, parser); return WEEK; }
 YEAR { un_reserved_keyword(yylval, yyscanner, parser); return YEAR; }
 HLL { un_reserved_keyword(yylval, yyscanner, parser); return HLL; }
+BITMAP { un_reserved_keyword(yylval, yyscanner, parser); return BITMAP; }
 
 ADDDATE { un_reserved_keyword(yylval, yyscanner, parser); return ADDDATE; /* The following tokens belong to builtin functions. */}
 BIT_AND { un_reserved_keyword(yylval, yyscanner, parser); return BIT_AND; }

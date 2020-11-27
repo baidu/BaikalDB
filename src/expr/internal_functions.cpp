@@ -488,7 +488,7 @@ ExprValue concat_ws(const std::vector<ExprValue>& input) {
     ExprValue tmp(pb::STRING);
 
     bool first_push = false;
-    for (int i = 1; i < input.size(); i++) {
+    for (uint32_t i = 1; i < input.size(); i++) {
         if (!input[i].is_null()) {
             if (!first_push) {
                 first_push = true;
@@ -589,7 +589,7 @@ ExprValue replace(const std::vector<ExprValue>& input) {
     ExprValue tmp(pb::STRING);
     tmp.str_val = input[0].str_val;
 
-    for (auto pos = 0; pos != std::string::npos; pos += input[2].str_val.length()) {
+    for (size_t pos = 0; pos != std::string::npos; pos += input[2].str_val.length()) {
         pos = tmp.str_val.find(input[1].str_val, pos);
         if (pos != std::string::npos) {
             tmp.str_val.replace(pos, input[1].str_val.length(), input[2].str_val);
@@ -619,7 +619,7 @@ ExprValue repeat(const std::vector<ExprValue>& input) {
     ExprValue tmp(pb::STRING);
     tmp.str_val.reserve(val.size() * len);
 
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         tmp.str_val += val;
     }
 
@@ -970,13 +970,13 @@ ExprValue week(const std::vector<ExprValue>& input) {
     struct tm tm;
     localtime_r(&t, &tm);
     boost::gregorian::date today(tm.tm_year += 1900, ++tm.tm_mon, tm.tm_mday);
-    uint32_t week_number = today.week_number();
+    uint32_t week_number = today.week_number() - 1;
     ExprValue tmp(pb::UINT32);
     if (input.size() > 1) {
         ExprValue two = input[1];
         uint32_t mode = two.cast_to(pb::UINT32)._u.uint32_val;
-        if (!mode) {
-            week_number -= 1;
+        if (mode > 0) {
+            week_number += 1;
         }
     }
     tmp._u.uint32_val = week_number;
@@ -1147,7 +1147,7 @@ ExprValue md5(const std::vector<ExprValue>& input) {
 
     int j = 0;
     static char const zEncode[] = "0123456789abcdef";
-    for (int i = 0; i < 16; i ++) {
+    for (uint32_t i = 0; i < 16; i ++) {
         int a = md5_str[i];
         tmp.str_val[j++] = zEncode[(a >> 4) & 0xf];
         tmp.str_val[j++] = zEncode[a & 0xf];
@@ -1171,6 +1171,303 @@ ExprValue sha1(const std::vector<ExprValue>& input) {
 ExprValue sha(const std::vector<ExprValue>& input) {
     return sha1(input);
 }
+
+ExprValue rb_build(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::BITMAP);
+    for (auto& val : input) {
+        tmp._u.bitmap->add(val.get_numberic<uint32_t>());
+    }
+    return tmp;
+}
+
+ExprValue rb_and(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::BITMAP);
+    for (uint32_t i = 1; i < input.size(); i++) {
+        if (input[i].is_bitmap()) {
+            *tmp._u.bitmap &= *input[i]._u.bitmap;
+        }
+    }
+    return tmp;
+}
+/*
+ExprValue rb_and_cardinality(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue bits = rb_and(input);
+    ExprValue tmp(pb::UINT64);
+    if (bits._u.bitmap != nullptr) {
+        tmp._u.uint64_val = bits.bitmap.cardinality();
+    }
+    return tmp;
+}
+*/
+
+ExprValue rb_or(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::BITMAP);
+    for (uint32_t i = 1; i < input.size(); i++) {
+        if (input[i].is_bitmap()) {
+            *tmp._u.bitmap |= *input[i]._u.bitmap;
+        }
+    }
+    return tmp;
+}
+
+/*
+ExprValue rb_or_cardinality(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue bits = rb_or(input);
+    ExprValue tmp(pb::UINT64);
+    tmp._u.uint64_val = bits.bitmap.cardinality();
+    return tmp;
+}
+*/
+
+ExprValue rb_xor(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::BITMAP);
+    for (uint32_t i = 1; i < input.size(); i++) {
+        if (input[i].is_bitmap()) {
+            *tmp._u.bitmap ^= *input[i]._u.bitmap;
+        }
+    }
+    return tmp;
+}
+/*
+ExprValue rb_xor_cardinality(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue bits = rb_xor(input);
+    ExprValue tmp(pb::UINT64);
+    tmp._u.uint64_val = bits.bitmap.cardinality();
+    return tmp;
+}
+*/
+
+ExprValue rb_andnot(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::BITMAP);
+    for (uint32_t i = 1; i < input.size(); i++) {
+        if (input[i].is_bitmap()) {
+            *tmp._u.bitmap -= *input[i]._u.bitmap;
+        }
+    }
+    return tmp;
+}
+/*
+ExprValue rb_andnot_cardinality(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue bits = rb_andnot(input);
+    ExprValue tmp(pb::UINT64);
+    tmp._u.uint64_val = bits.bitmap.cardinality();
+    return tmp;
+}
+*/
+
+ExprValue rb_cardinality(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || !input[0].is_bitmap()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::UINT64);
+    tmp._u.uint64_val = input[0]._u.bitmap->cardinality();
+    return tmp;
+}
+
+ExprValue rb_empty(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::BOOL);
+    if (input.size() != 1 || !input[0].is_bitmap()) {
+        tmp._u.bool_val = false;
+    } else {
+        tmp._u.bool_val = input[0]._u.bitmap->isEmpty();
+    }
+    return tmp;
+}
+
+ExprValue rb_equals(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::BOOL);
+    if (input.size() != 2 || !input[0].is_bitmap() || !input[1].is_bitmap()) {
+        tmp._u.bool_val = false;
+    } else {
+        tmp._u.bool_val = (*input[0]._u.bitmap == *input[1]._u.bitmap);
+    }
+    return tmp;
+}
+
+/*
+ExprValue rb_not_equals(const std::vector<ExprValue>& input) {
+    ExprValue tmp = rb_equals(input);
+    tmp._u.bool_val = tmp._u.bool_val ? false : true;
+    return tmp;
+}
+*/
+
+ExprValue rb_intersect(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::BOOL);
+    if (input.size() != 2 || !input[0].is_bitmap() || !input[1].is_bitmap()) {
+        tmp._u.bool_val = false;
+    } else {
+        tmp._u.bool_val = input[0]._u.bitmap->intersect(*input[1]._u.bitmap);
+    }
+    return tmp;
+}
+
+ExprValue rb_contains(const std::vector<ExprValue>& input) {
+    ExprValue result(pb::BOOL);
+    if (input.size() < 2 || !input[0].is_bitmap()) {
+        result._u.bool_val = false;
+    } else {
+        for (uint32_t i = 1; i < input.size(); i++) {
+            bool ret = input[0]._u.bitmap->contains(input[i].get_numberic<uint32_t>());
+            result._u.bool_val = ret;
+            if (!ret) {
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+ExprValue rb_contains_range(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::BOOL);
+    if (input.size() != 3 || !input[0].is_bitmap()) {
+        tmp._u.bool_val = false;
+    } else {
+        tmp._u.bool_val = input[0]._u.bitmap->containsRange(input[1].get_numberic<uint32_t>(), input[2].get_numberic<uint32_t>());
+    }
+    return tmp;    
+}
+
+ExprValue rb_add(const std::vector<ExprValue>& input) {
+    if (input.size() < 2 || !input[0].is_bitmap()) {
+        return ExprValue::Null();
+    }
+    ExprValue result = input[0];
+    for (size_t i = 1; i < input.size(); i++) {
+        result._u.bitmap->add(input[i].get_numberic<uint32_t>());
+    }
+    (ExprValue&)input[0] = result;
+    return input[0];    
+}
+
+ExprValue rb_add_range(const std::vector<ExprValue>& input) {
+    if (input.size() != 3 || !input[0].is_bitmap()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp._u.bitmap->addRange(input[1].get_numberic<uint32_t>(), input[2].get_numberic<uint32_t>());
+    return tmp;
+}
+
+ExprValue rb_remove(const std::vector<ExprValue>& input) {
+    if (input.size() < 2 || !input[0].is_bitmap()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    for (uint32_t i = 1; i < input.size(); i++) {
+        tmp._u.bitmap->remove(input[i].get_numberic<uint32_t>());
+    }
+    return tmp;
+}
+
+ExprValue rb_remove_range(const std::vector<ExprValue>& input) {
+    if (input.size() != 3 || !input[0].is_bitmap()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    uint32_t start = input[1].get_numberic<uint32_t>();
+    uint32_t end = input[2].get_numberic<uint32_t>();
+    for (uint32_t i = start; i < end; i++) {
+        tmp._u.bitmap->remove(i);
+    }
+    return tmp;
+}
+
+ExprValue rb_flip_range(const std::vector<ExprValue>& input) {
+    if (input.size() != 3 || !input[0].is_bitmap()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    uint32_t start = input[1].get_numberic<uint32_t>();
+    uint32_t end = input[2].get_numberic<uint32_t>();
+    tmp._u.bitmap->flip(start, end);
+    return tmp;    
+}
+
+ExprValue rb_flip(const std::vector<ExprValue>& input) {
+    if (input.size() < 2 || !input[0].is_bitmap()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    for (uint32_t i = 1; i < input.size(); i++) {
+        uint32_t val_tmp = input[1].get_numberic<uint32_t>();
+        tmp._u.bitmap->flip(val_tmp, val_tmp + 1);
+    }
+    return tmp;
+}
+
+ExprValue rb_minimum(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::UINT32);
+    if (input[0].is_bitmap()) {
+        tmp._u.uint32_val = input[0]._u.bitmap->minimum();
+    }
+    return tmp;
+}
+
+ExprValue rb_maximum(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::UINT32);
+    if (input[0].is_bitmap()) {
+        tmp._u.uint32_val = input[0]._u.bitmap->maximum();
+    }
+    return tmp;
+}
+
+ExprValue rb_rank(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::UINT32);
+    if (input[0].is_bitmap()) {
+        uint32_t val_tmp = input[1].get_numberic<uint32_t>();
+        tmp._u.uint32_val = input[0]._u.bitmap->rank(val_tmp);
+    }
+    return tmp;
+}
+
+ExprValue rb_jaccard_index(const std::vector<ExprValue>& input) {
+    ExprValue result(pb::DOUBLE);
+    if (input.size() != 2 || !input[0].is_bitmap() || !input[1].is_bitmap()) {
+        result._u.double_val = 0;
+    } else {
+        result._u.double_val = (input[0]._u.bitmap->jaccard_index(*input[1]._u.bitmap));
+    }
+    return result;
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -30,12 +30,12 @@ DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M")
 DEFINE_int32(ddl_update_time, 300 * 1000 * 1000, "time interval to update ddl");
 DEFINE_int32(ddl_update_process_per_thread_size, 500, "ddl common update process ddlwork size per thread");
 DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 2, "time interval to clear table_tombstone. default(2d)");
-DEFINE_int64(statistics_heart_beat_bytesize, 256 * 1024 * 1024, "default(256M)");
+DEFINE_uint64(statistics_heart_beat_bytesize, 256 * 1024 * 1024, "default(256M)");
 void TableManager::update_index_status(const pb::DdlWorkInfo& ddl_work) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     auto table_id = ddl_work.table_id();
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("update index table_id [%lld] table_info not exist.", table_id);
+        DB_FATAL("update index table_id [%ld] table_info not exist.", table_id);
         return;
     }
 
@@ -51,7 +51,7 @@ void TableManager::drop_index_request(const pb::DdlWorkInfo& ddl_work) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     auto table_id = ddl_work.table_id();
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
-        DB_FATAL("update index table_id [%lld] table_info not exist.", table_id);
+        DB_FATAL("update index table_id [%ld] table_info not exist.", table_id);
         return;
     }
     std::string index_name;
@@ -111,7 +111,7 @@ bool TableManager::process_ddl_update_job_index(DdlWorkMem& meta_work_info, pb::
     meta_work_info.region_ddl_infos.traverse_with_early_return(traverse_func);
 
     if (all_region_done) {
-        DB_NOTICE("table_%lld all region done get to [%s]", meta_work_info.table_id,
+        DB_NOTICE("table_%ld all region done get to [%s]", meta_work_info.table_id,
             pb::IndexState_Name(state).c_str());
         meta_work_info.set_state(state);
         auto meta_work_info_pb = meta_work_info.work_info;
@@ -120,7 +120,7 @@ bool TableManager::process_ddl_update_job_index(DdlWorkMem& meta_work_info, pb::
     //整体工作完成后，不给store发送job信息。
     auto op_type = meta_work_info.work_info.op_type(); 
     if (DdlHelper::ddlwork_is_finish(op_type, state) && all_region_done) {
-        DB_NOTICE("table_id[%lld] ddlwork job done.", meta_work_info.table_id);
+        DB_NOTICE("table_id[%ld] ddlwork job done.", meta_work_info.table_id);
     }
     return all_region_done;
 }
@@ -131,7 +131,7 @@ void TableManager::process_ddl_add_index_process(
     auto index_id = meta_work.work_info.index_id();
     pb::IndexState current_state;
     if (get_index_state(meta_work.table_id, index_id, current_state) != 0) {
-        DB_WARNING("ddl index not ready. table_id[%lld] index_id[%lld]", 
+        DB_WARNING("ddl index not ready. table_id[%ld] index_id[%ld]", 
             meta_work.table_id, index_id);
         return;
     }
@@ -173,7 +173,7 @@ void TableManager::process_ddl_del_index_process(
     auto index_id = meta_work.work_info.index_id();
     pb::IndexState current_state;
     if (get_index_state(meta_work.table_id, index_id, current_state) != 0) {
-        DB_WARNING("ddl index not ready. table_id[%lld] index_id[%lld]", 
+        DB_WARNING("ddl index not ready. table_id[%ld] index_id[%ld]", 
             meta_work.table_id, index_id);
         return;
     }
@@ -921,7 +921,7 @@ void TableManager::add_field(const pb::MetaManagerRequest& request,
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
         return;
     }
-    if (check_table_has_ddlwork(table_id) || check_table_is_linked(table_id)) {
+    if (check_table_has_ddlwork(table_id)) {
         DB_WARNING("table is doing ddl, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
@@ -973,7 +973,7 @@ void TableManager::drop_field(const pb::MetaManagerRequest& request,
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
         return;
     }
-    if (check_table_has_ddlwork(table_id) || check_table_is_linked(table_id)) {
+    if (check_table_has_ddlwork(table_id)) {
         DB_WARNING("table is doing ddl, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
@@ -985,6 +985,13 @@ void TableManager::drop_field(const pb::MetaManagerRequest& request,
             DB_WARNING("field name:%s not existed, request:%s",
                         field.field_name().c_str(), request.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name not exist");
+            return;
+        }
+        auto field_id = _table_info_map[table_id].field_id_map[field.field_name()];
+        if (check_filed_is_linked(table_id, field_id)) {
+            DB_WARNING("field name:%s is binlog link field, request:%s",
+                        field.field_name().c_str(), request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
             return;
         }
         drop_field_names.push_back(field.field_name());
@@ -1034,7 +1041,7 @@ void TableManager::rename_field(const pb::MetaManagerRequest& request,
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
         return;
     }
-    if (check_table_has_ddlwork(table_id) || check_table_is_linked(table_id)) {
+    if (check_table_has_ddlwork(table_id)) {
         DB_WARNING("table is doing ddl, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
@@ -1048,6 +1055,12 @@ void TableManager::rename_field(const pb::MetaManagerRequest& request,
             DB_WARNING("field name:%s not existed, request:%s",
                     field.field_name().c_str(), request.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name not exist");
+            return;
+        }
+        if (check_filed_is_linked(table_id,  _table_info_map[table_id].field_id_map[field.field_name()])) {
+            DB_WARNING("field name:%s is binlog link field, request:%s",
+                        field.field_name().c_str(), request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
             return;
         }
         if (!field.has_new_field_name()) {
@@ -1103,7 +1116,7 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
         return;
     }
-    if (check_table_has_ddlwork(table_id) || check_table_is_linked(table_id)) {
+    if (check_table_has_ddlwork(table_id)) {
         DB_WARNING("table is doing ddl, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
@@ -1116,6 +1129,13 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
             DB_WARNING("field name:%s not existed, request:%s",
                         field.field_name().c_str(), request.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name not exist");
+            return;
+        }
+        auto field_id = _table_info_map[table_id].field_id_map[field_name];
+        if (check_filed_is_linked(table_id, field_id)) {
+            DB_WARNING("field name:%s is binlog link field, request:%s",
+                        field.field_name().c_str(), request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
             return;
         }
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
@@ -1147,7 +1167,8 @@ void TableManager::process_schema_heartbeat_for_store(
                     < table_info_map.second.schema_pb.version()) {
             pb::SchemaInfo* new_table_info = response->add_schema_change_info();
             *new_table_info = table_info_map.second.schema_pb;
-            DB_DEBUG("table_id[%lld] add schema info [%s] ", table_id, new_table_info->ShortDebugString().c_str())
+            DB_DEBUG("table_id[%ld] add schema info [%s] ", table_id,
+                    new_table_info->ShortDebugString().c_str());
             //DB_WARNING("add or update table_name:%s, table_id:%ld",
             //            new_table_info->table_name().c_str(), new_table_info->table_id());
         }
@@ -1262,7 +1283,7 @@ void TableManager::check_update_statistics(const pb::BaikalOtherHeartBeatRequest
                 continue;
             }
             if (response->ByteSizeLong() + stat_pb.ByteSizeLong() > FLAGS_statistics_heart_beat_bytesize) {
-                DB_WARNING("response size: %ld, statistics size: %ld, big than %ld; count: %d", 
+                DB_WARNING("response size: %lu, statistics size: %lu, big than %ld; count: %d", 
                     response->ByteSizeLong(), stat_pb.ByteSizeLong(), FLAGS_statistics_heart_beat_bytesize, upd_cnt);
                 break;
             }
@@ -1367,7 +1388,7 @@ int TableManager::load_table_snapshot(const std::string& value) {
         DB_FATAL("parse from pb fail when load table snapshot, key: %s", value.c_str());
         return -1;
     }
-    DB_WARNING("table snapshot:%s, size:%d", table_pb.ShortDebugString().c_str(), value.size());
+    DB_WARNING("table snapshot:%s, size:%lu", table_pb.ShortDebugString().c_str(), value.size());
     TableMem table_mem;
     table_mem.schema_pb = table_pb;
     table_mem.whether_level_table = table_pb.has_upper_table_name();
@@ -1800,7 +1821,7 @@ void TableManager::check_table_exist_for_peer(const pb::StoreHeartBeatRequest* r
     // TODO:加这么大的锁是否有性能问题
     BAIDU_SCOPED_LOCK(_table_mutex);
     for (auto& peer_info : request->peer_infos()) {
-        int64_t global_index_id = peer_info.table_id();
+        //int64_t global_index_id = peer_info.table_id();
         int64_t main_table_id = peer_info.main_table_id() == 0 ? 
             peer_info.table_id() : peer_info.main_table_id();
         // 通过墓碑来安全gc已删表的region
@@ -2100,7 +2121,7 @@ int TableManager::check_startkey_regionid_map() {
                                  table_id, iter->second.region_id, str_to_hex(iter->first).c_str());
                         continue;
                     }
-                    DB_WARNING("table_id:%ld, first region_id:%ld, version:%d, key(%s, %s)",
+                    DB_WARNING("table_id:%ld, first region_id:%ld, version:%ld, key(%s, %s)",
                                table_id, first_region->region_id(), first_region->version(), 
                                str_to_hex(first_region->start_key()).c_str(), 
                                str_to_hex(first_region->end_key()).c_str());
@@ -2727,7 +2748,7 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
 
     if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "this table has ddlwork in processing.");
-        DB_WARNING("this table[%lld] has ddlwork in processing [%s].", table_id);
+        DB_WARNING("this table[%ld] has ddlwork in processing .", table_id);
         return;
     }
     
@@ -2822,7 +2843,7 @@ int TableManager::init_region_ddlwork(DdlWorkMem& ddl_work_mem) {
         }
         for (const auto& partition_regions : _table_info_map[table_id].partition_regions) {
             for (auto& region_id :  partition_regions.second) {
-                DB_DEBUG("DDL_LOG[init_ddlwork] get region %d", region_id);
+                DB_DEBUG("DDL_LOG[init_ddlwork] get region %ld", region_id);
                 region_ids.push_back(region_id);    
             }
         }
@@ -2830,10 +2851,10 @@ int TableManager::init_region_ddlwork(DdlWorkMem& ddl_work_mem) {
         RegionManager::get_instance()->get_region_info(region_ids, region_infos);
 
         auto replica_num = _table_info_map[table_id].schema_pb.replica_num();
-        DB_DEBUG("DDL_LOG replica_num [%lld]", replica_num);
+        DB_DEBUG("DDL_LOG replica_num [%ld]", replica_num);
         if (!std::all_of(region_infos.begin(), region_infos.end(), 
             [replica_num](const SmartRegionInfo& smart_region) {
-                DB_DEBUG("DDL_LOG region_id [%lld] peers_size [%lld].", 
+                DB_DEBUG("DDL_LOG region_id [%ld] peers_size [%d].", 
                     smart_region->region_id(), smart_region->peers_size());
                 return smart_region->peers_size() > 0;
             })) {
@@ -2844,7 +2865,7 @@ int TableManager::init_region_ddlwork(DdlWorkMem& ddl_work_mem) {
             for (const auto& smart_region : region_infos) {
                 //过滤空region
                 if (smart_region->start_key() == smart_region->end_key() && smart_region->start_key() != "") {
-                    DB_DEBUG("filter null region [%lld]", smart_region->region_id());
+                    DB_DEBUG("filter null region [%ld]", smart_region->region_id());
                     continue;
                 }
                 DdlRegionMem ddl_region_mem;
@@ -2960,7 +2981,7 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
     auto index_iter = mem_schema_pb.mutable_indexs()->begin();
     for (; index_iter != mem_schema_pb.mutable_indexs()->end();) {
         if (index_info.index_id() == index_iter->index_id()) {
-            DB_NOTICE("DDL_LOG udpate_index delete index [%lld].", index_iter->index_id());
+            DB_NOTICE("DDL_LOG udpate_index delete index [%ld].", index_iter->index_id());
             mem_schema_pb.mutable_indexs()->erase(index_iter);
         } else {
             index_iter++;
@@ -2985,7 +3006,7 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
     DB_NOTICE("DDL_LOG add_index schema_info [%s]", _table_info_map[table_id].schema_pb.ShortDebugString().c_str());
     //持久化ddlwork
     update_ddlwork_for_rocksdb(table_id, ddl_work_ptr->work_info, nullptr);
-    DB_NOTICE("DDL_LOG table_id[%lld], ddlwork info : %s", table_id, ddl_work_ptr->work_info.ShortDebugString().c_str());
+    DB_NOTICE("DDL_LOG table_id[%ld], ddlwork info : %s", table_id, ddl_work_ptr->work_info.ShortDebugString().c_str());
     _table_ddlinfo_map.emplace(
         table_id,
         std::move(ddl_work_ptr) 
@@ -2997,7 +3018,7 @@ bool TableManager::check_field_exist(const std::string &field_name,
                         int64_t table_id) {
     auto table_mem_iter = _table_info_map.find(table_id);
     if (table_mem_iter == _table_info_map.end()) {
-        DB_WARNING("table_id:[%lld] not exist.", table_id);
+        DB_WARNING("table_id:[%ld] not exist.", table_id);
         return false;
     }
     auto &&table_mem = table_mem_iter->second;
@@ -3037,7 +3058,7 @@ int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
                 index_info.state() == pb::IS_DELETE_LOCAL) {
                 if (same_index(index_info, index_info_to_check)) {
                     index_id = index_info.index_id();
-                    DB_NOTICE("DDL_LOG rebuild index[%lld]", index_id);
+                    DB_NOTICE("DDL_LOG rebuild index[%ld]", index_id);
                     return 1;
                 } else {
                     DB_WARNING("DDL_LOG same index name, diff fields.");
@@ -3092,7 +3113,7 @@ void TableManager::delete_ddl_region_info(DdlWorkMem& ddlwork, std::vector<int64
     for (const auto& smart_region : region_infos) {
         //过滤空region
         if (smart_region->start_key() == smart_region->end_key() && smart_region->start_key() != "") {
-            DB_NOTICE("DDL_LOG filter null region [%lld]", smart_region->region_id());
+            DB_NOTICE("DDL_LOG filter null region [%ld]", smart_region->region_id());
             ddlwork.region_ddl_infos.erase(smart_region->region_id());
         }
     }
@@ -3125,7 +3146,7 @@ void TableManager::update_ddl_work(const pb::StoreHeartBeatRequest& request, boo
         }
     }
 
-    auto current_clear_time = butil::gettimeofday_us();
+    //auto current_clear_time = butil::gettimeofday_us();
     //5分钟跑一次
     if (update_flag) {
         for (const auto& ddlinfo : local_ddlinfo_map) {
@@ -3150,7 +3171,7 @@ void TableManager::update_ddl_work(const pb::StoreHeartBeatRequest& request, boo
         //处理store中所有的ddlwork
         for (const auto& ddlinfo : local_ddlinfo_map) {
             
-            DB_NOTICE("update ddl work info table_id[%lld]", ddlinfo.first);
+            DB_NOTICE("update ddl work info table_id[%ld]", ddlinfo.first);
             DdlWorkMem& meta_work = *(ddlinfo.second); 
             auto op_type = meta_work.work_info.op_type();
 
@@ -3175,7 +3196,7 @@ void TableManager::update_ddl_work(const pb::StoreHeartBeatRequest& request, boo
         }
     }
     auto response_ddlwork_time = ddl_time.get_time();
-    DB_NOTICE("DDL_LOG ddlwork_time: leader_region_time[%lld] update_time[%lld], response_time[%lld], store_ddlwork_size[%d] leader_region_size[%d]",
+    DB_NOTICE("DDL_LOG ddlwork_time: leader_region_time[%ld] update_time[%ld], response_time[%ld], store_ddlwork_size[%d] leader_region_size[%d]",
         leader_region_time, update_ddlwork_time, response_ddlwork_time, request.ddlwork_infos_size(), request.leader_regions_size());
 }
 
@@ -3213,7 +3234,7 @@ void TableManager::process_ddl_heartbeat_for_store(const pb::StoreHeartBeatReque
     ddl_time.reset();
     update_ddl_work(*request, update_flag);
     auto update_time = ddl_time.get_time();
-    DB_NOTICE("ddlwork_time start[%llu] init[%llu] update[%llu]", start_time, init_time, update_time);
+    DB_NOTICE("ddlwork_time start[%lu] init[%lu] update[%lu]", start_time, init_time, update_time);
 }
 
 void TableManager::update_index_status(const pb::MetaManagerRequest& request,
@@ -3228,7 +3249,7 @@ void TableManager::update_index_status(const pb::MetaManagerRequest& request,
                     if (request_index_info.has_deleted() && 
                         request_index_info.deleted()) {
                         //删除索引
-                        DB_NOTICE("DDL_LOG udpate_index_status delete index [%lld].", index_iter->index_id());
+                        DB_NOTICE("DDL_LOG udpate_index_status delete index [%ld].", index_iter->index_id());
                         update_op_version(mem_schema_pb.mutable_schema_conf(), "drop index " + index_iter->index_name());
                         mem_schema_pb.mutable_indexs()->erase(index_iter);
                     } else {
@@ -3251,7 +3272,7 @@ void TableManager::delete_ddlwork(const pb::MetaManagerRequest& request, braft::
     BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
     std::vector<std::string> ddlwork_info_vector;
     int64_t table_id = request.ddlwork_info().table_id();
-    DB_DEBUG("DDL_LOG delete ddlwork table_id[%lld]", table_id);
+    DB_DEBUG("DDL_LOG delete ddlwork table_id[%ld]", table_id);
     if (_table_ddlinfo_map.find(table_id) == _table_ddlinfo_map.end()) {
         DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist or ddl not exist");
@@ -3289,7 +3310,7 @@ int TableManager::update_ddlwork_for_rocksdb(int64_t table_id,
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return -1;
     }    
-    DB_DEBUG("DDL_LOG update_ddlwork_for_rocksdb success, table_id[%lld], ddlwork_info[%s]", 
+    DB_DEBUG("DDL_LOG update_ddlwork_for_rocksdb success, table_id[%ld], ddlwork_info[%s]", 
         table_id, ddlwork_info.ShortDebugString().c_str());
     return 0;
 }
@@ -3317,7 +3338,7 @@ void TableManager::common_update_ddlwork_info_heartbeat_for_store(const pb::Stor
 
             const auto& store_ddl_info = request->ddlwork_infos(index);
             auto table_id = store_ddl_info.table_id();
-            //DB_DEBUG("update store ddl_work table_id[%lld] ddlwork[%s]", table_id, 
+            //DB_DEBUG("update store ddl_work table_id[%ld] ddlwork[%s]", table_id, 
             //    store_ddl_info.ShortDebugString().c_str());
 
             if (local_ddlwork_ptr.count(table_id) == 0) {
@@ -3333,14 +3354,14 @@ void TableManager::common_update_ddlwork_info_heartbeat_for_store(const pb::Stor
             auto current_timestamp = ddlwork_ptr->work_info.begin_timestamp();
             //时间戳不对，跳过
             if (store_ddl_info.begin_timestamp() != current_timestamp) {
-                DB_WARNING("store work begin_timestamp[%ld] and meta work begin_timestamp[%ld] not equal.",
+                DB_WARNING("store work begin_timestamp[%u] and meta work begin_timestamp[%u] not equal.",
                     store_ddl_info.begin_timestamp(), current_timestamp);
                 continue;
             }
 
             //处理store rollback
             if (store_ddl_info.rollback() == true) {
-                DB_FATAL("DDL_LOG rollback table_id [%lld] error[%s]", table_id, 
+                DB_FATAL("DDL_LOG rollback table_id [%ld] error[%s]", table_id, 
                     pb::ErrCode_Name(store_ddl_info.errcode()).c_str());
 
                 ddlwork_ptr->set_rollback(true);
@@ -3373,7 +3394,7 @@ int TableManager::load_ddl_snapshot(const std::string& value) {
     ddl_mem_ptr->table_id = work_info_pb.table_id();
     pb::IndexState current_state;
     if (get_index_state(ddl_mem_ptr->table_id, work_info_pb.index_id(), current_state) != 0) {
-        DB_FATAL("ddl index not ready. table_id[%lld] index_id[%lld]", 
+        DB_FATAL("ddl index not ready. table_id[%ld] index_id[%ld]", 
             ddl_mem_ptr->table_id, work_info_pb.index_id());
         return 0;
     } else {
@@ -3448,7 +3469,7 @@ void TableManager::collect_ddlwork_info(DdlWorkMem& meta_work) {
                 meta_work.need_scan_regions.set(region_id, 1);
             }
         }
-        DB_NOTICE("DDL_LOG table_id[%lld] scan_flag[%s], target_state_size[%d] non_target_state_size[%d]",
+        DB_NOTICE("DDL_LOG table_id[%ld] scan_flag[%s], target_state_size[%d] non_target_state_size[%d]",
             meta_work.table_id, meta_work.is_leader_region_info_collected ? "true" : "false", 
             target_state_size, non_target_state_size);
     } else {
@@ -3507,7 +3528,7 @@ void TableManager::init_ddlwork_with_leader_region_info(const pb::StoreHeartBeat
             if (peers.size() != int(region_info.peer_infos.size())) {
                 for (const auto& peer : peers) {
                     if (region_info.peer_infos.count(peer) == 0) {
-                        DB_NOTICE("add region from peer[%s] region_id[%lld] table_id[%lld]",
+                        DB_NOTICE("add region from peer[%s] region_id[%ld] table_id[%ld]",
                             peer.c_str(), region_id, table_id);
                         region_info.peer_infos.emplace(peer, DdlPeerMem{pb::IS_UNKNOWN, peer});
                     }
@@ -3557,7 +3578,7 @@ void TableManager::delete_ddlwork_with_leader_region_info(const pb::StoreHeartBe
             while (iter != region_info.peer_infos.end()) {
                 auto exist = std::find(std::begin(peers), std::end(peers), iter->second.peer);
                 if (exist == std::end(peers)) {
-                    DB_NOTICE("remove region from leader_region peer[%s] region_id[%lld] table_id[%lld]",
+                    DB_NOTICE("remove region from leader_region peer[%s] region_id[%ld] table_id[%ld]",
                         iter->second.peer.c_str(), region_id, table_id);
                     iter = region_info.peer_infos.erase(iter);
 
