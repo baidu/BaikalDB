@@ -11,7 +11,7 @@ startMeta()
 startStore()
 {
     echo "Starting baikalStore"
-    sleep 30
+    sleep 10
     cd baikalStore
     source script/init_meta_server.sh meta:8010
     source script/create_namespace.sh meta:8010
@@ -24,7 +24,7 @@ startStore()
 
 startDb() {
     echo "Starting baikaldb"
-    sleep 30
+    sleep 10
     cd baikaldb
     source script/create_internal_table.sh meta:8010
     bin/baikaldb --meta_server_bns=${META_SERVER_BNS:-meta:8010} 

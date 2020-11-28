@@ -8,7 +8,7 @@ curl -s -d '{
         "logical_rooms" : ["bj", "nj", "gz"]
     }
 }' http://$1/MetaService/meta_manager
-echo -e "\n"
+
 
 #插入物理机房
 echo -e "add physical idc: bj nj gz\n"
