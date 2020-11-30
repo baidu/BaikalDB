@@ -280,6 +280,32 @@ int PacketNode::handle_trace2(RuntimeState* state) {
     return 0;
 }
 
+int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
+    auto subquery_exprs_vec = state->mutable_subquery_exprs();
+    bool eos = false;
+    do {
+        if (_children.empty()) {
+            break;
+        }
+        RowBatch batch;
+        int ret = _children[0]->get_next(state, &batch, &eos);
+        if (ret < 0) {
+            DB_WARNING("children:get_next fail:%d", ret);
+            return ret;
+        }
+        for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
+            MemRow* row = batch.get_row().get();
+            std::vector<ExprValue> val_row;
+            val_row.reserve(_projections.size());
+            for (auto expr : _projections) {
+                val_row.emplace_back(expr->get_value(row).cast_to(expr->col_type()));
+            }
+            subquery_exprs_vec->emplace_back(val_row);
+        }
+    } while (!eos);
+    return 0;
+}
+
 int PacketNode::open(RuntimeState* state) {
     _client = state->client_conn();
 
@@ -325,6 +351,9 @@ int PacketNode::open(RuntimeState* state) {
         return open_histogram(state);
     } else if (state->explain_type == SHOW_CMSKETCH) {
         return open_cmsketch(state);
+    }
+    if (state->is_expr_subquery()) {
+        return fatch_expr_subquery_results(state);
     }
 
     pack_head();
@@ -460,7 +489,7 @@ int PacketNode::open_cmsketch(RuntimeState* state) {
     int field_id = state->get_tuple_desc(0)->slots(0).field_id();
     auto cmsketch_ptr = stat_ptr->get_cmsketchcolumn_ptr(field_id);
     if (cmsketch_ptr == nullptr) {
-        DB_WARNING("can`t find cmsketch, table_id:%ld, field_id:%ld", table_id, field_id);
+        DB_WARNING("can`t find cmsketch, table_id:%ld, field_id:%d", table_id, field_id);
         return -1;
     }
     names.push_back("field_id:" + std::to_string(field_id));
@@ -489,7 +518,6 @@ int PacketNode::open_analyze(RuntimeState* state) {
     bool eos = false;
     int ret = 0;
     TimeCost time;
-    int rows = 0;
     std::vector<std::shared_ptr<RowBatch> > batch_vector;
     do {
         if (_children.empty()) {
@@ -670,7 +698,7 @@ int PacketNode::pack_head() {
         return -1;
     }
     if (!_send_buf->byte_array_append_length_coded_binary(_fields.size())) {
-        DB_FATAL("byte_array_append_len failed. len:[%d]", _fields.size());
+        DB_FATAL("byte_array_append_len failed. len:[%lu]", _fields.size());
         return -1;
     }
     int packet_body_len = _send_buf->_size - start_pos - 4;

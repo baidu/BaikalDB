@@ -20,18 +20,6 @@
 #include "re2/re2.h"
 
 namespace baikaldb {
-class NotPredicate : public ScalarFnCall {
-public:
-    virtual ExprValue get_value(MemRow* row) {
-        ExprValue val = _children[0]->get_value(row);
-        if (!val.is_null()) {
-            val._u.bool_val = !val.get_numberic<bool>();
-            val.type = pb::BOOL;
-        }
-        return val;
-    }
-};
-
 class AndPredicate : public ScalarFnCall {
 public:
     virtual ExprValue get_value(MemRow* row) {
@@ -137,6 +125,24 @@ private:
     std::unique_ptr<re2::RE2> _regex_ptr;
     std::string _regex_pattern;
     char _escape_char = '\\';
+};
+
+class NotPredicate : public ScalarFnCall {
+public:
+    virtual ExprValue get_value(MemRow* row) {
+        ExprValue val = _children[0]->get_value(row);
+        if (!val.is_null()) {
+            val._u.bool_val = !val.get_numberic<bool>();
+            val.type = pb::BOOL;
+        }
+        return val;
+    }
+    bool always_null_or_false() const {
+        if (_children[0]->node_type() == pb::IN_PREDICATE) {
+            return _children[0]->has_null();
+        }
+        return false;
+    }
 };
 }
 

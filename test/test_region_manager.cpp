@@ -13,13 +13,13 @@
 // limitations under the License.
 
 #include "gtest/gtest.h"
+#include <gflags/gflags.h>
 #include "schema_manager.h"
 #include "table_manager.h"
 #include "region_manager.h"
 #include "namespace_manager.h"
 #include "database_manager.h"
 #include "meta_rocksdb.h"
-#include <gflags/gflags.h>
 namespace baikaldb {
     DECLARE_string(db_path);
 }
@@ -251,7 +251,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
             }
         }
         for (auto& field : table_mem.second.field_id_map) {
-            DB_WARNING("field_id:%ld, field_name:%s", field.second, field.first.c_str());
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
         }
         for (auto& index : table_mem.second.index_id_map) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
@@ -287,7 +287,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
         DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
-            DB_WARNING("field_id:%ld, field_name:%s", field.second, field.first.c_str());
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
         }
         for (auto& index : table_mem.second.index_id_map) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
@@ -361,7 +361,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
         DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
-            DB_WARNING("field_id:%ld, field_name:%s", field.second, field.first.c_str());
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
         }
         for (auto& index : table_mem.second.index_id_map) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
@@ -405,7 +405,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
         DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
-            DB_WARNING("field_id:%ld, field_name:%s", field.second, field.first.c_str());
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
         }
         for (auto& index : table_mem.second.index_id_map) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
@@ -479,7 +479,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
         DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
-            DB_WARNING("field_id:%ld, field_name:%s", field.second, field.first.c_str());
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
         }
         for (auto& index : table_mem.second.index_id_map) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
@@ -517,7 +517,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
         DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
-            DB_WARNING("field_id:%ld, field_name:%s", field.second, field.first.c_str());
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
         }
         for (auto& index : table_mem.second.index_id_map) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());

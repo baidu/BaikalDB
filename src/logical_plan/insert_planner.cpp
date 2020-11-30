@@ -79,10 +79,9 @@ int InsertPlanner::plan() {
 }
 
 int InsertPlanner::gen_select_plan() {
-    auto client = _ctx->client_conn;
     if (_insert_stmt->subquery_stmt != nullptr) {
         parser::DmlNode* subquery = _insert_stmt->subquery_stmt;
-        int ret = gen_subquery_plan(subquery);
+        int ret = gen_subquery_plan(subquery, _plan_table_ctx, ExprParams());
         if (ret < 0) {
             return -1;
         }
@@ -121,7 +120,7 @@ int InsertPlanner::parse_db_table(pb::InsertNode* node) {
         DB_WARNING("invalid database or table:%s.%s", database.c_str(), table.c_str());
         return -1;
     }
-    _table_id = _table_info[database + "." + table]->id;
+    _table_id = _plan_table_ctx->table_info[database + "." + table]->id;
     node->set_table_id(_table_id);
     //DB_WARNING("db:%s, tbl:%s, tbl_id:%lu", database.c_str(), table.c_str(), _table_id);
     return 0;
@@ -153,7 +152,7 @@ int InsertPlanner::parse_kv_list() {
         _update_slots.push_back(slot);
 
         pb::Expr value_expr;
-        if (0 != create_expr_tree(_insert_stmt->on_duplicate[i]->expr, value_expr, false, false)) {
+        if (0 != create_expr_tree(_insert_stmt->on_duplicate[i]->expr, value_expr, CreateExprOptions())) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
@@ -205,6 +204,7 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
             _default_fields.push_back(field);
         }
     }
+    DB_WARNING("insert_node:%s", node->DebugString().c_str());
     return 0;
 }
 
@@ -220,7 +220,7 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
         if (_ctx->new_prepared) {
             for (size_t idx = 0; idx < (size_t)row_expr->children.size(); ++idx) {
                 pb::Expr* expr = node->add_insert_values();
-                if (0 != create_expr_tree(row_expr->children[idx], *expr, false, false)) {
+                if (0 != create_expr_tree(row_expr->children[idx], *expr, CreateExprOptions())) {
                     DB_WARNING("create insertion value expr failed");
                     return -1;
                 }
@@ -266,7 +266,7 @@ int InsertPlanner::fill_default_value(SmartRecord record, FieldInfo& field) {
 
 int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartRecord record, FieldInfo& field) {
     pb::Expr value_expr;
-    if (0 != create_expr_tree(parser_expr, value_expr, false, false)) {
+    if (0 != create_expr_tree(parser_expr, value_expr, CreateExprOptions())) {
         DB_WARNING("create insertion value expr failed");
         return -1;
     }

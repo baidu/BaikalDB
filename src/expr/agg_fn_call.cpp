@@ -35,6 +35,13 @@ int AggFnCall::init(const pb::ExprNode& node) {
         {"max", MAX},
         {"hll_add_agg", HLL_ADD_AGG},
         {"hll_merge_agg", HLL_MERGE_AGG},
+        {"rb_or_agg", RB_OR_AGG},
+        //{"rb_or_cardinality_agg", RB_OR_CARDINALITY_AGG},
+        {"rb_and_agg", RB_AND_AGG},
+        //{"rb_and_cardinality_agg", RB_AND_CARDINALITY_AGG},
+        {"rb_xor_agg", RB_XOR_AGG},
+        //{"rb_xor_cardinality_agg", RB_XOR_CARDINALITY_AGG},
+        {"rb_build_agg", RB_BUILD_AGG},
     };
     //所有agg都是非const的
     _is_constant = false;
@@ -95,6 +102,27 @@ int AggFnCall::type_inferer() {
             }
             _col_type = pb::HLL;
             return 0;
+        case RB_OR_AGG:
+        case RB_AND_AGG:
+        case RB_XOR_AGG:
+        case RB_BUILD_AGG: {
+            if (_children.size() == 0) {
+                DB_FATAL("children.size is 0");
+                return -1;
+            }
+            _col_type = pb::BITMAP;
+            return 0;
+        }
+        case RB_AND_CARDINALITY_AGG:
+        case RB_XOR_CARDINALITY_AGG:
+        case RB_OR_CARDINALITY_AGG: {
+            if (_children.size() == 0) {
+                DB_FATAL("children.size is 0");
+                return -1;
+            }
+            _col_type = pb::UINT64;
+            return 0;
+        }
         default:
             DB_WARNING("un-support agg type:%d", _agg_type);
             return -1;
@@ -148,8 +176,15 @@ int AggFnCall::open() {
         case MAX:
         case HLL_ADD_AGG:
         case HLL_MERGE_AGG:
+        case RB_OR_AGG:
+        case RB_OR_CARDINALITY_AGG:
+        case RB_AND_AGG:
+        case RB_AND_CARDINALITY_AGG:
+        case RB_XOR_AGG:
+        case RB_XOR_CARDINALITY_AGG:
+        case RB_BUILD_AGG:
             if (_children.size() == 0) {
-                DB_WARNING("_agg_type:%d , _children.size() == 0", _agg_type)
+                DB_WARNING("_agg_type:%d , _children.size() == 0", _agg_type);
                 return -1;
             }
             break;
@@ -171,7 +206,7 @@ struct AvgIntermediate {
     }
 };
 
-bool AggFnCall::is_initialize(MemRow* dst) {
+bool AggFnCall::is_initialize(const std::string& key, MemRow* dst) {
     if (_is_distinct) {
         return false;
     }
@@ -205,40 +240,76 @@ bool AggFnCall::is_initialize(MemRow* dst) {
 }
 
 // 聚合函数逻辑
-int AggFnCall::initialize(MemRow* dst) {
-    if (!dst->get_value(_tuple_id, _intermediate_slot_id).is_null()) {
-        return 0;
-    }
+int AggFnCall::initialize(const std::string& key, MemRow* dst) {
+    ExprValue dst_val = dst->get_value(_tuple_id, _intermediate_slot_id);
     switch (_agg_type) {
         case COUNT_STAR:
-        case COUNT:
-            dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
+        case COUNT: {
+            if (dst_val.is_null()) {
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
+            }
             return 0;
-        case SUM:
-            dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
+        }
+        case SUM: {
+            if (dst_val.is_null()) {
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
+            }
             return 0;
+        }
         case AVG: {
-            ExprValue value(pb::STRING);
-            AvgIntermediate avg;
-            value.str_val.assign((char*)&avg, sizeof(avg));
-            dst->set_value(_tuple_id, _intermediate_slot_id, value);
-            dst->set_value(_tuple_id, _final_slot_id, ExprValue::Null());
+            if (dst_val.is_null()) {
+                ExprValue value(pb::STRING);
+                AvgIntermediate avg;
+                value.str_val.assign((char*)&avg, sizeof(avg));
+                dst->set_value(_tuple_id, _intermediate_slot_id, value);
+                dst->set_value(_tuple_id, _final_slot_id, ExprValue::Null());
+            }
             return 0;
         }
         case MIN:
-        case MAX:
-            dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
+        case MAX: {
+            if (dst_val.is_null()) {
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
+            }
             return 0;
+        }
         case HLL_ADD_AGG:
-        case HLL_MERGE_AGG:
-            dst->set_value(_tuple_id, _intermediate_slot_id, hll::hll_init());
+        case HLL_MERGE_AGG: {
+            if (dst_val.is_null()) {
+                dst->set_value(_tuple_id, _intermediate_slot_id, hll::hll_init());
+            }
             return 0;
+        }
+        case RB_OR_AGG:
+        case RB_OR_CARDINALITY_AGG:
+        case RB_AND_AGG:
+        case RB_AND_CARDINALITY_AGG:
+        case RB_XOR_AGG:
+        case RB_XOR_CARDINALITY_AGG:
+        case RB_BUILD_AGG: {
+            if (_intermediate_val_map.count(key) == 0) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                if (dst_val.is_null()) {
+                    intermediate_val.val = ExprValue::Bitmap();
+                    dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Bitmap());
+                } else {
+                    dst_val.cast_to(pb::BITMAP);
+                    intermediate_val.val = dst_val;
+                    dst->set_value(_tuple_id, _intermediate_slot_id, dst_val);
+                }
+                if (_agg_type != RB_AND_AGG && _agg_type != RB_AND_CARDINALITY_AGG) {
+                    // and第一次需要特殊处理
+                    intermediate_val.is_assign = true;
+                }
+            }
+            return 0;
+        }
         default:
             return -1;
     }
 }
 
-int AggFnCall::update(MemRow* src, MemRow* dst) {
+int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
     switch (_agg_type) {
         case COUNT_STAR: {
             ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
@@ -318,18 +389,65 @@ int AggFnCall::update(MemRow* src, MemRow* dst) {
             }
             return 0;
         }
+        case RB_OR_AGG:
+        case RB_OR_CARDINALITY_AGG: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                *intermediate_val.val._u.bitmap |= *value._u.bitmap;
+            }
+            return 0;
+        }
+        case RB_AND_AGG:
+        case RB_AND_CARDINALITY_AGG: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                if (intermediate_val.is_assign) {
+                    *intermediate_val.val._u.bitmap &= *value._u.bitmap;
+                } else {
+                    *intermediate_val.val._u.bitmap = *value._u.bitmap;
+                    intermediate_val.is_assign = true;
+                }              
+            }
+            return 0;
+        }
+        case RB_XOR_AGG:
+        case RB_XOR_CARDINALITY_AGG: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                *intermediate_val.val._u.bitmap ^= *value._u.bitmap;
+            }
+            return 0;
+        }
+        case RB_BUILD_AGG: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key].val;
+                intermediate_val._u.bitmap->add(value.get_numberic<uint32_t>());
+            }
+            return 0;
+        }
         default:
             return -1;
     }
 }
-int AggFnCall::merge(MemRow* src, MemRow* dst) {
+int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
     if (_is_distinct) {
         //distinct agg, 无merge概念
         //普通agg与distinct agg一起出现时，普通agg需要多计算一次，因此需要merge
-        return update(src, dst);
+        return update(key, src, dst);
     }
     //首行不需要merge
     if (src == dst) {
+        if (is_bitmap_agg()){
+            ExprValue dst_value = src->get_value(_tuple_id, _intermediate_slot_id);
+            dst_value.cast_to(pb::BITMAP);
+            auto& intermediate_val = _intermediate_val_map[key];
+            intermediate_val.is_assign = true;
+            intermediate_val.val = dst_value;
+        }
         return 0;
     }
     switch (_agg_type) {
@@ -385,12 +503,56 @@ int AggFnCall::merge(MemRow* src, MemRow* dst) {
             }
             return 0;
         }
+        case RB_OR_AGG:
+        case RB_OR_CARDINALITY_AGG:
+        case RB_BUILD_AGG: {
+            ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!src_value.is_null()) {
+                src_value.cast_to(pb::BITMAP);
+                auto& intermediate_val = _intermediate_val_map[key].val;
+                *intermediate_val._u.bitmap |= *src_value._u.bitmap;
+            }
+            return 0;
+        }
+        case RB_AND_AGG:
+        case RB_AND_CARDINALITY_AGG: {
+            ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!src_value.is_null()) {
+                src_value.cast_to(pb::BITMAP);
+                auto& intermediate_val = _intermediate_val_map[key];
+                if (intermediate_val.is_assign) {
+                    *intermediate_val.val._u.bitmap &= *src_value._u.bitmap;
+                } else {
+                    *intermediate_val.val._u.bitmap = *src_value._u.bitmap;
+                    intermediate_val.is_assign = true;
+                }
+            }
+            return 0;
+        }
+        case RB_XOR_AGG:
+        case RB_XOR_CARDINALITY_AGG: {
+            ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!src_value.is_null()) {
+                src_value.cast_to(pb::BITMAP);
+                auto& intermediate_val = _intermediate_val_map[key].val;
+                *intermediate_val._u.bitmap ^= *src_value._u.bitmap;
+            }
+            return 0;
+        }
         default:
             return -1;
     }
 }
-int AggFnCall::finalize(MemRow* dst) {
+int AggFnCall::finalize(const std::string& key, MemRow* dst) {
     if (_intermediate_slot_id == _final_slot_id) {
+        if (is_bitmap_agg()) {
+            auto& val = _intermediate_val_map[key];
+            if (val.is_assign) {
+                dst->set_value(_tuple_id, _final_slot_id, _intermediate_val_map[key].val);
+            } else {
+                dst->set_value(_tuple_id, _final_slot_id,  ExprValue::Null());
+            }
+        }
         return 0;
     }
     switch (_agg_type) {
@@ -404,6 +566,16 @@ int AggFnCall::finalize(MemRow* dst) {
             } else {
                 dst->set_value(_tuple_id, _final_slot_id, ExprValue::Null());
             }
+            return 0;
+        }
+        case RB_OR_CARDINALITY_AGG:
+        case RB_AND_CARDINALITY_AGG:
+        case RB_XOR_CARDINALITY_AGG: {
+            auto& intermediate_val = _intermediate_val_map[key];
+            dst->set_value(_tuple_id, _intermediate_slot_id, _intermediate_val_map[key].val);
+            ExprValue result(pb::UINT64);
+            result._u.uint64_val = intermediate_val.val._u.bitmap->cardinality();
+            dst->set_value(_tuple_id, _final_slot_id, result);
             return 0;
         }
         default:

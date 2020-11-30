@@ -67,7 +67,7 @@ int UnionPlanner::gen_select_stmts_plan() {
     std::vector<std::string>    final_select_names;
     for (int stmt_idx = 0; stmt_idx < _union_stmt->select_stmts.size(); stmt_idx++) {
         parser::SelectStmt* select = _union_stmt->select_stmts[stmt_idx];
-        int ret = gen_subquery_plan(select);
+        int ret = gen_subquery_plan(select, _plan_table_ctx, ExprParams());
         if (ret < 0) {
             return -1;
         }
@@ -89,7 +89,7 @@ int UnionPlanner::gen_select_stmts_plan() {
 
 void UnionPlanner::parse_dual_fields() {
     int32_t slot_id = 1;
-    int32_t tuple_id = _tuple_cnt++;
+    int32_t tuple_id = 0; // 复用第一个select的tuple
     pb::TupleDescriptor tuple_desc;
     tuple_desc.set_tuple_id(tuple_id);
     tuple_desc.set_table_id(1);
@@ -246,11 +246,11 @@ int UnionPlanner::parse_limit() {
         return 0;
     }
     parser::LimitClause* limit = _union_stmt->limit;
-    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, false, false)) {
+    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, CreateExprOptions())) {
         DB_WARNING("create limit offset expr failed");
         return -1;
     }
-    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, false, false)) {
+    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, CreateExprOptions())) {
         DB_WARNING("create limit count expr failed");
         return -1;
     }

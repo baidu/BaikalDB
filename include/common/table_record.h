@@ -178,6 +178,8 @@ public:
             const FieldInfo& field_info,
             MutTableKey& key, bool clear, bool like_prefix);
 
+    int field_to_string(const FieldInfo& field_info, std::string* out);
+
     //TODO: secondary key
     int decode_field(const Reflection* _reflection,
             const FieldDescriptor* field, 
@@ -203,7 +205,7 @@ public:
     int decode_primary_key(IndexInfo& index, const TableKey& key, int& pos);
 
     // those two funcs are only used for encode/decode non-pk fields after primary, for cstore
-    int encode_field(const FieldInfo& field_info, std::string& out);
+    int encode_field_for_cstore(const FieldInfo& field_info, std::string& out);
     int decode_field(const FieldInfo& field_info, const rocksdb::Slice& in);
 
     const FieldDescriptor* get_field_by_idx(int32_t idx) {

@@ -150,7 +150,7 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
                 MessageHelper::set_string(field, message, get_string());
             } break;
             default: {
-                DB_FATAL("invalid TYPE: %d, offset: %lu,%lu",
+                DB_FATAL("invalid TYPE: %d, field_id:%d, offset: %lu,%lu",
                         field->type(), iter->first, _offset, _size);
                 return -1;
             } break;

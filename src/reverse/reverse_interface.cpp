@@ -77,7 +77,7 @@ int parse_term_info(
     }
     uint64_t tags = strtoul(next + 1, NULL, 10);
     uint64_t tag = 1;
-    uint64_t tmp = 0xFFFFFFFFFFFFFFFF;//判断后续位是否还有1的标志
+    uint64_t tmp = UINT64_MAX;//判断后续位是否还有1的标志
     for (uint32_t i = 1; i <= 64; ++i) {
         if (tags & tag) {
             tag_source_vec.push_back(tag);

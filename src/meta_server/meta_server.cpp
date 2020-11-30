@@ -350,6 +350,13 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
         return;
     }
     if (request->op_type() == pb::OP_RECOVERY_ALL_REGION) {
+        if (!_meta_state_machine->is_leader()) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("not leader");
+            response->set_leader(butil::endpoint2str(_meta_state_machine->get_leader()).c_str());
+            DB_WARNING("meta state machine is not leader, request: %s", request->ShortDebugString().c_str());
+            return;
+        }
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
         RegionManager::get_instance()->recovery_all_region(*request, response);

@@ -307,11 +307,13 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 }
                 json_iter = root.FindMember("dists");
                 if (json_iter != root.MemberEnd()) {
-                    for (auto i = 0; i < json_iter->value.Size(); i++) {
-                        const rapidjson::Value& dist_value = json_iter->value[i];
-                        auto* dist = table.add_dists();
-                        dist->set_logical_room(dist_value["logical_room"].GetString());
-                        dist->set_count(dist_value["count"].GetInt());
+                    if (json_iter->value.IsArray()) {
+                        for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                            const rapidjson::Value& dist_value = json_iter->value[i];
+                            auto* dist = table.add_dists();
+                            dist->set_logical_room(dist_value["logical_room"].GetString());
+                            dist->set_count(dist_value["count"].GetInt());
+                        }
                     }
                 }
                 json_iter = root.FindMember("region_split_lines");
@@ -396,7 +398,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             
             for (int32_t index = 0; index < p_option->range.size(); ++index) {
                 auto range_ptr = partition_ptr->add_range_partition_values();
-                if (0 != create_expr_tree(p_option->range[index], *range_ptr, false, false)) {
+                if (0 != create_expr_tree(p_option->range[index], *range_ptr, CreateExprOptions())) {
                     DB_WARNING("error pasing common expression");
                     return -1;
                 }
@@ -722,6 +724,9 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     } break;
     case parser::MYSQL_TYPE_HLL: {
         return pb::HLL;
+    } break;
+    case parser::MYSQL_TYPE_BITMAP: {
+        return pb::BITMAP;
     } break;
     default : {
         DB_WARNING("unsupported item type: %d", field_type->type);

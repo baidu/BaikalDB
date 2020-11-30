@@ -140,6 +140,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
         if (!expr->children(i)->is_constant()) {
             return;
         }
+        if (!expr->children(i)->is_row_expr()) {
+            return;
+        }
         std::map<size_t, ExprValue> row_value;
         for (auto& pair : slots) {
             size_t idx = pair.first;
@@ -259,7 +262,7 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
             index_ids.push_back(index_id);
             if (table_info_ptr->reverse_fields.count(field_id) == 0 &&
                 table_info_ptr->arrow_reverse_fields.count(field_id) == 0) {
-                DB_DEBUG("table_id %ld field_id %ld not all reverse list", table_id, field_id);
+                DB_DEBUG("table_id %ld field_id %d not all reverse list", table_id, field_id);
                 return;
             }
         }
@@ -543,7 +546,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         pb::IndexType index_type = index_info.type;
         auto index_state = index_info.state;
         if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }

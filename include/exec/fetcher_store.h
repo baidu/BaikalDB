@@ -97,6 +97,8 @@ public:
         return run(state, region_infos, store_request, start_seq_id, start_seq_id, op_type);
     }
     void choose_opt_instance(pb::RegionInfo& info, std::string& addr);
+    void choose_other_if_faulty(pb::RegionInfo& info, std::string& addr);
+    void other_normal_peer_to_leader(pb::RegionInfo& info, std::string& addr);
     bool need_process_binlog(RuntimeState* state, pb::OpType op_type) {
         if (op_type == pb::OP_PREPARE
             || op_type == pb::OP_COMMIT) {

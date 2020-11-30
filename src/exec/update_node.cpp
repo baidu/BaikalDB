@@ -112,7 +112,7 @@ int UpdateNode::open(RuntimeState* state) {
         if (state->need_txn_limit) {
             bool is_limit = TxnLimitMap::get_instance()->check_txn_limit(state->txn_id, batch.size());
             if (is_limit) {
-                DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%d", 
+                DB_FATAL("Transaction too big, region_id:%ld, txn_id:%ld, txn_size:%lu", 
                     state->region_id(), state->txn_id, batch.size());
                 return -1;
             }

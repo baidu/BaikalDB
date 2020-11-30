@@ -14,6 +14,7 @@
 
 #include "filter_node.h"
 #include "scalar_fn_call.h"
+#include "predicate.h"
 #include "literal.h"
 #include "parser.h"
 #include "runtime_state.h"
@@ -244,6 +245,14 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
+        // TODO 除了not in外，其他计算null的地方在index_selector判断了，应该统一处理
+        if (expr->node_type() == pb::NOT_PREDICATE) {
+            if (static_cast<NotPredicate*>(expr)->always_null_or_false()) {
+                DB_WARNING("expr not is always null or false");
+                ctx->return_empty = true;
+                return 0;
+            }
+        }
         if (expr->children_size() < 2) {
             continue;
         }
@@ -435,7 +444,7 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             }
         }
         if (reached_limit()) {
-            DB_WARNING_STATE(state, "reach limit size:%u", batch->size());
+            DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
             *eos = true;
             return 0;
         }

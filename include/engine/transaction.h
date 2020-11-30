@@ -272,7 +272,7 @@ public:
         _write_begin_index = flag;
     }
     // return -1表示没有cache plan
-    int get_cache_plan_infos(pb::TransactionInfo& txn_info) {
+    int get_cache_plan_infos(pb::TransactionInfo& txn_info, bool for_num_rows) {
         BAIDU_SCOPED_LOCK(_cache_map_mutex);
         if (_cache_plan_map.size() == 0) {
             return -1;
@@ -281,14 +281,16 @@ public:
             return -2;
         }
         txn_info.set_txn_id(_txn_id);
-        txn_info.set_seq_id(_seq_id);
-        txn_info.set_start_seq_id(1);
-        txn_info.set_optimize_1pc(false);
-        for (auto seq_id : _need_rollback_seq) {
-            txn_info.add_need_rollback_seq(seq_id);
-        }
-        for (auto& cache_plan : _cache_plan_map) {
-            txn_info.add_cache_plans()->CopyFrom(cache_plan.second);
+        if (!for_num_rows) {
+            txn_info.set_seq_id(_seq_id);
+            txn_info.set_start_seq_id(1);
+            txn_info.set_optimize_1pc(false);
+            for (auto seq_id : _need_rollback_seq) {
+                txn_info.add_need_rollback_seq(seq_id);
+            }
+            for (auto& cache_plan : _cache_plan_map) {
+                txn_info.add_cache_plans()->CopyFrom(cache_plan.second);
+            }
         }
         txn_info.set_num_rows(num_increase_rows);
         txn_info.set_primary_region_id(_primary_region_id);
@@ -389,7 +391,7 @@ public:
             _ddl_state->is_ok = !ret;
             if (_ddl_state->is_ok) {
                 _ddl_state->index_state = state;
-                DB_DEBUG("region_%lld, txn_id: %lu Transaction atomic index[%s] ++", 
+                DB_DEBUG("region_%ld, txn_id: %lu Transaction atomic index[%s] ++", 
                        _region_info->region_id(), _txn_id, pb::IndexState_Name(state).c_str());
                 switch (state) {
                     case pb::IS_NONE:

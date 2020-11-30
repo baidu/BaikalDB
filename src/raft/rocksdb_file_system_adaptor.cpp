@@ -68,7 +68,7 @@ RocksdbReaderAdaptor::~RocksdbReaderAdaptor() {
 
 ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t size) {
     if (_closed) {
-        DB_FATAL("rocksdb reader has been closed, region_id: %ls, offset: %ld",
+        DB_FATAL("rocksdb reader has been closed, region_id: %ld, offset: %ld",
                     _region_id, offset);
         return -1;
     }
@@ -126,7 +126,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
             continue;
         }
         if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(pre_commit_prefix)) {
-            DB_FATAL("region_id: %ld should not have this message, txn_id: %lu",
+            DB_FATAL("region_id: %ld should not have this message, txn_id: %lu", _region_id,
                         MetaWriter::get_instance()->decode_pre_commit_key(iter_context->iter->key()));
             iter_context->iter->Next();
             continue;
@@ -246,7 +246,7 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
         path += std::to_string(_sst_idx);
     }
     if (_closed) {
-        DB_FATAL("write sst file path: %s failed, file closed: %d data len: %d, region_id: %ld",
+        DB_FATAL("write sst file path: %s failed, file closed: %d data len: %lu, region_id: %ld",
                 path.c_str(), _closed, data.size(), _region_id);
         return -1;
     }
@@ -259,7 +259,7 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
     std::vector<std::string> values;
     auto ret = parse_from_iobuf(data, keys, values);
     if (ret < 0) {
-        DB_FATAL("write sst file path: %s failed, received invalid data, data len: %d, region_id: %ld",
+        DB_FATAL("write sst file path: %s failed, received invalid data, data len: %lu, region_id: %ld",
                 path.c_str(), data.size(), _region_id);
         return -1;
     }
@@ -301,7 +301,8 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
         path = _path + std::to_string(_sst_idx);
         auto s = _writer->open(path);
         if (!s.ok()) {
-            DB_FATAL("open sst file path: %s failed, err: %s, region_id: %ld", path.c_str(), s.ToString().c_str());
+            DB_FATAL("open sst file path: %s failed, err: %s, region_id: %ld", 
+                    path.c_str(), s.ToString().c_str(), _region_id);
             return -1;
         }
     }

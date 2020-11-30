@@ -36,7 +36,7 @@ int UnionNode::open(RuntimeState* state) {
         return -1;
     }
     if (_children.size() != _select_runtime_states.size()) {
-        DB_WARNING("size not equal %d:%d", _children.size(), _select_runtime_states.size());
+        DB_WARNING("size not equal %lu:%lu", _children.size(), _select_runtime_states.size());
         return -1;
     }
     for (auto expr : _slot_order_exprs) {
@@ -59,7 +59,7 @@ int UnionNode::open(RuntimeState* state) {
     _mem_row_desc = state->mem_row_desc();
     _mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
     _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
-    for (int i = 0; i < _children.size(); i++) {
+    for (size_t i = 0; i < _children.size(); i++) {
         auto runtime_state = _select_runtime_states[i];
         ret = _children[i]->open(runtime_state);
         if (ret < 0) {
@@ -79,7 +79,7 @@ int UnionNode::open(RuntimeState* state) {
                 MemRow* row = batch.get_row().get();
                 std::unique_ptr<MemRow> dual_row = _mem_row_desc->fetch_mem_row();
                 auto projections = _select_projections[i];
-                for (int i = 0; i < projections.size(); i++) {
+                for (size_t i = 0; i < projections.size(); i++) {
                     auto expr = projections[i];
                     ExprValue result = expr->get_value(row).cast_to(expr->col_type());
                     auto slot = _tuple_desc->slots(i);

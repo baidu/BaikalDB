@@ -158,10 +158,10 @@ int AggNode::open(RuntimeState* state) {
     // 兼容mysql: select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        AggFnCall::initialize_all(_agg_fn_calls, row.get());
         uint8_t null_flag = 0;
         MutTableKey key;
         key.append_u8(null_flag);
+        AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get());
         _hash_map.insert(key.data(), row.release());
     }
     //等hash_map构建完毕后才取位置
@@ -198,19 +198,19 @@ void AggNode::process_row_batch(RowBatch& batch) {
             // merge多个store时，去除这种造的数据
             // 以便于 select id,count(*) from t where id>1;这种sql时id不会时造出来的null
             if (_is_merger && _group_exprs.size() == 0) {
-                if (AggFnCall::all_is_initialize(_agg_fn_calls, *agg_row)) {
+                if (AggFnCall::all_is_initialize(_agg_fn_calls, key.data(), *agg_row)) {
                     delete cur_row;
                     continue;
                 }
             }
-            AggFnCall::initialize_all(_agg_fn_calls, *agg_row);
+            AggFnCall::initialize_all(_agg_fn_calls, key.data(), *agg_row);
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);
         }
         if (_is_merger) {
-            AggFnCall::merge_all(_agg_fn_calls, cur_row, *agg_row);
+            AggFnCall::merge_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
         } else {
-            AggFnCall::update_all(_agg_fn_calls, cur_row, *agg_row);
+            AggFnCall::update_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
         }
     }
 }
@@ -233,7 +233,7 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         if (batch->is_full()) {
             return 0;
         }
-        AggFnCall::finalize_all(_agg_fn_calls, _iter->second);
+        AggFnCall::finalize_all(_agg_fn_calls, _iter->first, _iter->second);
         batch->move_row(std::move(std::unique_ptr<MemRow>(_iter->second)));
         _num_rows_returned++;
         _iter->second = nullptr;

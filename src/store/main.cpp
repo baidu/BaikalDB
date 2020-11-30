@@ -48,24 +48,26 @@ void sigsegv_handler(int signum, siginfo_t* info, void* ptr) {
     strings = backtrace_symbols(buffer, nptrs);
     if (strings != NULL) {
         for (int j = 0; j < nptrs; j++) {
-            DB_FATAL("%s", strings[j])
+            DB_FATAL("%s", strings[j]);
         }
     }
     server.Stop(0);
     // core的过程中依然会hang住baikaldb请求
-    // 先等一分钟，baikaldb反应过来
+    // 先等一会，baikaldb反应过来
     // 后续再调整
-    sleep(60);
+    sleep(5);
     abort();
 }
 
 int main(int argc, char **argv) {
 #ifdef BAIKALDB_REVISION
     google::SetVersionString(BAIKALDB_REVISION);
+    static bvar::Status<std::string> baikaldb_version("baikaldb_version", "");
+    baikaldb_version.set_value(BAIKALDB_REVISION);
 #endif
 
-    google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     google::ParseCommandLineFlags(&argc, &argv, true);
+    google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     srand((unsigned)time(NULL));
     boost::filesystem::path remove_path("init.success");
     boost::filesystem::remove_all(remove_path); 
@@ -111,7 +113,7 @@ int main(int argc, char **argv) {
         DB_WARNING("init wordseg agent failed");
         return -1;
     }
-    DB_WARNING("init nlpc success")
+    DB_WARNING("init nlpc success");
 #endif
     /* 
     auto call = []() {

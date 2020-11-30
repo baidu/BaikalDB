@@ -51,7 +51,6 @@ int TransactionNode::open(RuntimeState* state) {
             return -1;
         }
         auto res = txn->prepare();
-        int ret = 0;
         if (res.ok()) {
             //DB_WARNING_STATE(state, "prepare success, region_id: %ld, txn_id: %lu:%d", region_id, state->txn_id, state->seq_id);
             ret = txn->dml_num_affected_rows; // for autocommit dml, affected row is returned in commit node
@@ -69,7 +68,7 @@ int TransactionNode::open(RuntimeState* state) {
         return ret;
     } else if (_txn_cmd == pb::TXN_BEGIN_STORE) {
         SmartTransaction txn;
-        int ret = txn_pool->begin_txn(state->txn_id, txn, state->primary_region_id());
+        ret = txn_pool->begin_txn(state->txn_id, txn, state->primary_region_id());
         if (ret != 0) {
             DB_WARNING_STATE(state, "create txn failed: %lu:%d", state->txn_id, state->seq_id);
             return -1;
@@ -84,7 +83,6 @@ int TransactionNode::open(RuntimeState* state) {
             return -1;
         }
         auto res = txn->commit();
-        int ret = 0;
         if (res.ok()) {
             //DB_WARNING_STATE(state, "txn commit success, region_id: %ld, txn_id: %lu, seq_id:%d", 
             //    region_id, state->txn_id, state->seq_id);

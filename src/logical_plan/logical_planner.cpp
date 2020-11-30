@@ -32,6 +32,7 @@
 #include "network_socket.h"
 #include "parser.h"
 #include "mysql_err_code.h"
+#include "physical_planner.h"
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -53,8 +54,7 @@ std::map<parser::JoinType, pb::JoinType> LogicalPlanner::join_type_mapping {
 int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item, 
         pb::Expr& expr,
         pb::ExprNodeType type,
-        bool use_alias,
-        bool can_agg) {
+        const CreateExprOptions& options) {
 
     pb::ExprNode* node = expr.add_nodes();
     node->set_col_type(pb::BOOL);
@@ -80,7 +80,7 @@ int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item,
     func->set_fn_op(func_item->func_type);
 
     for (int32_t idx = 0; idx < func_item->children.size(); ++idx) {
-        if (0 != create_expr_tree(func_item->children[idx], expr, use_alias, can_agg)) {
+        if (0 != create_expr_tree(func_item->children[idx], expr, options)) {
             DB_WARNING("create child expr failed");
             return -1;
         }
@@ -92,8 +92,7 @@ int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item,
 int LogicalPlanner::create_in_predicate(const parser::FuncExpr* func_item, 
         pb::Expr& expr,
         pb::ExprNodeType type, 
-        bool use_alias,
-        bool can_agg) {
+        const CreateExprOptions& options) {
 
     pb::ExprNode* node = expr.add_nodes();
     node->set_col_type(pb::BOOL);
@@ -118,14 +117,75 @@ int LogicalPlanner::create_in_predicate(const parser::FuncExpr* func_item,
     func->set_name(func_item->fn_name.value);
     func->set_fn_op(func_item->func_type);
     parser::ExprNode* arg1 = (parser::ExprNode*)func_item->children[0];
+    int row_expr_size = 1;
+    if (arg1->expr_type == parser::ET_ROW_EXPR) {
+        row_expr_size = arg1->children.size();
+    }
     
-    if (0 != create_expr_tree(arg1, expr, use_alias, can_agg)) {
+    if (0 != create_expr_tree(arg1, expr, options)) {
         DB_WARNING("create child 1 expr failed");
         return -1;
     }
+    if (func_item->is_subquery) {
+        parser::ExprNode* arg2 = (parser::ExprNode*)func_item->children[1];
+        pb::Expr tmp_expr;
+        if (0 != create_expr_tree(arg2, tmp_expr, options)) {
+            DB_WARNING("create child expr failed");
+            return -1;
+        }
+        int row_count = 0;
+        for (int i = 0; i < tmp_expr.nodes_size(); i++) {
+            pb::ExprNode* child_node = expr.add_nodes();
+            child_node->CopyFrom(tmp_expr.nodes(i));
+            if (tmp_expr.nodes(i).node_type() == pb::ROW_EXPR) {
+                if (tmp_expr.nodes(i).num_children() != row_expr_size) {
+                    DB_WARNING("Operand should contain %d column(s)", row_expr_size);
+                    if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                        _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+                        _ctx->stat_info.error_msg << "Operand should contain " << row_expr_size << " column(s)";
+                    }
+                    return -1;
+                }
+                row_count++;
+            }
+        }
+        // pb是打平的node，需要计数
+        if (row_count > 0) {
+            node->set_num_children(row_count + 1);
+        } else {
+            if (row_expr_size != 1) {
+                DB_WARNING("Operand should contain %d column(s)", row_expr_size);
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+                    _ctx->stat_info.error_msg << "Operand should contain " << row_expr_size << " column(s)";
+                }
+                return -1;
+            }
+            node->set_num_children(tmp_expr.nodes_size() + 1);
+        }
+        return 0;
+    }
     parser::ExprNode* arg2 = (parser::ExprNode*)func_item->children[1];
     for (int i = 0; i < arg2->children.size(); i++) {
-        if (0 != create_expr_tree(arg2->children[i], expr, use_alias, can_agg)) {
+        auto node = static_cast<const parser::ExprNode*>(arg2->children[i]);
+        if (node->expr_type == parser::ET_ROW_EXPR) {
+            if (row_expr_size != arg2->children[i]->children.size()) {
+                DB_WARNING("Operand should contain %d column(s)", row_expr_size);
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+                    _ctx->stat_info.error_msg << "Operand should contain " << row_expr_size << " column(s)";
+                }
+                return -1;
+            }
+        } else if (row_expr_size != 1) {
+            DB_WARNING("Operand should contain %d column(s)", row_expr_size);
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+                _ctx->stat_info.error_msg << "Operand should contain " << row_expr_size << " column(s)";
+            }
+            return -1;
+        }
+        if (0 != create_expr_tree(arg2->children[i], expr, options)) {
             DB_WARNING("create child expr failed");
             return -1;
         }
@@ -265,6 +325,8 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         DB_WARNING("gen plan failed, type:%d", ctx->stmt_type);
         return -1;
     }
+    //ctx->succ_after_logical_plan = true;
+    //ctx->is_full_export =false;
     ctx->stmt->set_print_sample(true);
     auto stat_info = &(ctx->stat_info);
     pb::OpType op_type = pb::OP_NONE;
@@ -288,7 +350,8 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     return 0;
 }
 
-int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery) {
+int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlanTableCtx& plan_state,
+        const ExprParams& expr_params) {
     std::shared_ptr<QueryContext> subquery_ctx(new (std::nothrow)QueryContext());
     if (subquery_ctx.get() == nullptr) {
         DB_WARNING("create subquery context failed");
@@ -296,6 +359,7 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery) {
     }
     auto client = _ctx->client_conn;
     subquery_ctx->stmt = subquery;
+    subquery_ctx->expr_params = expr_params;
     subquery_ctx->stmt_type = subquery->node_type;
     subquery_ctx->cur_db = _ctx->cur_db;
     subquery_ctx->user_info = _ctx->user_info;
@@ -305,9 +369,9 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery) {
     subquery_ctx->sql = subquery->to_string();
     std::unique_ptr<LogicalPlanner> planner;
     if (subquery_ctx->stmt_type == parser::NT_SELECT) {
-        planner.reset(new SelectPlanner(subquery_ctx.get()));
+        planner.reset(new SelectPlanner(subquery_ctx.get(), plan_state));
     } else if (subquery_ctx->stmt_type == parser::NT_UNION) {
-        planner.reset(new UnionPlanner(subquery_ctx.get()));
+        planner.reset(new UnionPlanner(subquery_ctx.get(), plan_state));
     }
     if (planner->plan() != 0) {
         _ctx->stat_info.error_code = subquery_ctx->stat_info.error_code;
@@ -315,12 +379,14 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery) {
         DB_WARNING("gen plan failed, type:%d", subquery_ctx->stmt_type);
         return -1;
     }
+    //DB_WARNING("subquery sql:%s", subquery_ctx->sql.c_str());
     _ctx->stat_info.family = subquery_ctx->stat_info.family;
     _ctx->stat_info.table = subquery_ctx->stat_info.table;
     _ctx->cur_db = subquery_ctx->cur_db;
     if (_select_names.size() == 0) {
         _select_names = planner->select_names();
     }
+    subquery_ctx->expr_params.row_filed_number = planner->select_names().size();
     if (_select_alias_mapping.size() == 0) {
         _select_alias_mapping = planner->select_alias_mapping();
     }
@@ -340,24 +406,25 @@ int LogicalPlanner::add_derived_table(const std::string& database, const std::st
     DatabaseInfo db;
     db.name = database;
     db.namespace_ = _ctx->user_info->namespace_;
-    if (_table_dbs_mapping[table].count(database) == 0) {
-        _table_dbs_mapping[table].insert(database);
+    if (_plan_table_ctx->table_dbs_mapping[table].count(database) == 0) {
+        _plan_table_ctx->table_dbs_mapping[table].emplace(database);
     }
-    _database_info.emplace(database, db);
+    _plan_table_ctx->database_info.emplace(database, db);
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
     TableInfo& tbl_info = *tbl_info_ptr;
-    tbl_info.id = --_derived_table_id;
+    tbl_info.id = --_plan_table_ctx->derived_table_id;
     tbl_info.namespace_ = _ctx->user_info->namespace_;
     std::string table_name = database + "." + table;
     tbl_info.name = table_name;
-    bool ok = _table_info.emplace(table_name, tbl_info_ptr).second;
+    bool ok = _plan_table_ctx->table_info.emplace(table_name, tbl_info_ptr).second;
     if (ok) {
         ScanTupleInfo* tuple_info = get_scan_tuple(table_name, tbl_info.id);
         _ctx->derived_table_ctx_mapping[tuple_info->tuple_id] = _ctx->sub_query_plans.back();
-        _table_names.push_back(table_name);
+        _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
+        _table_names.emplace(table_name);
         //_table_alias_mapping.emplace(table, table_name);
         int field_id = 1;
-            for (auto& field_name : _select_names) {
+        for (auto& field_name : _select_names) {
             FieldInfo field_info;
             field_info.id = field_id++;
             field_info.table_id = tbl_info.id;
@@ -368,12 +435,11 @@ int LogicalPlanner::add_derived_table(const std::string& database, const std::st
             std::transform(lower_short_name.begin(), lower_short_name.end(), lower_short_name.begin(), ::tolower);
             field_info.lower_name = table_name + "." + lower_short_name;
             field_info.lower_short_name = lower_short_name;
-            _field_tbls_mapping[lower_short_name].insert(table_name);
+            _plan_table_ctx->field_tbls_mapping[lower_short_name].emplace(table_name);
             tbl_info.fields.push_back(field_info);
-            _field_info.emplace(field_info.lower_name, &tbl_info.fields.back());
         }
-        for (size_t i = 0; i < tbl_info.fields.size(); i++) {
-            _field_info[tbl_info.fields[i].lower_name] = &tbl_info.fields[i];
+        for (auto& field : tbl_info.fields) {
+            _plan_table_ctx->field_info.emplace(field.lower_name, &field);
         }
     } else {
         DB_WARNING("Not unique table/alias, db:%s, table:%s alias:%s", 
@@ -406,7 +472,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
     }
 
     DatabaseInfo db;
-    if (_database_info.count(database) == 0) {
+    if (_plan_table_ctx->database_info.count(database) == 0) {
         int64_t databaseid = -1;
         if (0 != _factory->get_database_id(_namespace + "." + database_name, databaseid)) {
             DB_WARNING("unknown _namespace:%s database: %s", _namespace.c_str(), database.c_str());
@@ -421,16 +487,16 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             _ctx->stat_info.error_msg << "database " << database << " not exist";
             return -1;
         }
-        _database_info.insert(std::make_pair(database, db));
+        _plan_table_ctx->database_info.emplace(database, db);
     } else {
-        db = _database_info[database];
+        db = _plan_table_ctx->database_info[database];
     }
     // 后续的计算，全部以alias为准，无alias则使用表名
     std::string alias_name = alias.empty() ? table : alias;
     std::string alias_full_name = database + "." + alias_name;
     std::string org_table_full_name = database + "." + table;
 
-    if (_table_info.count(alias_full_name) == 0) {
+    if (_plan_table_ctx->table_info.count(alias_full_name) == 0) {
         int64_t tableid = -1;
         std::string table_name = table;
         if (_ctx->has_information_schema) {
@@ -465,20 +531,20 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
                                       << database << "." << table;
             return -1;
         }
-        get_scan_tuple(alias_full_name, tableid);
-
+        ScanTupleInfo* tuple_info = get_scan_tuple(alias_full_name, tableid);
+        _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
         for (auto& field : tbl.fields) {
             std::string& col_name = field.lower_short_name;
-            _field_tbls_mapping[col_name].insert(alias_full_name);
-            _field_info.insert(std::make_pair(alias_full_name + "." + col_name, &field));
+            _plan_table_ctx->field_tbls_mapping[col_name].emplace(alias_full_name);
+            _plan_table_ctx->field_info.emplace(alias_full_name + "." + col_name, &field);
         }
 
-        _table_info.insert(std::make_pair(alias_full_name, tbl_ptr));
-        _table_names.push_back(alias_full_name);
-        if (_table_dbs_mapping[alias_name].count(database) == 0) {
-            _table_dbs_mapping[alias_name].insert(database);
+        _plan_table_ctx->table_info.emplace(alias_full_name, tbl_ptr);
+        _table_names.emplace(alias_full_name);
+        if (_plan_table_ctx->table_dbs_mapping[alias_name].count(database) == 0) {
+            _plan_table_ctx->table_dbs_mapping[alias_name].emplace(database);
         }
-    } else {
+    } else if (_table_names.count(alias_full_name) != 0) {
         DB_WARNING("Not unique table/alias, db:%s, table:%s alias:%s", 
                 database.c_str(), table.c_str(), alias.c_str());
         _ctx->stat_info.error_code = ER_NONUNIQ_TABLE;
@@ -591,7 +657,7 @@ int LogicalPlanner::create_join_node_from_item_join(const parser::JoinNode* join
     */
     if (condition != nullptr) {
         std::vector<pb::Expr> join_filters;
-        if (0 != flatten_filter(condition, join_filters, false, false)) {
+        if (0 != flatten_filter(condition, join_filters, CreateExprOptions())) {
             DB_WARNING("flatten_filter failed");
             return -1;
         }
@@ -668,8 +734,8 @@ int LogicalPlanner::parse_using_cols(const parser::Vector<parser::ColumnName*>& 
 }
 int LogicalPlanner::fill_join_table_infos(JoinMemTmp* join_node_mem) {
     for (auto& table_name : join_node_mem->left_node->left_full_table_names) {
-        int64_t table_id = _table_info[table_name]->id;
-        int32_t tuple_id = _table_tuple_mapping[table_name].tuple_id;
+        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
         if (join_node_mem->left_full_table_names.count(table_name) != 0) {
             DB_WARNING("not support self join");
             return -1;
@@ -679,8 +745,8 @@ int LogicalPlanner::fill_join_table_infos(JoinMemTmp* join_node_mem) {
         join_node_mem->left_full_table_names.insert(table_name);
     } 
     for (auto& table_name : join_node_mem->left_node->right_full_table_names) {
-        int64_t table_id = _table_info[table_name]->id;
-        int32_t tuple_id = _table_tuple_mapping[table_name].tuple_id;
+        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
         if (join_node_mem->left_full_table_names.count(table_name) != 0) {
             DB_WARNING("not support self join");
             return -1;
@@ -691,8 +757,8 @@ int LogicalPlanner::fill_join_table_infos(JoinMemTmp* join_node_mem) {
     }
 
     for (auto& table_name : join_node_mem->right_node->left_full_table_names) {
-        int64_t table_id = _table_info[table_name]->id;
-        int32_t tuple_id = _table_tuple_mapping[table_name].tuple_id;
+        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
         if (join_node_mem->right_full_table_names.count(table_name) != 0) {
             DB_WARNING("not support self join");
             return -1;
@@ -702,8 +768,8 @@ int LogicalPlanner::fill_join_table_infos(JoinMemTmp* join_node_mem) {
         join_node_mem->right_full_table_names.insert(table_name);
     }
     for (auto& table_name : join_node_mem->right_node->right_full_table_names) {
-        int64_t table_id = _table_info[table_name]->id;
-        int32_t tuple_id = _table_tuple_mapping[table_name].tuple_id;
+        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
         if (join_node_mem->right_full_table_names.count(table_name) != 0) {
             DB_WARNING("not support self join");
             return -1;
@@ -777,8 +843,8 @@ int LogicalPlanner::create_join_node_from_terminator(const std::string db,
     join_node_mem->left_full_table_names.insert(alias_full_name);
     join_node_mem->is_derived_table = is_derived_table;
     //这些表在这些map中肯定存在，不需要再判断
-    int64_t table_id = _table_info[alias_full_name]->id;
-    int32_t tuple_id = _table_tuple_mapping[alias_full_name].tuple_id;
+    int64_t table_id = _plan_table_ctx->table_info[alias_full_name]->id;
+    int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[alias_full_name].tuple_id;
     join_node_mem->join_node.add_left_tuple_ids(tuple_id);
     join_node_mem->join_node.add_left_table_ids(table_id);
     *join_root_ptr = join_node_mem.release();
@@ -833,6 +899,8 @@ int LogicalPlanner::parse_db_name_from_table_name(
     }
     _ctx->stat_info.family = db;
     _ctx->stat_info.table = table;
+    _current_table_name = db + "." + table;
+    _ctx->current_table_name = _current_table_name;
     return 0;
 }
 
@@ -853,17 +921,20 @@ int LogicalPlanner::parse_db_name_from_table_source(const parser::TableSource* t
             return -1;
         }
         _ctx->has_derived_table = true;
-        parser::DmlNode* derived_table = table_source->derived_table;
-        int ret = gen_subquery_plan(derived_table);
-        if (ret < 0) {
-            return -1;
-        }
         is_derived_table = true;
         table = table_source->as_name.value;
         alias = table;
         db = VIRTUAL_DATABASE_NAME;
         _ctx->stat_info.family = db;
         _ctx->stat_info.table = table;
+        _current_table_name = db + "." + table;
+        _ctx->current_table_name = _current_table_name;
+        parser::DmlNode* derived_table = table_source->derived_table;
+        int ret = gen_subquery_plan(derived_table, _plan_table_ctx, ExprParams());
+        if (ret < 0) {
+            DB_WARNING("gen subquery plan failed");
+            return -1;
+        }
         return 0;
     }
     parser::TableName* table_name = table_source->table_name;
@@ -873,12 +944,13 @@ int LogicalPlanner::parse_db_name_from_table_source(const parser::TableSource* t
     }
     if (!table_source->as_name.empty()) {
         alias = table_source->as_name.value;
+        _ctx->current_table_name = db + "." + alias;
     }
     return 0;
 }
 
 int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters, 
-        bool use_alias, bool can_agg) {
+        const CreateExprOptions& options) {
     if (item->expr_type == parser::ET_FUNC) {
         parser::FuncExpr* func = (parser::FuncExpr*)item;
         if (func->func_type == parser::FT_LOGIC_AND) {
@@ -888,7 +960,7 @@ int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb:
                     return -1;
                 }
                 parser::ExprNode* child = (parser::ExprNode*)func->children[i];
-                if (flatten_filter(child, filters, use_alias, can_agg) != 0) {
+                if (flatten_filter(child, filters, options) != 0) {
                     DB_WARNING("parse AND child error");
                     return -1;
                 }
@@ -898,11 +970,11 @@ int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb:
         if (func->func_type == parser::FT_BETWEEN) {
             pb::Expr ge_expr;
             pb::Expr le_expr;
-            if (0 != create_scala_func_expr(func, ge_expr, parser::FT_GE, use_alias, can_agg)) {
+            if (0 != create_scala_func_expr(func, ge_expr, parser::FT_GE, options)) {
                 DB_WARNING("create_scala_func_expr failed");
                 return -1;
             }
-            if (0 != create_scala_func_expr(func, le_expr, parser::FT_LE, use_alias, can_agg)) {
+            if (0 != create_scala_func_expr(func, le_expr, parser::FT_LE, options)) {
                 DB_WARNING("create_scala_func_expr failed");
                 return -1;
             }
@@ -912,7 +984,7 @@ int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb:
         }
     }
     pb::Expr root;
-    if (0 != create_expr_tree(item, root, use_alias, can_agg)) {
+    if (0 != create_expr_tree(item, root, options)) {
         DB_WARNING("error pasing common expression");
         return -1;
     }
@@ -922,7 +994,7 @@ int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb:
 
 void LogicalPlanner::create_order_func_slot() {
     if (_order_tuple_id == -1) {
-        _order_tuple_id = _tuple_cnt++;
+        _order_tuple_id = _plan_table_ctx->tuple_cnt++;
     }
     pb::SlotDescriptor slot;
     slot.set_slot_id(_order_slot_cnt++);
@@ -934,9 +1006,11 @@ void LogicalPlanner::create_order_func_slot() {
 std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
         const std::string& agg, const std::string& fn_name, bool& new_slot) {
     if (_agg_tuple_id == -1) {
-        _agg_tuple_id = _tuple_cnt++;
+        _agg_tuple_id = _plan_table_ctx->tuple_cnt++;
     }
-
+    static std::unordered_set<std::string> need_intermediate_slot_agg = {
+        "avg", "rb_or_cardinality_agg", "rb_and_cardinality_agg", "rb_xor_cardinality_agg"
+    };
     std::vector<pb::SlotDescriptor>* slots = nullptr;
     auto iter = _agg_slot_mapping.find(agg);
     if (iter != _agg_slot_mapping.end()) {
@@ -948,7 +1022,7 @@ std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
         (*slots)[0].set_slot_id(_agg_slot_cnt++);
         (*slots)[0].set_tuple_id(_agg_tuple_id);
         (*slots)[0].set_slot_type(pb::STRING);
-        if (fn_name == "avg") {
+        if (need_intermediate_slot_agg.count(fn_name)) {
             // create intermediate slot
             slots->push_back((*slots)[0]);
             (*slots)[1].set_slot_id(_agg_slot_cnt++);
@@ -958,12 +1032,15 @@ std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
     return *slots;
 }
 
-int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, bool use_alias) {
+int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, const CreateExprOptions& options) {
     static std::unordered_set<std::string> support_agg = {
-        "count", "sum", "avg", "min", "max", "hll_add_agg", "hll_merge_agg"
+        "count", "sum", "avg", "min", "max", "hll_add_agg", "hll_merge_agg",
+        "rb_or_agg", "rb_and_agg", "rb_xor_agg", "rb_build_agg"
     };
     if (support_agg.count(expr_item->fn_name.to_lower()) == 0) {
         DB_WARNING("un-supported agg op or func: %s", expr_item->fn_name.c_str());
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "func \'" << expr_item->fn_name.to_string() << "\' not support";
         return -1;
     }
     bool new_slot = true;
@@ -1000,7 +1077,7 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
     if (!count_star) {
         // count_distinct 参数为expr list，其他聚合参数为单一expr或slot ref
         for (int i = 0; i < expr_item->children.size(); i++) {
-            if (0 != create_expr_tree(expr_item->children[i], agg_expr, use_alias, false)) {
+            if (0 != create_expr_tree(expr_item->children[i], agg_expr, options)) {
                 DB_WARNING("create child expr failed");
                 return -1;
             }
@@ -1024,7 +1101,7 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
     return 0;
 }
 
-int LogicalPlanner::create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, bool use_alias, bool can_agg) {
+int LogicalPlanner::create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, const CreateExprOptions& options) {
     pb::ExprNode* and_node = expr.add_nodes();
     and_node->set_col_type(pb::BOOL);
     and_node->set_node_type(pb::AND_PREDICATE);
@@ -1033,11 +1110,11 @@ int LogicalPlanner::create_between_expr(const parser::FuncExpr* item, pb::Expr& 
     func->set_name("logic_and");
     func->set_fn_op(parser::FT_LOGIC_AND);
 
-    if (0 != create_scala_func_expr(item, expr, parser::FT_GE, use_alias, can_agg)) {
+    if (0 != create_scala_func_expr(item, expr, parser::FT_GE, options)) {
         DB_WARNING("create_scala_func_expr failed");
         return -1;
     }
-    if (0 != create_scala_func_expr(item, expr, parser::FT_LE, use_alias, can_agg)) {
+    if (0 != create_scala_func_expr(item, expr, parser::FT_LE, options)) {
         DB_WARNING("create_scala_func_expr failed");
         return -1;
     }
@@ -1052,7 +1129,9 @@ int LogicalPlanner::create_values_expr(const parser::FuncExpr* func_item, pb::Ex
         return 0;
     }
     // values param must be ColumnName
-    if (0 != create_term_slot_ref_node((parser::ColumnName*)func_item->children[0], expr, true)) {
+    CreateExprOptions options;
+    options.is_values = true;
+    if (0 != create_term_slot_ref_node((parser::ColumnName*)func_item->children[0], expr, options)) {
         DB_WARNING("create_term_slot_ref_node failed");
         return -1;
     }
@@ -1062,7 +1141,7 @@ int LogicalPlanner::create_values_expr(const parser::FuncExpr* func_item, pb::Ex
 // TODO in next stage: fill func name
 // fill arg_types, return_type(col_type) and has_var_args
 int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item, 
-        pb::Expr& expr, parser::FuncType op, bool use_alias, bool can_agg) {
+        pb::Expr& expr, parser::FuncType op, const CreateExprOptions& options) {
     if (op == parser::FT_COMMON) {
         if (FunctionManager::instance()->get_object(item->fn_name.to_lower()) == nullptr) {
             DB_WARNING("un-supported scala op or func: %s", item->fn_name.c_str());
@@ -1082,19 +1161,44 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
 
     // between => (>= && <=)
     if (item->func_type == parser::FT_BETWEEN && item->children.size() == 3) {
-        create_expr_tree(item->children[0], expr, use_alias, can_agg);
+        create_expr_tree(item->children[0], expr, options);
         node->set_num_children(2);
         if (op == parser::FT_GE) {
             func->set_name("ge");
-            create_expr_tree(item->children[1], expr, use_alias, can_agg);
+            create_expr_tree(item->children[1], expr, options);
         } else if (op == parser::FT_LE) {
             func->set_name("le");
-            create_expr_tree(item->children[2], expr, use_alias, can_agg);
+            create_expr_tree(item->children[2], expr, options);
         }
         return 0;
     }
+    int row_expr_size = 1;
     for (int32_t idx = 0; idx < item->children.size(); ++idx) {
-        if (0 != create_expr_tree(item->children[idx], expr, use_alias, can_agg)) {
+        auto node = static_cast<const parser::ExprNode*>(item->children[idx]);
+        if (idx == 0) {
+            if (node->expr_type == parser::ET_ROW_EXPR) {
+                row_expr_size = item->children[idx]->children.size();
+            }
+        } else {
+            if (node->expr_type == parser::ET_ROW_EXPR) {
+                if (row_expr_size != item->children[idx]->children.size()) {
+                    DB_WARNING("Operand should contain %d column(s)", row_expr_size);
+                    if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                        _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+                        _ctx->stat_info.error_msg << "Operand should contain " << row_expr_size << " column(s)";
+                    }
+                    return -1;
+                }
+            } else if (row_expr_size != 1) {
+                DB_WARNING("Operand should contain %d column(s)", row_expr_size);
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+                    _ctx->stat_info.error_msg << "Operand should contain " << row_expr_size << " column(s)";
+                }
+                return -1;
+            }
+        }
+        if (0 != create_expr_tree(item->children[idx], expr, options)) {
             DB_WARNING("create child expr failed");
             return -1;
         }
@@ -1103,7 +1207,319 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
     return 0;
 }
 
-int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, bool use_alias, bool can_agg) {
+void LogicalPlanner::construct_literal_expr(const ExprValue& value, pb::ExprNode* node) {
+    Literal literal = Literal(value);
+    node->set_num_children(0);
+    node->set_node_type(literal.node_type());
+    node->set_col_type(literal.col_type());
+    switch (literal.node_type()) {
+        case pb::INT_LITERAL:
+            node->mutable_derive_node()->set_int_val(value.get_numberic<int64_t>());
+            break;
+        case pb::DOUBLE_LITERAL:
+            node->mutable_derive_node()->set_double_val(value.get_numberic<int64_t>());
+            break;
+        case pb::STRING_LITERAL:
+            node->mutable_derive_node()->set_string_val(value.get_string());
+            break;
+        case pb::BOOL_LITERAL:
+            node->mutable_derive_node()->set_bool_val(value.get_numberic<bool>());
+            break;
+        case pb::NULL_LITERAL:
+            break;
+        default:
+            DB_WARNING("expr:%s", value.get_string().c_str());
+            break;
+    }    
+}
+
+
+int LogicalPlanner::exec_subquery_expr(QueryContext* sub_ctx) {
+    int ret = PhysicalPlanner::analyze(sub_ctx);
+    if (ret < 0) {
+        DB_WARNING("exec PhysicalPlanner failed");
+        return -1;
+    }
+    auto& scan_tuple = _plan_table_ctx->table_tuple_mapping[sub_ctx->current_table_name];
+     auto& slot_map = scan_tuple.field_slot_mapping;
+    pb::TupleDescriptor* tuple_desc = sub_ctx->get_tuple_desc(scan_tuple.tuple_id);
+    for (auto& slot : tuple_desc->slots()) {
+        for (auto& kv : slot_map) {
+            if (slot.slot_id() == kv.second.slot_id()) {
+                kv.second.set_slot_type(slot.slot_type());
+            }
+        }
+    }
+    RuntimeState& state = *sub_ctx->get_runtime_state();
+    ret = state.init(sub_ctx, nullptr);
+    if (ret < 0) {
+        DB_WARNING("init RuntimeState failed www");
+        return -1;
+    }
+    state.set_is_expr_subquery(true);
+    ret = sub_ctx->root->open(&state);
+    sub_ctx->root->close(&state);
+    if (ret < 0) {
+        return -1;
+    }
+    return 0;   
+}
+
+// in (SubSelect) or select (SubSelect)
+int LogicalPlanner::create_common_subquery_expr(const parser::SubqueryExpr* item, pb::Expr& expr,
+    const CreateExprOptions& options) {
+    int ret = gen_subquery_plan(item->query_stmt, _plan_table_ctx, ExprParams());
+    if (ret < 0) {
+        DB_WARNING("gen subquery plan failed");
+        return -1;
+    }
+
+    auto sub_ctx = _ctx->sub_query_plans.back();
+    if (!sub_ctx->expr_params.is_correlated_subquery) {
+        ret = exec_subquery_expr(sub_ctx.get());
+        if (ret < 0) {
+            DB_WARNING("exec subquery failed");
+            return -1;
+        }
+
+        _ctx->sub_query_plans.pop_back();
+        RuntimeState& state = *sub_ctx->get_runtime_state();
+        auto& subquery_exprs_vec = state.get_subquery_exprs();
+        if (options.need_most_one_row && subquery_exprs_vec.size() > 1) {
+            _ctx->stat_info.error_code = ER_SUBQUERY_NO_1_ROW;
+            _ctx->stat_info.error_msg << "Subquery returns more than 1 row";
+            return -1;
+        }
+        // select (SubSelect)
+        if (options.is_select_field) {
+            if (subquery_exprs_vec.size() != 1 || subquery_exprs_vec[0].size() != 1) {
+                _ctx->stat_info.error_code = ER_SUBQUERY_NO_1_ROW;
+                _ctx->stat_info.error_msg << "Subquery returns more than 1 row";
+                return -1;
+            }
+            pb::ExprNode* node = expr.add_nodes();
+            construct_literal_expr(subquery_exprs_vec[0][0], node);
+        // in (SubSelect)
+        } else {
+            if (subquery_exprs_vec.size() > 0) {
+                for (auto& rows : subquery_exprs_vec) {
+                    if (rows.size() > 1) {
+                        pb::ExprNode* row_node = expr.add_nodes();
+                        row_node->set_node_type(pb::ROW_EXPR);
+                        row_node->set_num_children(rows.size());
+                        for (auto& row : rows) {
+                            pb::ExprNode* node = expr.add_nodes();
+                            construct_literal_expr(row, node);
+                        }
+                    } else {
+                        pb::ExprNode* node = expr.add_nodes();
+                        construct_literal_expr(rows[0], node);
+                    }
+                }
+            } else {
+                if (sub_ctx->expr_params.row_filed_number > 1) {
+                    pb::ExprNode* row_node = expr.add_nodes();
+                    row_node->set_node_type(pb::ROW_EXPR);
+                    row_node->set_num_children(sub_ctx->expr_params.row_filed_number);
+                    for (int i = 0; i < sub_ctx->expr_params.row_filed_number; i++) {
+                        pb::ExprNode* node = expr.add_nodes();
+                        node->set_num_children(0);
+                        node->set_node_type(pb::NULL_LITERAL);
+                        node->set_col_type(pb::NULL_TYPE);
+                    }
+                } else {
+                    pb::ExprNode* node = expr.add_nodes();
+                    node->set_num_children(0);
+                    node->set_node_type(pb::NULL_LITERAL);
+                    node->set_col_type(pb::NULL_TYPE);
+                }
+            }
+        }
+    } else {
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "correlated subquery not support yet, report baikaldb RD";
+        return -1;
+    }
+    return 0;
+}
+
+int LogicalPlanner::create_compare_subquery_expr(const parser::CompareSubqueryExpr* item, pb::Expr& expr,
+    const CreateExprOptions& options) {
+    pb::Expr compare_expr;
+    pb::ExprNode* node = compare_expr.add_nodes();
+    node->set_node_type(pb::FUNCTION_CALL);
+    node->set_col_type(pb::INVALID_TYPE);
+    pb::Function* func = node->mutable_fn();
+    func->set_name(item->get_func_name());
+    func->set_fn_op(item->func_type);
+    node->set_num_children(2);
+
+    pb::Expr left_expr;
+    int ret = create_expr_tree(item->left_expr, left_expr, options);
+    if (ret < 0) {
+        DB_WARNING("create expr failed");
+        return -1;
+    }
+    ExprParams expr_params;
+    expr_params.is_expr_subquery = true;
+    expr_params.func_type = item->func_type;
+    expr_params.cmp_type = item->cmp_type;
+    if (item->right_expr != nullptr && item->right_expr->query_stmt != nullptr) {
+        ret = gen_subquery_plan(item->right_expr->query_stmt, _plan_table_ctx, expr_params);
+    } else {
+        DB_WARNING("wrong subquery expr");
+        return -1;
+    }
+    if (ret < 0) {
+        return -1;
+    }
+    auto sub_ctx = _ctx->sub_query_plans.back();
+    // 非相关子查询表达式，直接执行获取结果
+    if (!sub_ctx->expr_params.is_correlated_subquery) {
+        ret = exec_subquery_expr(sub_ctx.get());
+        if (ret < 0) {
+            return -1;
+        }
+        _ctx->sub_query_plans.pop_back();
+        RuntimeState& state = *sub_ctx->get_runtime_state();
+        auto& subquery_exprs_vec = state.get_subquery_exprs();
+        bool is_eq_all = false;
+        ExprValue first_val;
+        bool always_false = false;
+        bool is_neq_any = false;
+        // =
+        if (sub_ctx->expr_params.func_type == parser::FT_EQ) {
+            pb::ExprNode* node = compare_expr.mutable_nodes(0);
+            node->set_col_type(pb::BOOL);
+            node->set_node_type(pb::IN_PREDICATE);
+            pb::Function* func = node->mutable_fn();
+            func->set_name("in");
+            func->set_fn_op(parser::FT_IN);
+            // = all (xxx) 子查询返回的不同值最多1个，否则恒为false
+            if (sub_ctx->expr_params.cmp_type == parser::CMP_ALL) {
+                is_eq_all = true;
+            }
+            
+            if (subquery_exprs_vec.size() > 0) {
+                if (is_eq_all) {
+                    first_val = subquery_exprs_vec[0][0];
+                    for (uint32_t i = 1; i < subquery_exprs_vec.size(); i++) {
+                        // = all返回多个不同值
+                        if (first_val.compare(subquery_exprs_vec[i][0]) != 0) {
+                            DB_WARNING("always_false");
+                            always_false = true;
+                        }
+                    }
+                    node->set_num_children(2);
+                } else {
+                    node->set_num_children(subquery_exprs_vec.size() + 1);
+                }
+            } else {
+                node->set_num_children(2);
+            }
+        // != all -> not in (xxx)
+        } else if (sub_ctx->expr_params.func_type == parser::FT_NE) {
+            pb::ExprNode* node = compare_expr.mutable_nodes(0);
+            node->set_col_type(pb::BOOL);
+            node->set_node_type(pb::NOT_PREDICATE);
+            node->set_num_children(1);
+            pb::Function* item = node->mutable_fn();
+            item->set_name("logic_not");
+            item->set_fn_op(parser::FT_LOGIC_NOT);
+
+            //add real predicate (OP_IS_NULL/OP_IN/OP_LIKE) node
+            node = compare_expr.add_nodes();
+            node->set_col_type(pb::BOOL);
+            node->set_node_type(pb::IN_PREDICATE);
+            pb::Function* func = node->mutable_fn();
+            func->set_name("in");
+            func->set_fn_op(parser::FT_IN);
+            if (sub_ctx->expr_params.cmp_type != parser::CMP_ALL) {
+                is_neq_any = true;
+            }
+            if (subquery_exprs_vec.size() > 0) {
+                if (is_neq_any) {
+                    first_val = subquery_exprs_vec[0][0];
+                    for (uint32_t i = 1; i < subquery_exprs_vec.size(); i++) {
+                        // = all返回多个不同值
+                        if (first_val.compare(subquery_exprs_vec[i][0]) != 0) {
+                            DB_WARNING("always_false");
+                            always_false = true;
+                        }
+                    }
+                    node->set_num_children(2);
+                } else {
+                    node->set_num_children(subquery_exprs_vec.size() + 1);
+                }
+            } else {
+                 node->set_num_children(2);
+            }
+        }
+        for (auto& old_node : left_expr.nodes()) {
+                compare_expr.add_nodes()->CopyFrom(old_node);
+        }
+        if (subquery_exprs_vec.size() > 0 && !always_false) {
+            if (is_neq_any || is_eq_all) {
+               pb::ExprNode* node = compare_expr.add_nodes();
+                construct_literal_expr(first_val, node);
+            } else {
+                for (auto& rows : subquery_exprs_vec) {
+                    pb::ExprNode* node = compare_expr.add_nodes();
+                    construct_literal_expr(rows[0], node);
+                }
+            }
+        } else {
+            pb::ExprNode* node = compare_expr.add_nodes();
+            node->set_num_children(0);
+            node->set_node_type(pb::NULL_LITERAL);
+            node->set_col_type(pb::NULL_TYPE);
+        }
+    } else {
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "correlated subquery not support yet, report baikaldb RD";
+        return -1;
+    }
+    for (auto& old_node : compare_expr.nodes()) {
+        expr.add_nodes()->CopyFrom(old_node);
+    }
+    return 0;
+}
+
+int LogicalPlanner::create_exists_subquery_expr(const parser::ExistsSubqueryExpr* item, pb::Expr& expr,
+        const CreateExprOptions& options) {
+    int ret = gen_subquery_plan(item->query_expr->query_stmt, _plan_table_ctx, ExprParams());
+    if (ret < 0) {
+        DB_WARNING("gen subquery plan failed");
+        return -1;
+    }
+    auto sub_ctx = _ctx->sub_query_plans.back();
+    // 非相关子查询表达式，直接执行获取结果
+    if (!sub_ctx->expr_params.is_correlated_subquery) {
+        ret = exec_subquery_expr(sub_ctx.get());
+        if (ret < 0) {
+            return -1;
+        }
+        _ctx->sub_query_plans.pop_back();
+        RuntimeState& state = *sub_ctx->get_runtime_state();
+        auto& subquery_exprs_vec = state.get_subquery_exprs();
+    
+        pb::ExprNode* node = expr.add_nodes();
+        node->set_node_type(pb::BOOL_LITERAL);
+        node->set_col_type(pb::BOOL);
+        if (subquery_exprs_vec.size() > 0) {
+            node->mutable_derive_node()->set_bool_val(true);
+        } else {
+            node->mutable_derive_node()->set_bool_val(false);
+        }
+    } else {
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "correlated subquery not support yet, report baikaldb RD";
+        return -1;
+    }
+    return 0;    
+}
+
+int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, const CreateExprOptions& options) {
     if (item == nullptr) {
         return -1;
     }
@@ -1123,7 +1539,7 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, b
         }
     } else if (expr_item->expr_type == parser::ET_COLUMN) {
         int ret = -1;
-        if (use_alias) {
+        if (options.use_alias) {
             ret = create_alias_node(static_cast<const parser::ColumnName*>(expr_item), expr);
         }
         if (ret == -2) {
@@ -1133,7 +1549,7 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, b
             }
             return -1;
         } else if (ret == -1) {
-            if (0 != create_term_slot_ref_node(static_cast<const parser::ColumnName*>(expr_item), expr)) {
+            if (0 != create_term_slot_ref_node(static_cast<const parser::ColumnName*>(expr_item), expr, options)) {
                 if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                     _ctx->stat_info.error_code = ER_BAD_FIELD_ERROR;
                     _ctx->stat_info.error_msg << "Unknown column \'" << expr_item->to_string() << "\'";
@@ -1142,7 +1558,7 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, b
             }
         }
     } else if (expr_item->expr_type == parser::ET_ROW_EXPR) {
-        if (create_row_expr_node(static_cast<const parser::RowExpr*>(expr_item), expr, use_alias, can_agg) != 0) {
+        if (create_row_expr_node(static_cast<const parser::RowExpr*>(expr_item), expr, options) != 0) {
             DB_WARNING("create_row_expr_node failed");
             return -1;
         }
@@ -1150,27 +1566,27 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, b
         parser::FuncExpr* func = (parser::FuncExpr*)expr_item;
         switch (func->func_type) {
             case parser::FT_LOGIC_NOT:
-                return create_n_ary_predicate(func, expr, pb::NOT_PREDICATE, use_alias, can_agg);
+                return create_n_ary_predicate(func, expr, pb::NOT_PREDICATE, options);
             case parser::FT_LOGIC_AND:
-                return create_n_ary_predicate(func, expr, pb::AND_PREDICATE, use_alias, can_agg);
+                return create_n_ary_predicate(func, expr, pb::AND_PREDICATE, options);
             case parser::FT_LOGIC_OR:
-                return create_n_ary_predicate(func, expr, pb::OR_PREDICATE, use_alias, can_agg);
+                return create_n_ary_predicate(func, expr, pb::OR_PREDICATE, options);
             case parser::FT_LOGIC_XOR:
-                return create_n_ary_predicate(func, expr, pb::XOR_PREDICATE, use_alias, can_agg);
+                return create_n_ary_predicate(func, expr, pb::XOR_PREDICATE, options);
             case parser::FT_IS_NULL:
             case parser::FT_IS_UNKNOWN:
-                return create_n_ary_predicate(func, expr, pb::IS_NULL_PREDICATE, use_alias, can_agg);
+                return create_n_ary_predicate(func, expr, pb::IS_NULL_PREDICATE, options);
             case parser::FT_IS_TRUE:
-                return create_n_ary_predicate(func, expr, pb::IS_TRUE_PREDICATE, use_alias, can_agg);
+                return create_n_ary_predicate(func, expr, pb::IS_TRUE_PREDICATE, options);
             case parser::FT_IN:
-                return create_in_predicate(func, expr, pb::IN_PREDICATE, use_alias, can_agg);
+                return create_in_predicate(func, expr, pb::IN_PREDICATE, options);
             case parser::FT_LIKE:
             case parser::FT_EXACT_LIKE:
-                return create_n_ary_predicate(func, expr, pb::LIKE_PREDICATE, use_alias, can_agg);
+                return create_n_ary_predicate(func, expr, pb::LIKE_PREDICATE, options);
             case parser::FT_BETWEEN:
-                return create_between_expr(func, expr, use_alias, can_agg);
+                return create_between_expr(func, expr, options);
             case parser::FT_AGG:
-                if (!can_agg) {
+                if (!options.can_agg) {
                     if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                         _ctx->stat_info.error_code = ER_INVALID_GROUP_FUNC_USE;
                         _ctx->stat_info.error_msg << "Invalid use of group function";
@@ -1178,7 +1594,7 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, b
                     DB_WARNING("Invalid use of group function");
                     return -1;
                 }
-                return create_agg_expr(func, expr, use_alias);
+                return create_agg_expr(func, expr, options);
             case parser::FT_VALUES:
                 return create_values_expr(func, expr);
             // same as scala func
@@ -1194,21 +1610,34 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, b
             case parser::FT_BIT_AND:
             case parser::FT_BIT_OR:
             case parser::FT_BIT_XOR:
+            case parser::FT_MATCH_AGAINST:
+            case parser::FT_COMMON:
+                return create_scala_func_expr(func, expr, func->func_type, options);
             case parser::FT_EQ:
             case parser::FT_NE:
             case parser::FT_GT:
             case parser::FT_GE:
             case parser::FT_LT:
-            case parser::FT_LE:
-            case parser::FT_MATCH_AGAINST:
-            case parser::FT_COMMON:
-                return create_scala_func_expr(func, expr, func->func_type, use_alias, can_agg);
+            case parser::FT_LE: {
+                CreateExprOptions tmp_options = options;
+                tmp_options.need_most_one_row = true;
+                return create_scala_func_expr(func, expr, func->func_type, tmp_options);
+            }
             // todo:support
             default:
                 DB_WARNING("un-supported func_type:%d fn_name:%s", 
                         func->func_type, func->fn_name.c_str());
                 return -1;
         }
+    } else if (expr_item->expr_type == parser::ET_SUB_QUERY_EXPR) {
+        parser::SubqueryExpr* sub_query_expr = (parser::SubqueryExpr*)expr_item;
+        return create_common_subquery_expr(sub_query_expr, expr, options);
+    } else if (expr_item->expr_type == parser::ET_CMP_SUB_QUERY_EXPR) {
+        parser::CompareSubqueryExpr* sub_query_expr = (parser::CompareSubqueryExpr*)expr_item;
+        return create_compare_subquery_expr(sub_query_expr, expr, options);
+    } else if (expr_item->expr_type == parser::ET_EXISTS_SUB_QUERY_EXPR) {
+        parser::ExistsSubqueryExpr* sub_query_expr = (parser::ExistsSubqueryExpr*)expr_item;
+        return create_exists_subquery_expr(sub_query_expr, expr, options);
     } else {
         DB_WARNING("un-supported expr_type: %d", expr_item->expr_type);
         return -1;
@@ -1256,6 +1685,12 @@ std::string LogicalPlanner::get_field_alias_name(const parser::ColumnName* colum
             DB_WARNING("no table found for field: %s", column->to_string().c_str());
             return "";
         } else if (tables.size() > 1) {
+            // select id from t1 as tt1 join (select id from t2) as tt2 where tt1.id=tt2.id;
+            for (auto& table : tables) {
+                if (boost::algorithm::istarts_with(table, _current_table_name)) {
+                    return table;
+                }
+            }
             DB_WARNING("ambiguous field_name: %s", column->to_string().c_str());
             if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                 _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
@@ -1274,15 +1709,16 @@ std::string LogicalPlanner::get_field_alias_name(const parser::ColumnName* colum
 
 ScanTupleInfo* LogicalPlanner::get_scan_tuple(const std::string& table_name, int64_t table_id) {
     ScanTupleInfo* tuple_info = nullptr;
-    auto iter = _table_tuple_mapping.find(table_name);
-    if (iter != _table_tuple_mapping.end()) {
+    auto iter = _plan_table_ctx->table_tuple_mapping.find(table_name);
+    if (iter != _plan_table_ctx->table_tuple_mapping.end()) {
         tuple_info = &(iter->second);
     } else {
-        tuple_info = &_table_tuple_mapping[table_name];
-        tuple_info->tuple_id = _tuple_cnt++;
+        tuple_info = &(_plan_table_ctx->table_tuple_mapping[table_name]);
+        tuple_info->tuple_id = _plan_table_ctx->tuple_cnt++;
         tuple_info->table_id = table_id;
         tuple_info->slot_cnt = 1;
     }
+    //DB_WARNING("table_name:%s tuple_id:%d table_id:%d", table_name.c_str(), tuple_info->tuple_id, table_id);
     return tuple_info;
 }
 
@@ -1290,14 +1726,7 @@ pb::SlotDescriptor& LogicalPlanner::get_scan_ref_slot(
         const std::string& alias_name, int64_t table, 
         int32_t field, pb::PrimitiveType type) {
     ScanTupleInfo* tuple_info = get_scan_tuple(alias_name, table);
-    // if (iter != _table_tuple_mapping.end()) {
-    //     tuple_info = &(iter->second);
-    // } else {
-    //     tuple_info = &_table_tuple_mapping[table];
-    //     tuple_info->tuple_id = _tuple_cnt++;
-    //     tuple_info->table_id = table;
-    //     tuple_info->slot_cnt = 1;
-    // }
+    _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
     pb::SlotDescriptor *slot_desc = nullptr;
 
     auto& inner_map = tuple_info->field_slot_mapping;
@@ -1321,7 +1750,7 @@ pb::SlotDescriptor& LogicalPlanner::get_values_ref_slot(int64_t table,
         int32_t field, pb::PrimitiveType type) {
     auto& tuple_info = _values_tuple_info;
     if (tuple_info.tuple_id == -1) {
-        tuple_info.tuple_id = _tuple_cnt++;
+        tuple_info.tuple_id = _plan_table_ctx->tuple_cnt++;
         tuple_info.table_id = table;
         tuple_info.slot_cnt = 1;
     }
@@ -1376,7 +1805,7 @@ int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr
 int LogicalPlanner::create_term_slot_ref_node(
         const parser::ColumnName* col_expr, 
         pb::Expr& expr,
-        bool values) {
+        const CreateExprOptions& options) {
     std::stringstream ss;
     col_expr->to_stream(ss);
     std::string origin_name = ss.str();
@@ -1428,7 +1857,7 @@ int LogicalPlanner::create_term_slot_ref_node(
         return -1;
     }
     pb::SlotDescriptor slot;
-    if (values) {
+    if (options.is_values) {
         slot = get_values_ref_slot(field_info->table_id, field_info->id, field_info->type);
     } else {
         slot = get_scan_ref_slot(alias_name, field_info->table_id, field_info->id, field_info->type);
@@ -1497,12 +1926,12 @@ int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal,
     return 0;
 }
 
-int LogicalPlanner::create_row_expr_node(const parser::RowExpr* item, pb::Expr& expr, bool use_alias, bool can_agg) {
+int LogicalPlanner::create_row_expr_node(const parser::RowExpr* item, pb::Expr& expr, const CreateExprOptions& options) {
     pb::ExprNode* node = expr.add_nodes();
     node->set_col_type(pb::INVALID_TYPE);
     node->set_node_type(pb::ROW_EXPR);
     for (int32_t idx = 0; idx < item->children.size(); ++idx) {
-        if (0 != create_expr_tree(item->children[idx], expr, use_alias, can_agg)) {
+        if (0 != create_expr_tree(item->children[idx], expr, options)) {
             DB_WARNING("create child expr failed");
             return -1;
         }
@@ -1513,12 +1942,14 @@ int LogicalPlanner::create_row_expr_node(const parser::RowExpr* item, pb::Expr& 
 
 int LogicalPlanner::create_orderby_exprs(parser::OrderByClause* order) {
     parser::Vector<parser::ByItem*> order_items = order->items;
+    CreateExprOptions options;
+    options.use_alias = true;
+    options.can_agg = true;
     for (int idx = 0; idx < order_items.size(); ++idx) {
         bool is_asc = !order_items[idx]->is_desc;
-        
         // create order by expr node
         pb::Expr order_expr;
-        if (0 != create_expr_tree(order_items[idx]->expr, order_expr, true, true)) {
+        if (0 != create_expr_tree(order_items[idx]->expr, order_expr, options)) {
             DB_WARNING("create group expr failed");
             return -1;
         }
@@ -1530,7 +1961,7 @@ int LogicalPlanner::create_orderby_exprs(parser::OrderByClause* order) {
             std::string tmp_str = node.derive_node().string_val();
             tmp_col.name = tmp_str.c_str();
             order_expr.Clear();
-            if (create_term_slot_ref_node(&tmp_col, order_expr) != 0) {
+            if (create_term_slot_ref_node(&tmp_col, order_expr, options) != 0) {
                 DB_WARNING("create group term expr failed");
                 return -1;
             }
@@ -1556,11 +1987,13 @@ int LogicalPlanner::create_orderby_exprs(parser::OrderByClause* order) {
 }
 
 void LogicalPlanner::create_scan_tuple_descs() {
-    for (auto& pair : _table_tuple_mapping) {
+    for (auto& pair : _plan_table_ctx->table_tuple_mapping) {
         auto& tuple_info = pair.second;
         int64_t tableid = tuple_info.table_id;
         auto& slot_map = tuple_info.field_slot_mapping;
-
+        if (_ctx->current_tuple_ids.count(tuple_info.tuple_id) == 0) {
+            continue;
+        }
         pb::TupleDescriptor tuple_desc;
         tuple_desc.set_tuple_id(tuple_info.tuple_id);
         tuple_desc.set_table_id(tableid);
@@ -1718,7 +2151,7 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root) {
         scan->set_tuple_id(join_root->join_node.left_tuple_ids(0));
         scan->set_table_id(join_root->join_node.left_table_ids(0));
         scan->set_engine(_factory->get_table_engine(scan->table_id()));
-        DB_WARNING("get_table_engine :%d", scan->engine());
+        //DB_WARNING("get_table_engine :%d", scan->engine());
         for (auto index_id : join_root->use_indexes) {
             scan->add_use_indexes(index_id);
         }
@@ -1762,7 +2195,7 @@ int LogicalPlanner::create_scan_nodes() {
         scan->set_tuple_id(tuple_desc.tuple_id());
         scan->set_table_id(tuple_desc.table_id());
         scan->set_engine(_factory->get_table_engine(scan->table_id()));
-        DB_WARNING("get_table_engine :%d", scan->engine());
+        //DB_WARNING("get_table_engine :%d", scan->engine());
     }
     return 0;
 }

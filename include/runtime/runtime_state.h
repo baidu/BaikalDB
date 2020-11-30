@@ -15,6 +15,11 @@
 #pragma once
 
 #include <stdint.h>
+#ifdef BAIDU_INTERNAL
+#include <baidu/rpc/channel.h>
+#else
+#include <brpc/channel.h>
+#endif
 #include "mem_row_descriptor.h"
 #include "data_buffer.h"
 #include "proto/store.interface.pb.h"
@@ -72,7 +77,12 @@ class RuntimeStatePool;
 class RuntimeState {
 
 public:
-    ~RuntimeState();
+    RuntimeState() {
+        bthread_mutex_init(&_callid_lock, NULL);
+    }
+    ~RuntimeState() {
+        bthread_mutex_destroy(&_callid_lock);
+    }
 
     // baikalStore init
     int init(const pb::StoreReq& req,
@@ -299,9 +309,25 @@ public:
         _open_binlog = flag;
     }
 
+    bool is_expr_subquery() {
+        return _is_expr_subquery;
+    }
+
+    void set_is_expr_subquery(bool flag) {
+        _is_expr_subquery = flag;
+    }
+
     std::vector<TraceTimeCost>* get_trace_cost() {
         return &_trace_cost_vec;
-    } 
+    }
+
+    std::vector<std::vector<ExprValue>>& get_subquery_exprs() {
+        return _subquery_exprs;
+    }
+
+    std::vector<std::vector<ExprValue>>* mutable_subquery_exprs() {
+        return &_subquery_exprs;
+    }
 
     void set_primary_region_id(int64_t region_id) {
         _primary_region_id = region_id;
@@ -309,6 +335,23 @@ public:
 
     int64_t primary_region_id() const {
         return _primary_region_id;
+    }
+    void cancel_rpc(const std::set<std::string>& addrs, int fd) {
+        BAIDU_SCOPED_LOCK(_callid_lock);
+        for (auto& addr : addrs) {
+            if (_addr_callids_map.count(addr) == 0) {
+                continue;
+            }
+            for (auto& pair : _addr_callids_map[addr]) {
+                brpc::StartCancel(pair.second);
+                DB_WARNING("cancel addr:%s, region_id: %ld, fd: %d", addr.c_str(), pair.first, fd);
+            }
+            _addr_callids_map[addr].clear();
+        }
+    }
+    void insert_callid(const std::string addr, int64_t region_id, brpc::CallId callid) {
+        BAIDU_SCOPED_LOCK(_callid_lock);
+        _addr_callids_map[addr].emplace(region_id, callid);
     }
 
 public:
@@ -332,6 +375,7 @@ private:
     bool _is_cancelled = false;
     bool _eos          = false;
     bool _open_binlog  = false;
+    bool _is_expr_subquery = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
     MemRowDescriptor _mem_row_desc;
     int64_t          _region_id = 0;
@@ -353,6 +397,9 @@ private:
     bool              _optimize_1pc = false;  // 2pc de-generates to 1pc when autocommit=true and
                                               // there is only 1 region.
     NetworkSocket*    _client_conn = nullptr; // used for baikaldb
+    // used for baikaldb, 记录rpcid用于cancel
+    bthread_mutex_t _callid_lock;
+    std::map<std::string, std::map<int64_t, brpc::CallId>> _addr_callids_map; 
     TransactionPool*  _txn_pool = nullptr;    // used for store
     SmartTransaction  _txn = nullptr;         // used for store
     std::shared_ptr<RegionResource> _resource;// used for store
@@ -366,6 +413,7 @@ private:
     RuntimeStatePool* _pool = nullptr;
     //trace使用
     std::vector<TraceTimeCost> _trace_cost_vec;
+    std::vector<std::vector<ExprValue>> _subquery_exprs;
 };
 typedef std::shared_ptr<RuntimeState> SmartState;
 }

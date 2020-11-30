@@ -123,12 +123,12 @@ private:
         int64_t all_streaming_size = sizeof(int64_t) * 2 + sizeof(int8_t) + backup_info.meta_info.size + (
             backup_info.data_info.size == 0 ? 0 : (sizeof(int64_t) + backup_info.data_info.size)
         );
-        DB_NOTICE("region_%lld backup size meta[%ld] data[%ld]", 
+        DB_NOTICE("region_%ld backup size meta[%ld] data[%ld]", 
             _region_id, backup_info.meta_info.size, backup_info.data_info.size);
         auto ret = pa->WriteStreamingSize(all_streaming_size);
         if (ret != 0) {
             char error_buf[21];
-            DB_FATAL("region_%lld write streaming size error[%s] ret[%d]",
+            DB_FATAL("region_%ld write streaming size error[%s] ret[%d]",
                 _region_id, strerror_r(errno, error_buf, 21), ret);
             return -1;
         }
@@ -136,7 +136,7 @@ private:
         ret = pa->Write(reinterpret_cast<char*>(&log_index), sizeof(int64_t));
         if (ret != 0) {
             char error_buf[21];
-            DB_FATAL("region_%lld write index error[%s] ret[%d]",
+            DB_FATAL("region_%ld write index error[%s] ret[%d]",
                 _region_id, strerror_r(errno, error_buf, 21), ret);
             return -1;
         }
@@ -145,7 +145,7 @@ private:
         ret = pa->Write(reinterpret_cast<char*>(&file_num), sizeof(int8_t));
         if (ret != 0) {
             char error_buf[21];
-            DB_FATAL("region_%lld write file number error[%s] ret[%d]", 
+            DB_FATAL("region_%ld write file number error[%s] ret[%d]", 
                 _region_id, strerror_r(errno, error_buf, 21), ret);
             return -1;
         }
@@ -161,7 +161,7 @@ private:
             auto ret = pa->Write(reinterpret_cast<char*>(&file_info.size), sizeof(int64_t));
             if (ret != 0) {
                 char error_buf[21];
-                DB_FATAL("region_%lld write file size error[%s] ret[%d]", 
+                DB_FATAL("region_%ld write file size error[%s] ret[%d]", 
                     _region_id, strerror_r(errno, error_buf, 21), ret);
                 return -1;
             }
@@ -174,29 +174,29 @@ private:
                     return -1;
                 } 
                 if (read_ret != 0) {
-                    DB_DEBUG("region_%lld read: %lld", _region_id, read_ret);
+                    DB_DEBUG("region_%ld read: %ld", _region_id, read_ret);
                     ret = pa->Write(buf.get(), read_ret);
                     if (ret != 0) {
                         char error_buf[21];
-                        DB_FATAL("region_%lld write error[%s] ret[%d]",
+                        DB_FATAL("region_%ld write error[%s] ret[%d]",
                             _region_id, strerror_r(errno, error_buf, 21), ret);
                         return -1;
                     }
                 }
                 read_size += read_ret;
-                DB_DEBUG("region_%lld_all: %lld", _region_id, read_size);
+                DB_DEBUG("region_%ld_all: %ld", _region_id, read_size);
             } while (read_ret == BUF_SIZE);
             return 0;
         };
 
         if (append_file(backup_info.meta_info) == -1) {
-            DB_WARNING("backup region[%lld] send meta file[%s] error.", 
+            DB_WARNING("backup region[%ld] send meta file[%s] error.", 
                 _region_id, backup_info.meta_info.path.c_str());
             return -1;
         }
         if (backup_info.data_info.size > 0) {
             if (append_file(backup_info.data_info) == -1) {
-                DB_WARNING("backup region[%lld] send data file[%s] error.", 
+                DB_WARNING("backup region[%ld] send data file[%s] error.", 
                     _region_id, backup_info.data_info.path.c_str());
                 return -1;
             }

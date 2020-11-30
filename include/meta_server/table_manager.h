@@ -410,7 +410,7 @@ public:
         if (table_ids.size() != partition_ids.size()
                 || partition_ids.size() != region_ids.size()) {
              DB_WARNING("input param not legal, "
-                        "table_ids_size:%ld partition_ids_size:%ls, region_ids_size:%ld",
+                        "table_ids_size:%lu partition_ids_size:%lu, region_ids_size:%lu",
                         table_ids.size(), partition_ids.size(), region_ids.size());
              return;
         }
@@ -615,6 +615,19 @@ public:
         return table_iter->second.is_linked || table_iter->second.binlog_target_ids.size() > 0;
     }
 
+    bool check_filed_is_linked(int64_t table_id, int32_t field_id) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        auto table_iter = _table_info_map.find(table_id);
+        if (table_iter == _table_info_map.end()) {
+            return false;
+        }
+        if (table_iter->second.is_linked && table_iter->second.schema_pb.has_link_field()) {
+            return  table_iter->second.schema_pb.link_field().field_id() == field_id;
+        }
+        return false;
+    }
+
+
     int get_ddlwork_info(int64_t table_id, pb::QueryResponse* query_response) {
         auto ddlwork_ptr = get_ddlwork_ptr(table_id);
         if (ddlwork_ptr != nullptr) {
@@ -800,7 +813,7 @@ private:
         BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
         auto table_ddlinfo_iter = _table_ddlinfo_map.find(table_id);
         if (table_ddlinfo_iter == _table_ddlinfo_map.end()) {
-            DB_DEBUG("table_ddlinfo_map doesn't have table_id[%lld]", table_id);
+            DB_DEBUG("table_ddlinfo_map doesn't have table_id[%ld]", table_id);
             return nullptr;
         }
         return table_ddlinfo_iter->second;
@@ -829,7 +842,7 @@ private:
             ddl_peer_mem.workstate = work_state;
             ddl_peer_mem.peer = peer;
             region_ddl_info.peer_infos.emplace(peer, ddl_peer_mem);
-            DB_NOTICE("add_ddl_region region[%lld] peer[%s] state[%s]", region_ddl_info.region_id, peer.c_str(),
+            DB_NOTICE("add_ddl_region region[%ld] peer[%s] state[%s]", region_ddl_info.region_id, peer.c_str(),
                         pb::IndexState_Name(work_state).c_str());
         }
     }
@@ -853,21 +866,21 @@ private:
                     });
 
                     if (all_peer_done && region_info.workstate != store_job_state) {
-                        DB_NOTICE("table_id_%lld region_%lld all peer state[%s]", table_id, region_id, 
+                        DB_NOTICE("table_id_%ld region_%ld all peer state[%s]", table_id, region_id, 
                             pb::IndexState_Name(store_job_state).c_str());
                         region_info.workstate = store_job_state;
                     }
                     if (debug_flag && !all_peer_done) {
                         debug_flag = false;
                         for (const auto& peer_ddl_info : region_info.peer_infos) {
-                            DB_NOTICE("table_id_%lld wait for region[%lld] peer[%s] state[%s]", table_id, region_info.region_id,
+                            DB_NOTICE("table_id_%ld wait for region[%ld] peer[%s] state[%s]", table_id, region_info.region_id,
                                 peer_ddl_info.second.peer.c_str(), 
                                 pb::IndexState_Name(peer_ddl_info.second.workstate).c_str());
                         }
                     }
                 }
             } else {
-                DB_NOTICE("DDL_LOG region[%lld] peer[%s] has been delete.", region_id, peer.c_str());
+                DB_NOTICE("DDL_LOG region[%ld] peer[%s] has been delete.", region_id, peer.c_str());
                 //region_info.peer_infos.emplace(peer, DdlPeerMem{pb::IS_UNKNOWN, peer});
             }
         };

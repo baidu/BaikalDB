@@ -96,7 +96,7 @@ int DeletePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    auto iter = _table_tuple_mapping.begin();
+    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
     int64_t table_id = iter->second.table_id;
     _ctx->prepared_table_id = table_id;
     if (!_ctx->is_prepared) {
@@ -106,11 +106,11 @@ int DeletePlanner::plan() {
 }
 
 int DeletePlanner::create_delete_node() {
-    if (_table_tuple_mapping.size() != 1) {
+    if (_plan_table_ctx->table_tuple_mapping.size() != 1) {
         DB_WARNING("invalid sql format: %s", _ctx->sql.c_str());
         return -1;
     }
-    auto iter = _table_tuple_mapping.begin();
+    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
     int64_t table_id = iter->second.table_id;
 
     pb::PlanNode* delete_node = _ctx->add_plan_node();
@@ -135,11 +135,11 @@ int DeletePlanner::create_delete_node() {
 }
 
 int DeletePlanner::create_truncate_node() {
-    if (_table_tuple_mapping.size() != 1) {
+    if (_plan_table_ctx->table_tuple_mapping.size() != 1) {
         DB_WARNING("invalid sql format: %s", _ctx->sql.c_str());
         return -1;
     }
-    auto iter = _table_tuple_mapping.begin();
+    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
 
     pb::PlanNode* truncate_node = _ctx->add_plan_node();
     truncate_node->set_node_type(pb::TRUNCATE_NODE);
@@ -153,7 +153,7 @@ int DeletePlanner::create_truncate_node() {
 }
 
 int DeletePlanner::reset_auto_incr_id() {
-    auto iter = _table_tuple_mapping.begin();
+    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
     int64_t table_id = iter->second.table_id;
 
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
@@ -185,7 +185,7 @@ int DeletePlanner::parse_where() {
     if (_delete_stmt->where == nullptr) {
         return 0;
     }
-    if (0 != flatten_filter(_delete_stmt->where, _where_filters, false, false)) {
+    if (0 != flatten_filter(_delete_stmt->where, _where_filters, CreateExprOptions())) {
         DB_WARNING("flatten_filter failed");
         return -1;
     }

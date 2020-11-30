@@ -36,7 +36,8 @@ int LogEntryReader::read_log_entry(int64_t region_id, int64_t log_index, std::st
         DB_FATAL("log entry is not data, log_index:%ld, region_id: %ld", log_index, region_id);
         return -1;
     }
-    log_entry = log_value.substr(MyRaftLogStorage::LOG_HEAD_SIZE);
+    slice.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE);
+    log_entry.assign(slice.data(), slice.size());
     return 0;
 }
 

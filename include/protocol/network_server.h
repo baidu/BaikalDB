@@ -76,6 +76,7 @@ private:
     void fill_field_info(int64_t table_id, std::map<int64_t, int>& distinct_field_map, 
         std::string type, std::ostringstream& os);
     void print_agg_sql();
+    void store_health_check();
     
 private:
     // Server info.
@@ -91,8 +92,8 @@ private:
     Bthread         _conn_check_bth;
     Bthread         _heartbeat_bth;
     Bthread         _other_heartbeat_bth;
-    Bthread         _recover_bth;
     Bthread         _agg_sql_bth;
+    Bthread         _health_check_bth;
     uint32_t        _driver_thread_num;
     uint64_t        _instance_id = 0;
 };

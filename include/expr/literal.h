@@ -25,6 +25,7 @@ public:
 
     Literal(ExprValue value) : _value(value) {
         _is_constant = true;
+        _has_null = value.is_null();
         value_to_node_type();
     }
 
@@ -40,6 +41,7 @@ public:
         switch (node.node_type()) {
             case pb::NULL_LITERAL:
                 _value.type = pb::NULL_TYPE;
+                _has_null = true;
                 break;
             case pb::INT_LITERAL:
                 _value.type = pb::INT64;
@@ -64,6 +66,11 @@ public:
             case pb::HLL_LITERAL:
                 _value.type = pb::HLL;
                 _value.str_val = node.derive_node().string_val();
+                break;
+            case pb::BITMAP_LITERAL:
+                _value.type = pb::BITMAP;
+                _value.str_val = node.derive_node().string_val();
+                _value.cast_to(pb::BITMAP);
                 break;
             case pb::DATETIME_LITERAL:
                 _value.type = pb::DATETIME;
@@ -119,6 +126,7 @@ public:
             case pb::STRING_LITERAL:
             case pb::HEX_LITERAL:
             case pb::HLL_LITERAL:
+            case pb::BITMAP_LITERAL:
                 pb_node->mutable_derive_node()->set_string_val(_value.get_string());
                 break;
             case pb::DATETIME_LITERAL:
@@ -184,6 +192,8 @@ private:
             _node_type = pb::DOUBLE_LITERAL;
         } else if (_value.is_hll()) {
             _node_type = pb::HLL_LITERAL;
+        } else if (_value.is_bitmap()) {
+            _node_type = pb::BITMAP_LITERAL;
         } else {
             _node_type = pb::NULL_LITERAL;
         }

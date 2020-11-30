@@ -430,6 +430,9 @@ void TransactionPool::clear_transactions(Region* region) {
         }
     }
     for (auto txn : txns_need_reverse) {
+        if (txn->primary_region_id() == -1) {
+            continue;
+        }
         if (!txn->is_finished() && !txn->is_primary_region()) {
             pb::RegionInfo region_info;
             int ret = get_region_info_from_meta(txn->primary_region_id(), region_info);
@@ -511,13 +514,13 @@ void TransactionPool::on_leader_stop_rollback(uint64_t txn_id) {
 }
 
 // 该函数执行时需要保证没有事务的修改操作
-void TransactionPool::get_prepared_txn_info(std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn) {
+void TransactionPool::get_prepared_txn_info(std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn, bool for_num_rows) {
     std::unique_lock<std::mutex> lock(_map_mutex);
     for (auto& pair : _txn_map) {
         auto txn = pair.second;
         // 事务所有指令都发送给新region
         pb::TransactionInfo txn_info;
-        int ret = txn->get_cache_plan_infos(txn_info);
+        int ret = txn->get_cache_plan_infos(txn_info, for_num_rows);
         if (ret < 0) {
             continue;
         }

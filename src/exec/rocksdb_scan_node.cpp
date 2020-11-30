@@ -38,7 +38,7 @@ int RocksdbScanNode::select_index_for_store() {
         IndexInfo& info = *info_ptr;
         auto index_state = info.state;
         if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -857,7 +857,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             } else {
                 ret = _index_iter->get_next(_tuple_id, row);
             }
-            //DB_DEBUG("rocksdb_scan region_%lld record[%s]", _region_id, record->to_string().c_str());
+            //DB_DEBUG("rocksdb_scan region_%ld record[%s]", _region_id, record->to_string().c_str());
             if (ret < 0) {
                 //DB_WARNING_STATE(state, "get index fail, maybe reach end");
                 continue;
@@ -904,7 +904,6 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
 }
 void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
-    bool ignore_primary = false;
     auto scan_pb = pb_node->mutable_derive_node()->mutable_scan_node();
     if (region_id == 0 || _region_primary.count(region_id) == 0) {
         return;
@@ -933,10 +932,10 @@ int RocksdbScanNode::choose_arrow_pb_reverse_index(const pb::ScanNode& node) {
         for (auto id : _multi_reverse_index) {
             const pb::PossibleIndex& pos_index = node.indexes(id);
             auto index_id = pos_index.index_id();
-            DB_DEBUG("reverse_filter index [%lld]", index_id);
+            DB_DEBUG("reverse_filter index [%ld]", index_id);
             pb::StorageType type = pb::ST_UNKNOWN;
             if (SchemaFactory::get_instance()->get_index_storage_type(index_id, type) == -1) {
-                DB_FATAL("get index storage type error index [%lld]", index_id);
+                DB_FATAL("get index storage type error index [%ld]", index_id);
                 return -1;
             }
 

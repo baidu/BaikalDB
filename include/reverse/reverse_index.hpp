@@ -14,11 +14,11 @@
 
 namespace baikaldb {
 template <typename Schema>
-int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remove_third) {
+int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remove_third, bool force_remove_third) {
     _key_range = KeyRange(info.start_key(), info.end_key());
     if (need_remove_third) {
-        _reverse_remove_range_for_third_level(2);
-        _reverse_remove_range_for_third_level(3);
+        _reverse_remove_range_for_third_level(2, force_remove_third);
+        _reverse_remove_range_for_third_level(3, force_remove_third);
     }
     int8_t status = 0;
     TimeCost timer;
@@ -281,10 +281,10 @@ int ReverseIndex<Schema>::_create_reverse_key_prefix(uint8_t level, std::string&
 }
 
 template <typename Schema>
-int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) {
+int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix, bool force_remove_third) {
     // 和merge在同一个线程调度，简化处理
     // 如果后续发现性能问题分开的话，需要这里和merge都要调整成GetForUpdate
-    int8_t status = 0;
+    //int8_t status = 0;
     //1. create prefix key (regionid+tableid+_reverse_prefix)
     std::string key;
     _create_reverse_key_prefix(prefix, key);
@@ -336,7 +336,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) 
         ReverseList& third_msg = static_cast<ReverseList&>(*third_level_list);
         int old_count = third_msg.reverse_nodes_size();
         scan_node_count += old_count;
-        if (old_count > 0) {
+        if (old_count > 0 && !force_remove_third) {
             std::string first_key = third_msg.reverse_nodes(0).key();
             std::string last_key = third_msg.reverse_nodes(old_count - 1).key();
             if (first_key >= _key_range.first &&
@@ -369,23 +369,23 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) 
         }   
         std::string value;
         if (!new_third_level_list->SerializeToString(&value)) {
-            DB_FATAL("remove_range serialize failed, index_id: %ld, old_count: %d",
-                    _region_id, _index_id);
+            DB_FATAL("remove_range serialize failed, region_id: %ld, index_id: %ld, old_count: %d",
+                    _region_id, _index_id, old_count);
             return -1;
         }
         if (result_count > 0) {
             auto put_res = txn->get_txn()->Put(data_cf, iter->key(), value);
             if (!put_res.ok()) {
-                DB_FATAL("index_id: %ld, old_count: %d, rocksdb put error: code=%d, msg=%s",
-                        _region_id, _index_id, put_res.code(), put_res.ToString().c_str());
+                DB_FATAL("region_id: %ld, index_id: %ld, old_count: %d, rocksdb put error: code=%d, msg=%s",
+                        _region_id, _index_id, old_count, put_res.code(), put_res.ToString().c_str());
                 return -1;
             }
         } else {
             ++remove_rows;
             auto del_res = txn->get_txn()->Delete(data_cf, iter->key());
             if (!del_res.ok()) {
-                DB_FATAL("index_id: %ld, old_count: %d, rocksdb del error: code=%d, msg=%s",
-                        _region_id, _index_id, del_res.code(), del_res.ToString().c_str());
+                DB_FATAL("region_id: %ld, index_id: %ld, old_count: %d, rocksdb del error: code=%d, msg=%s",
+                        _region_id, _index_id, old_count, del_res.code(), del_res.ToString().c_str());
                 return -1;
             }
         }
@@ -744,12 +744,12 @@ int MutilReverseIndex<Schema>::init_operator_executor(
         for (const auto& child : fulltext_index_info.nested_fulltext_indexes()) {
             if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
                 OperatorBooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_operator_executor(child, child_exe) == 0) {
+                if (init_operator_executor(child, child_exe) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             } else {
                 BooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_term_executor(child, child_exe) == 0) {
+                if (init_term_executor(child, child_exe) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             }
@@ -761,12 +761,12 @@ int MutilReverseIndex<Schema>::init_operator_executor(
 
             if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
                 OperatorBooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_operator_executor(child, child_exe) == 0) {
+                if (init_operator_executor(child, child_exe) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             } else {
                 BooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_term_executor(child, child_exe) == 0) {
+                if (init_term_executor(child, child_exe) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             }

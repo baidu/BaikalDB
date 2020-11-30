@@ -19,6 +19,7 @@
 #include "table_record.h"
 #include "runtime_state.h"
 #include "base.h"
+#include "expr.h"
 #include "range.h"
 
 namespace baikaldb {
@@ -109,6 +110,15 @@ struct QueryStat {
         old_txn_id          = 0;
         old_seq_id          = 0;
     }
+};
+
+struct ExprParams {
+    bool is_expr_subquery = false;
+    bool is_correlated_subquery = false;
+    parser::FuncType    func_type = parser::FT_COMMON;
+    parser::CompareType cmp_type  = parser::CMP_ANY;
+    // (a,b) in (select a,b from t) row_filed_number=2
+    int  row_filed_number  = 1;
 };
 
 class QueryContext {
@@ -213,6 +223,8 @@ public:
     int64_t             prepared_table_id = -1;
     bool                has_derived_table = false;
     bool                has_information_schema = false;
+    ExprParams          expr_params;
+    std::string         current_table_name;
     // field: column_id
     std::map<std::string, int32_t> field_column_id_mapping;
     // tuple_id: field: slot_id
@@ -220,6 +232,8 @@ public:
     // tuple_id: slot_id: column_id
     std::map<int64_t, std::map<int32_t, int32_t>>     slot_column_mapping;
     std::map<int64_t, std::shared_ptr<QueryContext>> derived_table_ctx_mapping;
+    // 当前sql涉及的tuple
+    std::set<int64_t>   current_tuple_ids;
     bool                open_binlog = false;
 
     // user can scan data in specific region by comments 

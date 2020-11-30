@@ -214,7 +214,7 @@ public:
             _range_expr.push_back(node_ptr->get_value(nullptr));
         }
         if (_partition_num == 0 || _range_expr.size() == 0) {
-            DB_WARNING("partition_num [%d] or range_expr size is zero", _partition_num);
+            DB_WARNING("partition_num [%ld] or range_expr size is zero", _partition_num);
             return -1;
         }
         return 0;
@@ -374,9 +374,19 @@ struct SchemaMapping {
 
 using DoubleBufferedTable = butil::DoublyBufferedData<SchemaMapping>;
 
+struct InstanceDBStatus {
+    InstanceDBStatus() : InstanceDBStatus(pb::NORMAL, "") {}
+    InstanceDBStatus(pb::Status status, const std::string& logical_room) :
+        status(status), logical_room(logical_room) {}
+    // NORMAL 正常
+    // FAULTY 故障
+    // DEAD hang住假死，需要做rpc cancel
+    pb::Status status;
+    std::string logical_room;
+};
 struct IdcMapping {
     // store => logical_room
-    std::unordered_map<std::string, std::string> instance_logical_mapping;
+    std::unordered_map<std::string, InstanceDBStatus> instance_info_mapping;
     // physical_room => logical_room
     std::unordered_map<std::string, std::string> physical_logical_mapping;
 };
@@ -414,9 +424,8 @@ public:
     // _sync系统初始化的时候调用，防止meta信息获取延迟导致系统不可用
     void update_tables_double_buffer_sync(const SchemaVec& tables);
 
-    static int update_idc_double_buffer(
-            void* meta, bthread::TaskIterator<pb::IdcInfo>& iter);
-    void update_idc_double_buffer(bthread::TaskIterator<pb::IdcInfo>& iter);
+    void update_instance(const std::string& addr, pb::Status s);
+    int update_instance_internal(IdcMapping& idc_mapping, const std::string& addr, pb::Status s);
     void update_idc(const pb::IdcInfo& idc_info);
     int update_idc_internal(IdcMapping& background, const pb::IdcInfo& idc_info);
 
@@ -525,6 +534,7 @@ public:
     bool get_separate_switch(int64_t table_id);
     bool is_switch_open(const int64_t table_id, const std::string& switch_name);
     void get_cost_switch_open(std::vector<std::string>& database_table);
+    void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
     void table_with_statistics_info(std::vector<std::string>& database_table);
     void get_schema_conf_op_info(const int64_t table_id, int64_t& op_version, std::string& op_desc);
     template <class T>
@@ -584,17 +594,28 @@ public:
         //DB_NOTICE("get_logical_room [%s]", _logical_room.c_str());
         return _logical_room;
     }
-    std::string logical_room_for_instance(const std::string& store) {
+    InstanceDBStatus get_instance_status(const std::string& store) {
         DoubleBufferedIdc::ScopedPtr idc_ptr;
         if (_double_buffer_idc.Read(&idc_ptr) == 0) {
-            auto& instance_logical_mapping = idc_ptr->instance_logical_mapping;
-            if (instance_logical_mapping.find(store) != instance_logical_mapping.end()) {
-                return instance_logical_mapping.at(store);
+            auto& instance_info_mapping = idc_ptr->instance_info_mapping;
+            auto iter = instance_info_mapping.find(store);
+            if (iter != instance_info_mapping.end()) {
+                return iter->second;
             }
         } else {
             DB_WARNING("read double_buffer_idc error.");
         }
-        return "";
+        return {pb::NORMAL, ""};
+    }
+    int get_all_instance_status(std::unordered_map<std::string, InstanceDBStatus>* info_map) {
+        DoubleBufferedIdc::ScopedPtr idc_ptr;
+        if (_double_buffer_idc.Read(&idc_ptr) == 0) {
+            *info_map = idc_ptr->instance_info_mapping;
+            return 0;
+        } else {
+            DB_WARNING("read double_buffer_idc error.");
+            return -1;
+        }
     }
     bool is_global_index(const int64_t& table_id) {
         DoubleBufferedTable::ScopedPtr table_ptr;
@@ -635,7 +656,7 @@ public:
     int get_table_state(int64_t table_id, pb::IndexState& state) {
         auto table_ptr = get_table_info_ptr(table_id);
         if (table_ptr == nullptr) {
-            DB_FATAL("table_id[%lld] not in schema", table_id);
+            DB_FATAL("table_id[%ld] not in schema", table_id);
             return -1;
         }
         for (auto index_id : table_ptr->indices) {
@@ -646,7 +667,7 @@ public:
                     break;
                 }
             } else {
-                DB_FATAL("index_id[%lld] table_id[%lld] not in schema", index_id, table_id);
+                DB_FATAL("index_id[%ld] table_id[%ld] not in schema", index_id, table_id);
                 return -1;
             }
         }
@@ -678,6 +699,21 @@ public:
         } else {
             return -1;
         }
+    }
+
+    int get_disable_indexs(std::vector<std::string>& index_names) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return -1;
+        }
+        auto& index_info_mapping = table_ptr->index_info_mapping;
+        for (auto& index_info : index_info_mapping) {
+            if (index_info.second->index_hint_status == pb::IHS_DISABLE) {
+                index_names.emplace_back(index_info.second->name);
+            }
+        }
+        return 0;
     }
 
     bool is_table_partitioned(int64_t table_id) {
@@ -809,7 +845,6 @@ private:
     bthread::ExecutionQueueId<pb::SchemaInfo> _table_queue_id = {0};
 
     DoubleBufferedIdc _double_buffer_idc;
-    bthread::ExecutionQueueId<pb::IdcInfo>  _idc_queue_id = {0};
 
     DoubleBufferedTableRegionInfo _table_region_mapping;
     bthread::ExecutionQueueId<RegionVec> _region_queue_id = {0};

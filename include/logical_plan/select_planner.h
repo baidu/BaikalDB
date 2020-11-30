@@ -27,9 +27,15 @@ public:
         LogicalPlanner(ctx),
         _select(nullptr) {}
 
+    SelectPlanner(QueryContext* ctx, const SmartPlanTableCtx& plan_state) : 
+        LogicalPlanner(ctx, plan_state),
+        _select(nullptr) {}
+
     virtual ~SelectPlanner() {}
 
-    virtual int plan();
+    virtual int plan() override;
+
+    virtual bool is_correlated_subquery() override;
 
 private:
 
@@ -58,6 +64,8 @@ private:
     int parse_orderby();
 
     int parse_limit();
+
+    int expr_subquery_rewrite();
   
     bool is_full_export();
 
@@ -77,6 +85,7 @@ private:
 
     pb::Expr                _limit_offset;
     pb::Expr                _limit_count;
+    std::string             _table_name;
 };
 } //namespace baikal
 

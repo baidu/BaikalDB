@@ -103,6 +103,33 @@ ExprValue murmur_hash(const std::vector<ExprValue>& input);
 ExprValue md5(const std::vector<ExprValue>& input);
 ExprValue sha1(const std::vector<ExprValue>& input);
 ExprValue sha(const std::vector<ExprValue>& input);
+//  Roaring bitmap functions
+ExprValue rb_build(const std::vector<ExprValue>& input);
+ExprValue rb_and(const std::vector<ExprValue>& input);
+//ExprValue rb_and_cardinality(const std::vector<ExprValue>& input);
+ExprValue rb_or(const std::vector<ExprValue>& input);
+//ExprValue rb_or_cardinality(const std::vector<ExprValue>& input);
+ExprValue rb_xor(const std::vector<ExprValue>& input);
+//ExprValue rb_xor_cardinality(const std::vector<ExprValue>& input);
+ExprValue rb_andnot(const std::vector<ExprValue>& input);
+//ExprValue rb_andnot_cardinality(const std::vector<ExprValue>& input);
+ExprValue rb_cardinality(const std::vector<ExprValue>& input);
+ExprValue rb_empty(const std::vector<ExprValue>& input);
+ExprValue rb_equals(const std::vector<ExprValue>& input);
+//ExprValue rb_not_equals(const std::vector<ExprValue>& input);
+ExprValue rb_intersect(const std::vector<ExprValue>& input);
+ExprValue rb_contains(const std::vector<ExprValue>& input);
+ExprValue rb_contains_range(const std::vector<ExprValue>& input);
+ExprValue rb_add(const std::vector<ExprValue>& input);
+ExprValue rb_add_range(const std::vector<ExprValue>& input);
+ExprValue rb_remove(const std::vector<ExprValue>& input);
+ExprValue rb_remove_range(const std::vector<ExprValue>& input);
+ExprValue rb_flip(const std::vector<ExprValue>& input);
+ExprValue rb_flip_range(const std::vector<ExprValue>& input);
+ExprValue rb_minimum(const std::vector<ExprValue>& input);
+ExprValue rb_maximum(const std::vector<ExprValue>& input);
+ExprValue rb_rank(const std::vector<ExprValue>& input);
+ExprValue rb_jaccard_index(const std::vector<ExprValue>& input);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

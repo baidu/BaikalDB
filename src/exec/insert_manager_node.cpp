@@ -122,6 +122,8 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
             return -1;
         }
     }
+    // 最后一个clild就是_sub_query_node
+    _children.pop_back();
     ret = _sub_query_node->open(_sub_query_runtime_state);
     if (ret < 0) {
         return ret;
@@ -308,7 +310,7 @@ int InsertManagerNode::insert_ignore(RuntimeState* state) {
     // 写主表和全局二级索引并发
     ret = send_request_concurrency(state, 0);
     if (ret < 0) {
-        DB_WARNING("exec concurrency failed log_id:%lu, ret:%d ", ret, state->log_id());
+        DB_WARNING("exec concurrency failed log_id:%lu, ret:%d ", state->log_id(), ret);
         return ret;
     }
     return _affected_rows;

@@ -49,7 +49,7 @@ int TruncateNode::open(RuntimeState* state) {
     MutTableKey region_start;
     MutTableKey region_end;
     region_start.append_i64(_region_id);
-    region_end.append_i64(_region_id).append_u64(0xFFFFFFFFFFFFFFFF);
+    region_end.append_i64(_region_id).append_u64(UINT64_MAX);
 
     rocksdb::WriteOptions write_options;
     //write_options.disableWAL = true;

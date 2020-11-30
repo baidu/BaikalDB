@@ -26,7 +26,7 @@
 
 namespace baikaldb {
 int64_t ScanNode::select_index() {
-    std::multimap<uint32_t, int> prefix_ratio_id_mapping;
+    std::multimap<uint32_t, int64_t> prefix_ratio_id_mapping;
     std::unordered_set<int32_t> primary_fields;
     primary_fields = _paths[_table_id]->hit_index_field_ids;
     for (auto& pair : _paths) {
@@ -43,7 +43,7 @@ int64_t ScanNode::select_index() {
         }
         auto index_state = info.state;
         if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%lld] state [%s] ", 
+            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -184,7 +184,7 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         explain_info["type"] = "range";
         if (pos_index.ranges_size() == 1) {
             int field_cnt = pos_index.ranges(0).left_field_cnt();
-            if (field_cnt == index_info.fields.size() && 
+            if (field_cnt == (int)index_info.fields.size() && 
                     pos_index.ranges(0).left_pb_record() == pos_index.ranges(0).right_pb_record()) {
                 explain_info["type"] = "eq_ref";
                 if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_PRIMARY) {
@@ -235,7 +235,7 @@ void ScanNode::show_cost(std::vector<std::map<std::string, std::string>>& path_i
 
 int64_t ScanNode::select_index_by_cost() {
     double min_cost = DBL_MAX;
-    int min_idx = 0;
+    int64_t min_idx = 0;
     bool multi_0_0 = false;
     bool multi_1_0 = false;
     bool enable_use_cost = true;
@@ -357,7 +357,7 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
 void ScanNode::inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter) {
     auto inner_loop_iter = outer_loop_iter;
     while ((++inner_loop_iter) != _paths.end()) {
-        if (!inner_loop_iter->second->is_possible) {
+        if (!inner_loop_iter->second->is_possible || inner_loop_iter->second->is_virtual) {
             continue;
         }
 
@@ -389,7 +389,7 @@ int64_t ScanNode::pre_process_select_index() {
     int cover_index_cnt = 0;
     int64_t possible_index = 0;
     for (auto outer_loop_iter = _paths.begin(); outer_loop_iter != _paths.end(); outer_loop_iter++) {
-        if (!outer_loop_iter->second->is_possible) {
+        if (!outer_loop_iter->second->is_possible || outer_loop_iter->second->is_virtual) {
             continue;
         }
 
@@ -507,7 +507,7 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
         }
         other_condition = _paths[select_idx]->other_condition;
     }
-    DB_DEBUG("select_idx:%d _is_covering_index:%d index:%ld table:%ld", 
+    DB_DEBUG("select_idx:%ld _is_covering_index:%d index:%ld table:%ld", 
             select_idx, _is_covering_index, select_idx, _table_id);
     // modify filter conjuncts
     if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
@@ -547,10 +547,10 @@ int ScanNode::choose_arrow_pb_reverse_index() {
         arrow_indexs.reserve(4);
         pb::StorageType filter_type = pb::ST_UNKNOWN;
         for (auto index_id : _multi_reverse_index) {
-            DB_DEBUG("reverse_filter index [%lld]", index_id);
+            DB_DEBUG("reverse_filter index [%ld]", index_id);
             pb::StorageType type = pb::ST_UNKNOWN;
             if (SchemaFactory::get_instance()->get_index_storage_type(index_id, type) == -1) {
-                DB_FATAL("get index storage type error index [%lld]", index_id);
+                DB_FATAL("get index storage type error index [%ld]", index_id);
                 return -1;
             }
 

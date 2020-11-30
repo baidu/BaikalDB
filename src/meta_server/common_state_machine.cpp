@@ -41,13 +41,15 @@ void MetaServerClosure::Run() {
     if (cntl != nullptr) {
         remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
     }
-   
-    DB_NOTICE("request:%s, response:%s, raft_time_cost:[%ld], total_time_cost:[%ld], remote_side:[%s]", 
+  
+    if (response != nullptr && response->op_type() != pb::OP_GEN_ID_FOR_AUTO_INCREMENT) {
+        DB_NOTICE("request:%s, response:%s, raft_time_cost:[%ld], total_time_cost:[%ld], remote_side:[%s]", 
                 request.c_str(), 
-                (response == nullptr) ? "" : response->ShortDebugString().c_str(), 
+                response->ShortDebugString().c_str(), 
                 raft_time_cost, 
                 total_time_cost, 
                 remote_side.c_str());
+    }
     if (done != nullptr) {
         done->Run();
     }
@@ -204,7 +206,7 @@ void CommonStateMachine::check_migrate() {
     int ret = 0;
     if (get_instance_from_bns(&ret,FLAGS_meta_server_bns, instances, false) != 0 || 
             (int32_t)instances.size() != FLAGS_meta_replica_number) {
-        DB_WARNING("get instance from bns fail, bns:%s, ret:%d, instance.size:%d",
+        DB_WARNING("get instance from bns fail, bns:%s, ret:%d, instance.size:%lu",
                     FLAGS_meta_server_bns.c_str(), ret, instances.size());
         return;
     }

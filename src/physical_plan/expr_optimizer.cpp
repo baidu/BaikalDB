@@ -36,7 +36,7 @@ void ExprOptimize::analyze_union(QueryContext* ctx, PacketNode* packet_node) {
     }
     auto select_projections = select_packet_node->mutable_projections();
     pb::TupleDescriptor* tuple_desc = ctx->get_tuple_desc(0);
-    for (int i = 0; i < union_projections.size(); i++) {
+    for (size_t i = 0; i < union_projections.size(); i++) {
         union_projections[i]->set_col_type(select_projections[i]->col_type());
         auto slot = tuple_desc->mutable_slots(i);
         slot->set_slot_type(select_projections[i]->col_type());
@@ -66,7 +66,7 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
         for (auto& iter : slot_column_map) {
             int32_t outer_slot_id = iter.first;
             int32_t inter_column_id = iter.second;
-            if (inter_column_id >= select_projections.size()) {
+            if (inter_column_id >= (int)select_projections.size()) {
                 DB_WARNING("plan ilegal");
                 return -1;
             } 
@@ -74,7 +74,7 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
             for (auto expr : outer_projections) {
                  expr->set_slot_col_type(tuple_id, outer_slot_id, type);
             }
-            auto slot = tuple_desc->mutable_slots(outer_slot_id-1);
+            auto slot = tuple_desc->mutable_slots(outer_slot_id - 1);
             slot->set_slot_type(type);
             if (sort_node != nullptr) {
                 for (auto expr : *(sort_node->mutable_order_exprs())) {

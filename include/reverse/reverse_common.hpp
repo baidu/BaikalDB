@@ -58,8 +58,60 @@ int Tokenizer::nlpc_seg(drpc::NLPCClient& client,
 
 template<typename ReverseNode, typename ReverseList>
 int FirstLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool& res) {
+    int ret = 0;
+
+    while (_need_next && _node_dq.size() < 2) {
+        ReverseNode node;
+        ret = internal_next(&node, _need_next);
+        if (ret < 0) {
+            return -1;
+        }
+
+        if (!_need_next) {
+            break;
+        }
+
+        if (_node_dq.empty()) {
+            _node_dq.emplace_back(node);
+            continue;
+        }
+
+        if (node.key() == _node_dq.back().key()) {
+            _node_dq.pop_back();
+            _node_dq.emplace_back(node);
+            continue;
+        } else {
+            _node_dq.emplace_back(node);
+            break;
+        }
+    }
+
+    res = true;
+    if (_node_dq.size() > 1) {
+        _curr_node = _node_dq.front();
+        _node_dq.pop_front();
+        key = _curr_node.key();
+        return 0;
+    }
+
+    if (!_need_next) {
+        if (!_node_dq.empty()) {
+            _curr_node = _node_dq.front();
+            _node_dq.pop_front();
+            key = _curr_node.key();
+        } else {
+            res = false;
+        }
+    }
+
+    return 0;
+}
+
+template<typename ReverseNode, typename ReverseList>
+int FirstLevelMSIterator<ReverseNode, ReverseList>::internal_next(ReverseNode* node, bool& res) {
     //当key >= _end_key时该term的拉链实际已经结束，但是merge的时候，所有的term
     //的拉链顺序在一起，所以需要把当前term的拉链遍历完，才能成功访问后续term
+    std::string key;
     do {
         if (!_first) {
             _iter->Next();
@@ -89,11 +141,11 @@ int FirstLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool&
         }
         //rocksdb::Slice pin_slice = _iter->value();
         
-        if (!_curr_node.ParseFromArray(pin_slice.data(), pin_slice.size())) {
+        if (!node->ParseFromArray(pin_slice.data(), pin_slice.size())) {
             DB_FATAL("parse first level from pb failed");
             return -1;
         }
-        key = _curr_node.key();
+        key = node->key();
         
         if (_del) {
             auto remove_res = _txn->Delete(data_cf, _iter->key());
@@ -137,6 +189,14 @@ int SecondLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool
             //DB_WARNING("get %d index reverse node list size[%d]", _index, _list.reverse_nodes_size());
             res = true;
             key = (_list.mutable_reverse_nodes(_index))->key();
+            while (_index + 1 < _list.reverse_nodes_size()) {
+                if (key == _list.mutable_reverse_nodes(_index + 1)->key()) {
+                    _index++;
+                } else {
+                    break;
+                }
+            }
+
             //key = _list.reverse_nodes(_index).key();
         } else {
             res = false;

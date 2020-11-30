@@ -141,6 +141,7 @@ public:
         fill_node(tmp_node);
     }
 private:
+    int internal_next(ReverseNode* node, bool& res);
     std::unique_ptr<rocksdb::Iterator>& _iter;
     const std::string& _merge_term;
     bool _first;
@@ -150,6 +151,8 @@ private:
     bool _del;
     RocksWrapper* _rocksdb;
     rocksdb::Transaction* _txn;
+    std::deque<ReverseNode> _node_dq;
+    bool _need_next = true;
 };
 
 //add_node对arrow进行特化

@@ -179,7 +179,7 @@ public:
                                 std::map<std::string, std::set<int64_t>>& not_alive_regions,
                                 std::vector<pb::PeerStateInfo>& recover_region_way);
     void recovery_single_region_by_init_region(const std::set<int64_t> region_ids,
-                    std::vector<std::string>& instances,
+                    std::vector<Instance>& instances,
                     std::vector<pb::PeerStateInfo>& recover_region_way);
     void recovery_all_region(const pb::MetaManagerRequest& request, pb::MetaManagerResponse* response);
 

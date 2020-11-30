@@ -238,7 +238,7 @@ void TSOStateMachine::reset_tso(const pb::TsoRequest& request,
         if (physical < _tso_obj.last_save_physical
             || current.physical() < _tso_obj.current_timestamp.physical()) {
             if (!request.force()) {
-                DB_WARNING("time fallback save_physical:(%lld, %lld) current:(%lld, %lld, %lld, %lld)",
+                DB_WARNING("time fallback save_physical:(%ld, %ld) current:(%ld, %ld, %ld, %ld)",
                     physical, _tso_obj.last_save_physical, current.physical(), _tso_obj.current_timestamp.physical(),
                     current.logical(), _tso_obj.current_timestamp.logical());
                 if (done && ((TsoClosure*)done)->response) {
@@ -277,7 +277,7 @@ void TSOStateMachine::update_tso(const pb::TsoRequest& request,
     // 不能回退
     if (physical < _tso_obj.last_save_physical
         || current.physical() < _tso_obj.current_timestamp.physical()) {
-            DB_WARNING("time fallback save_physical:(%lld, %lld) current:(%lld, %lld, %lld, %lld)",
+            DB_WARNING("time fallback save_physical:(%ld, %ld) current:(%ld, %ld, %ld, %ld)",
             physical, _tso_obj.last_save_physical, current.physical(), _tso_obj.current_timestamp.physical(),
             current.logical(), _tso_obj.current_timestamp.logical());
         if (done && ((TsoClosure*)done)->response) {
@@ -349,7 +349,7 @@ void TSOStateMachine::update_timestamp() {
     }
     int64_t delta = now - prev_physical;
     if (delta < 0) {
-        DB_WARNING("physical time slow now:%lld prev:%lld", now, prev_physical);
+        DB_WARNING("physical time slow now:%ld prev:%ld", now, prev_physical);
     }
     int64_t next = now;
     if (delta > tso::update_timestamp_guard_ms) {

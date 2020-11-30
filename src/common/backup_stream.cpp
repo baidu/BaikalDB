@@ -59,7 +59,7 @@ int StreamReceiver::on_received_messages(brpc::StreamId id,
             }, &_to_process_size);
 
         if (_to_process_size == 0) {
-            DB_DEBUG("id[%lu] get meta file size %lld", id, _meta_file_size);
+            DB_DEBUG("id[%lu] get meta file size %ld", id, _meta_file_size);
             _state = ReceiverState::RS_META_FILE;
             _to_process_size = _meta_file_size;
         } else {
@@ -77,7 +77,7 @@ int StreamReceiver::on_received_messages(brpc::StreamId id,
             }, &_to_process_size);
 
         if (_to_process_size == 0) {
-            DB_NOTICE("id[%lu] get meta file size %lld", id, _meta_file_size);
+            DB_NOTICE("id[%lu] get meta file size %ld", id, _meta_file_size);
             _state = ReceiverState::RS_DATA_FILE_SIZE;
             _to_process_size = sizeof(int64_t);
             if (_file_num == 1) {
@@ -100,7 +100,7 @@ int StreamReceiver::on_received_messages(brpc::StreamId id,
 
         if (_to_process_size == 0) {
             _state = ReceiverState::RS_DATA_FILE;
-            DB_NOTICE("id[%lu] get data file size %lld", id, _data_file_size);
+            DB_NOTICE("id[%lu] get data file size %ld", id, _data_file_size);
             _to_process_size = _data_file_size;
         } else {
             break;
@@ -117,7 +117,7 @@ int StreamReceiver::on_received_messages(brpc::StreamId id,
             }, &_to_process_size);
 
         if (_to_process_size == 0) {
-            DB_NOTICE("id[%lu] get data_size[%lld] all_size[%lld]", 
+            DB_NOTICE("id[%lu] get data_size[%ld] all_size[%ld]", 
                 id, _data_file_size, _data_file_size + _meta_file_size + 25);
             _meta_file_streaming.flush();
             _data_file_streaming.flush();

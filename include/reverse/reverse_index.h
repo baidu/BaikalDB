@@ -33,7 +33,7 @@ public:
     virtual ~ReverseIndexBase() {
     }
     //倒排表的1、2、3级倒排链表merge函数
-    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third) = 0;
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third, bool force_remove_third = false) = 0;
     //新加正排 创建倒排索引
     virtual int insert_reverse(
                        rocksdb::Transaction* txn,
@@ -203,7 +203,7 @@ public:
     }
     ~ReverseIndex(){}
 
-    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third);
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third, bool force_remove_third = false);
     //0:success    -1:fail
     virtual int insert_reverse(
                         rocksdb::Transaction* txn,
@@ -292,7 +292,7 @@ private:
     //key = tableid_regionid_level
     int _create_reverse_key_prefix(uint8_t level, std::string& key);
     //remove out of range keys when split
-    int _reverse_remove_range_for_third_level(uint8_t prefix);
+    int _reverse_remove_range_for_third_level(uint8_t prefix, bool force_remove_third);
     //first(0/1) level merge to second(2) level
     int _reverse_merge_to_second_level(std::unique_ptr<rocksdb::Iterator>&, uint8_t);
     //get some level list

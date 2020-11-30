@@ -28,7 +28,10 @@ int32_t MemRowDescriptor::init(std::vector<pb::TupleDescriptor>& tuple_desc) {
     }
     _proto->set_name("mem_row.proto");
     std::vector<int32_t> tuples;
-    for (auto tuple : tuple_desc) {
+    for (auto& tuple : tuple_desc) {
+        if (!tuple.has_tuple_id()) {
+            continue;
+        }
         int32_t tuple_id = tuple.tuple_id();
         google::protobuf::DescriptorProto* tuple_proto = _proto->add_message_type();
         tuple_proto->set_name("tuple_" + std::to_string(tuple_id));
@@ -87,7 +90,12 @@ google::protobuf::Message* MemRowDescriptor::new_tuple_message(int32_t tuple_id)
 }
 
 std::unique_ptr<MemRow> MemRowDescriptor::fetch_mem_row() {
-    std::unique_ptr<MemRow> tmp(new MemRow(_id_tuple_mapping.size()));
+    int32_t size = _id_tuple_mapping.size();
+    int32_t largest = 1;
+    if (size > 0) {
+        largest = _id_tuple_mapping.rbegin()->first;
+    }
+    std::unique_ptr<MemRow> tmp(new MemRow(largest + 1));
     for (auto& pair : _id_tuple_mapping) {
         tmp->_tuples[pair.first] = pair.second->New();
     }

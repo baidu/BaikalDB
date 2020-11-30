@@ -110,6 +110,7 @@ message WatchInstanceInfo {
     optional int64         leader_count                 = 9;
     optional int64         region_count                 = 10;
     optional int64         id                           = 11;
+    optional string        version                      = 12;
 };
 
 message WatchRegionInfo {

@@ -83,37 +83,18 @@ int MysqlWrapper::handshake_send(SmartSocket sock) {
     return ret;
 }
 
-int MysqlWrapper::fill_auth_failed_packet(SmartSocket sock, const char* msg, int len) {
+int MysqlWrapper::fill_auth_failed_packet(SmartSocket sock, const char* msg) {
     if (!sock) {
         DB_FATAL("sock == NULL");
         return RET_ERROR;
     }
     sock->send_buf->byte_array_clear();
-    const char *head_info = "\xff\x15\x04#28000";
-    int tmp_len = len + strlen(head_info) + 1;
+    std::string tmp = "\xff\x15\x04#28000";
+    tmp += msg;
 
-    char *tmp = new (std::nothrow) char[tmp_len];
-    if (tmp == NULL) {
-        DB_FATAL("allocate temp buf error!");
+    if (!sock->send_buf->network_queue_send_append((uint8_t*) tmp.c_str(), tmp.size() + 1, 2, 0)) {
         return RET_ERROR;
     }
-    bzero(tmp, tmp_len);
-
-    if (tmp != strncat(tmp, head_info, strlen(head_info))) {
-        DB_FATAL("strcat1 error");
-        delete []tmp;
-        return RET_ERROR;
-    }
-    if (tmp != strncat(tmp, msg, len)) {
-        DB_FATAL("strcat2 error");
-        delete []tmp;
-        return RET_ERROR;
-    }
-    if (!sock->send_buf->network_queue_send_append((uint8_t*) tmp, tmp_len, 2, 0)) {
-        delete []tmp;
-        return RET_ERROR;
-    }
-    delete []tmp;
     return RET_SUCCESS;
 }
 
@@ -341,7 +322,7 @@ bool MysqlWrapper::make_err_packet(SmartSocket sock, MysqlErrCode err_code, cons
         return false;
     }
     if (!send_buf->byte_array_append_len((const uint8_t *)err_msg, strlen(err_msg))) {
-        DB_FATAL("Failed to byte_array_append_len.bytes:[%s], len:[%d]",
+        DB_FATAL("Failed to byte_array_append_len.bytes:[%s], len:[%lu]",
                         err_msg, strlen(err_msg));
         return false;
     }
@@ -492,17 +473,17 @@ bool MysqlWrapper::make_row_packet(DataBuffer* send_buf,
         uint64_t length = row[cnt].size();
         if (length == 0) {
             if (!send_buf->byte_array_append_len((const uint8_t*)&null_byte, 1)) {
-                DB_FATAL("Failed to append len.value:[%s],len:[1]", null_byte);
+                DB_FATAL("Failed to append len.value:[%d],len:[1]", null_byte);
                 return false;
             }
         } else {
             if (!send_buf->byte_array_append_length_coded_binary((unsigned long long)length)) {
-                DB_FATAL("Failed to append length coded binary.length:[%u]", length);
+                DB_FATAL("Failed to append length coded binary.length:[%lu]", length);
                 return false;
             }
             if (!send_buf->byte_array_append_len(
                             (const uint8_t *)row[cnt].c_str(), length)) {
-                DB_FATAL("Failed to append len. value:[%s],len:[%u]",
+                DB_FATAL("Failed to append len. value:[%s],len:[%lu]",
                                 row[cnt].c_str(), length);
                 return false;
             }
@@ -658,7 +639,7 @@ bool MysqlWrapper::make_eof_packet(DataBuffer* send_buf, const int packet_id) {
         return false;
     }
     if (!send_buf->byte_array_append_len((const uint8_t *)"\xfe\x00\x00\x02\x00", 5)) {
-        DB_FATAL("Failed to append len.str:[\xfe\x00\x00\x02\x00], len[5]");
+        DB_FATAL("Failed to append len.str:[\\xfe\\x00\\x00\\x02\\x00], len[5]");
         return false;
     }
     return true;
@@ -772,36 +753,17 @@ bool MysqlWrapper::make_stmt_prepare_ok_packet(SmartSocket sock) {
     return true;
 }
 
-bool MysqlWrapper::make_string_packet(SmartSocket sock, const char* data, int len) {
-    if (!sock || data == NULL || len <= 0) {
-        DB_FATAL("s == NULL || data == NULL || len=%d <= 0", len);
+bool MysqlWrapper::make_string_packet(SmartSocket sock, const char* data) {
+    if (!sock || data == NULL) {
+        DB_FATAL("s == NULL || data == NULL ");
         return false;
     }
-    const char *head_info = "\xff\x88\x88#88S88";
-    int tmp_len = len + strlen(head_info) + 1;
-    char *tmp = new (std::nothrow) char[tmp_len];
-    if (tmp == NULL) {
-        DB_FATAL("allocate temp buf error!");
-        return false;
-    }
-    bzero(tmp, tmp_len);
-
-    if (tmp != strncat(tmp, head_info, strlen(head_info))) {
-        DB_FATAL("strcat1 error");
-        delete []tmp;
-        return false;
-    }
-    if (tmp != strncat(tmp, data, len)) {
-        DB_FATAL("strcat2 error");
-        delete []tmp;
-        return false;
-    }
-    if (!sock->send_buf->network_queue_send_append((uint8_t*)tmp, tmp_len, ++sock->packet_id, 0)) {
+    std::string tmp = "\xff\x88\x88#88S88";
+    tmp += data;
+    if (!sock->send_buf->network_queue_send_append((uint8_t*)tmp.c_str(), tmp.size() + 1, ++sock->packet_id, 0)) {
         DB_FATAL("Failed to network_queue_send_append.");
-        delete []tmp;
         return false;
     }
-    delete []tmp;
     return true;
 }
 
@@ -814,7 +776,7 @@ int MysqlWrapper::protocol_get_length_coded_int(
         uint64_t&   result,
         bool&       is_null) {
     if ((uint32_t)packet_len < offset + 1) {
-        DB_FATAL("packet_len(%u) < offset(%u) + len(%lu)", packet_len, offset, 1);
+        DB_FATAL("packet_len(%d) < offset(%u) + len(%d)", packet_len, offset, 1);
         return RET_ERROR;
     }
     if (data[offset] > 254) {
@@ -961,7 +923,7 @@ int MysqlWrapper::decode_binary_protocol_value(
     }
     case MYSQL_TYPE_FLOAT: {
         if ((uint32_t)packet_len < offset + 4) {
-            DB_FATAL("packet_len(%u) < offset(%u) + len(%lu)", packet_len, offset, 4);
+            DB_FATAL("packet_len(%d) < offset(%u) + len(%d)", packet_len, offset, 4);
             return RET_ERROR;
         }
         uint8_t* p = (uint8_t*)(data+offset);
@@ -976,7 +938,7 @@ int MysqlWrapper::decode_binary_protocol_value(
     }
     case MYSQL_TYPE_DOUBLE: {
         if ((uint32_t)packet_len < offset + 8) {
-            DB_FATAL("packet_len(%u) < offset(%u) + len(%lu)", packet_len, offset, 8);
+            DB_FATAL("packet_len(%d) < offset(%u) + len(%d)", packet_len, offset, 8);
             return RET_ERROR;
         }
         uint8_t* p = (uint8_t*)(data+offset);

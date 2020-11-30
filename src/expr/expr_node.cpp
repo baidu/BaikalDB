@@ -33,6 +33,15 @@ void ExprNode::const_pre_calc() {
         if (!c->_is_constant) {
             _is_constant = false;
         }
+        if (c->has_null()) {
+            _has_null = true;
+        }
+    }
+    // is null 可以把null转为true/false
+    // not in 有null则结果是false or null
+    // TODO 需要对null统一处理，还包括ifnull等函数
+    if (_node_type == pb::IS_NULL_PREDICATE) {
+        _has_null = false;
     }
     //const表达式等着父节点来替换
     //root是const表达式则外部替换
@@ -248,6 +257,7 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
         case pb::STRING_LITERAL:
         case pb::HEX_LITERAL:
         case pb::HLL_LITERAL:
+        case pb::BITMAP_LITERAL:
         case pb::DATE_LITERAL:
         case pb::DATETIME_LITERAL:
         case pb::TIME_LITERAL:

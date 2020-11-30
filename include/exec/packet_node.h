@@ -76,6 +76,7 @@ private:
     int pack_text_row(MemRow* row);
     int pack_binary_row(MemRow* row);
     int pack_eof();
+    int fatch_expr_subquery_results(RuntimeState* state);
 
 private:
     bool _binary_protocol = false;

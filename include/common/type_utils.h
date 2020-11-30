@@ -38,6 +38,7 @@ enum MysqlType : uint8_t {
     MYSQL_TYPE_NEWDATE, 
     MYSQL_TYPE_VARCHAR,
     MYSQL_TYPE_BIT,
+    MYSQL_TYPE_BITMAP = 243,
     MYSQL_TYPE_HLL = 244,
     MYSQL_TYPE_JSON = 245,
     MYSQL_TYPE_NEWDECIMAL = 246,
@@ -323,6 +324,8 @@ inline uint8_t to_mysql_type(pb::PrimitiveType type) {
             return MYSQL_TYPE_TIMESTAMP;
         case pb::HLL:
             return MYSQL_TYPE_LONGLONG;
+        case pb::BITMAP:
+            return MYSQL_TYPE_STRING;
         default:
             return MYSQL_TYPE_STRING;
     }
@@ -359,6 +362,7 @@ inline std::string to_mysql_type_string(pb::PrimitiveType type) {
         case pb::TIMESTAMP:
             return "timestamp";
         case pb::HLL:
+        case pb::BITMAP:
             return "binary";
         default:
             return "text";
@@ -400,6 +404,7 @@ inline std::string to_mysql_type_full_string(pb::PrimitiveType type) {
         case pb::TIMESTAMP:
             return "timestamp(0)";
         case pb::HLL:
+        case pb::BITMAP:
             return "binary";
         default:
             return "text";
