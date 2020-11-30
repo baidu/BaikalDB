@@ -33,7 +33,7 @@ ExternalProject_Add(
         UPDATE_COMMAND ""
         CONFIGURE_COMMAND ""
         BUILD_IN_SOURCE 1
-        BUILD_COMMAND sh build.sh
+        BUILD_COMMAND mv ../build.sh . COMMAND sh build.sh
         INSTALL_COMMAND mkdir -p ${CROARING_INSTALL_DIR}/lib/ COMMAND cp ${CROARING_SOURCES_DIR}/src/extern_croaring/src/libroaring.a ${CROARING_LIBRARIES} COMMAND cp -r ${CROARING_SOURCES_DIR}/src/extern_croaring/include/roaring ${CROARING_INCLUDE_DIR} COMMAND cp -r ${CROARING_SOURCES_DIR}/src/extern_croaring/cpp/roaring.hh ${CROARING_INCLUDE_DIR}/
 )
 
