@@ -569,6 +569,7 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
             }
         }
 
+        _binlog_param.max_ts_in_map = ts;
         if (_binlog_param.ts_binlog_map.size() > 0) {
             _binlog_param.min_ts_in_map = _binlog_param.ts_binlog_map.begin()->first;
         } else {
@@ -742,6 +743,7 @@ void Region::apply_binlog(const pb::StoreReq& request, braft::Closure* done) {
         }
 
         binlog_update_map_when_apply(field_value_map);
+        binlog_update_check_point();
     }
 
     if (done != nullptr && ((BinlogClosure*)done)->response != nullptr) {
