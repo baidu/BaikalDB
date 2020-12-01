@@ -85,6 +85,7 @@ public:
         int64_t& commit_ts, int32_t fetch_num, int64_t wait_microsecs = 0);
 
 private:
+    int init_binlog();
     std::vector<std::string> _table_infos;
     int64_t _partition_id = 0;
     int64_t _binlog_id = 0;
@@ -157,12 +158,12 @@ public:
     int64_t run(int64_t& commit_ts);
 private:
 
-    int multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t tid);
+    int multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t table_id);
 
-    int multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t tid);
+    int multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id);
 
     int single_record_to_event(mysub::Event* event, 
-        const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t tid);
+        const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id);
 
     template<typename Repeated>
     int deserialization(const Repeated& repeat, RecordMap& records_map, int64_t table_id) {

@@ -181,13 +181,13 @@ CaptureStatus MergeBinlog::run(int64_t& commit_ts) {
 
 int BinLogTransfer::init() {
     //获取主键index_info
-    for (auto tid : _origin_ids) {
-        DB_NOTICE("config table id [%ld]", tid);
-        auto& cap_info = _cap_infos[tid];
+    for (auto table_id : _origin_ids) {
+        DB_NOTICE("config table id [%ld]", table_id);
+        auto& cap_info = _cap_infos[table_id];
 
-        cap_info.table_info = baikaldb::SchemaFactory::get_instance()->get_table_info_ptr(tid);
+        cap_info.table_info = baikaldb::SchemaFactory::get_instance()->get_table_info_ptr(table_id);
         if (cap_info.table_info == nullptr) {
-            DB_FATAL("get table info error table_id %ld", tid);
+            DB_FATAL("get table info error table_id %ld", table_id);
             return -1;
         }
         for (const auto index_id : cap_info.table_info->indices) {
@@ -229,10 +229,10 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
         DB_DEBUG("get binlog commit_ts[%ld] logid[%lu]", commit_ts, _log_id);
         for (const auto& mutation : binlog.prewrite_value().mutations()) {
             RecordCollection records;
-            int64_t tid = mutation.table_id();
+            int64_t table_id = mutation.table_id();
 
-            if (_cap_infos.count(tid) == 0) {
-                DB_DEBUG("table_id[%ld] is filter.", tid);
+            if (_cap_infos.count(table_id) == 0) {
+                DB_DEBUG("table_id[%ld] is filter.", table_id);
                 continue;
             }
             if (transfer_mutation(mutation, records) != 0) {
@@ -247,15 +247,15 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
             insert_size += records.insert_records.size();
             delete_size += records.delete_records.size();
             update_size += records.update_records.size();
-            if (multi_records_to_event(records.insert_records, mysub::INSERT_EVENT, commit_ts, tid) != 0) {
+            if (multi_records_to_event(records.insert_records, mysub::INSERT_EVENT, commit_ts, table_id) != 0) {
                 DB_FATAL("insert records to event error.");
                 return -1;
             }
-            if (multi_records_to_event(records.delete_records, mysub::DELETE_EVENT, commit_ts, tid) != 0) {
+            if (multi_records_to_event(records.delete_records, mysub::DELETE_EVENT, commit_ts, table_id) != 0) {
                 DB_FATAL("delete records to event error.");
                 return -1;
             }
-            if (multi_records_update_to_event(records.update_records, commit_ts, tid) != 0) {
+            if (multi_records_update_to_event(records.update_records, commit_ts, table_id) != 0) {
                 DB_FATAL("update records to event error.");
                 return -1;
             }
@@ -266,14 +266,14 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
         insert_size, delete_size, update_size, _log_id);
     return 0;
 }
-int BinLogTransfer::multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t tid) {
+int BinLogTransfer::multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t table_id) {
     for (const auto& record : update_records) {
         std::shared_ptr<mysub::Event> event(new mysub::Event);
         auto delete_insert_records = std::make_pair(
             record.first.get(),
             record.second.get()
             );
-        if (single_record_to_event(event.get(), delete_insert_records, mysub::UPDATE_EVENT, commit_ts, tid) !=0) {
+        if (single_record_to_event(event.get(), delete_insert_records, mysub::UPDATE_EVENT, commit_ts, table_id) !=0) {
             DB_WARNING("insert update record error.");
             return -1;
         }
@@ -282,14 +282,14 @@ int BinLogTransfer::multi_records_update_to_event(const UpdatePairVec& update_re
     return 0;
 }
 
-int BinLogTransfer::multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t tid) {
+int BinLogTransfer::multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id) {
     for (const auto& record : records) {
         std::shared_ptr<mysub::Event> event(new mysub::Event);
         auto delete_insert_records = std::make_pair(
             event_type == mysub::DELETE_EVENT ? record.second.get() : nullptr,
             event_type == mysub::INSERT_EVENT ? record.second.get() : nullptr
             );
-        if (single_record_to_event(event.get(), delete_insert_records, event_type, commit_ts, tid) != 0) {
+        if (single_record_to_event(event.get(), delete_insert_records, event_type, commit_ts, table_id) != 0) {
             DB_WARNING("insert/delete  record error.");
             return -1;
         }
@@ -299,8 +299,8 @@ int BinLogTransfer::multi_records_to_event(const RecordMap& records, mysub::Even
 }
 
 int BinLogTransfer::single_record_to_event(mysub::Event* event, 
-    const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t tid) {
-    auto& cap_info = _cap_infos[tid];
+    const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id) {
+    auto& cap_info = _cap_infos[table_id];
     auto delete_record = delete_insert_records.first;
     auto insert_record = delete_insert_records.second;
     event->set_db(cap_info.db_name);
@@ -374,16 +374,6 @@ int BinLogTransfer::transfer_mutation(const pb::TableMutation& mutation, RecordC
 }
 #if BAIDU_INTERNAL
 int Capturer::init(Json::Value& config) {
-    if (baikaldb::init_log("baikal_capture") != 0) {
-        fprintf(stderr, "log init failed.");
-    }
-    DB_WARNING("log file load success");
-
-    if (baikaldb::SchemaFactory::get_instance()->init() != 0) {
-        DB_FATAL("SchemaFactory init failed");
-        return -1;
-    } 
-
     if (!config.isMember("db_shard") || !config["db_shard"].isNumeric()) {
         DB_FATAL("config db_shard info error.");
         return -1;
@@ -408,29 +398,22 @@ int Capturer::init(Json::Value& config) {
             _table_infos.push_back(table_info["name"].asString());
         }
     }
-    for (const auto& table_info : _table_infos) {
-        DB_NOTICE("config namespace[%s] table[%s]", _namespace.c_str(), table_info.c_str());
-        BinlogNetworkServer::get_instance()->config(_namespace, table_info);
-    }
-
-    if (baikaldb::MetaServerInteract::get_instance()->init() != 0) {
-        DB_FATAL("meta server interact init failed");
-        return -1;
-    }
-    baikaldb::BinlogNetworkServer* server = baikaldb::BinlogNetworkServer::get_instance();
-    if (!server->init()) {
-        DB_FATAL("Failed to initail network server.");
-        return -1;
-    }
-
-    _binlog_id = server->get_binlog_target_id();
-    _origin_ids = server->get_binlog_origin_ids();
-    server->schema_heartbeat();
-    _schema_factory = baikaldb::SchemaFactory::get_instance();
-    return 0;
+    return init_binlog();
 }
 #endif
 int Capturer::init() {
+    _namespace = FLAGS_capture_namespace;
+    _partition_id = FLAGS_capture_partition_id;
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, FLAGS_capture_tables,
+            boost::is_any_of(";"), boost::token_compress_on);
+    for (const auto& tb : split_vec) {
+        _table_infos.push_back(tb);
+    }
+    return init_binlog();
+}
+
+int Capturer::init_binlog() {
     if (baikaldb::init_log("baikal_capture") != 0) {
         fprintf(stderr, "log init failed.");
     }
@@ -441,14 +424,6 @@ int Capturer::init() {
         return -1;
     } 
 
-    _namespace = FLAGS_capture_namespace;
-    _partition_id = FLAGS_capture_partition_id;
-    std::vector<std::string> split_vec;
-    boost::split(split_vec, FLAGS_capture_tables,
-            boost::is_any_of(";"), boost::token_compress_on);
-    for (const auto& tb : split_vec) {
-        _table_infos.push_back(tb);
-    }
     for (const auto& table_info : _table_infos) {
         DB_NOTICE("config namespace[%s] table[%s]", _namespace.c_str(), table_info.c_str());
         BinlogNetworkServer::get_instance()->config(_namespace, table_info);
