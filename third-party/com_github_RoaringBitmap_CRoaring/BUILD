@@ -42,6 +42,7 @@ cc_library(
         "-Werror",
         "-mpclmul",
         "-O2",
+        "-std=c99",
     ],
     visibility = ["//visibility:public"],
 )
