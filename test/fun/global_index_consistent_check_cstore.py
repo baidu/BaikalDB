@@ -8,7 +8,7 @@ import sys
 
 HOST=sys.argv[1]
 USER="root"
-PASSWORD="root"
+PASSWORD="****"
 DATABASE="Baikaltest"
 PORT=eval(sys.argv[2])
 resource_tag=''

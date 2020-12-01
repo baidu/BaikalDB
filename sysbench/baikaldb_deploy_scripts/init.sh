@@ -58,7 +58,7 @@ curl -d '{
     "op_type":"OP_CREATE_USER",
     "user_privilege" : {
         "username" : "root",
-        "password" : "root",
+        "password" : "****",
         "namespace_name" : "TEST",
         "privilege_database" : [{
                                     "database" : "TEST",

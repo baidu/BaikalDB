@@ -28,7 +28,7 @@ curl -d '{
     "version": 22,
     "namespace_id": 33,
     "database_id": 44
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8012/StoreService/add_table
+}' http://localhost:8012/StoreService/add_table
 
 curl -d '{
     "region_id": 1,
@@ -43,7 +43,7 @@ curl -d '{
         "10.101.25.72:8011",
         "10.101.25.72:8012"
     ]
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8010/StoreService/add_region
+}' http://localhost:8010/StoreService/add_region
 
 
 curl -d '{
@@ -59,7 +59,7 @@ curl -d '{
             "string_value": "630158_user"
         }
     ]
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8011/StoreService/insert_request
+}' http://localhost:8011/StoreService/insert_request
 
 curl -d '{
     "region_id": 2,
@@ -74,7 +74,7 @@ curl -d '{
             "is_null": true
         }
     ]
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8010/StoreService/select_request
+}' http://localhost:8010/StoreService/select_request
 
 curl -d '{
     "region_id": 2,
@@ -89,28 +89,28 @@ curl -d '{
             "is_null": true
         }
     ]
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8010/StoreService/delete_request
+}' http://localhost:8010/StoreService/delete_request
 
 
 curl -d '{
     "op_type": "GetLeader",
     "region_id": 1
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8010/StoreService/region_raft_control
+}' http://localhost:8010/StoreService/region_raft_control
 
 
 curl -d '{
     "op_type": "TransLeader",
     "region_id": 1,
     "new_leader": "10.101.25.72:8012"
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8010/StoreService/region_raft_control
+}' http://localhost:8010/StoreService/region_raft_control
 
 curl -d '{
     "op_type": "SnapShot",
     "region_id": 1
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8010/StoreService/region_raft_control
+}' http://localhost:8010/StoreService/region_raft_control
 
 
 curl -d '{
     "op_type": "ShutDown",
     "region_id": 1
-}' http://cp01-zhaobaoxue-dev.epc.baidu.com:8010/StoreService/region_raft_control
+}' http://localhost:8010/StoreService/region_raft_control
