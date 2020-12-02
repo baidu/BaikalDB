@@ -782,6 +782,32 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "capture",
+    srcs = glob(["src/tools/baikal_capturer.cpp"]),
+    hdrs = glob([
+        "include/**/*.h",
+        "include/**/*.hpp",
+        "src/tools/*.h",
+    ]),
+    copts = COPTS,
+    includes = [
+        "src/tools",
+    ],
+    deps = [
+        ":cc_baikaldb_internal_proto",
+        "@boost//:lexical_cast",
+        "@boost//:heap",
+        "//external:brpc",
+        "//external:bthread",
+        "//external:rocksdb",
+        "//external:croaring",
+        "//external:rapidjson",
+        ":common",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 baikaldb_proto_library(
     name = "cc_baikaldb_internal_proto",
     srcs = glob([
