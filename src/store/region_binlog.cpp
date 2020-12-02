@@ -508,6 +508,7 @@ void Region::binlog_update_map_when_scan(const std::map<std::string, ExprValue>&
 
 //on_apply中只有相关start_ts/commit_ts/rollback_ts和map区间有重合时才可以更新map
 int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map) {
+    std::unique_lock<bthread_mutex_t> lck(_binlog_param_lock);
     int ret = 0;
     BinlogDesc binlog_desc;
     int64_t ts = binlog_get_int64_val("ts", field_value_map);
@@ -539,49 +540,54 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
         return 0;
     }
 
-    if (ts > _binlog_param.max_ts_in_map) {
-        // DB_WARNING("region_id: %ld, type:%d, ts: %ld > max ts: %ld, don't update map", _region_id, type, ts, _binlog_param.max_ts_in_map);
-        return 0;
-    } else {
-        if (type == FAKE_BINLOG) {
-            binlog_desc.binlog_type = static_cast<BinlogType>(type);
-            _binlog_param.ts_binlog_map[ts] = binlog_desc;
-            // DB_WARNING("region_id: %ld, ts: %ld, FAKE BINLOG", _region_id, ts);
-        } else if (type == PREWRITE_BINLOG) {
-            binlog_desc.binlog_type = static_cast<BinlogType>(type);
-            binlog_desc.txn_id = txn_id;
-            binlog_desc.primary_region_id = binlog_get_int64_val("primary_region_id", field_value_map);
-            _binlog_param.ts_binlog_map[ts] = binlog_desc;
-            DB_WARNING("region_id: %ld, ts: %ld, PREWRITE BINLOG", _region_id, ts);
-        } else if (type == COMMIT_BINLOG || type == ROLLBACK_BINLOG) {
-            if (start_ts < _binlog_param.min_ts_in_map) {
-                DB_FATAL("region_id: %ld, type: %d, start_ts: %ld < min ts: %ld", _region_id, type, start_ts, _binlog_param.min_ts_in_map);
-                return 0;
-            }
-
-            auto iter = _binlog_param.ts_binlog_map.find(start_ts);
-            if (iter == _binlog_param.ts_binlog_map.end()) {
-                DB_FATAL("region_id: %ld, type: %d, start_ts: %ld can not find in map", _region_id, type, start_ts);
-                return 0;
-            } else {
-                _binlog_param.ts_binlog_map.erase(start_ts);
-                DB_WARNING("region_id: %ld, start_ts: %ld erase", _region_id, start_ts);
-            }
-        }
-
-        _binlog_param.max_ts_in_map = ts;
+//    if (ts > _binlog_param.max_ts_in_map) {
+//        // DB_WARNING("region_id: %ld, type:%d, ts: %ld > max ts: %ld, don't update map", _region_id, type, ts, _binlog_param.max_ts_in_map);
+//        return 0;
+//    } else {
+//    {
+    if (type == FAKE_BINLOG) {
         if (_binlog_param.ts_binlog_map.size() > 0) {
-            _binlog_param.min_ts_in_map = _binlog_param.ts_binlog_map.begin()->first;
-        } else {
-            _binlog_param.min_ts_in_map = _binlog_param.max_ts_in_map;
+            return 0;
+        }
+        binlog_desc.binlog_type = static_cast<BinlogType>(type);
+        _binlog_param.ts_binlog_map[ts] = binlog_desc;
+        // DB_WARNING("region_id: %ld, ts: %ld, FAKE BINLOG", _region_id, ts);
+    } else if (type == PREWRITE_BINLOG) {
+        binlog_desc.binlog_type = static_cast<BinlogType>(type);
+        binlog_desc.txn_id = txn_id;
+        binlog_desc.primary_region_id = binlog_get_int64_val("primary_region_id", field_value_map);
+        _binlog_param.ts_binlog_map[ts] = binlog_desc;
+//        DB_WARNING("region_id: %ld, ts: %ld, PREWRITE BINLOG", _region_id, ts);
+    } else if (type == COMMIT_BINLOG || type == ROLLBACK_BINLOG) {
+        if (start_ts < _binlog_param.min_ts_in_map) {
+            DB_FATAL("region_id: %ld, type: %d, start_ts: %ld < min ts: %ld", _region_id, type, start_ts, _binlog_param.min_ts_in_map);
+            return 0;
         }
 
+        auto iter = _binlog_param.ts_binlog_map.find(start_ts);
+        if (iter == _binlog_param.ts_binlog_map.end()) {
+            DB_FATAL("region_id: %ld, type: %d, start_ts: %ld can not find in map", _region_id, type, start_ts);
+            return 0;
+        } else {
+            _binlog_param.ts_binlog_map.erase(start_ts);
+            DB_WARNING("region_id: %ld, start_ts: %ld erase", _region_id, start_ts);
+        }
     }
+    if (ts > _binlog_param.max_ts_in_map) {
+        _binlog_param.max_ts_in_map = ts;
+    }
+    if (_binlog_param.ts_binlog_map.size() > 0) {
+        _binlog_param.min_ts_in_map = _binlog_param.ts_binlog_map.begin()->first;
+    } else {
+        _binlog_param.min_ts_in_map = _binlog_param.max_ts_in_map;
+    }
+//    }
     return 0;
 }
 
 //扫描一轮或者新写入binlog之后，更新map，更新扫描进度点
 int Region::binlog_update_check_point() {
+    std::unique_lock<bthread_mutex_t> lck(_binlog_param_lock);
     if (_binlog_param.max_ts_in_map == -1 || _binlog_param.min_ts_in_map == -1) {
         return 0;
     }
