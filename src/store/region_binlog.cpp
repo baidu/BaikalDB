@@ -623,6 +623,7 @@ int Region::binlog_update_check_point() {
         // check point 变小说明写入ts小于check point，告警
         DB_FATAL("region_id: %ld, new check point ts: %ld, < old check point ts: %ld", 
                     _region_id, check_point_ts, _binlog_param.check_point_ts);
+        return 0;
     } else if (_binlog_param.check_point_ts == check_point_ts) {
         return 0;
     }
