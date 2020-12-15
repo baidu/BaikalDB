@@ -1,0 +1,9 @@
+syntax="proto2";
+package baikaldb.pb;
+option cc_generic_services = true;
+
+message binlog_testtable {
+    optional sint64 id 	    = 1;
+    optional string name    = 2;
+    optional string addr     = 3;
+};

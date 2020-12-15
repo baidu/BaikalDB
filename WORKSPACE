@@ -93,6 +93,7 @@ new_http_archive(
     name = "com_github_facebook_rocksdb",
     url = "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz",
     strip_prefix = "rocksdb-6.8.1",
+    sha256 = "ca192a06ed3bcb9f09060add7e9d0daee1ae7a8705a3d5ecbe41867c5e2796a2",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
 )
 
@@ -105,6 +106,7 @@ new_http_archive(
     name = "com_github_RoaringBitmap_CRoaring",
     url = "https://github.com/RoaringBitmap/CRoaring/archive/v0.2.66.tar.gz",
     strip_prefix = "CRoaring-0.2.66",
+    sha256 = "df98bd8f6ff09097ada529a004af758ff4d33faf6a06fadf8fad9a6533afc241",
     build_file = "third-party/com_github_RoaringBitmap_CRoaring/BUILD",
 )
 

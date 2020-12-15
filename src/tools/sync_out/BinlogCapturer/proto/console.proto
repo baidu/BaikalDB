@@ -1,0 +1,261 @@
+syntax="proto2";
+import "common.proto";
+import "meta.interface.proto";
+package baikaldb.pb;
+option cc_generic_services = true;
+
+
+enum WatchOpType {
+    WATCH_UNKNOWN         = 1;
+    WATCH_PLATFORM        = 2;
+    WATCH_OVERVIEW        = 3;
+    WATCH_TABLE           = 4;
+    WATCH_INSTANCE        = 5;
+    WATCH_REGION          = 6;
+    WATCH_USER            = 7;
+    WATCH_NAMESPACE       = 8;
+    WATCH_DATABASE        = 9;
+    WATCH_CLUSTER         = 10;
+    WATCH_SCHEMA          = 11;
+    WATCH_IMPORTTASK      = 12;
+    WATCH_IMPORTTASK2     = 13;
+    WATCH_TASKLIST        = 14;
+    SUBMIT_IMPORTTASK     = 15;
+};
+
+message ConsoleRequest {
+    optional WatchOpType op_type       = 1;
+    optional string logical_room       = 2;
+    optional string physical_room      = 3;
+    optional string instance_address   = 4;
+    optional string user_name          = 5;
+    optional string namespace_name     = 6;
+    optional string database           = 7;
+    optional string table_name         = 8;
+    optional int64  region_id          = 9;
+    optional string resource_tag       = 10;
+};
+
+message ReplicationStatus {
+    optional int64   region_count  = 1;
+    optional int64   row_count     = 2;    
+};
+
+message QueryParam {
+    required WatchOpType optype             = 1;
+    optional string      physical_room      = 2;
+    optional string      instance           = 3;
+    optional string      resource_tag       = 4;
+    optional string      table_name         = 5;
+    optional string      region_id          = 6;
+    optional string      start              = 7;
+    optional string      limit              = 8;
+    optional string      logical_room       = 9;
+    optional string      step               = 10;
+    optional string      namespace_name     = 11;
+    optional string      database           = 12;
+    optional string      table_id           = 13;
+    optional string      raw_start_key      = 14;
+    optional string      done_file          = 15;
+    optional string      cluster_name       = 16;
+    optional string      ago_days           = 17;
+    optional string      user_sql           = 18;
+    optional string      modle              = 19;
+    optional string      charset            = 20;
+    optional string      interval_days      = 21;
+    optional string      crud_database      = 22;
+    optional string      platform           = 23;
+    optional string      meta_server_bns    = 24;
+};
+
+message OverViewInfo {
+    optional string   usage                        = 1;
+    optional string   instances_status             = 2;
+    optional ReplicationStatus replications_status = 3; 
+};
+
+message WatchTableInfo {
+    optional int64              id                   = 1;
+    optional int64              table_id             = 2;
+    optional string             table_name           = 3;
+    optional string             resource_tag         = 4;
+    optional int64              max_field_id         = 5;
+    optional int64              version              = 6;
+    optional Status             status               = 7;
+    optional int64              byte_size_per_record = 8;
+    optional string             create_time          = 9;
+    optional int64              region_count         = 10; 
+    optional int64              row_count            = 11;
+    optional int64              region_size          = 12;
+    optional int64              main_table_id        = 13;
+    optional int64              region_split_lines   = 14;
+};
+
+message WatchUserInfo {
+    optional string    username              = 1;
+    optional string    password              = 2;
+    optional int64     id                    = 3;
+    optional string    tablename             = 4;
+    optional RW        permission            = 5;
+    optional string    namespace_name        = 6;
+};
+
+message WatchInstanceInfo {
+    required string        address                      = 1;
+    optional int64         capacity                     = 2;
+    optional int64         used_size                    = 3;
+    optional string        resource_tag                 = 4;
+    optional Status        status                       = 5;
+    optional string        physical_room                = 6;
+    optional string        logical_room                 = 7;
+    optional int64         peer_count                   = 8;
+    optional int64         leader_count                 = 9;
+    optional int64         region_count                 = 10;
+    optional int64         id                           = 11;
+};
+
+message WatchRegionInfo {
+    required int64 region_id               = 1;
+    optional string table_name             = 2;
+    optional int64 partition_id            = 3;
+    optional int64 replica_num             = 4;
+    optional int64 version                 = 5;
+    optional int64 conf_version            = 6;
+    optional string start_key              = 7;
+    optional string end_key                = 8;
+    optional string peers                  = 9;
+    optional string leader                 = 10;
+    optional RegionStatus status           = 11;
+    optional int64  used_size              = 12;
+    optional int64  log_index              = 13;
+    optional string resource_tag           = 17;
+    optional int64  parent                 = 18;
+    optional string create_time            = 19;
+    optional int64  table_id               = 20;
+    optional int64  id                     = 21;
+    optional string raw_start_key          = 22;
+    optional int64  num_table_lines        = 23;
+    optional int64  main_table_id          = 24;
+};
+
+message WatchNameSpace {
+    repeated string namespace_name         = 1;
+};
+
+message TableName {
+    optional string name                    = 1;
+    optional int64  id                      = 2;
+};
+
+message WatchDatabaseInfo {
+    optional string    name                 = 1;
+    optional int64     id                   = 2;
+    repeated TableName children             = 3;
+};
+
+message WatchClusterInfo {
+    optional string    name                 = 1;
+    optional int64     id                   = 2;
+};
+
+message WatchImportTask {
+    optional int64     version              = 1;
+    optional string    start_time           = 2;
+    optional string    end_time             = 3;
+    optional string    exec_time            = 4;
+    optional int64     import_line          = 5;
+    optional string    modle                = 6;
+    optional string    status               = 7;
+}
+
+message WatchSSTTask {
+    optional string    database             = 1;
+    optional string    table_name           = 2;
+    optional string    table_id             = 3;
+    optional string    start_time           = 4;
+    optional string    end_time             = 5;
+    optional string    status               = 6;
+}
+
+message WatchTaskList {
+    optional string    table_info           = 1;
+    optional string    cluster_name         = 2;
+    optional string    done_file            = 3;
+    optional string    user_sql             = 4;
+    optional string    ago_days             = 5;
+    optional string    charset              = 6;
+    optional string    modle                = 7;
+    optional string    status               = 8;
+}
+
+message WatchSchemaInfo {
+    optional string       full_table_name   = 1;
+    repeated QuerySchema  schemas           = 2;
+};
+
+message WatchPlatForm {
+    repeated string plat_form         = 1;
+};
+
+message ConsoleResponse {
+    required ErrCode            errcode             = 1;
+    optional string             errmsg              = 2;
+    optional int64              itemnum             = 3;
+    optional OverViewInfo       overview            = 4;
+    repeated WatchTableInfo     table_infos         = 5;
+    repeated WatchInstanceInfo  instance_infos      = 6;
+    repeated WatchUserInfo      user_privileges     = 7;
+    repeated WatchRegionInfo    region_infos        = 8; 
+    optional WatchNameSpace     namespaces          = 9;
+    repeated WatchDatabaseInfo  databases           = 10;
+    optional WatchSchemaInfo    table_schemas       = 11;
+    repeated WatchClusterInfo   cluster_infos       = 12;
+    repeated WatchImportTask    import_task         = 13;
+    repeated WatchTaskList      task_list           = 14;
+    optional WatchPlatForm      plat_forms          = 15;
+    repeated WatchSSTTask       sst_backup_task     = 16;
+};
+message ShowxCondition {
+    optional string t = 1;
+    optional string k = 2;
+    optional string v = 3;
+};
+message ShowxRequest {
+    repeated ShowxCondition conditions = 1;
+};
+message ShowxColumn {
+    required string name = 1;
+    required string id   = 2;
+    optional string unit = 3;
+    optional string textAlign = 4;
+    optional bool   autoWrap  = 5;
+    optional string width     = 6;
+    optional string accuracy  = 7;
+    optional string remark    = 8;
+};
+message ShowxRow {
+    optional string database_name = 1;
+    optional string table_name    = 2;
+    optional string sign          = 3;
+    optional string time_range    = 4;
+    optional int64  pv            = 5;
+    optional int64  pv_diff       = 6;
+    optional float  avg           = 7;
+    optional float  avg_diff      = 8;
+};
+message ShowxData {
+    repeated ShowxColumn columns = 1;
+    repeated ShowxRow    rows    = 2;
+};
+message ShowxResponse {
+    optional int64  status = 1;
+    optional string msg    = 2;
+    optional ShowxData data = 3;
+    optional int64 total    = 4;
+};
+service ConsoleService {
+    rpc watch(ConsoleRequest) returns (ConsoleResponse);
+    rpc showx(ShowxRequest) returns (ShowxResponse);
+    rpc sql_alarm(ShowxRequest) returns (ShowxResponse);
+};
+

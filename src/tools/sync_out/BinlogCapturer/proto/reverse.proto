@@ -1,0 +1,42 @@
+syntax="proto2";
+package baikaldb.pb;
+//option cc_enable_arenas = true;
+
+enum ReverseNodeType {
+    REVERSE_NODE_NORMAL = 0;
+    REVERSE_NODE_DELETE = 1;
+};
+
+//--common
+message CommonReverseNode
+{
+    optional bytes key = 1;//must
+    required ReverseNodeType flag = 2;//must
+    optional float weight = 3;
+};
+message CommonReverseList
+{
+    repeated CommonReverseNode reverse_nodes = 1;//must
+};
+
+//--xbs
+message XbsReverseNode
+{
+    message Trigger {
+        required uint32 tag_source = 1;
+        optional float weight = 2;
+        optional bytes term = 3;
+        optional uint64 query_id = 4;
+    };
+    optional bytes key = 1;//must
+    required ReverseNodeType flag = 2;//must
+    repeated Trigger triggers = 3;
+    optional float weight = 4;
+    //todo:后续需要考虑更通用
+    optional uint32 userid = 5;
+    optional uint32 source = 6;
+};
+message XbsReverseList
+{
+    repeated XbsReverseNode reverse_nodes = 1;//must
+};

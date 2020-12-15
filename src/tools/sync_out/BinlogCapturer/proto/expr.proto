@@ -1,0 +1,73 @@
+syntax="proto2";
+import "common.proto";
+package baikaldb.pb;
+//option cc_enable_arenas = true;
+
+enum ExprNodeType {
+    SLOT_REF = 1;
+    FUNCTION_CALL = 2;
+    AGG_EXPR = 3;
+    NULL_LITERAL = 4;
+    BOOL_LITERAL = 5;
+    INT_LITERAL = 6;
+    DOUBLE_LITERAL = 7;
+    STRING_LITERAL = 8;
+    IS_NULL_PREDICATE = 9;
+    IN_PREDICATE = 10;
+    LIKE_PREDICATE = 11;
+    NOT_PREDICATE = 12;
+    AND_PREDICATE = 13;
+    OR_PREDICATE = 14;
+    XOR_PREDICATE = 15;
+    TIMESTAMP_LITERAL = 16;
+    DATETIME_LITERAL = 17;
+    DATE_LITERAL = 18;
+    IS_TRUE_PREDICATE = 19;
+    TIME_LITERAL = 20;
+    PLACE_HOLDER_LITERAL = 21;
+    ROW_EXPR = 22;
+    HLL_LITERAL = 23;
+    HEX_LITERAL = 24;
+};
+
+message Function {
+    //name='le_int_int' fn_op=(sql parser op type)
+    required string name = 1;
+    required int32  fn_op = 2;
+    repeated PrimitiveType arg_types = 3;
+    optional PrimitiveType return_type = 4;
+    optional bool has_var_args = 5;
+};
+
+message DeriveExprNode {
+    //SLOT_REF和AGG_EXPR使用
+    //AGG_EXPR在通用表达式中会退化为SLOT_REF
+    optional int32 tuple_id = 1;
+    optional int32 slot_id = 2;
+    //LITERAL使用
+    optional int64 int_val = 3;
+    optional double double_val = 4;
+    optional bytes string_val = 5;
+    optional bool bool_val = 6;
+    //与slot_id相同，只有avg AGG_EXPR与slot_id不同
+    optional int32 intermediate_slot_id = 7;
+    optional int32 field_id = 8;
+};
+
+message ExprNode {
+    required ExprNodeType node_type = 1;
+    required PrimitiveType col_type = 2;
+    required int32 num_children = 3;
+    optional Function fn = 4;
+    optional DeriveExprNode derive_node = 5;
+};
+
+message Expr {
+    // 保存先根序遍历的结果
+    repeated ExprNode nodes = 1;
+    // 过滤条件对应的index_id值，用于过滤条件剪枝使用
+    repeated int64 index_ids = 2;
+    optional string database = 3;
+    optional string table = 4;
+};
+

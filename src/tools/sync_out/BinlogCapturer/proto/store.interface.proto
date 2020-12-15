@@ -1,0 +1,232 @@
+syntax="proto2";
+package baikaldb.pb;
+import "common.proto";
+import "raft.proto";
+import "plan.proto";
+import "optype.proto";
+import "statistics.proto";
+import "meta.interface.proto";
+import "binlog.proto";
+option cc_generic_services = true;
+//option cc_enable_arenas = true;
+
+// CachePlan is used in three place:
+// 1) In-txn cmd cache in BaikalDB and region sides
+// 2) Write ahead log entry in BaikalDB side for prepared-transaction recovery
+// 3) replay transaction action for Region split and load_snapshot
+message CachePlan {
+    required OpType op_type = 1;  
+    required int32  seq_id  = 2;
+    required Plan   plan    = 3;  //cached query plan
+    repeated TupleDescriptor tuples  = 4;
+
+    //store to which regions commit will be sent, used for BaikalDB txn recovery
+    repeated RegionInfo regions = 5;
+};
+
+enum  TxnState {
+    TXN_UNKEOWN           = 0;
+    TXN_BEGINED           = 1;
+    TXN_PREPARED          = 2;
+    TXN_COMMITTED         = 3;
+    TXN_ROLLBACKED        = 4;
+};
+
+message TransactionInfo {
+    required uint64 txn_id           = 1;
+    required int32  seq_id           = 2;
+    optional int32  start_seq_id     = 3;  // the start_seq_id of the command in this request (include cached)
+    optional bool   optimize_1pc     = 4;
+    repeated int32  need_rollback_seq = 5; //因为在某些region上执行失败，需要全局回滚seq_id 
+    repeated CachePlan cache_plans   = 6;  //缓存的query的执行计划
+    optional int64   num_rows        = 7;  //事务增加的行数，用于事务恢复使用(split)
+    optional bool    autocommit      = 8;
+    optional int64   primary_region_id = 9;
+    optional TxnState txn_state        = 10;
+    optional int64   live_time         = 11;
+    optional int64   start_ts     = 12;
+    optional int64   commit_ts    = 13;  //事务commit的tso，用于恢复超时的prewrite binlog
+    optional bool    open_binlog  = 14;
+    optional bool    from_store        = 15;
+};
+
+message KvOp {
+    required OpType    op_type = 1;
+    optional bytes     key     = 2;
+    optional bytes     value   = 3;
+    optional int64     ttl_timestamp_us = 4;
+};
+
+message AnalyzeInfo {
+    required int32     depth   = 1;
+    required int32     width   = 2;
+    required int32     sample_rows = 3;
+    required int64     table_rows  = 4;     
+};
+
+//prewrite binlog需要填写binlog_ts、txn_id、primary_region_id、partion_key
+//commit/rollback binlog 只填binlog_ts、txn_id、start_ts
+//read binlog只填binlog_ts、read_binlog_cnt
+message BinlogDesc {
+    required int64     binlog_ts         = 1;
+    optional int64     txn_id            = 2;
+    optional int64     start_ts          = 3;
+    optional int64     primary_region_id = 4;
+    optional int64     partion_key       = 5;
+    optional int64     read_binlog_cnt   = 6;
+};
+
+message StoreReq {
+    required OpType op_type         = 1;  //对表的操作类型
+    repeated TupleDescriptor tuples = 2;
+    required int64 region_id        = 3;
+    required int64 region_version   = 4;
+    optional Plan plan              = 5;
+    repeated TransactionInfo txn_infos = 6; //只有OP_VALIDATE_AND_ADD_VERSION时会用到多个TransactionInfo，用于更新old_region上prepared事务的行数
+    optional fixed64 log_id         = 7; // for print log
+    //optional bytes split_key      = 8; //split操作时填写
+    optional bytes start_key        = 9;
+    optional bytes end_key          = 10;
+    optional int64 split_term       = 11;
+    optional int64 split_end_index  = 12;
+    optional int64 reduce_num_lines = 13; //split需要删除的行数
+    optional bool force             = 14;
+    optional bool not_check_region  = 15; //为true则不判断数据与region的匹配性
+    optional RegionInfo new_region_info = 16;
+    optional bool select_without_leader = 17;   //为true则select不判断是否leader,增加读性能
+    optional fixed64 db_conn_id     = 18; //baikaldb connection id
+    optional DdlWorkInfo ddlwork_info = 19; //更新ddl work
+    optional int64   num_increase_rows = 20;
+    repeated KvOp          kv_ops   = 21; //kv op
+    optional bool  is_trace         = 22;
+    optional AnalyzeInfo   analyze_info = 23;
+    repeated uint64    rollback_txn_ids = 24;
+    repeated uint64    commit_txn_ids   = 25;
+    optional BinlogDesc binlog_desc     = 26;
+    optional Binlog      binlog         = 27;
+};
+
+message RowValue {
+    repeated bytes tuple_values = 1;
+};
+
+message RegionLeader {
+    required int64  region_id            = 1;
+    required string leader               = 2;        
+};
+message IndexRecords {
+    required int64  index_id        = 1;
+    repeated bytes  records         = 2;  
+};
+
+message StoreRes {
+    required ErrCode errcode        = 1;
+    optional bytes errmsg          = 2;
+    optional string leader          = 3;
+    //目前返回所有tuple
+    repeated int32 tuple_ids        = 4;
+    repeated RowValue row_values    = 5;
+    optional int64 affected_rows    = 6;
+    repeated RegionInfo regions     = 7; //分裂更新两个region
+    optional int64 applied_index    = 8;
+    optional int32 last_seq_id      = 9; //store端当前事务已执行的最后一个cmd的seq_id, 未开始则为0
+    repeated TransactionInfo txn_infos = 10; // 用于OP_ADD_VERSION_FOR_SPLIT_REGION时返回Prepared事务行数
+    optional int32 mysql_errcode   = 11;
+    optional int64  region_count   = 12;
+    repeated RegionLeader region_leaders = 13;
+    optional bool  is_merge        = 14;//fetch node use it when error code is VERSION_OLD
+    repeated IndexRecords  records        = 15;
+    optional int64  scan_rows     = 16;
+    optional CMsketch cmsketch    = 17;
+    optional int64  filter_rows   = 18;
+    repeated bytes binlogs       = 19; //直接存储binlog序列化结果，由capture反序列化
+    repeated int64 commit_ts     = 20; //与上面的binlog一一对应
+};
+message InitRegion {
+    required RegionInfo region_info     = 1;
+    optional SchemaInfo schema_info     = 2;
+    optional bool       split_start     = 3;
+    optional int32      snapshot_times  = 4; //初始化时需要做snapshot的次数
+};
+
+message GetAppliedIndex {
+    required int64 region_id    = 1;
+};
+
+message RemoveRegion {
+    required int64  region_id       = 1;
+    optional bool   force           = 2;
+    optional bool   need_delay_drop = 3;
+};
+
+message RegionIds {
+    repeated int64  region_ids      = 1; // if size = 0, it will compact the entire db
+    optional bool compact_raft_log  = 2; // if true, compact raft log
+    optional int64  table_id        = 3; // use for restore region
+    optional int32  compact_type    = 4; //  1:data_cf 2:meta_cf 3:raft_log_cf
+};
+
+message BackUpReq {};
+
+message BackUpRes {};
+
+enum BackupOp {
+    BACKUP_DOWNLOAD = 0;
+    BACKUP_UPLOAD = 1;
+};
+
+message BackupRequest {
+    required int64 region_id    = 1;
+    optional int64 log_index   = 2;
+    optional BackupOp backup_op = 3;
+    optional bool ingest_store_latest_sst = 4;
+};
+
+message BackupResponse {
+    optional int64 log_index   = 1;
+    optional ErrCode errcode        = 2;
+};
+
+service StoreService {
+    //1、创建table时master调用，region及raft同步创建成功后才返回给metaServer,
+    //   创建表时raft node地址初始化为一个节点
+    //2、实例迁移的add_peer过程间接通过心跳包的响应包调用，
+    //   raft node地址初始化为空
+    //   leader调用完成这个之后主动调用一次raft的add_peer接口完成这个迁移过程
+    //3、分裂时调用
+    rpc init_region(InitRegion) returns (StoreRes);
+    
+    //raft控制接口，可以手工操作使用
+    rpc region_raft_control(RaftControlRequest) returns (RaftControlResponse); 
+    
+    //增删改查功能，需要走raft状态机的都通过此接口
+    rpc query(StoreReq) returns (StoreRes);
+
+    //binlog相关操作
+    rpc query_binlog(StoreReq) returns (StoreRes);
+    
+    //删除region，包括数据
+    rpc remove_region(RemoveRegion) returns (StoreRes);
+    
+    //leader收到的AddPeer请求，分两步执行
+    //1、给新增的region所在的store发送init region请求
+    //2、leader执行raft的add_peer操作
+    rpc add_peer(AddPeer) returns (StoreRes);
+
+    //get region的applied_index, 用来分裂完成后优化选择transfer leader的对象
+    rpc get_applied_index(GetAppliedIndex) returns (StoreRes);
+
+    rpc compact_region(RegionIds) returns (StoreRes);
+
+    rpc snapshot_region(RegionIds) returns(StoreRes);
+
+    rpc restore_region(RegionIds) returns(StoreRes);
+
+    rpc query_region(RegionIds) returns (StoreRes);
+    
+    rpc query_illegal_region(RegionIds) returns (StoreRes);
+
+    rpc backup_region(BackUpReq) returns (BackUpRes);
+
+    rpc backup(BackupRequest) returns (BackupResponse);
+};

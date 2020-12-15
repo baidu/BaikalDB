@@ -1,0 +1,34 @@
+syntax="proto2";
+import "common.proto";
+package baikaldb.pb;
+//option cc_enable_arenas = true;
+
+enum RaftControlOp {
+    SetPeer = 1; //只能发送给当前leader
+    TransLeader = 2; //主动切走leader,只能发送到leader机器上
+    SnapShot = 3; //手动控制做snapshot, leader and follower都可以做
+    GetLeader = 4; //获取leader, leader and follower都可以做
+    ShutDown = 5; //leader and follower both can do, 只关闭，但并没有从raft group里去掉
+    Vote = 6; //调用node的vote接口
+    ResetVoteTime = 7; //调用node的reset_election_timeout_ms接口
+};
+
+// operation request/response
+//force == true,只用在大部分节点已经挂掉需要紧急恢复的情况
+//官方wiki上给出的解释是可能会丢数据，尽量不要使用该方法
+message RaftControlRequest {
+    required RaftControlOp op_type = 1;
+    optional int64 region_id = 2;
+    optional string new_leader = 3;
+    repeated string old_peers = 4;
+    repeated string new_peers = 5;
+    optional int64 election_time = 6;
+    optional bool force = 7;
+};
+
+message RaftControlResponse {
+    required int64 region_id = 1;
+    required ErrCode errcode = 2;
+    optional string leader = 3;
+    optional string errmsg = 4;
+};

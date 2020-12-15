@@ -1,0 +1,286 @@
+syntax="proto2";
+import "common.proto";
+import "optype.proto";
+import "expr.proto";
+package baikaldb.pb;
+//option cc_enable_arenas = true;
+
+enum PlanNodeType {
+    SCAN_NODE = 1;
+    SORT_NODE = 2;
+    //sort可能分为两步，store初步sort，F1最终merge sort
+    //MERGE_SORT_NODE = 3; 
+    AGG_NODE = 4;
+    //agg可能分为两步，store初步agg，F1最终merge agg（有agg则sort只做一步）
+    MERGE_AGG_NODE = 5; 
+    TABLE_FILTER_NODE = 6;
+    JOIN_NODE = 7;
+    FETCHER_NODE = 8;
+    INSERT_NODE = 9;
+    DELETE_NODE = 10;
+    LIMIT_NODE = 11;
+    WHERE_FILTER_NODE = 12;
+    HAVING_FILTER_NODE = 13;
+    PACKET_NODE = 14;
+    UPDATE_NODE = 15;
+    TRUNCATE_NODE = 17;
+    TRANSACTION_NODE = 18;  //TransactionNode
+    KILL_NODE = 19;
+    BEGIN_MANAGER_NODE = 20;
+    COMMIT_MANAGER_NODE = 21;
+    ROLLBACK_MANAGER_NODE = 22;
+    TXN_ROLLBACK_MANAGER_NODE = 23;
+    SIGNEL_TXN_MANAGER_NODE = 24;
+    SELECT_MANAGER_NODE = 25;
+    INSERT_MANAGER_NODE = 26;
+    UPDATE_MANAGER_NODE = 27;
+    DELETE_MANAGER_NODE = 28;
+    TRUNCATE_MANAGER_NODE = 29;
+    KILL_MANAGER_NODE = 30;
+    LOCK_PRIMARY_NODE = 31;
+    LOCK_SECONDARY_NODE = 32;
+    FULL_EXPORT_NODE = 33;
+    DUAL_SCAN_NODE = 34;
+    UNION_NODE = 35;
+};
+
+enum TxnCmdType {
+    TXN_INVALID = 0;        // invalid transaction cmd
+    TXN_BEGIN = 1;          // start transaction/begin on baikaldb
+    TXN_BEGIN_STORE = 2;    // start transaction/begin on store
+    TXN_COMMIT = 3;         // commit on baikaldb
+    TXN_COMMIT_STORE = 4;   // commit on store
+    TXN_COMMIT_BEGIN = 5;   // commit txn and then begin a new one
+    TXN_ROLLBACK = 6;       // rollback on baikaldb
+    TXN_ROLLBACK_STORE = 7; // rollback on store
+    TXN_ROLLBACK_BEGIN = 8; // rollback txn and then begin a new one
+    TXN_PREPARE = 9;        // prepare
+};
+enum LockCmdType {
+    LOCK_INVALID = 0;
+    LOCK_GET = 1;
+    LOCK_GET_ONLY_PRIMARY = 2;
+    LOCK_DML = 3;
+    LOCK_GET_DML = 4;
+    LOCK_NO  = 5; //不加锁的操作
+};
+enum MatchMode {
+    M_NONE = 0;
+    M_NARUTAL_LANGUAGE = 1;
+    M_BOOLEAN = 2;
+};
+message PossibleIndex {
+    message Range {
+        optional bytes left_pb_record = 3;
+        optional bytes right_pb_record = 4;
+        optional int32 left_field_cnt = 5;
+        optional int32 right_field_cnt = 6;
+        optional bool left_open = 7;
+        optional bool right_open = 8;
+        optional bool like_prefix = 9;
+        optional MatchMode match_mode = 10;
+    };
+
+    message SortIndex {
+        // sort是升序还是降序
+        optional bool is_asc = 1;
+        optional int64 sort_limit = 2;
+    };
+
+    required int64 index_id = 1;
+    repeated Range ranges = 2;
+    //索引相关的谓词下推
+    repeated Expr index_conjuncts = 3;
+    optional SortIndex sort_index = 4;
+    optional bool bool_and = 5;
+    optional bool is_covering_index = 6;
+};
+
+message ScanNode {
+    required int32 tuple_id = 1;  //tuple中记录有读取列信息与table信息
+    required int64 table_id = 2;
+    repeated PossibleIndex indexes = 3; //baikal列举可能的index，region自己决定用哪个
+    repeated int64 use_indexes = 4;
+    optional Engine engine = 5;
+    repeated int64 ignore_indexes = 6;
+};
+
+message LimitNode {
+    optional int64 offset = 1;
+    optional Expr  offset_expr = 2;
+    optional Expr  count_expr = 3;
+};
+
+message SortNode {
+    repeated Expr order_exprs = 1;
+    repeated bool is_asc = 2;
+    repeated bool is_null_first = 3;
+    optional int32 tuple_id = 5; //这个tuple存放order_exprs计算后的结果，-1不存放
+    repeated Expr slot_order_exprs = 6; //等store全部上新版本后这个可以删掉
+};
+
+message AggNode {
+    repeated Expr group_exprs = 1;
+    repeated Expr agg_funcs = 2;
+    optional int32 agg_tuple_id = 3;
+};
+
+message FilterNode {
+    repeated Expr conjuncts = 1; //and分开的条件
+};
+
+enum JoinType {
+    NULL_JOIN  = 0;
+    LEFT_JOIN  = 1;
+    RIGHT_JOIN = 2;
+    INNER_JOIN = 3;
+};
+
+message JoinNode {
+    required JoinType       join_type       = 1;
+    repeated Expr           conditions      = 2; //and分开的条件
+    repeated string         using_clos      = 3;
+    repeated int32          left_tuple_ids  = 4;
+    repeated int64          left_table_ids  = 5;
+    repeated int32          right_tuple_ids = 6;
+    repeated int64          right_table_ids = 7;
+};
+
+message FetcherNode {
+    required OpType op_type = 1;
+    //repeated int64 region_ids = 1;
+    //repeated Plan  plans = 2;
+    //SortNode分离则需要填下面内容来最终排序
+    repeated Expr slot_order_exprs = 3;
+    repeated bool is_asc = 4;
+    repeated bool is_null_first = 5;
+};
+
+message InsertNode {
+    required int64 table_id = 1;
+    repeated bytes records = 2;
+    optional bool need_ignore = 3;
+    //on duplicate key update
+    repeated SlotDescriptor update_slots = 4;
+    repeated Expr update_exprs = 5;
+    optional int32 tuple_id = 6; // update原始数据tuple_id
+    optional int32 values_tuple_id = 7; // values 后数据tuple_id
+    optional bool is_replace = 8;
+    repeated int32 field_ids = 9;   // store field ids for prepared stmt
+    repeated Expr  insert_values = 10;   // store values for prepared stmt
+    optional int64 row_ttl_duration = 11; //row ttl support, compatible whit prepared stmt
+};
+message LockPrimaryNode {
+    required int64        table_id       = 1;
+    required LockCmdType  lock_type      = 2;
+    repeated bytes        put_records    = 3;
+    repeated bytes        delete_records = 4; 
+    optional bool         affect_primary = 5 [default = true];
+    repeated int64        affect_index_ids = 6;
+};
+message LockSecondaryNode {
+    required int64        table_id        = 1;
+    required int64        global_index_id = 2;
+    required LockCmdType  lock_type       = 3;
+    repeated bytes        put_records     = 4;
+    repeated bytes        delete_records  = 5;
+};
+
+message DeleteNode {
+    required int64 table_id = 1;
+    repeated SlotDescriptor primary_slots = 2;
+};
+
+message TruncateNode {
+    required int64 table_id = 1;
+};
+
+message UpdateNode {
+    required int64 table_id = 1;
+    repeated SlotDescriptor primary_slots = 2;
+    //表达式与slot一一对应
+    repeated SlotDescriptor update_slots = 3;
+    repeated Expr update_exprs = 4;
+    //repeated int64 affect_index_ids = 5;
+};
+
+message PacketNode {
+    //只能是SELECT/UPDATE/DELETE/INSERT
+    required OpType op_type = 1;
+    repeated Expr projections = 2;
+    //优先填as后的
+    repeated string col_names = 3;
+};
+
+message TransactionNode {
+    required TxnCmdType txn_cmd = 1;
+};
+
+message KillNode {
+    required uint64 db_conn_id = 1;
+    optional bool is_query = 2;
+};
+
+message DerivePlanNode {
+    optional ScanNode scan_node = 1;
+    optional SortNode sort_node = 2;
+    optional AggNode agg_node = 3;
+    optional FilterNode filter_node = 4;
+    optional JoinNode join_node = 5;
+    optional InsertNode insert_node = 6;
+    optional DeleteNode delete_node = 7;
+    optional UpdateNode update_node = 8;
+    optional FetcherNode fetcher_node = 9;
+    optional LimitNode limit_node = 10;
+    optional PacketNode packet_node = 11;
+    optional TruncateNode truncate_node = 12;
+    optional TransactionNode transaction_node = 13;
+    optional KillNode kill_node = 14;
+    optional LockPrimaryNode lock_primary_node = 15;
+    optional LockSecondaryNode lock_secondary_node = 16;
+};
+
+message PlanNode {
+    //required int32 node_id = 1;
+    required PlanNodeType node_type = 2;
+    required int32 num_children = 3;
+    //repeated int32 row_tuples = 4;
+    optional int64 limit = 5;
+    optional DerivePlanNode derive_node = 6;
+    optional bool is_explain = 7;
+};
+
+message Plan {
+    //保存先根遍历的结果
+    repeated PlanNode nodes  = 1;
+};
+
+message LocalTraceNode {
+    optional int64             time_cost_us      = 1;
+    optional int64             sort_time         = 2;
+    optional int64             affect_rows       = 3;
+    optional int64             scan_rows         = 4;
+    optional int64             index_filter_rows = 5;
+    optional int64             get_primary_rows  = 6;
+    //optional int64             repeat_cnt        = 7;
+    optional string            description       = 8;
+    optional int64             where_filter_rows = 9;
+    optional string            index_name        = 10;
+};
+
+message TraceNode {
+    optional PlanNodeType      node_type         = 1;
+    optional string            description       = 2;
+    optional string            instance          = 3;
+    optional int64             region_id         = 4;
+    optional int64             total_time        = 5;
+    optional int64             affect_rows       = 6;
+    optional LocalTraceNode    open_trace        = 7;
+    optional LocalTraceNode    get_next_trace    = 8;
+    optional LocalTraceNode    txn_get_trace     = 9;
+    optional LocalTraceNode    txn_put_trace     = 10;
+    optional LocalTraceNode    txn_delete_trace  = 11;
+    optional LocalTraceNode    txn_commit_trace  = 12;
+    optional LocalTraceNode    store_agg         = 13;
+    repeated TraceNode         child_nodes       = 14;
+};
