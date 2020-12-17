@@ -16,6 +16,7 @@
 
 #include <unordered_map>
 #include <map>
+#include <mutex>
 #include <bvar/bvar.h>
 #include "network_socket.h"
 #include "epoll_info.h"
@@ -174,6 +175,7 @@ private:
     bvar::PerSecond<bvar::Adder<int>> sql_error_second;
     std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > select_by_users;
     std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > dml_by_users;
+    std::mutex          _mutex;
 
     MysqlWrapper*   _wrapper = nullptr;
 

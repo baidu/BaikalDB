@@ -141,6 +141,7 @@ struct FieldInfo {
     bool                can_null = false;
     bool                auto_inc = false;
     bool                deleted = false;
+    bool                noskip = false;
 };
 
 struct DistInfo {

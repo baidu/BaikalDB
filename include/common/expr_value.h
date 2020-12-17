@@ -745,8 +745,9 @@ struct ExprValue {
     static ExprValue UTC_TIMESTAMP() {
         // static int UTC_OFFSET = 8 * 60 * 60;
         time_t current_time;
-        struct tm *timeinfo = localtime(&current_time);
-        long offset = timeinfo->tm_gmtoff;
+        struct tm timeinfo;
+        localtime_r(&current_time, &timeinfo);
+        long offset = timeinfo.tm_gmtoff;
 
         ExprValue tmp(pb::TIMESTAMP);
         tmp._u.uint32_val = time(NULL) - offset;
