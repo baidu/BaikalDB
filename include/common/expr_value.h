@@ -742,6 +742,20 @@ struct ExprValue {
         ExprValue ret(pb::BITMAP);
         return ret;
     }
+    static ExprValue UTC_TIMESTAMP() {
+        // static int UTC_OFFSET = 8 * 60 * 60;
+        time_t current_time;
+        struct tm *timeinfo = localtime(&current_time);
+        long offset = timeinfo->tm_gmtoff;
+
+        ExprValue tmp(pb::TIMESTAMP);
+        tmp._u.uint32_val = time(NULL) - offset;
+        tmp.cast_to(pb::DATETIME);
+        timeval tv;
+        gettimeofday(&tv, NULL);
+        tmp._u.uint64_val |= tv.tv_usec;
+        return tmp;
+    }
 };
 }
 

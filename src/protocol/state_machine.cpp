@@ -81,7 +81,7 @@ void StateMachine::run_machine(SmartSocket client,
                    DB_WARNING_CLIENT(client, "Failed to fill auth failed message.");
                 }
                 DB_WARNING("Username %s has reach the max connection limit(%u)",
-                        client->username.c_str(), 
+                        client->username.c_str(),
                         client->user_info->max_connection);
                 client->state = STATE_ERROR;
                 run_machine(client, epoll_info, shutdown);
@@ -92,7 +92,7 @@ void StateMachine::run_machine(SmartSocket client,
             go_on = 1;
         } else if (ret == RET_AUTH_FAILED) {
             char msg[256];
-            snprintf(msg, 256, "Access denied for user '%s'@'%s' (using password: YES)", 
+            snprintf(msg, 256, "Access denied for user '%s'@'%s' (using password: YES)",
                 client->username.c_str(), client->ip.c_str());
             if (_wrapper->fill_auth_failed_packet(client, msg) != RET_SUCCESS) {
                DB_WARNING_CLIENT(client, "Failed to fill auth failed message.");
@@ -152,9 +152,9 @@ void StateMachine::run_machine(SmartSocket client,
         client->query_ctx->stat_info.query_read_time = cost_read.get_time();
         if (ret == RET_SUCCESS) {
         } else if (ret == RET_CMD_DONE) {
-            client->state = STATE_READ_QUERY_RESULT; 
+            client->state = STATE_READ_QUERY_RESULT;
             run_machine(client, epoll_info, shutdown);
-            break;      
+            break;
         } else if (ret == RET_WAIT_FOR_EVENT) {
             epoll_info->poll_events_mod(client, EPOLLIN);
             break;
@@ -171,10 +171,10 @@ void StateMachine::run_machine(SmartSocket client,
         } else {
             DB_FATAL_CLIENT(client, "read query from client error "
                     "state=%d, ret=%d, errno=%d", client->state, ret, errno);
-            _wrapper->make_err_packet(client, 
+            _wrapper->make_err_packet(client,
                 ER_ERROR_ON_READ,
                 "read query from client error, errno: %d-%s",
-                errno, 
+                errno,
                 strerror(errno));
             client->state = STATE_ERROR;
             run_machine(client, epoll_info, shutdown);
@@ -279,7 +279,7 @@ void StateMachine::run_machine(SmartSocket client,
             DB_WARNING_CLIENT(client, "send partly, wait for fd ready.");
         } else if (client->state == STATE_READ_QUERY_RESULT_MORE) {
             run_machine(client, epoll_info, shutdown);
-        } 
+        }
         break;
     }
     case STATE_ERROR_REUSE: {
@@ -323,7 +323,7 @@ int StateMachine::_query_more(SmartSocket client, bool shutdown) {
         _wrapper->make_err_packet(client,
             client->query_ctx->stat_info.error_code, "%s",
             client->query_ctx->stat_info.error_msg.str().c_str());
-        
+
         return ret;
     }
     client->query_ctx->stat_info.query_exec_time += cost.get_time();
@@ -355,11 +355,11 @@ void StateMachine::_print_query_time(SmartSocket client) {
             index_id = *ctx->index_ids.begin();
         } else if (ctx->index_ids.size() == 1) {
             index_id = *ctx->index_ids.begin();
-            index_recommend_st << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time, 
+            index_recommend_st << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time,
                                 rows, stat_info->num_scan_rows, stat_info->num_filter_rows, ctx->field_range_type);
         }
         std::map<int32_t, int> field_range_type;
-        sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time, 
+        sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time,
                                 rows, stat_info->num_scan_rows, stat_info->num_filter_rows, field_range_type);
     }
 
@@ -367,15 +367,26 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 || ctx->mysql_cmd == COM_STMT_EXECUTE) {
         if (op_type == pb::OP_SELECT) {
             select_time_cost << stat_info->total_time;
-        } else if (op_type == pb::OP_INSERT || 
+            if (select_by_users.find(client->username) == dml_by_users.end()) {
+                select_by_users[client->username].reset(new bvar::LatencyRecorder("select_" + client->username));
+            }
+            (*select_by_users[client->username]) << stat_info->total_time;
+        } else if (op_type == pb::OP_INSERT ||
                 op_type == pb::OP_UPDATE ||
                 op_type == pb::OP_DELETE) {
             dml_time_cost << stat_info->total_time;
+            if (dml_by_users.find(client->username) == dml_by_users.end()) {
+                dml_by_users[client->username].reset(new bvar::LatencyRecorder("dml_" + client->username));
+            }
+            (*dml_by_users[client->username]) << stat_info->total_time;
+        }
+        if (stat_info->error_code != 1000) {
+            sql_error << 1;
         }
     }
 
-    if (ctx->mysql_cmd == COM_QUERY 
-            || ctx->mysql_cmd == COM_STMT_PREPARE 
+    if (ctx->mysql_cmd == COM_QUERY
+            || ctx->mysql_cmd == COM_STMT_PREPARE
             || ctx->mysql_cmd == COM_STMT_EXECUTE
             || ctx->mysql_cmd == COM_STMT_CLOSE
             || ctx->mysql_cmd == COM_STMT_RESET
@@ -390,8 +401,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
             stat_info->table = "no";
         }
 #ifdef BAIDU_INTERNAL
-        if (FLAGS_log_plat_name == "test" || 
-                (stat_info->family != "no" && stat_info->table != "no") || 
+        if (FLAGS_log_plat_name == "test" ||
+                (stat_info->family != "no" && stat_info->table != "no") ||
                 stat_info->error_code != 1000) {
 #else
         if (stat_info->total_time > FLAGS_print_time_us || stat_info->error_code != 1000) {
@@ -407,10 +418,13 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     sql = iter->second->sql;
                 }
             }
-            DB_NOTICE("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
+            uint64_t out[2];
+            butil::MurmurHash3_x64_128(stat_info->sample_sql.str().c_str(), stat_info->sample_sql.str().size(), 0x1234, out);
+            RE2::GlobalReplace(&sql, "\\s+", " ");
+            DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row[%d] bufsize=[%d] "
                     "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] stmt_name=[%s] "
-                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sqllen=[%lu] sql=[%s]",
+                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%llu] sqllen=[%d] sql=[%s] id=[%ld]",
                     stat_info->family.c_str(),
                     stat_info->table.c_str(),
                     op_type,
@@ -444,8 +458,10 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->old_txn_id,
                     stat_info->old_seq_id,
                     ctx->get_runtime_state()->optimize_1pc(),
+		            out[0],
                     sql.length(),
-                    sql.c_str());
+                    sql.c_str(),
+                    client->last_insert_id);
         }
     } else {
         if ('\x0e' == ctx->mysql_cmd) {
@@ -472,7 +488,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 client->username.c_str());
         }
     }
-    ctx->mysql_cmd = COM_SLEEP; 
+    ctx->mysql_cmd = COM_SLEEP;
     client->last_active = time(NULL);
     return;
 }
@@ -511,7 +527,7 @@ int StateMachine::_auth_read(SmartSocket sock) {
 
     // Get user name.
     std::string username;
-    if (0 != _wrapper->protocol_get_string(packet, 
+    if (0 != _wrapper->protocol_get_string(packet,
             sock->packet_len + PACKET_HEADER_LEN, off, username)) {
         DB_FATAL_CLIENT(sock, "Username is null");
         return RET_AUTH_FAILED;
@@ -575,7 +591,7 @@ int StateMachine::_auth_read(SmartSocket sock) {
 
     // set current_db
     if ((unsigned int)(sock->packet_len + PACKET_HEADER_LEN) > off) {
-        if (0 != _wrapper->protocol_get_string(packet, 
+        if (0 != _wrapper->protocol_get_string(packet,
                 sock->packet_len + PACKET_HEADER_LEN, off, sock->current_db)) {
             DB_FATAL_CLIENT(sock, "current_db is wrong");
             return RET_AUTH_FAILED;
@@ -730,7 +746,7 @@ int StateMachine::_query_read(SmartSocket sock) {
         return RET_CMD_DONE;
     } else if (COM_STMT_CLOSE == command || COM_STMT_RESET == command) {
         uint64_t stmt_id = 0;
-        if (RET_SUCCESS != _wrapper->protocol_get_length_fixed_int(packet, 
+        if (RET_SUCCESS != _wrapper->protocol_get_length_fixed_int(packet,
                 sock->packet_len + PACKET_HEADER_LEN, off, 4, stmt_id)) {
             DB_FATAL("read stmt_id failed");
             return RET_ERROR;
@@ -739,19 +755,19 @@ int StateMachine::_query_read(SmartSocket sock) {
             auto iter = sock->prepared_plans.find(std::to_string(stmt_id));
             if (iter == sock->prepared_plans.end()) {
                 _wrapper->make_err_packet(sock, ER_UNKNOWN_STMT_HANDLER, "prepare stmt not found");
-                return RET_ERROR;            
+                return RET_ERROR;
             } else {
                 _wrapper->make_simple_ok_packet(sock);
                 auto prepare_ctx = iter->second;
                 sock->query_ctx->sql = prepare_ctx->sql;
                 prepare_ctx->long_data_vars.clear();
                 return RET_CMD_DONE;
-            }         
+            }
         }
         // DB_WARNING("stmt_id is: %lu", stmt_id);
         sock->query_ctx->prepare_stmt_name = std::to_string(stmt_id);
         return RET_SUCCESS;
-    } else { 
+    } else {
         // command == (COM_QUERY || COM_STMT_PREPARE || COM_INIT_DB) Read query sql.
         int sql_len = sock->packet_len - 1;
         if (sql_len > 0) {
@@ -819,7 +835,7 @@ int StateMachine::_query_read_stmt_long_data(SmartSocket sock) {
     //DB_WARNING("param_id is: %lu", param_id);
     auto prepare_ctx = iter->second;
     std::string& long_data = prepare_ctx->long_data_vars[param_id];
-    long_data.append((char*)(packet + off), sock->packet_len + PACKET_HEADER_LEN - off);  
+    long_data.append((char*)(packet + off), sock->packet_len + PACKET_HEADER_LEN - off);
     //DB_WARNING("long data: %lu, %s", param_id, long_data.c_str());
     return RET_SUCCESS;
 }
@@ -890,7 +906,7 @@ int StateMachine::_query_read_stmt_execute(SmartSocket sock) {
             param_type.mysql_type = static_cast<MysqlType>(*(type_ptr + 2 * idx));
             param_type.is_unsigned = *(type_ptr + 2 * idx + 1) == 0x80;
             prepare_ctx->param_type.push_back(param_type);
-            // DB_WARNING("stmt_name: %s, mysql_type: %u, is_unsigned: %d", 
+            // DB_WARNING("stmt_name: %s, mysql_type: %u, is_unsigned: %d",
             //     stmt_name.c_str(), param_type.mysql_type, param_type.is_unsigned);
         }
         off += (2 * num_params);
@@ -1023,7 +1039,7 @@ bool StateMachine::_query_process(SmartSocket client) {
                                 client->query_ctx->sql, SQL_SHOW_VARIABLES)) {
                 ret = _handle_client_query_show_variables(client);
             } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_META)) {
-                ret = _handle_client_query_template(client, "Meta", 
+                ret = _handle_client_query_template(client, "Meta",
                     MYSQL_TYPE_VARCHAR, {FLAGS_meta_server_bns});
             } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_NAMESPACE)) {
                 ret = _handle_client_query_template(client, "Namespace", MYSQL_TYPE_VARCHAR,
@@ -1042,7 +1058,7 @@ bool StateMachine::_query_process(SmartSocket client) {
             }
         } else if (type == SQL_USE_IN_QUERY_NUM
                     && boost::algorithm::istarts_with(client->query_ctx->sql, SQL_USE)) {
-            ret = _handle_client_query_use_database(client); 
+            ret = _handle_client_query_use_database(client);
         } else if (type == SQL_DESC_NUM) {
             ret = _handle_client_query_desc_table(client);
         } else if (type == SQL_SHOW_NUM) {
@@ -1052,7 +1068,7 @@ bool StateMachine::_query_process(SmartSocket client) {
             //对于正常的请求做限制
             if (client->user_info->is_exceed_quota()) {
                 _wrapper->make_err_packet(client, ER_QUERY_EXCEED_QUOTA, "query exceed quota(qps)");
-                DB_WARNING("query exceed quota, user:%s, query:%u, quota:%u, time:%ld", 
+                DB_WARNING("query exceed quota, user:%s, query:%u, quota:%u, time:%ld",
                         client->username.c_str(),
                         client->user_info->query_count.load(),
                         client->user_info->query_quota,
@@ -1068,7 +1084,7 @@ bool StateMachine::_query_process(SmartSocket client) {
         DB_WARNING_CLIENT(client, "Unsupport command[%s]", client->query_ctx->sql.c_str());
         _wrapper->make_err_packet(client, ER_NOT_ALLOWED_COMMAND, "command not supported");
         client->state = STATE_ERROR_REUSE;
-    } else if (command == COM_STMT_PREPARE || command == COM_STMT_EXECUTE || command == COM_STMT_CLOSE) { 
+    } else if (command == COM_STMT_PREPARE || command == COM_STMT_EXECUTE || command == COM_STMT_CLOSE) {
         // 0x16 command: mysql_stmt_prepare
         // 0x17 command: mysql_stmt_execute
         // 0x19 command: mysql_stmt_close
@@ -1113,6 +1129,10 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
         boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
         boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
     }
+    re2::RE2 ignore_reg("(\\/\\*.*?\\*\\/)", option);
+    if (RE2::GlobalReplace(&(ctx->sql), reg, " ")) {
+        DB_WARNING("global replace sql.");
+    }
 }
 
 int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
@@ -1143,12 +1163,12 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd()) {
                 ctx->is_full_export = json_iter->value.GetBool();
                 DB_WARNING("full_export: %d", ctx->is_full_export);
-            }           
+            }
             json_iter = root.FindMember("ttl_duration");
             if (json_iter != root.MemberEnd()) {
                 ctx->row_ttl_duration = json_iter->value.GetInt64();
                 DB_DEBUG("row_ttl_duration: %ld", ctx->row_ttl_duration);
-            }           
+            }
         } catch (...) {
             DB_WARNING("parse extra file error [%s]", json_str.c_str());
             continue;
@@ -1189,8 +1209,8 @@ bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
         db_name = db;
     }
     if (std::find(dbs.begin(), dbs.end(), db_name) == dbs.end()) {
-        _wrapper->make_err_packet(client, ER_DBACCESS_DENIED_ERROR, 
-                "Access denied for user '%s' to database '%s'", 
+        _wrapper->make_err_packet(client, ER_DBACCESS_DENIED_ERROR,
+                "Access denied for user '%s' to database '%s'",
                 client->user_info->username.c_str(), db.c_str());
         client->state = STATE_READ_QUERY_RESULT;
         return false;
@@ -1365,7 +1385,7 @@ bool StateMachine::_handle_client_query_show_full_tables(SmartSocket client) {
         if (is_like_pattern) {
             if (!RE2::FullMatch(tables[cnt], *regex_ptr)) {
                 DB_NOTICE("not match");
-                continue; 
+                continue;
             }
         }
         std::vector<std::string> row;
@@ -1522,7 +1542,7 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
     if (factory->get_table_id(full_name, table_id) != 0) {
         client->state = STATE_ERROR;
         client->query_ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
-        client->query_ctx->stat_info.error_msg << "Table '" << db << "." 
+        client->query_ctx->stat_info.error_msg << "Table '" << db << "."
                                     << table << "' not exist";
         return false;
     }
@@ -1591,7 +1611,7 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         if (index_info.type == pb::I_FULLTEXT) {
             oss << ") COMMENT '{\"segment_type\":\"";
             oss << pb::SegmentType_Name(index_info.segment_type) << "\", ";
-            oss << "\"storage_type\":\"" << pb::StorageType_Name(index_info.storage_type) << "\"}'"; 
+            oss << "\"storage_type\":\"" << pb::StorageType_Name(index_info.storage_type) << "\"}'";
         } else {
             oss << ")";
         }
@@ -1631,7 +1651,7 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
     if (info.ttl_duration > 0) {
         oss << ", \"ttl_duration\":" << info.ttl_duration;
     }
-    
+
     if (info.partition_num > 1) {
         oss << ", \"column\":\"" << info.partition_info.field_info().field_name() << "\"";
         oss << ", \"partition_type\":\"" << pb::PartitionType_Name(info.partition_info.type()).c_str() << "\"";
@@ -1755,7 +1775,7 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
     TableInfo info = factory->get_table_info(table_id);
     std::map<int32_t, IndexInfo> field_index;
     for (auto& index_id : info.indices) {
-        IndexInfo index_info = factory->get_index_info(index_id); 
+        IndexInfo index_info = factory->get_index_info(index_id);
         for (auto& field : index_info.fields) {
             if (field_index.count(field.id) == 0) {
                 field_index[field.id] = index_info;
@@ -1793,7 +1813,7 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
         }
         row.push_back("select,insert,update,references");
         row.push_back(" ");
-        rows.push_back(row); 
+        rows.push_back(row);
     }
 
     // Make mysql packet.
@@ -1979,7 +1999,7 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
         pb::QueryResponse res;
         MetaServerInteract::get_instance()->send_request("query", req, res);
         std::string create_time = "2018-08-09 15:01:40";
-        int64_t avg_row_length = 0; 
+        int64_t avg_row_length = 0;
         int64_t row_count = 0;
         if (res.flatten_tables_size() == 1) {
             create_time = res.flatten_tables(0).create_time();
@@ -2026,7 +2046,7 @@ bool StateMachine::_handle_client_query_show_abnormal_regions(SmartSocket client
         //client->state = STATE_ERROR;
         return false;
     }
-    
+
     std::vector<std::string> split_vec;
     boost::split(split_vec, client->query_ctx->sql,
             boost::is_any_of(" \t\n\r"), boost::token_compress_on);
@@ -2102,7 +2122,7 @@ bool StateMachine::_handle_client_query_show_cost(SmartSocket client) {
         //client->state = STATE_ERROR;
         return false;
     }
-    
+
     std::vector<std::string> split_vec;
     boost::split(split_vec, client->query_ctx->sql,
             boost::is_any_of(" \t\n\r"), boost::token_compress_on);
@@ -2158,7 +2178,7 @@ bool StateMachine::_handle_client_query_show_schema_conf(SmartSocket client) {
         //client->state = STATE_ERROR;
         return false;
     }
-    
+
     std::vector<std::string> split_vec;
     boost::split(split_vec, client->query_ctx->sql,
             boost::is_any_of(" \t\n\r"), boost::token_compress_on);
@@ -2232,7 +2252,7 @@ bool StateMachine::_handle_client_query_show_virtual_index(SmartSocket client) {
         //client->state = STATE_ERROR;
         return false;
     }
-    
+
     std::vector<std::string> split_vec;
     boost::split(split_vec, client->query_ctx->sql,
             boost::is_any_of(" \t\n\r"), boost::token_compress_on);
@@ -2564,6 +2584,8 @@ bool StateMachine::_handle_client_query_show_collation(SmartSocket client) {
     row1.push_back("Yes");
     row1.push_back("1");
     rows.push_back(row1);
+    rows.push_back({"utf8_general_ci", "utf8", "33", "Yes", "Yes", "1"});
+    rows.push_back({"utf8_bin", "utf8", "83", " ", "Yes", "1"});
 
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {
@@ -2847,7 +2869,7 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
     TableInfo info = factory->get_table_info(table_id);
     std::multimap<int32_t, IndexInfo> field_index;
     for (auto& index_id : info.indices) {
-        IndexInfo index_info = factory->get_index_info(index_id); 
+        IndexInfo index_info = factory->get_index_info(index_id);
         for (auto& field : index_info.fields) {
             field_index.insert(std::make_pair(field.id, index_info));
         }
@@ -2893,7 +2915,7 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
             //extra_vec.push_back(" ");
         }
 
-        row.push_back(boost::algorithm::join(extra_vec, "|")); 
+        row.push_back(boost::algorithm::join(extra_vec, "|"));
 
         rows.push_back(row);
     }
@@ -3160,7 +3182,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             "sql too big");
         return false;
     }
-    
+
     // sql planner.
     TimeCost cost;
     TimeCost cost1;
@@ -3174,7 +3196,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
             client->query_ctx->stat_info.error_msg << "get logical plan failed";
         }
-        _wrapper->make_err_packet(client, 
+        _wrapper->make_err_packet(client,
             client->query_ctx->stat_info.error_code, "%s", client->query_ctx->stat_info.error_msg.str().c_str());
         return false;
     }
@@ -3219,7 +3241,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             client->update_old_txn_info();
         }
     });
-    
+
     //DB_WARNING("create_plan_tree success, %s", client->query_ctx->sql.c_str());
     ret = PhysicalPlanner::analyze(client->query_ctx.get());
     if (ret < 0) {
@@ -3233,7 +3255,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
             client->query_ctx->stat_info.error_msg << "get physical plan failed";
         }
-        _wrapper->make_err_packet(client, 
+        _wrapper->make_err_packet(client,
             client->query_ctx->stat_info.error_code, "%s",
             client->query_ctx->stat_info.error_msg.str().c_str());
         return false;
@@ -3243,16 +3265,16 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
         pb::Plan plan;
         ExecNode::create_pb_plan(0, &plan, client->query_ctx->root);
-        std::string plan_str = "logical_plan:" + client->query_ctx->plan.DebugString() + "\n" + 
+        std::string plan_str = "logical_plan:" + client->query_ctx->plan.DebugString() + "\n" +
                                "physical_plan:" + plan.DebugString();
-        
+
         std::vector<ResultField> fields;
         ResultField field;
         field.name = "Plan";
         field.type = MYSQL_TYPE_VARCHAR;
         field.length = 1024*1024;
         fields.push_back(field);
-        
+
         std::vector< std::vector<std::string> > rows;
         std::vector<std::string> row;
         row.push_back(plan_str);
@@ -3269,7 +3291,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         _wrapper->make_simple_ok_packet(client);
         return true;
     }
-   
+
     //DB_WARNING("client: %ld ,seq_id: %d", client.get(), client->seq_id);
     // 不会有fether那一层，重构
     if (!client->query_ctx->is_full_export) {
@@ -3279,7 +3301,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         // 单语句事务需要回退状态
         if (client->query_ctx->get_runtime_state()->single_sql_autocommit()) {
             client->on_commit_rollback();
-         } 
+         }
         client->query_ctx->stat_info.query_exec_time = cost.get_time();
         client->query_ctx->stat_info.send_buf_size = client->send_buf->_size;
     } else {

@@ -20,6 +20,9 @@
 #ifdef LZ4
 #undef LZ4
 #endif
+#ifdef ZSTD
+#undef ZSTD
+#endif
 #include <arrow/ipc/writer.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/api.h>
@@ -114,7 +117,7 @@ public:
         } else {
             return _inner_node;
         }
-        
+
     }
 
     void add_node(const std::string& key, int8_t flag, double weight) {
@@ -147,7 +150,7 @@ public:
     std::string get_key(int64_t index) const {
         return std::string{_keys_ptr->GetView(index)};
     }
-    
+
     pb::ReverseNodeType get_flag(int64_t index) const {
         return pb::ReverseNodeType(_flags_ptr->Value(index));
     }

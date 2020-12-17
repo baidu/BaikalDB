@@ -1143,6 +1143,14 @@ int LogicalPlanner::create_values_expr(const parser::FuncExpr* func_item, pb::Ex
 int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item, 
         pb::Expr& expr, parser::FuncType op, const CreateExprOptions& options) {
     if (op == parser::FT_COMMON) {
+        if (item->fn_name.to_lower() == "last_insert_id") {
+            pb::ExprNode* node = expr.add_nodes();
+            node->set_node_type(pb::INT_LITERAL);
+            node->set_col_type(pb::INT64);
+            node->set_num_children(0);
+            node->mutable_derive_node()->set_int_val(_ctx->client_conn->last_insert_id);
+            return 0;
+        }
         if (FunctionManager::instance()->get_object(item->fn_name.to_lower()) == nullptr) {
             DB_WARNING("un-supported scala op or func: %s", item->fn_name.c_str());
             return -1;

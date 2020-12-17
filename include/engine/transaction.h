@@ -532,5 +532,5 @@ private:
     static bvar::LatencyRecorder    rocksdb_get_time_cost;
 };
 
-typedef std::shared_ptr<Transaction> SmartTransaction;
+//typedef std::shared_ptr<Transaction> SmartTransaction;
 }
