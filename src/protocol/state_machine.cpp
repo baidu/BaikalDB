@@ -367,8 +367,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 || ctx->mysql_cmd == COM_STMT_EXECUTE) {
         if (op_type == pb::OP_SELECT) {
             select_time_cost << stat_info->total_time;
+            std::unique_lock<std::mutex> lock(_mutex);
             if (select_by_users.find(client->username) == select_by_users.end()) {
-                std::unique_lock<std::mutex> lock(_mutex);
                 select_by_users[client->username].reset(new bvar::LatencyRecorder("select_" + client->username));
             }
             (*select_by_users[client->username]) << stat_info->total_time;
@@ -376,8 +376,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 op_type == pb::OP_UPDATE ||
                 op_type == pb::OP_DELETE) {
             dml_time_cost << stat_info->total_time;
+            std::unique_lock<std::mutex> lock(_mutex);
             if (dml_by_users.find(client->username) == dml_by_users.end()) {
-                std::unique_lock<std::mutex> lock(_mutex);
                 dml_by_users[client->username].reset(new bvar::LatencyRecorder("dml_" + client->username));
             }
             (*dml_by_users[client->username]) << stat_info->total_time;
