@@ -128,3 +128,14 @@ curl -d '{
     }
 }' http://$1/MetaService/meta_manager
 echo -e "\n"
+
+#更新自增ID
+curl -d '{
+    "op_type": "OP_UPDATE_FOR_AUTO_INCREMENT",
+    "auto_increment": {
+        "table_id": 1,
+        "force": true,
+        "start_id": 100
+    }
+}' http://$1/MetaService/meta_manager
+echo -e "\n"
