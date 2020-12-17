@@ -367,7 +367,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 || ctx->mysql_cmd == COM_STMT_EXECUTE) {
         if (op_type == pb::OP_SELECT) {
             select_time_cost << stat_info->total_time;
-            if (select_by_users.find(client->username) == dml_by_users.end()) {
+            if (select_by_users.find(client->username) == select_by_users.end()) {
                 select_by_users[client->username].reset(new bvar::LatencyRecorder("select_" + client->username));
             }
             (*select_by_users[client->username]) << stat_info->total_time;
