@@ -1132,7 +1132,7 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
         boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
     }
     re2::RE2 ignore_reg("(\\/\\*.*?\\*\\/)", option);
-    if (RE2::GlobalReplace(&(ctx->sql), reg, " ")) {
+    if (RE2::GlobalReplace(&(ctx->sql), ignore_reg, " ")) {
         DB_WARNING("global replace sql.");
     }
 }
