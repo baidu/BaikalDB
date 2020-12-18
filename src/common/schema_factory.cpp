@@ -442,6 +442,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         field_info.auto_inc = field.auto_increment();
         field_info.deleted = field.deleted();
         field_info.comment = field.comment();
+        field_info.noskip = boost::algorithm::icontains(field_info.comment, "noskip");
         field_info.default_value = field.default_value();
         field_info.on_update_value = field.on_update_value();
         if (field.has_default_value()) {

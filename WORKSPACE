@@ -93,6 +93,7 @@ new_http_archive(
     name = "com_github_facebook_rocksdb",
     url = "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz",
     strip_prefix = "rocksdb-6.8.1",
+    sha256 = "ca192a06ed3bcb9f09060add7e9d0daee1ae7a8705a3d5ecbe41867c5e2796a2",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
 )
 
@@ -105,6 +106,7 @@ new_http_archive(
     name = "com_github_RoaringBitmap_CRoaring",
     url = "https://github.com/RoaringBitmap/CRoaring/archive/v0.2.66.tar.gz",
     strip_prefix = "CRoaring-0.2.66",
+    sha256 = "df98bd8f6ff09097ada529a004af758ff4d33faf6a06fadf8fad9a6533afc241",
     build_file = "third-party/com_github_RoaringBitmap_CRoaring/BUILD",
 )
 
@@ -145,6 +147,34 @@ bind(
     name = "snappy_config",
     actual = "//third-party/snappy_config:config"
 )
+
+# lz4
+new_http_archive(
+    name = "com_github_lz4_lz4",
+    urls = ["https://github.com/lz4/lz4/archive/v1.9.2.tar.gz"],
+    strip_prefix = "lz4-1.9.2",
+    build_file = "third-party/lz4.BUILD",
+    sha256 = "658ba6191fa44c92280d4aa2c271b0f4fbc0e34d249578dd05e50e76d0e5efcc",
+)
+bind(
+    name = "lz4",
+    actual = "@com_github_lz4_lz4//:lz4",
+)
+
+#zstd
+new_http_archive(
+    name = "com_github_facebook_zstd",
+    urls = ["https://github.com/facebook/zstd/archive/v1.4.4.tar.gz",],
+    strip_prefix = "zstd-1.4.4",
+    build_file = "third-party/zstd.BUILD",
+    sha256 = "a364f5162c7d1a455cc915e8e3cf5f4bd8b75d09bc0f53965b0c9ca1383c52c8",
+)
+
+bind(
+    name = "zstd",
+    actual = "@com_github_facebook_zstd//:zstd",
+)
+
 
 git_repository(
     name = "com_github_brpc_braft",

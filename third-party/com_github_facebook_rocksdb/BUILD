@@ -266,6 +266,8 @@ cc_library(
         "SNAPPY",
         "HAVE_SSE42",
         "ZLIB",
+        "LZ4",
+        "ZSTD",
         "ROCKSDB_SCHED_GETCPU_PRESENT",
         "ROCKSDB_MALLOC_USABLE_SIZE",
     ],
@@ -298,6 +300,8 @@ cc_library(
         "//external:gtest",
         "//external:snappy",
         "//external:zlib",
+        "//external:lz4",
+        "//external:zstd",
     ],
     visibility = ["//visibility:public"],
 )

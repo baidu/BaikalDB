@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "auto_inc.h"
+#include <boost/algorithm/string.hpp>
 #include "exec_node.h"
 #include "query_context.h"
 #include "schema_factory.h"
@@ -52,6 +53,11 @@ int AutoInc::analyze(QueryContext* ctx) {
                 }
             }
     }
+    auto field_info = table_info_ptr->get_field_ptr(table_info_ptr->auto_inc_field_id);
+    // 通过字段注释可以标示:自增id不会随着插入id进行跳号,当插入的自增id来自于异构数据源时,用于避免自增id的双写冲突问题.
+    if (field_info != nullptr && field_info->noskip) {
+        max_id = 0;
+    }
     if (auto_id_count == 0 && max_id == 0) {
         return 0;
     }
@@ -71,6 +77,9 @@ int AutoInc::analyze(QueryContext* ctx) {
     }
     
     if (auto_id_count == 0) {
+        if (max_id > 0) {
+            ctx->client_conn->last_insert_id = max_id;
+        }
         return 0;
     }
     int64_t start_id = response.start_id();

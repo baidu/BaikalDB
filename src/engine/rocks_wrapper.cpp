@@ -50,6 +50,10 @@ DEFINE_int32(min_write_buffer_number_to_merge, 2, "min_write_buffer_number_to_me
 DEFINE_int32(rocks_binlog_max_files_size_gb, 100, "binlog max size default 100G");
 DEFINE_int32(rocks_binlog_ttl_days, 7, "binlog ttl default 7 days");
 
+DEFINE_int32(level0_file_num_compaction_trigger, 5, "Number of files to trigger level-0 compaction");
+DEFINE_int32(max_bytes_for_level_base, 1024 * 1024 * 1024, "total size of level 1.");
+DEFINE_bool(enable_bottommost_compression, false, "enable zstd for bottommost_compression");
+
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log";
 const std::string RocksWrapper::DATA_CF     = "data";
@@ -151,18 +155,27 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.compaction_filter = SplitCompactionFilter::get_instance();
     _data_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
     _data_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
-    _data_cf_option.level0_file_num_compaction_trigger = 5;
+//    _data_cf_option.level0_file_num_compaction_trigger = 5;
     _data_cf_option.level0_slowdown_writes_trigger = 10;
     _data_cf_option.level0_stop_writes_trigger = FLAGS_stop_write_sst_cnt;
     _data_cf_option.hard_pending_compaction_bytes_limit = FLAGS_rocks_hard_pending_compaction_g * 1073741824ull;
     _data_cf_option.target_file_size_base = 128 * 1024 * 1024;
-    _data_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;
     _data_cf_option.max_bytes_for_level_multiplier = FLAGS_rocks_level_multiplier;
     _data_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
 
     _data_cf_option.max_write_buffer_number = FLAGS_max_write_buffer_number;
     _data_cf_option.write_buffer_size = FLAGS_write_buffer_size;
     _data_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
+
+    _data_cf_option.level0_file_num_compaction_trigger = FLAGS_level0_file_num_compaction_trigger;
+    _data_cf_option.max_bytes_for_level_base = FLAGS_max_bytes_for_level_base;
+
+    if (FLAGS_enable_bottommost_compression) {
+        _data_cf_option.bottommost_compression_opts.enabled = true;
+        _data_cf_option.bottommost_compression = rocksdb::kZSTD;
+        _data_cf_option.bottommost_compression_opts.max_dict_bytes = 1 << 14; // 16KB
+        _data_cf_option.bottommost_compression_opts.zstd_max_train_bytes = 1 << 18; // 256KB
+    }
 
     //todo
     //prefix: 0x01-0xFF,分别用来存储不同的meta信息

@@ -246,7 +246,7 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
         case COUNT_STAR:
         case COUNT: {
             if (dst_val.is_null()) {
-                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(_col_type));
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(pb::INT64));
             }
             return 0;
         }

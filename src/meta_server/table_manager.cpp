@@ -1140,7 +1140,12 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         }
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
             if (mem_field.field_name() == field_name) {
-                mem_field.set_mysql_type(field.mysql_type());
+                if (field.has_mysql_type()) {
+                    mem_field.set_mysql_type(field.mysql_type());
+                }
+                if (field.has_comment()) {
+                    mem_field.set_comment(field.comment());
+                }
             }
         }
     }
