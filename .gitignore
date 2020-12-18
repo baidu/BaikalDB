@@ -42,3 +42,15 @@
 cmake-build-debug
 cmake-build-release
 .DS_Store
+
+# eclipse
+.cproject
+.project
+.settings/language.settings.xml
+
+# bazel
+bazel-BaikalDB
+bazel-bin
+bazel-genfiles
+bazel-out
+bazel-testlogs
