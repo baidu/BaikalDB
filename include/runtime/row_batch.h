@@ -86,6 +86,12 @@ public:
     std::unique_ptr<MemRow>& get_row() {
         return _rows[_idx];
     }
+    std::unique_ptr<MemRow>& get_row(size_t i) {
+        return _rows[i];
+    }
+    const size_t& index() {
+        return _idx;
+    }
     void next() {
         _idx++;
     }
