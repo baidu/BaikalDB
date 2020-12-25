@@ -30,7 +30,6 @@ DEFINE_int32(test_total , 10 * 10000, "num");
 DEFINE_int32(test_depth , 5, "num");
 DEFINE_int32(test_width , 2048, "num");
 DEFINE_int32(test_value , 1, "num");
-DEFINE_string(user_email, "yuzhengquan@baidu.com","abc");
 namespace baikaldb {
 // only for UT
 void TEST_insert_value(const ExprValue& value, bool new_bucket, HistogramMap& bucket_mapping) {
