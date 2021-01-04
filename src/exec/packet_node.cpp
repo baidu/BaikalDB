@@ -20,6 +20,7 @@
 
 namespace baikaldb {
 DEFINE_int32(expect_bucket_count, 100, "expect_bucket_count");
+DEFINE_bool(field_charsetnr_set_by_client, false, "set charsetnr by client");
 int PacketNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -307,7 +308,11 @@ int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
 
 int PacketNode::open(RuntimeState* state) {
     _client = state->client_conn();
-
+    if (FLAGS_field_charsetnr_set_by_client) {
+        for (auto& field : _fields) {
+            field.charsetnr = _client->charset_num;
+        }
+    }
     _send_buf = state->send_buf();
     _wrapper = MysqlWrapper::get_instance();
     int ret = 0;
