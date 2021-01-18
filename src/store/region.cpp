@@ -290,6 +290,7 @@ int Region::init(bool new_region, int32_t snapshot_times) {
         //binlog region把start key和end key设置为空，防止filter把数据删掉
         SplitCompactionFilter::get_instance()->set_end_key(
                 _region_id, "");
+        SplitCompactionFilter::get_instance()->set_binlog_region(_region_id);
     } else {
         SplitCompactionFilter::get_instance()->set_end_key(
                 _region_id,
