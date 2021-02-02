@@ -71,7 +71,7 @@ struct ResultField {
     std::string     org_table;
     std::string     name;       // Name of column
     std::string     org_name;
-    uint16_t        charsetnr = 33;  // Character set default utf8.
+    uint16_t        charsetnr = 0;  // Character.
     uint32_t        length = 0;     // Width of column (create length).
     uint8_t         type = 0;       // Type of field. See mysql_com.h for types.
     uint16_t        flags = 1;      // Div flags.
