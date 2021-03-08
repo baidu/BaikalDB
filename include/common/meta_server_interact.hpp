@@ -29,6 +29,7 @@
 #include "common.h"
 
 namespace baikaldb {
+DECLARE_int64(time_between_meta_connect_error_ms);
 class MetaServerInteract {
 public:
     static const int RETRY_TIMES = 5;
@@ -54,6 +55,9 @@ public:
         int retry_time = 0;
         uint64_t log_id = butil::fast_rand();
         do {
+            if (retry_time > 0 && FLAGS_time_between_meta_connect_error_ms > 0) {
+                bthread_usleep(1000 * FLAGS_time_between_meta_connect_error_ms);
+            }
             brpc::Controller cntl;
             cntl.set_log_id(log_id);
             std::unique_lock<std::mutex> lck(_master_leader_mutex);

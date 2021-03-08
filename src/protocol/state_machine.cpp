@@ -1026,7 +1026,7 @@ bool StateMachine::_query_process(SmartSocket client) {
                 ret = _handle_client_query_show_schema_conf(client);
             } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_VIRTUAL_INDEX)) {
                 ret = _handle_client_query_show_virtual_index(client);
-            } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_COLLATION)) {
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW_COLLATION)) {
                 ret = _handle_client_query_show_collation(client);
             } else if (boost::iequals(client->query_ctx->sql, SQL_SHOW_WARNINGS)) {
                 ret = _handle_client_query_show_warnings(client);
