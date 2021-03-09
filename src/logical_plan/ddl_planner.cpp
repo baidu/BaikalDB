@@ -261,7 +261,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 can_support_ttl = false;
             } else if (boost::algorithm::iequals(str_val, "rocksdb_cstore")) {
                 table.set_engine(pb::ROCKSDB_CSTORE);
-                can_support_ttl = false;
+//                can_support_ttl = false;
             } else if (boost::algorithm::iequals(str_val, "binlog")) {
                 table.set_engine(pb::BINLOG);
                 can_support_ttl = false;
