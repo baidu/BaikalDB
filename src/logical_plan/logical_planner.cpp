@@ -1821,8 +1821,10 @@ int LogicalPlanner::create_term_slot_ref_node(
     std::string var_name;
     auto client = _ctx->client_conn;
     if (boost::algorithm::istarts_with(origin_name, "@@global.")) {
-        // TODO handle set global variable
-        return -1;
+//        // TODO handle set global variable
+//        return -1;
+        var_name = origin_name.substr(strlen("@@global."));
+        vars = &client->session_vars;
     } else if (boost::algorithm::istarts_with(origin_name, "@@session.")) {
         var_name = origin_name.substr(strlen("@@session."));
         vars = &client->session_vars;

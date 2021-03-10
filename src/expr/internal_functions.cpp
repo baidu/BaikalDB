@@ -22,6 +22,7 @@
 #include <algorithm>
 
 namespace baikaldb {
+DEFINE_string(db_version, "5.7.16-BaikalDB-v1.1.5", "db version");
 static const int32_t DATE_FORMAT_LENGTH = 128;
 static const std::vector<std::string> day_names = {
         "Sunday", "Monday", "Tuesday", "Wednesday",
@@ -1527,6 +1528,11 @@ ExprValue rb_jaccard_index(const std::vector<ExprValue>& input) {
     return result;
 }
 
+ExprValue version(const std::vector<ExprValue>& input) {
+    ExprValue tmp(pb::STRING);
+    tmp.str_val = FLAGS_db_version;
+    return tmp;
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */
