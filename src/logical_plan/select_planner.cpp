@@ -485,6 +485,7 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
     bool has_alias = false;
     if (!field->as_name.empty()) {
         select_name = field->as_name.value;
+        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
         has_alias = true;
     } else {
         if (field->expr->expr_type == parser::ET_COLUMN) {
@@ -500,7 +501,7 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
     _ctx->field_column_id_mapping[select_name] = _column_id++;
 
     if (has_alias) {
-        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
+//        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
         _select_alias_mapping.insert({select_name, (_select_names.size() - 1)});
     }
     return 0;
