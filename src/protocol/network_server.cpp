@@ -257,7 +257,6 @@ void NetworkServer::print_agg_sql() {
                         hostname = FLAGS_hostname;
                         DB_WARNING("get hostname failed");
                     }
-
                     uint64_t out[2];
                     int64_t version;
                     std::string op_description;

@@ -1035,7 +1035,7 @@ std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
 int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, const CreateExprOptions& options) {
     static std::unordered_set<std::string> support_agg = {
         "count", "sum", "avg", "min", "max", "hll_add_agg", "hll_merge_agg",
-        "rb_or_agg", "rb_and_agg", "rb_xor_agg", "rb_build_agg"
+        "rb_or_agg", "rb_and_agg", "rb_xor_agg", "rb_build_agg", "group_concat"
     };
     if (support_agg.count(expr_item->fn_name.to_lower()) == 0) {
         DB_WARNING("un-supported agg op or func: %s", expr_item->fn_name.c_str());

@@ -34,6 +34,7 @@ public:
         RB_XOR_AGG,
         RB_XOR_CARDINALITY_AGG,
         RB_BUILD_AGG,
+        GROUP_CONCAT,
         OTHER
     };
     AggFnCall() {
