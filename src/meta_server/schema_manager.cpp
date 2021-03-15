@@ -557,6 +557,16 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     total_region_count = partition_num * total_region_count;
     std::string resource_tag = request->table_info().resource_tag();
     boost::trim(resource_tag);
+    if (!table_info.has_resource_tag()) {
+        std::string namespace_name = table_info.namespace_name();
+        std::string database_name = namespace_name + "\001" + table_info.database();
+        int64_t database_id = DatabaseManager::get_instance()->get_database_id(database_name);
+        std::string database_resource_tag = DatabaseManager::get_instance()->get_resource_tag(database_id);
+        if (database_resource_tag != "") {
+            resource_tag = database_resource_tag;
+        }
+    }
+
     mutable_request->mutable_table_info()->set_resource_tag(resource_tag);
     DB_WARNING("create table should select instance count: %d", total_region_count);
     for (auto i = 0; i < total_region_count; ++i) { 

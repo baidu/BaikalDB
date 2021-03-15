@@ -15,6 +15,7 @@ message NameSpaceInfo {
     optional int64 quota                   = 3;
     optional int64 version                 = 4;
     optional bool deleted                  = 5;
+    optional string resource_tag           = 6;
 };
 
 message DataBaseInfo {
@@ -25,6 +26,7 @@ message DataBaseInfo {
     optional int64 quota                   = 5;
     optional int64 version                 = 6;
     optional bool   deleted                = 7;
+    optional string resource_tag           = 8;
 };
 
 enum Status {
