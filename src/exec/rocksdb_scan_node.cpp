@@ -191,19 +191,6 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         _is_covering_index = true;
     }
 
-    // 索引条件下推，减少主表查询次数
-    index_condition_pushdown();
-    for (auto expr : _index_conjuncts) {
-        //pb::Expr pb;
-        //ExprNode::create_pb_expr(&pb, expr);
-        //DB_NOTICE("where:%s", pb.ShortDebugString().c_str());
-        ret = expr->open();
-        if (ret < 0) {
-            DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
-            return ret;
-        }
-    }
-
     if (_multi_reverse_index.size() > 0) {
         for (auto id : _multi_reverse_index) {
             const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(id);
@@ -276,6 +263,20 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             _use_get = true;
         }
     }
+
+    // 索引条件下推，减少主表查询次数
+    index_condition_pushdown();
+    for (auto expr : _index_conjuncts) {
+        //pb::Expr pb;
+        //ExprNode::create_pb_expr(&pb, expr);
+        //DB_NOTICE("where:%s", pb.ShortDebugString().c_str());
+        ret = expr->open();
+        if (ret < 0) {
+            DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
+            return ret;
+        }
+    }
+
     //DB_WARNING_STATE(state, "start search");
     return 0;
 }
@@ -318,8 +319,12 @@ int RocksdbScanNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
 
 bool RocksdbScanNode::need_pushdown(ExprNode* expr) {
     pb::IndexType index_type = _index_info->type;
+    bool is_cstore_table_seek = false;
+    if ((!_use_get) && _table_info->engine == pb::ROCKSDB_CSTORE && _index_id == _table_id) {
+        is_cstore_table_seek = true;
+    }
     // get方式和主键无需下推
-    if (_use_get || index_type == pb::I_PRIMARY) {
+    if (_use_get || (index_type == pb::I_PRIMARY && !is_cstore_table_seek)) {
         return false;
     }
     // 该条件用于指定索引，在filternode里处理了
@@ -344,10 +349,12 @@ bool RocksdbScanNode::need_pushdown(ExprNode* expr) {
     if (expr->children(0)->node_type() != pb::SLOT_REF) {
         return false;
     }
-    SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
-    if (_index_slot_field_map.count(slot_ref->slot_id()) == 0) {
-        return false;
-    } 
+    if (!is_cstore_table_seek) {
+        SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
+        if (_index_slot_field_map.count(slot_ref->slot_id()) == 0) {
+            return false;
+        }
+    }
     // 倒排里用field_id识别
     //slot_ref->set_field_id(_index_slot_field_map[slot_ref->slot_id()]);
     switch (expr->node_type()) {
@@ -541,6 +548,20 @@ int RocksdbScanNode::open(RuntimeState* state) {
     }
     for (auto id : _index_ids) {
         state->add_scan_index(id);
+    }
+
+    if (!_use_get && _table_info->engine == pb::ROCKSDB_CSTORE && _index_id == _table_id) {
+        std::unordered_set<int32_t> filt_field_ids;
+        for (auto& expr : _index_conjuncts) {
+            expr->get_all_field_ids(filt_field_ids);
+        }
+        for (auto& iter : _field_ids) {
+            if (filt_field_ids.count(iter.first)) {
+                _filt_field_ids.push_back(iter.first);
+            } else {
+                _trivial_field_ids.push_back(iter.first);
+            }
+        }
     }
     return 0;
 }
@@ -744,19 +765,78 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
         }
-        ++_scan_rows;
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        int ret = _table_iter->get_next(_tuple_id, row);
-        if (ret < 0) {
-            continue;
+        if (!_table_iter->is_cstore()) {
+            ++_scan_rows;
+            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+            int ret = _table_iter->get_next(_tuple_id, row);
+            if (ret < 0) {
+                continue;
+            }
+            if (!need_copy(row.get(), _index_conjuncts)) {
+                state->inc_num_filter_rows();
+                ++index_filter_cnt;
+                continue;
+            }
+            batch->move_row(std::move(row));
+            ++_num_rows_returned;
+        } else {
+            // scan primary
+            RowBatch row_batch;
+            std::shared_ptr<FiltBitSet> filter;
+            if (_index_conjuncts.size() > 0) {
+                filter.reset(new FiltBitSet());
+            }
+            _table_iter->reset_primary_keys();
+            int32_t num = 0;
+            while (_table_iter->valid()) {
+                if (_limit != -1 && _num_rows_returned + num >= _limit) {
+                    break;
+                }
+                if (row_batch.size() + num >= row_batch.capacity()) {
+                    break;
+                }
+                std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+                std::string key;
+                int ret = _table_iter->get_next(_tuple_id, row);
+                if (ret < 0) {
+                    break;
+                }
+                row_batch.move_row(std::move(row));
+                ++num;
+            }
+            // scan filt column
+            for (auto& field_id : _filt_field_ids) {
+                FieldInfo* field_info = _field_ids[field_id];
+                int ret = _table_iter->get_column(_tuple_id, *field_info, nullptr, &row_batch);
+            }
+            // filt
+            if (filter.get() != nullptr) {
+                for (row_batch.reset(); !row_batch.is_traverse_over(); row_batch.next()) {
+                    std::unique_ptr<MemRow>& row = row_batch.get_row();
+                    if (!need_copy(row.get(), _index_conjuncts)) {
+                        filter->set(row_batch.index());
+                    }
+                }
+            }
+            // scan trivial column
+            for (auto& field_id : _trivial_field_ids) {
+                FieldInfo* field_info = _field_ids[field_id];
+                int ret = _table_iter->get_column(_tuple_id, *field_info, filter.get(), &row_batch);
+            }
+
+            // move to row batch
+            for (row_batch.reset(); !row_batch.is_traverse_over(); row_batch.next()) {
+                ++_scan_rows;
+                std::unique_ptr<MemRow>& row = row_batch.get_row();
+                if (filter  && filter->test(row_batch.index())) {
+                    state->inc_num_filter_rows();
+                    ++index_filter_cnt;
+                    continue;
+                }
+                batch->move_row(std::move(row));
+                ++_num_rows_returned;
+            }
         }
-        if (!need_copy(row.get(), _index_conjuncts)) {
-            state->inc_num_filter_rows();
-            ++index_filter_cnt;
-            continue;
-        }
-        batch->move_row(std::move(row));
-        ++_num_rows_returned;
     }
 }
 

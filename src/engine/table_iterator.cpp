@@ -78,7 +78,6 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
         _use_ttl = txn->use_ttl();
         _read_ttl_timestamp_us = txn->read_ttl_timestamp_us();
         _txn = txn->get_txn();
-        _is_cstore = txn->is_cstore();
     }
     bool like_prefix = range.like_prefix;
 
@@ -99,6 +98,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
         DB_WARNING("get schema factory failed");
         return -1;
     }
+    _is_cstore = _schema->get_table_engine(_pri_info->id) == pb::ROCKSDB_CSTORE;
 
     _start.append_i64(_region).append_i64(index_id);
     _end.append_i64(_region).append_i64(index_id);
@@ -339,6 +339,7 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
         key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
         rocksdb::Iterator* iter;
         if (_txn != nullptr) {
+            read_options.snapshot = txn->get_snapshot();
             iter = _txn->GetIterator(read_options, _data_cf);
         } else {
             iter = _db->new_iterator(read_options, RocksWrapper::DATA_CF);
@@ -358,8 +359,8 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
             DB_DEBUG("region:%ld, field:%d, SeekForPrev cost:%ld, valid=%d",
                      _region, field_id, cost.get_time(), iter->Valid());
         }
-        _non_pk_fields.push_back(pair.second);
-        _column_iters.push_back(iter);
+        _column_iters[field_id] = iter;
+//        pair.second->can_null && pair.second->default_expr_value.is_null();
     }
     return 0;
 }
@@ -463,12 +464,8 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
                 return -1;
             }
         } else {
-            // for cstore, column value may be null.
-            if (0 != get_next_columns(iter_key, record, tuple_id, mem_row)) {
-                DB_WARNING("get non-pk cloumn value failed table_id: %ld", _index_info->id);
-                _valid = false;
-                return -1;
-            }
+            _primary_keys.push_back(std::string(_iter->key().data() + _prefix_len,
+                                                _iter->key().size() - _prefix_len));
         }
     }
     if (KEY_ONLY == _mode || KEY_VAL == _mode) {
@@ -499,83 +496,77 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
     return 0;
 }
 
-// for cstore only
-int TableIterator::get_next_columns(const rocksdb::Slice& iter_key, SmartRecord* record, 
-        int32_t tuple_id, std::unique_ptr<MemRow>* mem_row) {
-    TableKey primary_key(iter_key, true);
-    rocksdb::Slice pk = iter_key;
-    pk.remove_prefix(_prefix_len);
-    int64_t table_id = _pri_info->id;
+int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const FiltBitSet* filter, RowBatch* batch) {
 
-    for (size_t i = 0; i < _non_pk_fields.size(); i++) {
-        int32_t field_id = _non_pk_fields[i]->id;
-        int32_t slot_id = _field_slot[field_id];
-        if (slot_id == 0 && record == nullptr) {
-            return -1;
-        }
-        rocksdb::Iterator* iter = _column_iters[i];
-        rocksdb::Slice column_key = iter->key();
-        // total valid is depend on pk's _iter, column iter's valid is not necessary
-        if (!iter->Valid()) {
-            if (record != nullptr) {
-                (*record)->set_default_value(*_non_pk_fields[i]);
-            } else {
-                (*mem_row)->set_value(tuple_id, slot_id, _non_pk_fields[i]->default_expr_value);
-            }
-            DB_DEBUG("iter not valid, field_id=%d, pk=%s, default_value=%s",
-                     field_id, pk.ToString(true).c_str(),
-                     _non_pk_fields[i]->default_value.c_str());
+    int32_t field_id = field.id;
+    int32_t slot_id = _field_slot[field_id];
+    if (slot_id == 0) {
+        return -1;
+    }
+    rocksdb::Iterator* iter = _column_iters[field_id];
+    MutTableKey prefix_key;
+    prefix_key.append_i64(_region);
+    prefix_key.append_i32(_pri_info->id);
+    prefix_key.append_i32(field_id);
+
+    int filter_num = 0;
+    for (size_t i = 0; i < batch->size(); ++i) {
+        if (filter != nullptr && filter->test(i)) {
+            filter_num++;
             continue;
         }
-        if (!_fits_prefix(column_key, field_id)) {
-            if (record != nullptr) {
-                (*record)->set_default_value(*_non_pk_fields[i]);
+        if (filter_num > 63) {
+            MutTableKey key;
+            key.append_index(prefix_key);
+            key.append_index(_primary_keys[i]);
+            if (_forward) {
+                iter->Seek(key.data());
             } else {
-                (*mem_row)->set_value(tuple_id, slot_id, _non_pk_fields[i]->default_expr_value);
+                iter->SeekForPrev(key.data());
             }
-            DB_DEBUG("not match prefix, field_id=%d, key=%s, default_value=%s",
-                     field_id, iter->key().ToString(true).c_str(),
-                     _non_pk_fields[i]->default_value.c_str());
-            continue;
         }
-        MutTableKey key(primary_key);
-        key.replace_i32(table_id, sizeof(int64_t));
-        key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
-        column_key.remove_prefix(_prefix_len);
-        auto cmp = pk.compare(column_key);
-        // when column pure key is equal to pk's pure key, get column value to record.
-        if (cmp == 0) {
-            if (record != nullptr) {
-                if (0 != (*record)->decode_field(*_non_pk_fields[i], iter->value())) {
-                    DB_WARNING("decode value failed: %d", field_id);
-                    return -1;
+        std::unique_ptr<MemRow>& mem_row = batch->get_row(i);
+        rocksdb::Slice primary_key = _primary_keys[i];
+        int32_t cmp = 0;
+        while (true) {
+            if (!iter->Valid()) {
+                mem_row->set_value(tuple_id, slot_id, field.default_expr_value);
+                break;
+            }
+            rocksdb::Slice column_key = iter->key();
+            if (!column_key.starts_with(prefix_key.data())){
+                mem_row->set_value(tuple_id, slot_id, field.default_expr_value);
+                DB_DEBUG("not match prefix, field_id=%d, key=%s, default_value=%s",
+                         field_id, iter->key().ToString(true).c_str(), field.default_value.c_str());
+                break;
+            }
+            column_key.remove_prefix(_prefix_len);
+            cmp = primary_key.compare(column_key);
+            if (_forward) {
+                if (cmp == 0) {
+                    mem_row->decode_field(tuple_id, slot_id, field.type, iter->value());
+                    iter->Next();
+                    break;
+                } else if (cmp < 0) {
+                    mem_row->set_value(tuple_id, slot_id, field.default_expr_value);
+                    break;
+                } else {
+                    iter->Next();
                 }
             } else {
-                if (0 != (*mem_row)->decode_field(tuple_id, slot_id, _non_pk_fields[i]->type, iter->value())) {
-                    DB_WARNING("decode value failed: %d", field_id);
-                    return -1;
+                if (cmp == 0) {
+                    mem_row->decode_field(tuple_id, slot_id, field.type, iter->value());
+                    iter->Prev();
+                    break;
+                } else if (cmp > 0) {
+                    mem_row->set_value(tuple_id, slot_id, field.default_expr_value);
+                    break;
+                } else {
+                    iter->Prev();
                 }
             }
-        } else {
-            if (record != nullptr) {
-                (*record)->set_default_value(*_non_pk_fields[i]);
-            } else {
-                (*mem_row)->set_value(tuple_id, slot_id, _non_pk_fields[i]->default_expr_value);
-            }
-            DB_DEBUG("field_id=%d, pk=%s, key=%s, default_value=%s, cmp=%d", field_id,
-                            pk.ToString(true).c_str(),
-                            column_key.ToString(true).c_str(),
-                            _non_pk_fields[i]->default_value.c_str(),
-                            cmp);
         }
-        // as the pure key maybe not exists in column iter,
-        // only need to move iter when pk are greater or equal.
-        if (_forward && cmp >= 0) {
-            iter->Next();
-        }
-        if (!_forward && cmp <= 0)  {
-            iter->Prev();
-        }
+        filter_num = 0;
     }
     return 0;
 }

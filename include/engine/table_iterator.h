@@ -13,7 +13,8 @@
 // limitations under the License.
 
 #pragma once
- 
+
+#include <bitset>
 #include "rocks_wrapper.h"
 #include "schema_factory.h"
 #include "mut_table_key.h"
@@ -25,6 +26,7 @@ class Transaction;
 class TableIterator;
 class IndexIterator;
 typedef std::shared_ptr<Transaction> SmartTransaction;
+typedef std::bitset<ROW_BATCH_CAPACITY> FiltBitSet;
 
 //前缀的=传 [key, key],双闭区间
 struct IndexRange {
@@ -85,8 +87,8 @@ public:
         delete _iter;
         _iter = nullptr;
         for (auto& iter : _column_iters) {
-            delete iter;
-            iter = nullptr;
+            delete iter.second;
+            iter.second = nullptr;
         }
     }
 
@@ -114,6 +116,14 @@ public:
         std::vector<int32_t>& field_slot,
         bool                check_region, 
         bool                forward);
+
+    bool is_cstore() {
+        return _is_cstore;
+    }
+    void reset_primary_keys() {
+        _primary_keys.clear();
+        _primary_keys.reserve(ROW_BATCH_CAPACITY);
+    }
 
 protected:
     MutTableKey             _start;
@@ -151,8 +161,8 @@ protected:
     std::map<int32_t, FieldInfo*>    _fields;
     std::vector<int32_t> _field_slot;
 
-    std::vector<rocksdb::Iterator*>     _column_iters; // cstore, own it, should delete when destruct
-    std::vector<FieldInfo*>             _non_pk_fields; // cstore
+    std::vector<std::string>                _primary_keys;
+    std::map<int32_t, rocksdb::Iterator*>   _column_iters;
 
     int _prefix_len = sizeof(int64_t) * 2;
 
@@ -182,13 +192,9 @@ public:
     void set_mode(KVMode mode) {
         _mode = mode;
     }
-
+    int get_column(int32_t tuple_id, const FieldInfo& field, const FiltBitSet* filter, RowBatch* batch);
 private:
     int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
-    // _iter is used to fit_bound and set pk field value,
-    // _column_iters is only used for set non-pk field value
-    int get_next_columns(const rocksdb::Slice& iter_key, SmartRecord* record, 
-            int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
     KVMode  _mode;
 };
 
