@@ -786,25 +786,31 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             if (_index_conjuncts.size() > 0) {
                 filter.reset(new FiltBitSet());
             }
-            _table_iter->ResetPrimaryKeys();
+            _table_iter->reset_primary_keys();
             int32_t num = 0;
             while (_table_iter->valid()) {
-                if (_limit != -1 && _num_rows_returned + num >= _limit) break;
-                if (row_batch.size() + num >= row_batch.capacity()) break;
+                if (_limit != -1 && _num_rows_returned + num >= _limit) {
+                    break;
+                }
+                if (row_batch.size() + num >= row_batch.capacity()) {
+                    break;
+                }
                 std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
                 std::string key;
                 int ret = _table_iter->get_next(_tuple_id, row);
-                if (ret < 0) break;
+                if (ret < 0) {
+                    break;
+                }
                 row_batch.move_row(std::move(row));
                 ++num;
             }
             // scan filt column
             for (auto& field_id : _filt_field_ids) {
                 FieldInfo* field_info = _field_ids[field_id];
-                int ret = _table_iter->get_column(_tuple_id, *field_info, &row_batch);
+                int ret = _table_iter->get_column(_tuple_id, *field_info, nullptr, &row_batch);
             }
             // filt
-            if (filter.get()) {
+            if (filter.get() != nullptr) {
                 for (row_batch.reset(); !row_batch.is_traverse_over(); row_batch.next()) {
                     std::unique_ptr<MemRow>& row = row_batch.get_row();
                     if (!need_copy(row.get(), _index_conjuncts)) {
@@ -815,7 +821,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             // scan trivial column
             for (auto& field_id : _trivial_field_ids) {
                 FieldInfo* field_info = _field_ids[field_id];
-                int ret = _table_iter->get_column(_tuple_id, *field_info, &row_batch, filter.get());
+                int ret = _table_iter->get_column(_tuple_id, *field_info, filter.get(), &row_batch);
             }
 
             // move to row batch

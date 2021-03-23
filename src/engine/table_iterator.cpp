@@ -496,7 +496,7 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
     return 0;
 }
 
-int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, RowBatch* batch, FiltBitSet* filter) {
+int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const FiltBitSet* filter, RowBatch* batch) {
 
     int32_t field_id = field.id;
     int32_t slot_id = _field_slot[field_id];
@@ -511,7 +511,7 @@ int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, RowBatch
 
     int filter_num = 0;
     for (size_t i = 0; i < batch->size(); ++i) {
-        if (filter && filter->test(i)) {
+        if (filter != nullptr && filter->test(i)) {
             filter_num++;
             continue;
         }

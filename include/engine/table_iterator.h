@@ -120,7 +120,7 @@ public:
     bool is_cstore() {
         return _is_cstore;
     }
-    void ResetPrimaryKeys() {
+    void reset_primary_keys() {
         _primary_keys.clear();
         _primary_keys.reserve(ROW_BATCH_CAPACITY);
     }
@@ -192,7 +192,7 @@ public:
     void set_mode(KVMode mode) {
         _mode = mode;
     }
-    int get_column(int32_t tuple_id, const FieldInfo& field, RowBatch* batch, FiltBitSet* filter = nullptr);
+    int get_column(int32_t tuple_id, const FieldInfo& field, const FiltBitSet* filter, RowBatch* batch);
 private:
     int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
     KVMode  _mode;
