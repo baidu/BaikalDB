@@ -198,6 +198,7 @@ int LikePredicate::open() {
     std::string like_pattern = children(1)->get_value(nullptr).get_string();
     re2::RE2::Options option;
     option.set_utf8(false);
+    option.set_dot_nl(true);
     if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
         covent_exact_pattern(like_pattern);
         option.set_case_sensitive(false);

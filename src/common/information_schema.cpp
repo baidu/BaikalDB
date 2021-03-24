@@ -273,6 +273,14 @@ void InformationSchema::init_columns() {
                 std::vector<std::string> items;
                 boost::split(items, table_info->name, boost::is_any_of("."));
                 std::string db = items[0];
+
+                std::multimap<int32_t, IndexInfo> field_index;
+                for (auto& index_id : table_info->indices) {
+                    IndexInfo index_info = factory->get_index_info(index_id);
+                    for (auto& field : index_info.fields) {
+                        field_index.insert(std::make_pair(field.id, index_info));
+                    }
+                }
                 for (auto& field : table_info->fields) {
                     if (field.deleted) {
                         continue;
@@ -286,7 +294,77 @@ void InformationSchema::init_columns() {
                     record->set_string(record->get_field_by_name("COLUMN_DEFAULT"), field.default_value);
                     record->set_string(record->get_field_by_name("IS_NULLABLE"), field.can_null ? "YES" : "NO");
                     record->set_string(record->get_field_by_name("DATA_TYPE"), to_mysql_type_string(field.type));
+                    switch (field.type) {
+                        case pb::STRING:
+                            record->set_int64(record->get_field_by_name("CHARACTER_MAXIMUM_LENGTH"), 1048576);
+                            record->set_int64(record->get_field_by_name("CHARACTER_OCTET_LENGTH"), 3145728);
+                            break;
+                        case pb::INT8:
+                        case pb::UINT8:
+                            record->set_int64(record->get_field_by_name("NUMERIC_SCALE"), 3);
+                            record->set_int64(record->get_field_by_name("NUMERIC_PRECISION"), 0);
+                            break;
+                        case pb::INT16:
+                        case pb::UINT16:
+                            record->set_int64(record->get_field_by_name("NUMERIC_SCALE"), 5);
+                            record->set_int64(record->get_field_by_name("NUMERIC_PRECISION"), 0);
+                            break;
+                        case pb::INT32:
+                        case pb::UINT32:
+                            record->set_int64(record->get_field_by_name("NUMERIC_SCALE"), 10);
+                            record->set_int64(record->get_field_by_name("NUMERIC_PRECISION"), 0);
+                            break;
+                        case pb::INT64:
+                            record->set_int64(record->get_field_by_name("NUMERIC_SCALE"), 19);
+                            record->set_int64(record->get_field_by_name("NUMERIC_PRECISION"), 0);
+                            break;
+                        case pb::UINT64:
+                            record->set_int64(record->get_field_by_name("NUMERIC_SCALE"), 20);
+                            record->set_int64(record->get_field_by_name("NUMERIC_PRECISION"), 0);
+                            break;
+                        case pb::FLOAT:
+                            record->set_int64(record->get_field_by_name("NUMERIC_SCALE"), 38);
+                            record->set_int64(record->get_field_by_name("NUMERIC_PRECISION"), 6);
+                            break;
+                        case pb::DOUBLE:
+                            record->set_int64(record->get_field_by_name("NUMERIC_SCALE"), 308);
+                            record->set_int64(record->get_field_by_name("NUMERIC_PRECISION"), 15);
+                            break;
+                        case pb::DATETIME:
+                        case pb::TIMESTAMP:
+                        case pb::DATE:
+                            record->set_int64(record->get_field_by_name("DATETIME_PRECISION"), 0);
+                            break;
+                        default:
+                            break;
+                    }
+                    record->set_string(record->get_field_by_name("CHARACTER_SET_NAME"), "utf8");
+                    record->set_string(record->get_field_by_name("COLLATION_NAME"), "utf8_general_ci");
                     record->set_string(record->get_field_by_name("COLUMN_TYPE"), to_mysql_type_full_string(field.type));
+                    std::vector<std::string> extra_vec;
+                    if (field_index.count(field.id) == 0) {
+                        record->set_string(record->get_field_by_name("COLUMN_KEY"), " ");
+                    } else {
+                        std::vector<std::string> index_types;
+                        index_types.reserve(4);
+                        auto range = field_index.equal_range(field.id);
+                        for (auto index_iter = range.first; index_iter != range.second; ++index_iter) {
+                            auto& index_info = index_iter->second;
+                            std::string index = pb::IndexType_Name(index_info.type);
+                            if (index_info.type == pb::I_FULLTEXT) {
+                                index += "(" + pb::SegmentType_Name(index_info.segment_type) + ")";
+                            }
+                            index_types.push_back(index);
+                            extra_vec.push_back(pb::IndexState_Name(index_info.state));
+                        }
+                        record->set_string(record->get_field_by_name("COLUMN_KEY"), boost::algorithm::join(index_types, "|"));
+                    }
+                    if (table_info->auto_inc_field_id == field.id) {
+                        extra_vec.push_back("auto_increment");
+                    } else {
+                        //extra_vec.push_back(" ");
+                    }
+                    record->set_string(record->get_field_by_name("EXTRA"), boost::algorithm::join(extra_vec, "|"));
                     record->set_string(record->get_field_by_name("PRIVILEGES"), "select,insert,update,references");
                     record->set_string(record->get_field_by_name("COLUMN_COMMENT"), field.comment);
                     records.emplace_back(record);
