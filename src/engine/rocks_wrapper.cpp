@@ -22,6 +22,7 @@
 #include "my_listener.h"
 #include "raft_log_compaction_filter.h"
 #include "split_compaction_filter.h"
+#include "transaction_db_bthread_mutex.h"
 namespace baikaldb {
 
 DEFINE_int32(rocks_transaction_lock_timeout_ms, 20000, "rocksdb transaction_lock_timeout, real lock_time is 'time + rand_less(time)' (ms)");
@@ -111,6 +112,8 @@ int32_t RocksWrapper::init(const std::string& path) {
     DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
     txn_db_options.default_lock_timeout = FLAGS_rocks_default_lock_timeout_ms;
+    txn_db_options.custom_mutex_factory = std::shared_ptr<rocksdb::TransactionDBMutexFactory>(
+                              new TransactionDBBthreadFactory());
 
     //todo 
     _log_cf_option.prefix_extractor.reset(

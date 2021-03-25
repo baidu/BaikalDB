@@ -1234,18 +1234,6 @@ void Region::dml_2pc(const pb::StoreReq& request,
         int32_t seq_id, bool need_txn_limit) {
 
     TimeCost cost;
-    if (applied_index == 0 && (op_type == pb::OP_INSERT ||
-        op_type == pb::OP_UPDATE ||
-        op_type == pb::OP_DELETE)) {
-        Concurrency::get_instance()->service_lock_concurrency.increase_wait();
-    }
-    ON_SCOPE_EXIT(([op_type, applied_index]() {
-        if (applied_index == 0 && (op_type == pb::OP_INSERT ||
-            op_type == pb::OP_UPDATE ||
-            op_type == pb::OP_DELETE)) {
-            Concurrency::get_instance()->service_lock_concurrency.decrease_broadcast();
-        }
-    }));
     int64_t wait_cost = cost.get_time();
     //DB_WARNING("num_prepared:%d region_id: %ld", num_prepared(), _region_id);
     std::set<int> need_rollback_seq;
