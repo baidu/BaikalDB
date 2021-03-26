@@ -19,6 +19,7 @@
 #include "binlog_context.h"
 
 namespace baikaldb {
+DECLARE_string(db_version);
 static UserInfo dummy;
 bvar::Adder<int64_t> NetworkSocket::bvar_prepare_count{"bvar_prepare_count"};
 
@@ -74,6 +75,8 @@ NetworkSocket::NetworkSocket() {
     session_vars["system_time_zone"] = str_node;
     str_node.mutable_derive_node()->set_string_val("SYSTEM");
     session_vars["time_zone"] = str_node;
+    str_node.mutable_derive_node()->set_string_val(FLAGS_db_version);
+    session_vars["version"] = str_node;
 
     pb::ExprNode int_node;
     int_node.set_node_type(pb::INT_LITERAL);

@@ -78,6 +78,13 @@ public:
         }
         return _namespace_id_map[namespace_name];
     }
+    const std::string& get_resource_tag(const int64_t& namespace_id) {
+        BAIDU_SCOPED_LOCK(_namespace_mutex);
+        if (_namespace_info_map.find(namespace_id) == _namespace_info_map.end()) {
+            return "";
+        }
+        return _namespace_info_map[namespace_id].resource_tag();
+    }
 
     void clear() {
         _namespace_id_map.clear();

@@ -5685,7 +5685,7 @@ void Region::ttl_remove_expired_data() {
     std::atomic<int64_t> write_sst_lines(0);
 
     IndexInfo pk_info = _factory->get_index_info(main_table_id);
-
+    bool is_cstore = _factory->get_table_engine(main_table_id) == pb::ROCKSDB_CSTORE;
     for (int64_t index_id : indices) {
         MutTableKey table_prefix;
         table_prefix.append_i64(_region_id).append_i64(index_id);
@@ -5739,6 +5739,11 @@ void Region::ttl_remove_expired_data() {
                 DB_FATAL("index %ld, region_id: %ld Delete failed, status: %s", 
                         index_id, _region_id, s.ToString().c_str());
                 continue;
+            }
+            // for cstore only, remove_columns
+            if (is_cstore && index_info.type == pb::I_PRIMARY && !_is_global_index) {
+                txn->set_region_info(&_region_info);
+                txn->remove_columns(iter->key());
             }
             // 维护num_table_lines
             // 不好维护，走raft的话，切主后再做ttl删除可能多删

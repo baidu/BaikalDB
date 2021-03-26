@@ -386,7 +386,6 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "partition table field info error.");
             return;
         }
-
     }
     table_mem.schema_pb = table_info;
     //发起交互， 层次表与非层次表区分对待，非层次表需要与store交互，创建第一个region

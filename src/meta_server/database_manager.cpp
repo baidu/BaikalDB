@@ -42,6 +42,12 @@ void DatabaseManager::create_database(const pb::MetaManagerRequest& request, bra
     int64_t tmp_database_id = _max_database_id + 1;
     database_info.set_database_id(tmp_database_id);
     database_info.set_namespace_id(namespace_id);
+    if (!database_info.has_resource_tag()) {
+        std::string resource_tag =  NamespaceManager::get_instance()->get_resource_tag(namespace_id);
+        if (resource_tag != "") {
+            database_info.set_resource_tag(resource_tag);
+        }
+    }
     database_info.set_version(1);
     
     std::string database_value;
@@ -130,7 +136,9 @@ void DatabaseManager::modify_database(const pb::MetaManagerRequest& request, bra
     pb::DataBaseInfo tmp_database_info = _database_info_map[database_id];
     tmp_database_info.set_version(tmp_database_info.version() + 1);
     tmp_database_info.set_quota(database_info.quota());
-    
+    if (database_info.has_resource_tag()) {
+        tmp_database_info.set_resource_tag(database_info.resource_tag());
+    }
     
     std::string database_value;
     if (!tmp_database_info.SerializeToString(&database_value)) {

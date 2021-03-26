@@ -252,6 +252,13 @@ void NetworkServer::print_agg_sql() {
         for (auto& pair : sample.internal_map) {
             if (!pair.first.empty()) {
                 for (auto& pair2 : pair.second) {
+                    std::string hostname = FLAGS_hostname;
+                    if (hostname == "HOSTNAME") {
+                        hostname = butil::my_hostname();
+                        if (hostname == "") {
+                            DB_WARNING("get hostname failed");
+                        }
+                    }
                     uint64_t out[2];
                     int64_t version;
                     std::string op_description;
@@ -266,7 +273,7 @@ void NetworkServer::print_agg_sql() {
                         pair2.second.sum, pair2.second.count,
                         pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
                         pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
-                        out[0], FLAGS_hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),  
+                        out[0], hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),
                         version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str());
                 }
             }

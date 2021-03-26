@@ -133,6 +133,9 @@ ExprValue rb_minimum(const std::vector<ExprValue>& input);
 ExprValue rb_maximum(const std::vector<ExprValue>& input);
 ExprValue rb_rank(const std::vector<ExprValue>& input);
 ExprValue rb_jaccard_index(const std::vector<ExprValue>& input);
+
+// other
+ExprValue version(const std::vector<ExprValue>& input);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

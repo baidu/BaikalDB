@@ -218,6 +218,8 @@ void FunctionManager::register_operators() {
     register_object_ret("rb_maximum", rb_maximum, pb::UINT32);
     register_object_ret("rb_rank", rb_rank, pb::UINT32);
     register_object_ret("rb_jaccard_index", rb_jaccard_index, pb::DOUBLE);
+
+    register_object_ret("version", version, pb::STRING);
 }
 
 int FunctionManager::init() {

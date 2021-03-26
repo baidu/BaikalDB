@@ -42,6 +42,7 @@ int AggFnCall::init(const pb::ExprNode& node) {
         {"rb_xor_agg", RB_XOR_AGG},
         //{"rb_xor_cardinality_agg", RB_XOR_CARDINALITY_AGG},
         {"rb_build_agg", RB_BUILD_AGG},
+        {"group_concat", GROUP_CONCAT},
     };
     //所有agg都是非const的
     _is_constant = false;
@@ -123,6 +124,13 @@ int AggFnCall::type_inferer() {
             _col_type = pb::UINT64;
             return 0;
         }
+        case GROUP_CONCAT:
+            if (_children.size() == 0) {
+                DB_FATAL("children.size is 0");
+                return -1;
+            }
+            _col_type = pb::STRING;
+            return 0;
         default:
             DB_WARNING("un-support agg type:%d", _agg_type);
             return -1;
@@ -183,6 +191,7 @@ int AggFnCall::open() {
         case RB_XOR_AGG:
         case RB_XOR_CARDINALITY_AGG:
         case RB_BUILD_AGG:
+        case GROUP_CONCAT:
             if (_children.size() == 0) {
                 DB_WARNING("_agg_type:%d , _children.size() == 0", _agg_type);
                 return -1;
@@ -301,6 +310,12 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                     // and第一次需要特殊处理
                     intermediate_val.is_assign = true;
                 }
+            }
+            return 0;
+        }
+        case GROUP_CONCAT: {
+            if (dst_val.is_null()) {
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(pb::STRING));
             }
             return 0;
         }
@@ -429,6 +444,18 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             }
             return 0;
         }
+        case GROUP_CONCAT: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null()) {
+                ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
+                if (result.str_val.length() > 0) {
+                    result.str_val += ",";
+                }
+                result.str_val += value.get_string();
+                dst->set_value(_tuple_id, _intermediate_slot_id, result);
+            }
+            return 0;
+        }
         default:
             return -1;
     }
@@ -536,6 +563,18 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
                 src_value.cast_to(pb::BITMAP);
                 auto& intermediate_val = _intermediate_val_map[key].val;
                 *intermediate_val._u.bitmap ^= *src_value._u.bitmap;
+            }
+            return 0;
+        }
+        case GROUP_CONCAT: {
+            ExprValue value = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!value.is_null()) {
+                ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
+                if (result.str_val.length() > 0) {
+                    result.str_val += ",";
+                }
+                result.str_val += value.get_string();
+                dst->set_value(_tuple_id, _intermediate_slot_id, result);
             }
             return 0;
         }

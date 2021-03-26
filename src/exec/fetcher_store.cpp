@@ -33,6 +33,7 @@ DEFINE_int32(fetcher_request_timeout, 100000,
                     "store as server request timeout, default:10000ms");
 DEFINE_int32(fetcher_connect_timeout, 1000,
                     "store as server connect timeout, default:1000ms");
+DEFINE_bool(fetcher_follower_read, true, "where allow follower read for fether");
                     
 ErrorType FetcherStore::send_request(
         RuntimeState* state,
@@ -208,7 +209,7 @@ ErrorType FetcherStore::send_request(
     int ret = 0;
     std::string addr = info.leader();
     // 事务读也读leader
-    if (op_type == pb::OP_SELECT && state->txn_id == 0) {
+    if (op_type == pb::OP_SELECT && state->txn_id == 0 && FLAGS_fetcher_follower_read) {
         // 多机房优化
         if (retry_times == 0) {
             choose_opt_instance(info, addr);

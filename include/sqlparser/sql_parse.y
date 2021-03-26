@@ -2278,6 +2278,13 @@ SumExpr:
         fun->children.push_back($4, parser->arena);
         $$ = fun;
     }
+    | GROUP_CONCAT '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->func_type = FT_AGG;
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
     | USER_AGG '(' Expr ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->func_type = FT_AGG;

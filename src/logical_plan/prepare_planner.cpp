@@ -188,6 +188,8 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
         return -1;
     }
     if (planner->plan() != 0) {
+        _ctx->stat_info.error_code = prepare_ctx->stat_info.error_code;
+        _ctx->stat_info.error_msg.str(prepare_ctx->stat_info.error_msg.str());
         DB_WARNING("gen plan failed, type:%d", prepare_ctx->stmt_type);
         return -1;
     }
