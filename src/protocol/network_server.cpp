@@ -252,10 +252,12 @@ void NetworkServer::print_agg_sql() {
         for (auto& pair : sample.internal_map) {
             if (!pair.first.empty()) {
                 for (auto& pair2 : pair.second) {
-                    std::string hostname = butil::my_hostname();
-                    if (hostname == "") {
-                        hostname = FLAGS_hostname;
-                        DB_WARNING("get hostname failed");
+                    std::string hostname = FLAGS_hostname;
+                    if (hostname == "HOSTNAME") {
+                        hostname = butil::my_hostname();
+                        if (hostname == "") {
+                            DB_WARNING("get hostname failed");
+                        }
                     }
                     uint64_t out[2];
                     int64_t version;
