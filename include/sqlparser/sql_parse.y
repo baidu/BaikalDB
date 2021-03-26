@@ -232,6 +232,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LONG
     VARCHAR
     VARBINARY
+    _BINARY
     VIRTUAL
     WHEN
     WHERE
@@ -2608,6 +2609,10 @@ SimpleExpr:
         $$ = FuncExpr::new_unary_op_node(FT_UMINUS, $2, parser->arena);
     }
     | '+' SimpleExpr %prec NEG { 
+        $$ = $2;
+    }
+    | _BINARY SimpleExpr %prec NEG {
+        // See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#operator_binary 
         $$ = $2;
     }
     | NOT SimpleExpr {

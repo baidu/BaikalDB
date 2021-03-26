@@ -90,6 +90,7 @@ cc_library(
         "//external:croaring",
         "//external:tcmalloc_and_profiler",
         ":cc_baikaldb_internal_proto",
+        ":sqlparser",
     ],
     visibility = ["//visibility:public"],
 )

@@ -205,6 +205,7 @@ VALUES { return VALUES; }
 LONG { return LONG; }
 VARCHAR { return VARCHAR; }
 VARBINARY { return VARBINARY; }
+_BINARY { return _BINARY; }
 VIRTUAL { return VIRTUAL; }
 WHEN { return WHEN; }
 WHERE { return WHERE; }
