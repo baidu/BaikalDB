@@ -21,6 +21,7 @@
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
 #include "common.h"
+#include "tdigest.h"
 #include "datetime.h"
 #include "type_utils.h"
 #include "roaring.hh"
@@ -48,6 +49,10 @@ struct ExprValue {
         _u.int64_val = 0;
         if (type_ == pb::BITMAP) {
             _u.bitmap = new(std::nothrow) Roaring();
+        } else if (type_ == pb::TDIGEST) {
+            str_val.resize(tdigest::td_required_buf_size(tdigest::COMPRESSION));
+            uint8_t* buff = (uint8_t*)str_val.data();
+            tdigest::td_init(tdigest::COMPRESSION, buff, str_val.size());
         }
     }
 
@@ -151,13 +156,14 @@ struct ExprValue {
             case pb::STRING:
             case pb::HLL:
             case pb::HEX:
+            case pb::TDIGEST:
                 str_val = value.string_val();
                 break;
             case pb::BITMAP: {
                 _u.bitmap = new(std::nothrow) Roaring();
                 if (value.string_val().size() > 0) {
                     try {
-                        *_u.bitmap = Roaring::readSafe(value.string_val().c_str(), value.string_val().size());
+                        *_u.bitmap = Roaring::readSafe(value.string_val().data(), value.string_val().size());
                     } catch (...) {
                         DB_WARNING("bitmap read from string failed");
                     }
@@ -275,6 +281,7 @@ struct ExprValue {
             case pb::STRING:
             case pb::HEX:
             case pb::BITMAP:
+            case pb::TDIGEST:
                 value->set_string_val(str_val);
                 break;
             default:
@@ -338,6 +345,47 @@ struct ExprValue {
             }
             case pb::DATE:
                 return _u.uint32_val; 
+            default:
+                return 0;
+        }
+    }
+
+    int64_t size() const {
+        switch (type) {
+            case pb::BOOL:
+            case pb::INT8:
+            case pb::UINT8:
+                return 1;
+            case pb::INT16:
+            case pb::UINT16:
+                return 2;
+            case pb::INT32:
+            case pb::UINT32:
+                return 4;
+            case pb::INT64:
+            case pb::UINT64:
+                return 8;
+            case pb::FLOAT:
+                return 4;
+            case pb::DOUBLE:
+                return 8;
+            case pb::STRING:
+            case pb::HEX:
+            case pb::HLL:
+            case pb::TDIGEST:
+                return str_val.length();
+            case pb::DATETIME:
+                return 8;
+            case pb::TIME:
+            case pb::DATE:
+            case pb::TIMESTAMP:
+                return 4;
+            case pb::BITMAP: {
+                if (_u.bitmap != nullptr) {
+                    return _u.bitmap->getSizeInBytes();
+                } 
+                return 0;
+            }
             default:
                 return 0;
         }
@@ -435,6 +483,15 @@ struct ExprValue {
                 }
                 break;
             }
+            case pb::TDIGEST: {
+                // 如果不是就构建一个新的
+                if (!tdigest::is_td_object(str_val)) {
+                    str_val.resize(tdigest::td_required_buf_size(tdigest::COMPRESSION));
+                    uint8_t* buff = (uint8_t*)str_val.data();
+                    tdigest::td_init(tdigest::COMPRESSION, buff, str_val.size());
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -511,6 +568,7 @@ struct ExprValue {
             case pb::STRING:
             case pb::HEX:
             case pb::HLL:
+            case pb::TDIGEST:
                 return str_val;
             case pb::DATETIME:
                 return datetime_to_str(_u.uint64_val);
@@ -526,7 +584,8 @@ struct ExprValue {
                     _u.bitmap->runOptimize();
                     uint32_t expectedsize = _u.bitmap->getSizeInBytes();
                     final_str.resize(expectedsize);
-                    _u.bitmap->write(&final_str[0]);
+                    char* buff = (char*)final_str.data();
+                    _u.bitmap->write(buff);
                 }
                 return final_str;
             }
@@ -666,7 +725,7 @@ struct ExprValue {
     }
 
     bool is_string() const {
-        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP;
+        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP || type == pb::HLL;
     }
 
     bool is_double() const {
@@ -699,6 +758,10 @@ struct ExprValue {
 
     bool is_hll() const {
         return type == pb::HLL;
+    }
+
+    bool is_tdigest() const {
+        return type == pb::TDIGEST;
     }
 
     bool is_bitmap() const {
@@ -740,6 +803,14 @@ struct ExprValue {
     }
     static ExprValue Bitmap() {
         ExprValue ret(pb::BITMAP);
+        return ret;
+    }
+    static ExprValue Tdigest() {
+        ExprValue ret(pb::TDIGEST);
+        return ret;
+    }
+    static ExprValue Uint64() {
+        ExprValue ret(pb::UINT64);
         return ret;
     }
     static ExprValue UTC_TIMESTAMP() {

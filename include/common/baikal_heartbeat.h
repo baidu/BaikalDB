@@ -21,9 +21,9 @@
 namespace baikaldb {
 class BaikalHeartBeat {
 public:
-    static void construct_heart_beat_request(pb::BaikalHeartBeatRequest& request);
+    static void construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup = false);
     static void process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response);
-    static void process_heart_beat_response(const pb::BaikalHeartBeatResponse& response);
+    static void process_heart_beat_response(const pb::BaikalHeartBeatResponse& response, bool is_backup = false);
 };
 
 class BinlogNetworkServer  {

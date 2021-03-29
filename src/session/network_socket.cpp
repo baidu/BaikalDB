@@ -103,6 +103,8 @@ NetworkSocket::NetworkSocket() {
     bthread_mutex_init(&region_lock, nullptr);
 }
 
+std::atomic<uint64_t> NetworkSocket::txn_id_counter(1);
+
 NetworkSocket::~NetworkSocket() {
     //DB_WARNING_CLIENT(this, "NetworkSocket close");
     if (fd > 0) {
@@ -117,6 +119,8 @@ NetworkSocket::~NetworkSocket() {
     for (auto& pair : cache_plans) {
         delete pair.second.root;
     }
+    int pre_size = prepared_plans.size();
+    bvar_prepare_count << -pre_size;
     bthread_mutex_destroy(&region_lock);
 }
 
@@ -127,7 +131,8 @@ bool NetworkSocket::transaction_has_write() {
     }
     for (auto& pair : cache_plans) {
         pb::OpType type = pair.second.op_type;
-        if (type == pb::OP_INSERT || type == pb::OP_DELETE || type == pb::OP_UPDATE) {
+        if (type == pb::OP_INSERT || type == pb::OP_DELETE || 
+            type == pb::OP_UPDATE || type == pb::OP_SELECT_FOR_UPDATE) {
             return true;
         }
     }
@@ -154,25 +159,44 @@ SmartBinlogContext NetworkSocket::get_binlog_ctx() {
     return binlog_ctx;
 }
 
-void NetworkSocket::on_begin(uint64_t txn_id) {
-    this->txn_id = txn_id;
+SmartQueryContex NetworkSocket::get_query_ctx() {
+    BAIDU_SCOPED_LOCK(region_lock);
+    return query_ctx;
+}
+
+void NetworkSocket::reset_query_ctx(QueryContext* ctx) {
+    BAIDU_SCOPED_LOCK(region_lock);
+    query_ctx.reset(ctx);
+}
+
+void NetworkSocket::on_begin() {
+    this->txn_id = get_txn_id();
+    seq_id = 0;
     this->primary_region_id = -1;
+    auto time = butil::gettimeofday_us();
+    DB_DEBUG("set txn start time %ld", time);
+    this->txn_start_time = time;
 }
 
 void NetworkSocket::on_commit_rollback() {
+    BAIDU_SCOPED_LOCK(region_lock);
     update_old_txn_info();
     txn_id = 0;
-    new_txn_id = 0;
     seq_id = 0;
+    txn_start_time = 0;
     open_binlog = false;
     need_rollback_seq.clear();
     //multi_state_txn = !autocommit;
-    for (auto& pair : cache_plans) {
-        delete pair.second.root;
+    if (not_in_load_data) {
+        for (auto& pair : cache_plans) {
+            delete pair.second.root;
+        }
+        cache_plans.clear();
     }
-    cache_plans.clear();
     region_infos.clear();
     binlog_ctx.reset();
+    addr_callids_map.clear();
+    clear_txn_tid_set();
 }
 
 void NetworkSocket::update_old_txn_info() {

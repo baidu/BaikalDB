@@ -58,13 +58,6 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
     }
     
     int64_t other_limit = limit;
-    if (ctx->has_recommend && (node->node_type() == pb::SELECT_MANAGER_NODE 
-        || node->node_type() == pb::FETCHER_NODE || node->node_type() == pb::FULL_EXPORT_NODE)) {
-        other_limit /= 80;
-        if (other_limit == 0) {
-            other_limit = 1;
-        }
-    }
     for (auto& child : node->children()) {
         _analyze_limit(ctx, child, other_limit); 
     }

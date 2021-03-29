@@ -228,6 +228,7 @@ public:
         _add_peer_queue.stop();
         _remove_region_queue.stop();
         _compact_queue.stop();
+        _transfer_leader_queue.stop();
         _shutdown = true;
         _heart_beat_bth.join();
         DB_WARNING("heart beat bth join");
@@ -237,6 +238,8 @@ public:
         DB_WARNING("_remove_region_queue join");
         _compact_queue.join();
         DB_WARNING("_compact_queue join");
+        _transfer_leader_queue.join();
+        DB_WARNING("_transfer_leader_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
         _merge_bth.join();
@@ -270,7 +273,10 @@ private:
              _disk_total("disk_total", 0),
              _disk_used("disk_used", 0),
              dml_time_cost("dml_time_cost"),
-             select_time_cost("select_time_cost") {}
+             select_time_cost("select_time_cost"),
+             heart_beat_count("heart_beat_count") {
+        bthread_mutex_init(&_param_mutex, NULL);
+    }
     
     int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
@@ -332,13 +338,15 @@ private:
     bvar::Status<int64_t> _disk_total;
     bvar::Status<int64_t> _disk_used;
 
-    std::vector<rocksdb::Transaction*> _recovered_txns;
     ExecutionQueue _add_peer_queue;
     ExecutionQueue _compact_queue;
     ExecutionQueue _remove_region_queue;
+    ExecutionQueue _transfer_leader_queue;
 
     bool _has_prepared_tran = true;
     BthreadCond _get_tso_cond {-1};
+    bthread_mutex_t _param_mutex;
+    std::map<std::string, std::string> _param_map;
 public:
     bool exist_prepared_log(int64_t region_id, uint64_t txn_id) {
         if (prepared_txns.find(region_id) != prepared_txns.end()
@@ -357,6 +365,7 @@ public:
     std::set<int64_t>   doing_snapshot_regions;
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
+    bvar::Adder<int64_t>  heart_beat_count;
 
     //for fake binlog tso
     TimeCost gen_tso_time;

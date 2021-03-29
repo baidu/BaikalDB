@@ -47,22 +47,27 @@ enum NodeMode {
      * 分裂packet
      */
     int analyze(QueryContext* ctx);
+    TransactionNode* create_txn_node(pb::TxnCmdType cmd_type);
 
 private:
     int separate_union(QueryContext* ctx);
+    int separate_load(QueryContext* ctx);
     int separate_insert(QueryContext* ctx);
     int separate_update(QueryContext* ctx);
     int separate_delete(QueryContext* ctx);
-    int separate_single_txn(PacketNode* packet_node);
+
+    template<typename T>
+    int separate_single_txn(T* node, pb::OpType op_type);
+
     int separate_truncate(QueryContext* ctx);
     int separate_kill(QueryContext* ctx);
     int separate_commit(QueryContext* ctx);
     int separate_rollback(QueryContext* ctx);
     int separate_begin(QueryContext* ctx);
     int separate_select(QueryContext* ctx);
-    int separate_simple_select(QueryContext* ctx);
-    int separate_join(QueryContext* ctx, const std::vector<ExecNode*>& scan_nodes,
-                        const std::vector<ExecNode*>& dual_scan_nodes);
+    int separate_simple_select(QueryContext* ctx, ExecNode* plan);
+    int separate_apply(QueryContext* ctx, const std::vector<ExecNode*>& apply_nodes);
+    int separate_join(QueryContext* ctx, const std::vector<ExecNode*>& join_nodes);
 
     int separate_global_insert(InsertManagerNode* manager_node, InsertNode* insert_node);
     int separate_global_delete(DeleteManagerNode* manager_node, DeleteNode* delete_node, ExecNode* scan_node);
@@ -77,10 +82,11 @@ private:
             const std::vector<int64_t>& local_affected_indexs, 
             ExecNode* manager_node);
 
-    TransactionNode* create_txn_node(pb::TxnCmdType cmd_type);
     SelectManagerNode* create_select_manager_node();
     bool need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id);
-    bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id);
+    bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id); 
+
+    SchemaFactory* _factory = SchemaFactory::get_instance();
 };
 }
 

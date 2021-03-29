@@ -31,6 +31,7 @@
 #include "store.h"
 #include "closure.h"
 #include "rapidjson/rapidjson.h"
+#include "qos.h"
 #ifdef BAIDU_INTERNAL
 #include <base/files/file.h>
 #else
@@ -49,6 +50,8 @@ DECLARE_int32(raft_election_heartbeat_factor);
 }
 
 namespace baikaldb {
+DEFINE_bool(use_fulltext_wordweight_segment, true, "load wordweight dict");
+DEFINE_bool(use_fulltext_wordseg_wordrank_segment, true, "load wordseg wordrank dict");
 DEFINE_int32(election_timeout_ms, 1000, "raft election timeout(ms)");
 DEFINE_int32(skew, 5, "split skew, default : 45% - 55%");
 DEFINE_int32(reverse_level2_len, 5000, "reverse index level2 length, default : 5000");
@@ -183,6 +186,21 @@ int Region::init(bool new_region, int32_t snapshot_times) {
                         segment_type = pb::S_UNIGRAMS;
 #endif
                     }
+#ifdef BAIDU_INTERNAL
+                    if (segment_type == pb::S_WORDRANK || segment_type == pb::S_WORDSEG_BASIC || 
+                        segment_type == pb::S_WORDRANK_Q2B_ICASE) {
+                        if (!FLAGS_use_fulltext_wordseg_wordrank_segment) {
+                            DB_FATAL("region %ld store not support word[seg/rank] segment, \
+                                open flag use_fulltext_workseg_wordrank_segment", _region_id);
+                            return -1;
+                        }
+                    } else if ((segment_type == pb::S_WORDWEIGHT || segment_type == pb::S_WORDWEIGHT_NO_FILTER) &&
+                         !FLAGS_use_fulltext_wordweight_segment) {
+                        DB_FATAL("region %ld store not support wordweight segment, \
+                            open flag use_fulltext_wordweight_segment", _region_id);
+                        return -1;
+                    }
+#endif
 
                     if (info.storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
                         DB_NOTICE("create pb schema.");
@@ -205,24 +223,7 @@ int Region::init(bool new_region, int32_t snapshot_times) {
                             false, // common need not cache
                             true);
                     }
-                    
                     break;
-                case pb::I_RECOMMEND: {
-                    DB_NOTICE("create xbs schema.");
-                    _reverse_index_map[index_id] = new ReverseIndex<XbsSchema>(
-                            _region_id, 
-                            index_id,
-                            FLAGS_reverse_level2_len,
-                            _rocksdb,
-                            segment_type,
-                            true,
-                            false); // xbs need not cache segment
-                    int32_t userid_field_id = get_field_id_by_name(table_info.fields, "userid");
-                    int32_t source_field_id = get_field_id_by_name(table_info.fields, "source");
-                    _reverse_index_map[index_id]->add_field("userid", userid_field_id);
-                    _reverse_index_map[index_id]->add_field("source", source_field_id);
-                    break;
-                }
                 default:
                     break;
             }
@@ -421,7 +422,8 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
         if (op_type != pb::OP_BEGIN 
                 && op_type != pb::OP_INSERT 
                 && op_type != pb::OP_DELETE 
-                && op_type != pb::OP_UPDATE) {
+                && op_type != pb::OP_UPDATE
+                && op_type != pb::OP_SELECT_FOR_UPDATE) {
                 //&& op_type != pb::OP_PREPARE) {
             response.set_errcode(pb::UNSUPPORT_REQ_TYPE);
             response.set_errmsg("unexpected cache plan op_type: " + std::to_string(op_type));
@@ -440,7 +442,11 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
         // normally, cache plan should be execute successfully, because it has been executed 
         // on other peers, except for single-stmt transactions
         pb::StoreRes res;
-        dml_2pc(request, op_type, plan, tuples, res, applied_index, term, seq_id, false);
+        if (op_type != pb::OP_SELECT_FOR_UPDATE) {
+            dml_2pc(request, op_type, plan, tuples, res, applied_index, term, seq_id, false);
+        } else {
+            select(request, res);
+        }
         if (res.has_errcode() && res.errcode() != pb::SUCCESS) {
             response.set_errcode(res.errcode());
             response.set_errmsg(res.errmsg());
@@ -452,6 +458,7 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
             }
             return -1;
         }
+        
         // if this is the BEGIN cmd, we need to refresh the txn handler
         if (op_type == pb::OP_BEGIN && (nullptr == (txn = _txn_pool.get_txn(txn_id)))) {
             char errmsg[100];
@@ -498,7 +505,7 @@ void Region::exec_txn_complete(google::protobuf::RpcController* controller,
             } else {
                 txn->rollback();
             }
-            _txn_pool.remove_txn(txn_id);
+            _txn_pool.remove_txn(txn_id, false);
         } else {
             DB_WARNING("TransactionNote: txn not exist region_id: %ld txn_id: %lu",
                     _region_id, txn_id);
@@ -514,7 +521,7 @@ void Region::exec_txn_complete(google::protobuf::RpcController* controller,
             } else {
                 txn->commit();
             }
-            _txn_pool.remove_txn(txn_id);
+            _txn_pool.remove_txn(txn_id, false);
         } else {
             DB_WARNING("TransactionNote: txn not exist region_id: %ld txn_id: %lu",
                     _region_id, txn_id);
@@ -667,16 +674,16 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
             txn->set_in_process(false);
             response->set_affected_rows(0);
             response->set_errcode(pb::SUCCESS);
-            DB_WARNING("TransactionNote: no write DML when commit/rollback, remote_side:%s "
-                    "region_id: %ld, txn_id: %lu, op_type: %s log_id:%lu optimize_1pc:%d",
-                    remote_side, _region_id, txn_id, pb::OpType_Name(op_type).c_str(), log_id, optimize_1pc);
+            // DB_WARNING("TransactionNote: no write DML when commit/rollback, remote_side:%s "
+            //         "region_id: %ld, txn_id: %lu, op_type: %s log_id:%lu optimize_1pc:%d",
+            //         remote_side, _region_id, txn_id, pb::OpType_Name(op_type).c_str(), log_id, optimize_1pc);
             return;
         }
     }
-    //if (txn_info.start_seq_id() > last_seq + 1) {
-    if (last_seq == 0 && txn_info.start_seq_id() > last_seq + 1 && op_type != pb::OP_ROLLBACK) {
-        DB_WARNING("TransactionNote: TXN_FOLLOW_UP region_id: %ld, txn_id: %lu, txn_last_seq: %d, request_start_seq: %d remote_side: %s",
-            _region_id, txn_id, last_seq, txn_info.start_seq_id(), remote_side);
+    if (last_seq == 0 && txn_info.start_seq_id() > 1 && op_type != pb::OP_ROLLBACK) {
+        DB_WARNING("TransactionNote: TXN_FOLLOW_UP region_id: %ld, txn_id: %lu, txn_last_seq: %d, "
+            "request_start_seq: %d op_type:%s remote_side: %s",
+            _region_id, txn_id, last_seq, txn_info.start_seq_id(), pb::OpType_Name(op_type).c_str(), remote_side);
         if (txn != nullptr) {
             txn->set_in_process(false);
         }
@@ -695,9 +702,8 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
     ScopeGuard auto_rollback_current_request([this, &txn, txn_id, &apply_success]() {
         if (txn != nullptr && !apply_success) {
             txn->rollback_current_request();
-            DB_WARNING("region_id:%ld txn_id: %lu need rollback cur seq_id:%d", _region_id, txn->txn_id(), txn->seq_id());
+            //DB_WARNING("region_id:%ld txn_id: %lu need rollback cur seq_id:%d", _region_id, txn->txn_id(), txn->seq_id());
             txn->set_in_process(false);
-            remove_readonly_txn(txn.get());
         }
     });
     
@@ -714,9 +720,10 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
     // execute the current cmd
     // OP_BEGIN cmd is always cached
     switch (op_type) {
-        case pb::OP_SELECT: {
+        case pb::OP_SELECT:
+        case pb::OP_SELECT_FOR_UPDATE: {
             TimeCost cost;
-            select(*request, *response);
+            ret = select(*request, *response);
             int64_t select_cost = cost.get_time();
             Store::get_instance()->select_time_cost << select_cost;
             if (select_cost > FLAGS_print_time_us) {
@@ -726,8 +733,29 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
                         cost.get_time(), log_id, remote_side);
             }
             if (txn != nullptr) {
-                txn->set_seq_id(seq_id);
-                txn->set_in_process(false);
+                txn->select_update_txn_status(seq_id);
+            }
+            if (op_type == pb::OP_SELECT_FOR_UPDATE && ret != -1) {
+                butil::IOBuf data;
+                butil::IOBufAsZeroCopyOutputStream wrapper(&data);
+                if (!request->SerializeToZeroCopyStream(&wrapper)) {
+                    apply_success = false;
+                    cntl->SetFailed(brpc::EREQUEST, "Fail to serialize request");
+                    return;
+                }
+                DMLClosure* c = new DMLClosure;
+                c->cost.reset();
+                c->op_type = op_type;
+                c->cntl = cntl;
+                c->response = response;
+                c->done = done_guard.release();
+                c->region = this;
+                c->transaction = txn;
+                c->remote_side = remote_side;
+                braft::Task task;
+                task.data = &data;
+                task.done = c;
+                _node.apply(task);
             }
         }
         break;
@@ -809,6 +837,9 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
             c->done = done_guard.release();
             c->region = this;
             c->transaction = txn;
+            if (txn != nullptr) {
+                txn->set_applying(true);
+            }
             c->remote_side = remote_side;
             braft::Task task;
             task.data = &data;
@@ -841,12 +872,19 @@ void Region::exec_out_txn_query(google::protobuf::RpcController* controller,
     const char* remote_side = remote_side_tmp.c_str();
     pb::OpType op_type = request->op_type();
     switch (op_type) {
+        // OP_SELECT_FOR_UPDATE 只出现在事务中。
         case pb::OP_SELECT: {
             TimeCost cost;
             select(*request, *response);
             int64_t select_cost = cost.get_time();
             Store::get_instance()->select_time_cost << select_cost;
             if (select_cost > FLAGS_print_time_us) {
+                //担心ByteSizeLong对性能有影响，先对耗时长的，返回行多的请求做压缩
+                if (response->affected_rows() > 1024) {
+                    cntl->set_response_compress_type(brpc::COMPRESS_TYPE_SNAPPY);
+                } else if (response->ByteSizeLong() > 1024 * 1024) {
+                    cntl->set_response_compress_type(brpc::COMPRESS_TYPE_SNAPPY);
+                }
                 DB_NOTICE("select type: %s, seq_id: %d, region_id: %ld, time_cost:%ld,"
                           "log_id: %lu, remote_side: %s", 
                         pb::OpType_Name(request->op_type()).c_str(), 0, _region_id, 
@@ -939,10 +977,6 @@ void Region::exec_dml_out_txn_query(const pb::StoreReq* request,
     brpc::ClosureGuard done_guard(done);
     TimeCost cost;
     
-    Concurrency::get_instance()->service_write_concurrency.increase_wait();
-    ON_SCOPE_EXIT([]() {
-        Concurrency::get_instance()->service_write_concurrency.decrease_broadcast();
-    });
     int64_t wait_cost = cost.get_time();
     int ret = 0;
     uint64_t db_conn_id = request->db_conn_id();
@@ -1025,14 +1059,20 @@ void Region::exec_dml_out_txn_query(const pb::StoreReq* request,
     //等待所有raft执行完成
     state.txn_cond.wait();
     
-    if (state.is_fail) {
+    if (state.err_code == pb::SUCCESS) {
+        response->set_affected_rows(ret);
+        response->set_errcode(pb::SUCCESS);
+    } else if (state.err_code == pb::NOT_LEADER) {
+        response->set_errcode(pb::NOT_LEADER);
+        response->set_leader(butil::endpoint2str(get_leader()).c_str());
+        response->set_errmsg(state.raft_error_msg.c_str());
+        DB_WARNING("not leader, region_id: %ld, error_msg:%s", 
+                 _region_id, state.raft_error_msg.c_str());
+    } else {
         response->set_errcode(pb::EXEC_FAIL);
         response->set_errmsg(state.raft_error_msg.c_str());
         DB_FATAL("txn commit failed, region_id: %ld, error_msg:%s", 
                  _region_id, state.raft_error_msg.c_str());
-    } else {
-        response->set_affected_rows(ret);
-        response->set_errcode(pb::SUCCESS);
     }
     
     int64_t dml_cost = cost.get_time();
@@ -1072,18 +1112,19 @@ void Region::query(google::protobuf::RpcController* controller,
     }
     const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
     const char* remote_side = remote_side_tmp.c_str();
-    if ((!is_leader()) && 
-        //为了性能，支持非一致性读
-            (!request->select_without_leader() || _shutdown || !_init_success)) {
-        response->set_errcode(pb::NOT_LEADER);
+    if (!is_leader()) {
+        // 非leader才返回
         response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str());
-        response->set_errmsg("not leader");
-        DB_WARNING("not leader, leader:%s, region_id: %ld, log_id:%lu, remote_side:%s",
-                        butil::endpoint2str(_node.leader_id().addr).c_str(), 
-                        _region_id, log_id, remote_side);
-        return;
+        //为了性能，支持非一致性读
+        if (!request->select_without_leader() || _shutdown || !_init_success) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("not leader");
+            DB_WARNING("not leader, leader:%s, region_id: %ld, log_id:%lu, remote_side:%s",
+                    butil::endpoint2str(_node.leader_id().addr).c_str(), 
+                    _region_id, log_id, remote_side);
+            return;
+        }
     }
-    response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str()); // 每次都返回leader
     if (validate_version(request, response) == false) {
         //add_version的第二次或者打三次重试，需要把num_table_line返回回去
         if (request->op_type() == pb::OP_ADD_VERSION_FOR_SPLIT_REGION) {
@@ -1134,7 +1175,8 @@ void Region::query(google::protobuf::RpcController* controller,
         case pb::OP_PREPARE:
         case pb::OP_COMMIT:
         case pb::OP_ROLLBACK:
-        case pb::OP_TRUNCATE_TABLE: {
+        case pb::OP_TRUNCATE_TABLE:
+        case pb::OP_SELECT_FOR_UPDATE: {
             uint64_t txn_id = 0;
             if (request->txn_infos_size() > 0) {
                 txn_id = request->txn_infos(0).txn_id();
@@ -1267,8 +1309,8 @@ void Region::dml_2pc(const pb::StoreReq& request,
         for (auto it = need_rollback_seq.rbegin(); it != need_rollback_seq.rend(); ++it) {
             int seq = *it;
             txn->rollback_to_point(seq);
-            DB_WARNING("rollback seq_id: %d region_id: %ld, txn_id: %lu, seq_id: %d, req_seq: %d", 
-                seq, _region_id, txn_id, txn->seq_id(), seq_id);
+            // DB_WARNING("rollback seq_id: %d region_id: %ld, txn_id: %lu, seq_id: %d, req_seq: %d", 
+            //     seq, _region_id, txn_id, txn->seq_id(), seq_id);
         }
         // if current cmd need rollback, simply not execute
         if (need_rollback_seq.count(seq_id) != 0) {
@@ -1446,8 +1488,8 @@ void Region::dml_2pc(const pb::StoreReq& request,
         ret = _num_table_lines;
         _num_table_lines = 0;
         // truncate后主动执行compact
-        DB_WARNING("region_id: %ld, truncate do compact in queue", _region_id);
-        compact_data_in_queue();
+        // DB_WARNING("region_id: %ld, truncate do compact in queue", _region_id);
+        // compact_data_in_queue();
     } else if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
         txn->num_increase_rows += state.num_increase_rows();
     } else if (op_type == pb::OP_COMMIT) {
@@ -1482,9 +1524,9 @@ void Region::dml_2pc(const pb::StoreReq& request,
     Store::get_instance()->dml_time_cost << dml_cost;
     if (dml_cost > FLAGS_print_time_us ||
         //op_type == pb::OP_BEGIN ||
-        op_type == pb::OP_COMMIT ||
-        op_type == pb::OP_ROLLBACK ||
-        op_type == pb::OP_PREPARE) {
+        //op_type == pb::OP_COMMIT ||
+        //op_type == pb::OP_PREPARE ||
+        op_type == pb::OP_ROLLBACK) {
         DB_NOTICE("dml type: %s, time_cost:%ld, region_id: %ld, txn_id: %lu:%d:%lu, num_table_lines:%ld, "
                   "affected_rows:%d, applied_index:%ld, term:%ld, txn_num_rows:%ld,"
                   " average_cost: %ld, log_id:%lu, wait_cost:%ld", 
@@ -1579,7 +1621,7 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         // if txn in pool (new_txn == false), remove it from pool
         // else directly delete it
         if (!is_new_txn) {
-            _txn_pool.remove_txn(state.txn_id);
+            _txn_pool.remove_txn(state.txn_id, false);
         }
     });
     auto txn = state.txn();
@@ -1662,8 +1704,8 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         }
         tmp_num_table_lines = 0;
         // truncate后主动执行compact
-        DB_WARNING("region_id: %ld, truncate do compact in queue", _region_id);
-        compact_data_in_queue();
+        // DB_WARNING("region_id: %ld, truncate do compact in queue", _region_id);
+        // compact_data_in_queue();
     }
     int64_t txn_num_increase_rows = txn->num_increase_rows;
     tmp_num_table_lines += txn_num_increase_rows;
@@ -1780,11 +1822,19 @@ void Region::kv_apply_raft(RuntimeState* state, SmartTransaction txn) {
 
 
 
-void Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
-    select(request, request.plan(), request.tuples(), response);
+int Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
+    QosType type = QOS_SELECT;
+    uint64_t sign = 0;
+    if (request.has_sql_sign()) {
+        sign = request.sql_sign();
+    } 
+    StoreQos::get_instance()->create_bthread_local(type, sign);
+    int ret = select(request, request.plan(), request.tuples(), response);
+    StoreQos::get_instance()->destroy_bthread_local();
+    return ret;
 }
 
-void Region::select(const pb::StoreReq& request, 
+int Region::select(const pb::StoreReq& request, 
         const pb::Plan& plan,
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         pb::StoreRes& response) {
@@ -1834,7 +1884,7 @@ void Region::select(const pb::StoreReq& request,
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("RuntimeState init fail");
         DB_FATAL("RuntimeState init fail, region_id: %ld", _region_id);
-        return;
+        return -1;
     }
     _state_pool.set(db_conn_id, state_ptr);
     ON_SCOPE_EXIT(([this, db_conn_id]() {
@@ -1845,7 +1895,7 @@ void Region::select(const pb::StoreReq& request,
         DB_WARNING("double check region version too old, region_id: %ld,"
                    " request_version:%ld, region_version:%ld",
                     _region_id, request.region_version(), _region_info.version());
-        return;
+        return -1;
     }
     const pb::TransactionInfo& txn_info = request.txn_infos(0);
     bool is_new_txn = false;
@@ -1855,9 +1905,25 @@ void Region::select(const pb::StoreReq& request,
         response.set_leader(butil::endpoint2str(_node.leader_id().addr).c_str());
         response.set_errmsg("not leader, maybe transfer leader");
         DB_WARNING("no txn found: region_id: %ld, txn_id: %lu:%d", _region_id, txn_info.txn_id(), txn_info.seq_id());
-        return;
+        return -1;
     }
     if (txn != nullptr) {
+        auto op_type = request.op_type();
+        if (op_type == pb::OP_SELECT_FOR_UPDATE) {
+            auto seq_id = txn_info.seq_id();
+            txn->set_seq_id(seq_id);
+            txn->set_region_info(&_region_info);
+            pb::CachePlan plan_item;
+            plan_item.set_op_type(op_type);
+            plan_item.set_seq_id(seq_id);
+            plan_item.mutable_plan()->CopyFrom(plan);
+            for (auto& tuple : tuples) {
+                plan_item.add_tuples()->CopyFrom(tuple);
+            }
+            txn->push_cmd_to_cache(seq_id, plan_item);
+            //DB_WARNING("put txn cmd to cache: region_id: %ld, txn_id: %lu:%d", _region_id, txn_info.txn_id(), seq_id);
+        }
+        
         std::set<int> need_rollback_seq;
         for (int rollback_seq : txn_info.need_rollback_seq()) {
             need_rollback_seq.insert(rollback_seq);
@@ -1891,7 +1957,7 @@ void Region::select(const pb::StoreReq& request,
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("create plan fail");
         DB_FATAL("create plan fail, region_id: %ld", _region_id);
-        return;
+        return -1;
     }
     if (is_trace) {
         pb::TraceNode* root_trace = trace_node.add_child_nodes();
@@ -1911,7 +1977,7 @@ void Region::select(const pb::StoreReq& request,
             response.set_errmsg("plan open fail");
         }
         DB_FATAL("plan open fail, region_id: %ld", _region_id);
-        return;
+        return -1;
     }
     int rows = 0;
     for (auto& tuple : state.tuple_descs()) {
@@ -1919,7 +1985,7 @@ void Region::select(const pb::StoreReq& request,
             response.add_tuple_ids(tuple.tuple_id());
         }
     }
-
+    
     if (request.has_analyze_info()) {
         rows = select_sample(state, root, request.analyze_info(), response);
     } else {
@@ -1929,9 +1995,14 @@ void Region::select(const pb::StoreReq& request,
         root->close(&state);
         ExecNode::destroy_tree(root);
         response.set_errcode(pb::EXEC_FAIL);
-        response.set_errmsg("plan exec fail");
+        if (state.error_code != ER_ERROR_FIRST) {
+            response.set_mysql_errcode(state.error_code);
+            response.set_errmsg(state.error_msg.str());
+        } else {
+            response.set_errmsg("plan exec failed");
+        }
         DB_FATAL("plan exec fail, region_id: %ld", _region_id);
-        return;
+        return -1;
     }
 
     //DB_NOTICE("select rows:%d", rows);
@@ -1947,6 +2018,7 @@ void Region::select(const pb::StoreReq& request,
     response.set_scan_rows(state.num_scan_rows());
     response.set_filter_rows(state.num_filter_rows());
     desc += " rows:" + std::to_string(rows);    
+    return 0;
 }
 
 int Region::select_normal(RuntimeState& state, ExecNode* root, pb::StoreRes& response) {
@@ -2000,6 +2072,9 @@ int Region::select_sample(RuntimeState& state, ExecNode* root, const pb::Analyze
     }
     sample_batch.set_capacity(sample_cnt);
     pb::TupleDescriptor* tuple_desc = state.get_tuple_desc(0);
+    if (tuple_desc == nullptr) {
+        return -1;
+    }
     CMsketch cmsketch(analyze_info.depth(), analyze_info.width());
 
     while (!eos) {
@@ -2259,11 +2334,13 @@ void Region::on_apply(braft::Iterator& iter) {
             case pb::OP_INSERT:
             case pb::OP_DELETE:
             case pb::OP_UPDATE: 
-            case pb::OP_TRUNCATE_TABLE: {
+            case pb::OP_TRUNCATE_TABLE:
+            case pb::OP_SELECT_FOR_UPDATE: {
                 _data_index = _applied_index;
                 uint64_t txn_id = request.txn_infos_size() > 0 ? request.txn_infos(0).txn_id():0;
                 //事务流程中DML处理
-                if (txn_id != 0 && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
+                if (txn_id != 0 && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || 
+                    op_type == pb::OP_UPDATE || op_type == pb::OP_SELECT_FOR_UPDATE)) {
                     apply_txn_request(request, done, _applied_index, term);
                     break;
                 }
@@ -2291,6 +2368,11 @@ void Region::on_apply(braft::Iterator& iter) {
                     }
                 }
                 //DB_WARNING("dml_1pc %s", res.trace_nodes().DebugString().c_str());
+                break;
+            }
+            case pb::OP_CLEAR_APPLYING_TXN: {
+                clear_orphan_transactions(done, _applied_index, term);
+                _meta_writer->update_apply_index(_region_id, _applied_index, _data_index);
                 break;
             }
             //split的各类请求传进的来的done类型各不相同，不走下边的if(done)逻辑，直接处理完成，然后continue
@@ -2373,7 +2455,7 @@ void Region::apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done,
         is_out_txn = true;
     } else {
         //follower create txn
-        txn = SmartTransaction(new Transaction(0, &_txn_pool, false));
+        txn = SmartTransaction(new Transaction(0, &_txn_pool, _use_ttl));
         txn->set_region_info(&(_resource->region_info));
         txn->set_ddl_state(_resource->ddl_param_ptr);
         txn->begin();
@@ -2385,7 +2467,7 @@ void Region::apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done,
         if (!commit_succ) {
             txn->rollback();
             if (is_out_txn && done) {
-                ((Dml1pcClosure*)done)->state->is_fail = true;
+                ((Dml1pcClosure*)done)->state->err_code = pb::EXEC_FAIL;
                 ((Dml1pcClosure*)done)->state->raft_error_msg = "commit fail";
             }
         }
@@ -2395,7 +2477,7 @@ void Region::apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done,
         pb::OpType op_type = kv_op.op_type();
         switch (op_type) {          
             case pb::OP_PUT_KV: {
-                rc = txn->put_kv(kv_op.key(), kv_op.value());
+                rc = txn->put_kv(kv_op.key(), kv_op.value(), kv_op.ttl_timestamp_us());
                 //DB_WARNING("region_id:%ld put key:%s value:%s", 
                 //          _region_id, str_to_hex(kv_op.key()).c_str(), 
                 //          str_to_hex(kv_op.value()).c_str());
@@ -2454,7 +2536,7 @@ void Region::apply_kv_split(const pb::StoreReq& request, braft::Closure* done,
     int rc = 0;
     TimeCost cost;
 
-    SmartTransaction txn = SmartTransaction(new Transaction(0, &_txn_pool, false));
+    SmartTransaction txn = SmartTransaction(new Transaction(0, &_txn_pool, _use_ttl));
     txn->set_region_info(&(_resource->region_info));
     txn->set_ddl_state(_resource->ddl_param_ptr);
     txn->begin();
@@ -2519,7 +2601,7 @@ void Region::apply_kv_split(const pb::StoreReq& request, braft::Closure* done,
 
         switch (op_type) {          
             case pb::OP_PUT_KV: {
-                rc = txn->put_kv(key.data(), kv_op.value());
+                rc = txn->put_kv(key.data(), kv_op.value(), kv_op.ttl_timestamp_us());
                 if (!is_key_exist) {
                     scope_write_lines++;
                 }
@@ -2651,6 +2733,8 @@ void Region::apply_txn_request(const pb::StoreReq& request, braft::Closure* done
     }
     if (txn != nullptr) {
         txn->set_write_begin_index(false);
+        txn->set_applying(false);
+        txn->set_applied_seq_id(seq_id);
     }
     if (txn == nullptr) {
         // 由于raft日志apply慢导致事务反查primary region先执行，导致事务提交
@@ -2984,71 +3068,50 @@ void Region::add_version_for_split_region(const pb::StoreReq& request, braft::Cl
     
 }
 
-// leader切换时确保事务状态一致，回放last DML
-void Region::recovery_when_leader_start(std::map<uint64_t, SmartTransaction> replay_txns) {
-    std::set<uint64_t> txn_ids;
-    for (auto txn_pair : replay_txns) {
-        txn_ids.insert(txn_pair.first);
+void Region::clear_orphan_transactions(braft::Closure* done, int64_t applied_index, int64_t term) {
+    TimeCost time_cost;
+    _txn_pool.clear_orphan_transactions();
+    DB_WARNING("region_id: %ld leader clear orphan txn applied_index: %ld  term:%ld cost: %ld",
+        _region_id, applied_index, term, time_cost.get_time());
+    if (done) {
+        ((DMLClosure*)done)->response->set_errcode(pb::SUCCESS);
+        ((DMLClosure*)done)->response->set_errmsg("success");
     }
-    std::unordered_map<uint64_t, int64_t> prepared_log_indexs;
-    int64_t start_log_index = INT64_MAX;
-    _meta_writer->parse_txn_log_indexs(_region_id, prepared_log_indexs);
-    for (auto log_index_pair : prepared_log_indexs) {
-        uint64_t txn_id = log_index_pair.first;
-        if (txn_ids.count(txn_id)) {
-            int64_t log_index = log_index_pair.second;
-            if (log_index < start_log_index) {
-                start_log_index = log_index;
-            }
-        }
-    }
-    if (start_log_index > _applied_index) {
-        DB_FATAL("read start log index fail, _region_id: %ld, start_log_index:%ld log_index: %ld",
-                    _region_id, start_log_index, _applied_index);
-        return;
-    }
-    // txn_id ->log entry
-    std::map<uint64_t, std::string> reply_log_entrys;
-    int ret = LogEntryReader::get_instance()->read_txn_last_log_entry(_region_id, start_log_index,
-                _applied_index, txn_ids, reply_log_entrys);
-    if (ret < 0) {
-        DB_FATAL("read prepared and not commited log entry fail, _region_id: %ld, log_index: %ld",
-                    _region_id, start_log_index);
-        return;
-    }
-    BthreadCond replay_last_log_cond;
+}
+
+// leader切换时确保事务状态一致，提交OP_CLEAR_APPLYING_TXN指令清理不一致事务
+void Region::apply_clear_transactions_log() {
+    _multi_thread_cond.increase();
+    ON_SCOPE_EXIT([this]() {
+        _multi_thread_cond.decrease_signal();
+    });
+    BthreadCond clear_applying_txn_cond;
     pb::StoreRes response;
-    for (auto log_entry_pair : reply_log_entrys) {
-        pb::StoreReq store_req;
-        if (!store_req.ParseFromString(log_entry_pair.second)) {
-            DB_FATAL("parse prepared exec plan fail from log entry, region_id: %ld", _region_id);
-            continue;
-        }
-        if (store_req.op_type() == pb::OP_COMMIT || store_req.op_type() == pb::OP_ROLLBACK) {
-            DB_FATAL("not expect op_type region_id: %ld, txn_id:%lu op_type: %s", 
-                    _region_id, log_entry_pair.first, pb::OpType_Name(store_req.op_type()).c_str());
-            continue;
-        }
-        DB_WARNING("replay log entry region_id: %ld, txn_id:%lu op_type:%s",
-            _region_id, log_entry_pair.first, pb::OpType_Name(store_req.op_type()).c_str());
-        auto txn = replay_txns[log_entry_pair.first];
-        butil::IOBuf data;
-        data.append(log_entry_pair.second);
-        replay_last_log_cond.increase();
-        DMLClosure* c = new DMLClosure(&replay_last_log_cond);
-        c->cost.reset();
-        c->transaction = txn;
-        c->op_type = store_req.op_type();
-        c->response = &response;
-        c->is_replay = true;
-        c->remote_side = "127.0.0.1";
-        c->region = this;
-        braft::Task task;
-        task.data = &data;
-        task.done = c;
-        _node.apply(task);
+    pb::StoreReq clear_applying_txn_request;
+    clear_applying_txn_request.set_op_type(pb::OP_CLEAR_APPLYING_TXN);
+    clear_applying_txn_request.set_region_id(_region_id);
+    clear_applying_txn_request.set_region_version(_region_info.version());
+    butil::IOBuf data;
+    butil::IOBufAsZeroCopyOutputStream wrapper(&data);
+    if (!clear_applying_txn_request.SerializeToZeroCopyStream(&wrapper)) {
+        DB_FATAL("clear log serializeToString fail, region_id: %ld", _region_id);
+        _node.transfer_leadership_to(braft::PeerId());
+        return;
     }
-    replay_last_log_cond.wait();
+    DMLClosure* c = new DMLClosure(&clear_applying_txn_cond);
+    clear_applying_txn_cond.increase();
+    c->response = &response;
+    c->region = this;
+    c->cost.reset();
+    c->op_type = pb::OP_CLEAR_APPLYING_TXN;
+    c->is_clear_applying_txn = true;
+    c->remote_side = "127.0.0.1";
+    braft::Task task;
+    task.data = &data;
+    task.done = c;
+    _node.apply(task);
+    clear_applying_txn_cond.wait();
+    leader_start();
 }
 
 void Region::on_shutdown() {
@@ -3057,9 +3120,15 @@ void Region::on_shutdown() {
 
 void Region::on_leader_start() {
     _region_info.set_leader(butil::endpoint2str(_node.leader_id().addr).c_str());
-    _txn_pool.on_leader_start_recovery(this);
-    //_is_leader.store(true);
-    //DB_WARNING("leader start, region_id: %ld", _region_id);
+    if (!_is_binlog_region) {
+        auto clear_applying_txn_fun = [this] {
+                this->apply_clear_transactions_log();
+            };
+        Bthread bth;
+        bth.run(clear_applying_txn_fun);
+    } else {
+        leader_start();
+    }
 }
 
 void Region::on_leader_start(int64_t term) {
@@ -3084,6 +3153,7 @@ void Region::on_leader_stop(const butil::Status& status) {
 void Region::on_error(const ::braft::Error& e) {
     DB_FATAL("raft node meet error, region_id: %ld, error_type:%d, error_desc:%s",
                 _region_id, e.type(), e.status().error_cstr());
+    _region_status = pb::STATUS_ERROR;
 }
 
 void Region::on_configuration_committed(const::braft::Configuration& conf) {
@@ -3528,11 +3598,6 @@ void Region::reverse_merge() {
     // split后只做一次
     bool remove_range = _reverse_remove_range;
     _reverse_remove_range = false;
-    bool force_remove_range = _reverse_force_remove_range;
-    _reverse_force_remove_range = false;
-    if (force_remove_range) {
-        remove_range = true;
-    }
 
     // 功能先不上，再追查下reverse_merge性能
     //remove_range = false;
@@ -3547,7 +3612,7 @@ void Region::reverse_merge() {
     }
     TimeCost cost;
     for (auto& pair : reverse_merge_index_map) {
-        pair.second->reverse_merge_func(_resource->region_info, remove_range, force_remove_range);
+        pair.second->reverse_merge_func(_resource->region_info, remove_range);
     }
     //DB_WARNING("region_id: %ld reverse merge:%lu", _region_id, cost.get_time());
 }
@@ -3892,7 +3957,7 @@ void Region::start_process_split(const pb::RegionSplitResponse& split_response,
     region_info->set_parent(_region_id);
     region_info->set_timestamp(time(NULL));
     region_info->set_can_add_peer(false);
-    region_info->set_partition_num(1);
+    region_info->set_partition_num(get_partition_num());
     _new_region_info = *region_info; 
     //如果此参数设置为true，则认为此region是分裂出来的region
     //需要判断分裂多久之后有没有成功，没有成功则认为是失败，需要自己删除自己
@@ -4150,7 +4215,7 @@ void Region::write_local_rocksdb_for_split() {
                         skip_write_lines++;
                         continue;
                     }
-                } else if (index_info.type == pb::I_FULLTEXT || index_info.type == pb::I_RECOMMEND) {
+                } else if (index_info.type == pb::I_FULLTEXT) {
                     uint8_t level = key_slice.data_[0];
                     if (level == 1) {
                         ++level1_lines;
@@ -4902,7 +4967,8 @@ int Region::get_log_entry_for_split(const int64_t split_start_index,
                 && store_req.op_type() != pb::OP_ROLLBACK
                 && store_req.op_type() != pb::OP_COMMIT
                 && store_req.op_type() != pb::OP_NONE
-                && store_req.op_type() != pb::OP_KV_BATCH) {
+                && store_req.op_type() != pb::OP_KV_BATCH
+                && store_req.op_type() != pb::OP_SELECT_FOR_UPDATE) {
             DB_WARNING("unexpected store_req:%s, region_id: %ld", 
                      pb2json(store_req).c_str(), _region_id);
             return -1;
@@ -5307,7 +5373,7 @@ void Region::write_local_rocksdb_for_ddl() {
             break;
         }
         ret = txn->get_update_primary(_region_id, pk_info, record, field_ids, GET_LOCK, true);
-        if (ret == -3 || ret == -2) {
+        if (ret == -3 || ret == -2 || ret == -4) {
             DB_DEBUG("DDL_LOG snap key is deleted, skip. error[%d]", ret);
             txn->rollback();
             continue;
@@ -5321,24 +5387,32 @@ void Region::write_local_rocksdb_for_ddl() {
         switch (index_info_to_modify.type) {
             case pb::I_UNIQ:
                 {
-                    MutTableKey exist_pk_val;
+                    SmartRecord exist_record = record->clone();
                     ret = txn->get_update_secondary(_region_id, pk_info, 
-                        index_info_to_modify, record, GET_LOCK, exist_pk_val, false);
-
+                        index_info_to_modify, exist_record, GET_LOCK, false);
+                    
                     if (ret == 0) {
-                        TableKey exist_table_pk_val(exist_pk_val);
-                        if (pk_table_key.data().compare(exist_table_pk_val.data()) == 0) {
-                            DB_DEBUG("snap2 region_%ld insert record [%s]", _region_id, record->to_string().c_str());
-                            DB_DEBUG("DDL_LOG get_update_secondary exist, primary key equal.");
-                        } else {
-                            //唯一索引重复，主键重复，添加索引失败。
-                            //发送rollback请求给meta，meta销毁ddlwork，各store销毁ddlwork。
-                            DB_WARNING("DDL_LOG get_update_secondary exist, primary key not equal.");
-                            DB_WARNING("DDL_LOG region_%ld insert record [%s] rollback", _region_id, record->to_string().c_str());
-                            ddlwork_rollback(pb::DDL_UNIQUE_KEY_FAIL, is_success);
+                        MutTableKey exist_table_pk_val;
+                        int decode_ret = exist_record->encode_key(pk_info, exist_table_pk_val, -1, false, false);
+                        if (decode_ret != 0) {
+                            DB_WARNING("DDL_LOG record [%s] decode_key error[%d]", exist_record->to_string().c_str(), decode_ret);
+                            ddlwork_rollback(pb::INTERNAL_ERROR, is_success);
                             break;
+                        } else {
+                            if (pk_table_key.data().compare(exist_table_pk_val.data()) == 0) {
+                                DB_DEBUG("snap2 region_%ld insert record [%s]", _region_id, record->to_string().c_str());
+                                DB_DEBUG("DDL_LOG get_update_secondary exist, primary key equal.");
+                            } else {
+                                //唯一索引重复，主键重复，添加索引失败。
+                                //发送rollback请求给meta，meta销毁ddlwork，各store销毁ddlwork。
+                                DB_WARNING("DDL_LOG region_%ld exist record [%s] insert record [%s] error[DDL_UNIQUE_KEY_FAIL]", 
+                                    _region_id, exist_record->to_string().c_str(), record->to_string().c_str());
+                                ddlwork_rollback(pb::DDL_UNIQUE_KEY_FAIL, is_success);
+                                break;
+                            }
                         }
-                    } else if (ret == -2 || ret == -3) {
+                        
+                    } else if (ret == -2 || ret == -3 || ret == -4) {
                         DB_DEBUG("DDL_LOG get_update_secondary unique not exist.");
                     } else {
                         ddlwork_rollback(pb::INTERNAL_ERROR, is_success);
@@ -5429,6 +5503,9 @@ void Region::write_local_rocksdb_for_ddl() {
             DB_WARNING("DDL_LOG record [%s] commit error, rollback.", record->to_string().c_str());
             ddlwork_rollback(pb::INTERNAL_ERROR, is_success);
             txn->rollback();
+            break;
+        }
+        if (!is_success) {
             break;
         }
     }

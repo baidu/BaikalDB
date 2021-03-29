@@ -34,6 +34,8 @@ public:
         RB_XOR_AGG,
         RB_XOR_CARDINALITY_AGG,
         RB_BUILD_AGG,
+        TDIGEST_AGG,
+        TDIGEST_BUILD_AGG,
         GROUP_CONCAT,
         OTHER
     };
@@ -104,6 +106,24 @@ public:
             case RB_XOR_AGG:
             case RB_XOR_CARDINALITY_AGG:
             case RB_BUILD_AGG:
+                return true;
+            default:
+                return false;
+        }
+    }
+    bool is_tdigest_agg() const {
+        switch(_agg_type) {
+            case TDIGEST_AGG:
+            case TDIGEST_BUILD_AGG:
+                return true;
+            default:
+                return false;
+        }
+    }
+    bool is_hll_agg() const {
+        switch(_agg_type) {
+            case HLL_ADD_AGG:
+            case HLL_MERGE_AGG:
                 return true;
             default:
                 return false;

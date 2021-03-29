@@ -68,6 +68,7 @@ public:
     ~ClusterManager() {
         bthread_mutex_destroy(&_physical_mutex);
         bthread_mutex_destroy(&_instance_mutex);
+        bthread_mutex_destroy(&_instance_param_mutex);
     }
     static ClusterManager* get_instance() {
         static ClusterManager instance;
@@ -88,6 +89,8 @@ public:
     void drop_instance(const pb::MetaManagerRequest& request, braft::Closure* done); 
     void update_instance(const pb::MetaManagerRequest& request, braft::Closure* done);
 
+    void update_instance_param(const pb::MetaManagerRequest& request, braft::Closure* done);
+
     void move_physical(const pb::MetaManagerRequest& request, braft::Closure* done); 
     
     void set_instance_migrate(const pb::MetaManagerRequest* request,
@@ -102,6 +105,8 @@ public:
     void process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request,
             pb::BaikalHeartBeatResponse* response); 
     void process_instance_heartbeat_for_store(const pb::InstanceInfo& request);
+    void process_instance_param_heartbeat_for_store(const pb::StoreHeartBeatRequest* request, 
+                pb::StoreHeartBeatResponse* response);
     void process_peer_heartbeat_for_store(const pb::StoreHeartBeatRequest* request, 
                 pb::StoreHeartBeatResponse* response);
     void store_healthy_check_function();
@@ -283,11 +288,15 @@ public:
         _instance_regions_count_map[instance] = instance_regions_count;
     }
     
+    // return -1: add instance -2: update instance
     int update_instance_info(const pb::InstanceInfo& instance_info) {
         std::string instance = instance_info.address();
         BAIDU_SCOPED_LOCK(_instance_mutex);
         if (_instance_info.find(instance) == _instance_info.end()) {
             return -1;
+        }
+        if (_instance_info[instance].resource_tag != instance_info.resource_tag()) {
+            return -2;
         }
         _instance_info[instance].capacity = instance_info.capacity();
         _instance_info[instance].used_size = instance_info.used_size();
@@ -356,6 +365,7 @@ private:
     ClusterManager() {
         bthread_mutex_init(&_physical_mutex, NULL);
         bthread_mutex_init(&_instance_mutex, NULL);
+        bthread_mutex_init(&_instance_param_mutex, NULL);
         {
             BAIDU_SCOPED_LOCK(_physical_mutex);
             _physical_info[FLAGS_default_physical_room] = 
@@ -388,7 +398,15 @@ private:
                 + MetaServer::INSTANCE_CLUSTER_IDENTIFY
                 + instance;
     }
+    std::string construct_instance_param_key(const std::string& resource_tag_or_address) {
+        return MetaServer::CLUSTER_IDENTIFY
+                + MetaServer::INSTANCE_PARAM_CLUSTER_IDENTIFY
+                + resource_tag_or_address;
+    }
     int load_instance_snapshot(const std::string& instance_prefix,
+                                 const std::string& key, 
+                                 const std::string& value);
+    int load_instance_param_snapshot(const std::string& instance_param_prefix,
                                  const std::string& key, 
                                  const std::string& value);
     int load_physical_snapshot(const std::string& physical_prefix,
@@ -412,6 +430,10 @@ private:
     //实例信息
     std::unordered_map<std::string, Instance>                   _instance_info;
     std::string                                                 _last_rolling_instance;
+
+    bthread_mutex_t                                             _instance_param_mutex;
+
+    std::unordered_map<std::string, pb::InstanceParam>          _instance_param_map;
 
     //下边信息只在leader中保存，切换leader之后需要一段时间来收集数据，会出现暂时的数据不准情况
     typedef std::unordered_map<int64_t, std::vector<int64_t>>      TableRegionMap;

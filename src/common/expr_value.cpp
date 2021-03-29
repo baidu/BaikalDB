@@ -22,7 +22,8 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         return STMPS_NEED_RESIZE;
     }
     switch (type) {
-        case pb::NULL_TYPE: {
+        case pb::NULL_TYPE:
+        case pb::TDIGEST: {
             uint8_t null_byte = 0xfb;
             memcpy(buf, (const uint8_t*)&null_byte, 1);
             len = 1;

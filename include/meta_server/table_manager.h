@@ -22,8 +22,16 @@
 #include "meta_server.h"
 #include "table_key.h"
 #include "ddl_common.h"
+#include "ddl_manager.h"
+#ifdef BAIDU_INTERNAL
+#include <raft/repeated_timer_task.h>
+#else
+#include <braft/repeated_timer_task.h>
+#endif
 
 namespace baikaldb {
+DECLARE_int64(table_tombstone_gc_time_s);
+DECLARE_int64(min_ddl_index_state_change_interval_us);
 enum MergeStatus {
     MERGE_IDLE   = 0, //空闲
     MERGE_SRC    = 1,  //用于merge源
@@ -67,6 +75,7 @@ struct TableMem {
         }
         return false;
     }
+
     void clear_regions() {
         partition_regions.clear();
         startkey_regiondesc_map.clear();
@@ -120,6 +129,8 @@ struct DdlWorkMem {
     std::atomic<bool> is_doing {false};
     ThreadSafeMap<int64_t, int64_t> need_scan_regions;
     std::mutex mutex;
+    int64_t update_interval_us {FLAGS_min_ddl_index_state_change_interval_us};
+    int64_t last_update_timestamp_us {0};
     void set_rollback(bool rollback) {
         std::lock_guard<std::mutex> lock(mutex);
         work_info.set_rollback(rollback);
@@ -132,9 +143,30 @@ struct DdlWorkMem {
         std::lock_guard<std::mutex> lock(mutex);
         work_info.set_deleted(true);
     }
+    bool should_update() {
+        int64_t current_time = butil::gettimeofday_us();
+        std::lock_guard<std::mutex> lock(mutex);
+        if (current_time - last_update_timestamp_us > update_interval_us) {
+            last_update_timestamp_us = current_time;
+            return true;
+        }
+        return false;
+    }
 };
 
 using DdlWorkMemPtr = std::shared_ptr<DdlWorkMem>;
+
+class TableTimer : public braft::RepeatedTimerTask {
+public:
+    TableTimer() {}
+    virtual ~TableTimer() {}
+    int init(int timeout_ms) {
+        return RepeatedTimerTask::init(timeout_ms);
+    }
+    virtual void run();
+protected:
+    virtual void on_destroy() {}
+};
 
 class TableManager {
 public:
@@ -142,6 +174,8 @@ public:
         bthread_mutex_destroy(&_table_mutex);
         bthread_mutex_destroy(&_table_ddlinfo_mutex);
         bthread_mutex_destroy(&_all_table_ddlinfo_mutex);
+        _table_timer.stop();
+        _table_timer.destroy();
     }
     static TableManager* get_instance()  {
         static TableManager instance;
@@ -166,6 +200,10 @@ public:
 
     void add_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void add_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    int add_local_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done, 
+        const int64_t table_id, pb::IndexInfo& index_info);
+    int add_global_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done,  
+        const int64_t table_id, pb::IndexInfo& index_info);
     void drop_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void rename_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -176,6 +214,8 @@ public:
 
     void update_index_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void delete_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void delete_local_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void delete_global_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done);
 
     void process_schema_heartbeat_for_store(
                 std::unordered_map<int64_t, int64_t>& store_table_id_version,
@@ -226,7 +266,7 @@ public:
                           std::string new_start_key, std::string origin_start_key, 
                           std::map<int64_t, std::map<std::string, RegionDesc>>& startkey_regiondesc_map,
                           std::map<int64_t, SmartRegionInfo>& id_noneregion_map,
-                          std::vector<SmartRegionInfo>& regions);
+                          std::vector<SmartRegionInfo>& regions, int64_t partition_id);
     int get_split_regions(int64_t table_id, 
                           std::string new_end_key, std::string origin_end_key, 
                           std::map<std::string, SmartRegionInfo>& key_newregion_map,
@@ -247,6 +287,8 @@ public:
                                              pb::StoreHeartBeatResponse* response,
                                              uint64_t log_id);
 
+    void on_leader_start();
+    void on_leader_stop();
    
 public:
     void set_max_table_id(int64_t max_table_id) {
@@ -265,10 +307,14 @@ public:
         for (auto& index_info : schema_pb.indexs()) {
             if (is_global_index(index_info)) {
                 _table_info_map[index_info.index_id()].schema_pb = schema_pb;
+                _table_info_map[index_info.index_id()].is_global_index = true;
+                _table_info_map[index_info.index_id()].main_table_id = schema_pb.table_id();
+                _table_info_map[index_info.index_id()].global_index_id = index_info.index_id();
                 _table_info_map[index_info.index_id()].print(); 
             }
         }
     }
+    
     int64_t get_table_id(const std::string& table_name) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_id_map.find(table_name) != _table_id_map.end()) {
@@ -346,6 +392,7 @@ public:
         _table_id_map.erase(table_name);
         _table_info_map.erase(table_id);
     }
+
     int find_last_table_tombstone(const pb::SchemaInfo& table_info, TableMem* table_mem) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         const std::string& namespace_name = table_info.namespace_name();
@@ -361,6 +408,18 @@ public:
             }
         }
         return -1;
+    }
+
+    size_t get_region_size(int64_t table_id) {
+        size_t ret = 0;
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        auto it = _table_info_map.find(table_id);
+        if (it != _table_info_map.end()) {
+            for (auto& region_it : it->second.partition_regions) {
+                ret += region_it.second.size();
+            }
+        }
+        return ret;
     }
     void erase_table_tombstone(int64_t table_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
@@ -600,12 +659,15 @@ public:
     int load_ddl_snapshot(const std::string& value);
 
     bool check_table_has_ddlwork(int64_t table_id) {
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
-            return true;
+        {
+            BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
+            if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
+                return true;
+            }
         }
-        return false;
+        return DDLManager::get_instance()->check_table_has_ddlwork(table_id);
     }
+
     bool check_table_is_linked(int64_t table_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         auto table_iter = _table_info_map.find(table_id);
@@ -676,11 +738,42 @@ public:
     }
     bool check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index);
+
+    void update_index_status(const pb::DdlWorkInfo& ddl_work);
+
+    void remove_global_index_data(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+
+    void drop_index_request(const pb::DdlWorkInfo& ddl_work);
+
+    void get_delay_delete_index(std::vector<pb::SchemaInfo>& index_to_delete) {
+        auto current_time = butil::gettimeofday_us();
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        for (auto& table_info : _table_info_map) {
+            if (table_info.second.is_global_index) {
+                continue;
+            }
+            auto& schema_pb = table_info.second.schema_pb; 
+            for (auto& index : schema_pb.indexs()) {
+                if (index.hint_status() == pb::IHS_DISABLE  && 
+                    index.drop_timestamp() != 0             && 
+                    index.drop_timestamp() < current_time) {
+                    DB_NOTICE("disbale %s", schema_pb.ShortDebugString().c_str());
+                    pb::SchemaInfo delete_schema = schema_pb;
+                    delete_schema.clear_indexs();
+                    auto index_ptr = delete_schema.add_indexs();
+                    index_ptr->CopyFrom(index);
+                    index_to_delete.emplace_back(delete_schema);
+                    break;
+                }
+            } 
+        }
+    }
 private:
     TableManager(): _max_table_id(0) {
         bthread_mutex_init(&_table_mutex, NULL);
         bthread_mutex_init(&_table_ddlinfo_mutex, NULL);
         bthread_mutex_init(&_all_table_ddlinfo_mutex, NULL);
+        _table_timer.init(FLAGS_table_tombstone_gc_time_s * 1000);
     }
     int write_schema_for_not_level(TableMem& table_mem,
                                     braft::Closure* done,
@@ -789,12 +882,10 @@ private:
 
     int init_ddlwork(const pb::MetaManagerRequest& request, DdlWorkMem& ddl_work_mem);
     int init_ddlwork_drop_index(const pb::MetaManagerRequest& request, DdlWorkMem& ddl_work_mem);
-    int init_ddlwork_add_index(const pb::MetaManagerRequest& request, DdlWorkMem& ddl_work_mem, pb::IndexInfo& index_info);
-    void update_index_status(const pb::DdlWorkInfo& ddl_work);
+    int init_ddlwork_add_index(const pb::MetaManagerRequest& request, DdlWorkMem& ddl_work_mem);
 
     bool process_ddl_update_job_index(DdlWorkMem& meta_work_info, pb::IndexState expected_state,
         pb::IndexState state);
-    void drop_index_request(const pb::DdlWorkInfo& ddl_work);
     void rollback_ddlwork(DdlWorkMem& ddlwork_mem);
 
     bool is_global_index(const pb::IndexInfo& index_info) {
@@ -915,7 +1006,7 @@ private:
     void init_store_ddl_work(const pb::StoreHeartBeatRequest* request,
         pb::StoreHeartBeatResponse* response);
 
-    void update_ddl_work(const pb::StoreHeartBeatRequest& request, bool update_flag);
+    void update_ddl_work(const pb::StoreHeartBeatRequest& request);
 
     void ddlwork_process_leader_region(const pb::StoreHeartBeatRequest& store_req);
 
@@ -941,6 +1032,7 @@ private:
 
     IncrementalUpdate<std::vector<pb::SchemaInfo>> _incremental_schemainfo;
     IncrementalUpdate<std::vector<pb::Statistics>> _incremental_statistics_info;
+    TableTimer _table_timer;
 }; //class
 
 }//namespace

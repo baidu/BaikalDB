@@ -28,8 +28,11 @@
 #include <nlpc/ver_1_0_0/wordseg_input.h>
 #include <nlpc/ver_1_0_0/wordrank_output.h>
 #include <nlpc/ver_1_0_0/wordseg_output.h>
+#include <nlpc/ver_1_0_0/wordweight_input.h>
+#include <nlpc/ver_1_0_0/wordweight_output.h>
 #include <nlpc_client.h>
 #endif
+#include "my_rocksdb.h"
 
 namespace baikaldb {
 typedef std::shared_ptr<google::protobuf::Message> MessageSP;
@@ -40,6 +43,7 @@ extern std::atomic_long g_statistic_delete_key_num;
 #ifdef BAIDU_INTERNAL
 extern drpc::NLPCClient* wordrank_client;
 extern drpc::NLPCClient* wordseg_client;
+extern drpc::NLPCClient* wordweight_client;
 #endif
 class Tokenizer {
 public:
@@ -50,11 +54,12 @@ public:
     int init();
 
 #ifdef BAIDU_INTERNAL
-    template <typename OUT>
+    template <typename OUT, typename IN>
         int nlpc_seg(drpc::NLPCClient& client, 
                 const std::string& word, 
-                OUT& s_output);
+                OUT& s_output, IN& s_input);
     int wordrank(std::string word, std::map<std::string, float>& term_map);
+    int wordweight(std::string word, std::map<std::string, float>& term_map, bool is_filter = false);
     int wordrank_q2b_icase(std::string word, std::map<std::string, float>& term_map);
     int wordseg_basic(std::string word, std::map<std::string, float>& term_map);
 #endif
@@ -116,13 +121,13 @@ template<typename ReverseNode, typename ReverseList>
 class FirstLevelMSIterator : public MergeSortIterator<ReverseNode, ReverseList> {
 public:
     FirstLevelMSIterator(
-                       std::unique_ptr<rocksdb::Iterator>& iter,
+                       std::unique_ptr<myrocksdb::Iterator>& iter,
                        uint8_t prefix,
                        const KeyRange& key_range,
                        const std::string& merge_term,
                        bool del = false, 
                        RocksWrapper* rocksdb = NULL,
-                       rocksdb::Transaction* txn = NULL) : 
+                       myrocksdb::Transaction* txn = NULL) : 
                            _iter(iter),
                            _merge_term(merge_term),
                            _first(true),
@@ -142,7 +147,7 @@ public:
     }
 private:
     int internal_next(ReverseNode* node, bool& res);
-    std::unique_ptr<rocksdb::Iterator>& _iter;
+    std::unique_ptr<myrocksdb::Iterator>& _iter;
     const std::string& _merge_term;
     bool _first;
     ReverseNode _curr_node;
@@ -150,7 +155,7 @@ private:
     KeyRange _key_range;
     bool _del;
     RocksWrapper* _rocksdb;
-    rocksdb::Transaction* _txn;
+    myrocksdb::Transaction* _txn;
     std::deque<ReverseNode> _node_dq;
     bool _need_next = true;
 };
@@ -200,7 +205,7 @@ int level_merge(MergeSortIterator<ReverseNode, ReverseList>* new_iter,
                 bool is_del);
 
 //end:true   not end:false
-bool is_prefix_end(std::unique_ptr<rocksdb::Iterator>& iterator, uint8_t level);
+bool is_prefix_end(std::unique_ptr<myrocksdb::Iterator>& iterator, uint8_t level);
 //regionid_tableid_level_term_\0_pk  -> level
 inline uint8_t get_level_from_reverse_key(const rocksdb::Slice& key) {
     return (uint8_t)key[16];
@@ -258,7 +263,6 @@ public:
 };
 //test api
 void print_reverse_list_common(pb::CommonReverseList& list);
-void print_reverse_list_xbs(pb::XbsReverseList& list);
 
 template<typename, typename = void>
 struct ReverseTrait;
@@ -266,8 +270,7 @@ struct ReverseTrait;
 template<typename ListType>
 struct ReverseTrait<ListType,
     typename std::enable_if<
-        std::is_same<ListType, pb::CommonReverseList>::value ||
-        std::is_same<ListType, pb::XbsReverseList>::value
+        std::is_same<ListType, pb::CommonReverseList>::value
     >::type
 > {
     using PrimaryType = std::string;

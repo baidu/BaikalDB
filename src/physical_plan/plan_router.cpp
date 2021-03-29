@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "plan_router.h"
+#include "packet_node.h"
 #include "network_socket.h"
 #include "expr.h"
 #include "slot_ref.h"
@@ -27,6 +28,10 @@ int PlanRouter::analyze(QueryContext* ctx) {
     }
     ExecNode* plan = ctx->root;
     if (!plan->need_seperate()) {
+        return 0;
+    }
+    PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
+    if (packet_node != nullptr && packet_node->op_type() == pb::OP_LOAD) {
         return 0;
     }
     //DB_NOTICE("need_seperate:%d", plan->need_seperate());
@@ -138,12 +143,28 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     if (router_index != nullptr) {
         DB_WARNING("index:%ld router_index_id:%ld", router_index->index_id(), router_index_id);
     }*/
+    auto ret = 0;
 
-    auto ret = schema_factory->get_region_by_key(main_table_id, 
+    switch (scan_node->router_policy()) {
+    
+    case RouterPolicy::RP_RANGE: {
+        ret = schema_factory->get_region_by_key(main_table_id, 
             *index_ptr, router_index,
             scan_node->region_infos(),
             scan_node->mutable_region_primary(),
             scan_node->get_partition());
+        break;
+    }
+    case RouterPolicy::RP_REGION: {
+        ret = schema_factory->get_region_by_key(scan_node->old_region_infos(), 
+            scan_node->region_infos());
+        break;
+    }
+    default:
+        ret = -1;
+        break;
+    }
+    
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
@@ -274,6 +295,7 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
     if (ctx->is_explain) {
         return 0;
     }
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
     ExecNode* plan = ctx->root;
     if (!plan->need_seperate()) {
         return 0;
@@ -316,7 +338,7 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
                             expr->children(1)->is_literal()) {
                             auto lietral_value = static_cast<Literal*>(expr->children(1))->get_value(nullptr);
                             int64_t partition_index = 0;
-                            if (SchemaFactory::get_instance()->get_partition_index(table_id, lietral_value, partition_index) == 0) {
+                            if (schema_factory->get_partition_index(table_id, lietral_value, partition_index) == 0) {
                                 scan_node->get_partition().push_back(partition_index);
                                 DB_DEBUG("get partition num %ld", partition_index);
                                 get_partition = true;

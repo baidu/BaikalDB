@@ -210,6 +210,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TABLE
     STORED
     TERMINATED
+    OPTIONALLY
     THEN
     TINYBLOB
     TINYINT
@@ -420,6 +421,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     YEAR
     HLL
     BITMAP
+    TDIGEST
 
     /* The following tokens belong to builtin functions. */
     ADDDATE
@@ -485,6 +487,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     FieldAsName
     ShowDatabaseNameOpt
     ShowTableAliasOpt
+    LinesTerminated
+    Starting
 
 %type <expr> 
     RowExprList
@@ -517,6 +521,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ShowLikeOrWhereOpt
     FulltextSearchModifierOpt
     SubSelect
+    IsolationLevel
 
 %type <item> 
     ColumnNameListOpt 
@@ -530,6 +535,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SelectFieldList
     WhenClauseList
     WhenClause
+    Fields
+    Lines
 
 %type <item> 
     TableElementList 
@@ -566,6 +573,11 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     PartitionOpt
     PartitionRangeList
     PartitionRange
+    TransactionChar
+    FieldItemList
+    FieldItem
+    ColumnNameOrUserVarListOptWithBrackets
+    LoadDataSetSpecOpt
 
 %type <item> OnDuplicateKeyUpdate 
 %type <item> 
@@ -613,6 +625,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     NewPrepareStmt
     ExecPrepareStmt
     DeallocPrepareStmt
+    TransactionChars
+    LoadDataStmt
 
 %type <assign> Assignment
 %type <integer>
@@ -650,6 +664,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     OptFull
     UnionOpt
     CompareOp
+    IgnoreLines
+    DuplicateOpt
+    LocalOpt
 
 %type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
@@ -719,6 +736,7 @@ Statement:
     | DeallocPrepareStmt
     | ExplainStmt
     | KillStmt
+    | LoadDataStmt
     ;
 
 InsertStmt:
@@ -2780,20 +2798,17 @@ PredicateOp:
     | RowExpr InOrNot SubSelect {
         FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
         fun->is_not = $2;
-        fun->is_subquery = true;
         $$ = fun;
     }
     | SimpleExpr InOrNot SubSelect {
         FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
         fun->is_not = $2;
-        fun->is_subquery = true;
         $$ = fun;
     }
     /*
     | SimpleExpr LikeOrNot SubSelect LikeEscapeOpt %prec LIKE {
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_LIKE, $1, $3, $4, parser->arena);
         fun->is_not = $2;
-        fun->is_subquery = true;
         $$ = fun;
     }*/
     | SimpleExpr LikeOrNot SimpleExpr LikeEscapeOpt %prec LIKE {
@@ -3539,6 +3554,11 @@ StringType:
         field_type->type = MYSQL_TYPE_BITMAP;
         $$ = field_type;
     }
+    | TDIGEST {
+        FieldType* field_type = new_node(FieldType);
+        field_type->type = MYSQL_TYPE_TDIGEST;
+        $$ = field_type;
+    }
     ;
 
 NationalOpt:
@@ -4069,17 +4089,18 @@ SetStmt:
     {
         $$ = $2;
     }
-//    | SET GLOBAL TRANSACTION TransactionChars
-//    {
-//        $$ = $4;
-//    }
-//    | SET SESSION TRANSACTION TransactionChars 
-//        $$ = $4;
-//    {
-//    }
-//    | SET TRANSACTION TransactionChars {
-//        $$ = $3;
-//    }
+    | SET GLOBAL TRANSACTION TransactionChars
+    {
+        $$ = $4;
+    }
+    | SET SESSION TRANSACTION TransactionChars 
+    {
+        $$ = $4;
+    }
+    | SET TRANSACTION TransactionChars 
+    {
+        $$ = $3;
+    }
     ;
 
 VarAssignList:
@@ -4186,39 +4207,29 @@ VarName:
     }
     ;
 
-//TransactionChars:
-//    TransactionChar
-//    {
-//        SetStmt* set = new_node(SetStmt);
-//        set->var_list.push_back((VarAssign*)$1, parser->arena);
-//        $$ = set;
-//    }
-//    | TransactionChars ',' TransactionChar 
-//    {
-//        ((SetStmt*)$1)->var_list.push_back((VarAssign*)$3, parser->arena);
-//        $$ = $1;
-//    }
-//    ;
-//
-//TransactionChar: 
-//    ISOLATION LEVEL IsolationLevel 
-//    {
-//        VarAssign* assign = new_node(VarAssign);
-//        assign->key.strdup(""
-//        if ($3 != nullptr && $3->expr_type == ET_COLUMN) {
-//            ColumnName* col_name = (ColumnName*)$3;
-//            if (col_name->name.to_lower() == "off") {
-//                // SET XXX = OFF
-//                // OFF to 0
-//                assign->value = LiteralExpr::make_int("0", parser->arena);
-//            } else {
-//                assign->value = $3;
-//            }
-//        } else {
-//            assign->value = $3;
-//        }
-//        $$ = assign;
-//    }
+TransactionChars:
+    TransactionChar
+    {
+        SetStmt* set = new_node(SetStmt);
+        set->var_list.push_back((VarAssign*)$1, parser->arena);
+        $$ = set;
+    }
+    | TransactionChars ',' TransactionChar 
+    {
+        ((SetStmt*)$1)->var_list.push_back((VarAssign*)$3, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+TransactionChar: 
+    ISOLATION LEVEL IsolationLevel 
+    {
+        VarAssign* assign = new_node(VarAssign);
+        assign->key.strdup("@@isolation.", parser->arena);
+        assign->value = $3;
+        $$ = assign;
+    }
+    ;
 //    | READ WRITE
 //    {
 //    }
@@ -4226,26 +4237,26 @@ VarName:
 //    {
 //    }
 //    ;
-//
-//IsolationLevel:
-//    REPEATABLE READ
-//    {
-//        $$ = ast.RepeatableRead
-//    }
-//    | READ COMMITTED
-//    {
-//        $$ = ast.ReadCommitted
-//    }
-//    | READ UNCOMMITTED
-//    {
-//        $$ = ast.ReadUncommitted
-//    }
-//    | SERIALIZABLE
-//    {
-//        $$ = ast.Serializable
-//    }
-//    ;
-//
+
+IsolationLevel:
+    REPEATABLE READ
+    {
+        $$ = LiteralExpr::make_int("1", parser->arena);
+    }
+    | READ COMMITTED
+    {
+        $$ = LiteralExpr::make_int("2", parser->arena);
+    }
+    | READ UNCOMMITTED
+    {
+        $$ = LiteralExpr::make_int("3", parser->arena);
+    }
+    | SERIALIZABLE
+    {
+        $$ = LiteralExpr::make_int("4", parser->arena);
+    }
+    ;
+
 ShowStmt:
     SHOW ShowTargetFilterable ShowLikeOrWhereOpt {
         $$ = nullptr;
@@ -4511,6 +4522,13 @@ AlterSpec:
         spec->index_name = $4;
         $$ = spec;
     }
+    | RESTORE INDEX IndexName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_RESTORE_INDEX;
+        spec->index_name = $3;
+        $$ = spec;
+    }
     ;
 
 // Prepare Statement
@@ -4633,12 +4651,235 @@ KillStmt:
     }
     ;
 
+/**************************************LoadDataStmt*****************************************
+ * See https://dev.mysql.com/doc/refman/5.7/en/load-data.html
+ *******************************************************************************************/
+LoadDataStmt:
+    LOAD DATA LocalOpt INFILE STRING_LIT DuplicateOpt INTO TABLE TableName OptCharset Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt
+    {
+        LoadDataStmt* load = new_node(LoadDataStmt);
+        load->is_local = $3;
+        load->path = ((LiteralExpr*)$5)->_u.str_val;
+        load->on_duplicate_handle = (OnDuplicateKeyHandle)$6;
+        load->table_name = (TableName*)$9;
+        load->char_set = $10;
+        load->fields_info = (FieldsClause*)$11;
+        load->lines_info = (LinesClause*)$12;
+        load->ignore_lines = $13;
+        if ($14 != nullptr) {
+            load->columns.reserve($14->children.size(), parser->arena);
+            for (int i = 0; i < $14->children.size(); i++) {
+                ColumnName* column = (ColumnName*)$14->children[i];
+                load->columns.push_back(column, parser->arena);
+            }
+        }
+        if ($15 != nullptr) {
+            load->set_list.reserve($15->children.size(), parser->arena);
+            for (int i = 0; i < $15->children.size(); i++) {
+                Assignment* assign = (Assignment*)$15->children[i];
+                load->set_list.push_back(assign, parser->arena);
+            }
+        }
+        $$ = load;
+    }
+    ;
+
+// 只支持文件和baikaldb在一台机器
+LocalOpt:
+    {
+        $$ = true;
+    }
+    |  LOCAL {
+        $$ = true;
+    }
+    ;
+
+IgnoreLines:
+    {
+        $$ = 0;
+    }
+    | IGNORE INTEGER_LIT LINES
+    {
+        $$ = ((LiteralExpr*)$2)->_u.int64_val;
+    }
+    ;
+
+DuplicateOpt:
+    {
+        $$ = ON_DUPLICATE_KEY_ERROR;
+    }
+    | IGNORE
+    {
+        $$ = ON_DUPLICATE_KEY_IGNORE;
+    }
+    | REPLACE
+    {
+        $$ = ON_DUPLICATE_KEY_REPLACE;
+    }
+    ;
+
+Fields:
+    {
+        FieldsClause* fields_info = new_node(FieldsClause);
+        fields_info->terminated = "\t";
+        fields_info->escaped = "\\";
+        fields_info->enclosed = nullptr;
+        $$ = fields_info;
+    }
+    | FieldsOrColumns FieldItemList {
+        FieldsClause* fields_info = new_node(FieldsClause);
+        fields_info->terminated = "\t";
+        fields_info->escaped = "\\";
+        fields_info->enclosed = nullptr;
+        for (int i = 0; i < $2->children.size(); i++) {
+            FieldItem* item = (FieldItem*)$2->children[i];
+            switch (item->type) {
+                case LOAD_TERMINATED: {
+                    fields_info->terminated = item->value;
+                    break;
+                }
+                case LOAD_ENCLOSED: {
+                    fields_info->enclosed = item->value;
+                    fields_info->opt_enclosed = item->opt_enclosed;
+                    break;
+                }
+                case LOAD_ESCAPED: {
+                    fields_info->escaped = item->value;
+                    break;
+                }
+            }
+        }
+        $$ = fields_info;
+    }
+    ;
+
+FieldsOrColumns:
+    FIELDS
+    |  COLUMNS
+    ;
+
+FieldItemList:
+    FieldItem
+    {
+        Node* list = new_node(Node);
+        list->children.reserve(5, parser->arena);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | FieldItemList FieldItem
+    {
+        $1->children.push_back($2, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+FieldItem:
+    TERMINATED BY STRING_LIT
+    {
+        FieldItem* field_item = new_node(FieldItem);
+        field_item->type = LOAD_TERMINATED;
+        field_item->value = ((LiteralExpr*)$3)->_u.str_val;;
+        $$ = field_item;
+    }
+    | OPTIONALLY ENCLOSED BY STRING_LIT
+    {
+        FieldItem* field_item = new_node(FieldItem);
+        field_item->type = LOAD_ENCLOSED;
+        field_item->value = ((LiteralExpr*)$4)->_u.str_val;;
+        field_item->opt_enclosed = true;
+        if (field_item->value.to_string() != "\\" && field_item->value.length > 1) {
+            sql_error(&@2, yyscanner, parser, "wrong terminator.");
+            return -1;
+        }
+        $$ = field_item;
+    }
+    | ENCLOSED BY STRING_LIT
+    {
+        FieldItem* field_item = new_node(FieldItem);
+        field_item->type = LOAD_ENCLOSED;
+        field_item->value = ((LiteralExpr*)$3)->_u.str_val;;
+        if (field_item->value.to_string()  != "\\" && field_item->value.length > 1) {
+            sql_error(&@2, yyscanner, parser, "wrong terminator.");
+            return -1;
+        }
+        $$ = field_item;
+    }
+    | ESCAPED BY STRING_LIT
+    {
+        FieldItem* field_item = new_node(FieldItem);
+        field_item->type = LOAD_ESCAPED;
+        field_item->value = ((LiteralExpr*)$3)->_u.str_val;;
+        if (field_item->value.to_string() != "\\" && field_item->value.length > 1) {
+            sql_error(&@2, yyscanner, parser, "wrong terminator.");
+            return -1;
+        }
+        $$ = field_item;
+    }
+    ;
+
+Lines:
+    {
+        LinesClause* lines = new_node(LinesClause);
+        lines->terminated = "\n";
+        lines->starting = nullptr;
+        $$ = lines;
+    }
+    |	LINES Starting LinesTerminated
+    {
+        LinesClause* lines = new_node(LinesClause);
+        lines->starting = $2;
+        lines->terminated = $3;
+        $$ = lines;
+    }
+    ;
+
+Starting:
+    {
+        $$ = "";
+    }
+    | STARTING BY STRING_LIT
+    {
+        $$ = ((LiteralExpr*)$3)->_u.str_val;;
+    }
+    ;
+
+LinesTerminated:
+    {
+        $$ = "\n";
+    }
+    | TERMINATED BY STRING_LIT
+    {
+        $$ = ((LiteralExpr*)$3)->_u.str_val;;
+    }
+    ;
+
+ColumnNameOrUserVarListOptWithBrackets:
+    {
+        $$ = nullptr;
+    }
+    | '(' ColumnNameListOpt ')'
+    {
+        $$ = $2;
+    }
+    ;
+
+LoadDataSetSpecOpt:
+    {
+        $$ = nullptr;
+    }
+    | SET AssignmentList
+    {
+        $$ = $2;
+    }
+    ;
+
 ExplainableStmt:
     SelectStmt
     | DeleteStmt
     | UpdateStmt
     | InsertStmt
     | ReplaceStmt
+    | LoadDataStmt
     ;
 
 //CreateUserStmt:

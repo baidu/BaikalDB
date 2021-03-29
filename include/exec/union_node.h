@@ -61,10 +61,14 @@ public:
         tmp.swap(projections);
         _select_projections.push_back(tmp);
     }
+    int32_t union_tuple_id() const {
+        return _union_tuple_id;
+    }
 private:
     std::vector<ExprNode*> _slot_order_exprs;
     std::vector<bool> _is_asc;
     std::vector<bool> _is_null_first;
+    int32_t           _union_tuple_id = -1;
     MemRowDescriptor* _mem_row_desc = nullptr;
     pb::TupleDescriptor* _tuple_desc = nullptr;
     std::shared_ptr<Sorter> _sorter;

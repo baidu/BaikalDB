@@ -278,14 +278,18 @@ struct TableInfo {
     DynamicMessageFactory*  factory = nullptr;
     DescriptorPool*         pool = nullptr;
     const Message*          msg_proto = nullptr;
+    uint32_t                timestamp = 0;
     bool                    have_statistics = false;
+    bool                    have_backup = false;
+    bool                    need_read_backup = false;
+    bool                    need_write_backup = false;
+    // 该表是否已和 binlog 表关联
+    bool is_linked = false;
     pb::PartitionInfo partition_info;
     // 该binlog表关联的普通表集合
     std::set<uint64_t> binlog_target_ids;
-    // 该表是否已和 binlog 表关联
-    bool is_linked = false;
     // 该表关联的 binlog 表id
-    uint64_t binlog_id = 0;
+    int64_t binlog_id = 0;
     std::shared_ptr<Partition> partition_ptr = nullptr;
     // 普通表 使用该字段和 binlog 表进行关联
     std::vector<FieldInfo> link_field;
@@ -344,6 +348,7 @@ struct IndexInfo {
     bool                    is_global = false;
     pb::StorageType storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
     pb::IndexHintStatus     index_hint_status = pb::IHS_NORMAL;
+    int64_t write_only_time = -1;
 };
 
 struct DatabaseInfo {
@@ -405,11 +410,23 @@ public:
         bthread_mutex_destroy(&_update_show_db_mutex);
     }
 
+    static BthreadLocal<bool> use_backup;
     static SchemaFactory* get_instance() {
+        bool* bk = use_backup.get_bthread_local();
+        if (bk != nullptr && *bk) {
+            return get_backup_instance();
+        }
         static SchemaFactory _instance;
         return &_instance;
     }
 
+    static SchemaFactory* get_backup_instance() {
+        static SchemaFactory _instance;
+        return &_instance;
+    }
+    bool is_inited() {
+        return _is_inited;
+    }
     //bucket_size
     int init();
 
@@ -645,9 +662,18 @@ public:
         auto table_info = table_info_mapping.at(main_table_id);
         std::vector<int64_t> indices = table_info->indices;
         auto& global_index_id_mapping = table_ptr->global_index_id_mapping;
+        auto index_info_map = table_ptr->index_info_mapping;
         for (auto& index_id : indices) {
             if (global_index_id_mapping.find(index_id) != global_index_id_mapping.end()
                     && global_index_id_mapping.at(index_id) != index_id) {
+                
+                auto index_ptr = index_info_map.find(index_id);
+                if (index_ptr == index_info_map.end()) {
+                    continue;
+                }
+                if (index_ptr->second->state == pb::IS_NONE) {
+                    continue;
+                }
                 return true;
             }
         }
@@ -800,6 +826,20 @@ public:
     int get_binlog_regions(int64_t table_id, pb::RegionInfo& region_info, const ExprValue& value = ExprValue{}, 
         PartitionRegionSelect prs = PRS_RANDOM);
 
+    bool is_region_info_exist(int64_t table_id) {
+        DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+        if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+            DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
+            return false;
+        }
+        auto it = table_region_mapping_ptr->find(table_id);
+        if (it == table_region_mapping_ptr->end()) {
+            DB_WARNING("index id[%ld] not in table_region_mapping", table_id);
+            return false;
+        }
+        return true;
+    }
+
     void update_virtual_index_info(const int64_t virtual_index_id, const std::string& virtual_index_name, const std::string& sample_sql) {
         _virtual_index_info << VirtualIndexMap(virtual_index_id, virtual_index_name, sample_sql);
     }
@@ -807,9 +847,10 @@ public:
     VirtualIndexMap get_virtual_index_info() {
         return _virtual_index_info.reset();
     }
+    int is_unique_field_ids(int64_t table_id, const std::set<int32_t>& field_ids);
 private:
     SchemaFactory() {
-        _is_init = false;
+        _is_inited = false;
         bthread_mutex_init(&_update_user_mutex, NULL);
         bthread_mutex_init(&_update_show_db_mutex, NULL);
         butil::EndPoint addr;
@@ -832,7 +873,7 @@ private:
     void delete_table(const pb::SchemaInfo& table, SchemaMapping& background);
 
     void delete_table_region_map(const pb::SchemaInfo& table);
-    bool                    _is_init;
+    bool                    _is_inited;
     bthread_mutex_t         _update_user_mutex;
     bthread_mutex_t         _update_show_db_mutex;
 

@@ -46,8 +46,10 @@ public:
     
     void clear() {
         region_batch.clear();
+        split_region_batch.clear();
         index_records.clear();
         start_key_sort.clear();
+        split_start_key_sort.clear();
         error = E_OK;
         skip_region_set.clear();
         affected_rows = 0;
@@ -55,6 +57,7 @@ public:
         filter_rows = 0;
         row_cnt = 0;
         analyze_fail_cnt = 0;
+        used_bytes = 0;
     }
 
     // send (cached) cmds with seq_id >= start_seq_id
@@ -120,24 +123,28 @@ public:
                            const pb::OpType op_type,
                            const uint64_t log_id);
     int64_t get_commit_ts();
+    int memory_limit_exceeded(RuntimeState* state, MemRow* row);
 public:
-    std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
     std::map<int64_t, std::vector<SmartRecord>>  index_records; //key: index_id
+    std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
+    std::map<int64_t, std::shared_ptr<RowBatch>> split_region_batch;
 
     std::multimap<std::string, int64_t> start_key_sort;
+    std::multimap<std::string, int64_t> split_start_key_sort;
     bthread_mutex_t region_lock;
     std::set<int64_t> skip_region_set;
     ErrorType error = E_OK;
     // 因为split会导致多region出来,加锁保护公共资源
-    int64_t row_cnt = 0;
-    std::atomic<int64_t> affected_rows;
-    std::atomic<int64_t> scan_rows;
-    std::atomic<int64_t> filter_rows;
-    std::atomic<int> analyze_fail_cnt;
+    std::atomic<int64_t> row_cnt = {0};
+    std::atomic<int64_t> affected_rows = {0};
+    std::atomic<int64_t> scan_rows = {0};
+    std::atomic<int64_t> filter_rows = {0};
+    std::atomic<int> analyze_fail_cnt = {0};
     BthreadCond binlog_cond;
     NetworkSocket* client_conn = nullptr;
     bool  binlog_prepare_success = false;
     bool  need_get_binlog_region = true;
+    std::atomic<int64_t> used_bytes = {0};
 };
 }
 

@@ -639,7 +639,8 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
 
     } else if (spec->spec_type == parser::ALTER_SPEC_DROP_INDEX) {
-        alter_request.set_op_type(pb::OP_DROP_INDEX);
+        //drop index 转换成屏蔽
+        alter_request.set_op_type(pb::OP_SET_INDEX_HINT_STATUS);
         if (spec->index_name.empty()) {
             DB_WARNING("index_name is null.");
             return -1;
@@ -647,13 +648,26 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
 
         pb::IndexInfo* index = table->add_indexs();
         index->set_index_name(spec->index_name.value);
+        index->set_hint_status(pb::IHS_DISABLE);
         // 删除虚拟索引
         if (spec->is_virtual_index) {
             std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
             SchemaFactory::get_instance()->drop_virtual_index(table_full_name, table->indexs(0));
             return -2;
         }
-        DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
+        DB_NOTICE("drop index schema_info[%s]", table->ShortDebugString().c_str());
+    } else if (spec->spec_type == parser::ALTER_SPEC_RESTORE_INDEX) {
+        //restore index 解除屏蔽 
+        alter_request.set_op_type(pb::OP_SET_INDEX_HINT_STATUS);
+        if (spec->index_name.empty()) {
+            DB_WARNING("index_name is null.");
+            return -1;
+        }
+
+        pb::IndexInfo* index = table->add_indexs();
+        index->set_index_name(spec->index_name.value);
+        index->set_hint_status(pb::IHS_NORMAL);
+        DB_NOTICE("restore index schema_info[%s]", table->ShortDebugString().c_str());
     } else {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
         _ctx->stat_info.error_msg << "alter_specification type (" 
@@ -728,6 +742,9 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     case parser::MYSQL_TYPE_BITMAP: {
         return pb::BITMAP;
     } break;
+    case parser::MYSQL_TYPE_TDIGEST: {
+        return pb::TDIGEST;
+    } break;
     default : {
         DB_WARNING("unsupported item type: %d", field_type->type);
         return pb::INVALID_TYPE;
@@ -762,7 +779,9 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
         DB_WARNING("lack of index name");
         return -1;
     }
+    index->set_is_global(constraint->global);
     index->set_index_type(index_type);
+    index->set_hint_status(pb::IHS_DISABLE);
     index->set_index_name(constraint->name.value);
 
     for (int32_t column_index = 0; column_index < constraint->columns.size(); ++column_index) {

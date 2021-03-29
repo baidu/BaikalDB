@@ -50,7 +50,9 @@ std::string TableKey::decode_start_key_string(pb::PrimitiveType field_type, int&
             if (pos + sizeof(int32_t) > size()) {
                 start_key_string = "decode fail";
             } else {
-                start_key_string = std::to_string(extract_i32(pos));
+                ExprValue v(field_type);
+                v._u.int32_val = extract_i32(pos);
+                start_key_string = v.get_string();
             }
             pos += sizeof(int32_t);
         } break;
@@ -76,7 +78,9 @@ std::string TableKey::decode_start_key_string(pb::PrimitiveType field_type, int&
             if (pos + sizeof(uint32_t) > size()) {
                 start_key_string = "decode fail";
             } else {
-                start_key_string = std::to_string(extract_u32(pos));
+                ExprValue v(field_type);
+                v._u.uint32_val = extract_u32(pos);
+                start_key_string = v.get_string();
             }
             pos += sizeof(uint32_t);
         } break;
@@ -93,7 +97,9 @@ std::string TableKey::decode_start_key_string(pb::PrimitiveType field_type, int&
             if (pos + sizeof(uint64_t) > size()) {
                 start_key_string = "decode fail";
             } else {
-                start_key_string = std::to_string(extract_u64(pos));
+                ExprValue v(field_type);
+                v._u.uint64_val = extract_u64(pos);
+                start_key_string = v.get_string();
             }
             pos += sizeof(uint64_t);
         } break;

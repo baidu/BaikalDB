@@ -104,11 +104,11 @@ struct FuncExpr : public ExprNode {
     bool is_not = false;
     bool distinct = false;
     bool is_star = false;
-    bool is_subquery = false;
     FuncExpr() {
         fn_name = nullptr;
         expr_type = ET_FUNC;
     }
+    bool has_subquery() const;
     virtual void print() const override {
         std::cout << "func:" << func_type << " fn_name:" << fn_name << std::endl;
     }
@@ -130,9 +130,14 @@ struct SubqueryExpr : public ExprNode {
     DmlNode* query_stmt = nullptr;
     SubqueryExpr() {
         expr_type = ET_SUB_QUERY_EXPR;
+        is_complex = true;
     }
     virtual void print() const override {
         std::cout << this << std::endl;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        query_stmt->set_print_sample(print_sample_);
     }
     virtual void to_stream(std::ostream& os) const override;
 };
@@ -143,10 +148,16 @@ struct CompareSubqueryExpr: public ExprNode {
     CompareType cmp_type = CMP_ANY;
     FuncType func_type = FT_COMMON;
     CompareSubqueryExpr() {
+        is_complex = true;
         expr_type = ET_CMP_SUB_QUERY_EXPR;
     }
     virtual void print() const override {
         std::cout << this << std::endl;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        left_expr->set_print_sample(print_sample_);
+        right_expr->set_print_sample(print_sample_);
     }
     virtual void to_stream(std::ostream& os) const override;
     const char* get_func_name() const;
@@ -154,11 +165,17 @@ struct CompareSubqueryExpr: public ExprNode {
 
 struct ExistsSubqueryExpr: public ExprNode {
     SubqueryExpr* query_expr = nullptr;
+    bool is_not = false;
     ExistsSubqueryExpr() {
+        is_complex = true;
         expr_type = ET_EXISTS_SUB_QUERY_EXPR;
     }
     virtual void print() const override {
         std::cout << this << std::endl;
+    }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        query_expr->set_print_sample(print_sample_);
     }
     virtual void to_stream(std::ostream& os) const override;
 };

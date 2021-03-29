@@ -35,6 +35,7 @@ void DB_TRACE(const char *fmt, ...) __attribute__((format(printf,1,2)));
 inline void DB_TRACE(const char *fmt, ...) {}
 void DB_NOTICE(const char *fmt, ...) __attribute__((format(printf,1,2)));
 inline void DB_NOTICE(const char *fmt, ...) {}
+#define DB_NOTICE_LONG DB_NOTICE
 
 void SELF_TRACE(const char *fmt, ...) __attribute__((format(printf,1,2)));
 inline void SELF_TRACE(const char *fmt, ...) {}
@@ -99,6 +100,8 @@ DECLARE_bool(servitysinglelog);
         com_writelog("NOTICE", "[%s:%d][%s][%lu]" _fmt_, \
                 strrchr(__FILE__, '/') + 1, __LINE__, __FUNCTION__, bthread_self(), ##args);\
     } while (0)
+
+#define DB_NOTICE_LONG DB_NOTICE
 
 #define DB_WARNING(_fmt_, args...) \
     do {\

@@ -17,7 +17,6 @@
 #include <unordered_set>
 
 namespace baikaldb {
-DECLARE_bool(disable_writebatch_index);
 int InsertNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);

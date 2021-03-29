@@ -23,6 +23,7 @@
 #include "join_reorder.h"
 #include "separate.h"
 #include "auto_inc.h"
+#include "decorrelate.h"
 
 namespace baikaldb {
 class PhysicalPlanner {

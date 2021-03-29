@@ -22,6 +22,10 @@ DEFINE_bool(delete_all_to_truncate, false,  "delete from xxx; treat as truncate"
 int DeletePlanner::plan() {
     if (_ctx->stmt_type == parser::NT_TRUNCATE) {
         if (_ctx->client_conn->txn_id != 0) {
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_NOT_ALLOWED_COMMAND;
+                _ctx->stat_info.error_msg.str("not allowed truncate in transaction");
+            }
             DB_FATAL("not allowed truncate table in txn connection txn_id:%lu",
                 _ctx->client_conn->txn_id);
             return -1;
@@ -96,22 +100,27 @@ int DeletePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
-    int64_t table_id = iter->second.table_id;
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[_current_tables[0]];
+    int64_t table_id = info.table_id;
     _ctx->prepared_table_id = table_id;
     if (!_ctx->is_prepared) {
         set_dml_txn_state(table_id);
     }
+    set_socket_txn_tid_set();
     return 0;
 }
 
 int DeletePlanner::create_delete_node() {
-    if (_plan_table_ctx->table_tuple_mapping.size() != 1) {
+    if (_current_tables.size() != 1 || _plan_table_ctx->table_tuple_mapping.count(_current_tables[0]) == 0) {
         DB_WARNING("invalid sql format: %s", _ctx->sql.c_str());
         return -1;
     }
-    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
-    int64_t table_id = iter->second.table_id;
+    if (_apply_root != nullptr) {
+        DB_WARNING("not support correlation subquery sql format: %s", _ctx->sql.c_str());
+        return -1;
+    }
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[_current_tables[0]];
+    int64_t table_id = info.table_id;
 
     pb::PlanNode* delete_node = _ctx->add_plan_node();
     delete_node->set_node_type(pb::DELETE_NODE);
@@ -128,7 +137,7 @@ int DeletePlanner::create_delete_node() {
         return -1;
     }
     for (auto& field : pk->fields) {
-        auto& slot = get_scan_ref_slot(iter->first, table_id, field.id, field.type);
+        auto& slot = get_scan_ref_slot(_current_tables[0], table_id, field.id, field.type);
         _delete->add_primary_slots()->CopyFrom(slot);
     }
     return 0;

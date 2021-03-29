@@ -183,6 +183,7 @@ STRAIGHT_JOIN { return STRAIGHT_JOIN; }
 TABLE { return TABLE; }
 STORED { return STORED; }
 TERMINATED { return TERMINATED; }
+OPTIONALLY { return OPTIONALLY; }
 THEN { return THEN; }
 TINYBLOB { return TINYBLOB; }
 TINYINT { return TINYINT; }
@@ -374,6 +375,7 @@ WEEK { un_reserved_keyword(yylval, yyscanner, parser); return WEEK; }
 YEAR { un_reserved_keyword(yylval, yyscanner, parser); return YEAR; }
 HLL { un_reserved_keyword(yylval, yyscanner, parser); return HLL; }
 BITMAP { un_reserved_keyword(yylval, yyscanner, parser); return BITMAP; }
+TDIGEST { un_reserved_keyword(yylval, yyscanner, parser); return TDIGEST; }
 
 ADDDATE { un_reserved_keyword(yylval, yyscanner, parser); return ADDDATE; /* The following tokens belong to builtin functions. */}
 BIT_AND { un_reserved_keyword(yylval, yyscanner, parser); return BIT_AND; }
@@ -506,6 +508,8 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 
 [-,\.*+(){}|&/^~;] { return yytext[0]; }
 [][] { return yytext[0]; }
+
+"/*"([*]*(([^*/])+([/])*)*)*"*/" {/* comment; do nothing */}
 
 . { return CHINESE_DOT; }
 

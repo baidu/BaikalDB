@@ -313,13 +313,12 @@ int Backup::upload_sst_info(brpc::Controller* cntl, BackupInfo& backup_info) {
 void Backup::process_download_sst_streaming(brpc::Controller* cntl, 
         const pb::BackupRequest* request,
         pb::BackupResponse* response) {
-    
+
+    bool is_same_log_index = false;
     if (auto region_ptr = _region.lock()) {
         auto log_index = region_ptr->get_data_index();
         if (request->log_index() == log_index) {
-            response->set_errcode(pb::BACKUP_SAME_LOG_INDEX);
-            DB_NOTICE("backup region[%ld] not changed.", _region_id);
-            return;
+            is_same_log_index = true;
         }
         response->set_log_index(log_index);
         //async
@@ -335,12 +334,14 @@ void Backup::process_download_sst_streaming(brpc::Controller* cntl,
             return;
         }
         Bthread streaming_work {&BTHREAD_ATTR_NORMAL};
-        streaming_work.run([this, sd, receiver, log_index]() {
-            backup_datainfo_streaming(sd, log_index);
+        streaming_work.run([this, region_ptr, sd, receiver, log_index, is_same_log_index]() {
+            if (!is_same_log_index) {
+                backup_datainfo_streaming(sd, log_index, region_ptr);
+            }
             receiver->wait();
         });
         response->set_errcode(pb::SUCCESS);
-        DB_NOTICE("backup datainfo region[%ld]", _region_id);       
+        DB_NOTICE("backup datainfo region[%ld]", _region_id);
     } else {
         response->set_errcode(pb::BACKUP_ERROR);
         DB_NOTICE("backup datainfo region[%ld] error, region quit.", _region_id);
@@ -348,12 +349,17 @@ void Backup::process_download_sst_streaming(brpc::Controller* cntl,
 
 }
 
-int Backup::backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index) {
+int Backup::backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index, SmartRegion region_ptr) {
     BackupInfo backup_info;
     backup_info.data_info.path = 
         std::string{"region_datainfo_backup_"} + std::to_string(_region_id) + ".sst";
     backup_info.meta_info.path = 
         std::string{"region_metainfo_backup_"} + std::to_string(_region_id) + ".sst";
+
+    region_ptr->_multi_thread_cond.increase();
+    ON_SCOPE_EXIT([region_ptr]() {
+        region_ptr->_multi_thread_cond.decrease_signal();
+    });
 
     ON_SCOPE_EXIT(([&backup_info]() {
         std::remove(backup_info.data_info.path.c_str());
@@ -395,23 +401,29 @@ void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
     }
 
     //async
-    Bthread streaming_work{&BTHREAD_ATTR_NORMAL};
-    streaming_work.run(
-        [this, ingest_store_latest_sst, sd, receiver, backup_info]() {
-            upload_sst_info_streaming(sd, receiver, ingest_store_latest_sst, backup_info);
-        }
-    );
+    if (auto region_ptr = _region.lock()) {
+        Bthread streaming_work{&BTHREAD_ATTR_NORMAL};
+        streaming_work.run(
+            [this, region_ptr, ingest_store_latest_sst, sd, receiver, backup_info]() {
+                upload_sst_info_streaming(sd, receiver, ingest_store_latest_sst, backup_info, region_ptr);
+            }
+        );
+    }
 }
 int Backup::upload_sst_info_streaming(
     brpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
-    bool ingest_store_latest_sst, const BackupInfo& backup_info) {
+    bool ingest_store_latest_sst, const BackupInfo& backup_info, SmartRegion region_ptr) {
+    region_ptr->_multi_thread_cond.increase();
+    ON_SCOPE_EXIT([region_ptr]() {
+        region_ptr->_multi_thread_cond.decrease_signal();
+    });
 
     DB_NOTICE("upload datainfo region_id[%ld]", _region_id);
 
     ON_SCOPE_EXIT(([&backup_info]() {
-        std::remove(backup_info.data_info.path.c_str());
-        std::remove(backup_info.meta_info.path.c_str());
-    }));
+                std::remove(backup_info.data_info.path.c_str());
+                std::remove(backup_info.meta_info.path.c_str());
+                }));
 
     while (receiver->get_status() == StreamReceiver::StreamState::SS_INIT) {
         bthread_usleep(100 * 1000);
@@ -425,54 +437,49 @@ int Backup::upload_sst_info_streaming(
     brpc::StreamClose(sd);
     receiver->wait();
     //设置禁写，新数据写入sst.
-    
-    if (auto region_ptr = _region.lock()) {
-        region_ptr->set_disable_write();
-        ON_SCOPE_EXIT(([this, region_ptr]() {
-            region_ptr->reset_allow_write();
-        }));
-        int ret = region_ptr->_real_writing_cond.timed_wait(FLAGS_disable_write_wait_timeout_us * 10);
-        if (ret != 0) {
-            DB_FATAL("upload real_writing_cond wait timeout, region_id: %ld", _region_id);
-            return -1;
-        }
 
-        ret = region_ptr->ingest_sst(backup_info.data_info.path, backup_info.meta_info.path);
-        if (ret != 0) {
-            DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
-            return -1;
-        }
-
-        DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d]", _region_id, int(ingest_store_latest_sst));
-        if (!ingest_store_latest_sst) {
-            DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
-            return 0;
-        }
-
-        BackupInfo latest_backup_info;
-        latest_backup_info.meta_info.path = std::to_string(_region_id) + ".latest.meta.sst";
-        latest_backup_info.data_info.path = std::to_string(_region_id) + ".latest.data.sst";
-
-        ON_SCOPE_EXIT(([&latest_backup_info]() {
-            std::remove(latest_backup_info.data_info.path.c_str());
-            std::remove(latest_backup_info.meta_info.path.c_str());
-        }));
-
-        if (dump_sst_file(latest_backup_info) != 0) {
-            DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
-            return -1;
-        }
-
-        DB_NOTICE("region[%ld] ingest latest data.", _region_id);
-        ret = region_ptr->ingest_sst(latest_backup_info.data_info.path, latest_backup_info.meta_info.path);
-        if (ret == 0) {
-            DB_NOTICE("upload region[%ld] ingest latest sst success.", _region_id);
-        } else {
-            DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
-        }
-    } else {
-        DB_FATAL("region_id: %ld is quit.", _region_id);
+    region_ptr->set_disable_write();
+    ON_SCOPE_EXIT(([this, region_ptr]() {
+        region_ptr->reset_allow_write();
+    }));
+    int ret = region_ptr->_real_writing_cond.timed_wait(FLAGS_disable_write_wait_timeout_us * 10);
+    if (ret != 0) {
+        DB_FATAL("upload real_writing_cond wait timeout, region_id: %ld", _region_id);
         return -1;
+    }
+
+    ret = region_ptr->ingest_sst(backup_info.data_info.path, backup_info.meta_info.path);
+    if (ret != 0) {
+        DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
+        return -1;
+    }
+
+    DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d]", _region_id, int(ingest_store_latest_sst));
+    if (!ingest_store_latest_sst) {
+        DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
+        return 0;
+    }
+
+    BackupInfo latest_backup_info;
+    latest_backup_info.meta_info.path = std::to_string(_region_id) + ".latest.meta.sst";
+    latest_backup_info.data_info.path = std::to_string(_region_id) + ".latest.data.sst";
+
+    ON_SCOPE_EXIT(([&latest_backup_info]() {
+        std::remove(latest_backup_info.data_info.path.c_str());
+        std::remove(latest_backup_info.meta_info.path.c_str());
+    }));
+
+    if (dump_sst_file(latest_backup_info) != 0) {
+        DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
+        return -1;
+    }
+
+    DB_NOTICE("region[%ld] ingest latest data.", _region_id);
+    ret = region_ptr->ingest_sst(latest_backup_info.data_info.path, latest_backup_info.meta_info.path);
+    if (ret == 0) {
+        DB_NOTICE("upload region[%ld] ingest latest sst success.", _region_id);
+    } else {
+        DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
     }
     return 0;
 }

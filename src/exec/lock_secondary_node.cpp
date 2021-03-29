@@ -28,6 +28,7 @@ int LockSecondaryNode::init(const pb::PlanNode& node) {
     _table_id = lock_secondary_node.table_id();
     _lock_type = lock_secondary_node.lock_type();
     _global_index_id = lock_secondary_node.global_index_id();
+    _lock_secondary_type = lock_secondary_node.lock_secondary_type();
     return 0;
 }
 
@@ -40,6 +41,7 @@ void LockSecondaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     lock_secondary_node->set_global_index_id(_global_index_id);
     lock_secondary_node->set_table_id(_table_id);
     lock_secondary_node->set_lock_type(_lock_type);
+    lock_secondary_node->set_lock_secondary_type(_lock_secondary_type);
     lock_secondary_node->clear_put_records();
     if (_insert_records_by_region.count(region_id) != 0) {
         for (auto& record : _insert_records_by_region[region_id]) {
@@ -56,6 +58,11 @@ void LockSecondaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     }
 }
 
+void LockSecondaryNode::reset(RuntimeState* state) {
+    _insert_records_by_region.clear();
+    _delete_records_by_region.clear();
+}
+
 int LockSecondaryNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
@@ -69,9 +76,23 @@ int LockSecondaryNode::open(RuntimeState* state) {
         return ret;
     }
     _global_index_info = _factory->get_index_info_ptr(_global_index_id);
+    //索引还未同步到store，返回成功。
     if (_global_index_info == nullptr) {
         DB_WARNING("get index info fail, index_id: %ld", _global_index_id);
-        return -1;
+        return 0;
+    }
+    bool can_write = _global_index_info->state == pb::IS_WRITE_LOCAL ||
+                _global_index_info->state == pb::IS_WRITE_ONLY ||
+                _global_index_info->state == pb::IS_PUBLIC;
+    bool can_delete = _global_index_info->state != pb::IS_NONE;
+
+    if (_lock_type == pb::LOCK_NO_GLOBAL_DDL || _lock_type == pb::LOCK_GLOBAL_DDL) {
+        // 和baikaldb 索引状态同步，store状态可能会比db状态迟，不同步会丢数据
+        // 分裂发送日志时，索引状态已经是 IS_PUBLIC，在该状态下，必须可以写入。
+        if (!can_write) {
+            DB_WARNING_STATE(state, "state is not write_local or write_only or public");
+            return -1;
+        }
     }
     auto txn = state->txn();
     if (txn == nullptr) {
@@ -94,10 +115,13 @@ int LockSecondaryNode::open(RuntimeState* state) {
         if (fit_region) {
             put_records.push_back(record);
         } else {
-            //DB_WARNING("index_id: %ld not in region_id: %d, record: %s",
-            //    _global_index_id, _region_id, record->debug_string().c_str());
+            if (_lock_secondary_type == pb::LST_GLOBAL_DDL) {
+                DB_WARNING("index_id: %ld not in region_id: %ld, record: %s",
+                    _global_index_id, _region_id, record->debug_string().c_str());
+            }
         }
     }
+
     for (auto& str_record : _pb_node.derive_node().lock_secondary_node().delete_records()) {
         SmartRecord record = record_template->clone(false);
         record->decode(str_record);
@@ -116,49 +140,60 @@ int LockSecondaryNode::open(RuntimeState* state) {
     }
     //对全局二级索引加锁返回
     if (_lock_type == pb::LOCK_GET) {
-        for (auto& record : put_records) {
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            auto ret = txn->get_update_secondary(_region_id, *_pri_info, *_global_index_info, record, GET_LOCK, true);
-            if (ret == -3 || ret == -2) {
-                continue;
+        if (can_write) {
+            for (auto& record : put_records) {
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                auto ret = txn->get_update_secondary(_region_id, *_pri_info, *_global_index_info, record, GET_LOCK, true);
+                if (ret == -3 || ret == -2 || ret == -4) {
+                    continue;
+                }
+                if (ret == -1) {
+                    DB_WARNING("get lock fail");
+                    return -1;
+                }
+                _return_records[_global_index_info->id].push_back(record);
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
             }
-            if (ret == -1) {
-                DB_WARNING("get lock fail");
-                return -1;
-            }
-            _return_records[_global_index_info->id].push_back(record);
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
         }
     }
     //对全局二级索引进行加锁写入 or  删除
-    if (_lock_type == pb::LOCK_DML ) {
-        for (auto& record : delete_records) {
-            ret = delete_global_index(state, record);
-            if (ret < 0) {
-                DB_WARNING_STATE(state, "insert_row fail");
-                return -1;
+    if (_lock_type == pb::LOCK_DML || _lock_type == pb::LOCK_GLOBAL_DDL) {
+        if (can_delete) {
+            for (auto& record : delete_records) {
+                ret = delete_global_index(state, record);
+                if (ret < 0) {
+                    DB_WARNING_STATE(state, "insert_row fail");
+                    return -1;
+                }
+                num_affected_rows += ret;
             }
-            num_affected_rows += ret;
         }
-        for (auto& record : put_records) {
-            //加锁写入
-            ret = insert_global_index(state, record);
-            if (ret < 0) {
-                DB_WARNING_STATE(state, "insert_row fail");
-                return -1;
+        
+        if (can_write) {
+            for (auto& record : put_records) {
+                //加锁写入
+                ret = insert_global_index(state, record);
+                if (ret < 0) {
+                    DB_WARNING_STATE(state, "insert_row fail");
+                    return -1;
+                }
+                num_affected_rows += ret;
             }
-            num_affected_rows += ret;
-        }  
+        }
+        
     }
-    if (_lock_type == pb::LOCK_NO) {
-        for (auto& record : put_records) {
-            ret = put_global_index(state, record);
-            if (ret < 0) {
-                DB_WARNING_STATE(state, "put_row fail");
-                return -1;
+    if (_lock_type == pb::LOCK_NO || _lock_type == pb::LOCK_NO_GLOBAL_DDL) {
+        if (can_write) {
+            for (auto& record : put_records) {
+                ret = put_global_index(state, record);
+                if (ret < 0) {
+                    DB_WARNING_STATE(state, "put_row fail");
+                    return -1;
+                }
+                num_affected_rows += ret;
             }
-            num_affected_rows += ret;
         }
+        
     }
     state->set_num_increase_rows(_num_increase_rows);
     if (state->need_txn_limit) {
@@ -175,18 +210,49 @@ int LockSecondaryNode::open(RuntimeState* state) {
 int LockSecondaryNode::insert_global_index(RuntimeState* state, SmartRecord record) {
     auto txn = state->txn();
     //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-    auto ret = txn->get_update_secondary(_region_id, *_pri_info, *_global_index_info, record, GET_LOCK, true);
+    //DB_WARNING("record:%s", record->debug_string().c_str());
+
+    SmartRecord exist_record = record->clone();
+    auto ret = txn->get_update_secondary(_region_id, *_pri_info, *_global_index_info, exist_record, GET_LOCK, true);
     if (ret == 0) {
-        DB_WARNING_STATE(state, "insert uniq key must not exist, "
-                        "index:%ld, ret:%d", _global_index_info->id, ret);
-            state->error_code = ER_DUP_ENTRY;
-            state->error_msg << "Duplicate entry: '" << 
-                    record->get_index_value(*_global_index_info) << "' for key '" << _global_index_info->short_name << "'";
-        return -1;
+        if (_lock_type == pb::LOCK_GLOBAL_DDL) {
+            MutTableKey key;
+            MutTableKey exist_key;
+            if (record->encode_key(*_pri_info, key, -1, false, false) == 0 && 
+                exist_record->encode_key(*_pri_info, exist_key, -1, false, false) == 0) {
+
+                if (key.data().compare(exist_key.data()) == 0) {
+                    DB_NOTICE("same pk val.");
+                    ++_num_increase_rows;
+                    return 1;
+                } else {
+                    DB_WARNING("not same pk value record %s exist_record %s.", record->to_string().c_str(), 
+                        exist_record->to_string().c_str());
+                    state->error_code = ER_DUP_ENTRY;
+                    state->error_msg << "Duplicate entry: '" << 
+                            record->get_index_value(*_global_index_info) << "' for key '" << _global_index_info->short_name << "'";
+                    return -1;
+                }
+            } else {
+                DB_FATAL("encode key error record %s exist_record %s.", record->to_string().c_str(), 
+                    exist_record->to_string().c_str());
+                state->error_code = ER_DUP_ENTRY;
+                state->error_msg << "Duplicate entry: '" << 
+                        record->get_index_value(*_global_index_info) << "' for key '" << _global_index_info->short_name << "'";
+                return -1;
+            }
+        } else {
+            DB_WARNING_STATE(state, "insert uniq key must not exist, "
+                            "index:%ld, ret:%d", _global_index_info->id, ret);
+                state->error_code = ER_DUP_ENTRY;
+                state->error_msg << "Duplicate entry: '" << 
+                        record->get_index_value(*_global_index_info) << "' for key '" << _global_index_info->short_name << "'";
+            return -1;
+        }
     }
     // ret == -3 means the primary_key returned by get_update_secondary is out of the region
     // (dirty data), this does not affect the insertion
-    if (ret != -2 && ret != -3) {
+    if (ret != -2 && ret != -3 && ret != -4) {
         DB_WARNING_STATE(state, "insert rocksdb failed, index:%ld, ret:%d", _global_index_info->id, ret);
         return -1;
     }

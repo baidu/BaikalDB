@@ -33,13 +33,14 @@ public:
         const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
         const std::function<pb::TupleDescriptor*(int32_t)>& get_tuple_desc,
         bool has_join);
-private:
-    template<typename T>
-    int insert_node_analyze(T* node, QueryContext* ctx); 
 
     int scan_node_analyze(RocksdbScanNode* scan_node, 
         QueryContext* ctx, bool has_join);
-    
+ 
+private:
+    template<typename T>
+    int insert_node_analyze(T* node, QueryContext* ctx); 
+   
     int truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ctx);
     int kill_node_analyze(KillNode* kill_node, QueryContext* ctx);
     int transaction_node_analyze(TransactionNode* txn_node, QueryContext* ctx);

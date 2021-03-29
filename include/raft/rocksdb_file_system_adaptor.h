@@ -97,12 +97,7 @@ public:
     
     virtual ssize_t size() override;
     
-#ifdef BAIDU_INTERNAL
-    // Close this adaptor
     virtual bool close() override;
-#else 
-    bool close();
-#endif
     void open() {
         _closed = false;
     }
@@ -145,12 +140,7 @@ public:
     int open();
 
     virtual ssize_t write(const butil::IOBuf& data, off_t offset) override;
-#ifdef BAIDU_INTERNAL
-    // Close this adaptor
     virtual bool close() override;
-#else
-    bool close();
-#endif
     
     virtual ssize_t read(butil::IOPortal* portal, off_t offset, size_t size) override;
     
@@ -184,11 +174,7 @@ public:
     virtual ssize_t read(butil::IOPortal* portal, off_t offset, size_t size) override;
     virtual ssize_t size() override;
     virtual bool sync() override;
-#ifdef BAIDU_INTERNAL
     virtual bool close() override;
-#else
-    bool close();
-#endif
 
 protected:
     PosixFileAdaptor(const std::string& p) : _path(p), _fd(-1) {}
@@ -232,7 +218,8 @@ private:
 
 private:
     int64_t             _region_id;
-    bthread_mutex_t     _snapshot_mutex;
+    bthread::Mutex      _snapshot_mutex;
+    bthread::Mutex      _open_reader_adaptor_mutex;
     BthreadCond         _mutil_snapshot_cond;
     typedef std::map<std::string, std::pair<SnapshotContextPtr, int64_t>> SnapshotMap;
     SnapshotMap         _snapshots;

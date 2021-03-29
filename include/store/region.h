@@ -158,7 +158,10 @@ public:
     void join() {
         _node.join();
         DB_WARNING("raft node join completely, region_id: %ld", _region_id);
+        _real_writing_cond.wait();
+        _disable_write_cond.wait();
         _multi_thread_cond.wait();
+        _binlog_cond.wait();
         DB_WARNING("_multi_thread_cond wait success, region_id: %ld", _region_id);
         _txn_pool.close();
     }
@@ -248,8 +251,8 @@ public:
             int64_t applied_index,
             int64_t term);
 
-    void select(const pb::StoreReq& request, pb::StoreRes& response);
-    void select(const pb::StoreReq& request, 
+    int select(const pb::StoreReq& request, pb::StoreRes& response);
+    int select(const pb::StoreReq& request, 
             const pb::Plan& plan,
             const RepeatedPtrField<pb::TupleDescriptor>& tuples,
             pb::StoreRes& response);
@@ -293,13 +296,6 @@ public:
         return _region_control;
     }
 
-    void remove_readonly_txn(Transaction* txn) {
-        if (txn->seq_id() == 1) {
-            DB_WARNING("region_id:%ld txn_id: %lu need rollback", _region_id, txn->txn_id());
-            _txn_pool.remove_txn(txn->txn_id(), false);
-        }
-    }
-
     void add_peer(const pb::AddPeer* request,  
             pb::StoreRes* response, 
             google::protobuf::Closure* done) {
@@ -309,8 +305,9 @@ public:
     void do_snapshot() {
         _region_control.sync_do_snapshot();
     }
-    int transfer_leader(const pb::TransLeaderRequest& trans_leader_request) {
-        return _region_control.transfer_leader(trans_leader_request);
+    int transfer_leader(const pb::TransLeaderRequest& trans_leader_request, 
+            SmartRegion region, ExecutionQueue& queue) {
+        return _region_control.transfer_leader(trans_leader_request, region, queue);
     }
     void reset_region_status () {
         _region_control.reset_region_status();
@@ -501,7 +498,7 @@ public:
         return _region_info.table_id();
     }
     bool is_leader() {
-        return (_is_leader.load() && _node.is_leader());
+        return (_is_leader.load());
     }
     void leader_start() {
         _is_leader.store(true);
@@ -645,7 +642,8 @@ public:
         _txn_pool.clear_transactions(this);
         _multi_thread_cond.decrease_signal();
     }
-    void recovery_when_leader_start(std::map<uint64_t, SmartTransaction> replay_txns);
+    void clear_orphan_transactions(braft::Closure* done, int64_t applied_index, int64_t term);
+    void apply_clear_transactions_log();
 
     TransactionPool& get_txn_pool() {
         return _txn_pool;
@@ -779,6 +777,10 @@ public:
     
     void binlog_fake(int64_t ts, BthreadCond& cond);
 
+    pb::PeerStatus region_status() const {
+        return _region_status;
+    }
+
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -821,9 +823,11 @@ private:
         int64_t max_ts_in_map  = -1;
         int64_t check_point_ts = -1;
         int64_t oldest_ts      = -1;
+        bool    binlog_restart = false;
     };
 
         //binlog function
+    void recover_binlog();
     void read_binlog(const pb::StoreReq* request, pb::StoreRes* response);
     void apply_binlog(const pb::StoreReq& request, braft::Closure* done);
     int write_binlog_record(SmartRecord record);
@@ -941,7 +945,6 @@ private:
     bool                                _storage_compute_separate = false;
     bool                                _use_ttl = false; //init时更新，表的ttl后续不会改变
     bool                                _reverse_remove_range = false; //split的数据，把拉链过滤一遍  
-    bool                                _reverse_force_remove_range = true;// 改为true,重启之后过滤一边，后续升级需要删除 by YUZHENGQUAN 20201118
     //raft node
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;
@@ -995,6 +998,7 @@ private:
     BinlogParam _binlog_param;
     std::string     _rocksdb_start;
     std::string     _rocksdb_end;
+    pb::PeerStatus  _region_status = pb::STATUS_NORMAL;
 };
 
 } // end of namespace

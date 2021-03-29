@@ -60,7 +60,7 @@ int SelectManagerNode::open(RuntimeState* state) {
     }
     for (auto& pair : _fetcher_store.start_key_sort) {
         auto& batch = _fetcher_store.region_batch[pair.second];
-        if (batch != NULL && batch->size() != 0) {
+        if (batch != nullptr && batch->size() != 0) {
             _sorter->add_batch(batch);
         }
     }
@@ -83,6 +83,9 @@ int SelectManagerNode::subquery_open(RuntimeState* state) {
         return ret;
     }
     pb::TupleDescriptor* tuple_desc = state->get_tuple_desc(_derived_tuple_id);
+    if (tuple_desc == nullptr) {
+        return -1;
+    }
     MemRowDescriptor* mem_row_desc = state->mem_row_desc();
     bool eos = false;
     int32_t affected_rows = 0;
@@ -201,6 +204,9 @@ int SelectManagerNode::construct_primary_possible_index(
     SmartRecord record_template = _factory->new_record(main_table_id);
     for (auto& pair : _fetcher_store.start_key_sort) {
         auto& batch = _fetcher_store.region_batch[pair.second];
+        if (batch == nullptr) {
+            continue;
+        }
         for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
             std::unique_ptr<MemRow>& mem_row = batch->get_row();
             SmartRecord record = record_template->clone(false);

@@ -18,14 +18,20 @@
 #include <stdio.h>
 #include <string>
 #include <gflags/gflags.h>
+#include <boost/filesystem.hpp>
 //#include <gperftools/malloc_extension.h>
 #include "common.h"
 #include "network_server.h"
 #include "fn_manager.h"
+#include "task_fetcher.h"
+#include "task_manager.h"
 #include "schema_factory.h"
 #include "information_schema.h"
+#include "memory_profile.h"
 
 namespace baikaldb {
+
+DEFINE_int64(db_sql_memory_bytes_limit, 8589934592, "minimum memory use size , defalut: 8G");
 
 // Signal handlers.
 void handle_exit_signal() {
@@ -45,6 +51,8 @@ int main(int argc, char **argv) {
 #endif
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     google::ParseCommandLineFlags(&argc, &argv, true);
+    boost::filesystem::path remove_path("init.success");
+    boost::filesystem::remove_all(remove_path); 
     // Initail log
     if (baikaldb::init_log(argv[0]) != 0) {
         fprintf(stderr, "log init failed.");
@@ -68,20 +76,39 @@ int main(int argc, char **argv) {
         DB_FATAL("meta server interact init failed");
         return -1;
     }
-    if (baikaldb::AutoInc::init_meta_inter() != 0) {
-        DB_FATAL("auto incr meta server interact init failed");
+    if (baikaldb::MetaServerInteract::get_auto_incr_instance()->init() != 0) {
+        DB_FATAL("meta server interact init failed");
         return -1;
     }
-    if (baikaldb::TsoFetcher::init_meta_inter() != 0) {
-        DB_FATAL("tso meta server interact init failed");
+    if (baikaldb::MetaServerInteract::get_tso_instance()->init() != 0) {
+        DB_FATAL("meta server interact init failed");
         return -1;
     }
+    // 可以没有backup
+    if (baikaldb::MetaServerInteract::get_backup_instance()->init(true) != 0) {
+        DB_FATAL("meta server interact backup init failed");
+        return -1;
+    }
+    if (baikaldb::MetaServerInteract::get_backup_instance()->is_inited()) {
+        if (baikaldb::SchemaFactory::get_backup_instance()->init() != 0) {
+            DB_FATAL("SchemaFactory init failed");
+            return -1;
+        }
+    }
+
+    if (baikaldb::TaskManager::get_instance()->init() != 0) {
+        DB_FATAL("init task manager error.");
+        return -1;
+    }
+    baikaldb::MemoryGCHandler::get_instance()->init();
+    baikaldb::MemTrackerPool::get_instance()->init(baikaldb::FLAGS_db_sql_memory_bytes_limit);
     // Initail server.
     baikaldb::NetworkServer* server = baikaldb::NetworkServer::get_instance();
     if (!server->init()) {
         DB_FATAL("Failed to initail network server.");
         return 1;
     }
+    std::ofstream init_fs("init.success", std::ofstream::out | std::ofstream::trunc);
     if (!server->start()) {
         DB_FATAL("Failed to start server.");
     }
@@ -89,6 +116,8 @@ int main(int argc, char **argv) {
 
     // Stop server.
     server->stop();
+    baikaldb::MemoryGCHandler::get_instance()->close();
+    baikaldb::MemTrackerPool::get_instance()->close();
     DB_NOTICE("Server stopped.");
     return 0;
 }

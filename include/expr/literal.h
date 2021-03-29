@@ -31,6 +31,13 @@ public:
 
     virtual ~Literal() {
     }
+
+    void init(const ExprValue& value) {
+        _value = value;
+        _is_constant = true;
+        _has_null = value.is_null();
+        value_to_node_type();
+    }
     
     virtual int init(const pb::ExprNode& node) {
         int ret = 0;
@@ -39,60 +46,78 @@ public:
             return ret;
         }
         switch (node.node_type()) {
-            case pb::NULL_LITERAL:
+            case pb::NULL_LITERAL: {
                 _value.type = pb::NULL_TYPE;
                 _has_null = true;
                 break;
-            case pb::INT_LITERAL:
+            }
+            case pb::INT_LITERAL: {
                 _value.type = pb::INT64;
                 _value._u.int64_val = node.derive_node().int_val();
                 break;
-            case pb::BOOL_LITERAL:
+            }
+            case pb::BOOL_LITERAL: {
                 _value.type = pb::BOOL;
                 _value._u.bool_val = node.derive_node().bool_val();
                 break;
-            case pb::DOUBLE_LITERAL:
+            }
+            case pb::DOUBLE_LITERAL: {
                 _value.type = pb::DOUBLE;
                 _value._u.double_val = node.derive_node().double_val();
                 break;
-            case pb::STRING_LITERAL:
+            }
+            case pb::STRING_LITERAL: {
                 _value.type = pb::STRING;
                 _value.str_val = node.derive_node().string_val();
                 break;
-            case pb::HEX_LITERAL:
+            }
+            case pb::HEX_LITERAL: {
                 _value.type = pb::HEX;
                 _value.str_val = node.derive_node().string_val();
                 break;
-            case pb::HLL_LITERAL:
+            }
+            case pb::HLL_LITERAL: {
                 _value.type = pb::HLL;
                 _value.str_val = node.derive_node().string_val();
                 break;
-            case pb::BITMAP_LITERAL:
+            }
+            case pb::BITMAP_LITERAL: {
                 _value.type = pb::BITMAP;
                 _value.str_val = node.derive_node().string_val();
                 _value.cast_to(pb::BITMAP);
                 break;
-            case pb::DATETIME_LITERAL:
+            }
+            case pb::TDIGEST_LITERAL: {
+                _value.type = pb::TDIGEST;
+                _value.str_val = node.derive_node().string_val();
+                break;
+            }
+            case pb::DATETIME_LITERAL: {
                 _value.type = pb::DATETIME;
                 _value._u.uint64_val = node.derive_node().int_val();
                 break;
-            case pb::TIME_LITERAL:
+            }
+            case pb::TIME_LITERAL: {
                 _value.type = pb::TIME;
                 _value._u.int32_val = node.derive_node().int_val();
                 break;
-            case pb::TIMESTAMP_LITERAL:
+            }
+            case pb::TIMESTAMP_LITERAL: {
                 _value.type = pb::TIMESTAMP;
                 _value._u.uint32_val = node.derive_node().int_val();
-                break;        
-            case pb::DATE_LITERAL:
+                break;
+            }
+            case pb::DATE_LITERAL: {
                 _value.type = pb::DATE;
                 _value._u.uint32_val = node.derive_node().int_val();
                 break;
-            case pb::PLACE_HOLDER_LITERAL:
+            }
+            case pb::PLACE_HOLDER_LITERAL: {
                 _value.type = pb::NULL_TYPE;
                 _is_place_holder = true;
                 _place_holder_id = node.derive_node().int_val(); // place_holder id
                 break;
+            }
             default:
                 return -1;
         }

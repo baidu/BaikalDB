@@ -50,6 +50,14 @@ public:
             expr->find_place_holder(placeholders);
         }
     }
+    virtual void remove_additional_predicate(std::vector<ExprNode*>& input_exprs);
+    virtual void replace_slot_ref_to_literal(const std::set<int64_t>& sign_set,
+                    std::map<int64_t, std::vector<ExprNode*>>& literal_maps) {
+        ExecNode::replace_slot_ref_to_literal(sign_set, literal_maps);
+        for (auto& expr : _conjuncts) {
+            expr->replace_slot_ref_to_literal(sign_set, literal_maps);
+        }
+    }
     void modifiy_pruned_conjuncts_by_index(const std::unordered_set<ExprNode*>& other_condition) {
         // 先清理，后续transfer pb会填充 _pruned_conjuncts
         mutable_pb_node()->mutable_derive_node()->mutable_filter_node()->clear_conjuncts();
@@ -59,6 +67,7 @@ public:
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 private:
     bool need_copy(MemRow* row);
+    void memory_limit_release(RuntimeState* state, MemRow* row);
 
 private:
     std::vector<ExprNode*> _conjuncts;

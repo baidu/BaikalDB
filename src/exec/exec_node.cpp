@@ -35,6 +35,8 @@
 #include "lock_secondary_node.h"
 #include "full_export_node.h"
 #include "union_node.h"
+#include "apply_node.h"
+#include "load_node.h"
 #include "runtime_state.h"
 
 namespace baikaldb {
@@ -69,6 +71,13 @@ int ExecNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     input_exprs.clear();
     return 0;
 }
+
+void ExecNode::remove_additional_predicate(std::vector<ExprNode*>& input_exprs) {
+    for (auto c : _children) {
+        c->remove_additional_predicate(input_exprs);
+    }
+}
+
 void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
     pb::PlanNode pb_plan_node;
     pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
@@ -83,16 +92,29 @@ void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
         filter_node->add_conjunct(expr);
     }
 }
-void ExecNode::get_node(pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes) {
+
+void ExecNode::get_node(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes) {
     if (_node_type == node_type) {
-        exec_nodes.push_back(this);
+        exec_nodes.emplace_back(this);
     } 
     for (auto c : _children) {
         c->get_node(node_type, exec_nodes);
     }
 }
 
-ExecNode* ExecNode::get_node(pb::PlanNodeType node_type) {
+void ExecNode::join_get_scan_nodes(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes) {
+    if (_node_type == node_type) {
+        exec_nodes.emplace_back(this);
+    }
+    for (auto c : _children) {
+        if (c->node_type() == pb::JOIN_NODE || c->node_type() == pb::APPLY_NODE) {
+            continue;
+        }
+        c->join_get_scan_nodes(node_type, exec_nodes);
+    }
+}
+
+ExecNode* ExecNode::get_node(const pb::PlanNodeType node_type) {
     if (_node_type == node_type) {
         return this;
     } else {
@@ -302,6 +324,12 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
         case pb::UNION_NODE:
             *exec_node = new UnionNode;
             return (*exec_node)->init(node);
+        case pb::APPLY_NODE:
+            *exec_node = new ApplyNode;
+            return (*exec_node)->init(node);
+        case pb::LOAD_NODE:
+            *exec_node = new LoadNode;
+            return (*exec_node)->init(node);
         default:
             DB_FATAL("create_exec_node failed: %s", node.DebugString().c_str());
             return -1;
@@ -313,8 +341,8 @@ int ExecNode::push_cmd_to_cache(RuntimeState* state,
                                 pb::OpType op_type,
                                 ExecNode* store_request,
                                 int seq_id) {
-    //DB_WARNING("txn_id: %lu op_type: %s, seq_id: %d, exec_node:%p", 
-    //    state->txn_id, pb::OpType_Name(op_type).c_str(), seq_id, store_request);
+    DB_DEBUG("txn_id: %lu op_type: %s, seq_id: %d, exec_node:%p", 
+        state->txn_id, pb::OpType_Name(op_type).c_str(), seq_id, store_request);
     if (state->txn_id == 0) {
         return 0;
     }

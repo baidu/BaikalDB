@@ -62,7 +62,6 @@ int IndexSelector::analyze(QueryContext* ctx) {
                             filter_node, 
                             NULL,
                             join_node,
-                            &ctx->has_recommend,
                             &index_has_null,
                             field_range_type,
                             ctx->stat_info.sample_sql.str());
@@ -72,7 +71,6 @@ int IndexSelector::analyze(QueryContext* ctx) {
                            filter_node, 
                            sort_node,
                            join_node,
-                           &ctx->has_recommend,
                            &index_has_null,
                            field_range_type, 
                            ctx->stat_info.sample_sql.str());
@@ -249,7 +247,7 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
     {
         // or 只能全部是倒排索引才能选择。
         // 倒排索引 or 普通索引时，不选择倒排索引（针对该 expr，不排除其他 expr 选择该倒排索引）。
-        auto table_info_ptr = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
+        auto table_info_ptr = _factory->get_table_info_ptr(table_id);
         if (table_info_ptr == nullptr) {
             return;
         }
@@ -465,14 +463,12 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                                     FilterNode* filter_node, 
                                     SortNode* sort_node,
                                     JoinNode* join_node,
-                                    bool* has_recommend,
                                     bool* index_has_null,
                                     std::map<int32_t, int>& field_range_type,
                                     const std::string& sample_sql) {
     int64_t table_id = scan_node->table_id();
     int32_t tuple_id = scan_node->tuple_id();
-    SchemaFactory* schema_factory = SchemaFactory::get_instance();
-    auto table_info = schema_factory->get_table_info_ptr(table_id);
+    auto table_info = _factory->get_table_info_ptr(table_id);
     if (table_info == nullptr) {
         DB_WARNING("table info not found:%ld", table_id);
         return -1;
@@ -523,17 +519,17 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
     ignore_indexs.insert(std::begin(pb_scan_node->ignore_indexes()), 
             std::end(pb_scan_node->ignore_indexes()));
 
-    auto pri_ptr = schema_factory->get_index_info_ptr(table_id); 
+    auto pri_ptr = _factory->get_index_info_ptr(table_id); 
     if (pri_ptr == nullptr) {
         DB_WARNING("pk info not found:%ld", table_id);
         return -1;
     }
-    SmartRecord record_template = schema_factory->new_record(table_id);
+    SmartRecord record_template = _factory->new_record(table_id);
     for (auto index_id : index_ids) {
         if (ignore_indexs.count(index_id) == 1 && index_id != table_id) {
             continue;
         }
-        auto info_ptr = schema_factory->get_index_info_ptr(index_id); 
+        auto info_ptr = _factory->get_index_info_ptr(index_id); 
         if (info_ptr == nullptr) {
             continue;
         }
@@ -574,11 +570,6 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         access_path->insert_no_cut_condition(expr_field_map);
         access_path->calc_is_covering_index(tuple_descs[tuple_id]);
         scan_node->add_access_path(access_path);
-        if (index_type == pb::I_RECOMMEND && access_path->is_possible) {
-            if (has_recommend != NULL) {
-                *has_recommend = true;
-            }
-        }
     }
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
     return scan_node->select_index_in_baikaldb(sample_sql); 

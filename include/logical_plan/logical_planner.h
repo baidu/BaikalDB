@@ -51,6 +51,12 @@ struct JoinMemTmp {
     }
 };
 
+struct ApplyMemTmp {
+    pb::ApplyNode apply_node;
+    JoinMemTmp* outer_node = nullptr;
+    pb::Plan    inner_plan;
+};
+
 struct ScanTupleInfo {
     int32_t tuple_id = -1;
     int64_t table_id = -1;
@@ -66,7 +72,10 @@ struct CreateExprOptions {
     bool can_agg = false;
     bool is_select_field = false;
     bool is_values = false;
-    bool need_most_one_row = false;
+    bool max_one_row = false;
+    bool is_not = false;
+    int row_expr_size = 1;
+    pb::CompareType compare_type = pb::CMP_NULL;
 };
 
 struct PlanTableContext {
@@ -101,11 +110,10 @@ public:
 
     virtual ~LogicalPlanner() {
         delete _join_root;
+        delete _apply_root;
     }
 
     virtual int plan() = 0;
-
-    virtual bool is_correlated_subquery() { return false; }
 
     static int analyze(QueryContext* ctx);
    
@@ -119,6 +127,8 @@ public:
     std::multimap<std::string, size_t>& select_alias_mapping() {
         return _select_alias_mapping;
     }
+
+    void set_socket_txn_tid_set();
 
 protected:
     int gen_subquery_plan(parser::DmlNode* subquery, const SmartPlanTableCtx& plan_state,
@@ -161,14 +171,6 @@ protected:
         }
         return nullptr;
     }
-
-    // int64_t get_index_id(const std::string& database) {
-    //     auto iter = _index_id_mapping.find(database);
-    //     if (iter != _index_id_mapping.end()) {
-    //         return iter->second;
-    //     }
-    //     return -1;
-    // }
    
     int parse_db_tables(const parser::TableName* table_name);
     int parse_db_tables(const parser::TableSource* table_source);
@@ -220,15 +222,6 @@ protected:
     int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, const CreateExprOptions& options);
     int create_values_expr(const parser::FuncExpr* item, pb::Expr& expr);
 
-
-    int exec_subquery_expr(QueryContext* sub_ctx);
-    int create_common_subquery_expr(const parser::SubqueryExpr* item, pb::Expr& expr,
-            const CreateExprOptions& options);
-    int create_compare_subquery_expr(const parser::CompareSubqueryExpr* item, pb::Expr& expr,
-            const CreateExprOptions& options);
-    int create_exists_subquery_expr(const parser::ExistsSubqueryExpr* item, pb::Expr& expr,
-            const CreateExprOptions& options);
-
     // TODO in next stage: fill full func name
     // fill arg_types, return_type(col_type) and has_var_args
     int create_scala_func_expr(const parser::FuncExpr* item, pb::Expr& expr, parser::FuncType op, 
@@ -266,11 +259,10 @@ protected:
     int create_filter_node(std::vector<pb::Expr>& filters, pb::PlanNodeType type);
     int create_sort_node();
     int create_scan_nodes();
-    int create_join_and_scan_nodes(baikaldb::JoinMemTmp* join_root);
+    int create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTmp* apply_root);
 
 
     void set_dml_txn_state(int64_t table_id);
-    uint64_t get_txn_id();
     void plan_begin_txn();
     void plan_commit_txn();
     void plan_rollback_txn();
@@ -282,13 +274,31 @@ private:
             pb::Expr& expr,
             pb::ExprNodeType type,
             const CreateExprOptions& options);
-    int create_in_predicate(const parser::FuncExpr* item, 
+    int create_in_predicate(const parser::FuncExpr* func_item, 
             pb::Expr& expr,
-            pb::ExprNodeType type,
+            const CreateExprOptions& options);
+    int exec_subquery_expr(QueryContext* sub_ctx);
+    int create_common_subquery_expr(const parser::SubqueryExpr* item, pb::Expr& expr,
+            const CreateExprOptions& options, bool& is_correlate);
+    int handle_in_subquery(const parser::FuncExpr* func_item,
+            pb::Expr& expr,
+            const CreateExprOptions& options);
+    int handle_scalar_subquery(const parser::FuncExpr* func_item,
+            pb::Expr& expr,
+            const CreateExprOptions& options);
+    int handle_common_subquery(const parser::ExprNode* expr_item,
+            pb::Expr& expr,
+            const CreateExprOptions& options);
+    int construct_apply_node(QueryContext* ctx,
+        pb::Expr& expr,
+        const pb::JoinType join_type,
+        const CreateExprOptions& options);
+    int handle_compare_subquery(const parser::ExprNode* item, pb::Expr& expr,
+            const CreateExprOptions& options);
+    int handle_exists_subquery(const parser::ExprNode* item, pb::Expr& expr,
             const CreateExprOptions& options);
     void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
-
-    static std::atomic<uint64_t> _txn_id_counter;
+    int construct_in_predicate_node(const parser::FuncExpr* func_item, pb::Expr& expr, pb::ExprNode** node);
 
 protected:
     QueryContext*       _ctx = nullptr;
@@ -323,9 +333,10 @@ protected:
     std::vector<bool>           _order_ascs;
 
     JoinMemTmp*                 _join_root = nullptr;
-    int32_t                     _derived_table_id = -1;
+    ApplyMemTmp*                _apply_root = nullptr;
+    bool                        _is_correlate_subquery_expr = false;
     int32_t                     _column_id = 0;
-    std::string                 _current_table_name;
+    // 同一层级的操作表集合，e.g:join的左右表
+    std::vector<std::string>       _current_tables;
 };
 } //namespace baikal
-

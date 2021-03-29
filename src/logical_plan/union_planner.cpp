@@ -62,25 +62,25 @@ int UnionPlanner::plan() {
 }
 
 int UnionPlanner::gen_select_stmts_plan() {
-    int  _number_for_columns = 0; // union的每个select的column个数必须一样
     _is_distinct = _union_stmt->distinct;
     std::vector<std::string>    final_select_names;
+    _union_tuple_id = _plan_table_ctx->tuple_cnt;
     for (int stmt_idx = 0; stmt_idx < _union_stmt->select_stmts.size(); stmt_idx++) {
         parser::SelectStmt* select = _union_stmt->select_stmts[stmt_idx];
         int ret = gen_subquery_plan(select, _plan_table_ctx, ExprParams());
         if (ret < 0) {
             return -1;
         }
+        auto sub_ctx = _ctx->sub_query_plans.back();
         if (stmt_idx == 0) {
             final_select_names = _select_names;
         }
-        int columns_size = _select_names.size();
-        if (_number_for_columns != 0 &&  _number_for_columns != columns_size) {
+        // union的每个select的column个数必须一样
+        if (final_select_names.size() != sub_ctx->expr_params.row_filed_number) {
             _ctx->stat_info.error_code = ER_WRONG_NUMBER_OF_COLUMNS_IN_SELECT;
             _ctx->stat_info.error_msg << "The used SELECT statements have a different number of columns";
+            DB_WARNING("have a different number of columns %zu %d", final_select_names.size(), sub_ctx->expr_params.row_filed_number);
             return -1;
-        } else {
-            _number_for_columns = columns_size;
         }
     }
     _select_names.swap(final_select_names);
@@ -89,7 +89,7 @@ int UnionPlanner::gen_select_stmts_plan() {
 
 void UnionPlanner::parse_dual_fields() {
     int32_t slot_id = 1;
-    int32_t tuple_id = 0; // 复用第一个select的tuple
+    int32_t tuple_id = _union_tuple_id; // 复用第一个select的tuple
     pb::TupleDescriptor tuple_desc;
     tuple_desc.set_tuple_id(tuple_id);
     tuple_desc.set_table_id(1);
@@ -137,7 +137,7 @@ int UnionPlanner::parse_dual_order_by() {
             node->set_node_type(pb::SLOT_REF);
             node->set_col_type(pb::INVALID_TYPE);
             node->set_num_children(0);
-            node->mutable_derive_node()->set_tuple_id(0);
+            node->mutable_derive_node()->set_tuple_id(_union_tuple_id);
             node->mutable_derive_node()->set_slot_id(_name_slot_id_mapping[column_name]);
         } else {
             _ctx->stat_info.error_code = ER_WRONG_COLUMN_NAME;
@@ -151,11 +151,14 @@ int UnionPlanner::parse_dual_order_by() {
 }
 
 void UnionPlanner::create_union_node() {
-    pb::PlanNode* union_node = _ctx->add_plan_node();
-    union_node->set_node_type(pb::UNION_NODE);
-    union_node->set_limit(-1);
-    union_node->set_is_explain(_ctx->is_explain);
-    union_node->set_num_children(0);
+    pb::PlanNode* plan_node = _ctx->add_plan_node();
+    plan_node->set_node_type(pb::UNION_NODE);
+    plan_node->set_limit(-1);
+    plan_node->set_is_explain(_ctx->is_explain);
+    plan_node->set_num_children(0);
+    pb::DerivePlanNode* derive = plan_node->mutable_derive_node();
+    pb::UnionNode* union_node = derive->mutable_union_node();
+    union_node->set_union_tuple_id(_union_tuple_id);
 }
 
 // create packet_node/sort_node/limit_node/agg_node
@@ -217,7 +220,7 @@ int UnionPlanner::create_common_plan_node() {
             sort->add_is_asc(_order_ascs[idx]);
             sort->add_is_null_first(_order_ascs[idx]);
         }
-        sort->set_tuple_id(0);
+        sort->set_tuple_id(_union_tuple_id);
     }
     if (_is_distinct) {
         pb::PlanNode* agg_node = _ctx->add_plan_node();

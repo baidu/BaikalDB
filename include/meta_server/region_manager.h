@@ -173,8 +173,15 @@ public:
         return 0;
     }
 
+    void remove_error_peer(const int64_t region_id,
+                                std::set<std::string> peers,
+                                std::vector<pb::PeerStateInfo>& recover_region_way);
+    void remove_illegal_peer(const int64_t region_id,
+                                std::set<std::string> peers,
+                                std::vector<pb::PeerStateInfo>& recover_region_way);
     void recovery_single_region_by_set_peer(const int64_t region_id,
                                 const std::set<std::string>& resource_tags,
+                                const pb::RecoverOpt recover_opt,
                                 std::set<std::string> peers,
                                 std::map<std::string, std::set<int64_t>>& not_alive_regions,
                                 std::vector<pb::PeerStateInfo>& recover_region_way);

@@ -96,13 +96,13 @@ TEST(test_stripslashes, case_all) {
     std::cout << xx2 << ":aaa\n";
     std::string str = "\\%\\a\\t";
     std::cout << "orgin:" << str << std::endl;
-    stripslashes(str);
+    stripslashes(str, true);
     std::cout << "new:" << str << std::endl;
     EXPECT_STREQ(str.c_str(), "\\%a\t");
 
     std::string str2 = "abc";
     std::cout << "orgin:" << str2 << std::endl;
-    stripslashes(str2);
+    stripslashes(str2, true);
     std::cout << "new:" << str2 << std::endl;
     EXPECT_STREQ(str2.c_str(), "abc");
 }
@@ -269,9 +269,9 @@ TEST(BvarMap, bvarmap) {
     bvar::Adder<BvarMap> bm;
     std::map<int32_t, int> field_range_type;
     //bm << BvarMap(std::make_pair("abc", 1));
-    bm << BvarMap("abc", 1, 101, 10, 1, 5, 3, field_range_type);
-    bm << BvarMap("abc", 4, 102, 20, 2, 6, 2, field_range_type);
-    bm << BvarMap("bcd", 5, 103, 30, 3, 7, 1, field_range_type);
+    bm << BvarMap("abc", 1, 101, 10, 1, 5, 3, field_range_type, 1);
+    bm << BvarMap("abc", 4, 102, 20, 2, 6, 2, field_range_type, 1);
+    bm << BvarMap("bcd", 5, 103, 30, 3, 7, 1, field_range_type, 1);
     std::cout << bm.get_value();
 }
 
@@ -294,5 +294,50 @@ TEST(test_gbk_regex, match) {
 
     std::cout << "wregex match result : " << boost::regex_match(wval1, wzhao_regex) << '\n';
 }
+
+DEFINE_int64(gflags_test_int64, 20000, "");
+DEFINE_double(gflags_test_double, 0.234, "");
+DEFINE_string(gflags_test_string, "abc", "");
+DEFINE_bool(gflags_test_bool, true, "");
+
+TEST(gflags_test, case_all) {
+    if (!google::SetCommandLineOption("gflags_test_int64", "1000").empty()) {
+        DB_WARNING("gflags_test_int64:%ld", FLAGS_gflags_test_int64);
+    }
+    if (!google::SetCommandLineOption("gflags_test_double", "0.123").empty()) {
+        DB_WARNING("gflags_test_double:%f", FLAGS_gflags_test_double);
+    }
+    if (!google::SetCommandLineOption("gflags_test_string", "def").empty()) {
+        DB_WARNING("gflags_test_string:%s", FLAGS_gflags_test_string.c_str());
+    }
+    if (!google::SetCommandLineOption("gflags_test_bool", "false").empty()) {
+        DB_WARNING("gflags_test_bool:%d", FLAGS_gflags_test_bool);
+    }
+    if (!google::SetCommandLineOption("gflags_test_int32", "500").empty()) {
+        DB_WARNING("gflags_test_int32: succ");
+    } else {
+        DB_WARNING("gflags_test_int32: failed");
+    }
+    
+    if (!google::SetCommandLineOption("gflags_test_int64", "400.0").empty()) {
+        DB_WARNING("gflags_test_int64: succ");
+    } else {
+        DB_WARNING("gflags_test_int64: failed");
+    }
+    if (!google::SetCommandLineOption("gflags_test_double", "300").empty()) {
+        DB_WARNING("gflags_test_double: succ:%f", FLAGS_gflags_test_double);
+    } else {
+        DB_WARNING("gflags_test_double: failed");
+    }
+    if (!google::SetCommandLineOption("gflags_test_bool", "123").empty()) {
+        DB_WARNING("gflags_test_bool: succ:%d", FLAGS_gflags_test_bool);
+    } else {
+        DB_WARNING("gflags_test_bool: failed");
+    }
+    update_param("gflags_test_double", "600");
+    update_param("gflags_test_int32", "600");
+    update_param("gflags_test_bool", "false");
+}
+
 
 }  // namespace baikal

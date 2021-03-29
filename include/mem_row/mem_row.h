@@ -29,7 +29,7 @@ class MemRowDescriptor;
 class MemRow final {
 friend MemRowDescriptor;
 public:
-    explicit MemRow(int size) : _tuples(size) {
+    explicit MemRow(int size) : _tuples(size), _tuples_assignd(size) {
     }
 
     ~MemRow() {
@@ -71,6 +71,7 @@ public:
         for (auto& t : _tuples) {
             t->Clear();
         }
+        std::fill(_tuples_assignd.begin(), _tuples_assignd.end(), false);
     }
 
     std::string* mutable_string(int32_t tuple_id, int32_t slot_id);
@@ -93,7 +94,6 @@ public:
         }
         const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
         auto field = descriptor->field(slot_id - 1);
-
         return MessageHelper::set_value(field, tuple, value);
     }
 
@@ -103,7 +103,10 @@ public:
                 DB_WARNING("tuple not in memrow");
                 return -1;
             }
-            _tuples[tuple_id]->CopyFrom(*(mem_row->_tuples[tuple_id]));
+            if (!_tuples_assignd[tuple_id]) {
+                _tuples[tuple_id]->CopyFrom(*(mem_row->_tuples[tuple_id]));
+                _tuples_assignd[tuple_id] = true;
+            }
         }
         return 0;
     }
@@ -127,8 +130,19 @@ public:
         return MessageHelper::decode_field(field, field_type, tuple, in);
     }
 
+    int64_t byte_size_long() {
+        int64_t used_size = 9 * _tuples.size() + sizeof(MemRow);
+        for (auto& t : _tuples) {
+            if (t != nullptr) {
+                used_size += t->ByteSizeLong();
+            }
+        }
+        return used_size;
+    }
+
     private:
     std::vector<google::protobuf::Message*> _tuples;
+    std::vector<bool> _tuples_assignd;
 };
 }
 

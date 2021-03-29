@@ -95,7 +95,8 @@ int JoinReorder::analyze(QueryContext* ctx) {
         }
         if (select_tuple == -1) {
             // no equal join
-            return -1;
+            DB_WARNING("has no equal condition in join");
+            return 0;
         }
         tuple_reorder.push_back(select_tuple);
         tuple_equals_map.erase(select_tuple);

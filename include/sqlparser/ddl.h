@@ -50,6 +50,7 @@ enum MysqlType : unsigned char {
     MYSQL_TYPE_TIMESTAMP2, 
     MYSQL_TYPE_DATETIME2, 
     MYSQL_TYPE_TIME2,
+    MYSQL_TYPE_TDIGEST      = 242,
     MYSQL_TYPE_BITMAP       = 243,
     MYSQL_TYPE_HLL          = 244,
     MYSQL_TYPE_JSON         = 245, 
@@ -142,7 +143,8 @@ enum AlterSpecType : unsigned char {
 
     ALTER_SPEC_RENAME_COLUMN,
     ALTER_SPEC_RENAME_TABLE,
-    ALTER_SPEC_TABLE_OPTION
+    ALTER_SPEC_TABLE_OPTION,
+    ALTER_SPEC_RESTORE_INDEX
 };
 
 enum PartitionType : unsigned char {

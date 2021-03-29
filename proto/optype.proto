@@ -33,8 +33,11 @@ enum OpType {
     OP_TXN_QUERY_PRIMARY_REGION             = 24; // Percolator反查primary region
     OP_TXN_QUERY_STATE                      = 25; // 查询事务状态
     OP_TXN_COMPLETE                         = 26; // 手动完成特定事务处理
+    OP_CLEAR_APPLYING_TXN                   = 27; // 清理未apply的事务
+    OP_SELECT_FOR_UPDATE                    = 28;
     // fake op
     OP_UNION                                = 51;
+    OP_LOAD                                 = 52;
     
     // for binlog
     OP_READ_BINLOG                          = 60; //read     binlog
@@ -42,6 +45,7 @@ enum OpType {
     OP_COMMIT_BINLOG                        = 62; //commit   binlog
     OP_ROLLBACK_BINLOG                      = 63; //rollback binlog
     OP_FAKE_BINLOG                          = 64; //fake     binlog
+    OP_RECOVER_BINLOG                       = 65; //recover  binlog
 
     // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
@@ -111,4 +115,9 @@ enum OpType {
     OP_UNLINK_BINLOG                        = 178; //清除binlog关联
     OP_SET_INDEX_HINT_STATUS                = 179; //设置索引提示状态
     OP_UPDATE_TTL_DURATION                  = 180; //修改ttl_duration，只有ttl表才能改
+    OP_UPDATE_INSTANCE_PARAM                = 181;
+    OP_UPDATE_GLOBAL_REGION_DDL_WORK        = 182;
+    OP_SUSPEND_DDL_WORK                     = 183; 
+    OP_RESTART_DDL_WORK                     = 184; 
+    OP_REMOVE_GLOBAL_INDEX_DATA             = 185; 
 };

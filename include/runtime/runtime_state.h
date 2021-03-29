@@ -31,6 +31,7 @@
 #include "mysql_err_code.h"
 #include "trace_state.h"
 #include "statistics.h"
+#include "memory_profile.h"
 //#include "region_resource.h"
 
 using google::protobuf::RepeatedPtrField;
@@ -78,10 +79,11 @@ class RuntimeState {
 
 public:
     RuntimeState() {
-        bthread_mutex_init(&_callid_lock, NULL);
+        bthread_mutex_init(&_mem_lock, NULL);
     }
     ~RuntimeState() {
-        bthread_mutex_destroy(&_callid_lock);
+        memory_limit_release(_used_bytes);
+        bthread_mutex_destroy(&_mem_lock);
     }
 
     // baikalStore init
@@ -111,12 +113,18 @@ public:
         return _is_cancelled;
     }
     pb::TupleDescriptor* get_tuple_desc(int tuple_id) {
+        if (tuple_id >= (int32_t)_tuple_descs.size()) {
+            return nullptr;
+        }
         return &_tuple_descs[tuple_id];
     }
     std::vector<pb::TupleDescriptor>* mutable_tuple_descs() {
         return &_tuple_descs;
     }
     int32_t get_slot_id(int32_t tuple_id, int32_t field_id) {
+        if (tuple_id >= (int32_t)_tuple_descs.size()) {
+            return -1;
+        }
         for (const auto& slot_desc : _tuple_descs[tuple_id].slots()) {
             if (slot_desc.field_id() == field_id) {
                 return slot_desc.slot_id();
@@ -297,6 +305,10 @@ public:
         return _eos;
     }
 
+    bool use_backup() {
+        return _use_backup;
+    }
+
     void set_eos() {
         _eos = true;
     }
@@ -336,22 +348,13 @@ public:
     int64_t primary_region_id() const {
         return _primary_region_id;
     }
-    void cancel_rpc(const std::set<std::string>& addrs, int fd) {
-        BAIDU_SCOPED_LOCK(_callid_lock);
-        for (auto& addr : addrs) {
-            if (_addr_callids_map.count(addr) == 0) {
-                continue;
-            }
-            for (auto& pair : _addr_callids_map[addr]) {
-                brpc::StartCancel(pair.second);
-                DB_WARNING("cancel addr:%s, region_id: %ld, fd: %d", addr.c_str(), pair.first, fd);
-            }
-            _addr_callids_map[addr].clear();
+    int memory_limit_exceeded(int64_t bytes);
+    int memory_limit_release(int64_t bytes);
+    void used_bytes_release(int64_t bytes) {
+        _used_bytes -= bytes;
+        if (_used_bytes < 0) {
+            _used_bytes = 0;
         }
-    }
-    void insert_callid(const std::string addr, int64_t region_id, brpc::CallId callid) {
-        BAIDU_SCOPED_LOCK(_callid_lock);
-        _addr_callids_map[addr].emplace(region_id, callid);
     }
 
 public:
@@ -364,12 +367,21 @@ public:
     bool              use_ttl = false;
     BthreadCond       txn_cond;
     std::function<void(RuntimeState* state, SmartTransaction txn)> raft_func;
-    bool              is_fail = false;
     bool              need_txn_limit = false;
+    pb::ErrCode       err_code = pb::SUCCESS;
     std::string       raft_error_msg;
     ExplainType       explain_type = EXPLAIN_NULL;
     std::shared_ptr<CMsketch> cmsketch = nullptr;
 
+    // global index ddl 使用
+    int32_t             ddl_scan_size = 0;
+    std::string        ddl_max_pk_key;
+    std::string        ddl_max_router_key;
+    MysqlErrCode       ddl_error_code = ER_ERROR_FIRST;
+    std::unique_ptr<std::string> first_record_ptr {nullptr};
+    std::unique_ptr<std::string> last_record_ptr {nullptr};
+
+    uint64_t          sign = 0;
 private:
     bool _is_inited    = false;
     bool _is_cancelled = false;
@@ -395,18 +407,16 @@ private:
 
     bool              _single_sql_autocommit = true;     // used for baikaldb and store
     bool              _optimize_1pc = false;  // 2pc de-generates to 1pc when autocommit=true and
+    // 如果用了排序列做索引，就不需要排序了
+    bool              _sort_use_index = false;
+    bool              _use_backup = false;
                                               // there is only 1 region.
     NetworkSocket*    _client_conn = nullptr; // used for baikaldb
-    // used for baikaldb, 记录rpcid用于cancel
-    bthread_mutex_t _callid_lock;
-    std::map<std::string, std::map<int64_t, brpc::CallId>> _addr_callids_map; 
     TransactionPool*  _txn_pool = nullptr;    // used for store
     SmartTransaction  _txn = nullptr;         // used for store
     std::shared_ptr<RegionResource> _resource;// used for store
     int64_t           _primary_region_id = -1;// used for store
 
-    // 如果用了排序列做索引，就不需要排序了
-    bool _sort_use_index = false;
     std::vector<int64_t> _scan_indices;
     size_t _row_batch_capacity = ROW_BATCH_CAPACITY;
     int _multiple = 1;
@@ -414,6 +424,10 @@ private:
     //trace使用
     std::vector<TraceTimeCost> _trace_cost_vec;
     std::vector<std::vector<ExprValue>> _subquery_exprs;
+    // mem limit
+    int64_t _used_bytes = 0;
+    bthread_mutex_t  _mem_lock;
+    SmartMemTracker  _mem_tracker = nullptr;
 };
 typedef std::shared_ptr<RuntimeState> SmartState;
 }

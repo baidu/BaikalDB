@@ -52,11 +52,14 @@ int FullExportNode::open(RuntimeState* state) {
 bool FullExportNode::get_batch(RowBatch* batch) {
     auto iter = _sent_region_ids.begin();
     if (iter != _sent_region_ids.end()) {
-        auto iter2 = _fetcher_store.region_batch.find(*iter);
+        // _fetcher_store内部region_batch修改
+        // full_export_node没有调用run，会放入split_region_batch
+        // todo full_export_node统一
+        auto iter2 = _fetcher_store.split_region_batch.find(*iter);
         _sent_region_ids.erase(iter);
-        if (iter2 != _fetcher_store.region_batch.end()) {
+        if (iter2 != _fetcher_store.split_region_batch.end()) {
             batch->swap(*iter2->second);
-            _fetcher_store.region_batch.erase(iter2);
+            _fetcher_store.split_region_batch.erase(iter2);
             return true;
         } else {
             return false;

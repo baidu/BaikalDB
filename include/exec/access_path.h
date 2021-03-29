@@ -47,7 +47,6 @@ enum IndexHint {
     void calc_index_range(Property& sort_property) {
         fetch_field_ids();
         switch (index_type) {
-            case pb::I_RECOMMEND:
             case pb::I_FULLTEXT:
                 calc_fulltext();
                 break;
@@ -78,12 +77,6 @@ enum IndexHint {
         }
         if (index_type == pb::I_FULLTEXT) {
             cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__weight"));
-        }
-        if (index_type == pb::I_RECOMMEND) {
-            int32_t userid_field_id = get_field_id_by_name(table_info_ptr->fields, "userid");
-            int32_t source_field_id = get_field_id_by_name(table_info_ptr->fields, "source");
-            cover_field_ids.insert(userid_field_id);
-            cover_field_ids.insert(source_field_id);
         }
     }
     

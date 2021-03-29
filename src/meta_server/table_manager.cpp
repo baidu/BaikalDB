@@ -22,15 +22,32 @@
 #include "cluster_manager.h"
 #include "meta_util.h"
 #include "meta_rocksdb.h"
+#include "ddl_manager.h"
 
 namespace baikaldb {
 DECLARE_int32(concurrency_num);
 DEFINE_int32(region_replica_num, 3, "region replica num, default:3"); 
 DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M");
-DEFINE_int32(ddl_update_time, 300 * 1000 * 1000, "time interval to update ddl");
+DEFINE_int64(min_ddl_index_state_change_interval_us, 30 * 1000 * 1000, "min time interval to update ddl");
+DEFINE_int64(max_ddl_index_state_change_interval_us, 300 * 1000 * 1000, "max time interval to update ddl");
 DEFINE_int32(ddl_update_process_per_thread_size, 500, "ddl common update process ddlwork size per thread");
 DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 2, "time interval to clear table_tombstone. default(2d)");
 DEFINE_uint64(statistics_heart_beat_bytesize, 256 * 1024 * 1024, "default(256M)");
+
+void TableTimer::run() {
+    DB_NOTICE("Table Timer run.");
+    std::vector<pb::SchemaInfo> delete_schemas;
+    delete_schemas.reserve(10);
+    TableManager::get_instance()->get_delay_delete_index(delete_schemas);
+    for (auto& schema : delete_schemas) {
+        pb::MetaManagerRequest request;
+        request.set_op_type(pb::OP_DROP_INDEX);
+        request.mutable_table_info()->CopyFrom(schema);
+        DB_NOTICE("DDL_LOG drop_index_request req[%s]", request.ShortDebugString().c_str());
+        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL); 
+    }
+}
+
 void TableManager::update_index_status(const pb::DdlWorkInfo& ddl_work) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     auto table_id = ddl_work.table_id();
@@ -1825,19 +1842,27 @@ void TableManager::check_table_exist_for_peer(const pb::StoreHeartBeatRequest* r
     // TODO:加这么大的锁是否有性能问题
     BAIDU_SCOPED_LOCK(_table_mutex);
     for (auto& peer_info : request->peer_infos()) {
-        //int64_t global_index_id = peer_info.table_id();
+        int64_t global_index_id = peer_info.table_id();
         int64_t main_table_id = peer_info.main_table_id() == 0 ? 
             peer_info.table_id() : peer_info.main_table_id();
         // 通过墓碑来安全gc已删表的region
+        auto table_iter = _table_info_map.find(main_table_id);
+        if (global_index_id != main_table_id && table_iter != _table_info_map.end()) {
+            if (!table_iter->second.exist_global_index(global_index_id)) {
+                DB_WARNING("drop global index region %ld", peer_info.region_id());
+                response->add_delete_region_ids(peer_info.region_id());
+            } 
+        }
         if (_table_tombstone_map.find(main_table_id) != _table_tombstone_map.end()) {
             DB_WARNING("table id:%ld has be deleted, drop region_id:%ld not exit, store_address:%s",
                     main_table_id, peer_info.region_id(),
                     request->instance_info().address().c_str());
             response->add_delete_region_ids(peer_info.region_id());
             continue;
-        } else if (_table_info_map.find(main_table_id) != _table_info_map.end()) {
+        } else if (table_iter != _table_info_map.end()) {
             continue;
         }
+        
         // 老逻辑，使用墓碑删除，后续可以删掉这段逻辑
         DB_WARNING("table id:%ld according to region_id:%ld not exit, drop region_id, store_address:%s",
                 main_table_id, peer_info.region_id(),
@@ -2236,15 +2261,14 @@ bool TableManager::check_region_when_update(int64_t table_id,
 
     for (const auto& start_pid_key : min_start_key) {
         auto partition_id = start_pid_key.first;
-        auto start_key_region_iter = _table_info_map[table_id].startkey_regiondesc_map.find(partition_id);
+        auto& partition_startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map[partition_id];
         auto max_pid_key = max_end_key.find(partition_id);
-        if (start_key_region_iter == _table_info_map[table_id].startkey_regiondesc_map.end() ||
-            max_pid_key == max_end_key.end()) {
+        if (max_pid_key == max_end_key.end()) {
             DB_WARNING("not find partition %ld, init", partition_id);
-            return true;
+            continue;
         }
         if (!partition_check_region_when_update(table_id, start_pid_key.second, 
-            max_pid_key->second, start_key_region_iter->second)) {
+            max_pid_key->second, partition_startkey_regiondesc_map)) {
             DB_FATAL("table_id:%ld, min_start_key:%s, max_end_key:%s check fail", 
                      table_id, str_to_hex(start_pid_key.second).c_str(), 
                      str_to_hex(max_pid_key->second).c_str());
@@ -2456,7 +2480,7 @@ int TableManager::get_merge_regions(int64_t table_id,
                       std::string new_start_key, std::string origin_start_key, 
                       std::map<int64_t, std::map<std::string, RegionDesc>>& startkey_regiondesc_map,
                       std::map<int64_t, SmartRegionInfo>& id_noneregion_map,
-                      std::vector<SmartRegionInfo>& regions) {
+                      std::vector<SmartRegionInfo>& regions, int64_t partition_id) {
     if (new_start_key == origin_start_key) {
         return 0;
     }
@@ -2464,7 +2488,7 @@ int TableManager::get_merge_regions(int64_t table_id,
         return -1;
     }
 
-    auto& partition_region_map = startkey_regiondesc_map[0];
+    auto& partition_region_map = startkey_regiondesc_map[partition_id];
     for (auto region_iter = partition_region_map.find(new_start_key); 
             region_iter != partition_region_map.end(); region_iter++) {
         if (region_iter->first > origin_start_key) {
@@ -2572,6 +2596,7 @@ void TableManager::get_update_region_requests(int64_t table_id, TableMem& table_
         regions.clear();
         int64_t region_id = cur_iter->first;
         auto ptr_region = cur_iter->second;
+        int64_t partition_id = ptr_region->partition_id();
         auto master_region = RegionManager::get_instance()->get_region_info(region_id); 
         if (master_region == nullptr) {
             DB_WARNING("can`t find region_id:%ld in region info map", region_id);
@@ -2597,7 +2622,7 @@ void TableManager::get_update_region_requests(int64_t table_id, TableMem& table_
         }
         ret = get_merge_regions(table_id, ptr_region->start_key(), 
                                 master_region->start_key(), 
-                                startkey_regiondesc_map, id_noneregion_map, regions);
+                                startkey_regiondesc_map, id_noneregion_map, regions, partition_id);
         if (ret < 0) {
             DB_WARNING("table_id:%ld, region_id:%ld get merge region failed",
                        table_id, region_id);
@@ -2730,14 +2755,9 @@ void TableManager::check_update_region(const pb::LeaderHeartBeat& leader_region,
     }
 }
 
-
-
-
-
 void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
     //检查参数有效性
-    BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-    DB_DEBUG("drop index, request:%s", request.ShortDebugString().c_str());
+    DB_NOTICE("drop index, request:%s", request.ShortDebugString().c_str());
     int64_t table_id;
     if (check_table_exist(request.table_info(), table_id) != 0) {
         DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
@@ -2750,9 +2770,9 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
         return;
     }
 
-    if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "this table has ddlwork in processing.");
-        DB_WARNING("this table[%ld] has ddlwork in processing .", table_id);
+    if (check_table_has_ddlwork(table_id)) {
+        DB_WARNING("table is doing ddl , request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
     }
     
@@ -2765,6 +2785,18 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
                 info.index_type() == pb::I_FULLTEXT);
         });
     if (index_to_del != std::end(schema_info.indexs())) {
+        
+        if (index_to_del->is_global()) {
+            //全局二级索引逻辑
+            int ret = DDLManager::get_instance()->init_del_global_ddlwork(table_id, index_to_del->index_id());
+            if (ret != 0) {
+                IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "delete global index init error.");
+                DB_WARNING("DDL_LOG delete global index init error index [%s].", index_to_del->index_name().c_str());
+            } else {
+                IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+            }
+            return;
+        }
         std::unique_ptr<DdlWorkMem> ddl_work_ptr(new DdlWorkMem);
         ddl_work_ptr->table_id = table_id;
         ddl_work_ptr->work_info.set_index_id(index_to_del->index_id());
@@ -2786,6 +2818,7 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
                 return;
             }
             update_ddlwork_for_rocksdb(table_id, ddl_work_ptr->work_info, nullptr);
+            BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
             _table_ddlinfo_map.emplace(
                 table_id,
                 std::move(ddl_work_ptr) 
@@ -2799,28 +2832,12 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
 }
 
 int TableManager::init_ddlwork_add_index(const pb::MetaManagerRequest& request, 
-    DdlWorkMem& ddl_work_mem, pb::IndexInfo& index_info) {
+    DdlWorkMem& ddl_work_mem) {
     int ret = 0;
     if ((ret = init_ddlwork(request, ddl_work_mem)) != 0) {
         return ret;
     }
     ddl_work_mem.work_info.set_job_state(pb::IS_NONE);
-    index_info.CopyFrom(request.table_info().indexs(0));
-    //初始化第一个index。 
-    index_info.set_state(pb::IS_NONE);
-    
-    auto table_id = ddl_work_mem.table_id;
-    for (const auto& field_name : index_info.field_names()) {
-        auto field_id_iter = _table_info_map[table_id].field_id_map.find(field_name);
-        if (field_id_iter == _table_info_map[table_id].field_id_map.end()) {
-            DB_WARNING("field_id not found field_name[%s] in field_id_map.", field_name.c_str());
-            return -1;
-        } else {
-            index_info.add_field_ids(field_id_iter->second);
-            DB_DEBUG("DDL_LOG add field id[%d] field_name[%s]", field_id_iter->second, field_name.c_str());
-        }
-    }
-
     return 0;
 }
 
@@ -2876,6 +2893,17 @@ int TableManager::init_region_ddlwork(DdlWorkMem& ddl_work_mem) {
                 init_ddlwork_region_info(ddl_region_mem, *smart_region.get(), pb::IS_UNKNOWN);
                 ddl_work_mem.region_ddl_infos.set(smart_region->region_id(), ddl_region_mem);
             }
+            auto region_ddl_info_size = ddl_work_mem.region_ddl_infos.size();
+            const static int32_t MIX_REGION_SIZE_THRESHOLD = 100;
+            const static int32_t MAX_REGION_SIZE_THRESHOLD = 1000;
+            if (region_ddl_info_size > MIX_REGION_SIZE_THRESHOLD) {
+                if (region_ddl_info_size < MAX_REGION_SIZE_THRESHOLD) {
+                    ddl_work_mem.update_interval_us = region_ddl_info_size * 300 * 1000LL;
+                } else {
+                    ddl_work_mem.update_interval_us = FLAGS_max_ddl_index_state_change_interval_us; 
+                }
+            }
+            DB_NOTICE("ddl index status change update interval_us %ld", ddl_work_mem.update_interval_us);
         } else {
             DB_FATAL("DDL_LOG unknown optype.");
             return -1;
@@ -2890,7 +2918,7 @@ int TableManager::init_ddlwork(const pb::MetaManagerRequest& request, DdlWorkMem
     ddl_work_mem.work_info.set_table_id(table_id);
     ddl_work_mem.work_info.set_op_type(request.op_type());
     ddl_work_mem.work_info.set_rollback(false);
-    ddl_work_mem.work_info.set_begin_timestamp(std::chrono::seconds(std::time(nullptr)).count());
+    ddl_work_mem.work_info.set_begin_timestamp(request.ddlwork_info().begin_timestamp());
     //init ddlwork regions info
     return init_region_ddlwork(ddl_work_mem);
 }
@@ -2898,14 +2926,18 @@ int TableManager::init_ddlwork(const pb::MetaManagerRequest& request, DdlWorkMem
 void TableManager::add_index(const pb::MetaManagerRequest& request, 
                              const int64_t apply_index, 
                              braft::Closure* done) {
-
+    int ret = 0;
     DB_DEBUG("DDL_LOG[add_index] add index, request:%s", request.ShortDebugString().c_str());
-    BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
     int64_t table_id;
     if (check_table_exist(request.table_info(), table_id) != 0 && 
         request.table_info().table_id() == table_id) {
         DB_WARNING("DDL_LOG[add_index] check table exist fail, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
+        return;
+    }
+    if (check_table_has_ddlwork(table_id)) {
+        DB_WARNING("table is doing ddl , request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
     }
     //检查field有效性
@@ -2944,23 +2976,10 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
         return;
     }
     DB_DEBUG("DDL_LOG[add_index] check index info success.");
-    //初始化DdlWorkInfo
-    if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
-        //该table有ddl操作在进行，返回。
-        DB_WARNING("DDL_LOG[add_index] check ddlinfo_map info fail, request:%s", request.ShortDebugString().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "ddlinfo_map already processing");
-        return;
-    }
-    DB_DEBUG("DDL_LOG[add_index] init ddlwork start.");
 
-    std::unique_ptr<DdlWorkMem> ddl_work_ptr(new DdlWorkMem);
     pb::IndexInfo index_info;
-    ddl_work_ptr->table_id = table_id;
-    if (init_ddlwork_add_index(request, *ddl_work_ptr, index_info) != 0) {
-        DB_WARNING("DDL_LOG[add_index] init ddlwork info fail, request:%s", request.ShortDebugString().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "init ddlwork info fail.");
-        return;
-    }
+    index_info.CopyFrom(request.table_info().indexs(0));
+    index_info.set_state(pb::IS_NONE);
     if (index_ret == 1) {
         index_info.set_index_id(index_id);
     } else {
@@ -2969,7 +2988,7 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
         set_max_table_id(tmp_max_table_id);
         std::string max_table_id_value;
         max_table_id_value.append((char*)&tmp_max_table_id, sizeof(int64_t));
-        int ret = MetaRocksdb::get_instance()->put_meta_info(construct_max_table_id_key(), max_table_id_value);    
+        ret = MetaRocksdb::get_instance()->put_meta_info(construct_max_table_id_key(), max_table_id_value);    
         if (ret < 0) {
             DB_WARNING("update max_table_id to rocksdb fail.");
             IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
@@ -2977,10 +2996,28 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
         }  
         DB_NOTICE("alloc new index_id[%ld]", tmp_max_table_id);
     }
-    ddl_work_ptr->work_info.set_index_id(index_info.index_id());
 
-    DB_DEBUG("DDL_LOG[add_index] ddlwork [%s] after init.", ddl_work_ptr->work_info.ShortDebugString().c_str());
-    // 更新现有的schemainfo
+    for (const auto& field_name : index_info.field_names()) {
+        auto field_id_iter = _table_info_map[table_id].field_id_map.find(field_name);
+        if (field_id_iter == _table_info_map[table_id].field_id_map.end()) {
+            DB_WARNING("field_id not found field_name[%s] in field_id_map.", field_name.c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "get field id error");
+            return;
+        } else {
+            index_info.add_field_ids(field_id_iter->second);
+            DB_DEBUG("DDL_LOG add field id[%d] field_name[%s]", field_id_iter->second, field_name.c_str());
+        }
+    }
+    if (request.table_info().indexs(0).is_global()) {
+        ret = add_global_index(request, apply_index, done, table_id, index_info);
+    } else {
+        ret = add_local_index(request, apply_index, done, table_id, index_info);
+    }
+    if (ret != 0) {
+        DB_WARNING("add global|local index error.");
+        return;
+    }
+    //update schema
     pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
     auto index_iter = mem_schema_pb.mutable_indexs()->begin();
     for (; index_iter != mem_schema_pb.mutable_indexs()->end();) {
@@ -2991,8 +3028,6 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
             index_iter++;
         }
     }
-    ddl_work_ptr->resource_tag = mem_schema_pb.resource_tag();
-    DB_NOTICE("resource_tag : %s", ddl_work_ptr->resource_tag.c_str());
     pb::IndexInfo* add_index = mem_schema_pb.add_indexs();
     add_index->CopyFrom(index_info);
     mem_schema_pb.set_version(mem_schema_pb.version() + 1);
@@ -3001,13 +3036,152 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
     std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
     put_incremental_schemainfo(apply_index, schema_infos);
 
-    auto ret = update_schema_for_rocksdb(table_id, mem_schema_pb, done);
+    ret = update_schema_for_rocksdb(table_id, mem_schema_pb, done);
     if (ret < 0) {
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
     DB_DEBUG("DDL_LOG add_index index_info [%s]", add_index->ShortDebugString().c_str());
-    DB_NOTICE("DDL_LOG add_index schema_info [%s]", _table_info_map[table_id].schema_pb.ShortDebugString().c_str());
+    DB_NOTICE("DDL_LOG add_index schema_info [%s] apply_index %ld", 
+        _table_info_map[table_id].schema_pb.ShortDebugString().c_str(), apply_index);
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+}
+
+int TableManager::add_global_index(const pb::MetaManagerRequest& request, 
+                             const int64_t apply_index, 
+                             braft::Closure* done, const int64_t table_id, pb::IndexInfo& index_info) {
+    auto& table_mem =  _table_info_map[table_id];
+    std::vector<std::string> rocksdb_keys;
+    std::vector<std::string> rocksdb_values;
+    std::vector<std::string> init_store;
+    init_store.reserve(4);
+    std::string resource_tag = table_mem.schema_pb.resource_tag();
+    boost::trim(resource_tag);
+    for (auto i = 0; i < table_mem.schema_pb.partition_num(); ++i) { 
+        std::string instance;
+        int ret = ClusterManager::get_instance()->select_instance_rolling(
+                    resource_tag,
+                    {},
+                    table_mem.schema_pb.main_logical_room(),    
+                    instance);
+        if (ret < 0) {
+            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "select instance fail");
+            return -1;
+        }
+        init_store.emplace_back(instance);
+    }
+    //持久化region_info
+    //与store交互
+    //准备partition_num个数的regionInfo
+    int64_t tmp_max_region_id = RegionManager::get_instance()->get_max_region_id();
+    int64_t start_region_id = tmp_max_region_id + 1;
+   
+    std::shared_ptr<std::vector<pb::InitRegion>> init_regions(new std::vector<pb::InitRegion>{});
+    init_regions->reserve(init_store.size());
+    int64_t instance_count = 0;
+    pb::SchemaInfo simple_table_info = table_mem.schema_pb;
+    //没有指定split_key的索引
+    for (auto i = 0; i < table_mem.schema_pb.partition_num() &&
+            (table_mem.schema_pb.engine() == pb::ROCKSDB ||
+            table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE ||
+            table_mem.schema_pb.engine() == pb::BINLOG); ++i) {
+        pb::InitRegion init_region_request;
+        pb::RegionInfo* region_info = init_region_request.mutable_region_info();
+        region_info->set_region_id(++tmp_max_region_id);
+        region_info->set_table_id(index_info.index_id());
+        region_info->set_main_table_id(table_id);
+        region_info->set_table_name(table_mem.schema_pb.table_name());
+        construct_common_region(region_info, table_mem.schema_pb.replica_num());
+        region_info->set_partition_id(i);
+        region_info->add_peers(init_store[instance_count]);
+        region_info->set_leader(init_store[instance_count]);
+        region_info->set_can_add_peer(false);// 简化理解，让raft addpeer必须发送snapshot
+        region_info->set_partition_num(table_mem.schema_pb.partition_num());
+        region_info->set_is_binlog_region(table_mem.is_binlog);
+        *(init_region_request.mutable_schema_info()) = simple_table_info;
+        init_region_request.set_snapshot_times(2);
+        init_regions->emplace_back(init_region_request);
+        DB_WARNING("init_region_request: %s", init_region_request.DebugString().c_str());
+        ++instance_count;
+    }
+    //持久化region_id
+    std::string max_region_id_key = RegionManager::get_instance()->construct_max_region_id_key();
+    std::string max_region_id_value;
+    max_region_id_value.append((char*)&tmp_max_region_id, sizeof(int64_t));
+    rocksdb_keys.emplace_back(max_region_id_key);
+    rocksdb_values.emplace_back(max_region_id_value);
+
+    //持久化schema_info
+    std::string table_value;
+    if (!simple_table_info.SerializeToString(&table_value)) {
+        DB_WARNING("request serializeToArray fail when create not level table, request:%s",
+                    simple_table_info.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+        return -1;
+    }
+    
+    int ret = MetaRocksdb::get_instance()->put_meta_info(rocksdb_keys, rocksdb_values);
+    if (ret < 0) {
+        DB_WARNING("add new not level table:%s to rocksdb fail",
+                        simple_table_info.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return -1;
+    }
+    RegionManager::get_instance()->set_max_region_id(tmp_max_region_id);
+    //leader发送请求
+    if (done && (table_mem.schema_pb.engine() == pb::ROCKSDB
+        || table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE || 
+        table_mem.schema_pb.engine() == pb::BINLOG)) {
+        std::string namespace_name = table_mem.schema_pb.namespace_name();
+        std::string database = table_mem.schema_pb.database();
+        std::string table_name = table_mem.schema_pb.table_name();
+        Bthread bth(&BTHREAD_ATTR_SMALL);
+        auto create_table_fun = 
+            [this, namespace_name, database, table_name, init_regions]() {
+                send_create_table_request(namespace_name, database, table_name, init_regions);
+            };
+        bth.run(create_table_fun);
+    }
+    ret = DDLManager::get_instance()->init_global_ddlwork(table_id, index_info.index_id(), table_mem.partition_regions);
+    if (ret < 0) {
+        DB_WARNING("table_id[%ld] add global index init global ddlwork error.", table_id);
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "init global ddlwork error");
+        return -1;
+    }
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_WARNING("create global index, table_id:%ld, table_name:%s, "
+                " alloc start_region_id:%ld, end_region_id :%ld", 
+                table_mem.schema_pb.table_id(), table_mem.schema_pb.table_name().c_str(), 
+                start_region_id, 
+                RegionManager::get_instance()->get_max_region_id());
+    return 0;
+}
+
+int TableManager::add_local_index(const pb::MetaManagerRequest& request, 
+                             const int64_t apply_index, 
+                             braft::Closure* done, const int64_t table_id, pb::IndexInfo& index_info) {
+
+    BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
+    //初始化DdlWorkInfo
+    if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
+        //该table有ddl操作在进行，返回。
+        DB_WARNING("DDL_LOG[add_index] check ddlinfo_map info fail, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "ddlinfo_map already processing");
+        return -1;
+    }
+    std::unique_ptr<DdlWorkMem> ddl_work_ptr(new DdlWorkMem);
+    ddl_work_ptr->table_id = table_id;
+    if (init_ddlwork_add_index(request, *ddl_work_ptr) != 0) {
+        DB_WARNING("DDL_LOG[add_index] init ddlwork info fail, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "init ddlwork info fail.");
+        return -1;
+    }
+    ddl_work_ptr->work_info.set_index_id(index_info.index_id());
+
+    DB_DEBUG("DDL_LOG[add_index] ddlwork [%s] after init.", ddl_work_ptr->work_info.ShortDebugString().c_str());
+    // 更新现有的schemainfo
+    pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
+    ddl_work_ptr->resource_tag = mem_schema_pb.resource_tag();
     //持久化ddlwork
     update_ddlwork_for_rocksdb(table_id, ddl_work_ptr->work_info, nullptr);
     DB_NOTICE("DDL_LOG table_id[%ld], ddlwork info : %s", table_id, ddl_work_ptr->work_info.ShortDebugString().c_str());
@@ -3015,7 +3189,7 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
         table_id,
         std::move(ddl_work_ptr) 
     );
-    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    return 0;
 }
 
 bool TableManager::check_field_exist(const std::string &field_name,
@@ -3139,10 +3313,11 @@ void TableManager::init_store_ddl_work(const pb::StoreHeartBeatRequest* request,
 
 }
 
-void TableManager::update_ddl_work(const pb::StoreHeartBeatRequest& request, bool update_flag) {
+void TableManager::update_ddl_work(const pb::StoreHeartBeatRequest& request) {
 
     TimeCost ddl_time;
     std::unordered_map<int64_t, DdlWorkMemPtr> local_ddlinfo_map;
+    std::unordered_map<int64_t, bool> update_map;
     {
         BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
         for (const auto& ddlinfo : _table_ddlinfo_map) {
@@ -3150,13 +3325,13 @@ void TableManager::update_ddl_work(const pb::StoreHeartBeatRequest& request, boo
         }
     }
 
-    //auto current_clear_time = butil::gettimeofday_us();
-    //5分钟跑一次
-    if (update_flag) {
-        for (const auto& ddlinfo : local_ddlinfo_map) {
-            check_delete_ddl_region_info(*ddlinfo.second);
-            collect_ddlwork_info(*(ddlinfo.second));
+    for (const auto& ddlinfo : local_ddlinfo_map) {
+        if (!ddlinfo.second->should_update()) {
+            continue;
         }
+        update_map[ddlinfo.first] = true;
+        check_delete_ddl_region_info(*ddlinfo.second);
+        collect_ddlwork_info(*(ddlinfo.second));
     }
     //遍历store leader_region，增加新region或peer。
     ddlwork_process_leader_region(request);
@@ -3170,33 +3345,32 @@ void TableManager::update_ddl_work(const pb::StoreHeartBeatRequest& request, boo
     auto update_ddlwork_time = ddl_time.get_time();
     ddl_time.reset();
 
-    //5分钟跑一次
-    if (update_flag) {
-        //处理store中所有的ddlwork
-        for (const auto& ddlinfo : local_ddlinfo_map) {
-            
-            DB_NOTICE("update ddl work info table_id[%ld]", ddlinfo.first);
-            DdlWorkMem& meta_work = *(ddlinfo.second); 
-            auto op_type = meta_work.work_info.op_type();
+    //处理store中所有的ddlwork
+    for (const auto& ddlinfo : local_ddlinfo_map) {
+        if (!update_map[ddlinfo.first]) {
+            continue;
+        }    
+        DB_NOTICE("update ddl work info table_id[%ld]", ddlinfo.first);
+        DdlWorkMem& meta_work = *(ddlinfo.second); 
+        auto op_type = meta_work.work_info.op_type();
 
-            //检查回滚，为避免状态机延迟导致多次回滚，设置内存变量控制。
-            bool expected_value = false;
-            if (meta_work.work_info.rollback() && 
-                meta_work.is_rollback.compare_exchange_weak(expected_value, true)) {
-                rollback_ddlwork(meta_work);         
-                continue;
-            }
+        //检查回滚，为避免状态机延迟导致多次回滚，设置内存变量控制。
+        bool expected_value = false;
+        if (meta_work.work_info.rollback() && 
+            meta_work.is_rollback.compare_exchange_weak(expected_value, true)) {
+            rollback_ddlwork(meta_work);         
+            continue;
+        }
 
-            switch (op_type) {
-                case pb::OP_ADD_INDEX:
-                    process_ddl_add_index_process(meta_work);
-                    break;
-                case pb::OP_DROP_INDEX:
-                    process_ddl_del_index_process(meta_work);
-                    break;
-                default:
-                    DB_WARNING("DDL_LOG unknown optype");
-            }
+        switch (op_type) {
+            case pb::OP_ADD_INDEX:
+                process_ddl_add_index_process(meta_work);
+                break;
+            case pb::OP_DROP_INDEX:
+                process_ddl_del_index_process(meta_work);
+                break;
+            default:
+                DB_WARNING("DDL_LOG unknown optype");
         }
     }
     auto response_ddlwork_time = ddl_time.get_time();
@@ -3223,20 +3397,13 @@ void TableManager::process_ddl_heartbeat_for_store(const pb::StoreHeartBeatReque
         }
     }
 
-    auto current_time = butil::gettimeofday_us();
-    bool update_flag = false;
-    if (current_time - _last_ddl_update_timestamp > FLAGS_ddl_update_time) {
-        _last_ddl_update_timestamp = current_time;
-        update_flag = true;
-    }
-
     auto start_time = ddl_time.get_time();
     ddl_time.reset();
     //发送ddl工作给store
     init_store_ddl_work(request, response);
     auto init_time = ddl_time.get_time();
     ddl_time.reset();
-    update_ddl_work(*request, update_flag);
+    update_ddl_work(*request);
     auto update_time = ddl_time.get_time();
     DB_NOTICE("ddlwork_time start[%lu] init[%lu] update[%lu]", start_time, init_time, update_time);
 }
@@ -3273,6 +3440,19 @@ void TableManager::update_index_status(const pb::MetaManagerRequest& request,
 }
 
 void TableManager::delete_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    bool is_global = request.ddlwork_info().global();
+    DB_NOTICE("delete ddlwork %s is_global[%d]", request.ShortDebugString().c_str(), request.ddlwork_info().global());
+    if (is_global) {
+        delete_global_ddlwork(request, done);
+    } else {
+        delete_local_ddlwork(request, done);
+    }
+}
+void TableManager::delete_global_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    DDLManager::get_instance()->delete_ddlwork(request, done);
+}
+
+void TableManager::delete_local_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done) {
     BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
     std::vector<std::string> ddlwork_info_vector;
     int64_t table_id = request.ddlwork_info().table_id();
@@ -3392,6 +3572,11 @@ int TableManager::load_ddl_snapshot(const std::string& value) {
     if (!work_info_pb.ParseFromString(value)) {
         DB_FATAL("parse from pb fail when load ddl snapshot, key: %s", value.c_str());
         return -1;
+    }
+    if (work_info_pb.global()) {
+        DB_NOTICE("load gobal ddl work.");
+        DDLManager::get_instance()->load_table_ddl_snapshot(work_info_pb);
+        return 0;
     }
     DdlWorkMemPtr ddl_mem_ptr{new DdlWorkMem};
     ddl_mem_ptr->work_info = work_info_pb;
@@ -3789,6 +3974,13 @@ void TableManager::unlink_binlog(const pb::MetaManagerRequest& request, const in
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
 }
 
+void TableManager::on_leader_start() {
+    _table_timer.start();
+}
+void TableManager::on_leader_stop() {
+    _table_timer.stop();
+}
+
 void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
         [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
@@ -3800,6 +3992,13 @@ void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, 
                             index_iter->index_type() != pb::I_PRIMARY &&
                             index_iter->hint_status() != index_info.hint_status()) {
                             index_iter->set_hint_status(index_info.hint_status());
+                            int64_t due_time = 0;
+                            if (index_info.hint_status() == pb::IHS_DISABLE) {
+                                due_time = butil::gettimeofday_us() + FLAGS_table_tombstone_gc_time_s * 1000 * 1000LL;
+                            }
+                            index_iter->set_drop_timestamp(due_time);
+                            DB_NOTICE("set index hint status schema %s", mem_schema_pb.ShortDebugString().c_str());
+                            break;
                         }
                     }
                 }
@@ -3807,6 +4006,49 @@ void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, 
             }
         });
 }
+void TableManager::remove_global_index_data(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
+    int ret = 0;
+    auto& ddl_work = request.ddlwork_info(); 
+    auto drop_index_id = ddl_work.index_id();
+    std::vector<std::string> delete_rocksdb_keys;
+    delete_rocksdb_keys.reserve(100);
+    std::vector<std::string> write_rocksdb_keys;
+    std::vector<std::string> write_rocksdb_values;
+
+    if (_table_info_map.find(drop_index_id) == _table_info_map.end()) {
+        DB_WARNING("drop table error. table not exist."); 
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "global index not in table info map.");
+        return;
+    }
+    std::vector<std::int64_t> drop_region_ids;
+    drop_region_ids.reserve(100);
+    for (auto& partition_region: _table_info_map[drop_index_id].partition_regions) {
+        for (auto& drop_region_id : partition_region.second) {
+            std::string drop_region_key = RegionManager::get_instance()->construct_region_key(drop_region_id);
+            delete_rocksdb_keys.emplace_back(drop_region_key);
+            drop_region_ids.emplace_back(drop_region_id);
+        }
+    }
+
+    ret = MetaRocksdb::get_instance()->write_meta_info(write_rocksdb_keys, 
+                                                                    write_rocksdb_values, 
+                                                                    delete_rocksdb_keys);
+    if (ret < 0) {
+        DB_WARNING("drop index fail, request：%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    DB_NOTICE("drop index success, request:%s", request.ShortDebugString().c_str());
+    if (done) {
+        Bthread bth_remove_region(&BTHREAD_ATTR_SMALL);
+        std::function<void()> remove_function = [drop_region_ids]() {
+                RegionManager::get_instance()->send_remove_region_request(drop_region_ids);
+            };
+        bth_remove_region.run(remove_function);
+    }
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+}
+
 }//namespace 
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

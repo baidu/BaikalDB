@@ -367,6 +367,44 @@ private:
     BthreadCond _cond;
     const bthread_attr_t* _attr = NULL;
 };
+template <typename T> 
+class BthreadLocal {
+public:
+    BthreadLocal() {
+        bthread_key_create(&_bthread_local_key, [](void* data) {
+            delete static_cast<T*>(data);
+        });
+    }
+    ~BthreadLocal() {
+        bthread_key_delete(_bthread_local_key);
+    }
+    T* set_bthread_local(const T& t) {
+        T* data = get_bthread_local();
+        if (data != nullptr) {
+            *data = t;
+            return data;
+        }
+
+        data = new(std::nothrow) T(t);
+        if (data == nullptr) {
+            return nullptr;
+        }
+        int ret = bthread_setspecific(_bthread_local_key, data); 
+        if (ret < 0) {
+            delete data;
+            return nullptr;
+        }
+        return data;
+    }
+
+    T* get_bthread_local() {
+        void* data = bthread_getspecific(_bthread_local_key);
+        return static_cast<T*>(data);
+    }
+
+private:
+    bthread_key_t _bthread_local_key {INVALID_BTHREAD_KEY};
+};
 // RAII
 class ScopeGuard {
 public:
@@ -391,6 +429,7 @@ private:
 
 template <typename KEY, typename VALUE, uint32_t MAP_COUNT = 23>
 class ThreadSafeMap {
+    static_assert( MAP_COUNT > 0, "Invalid MAP_COUNT parameters.");
 public:
     ThreadSafeMap() {
         for (uint32_t i = 0; i < MAP_COUNT; i++) {
@@ -429,15 +468,31 @@ public:
         }
         return _map[idx][key];
     }
+    const VALUE get_or_put(const KEY& key, const VALUE& value) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            _map[idx][key] = value;
+            return value;
+        }
+        return _map[idx][key];
+    }
     VALUE& operator[](const KEY& key) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         return _map[idx][key];
     }
-    void erase(const KEY& key) {
+
+    bool exist(const KEY& key) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
-        _map[idx].erase(key);
+        return _map[idx].count(key) > 0;
+    }
+
+    size_t erase(const KEY& key) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        return _map[idx].erase(key);
     }
     // 会加锁，轻量级操作采用traverse否则用copy
     void traverse(const std::function<void(VALUE& value)>& call) {
@@ -476,25 +531,30 @@ public:
     }
 
     template<typename... Args>
-    void init_if_not_exist_else_update(const KEY& key, 
+    bool init_if_not_exist_else_update(const KEY& key, 
         const std::function<void(VALUE& value)>& call, Args&&... args) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         auto iter = _map[idx].find(key);
         if (iter == _map[idx].end()) {
             _map[idx].insert(std::make_pair(key, VALUE(std::forward<Args>(args)...)));
+            return false;
         } else {
             //字段存在，才执行回调
             call(iter->second);
+            return true;
         }
     }
 
-    void update(const KEY& key, const std::function<void(VALUE& value)>& call) {
+    bool update(const KEY& key, const std::function<void(VALUE& value)>& call) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         auto iter = _map[idx].find(key);
         if (iter != _map[idx].end()) {
             call(iter->second);
+            return true;
+        } else {
+            return false;
         }
     }
 
@@ -512,13 +572,10 @@ public:
     }
 
 private:
-    uint32_t map_idx(KEY key) {
-        if (std::is_integral<KEY>::value) {
-            return (uint32_t)key % MAP_COUNT;
-        }
-        // un-support other
-        return 0;
+    uint32_t map_idx(const KEY& key) {
+        return std::hash<KEY>{}(key) % MAP_COUNT;
     }
+
 private:
     std::unordered_map<KEY, VALUE> _map[MAP_COUNT];
     bthread_mutex_t _mutex[MAP_COUNT];
@@ -641,8 +698,10 @@ private:
 struct BvarMap {
     struct SumCount {
         SumCount() {}
-        SumCount(int64_t table_id, int64_t sum, int64_t count, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, const std::map<int32_t, int>& field_range_type_) 
-            : table_id(table_id), sum(sum), count(count), affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows) {
+        SumCount(int64_t table_id, int64_t sum, int64_t count, int64_t err_count,
+                int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, const std::map<int32_t, int>& field_range_type_) 
+            : table_id(table_id), sum(sum), count(count), err_count(err_count),
+            affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows) {
                 field_range_type = field_range_type_;
             }
         SumCount& operator+=(const SumCount& other) {
@@ -657,6 +716,7 @@ struct BvarMap {
 
             sum += other.sum;
             count += other.count;
+            err_count += other.err_count;
             affected_rows += other.affected_rows;
             scan_rows += other.scan_rows;
             filter_rows += other.filter_rows;
@@ -665,6 +725,7 @@ struct BvarMap {
         SumCount& operator-=(const SumCount& other) {
             sum -= other.sum;
             count -= other.count;
+            err_count -= other.err_count;
             affected_rows -= other.affected_rows;
             scan_rows -= other.scan_rows;
             filter_rows -= other.filter_rows;
@@ -673,6 +734,7 @@ struct BvarMap {
         int64_t table_id = 0;
         int64_t sum = 0;
         int64_t count = 0;
+        int64_t err_count = 0;
         int64_t affected_rows = 0;
         int64_t scan_rows = 0;
         int64_t filter_rows = 0;
@@ -682,8 +744,8 @@ struct BvarMap {
 public:
     BvarMap() {}
     BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, 
-        const std::map<int32_t, int>& field_range_type_) {
-        internal_map[key][index_id] = SumCount(table_id, cost, 1, affected_rows, scan_rows, filter_rows, field_range_type_);
+        const std::map<int32_t, int>& field_range_type_, int64_t err_count) {
+        internal_map[key][index_id] = SumCount(table_id, cost, 1, err_count, affected_rows, scan_rows, filter_rows, field_range_type_);
     }
     BvarMap& operator+=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
@@ -755,6 +817,58 @@ inline std::ostream& operator<<(std::ostream& os, const VirtualIndexMap& vim) {
     return os;
 }
 
+struct RocksdbVars {
+    static RocksdbVars* get_instance() {
+        static RocksdbVars _instance;
+        return &_instance;
+    }
+
+    bvar::LatencyRecorder    rocksdb_put_time_cost;
+    bvar::LatencyRecorder    rocksdb_get_time_cost;
+    bvar::LatencyRecorder    rocksdb_scan_time_cost;
+    bvar::LatencyRecorder    rocksdb_seek_time_cost;
+    bvar::LatencyRecorder    qos_fetch_tokens_wait_time_cost;
+    bvar::Adder<int64_t>     qos_fetch_tokens_wait_count;
+    bvar::Adder<int64_t>     qos_fetch_tokens_count;
+    bvar::PerSecond<bvar::Adder<int64_t> > qos_fetch_tokens_qps;
+    bvar::Adder<int64_t>     qos_token_waste_count;
+    bvar::PerSecond<bvar::Adder<int64_t> > qos_token_waste_qps;
+    // 统计未提交的binlog最大时间
+    bvar::Maxer<int64_t>     binlog_not_commit_max_cost;
+    bvar::Window<bvar::Maxer<int64_t> > binlog_not_commit_max_cost_minute;
+
+private:
+    RocksdbVars(): rocksdb_put_time_cost("rocksdb_put_time_cost"), 
+                   rocksdb_get_time_cost("rocksdb_get_time_cost"), 
+                   rocksdb_scan_time_cost("rocksdb_scan_time_cost"),
+                   rocksdb_seek_time_cost("rocksdb_seek_time_cost"),
+                   qos_fetch_tokens_wait_time_cost("qos_fetch_tokens_wait_time_cost"),
+                   qos_fetch_tokens_wait_count("qos_fetch_tokens_wait_count"),
+                   qos_fetch_tokens_qps("qos_fetch_tokens_qps", &qos_fetch_tokens_count),
+                   qos_token_waste_qps("qos_token_waste_qps", &qos_token_waste_count),
+                   binlog_not_commit_max_cost_minute("binlog_not_commit_max_cost_minute", &binlog_not_commit_max_cost, 60) {
+                   }
+};
+
+inline void update_param(const std::string& name, const std::string& value) {
+    std::string target;
+    if (!google::GetCommandLineOption(name.c_str(), &target)) {
+        DB_WARNING("get command line: %s failed",name.c_str());
+        return;
+    }
+
+    if (target == value) {
+        return;
+    }
+
+    if (google::SetCommandLineOption(name.c_str(), value.c_str()).empty()) {
+        DB_WARNING("set command line: %s value: %s failed", name.c_str(), value.c_str());
+        return;
+    } else {
+        DB_WARNING("set command line: %s %s => %s", name.c_str(), target.c_str(), value.c_str());
+    }
+}
+
 extern int64_t timestamp_diff(timeval _start, timeval _end);
 extern std::string pb2json(const google::protobuf::Message& message);
 extern std::string json2pb(const std::string& json, google::protobuf::Message* message);
@@ -770,7 +884,7 @@ extern SerializeStatus to_string(uint64_t number, char *buf, size_t size, size_t
 //extern std::string str_gbk_to_utf8(const char* input);
 extern std::string remove_quote(const char* str, char quote);
 extern std::string str_to_hex(const std::string& str);
-void stripslashes(std::string& str);
+void stripslashes(std::string& str, bool is_gbk);
 extern void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf);
 extern void update_op_version(pb::SchemaConf* p_conf, const std::string& desc);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
@@ -783,6 +897,7 @@ extern bool is_digits(const std::string& str);
 extern std::string url_decode(const std::string& str);
 extern std::string url_encode(const std::string& str);
 extern std::vector<std::string> string_split(const std::string &s, char delim);
+extern bool ends_with(const std::string &str, const std::string &ending);
 extern std::string string_trim(std::string& str);
 extern const std::string& rand_peer(pb::RegionInfo& info);
 extern void other_peer_to_leader(pb::RegionInfo& info);
@@ -825,7 +940,23 @@ inline int64_t clock_realtime_ms() {
   return tp.tv_sec * 1000ULL + tp.tv_nsec / 1000000ULL - base_timestamp_ms;
 }
 
+inline uint32_t get_timestamp_internal(int64_t offset) {
+    return ((offset >> 18) + base_timestamp_ms) / 1000;
+}
+
 } // namespace tso
+
+template<typename Class>
+class Singleton {
+public:
+    Singleton() = default;
+    Singleton(const Singleton&) = delete;
+    Singleton& operator=(const Singleton&) = delete;
+    static Class* get_instance() {
+        static Class instance;
+        return &instance;
+    }
+};
 
 } // namespace baikaldb
 

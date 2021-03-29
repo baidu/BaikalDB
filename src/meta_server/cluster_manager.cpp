@@ -87,6 +87,14 @@ void ClusterManager::process_cluster_info(google::protobuf::RpcController* contr
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
+    case pb::OP_UPDATE_INSTANCE_PARAM: {
+        if (request->instance_params().size() < 1) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, "no instance params", request->op_type(), log_id);
+            return;
+        }
+        _meta_state_machine->process(controller, request, response, done_guard.release());
+        return;
+    }
     case pb::OP_MOVE_PHYSICAL: {
         if (!request->has_move_physical_request()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, "no move physical request", request->op_type(), log_id);
@@ -452,6 +460,70 @@ void ClusterManager::update_instance(const pb::MetaManagerRequest& request, braf
     DB_NOTICE("modify tage success, request:%s", request.ShortDebugString().c_str());
 }
 
+// 如果已存在则修改，不存在则新添加
+inline void agg_instance_param(const pb::InstanceParam& old_param, const pb::InstanceParam& new_param, pb::InstanceParam* out_param) {
+    std::map<std::string, std::string> kv_map;
+    for (auto& iterm : old_param.params()) {
+        kv_map[iterm.key()] = iterm.value();
+    }
+    for (auto& iterm : new_param.params()) {
+        kv_map[iterm.key()] = iterm.value();
+    }
+
+    for (auto iter : kv_map) {
+        auto param_iterm = out_param->add_params();
+        param_iterm->set_key(iter.first);
+        param_iterm->set_value(iter.second);
+    }
+}
+
+void ClusterManager::update_instance_param(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    std::vector<std::string> keys;
+    keys.reserve(5);
+    std::vector<std::string> values;
+    values.reserve(5);
+    {
+        BAIDU_SCOPED_LOCK(_instance_param_mutex);
+        for (auto& param : request.instance_params()) {
+            auto iter = _instance_param_map.find(param.resource_tag_or_address());
+            if (iter != _instance_param_map.end()) {
+                pb::InstanceParam tmp_param;
+                tmp_param.set_resource_tag_or_address(param.resource_tag_or_address());
+                agg_instance_param(iter->second, param, &tmp_param);
+                _instance_param_map[param.resource_tag_or_address()] = tmp_param;
+                std::string value;
+                if (!tmp_param.SerializeToString(&value)) { 
+                    DB_FATAL("SerializeToString fail");
+                    continue;
+                }
+                keys.emplace_back(construct_instance_param_key(param.resource_tag_or_address()));
+                values.emplace_back(value);
+                DB_WARNING("add instance param:%s", tmp_param.ShortDebugString().c_str());
+            } else {
+                std::string value;
+                if (!param.SerializeToString(&value)) { 
+                    DB_FATAL("SerializeToString fail");
+                    continue;
+                }
+                keys.emplace_back(construct_instance_param_key(param.resource_tag_or_address()));
+                values.emplace_back(value);
+                _instance_param_map[param.resource_tag_or_address()] = param;
+                DB_WARNING("add instance param:%s", param.ShortDebugString().c_str());
+            }
+        }
+    }
+
+    auto ret = MetaRocksdb::get_instance()->put_meta_info(keys, values);
+    if (ret < 0) {
+        DB_WARNING("add phyical room:%s to rocksdb fail", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("modify instance param success, request:%s", request.ShortDebugString().c_str());
+}
+
 void ClusterManager::move_physical(const pb::MetaManagerRequest& request, braft::Closure* done) {
     std::string physical_room = request.move_physical_request().physical_room();
     std::string new_logical_room = request.move_physical_request().new_logical_room();
@@ -625,16 +697,42 @@ void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* 
 }
 
 void ClusterManager::process_instance_heartbeat_for_store(const pb::InstanceInfo& instance_heart_beat) {
-    auto ret = update_instance_info(instance_heart_beat);
+    int ret = update_instance_info(instance_heart_beat);
     if (ret == 0) {
         return;
     }
-    //构造请求
+
+    //构造请求 -1: add instance -2: update instance
     pb::MetaManagerRequest request;
-    request.set_op_type(pb::OP_ADD_INSTANCE);
+    if (ret == -1) {
+        request.set_op_type(pb::OP_ADD_INSTANCE);
+    } else {
+        request.set_op_type(pb::OP_UPDATE_INSTANCE);
+    }
     pb::InstanceInfo* instance_info = request.mutable_instance();
     *instance_info = instance_heart_beat;
     process_cluster_info(NULL, &request, NULL, NULL);
+}
+
+// 获取实例参数
+void ClusterManager::process_instance_param_heartbeat_for_store(const pb::StoreHeartBeatRequest* request,
+        pb::StoreHeartBeatResponse* response) {
+    std::string address = request->instance_info().address();
+    std::string resource_tag = request->instance_info().resource_tag();
+
+    BAIDU_SCOPED_LOCK(_instance_param_mutex);
+
+    auto iter = _instance_param_map.find(resource_tag);
+    if (iter != _instance_param_map.end()) {
+        *(response->add_instance_params()) = iter->second;
+    }
+
+    // 实例单独配置
+    iter = _instance_param_map.find(address);
+    if (iter != _instance_param_map.end()) {
+        *(response->add_instance_params()) = iter->second;
+    }
+
 }
 
 void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRequest* request,
@@ -950,6 +1048,9 @@ int ClusterManager::load_snapshot() {
 
     std::string instance_prefix = MetaServer::CLUSTER_IDENTIFY;
     instance_prefix += MetaServer::INSTANCE_CLUSTER_IDENTIFY;
+
+    std::string instance_param_prefix = MetaServer::CLUSTER_IDENTIFY;
+    instance_param_prefix += MetaServer::INSTANCE_PARAM_CLUSTER_IDENTIFY;
     int ret = 0;
     for (; iter->Valid(); iter->Next()) {
         if (iter->key().starts_with(instance_prefix)) {
@@ -958,6 +1059,8 @@ int ClusterManager::load_snapshot() {
             ret = load_physical_snapshot(physical_prefix, iter->key().ToString(), iter->value().ToString());
         } else if (iter->key().starts_with(logical_prefix)) {
             ret = load_logical_snapshot(logical_prefix, iter->key().ToString(), iter->value().ToString());
+        } else if (iter->key().starts_with(instance_param_prefix)) {
+            ret = load_instance_param_snapshot(instance_param_prefix, iter->key().ToString(), iter->value().ToString());
         } else {
             DB_FATAL("unsupport cluster info when load snapshot, key:%s", iter->key().data());
         }
@@ -1040,6 +1143,28 @@ int ClusterManager::load_instance_snapshot(const std::string& instance_prefix,
     if (_instance_regions_count_map.find(address) == _instance_regions_count_map.end()) {
         _instance_regions_count_map[address] = std::unordered_map<int64_t, int64_t>{};
     }
+    return 0;
+}
+
+int ClusterManager::load_instance_param_snapshot(const std::string& instance_param_prefix,
+                                             const std::string& key, 
+                                             const std::string& value) {
+    std::string resource_tag_or_address(key, instance_param_prefix.size());
+    pb::InstanceParam instance_param_pb;
+    if (!instance_param_pb.ParseFromString(value)) {
+        DB_FATAL("parse from pb fail when load instance param snapshot, key:%s", key.c_str());
+        return -1;
+    }
+    DB_WARNING("instance_param_pb:%s", instance_param_pb.ShortDebugString().c_str());
+    if (resource_tag_or_address != instance_param_pb.resource_tag_or_address()) {
+        DB_FATAL("diff resource tag: %s vs %s", resource_tag_or_address.c_str(), 
+                instance_param_pb.resource_tag_or_address().c_str());
+        return -1;
+    }
+
+    BAIDU_SCOPED_LOCK(_instance_param_mutex);
+    _instance_param_map[resource_tag_or_address] = instance_param_pb;
+    
     return 0;
 }
 

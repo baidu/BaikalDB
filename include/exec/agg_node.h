@@ -48,9 +48,23 @@ public:
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
-    void process_row_batch(RowBatch& batch);
+    void process_row_batch(RuntimeState* state, RowBatch& batch);
+    void memory_limit_release(RuntimeState* state, MemRow* row);
     std::vector<ExprNode*>* mutable_group_exprs() {
         return &_group_exprs;
+    }
+    int add_group_expr(pb::Expr& expr, int32_t slot_id) {
+        if (_agg_slot_set.count(slot_id) == 1) {
+            return 0;
+        }
+        ExprNode* group_expr = nullptr;
+        int ret = ExprNode::create_tree(expr, &group_expr);
+        if (ret < 0) {
+            return ret;
+        }
+        _agg_slot_set.insert(slot_id);
+        _group_exprs.emplace_back(group_expr);
+        return 0;
     }
     std::vector<AggFnCall*>* mutable_agg_fn_calls() {
         return &_agg_fn_calls;
@@ -61,6 +75,7 @@ private:
     int32_t _agg_tuple_id;
     pb::TupleDescriptor* _group_tuple_desc;
     std::vector<AggFnCall*> _agg_fn_calls;
+    std::set<int> _agg_slot_set;
     bool _is_merger = false;
     MemRowDescriptor* _mem_row_desc;
     //用于分组和get_next的定位,用map可与mysql保持一致

@@ -246,7 +246,7 @@ void StateMachine::run_machine(SmartSocket client,
         } else if (client->state == STATE_SEND_AUTH_RESULT) {
             _print_query_time(client);
             // query结束后及时释放内存
-            client->query_ctx.reset(new (std::nothrow)QueryContext(client->user_info, client->current_db));
+            client->reset_query_ctx(new (std::nothrow)QueryContext(client->user_info, client->current_db));
         } else if (ret < 0 || client->state == STATE_ERROR || ret == RET_SHUTDOWN) {
             DB_WARNING_CLIENT(client, "handle query failed. sql=[%s]",
                     client->query_ctx->sql.c_str());
@@ -274,7 +274,7 @@ void StateMachine::run_machine(SmartSocket client,
         } else if (client->state == STATE_SEND_AUTH_RESULT) {
             _print_query_time(client);
             // query结束后及时释放内存
-            client->query_ctx.reset(new (std::nothrow)QueryContext(client->user_info, client->current_db));
+            client->reset_query_ctx(new (std::nothrow)QueryContext(client->user_info, client->current_db));
         } else if (client->state == STATE_READ_QUERY_RESULT && ret == RET_WAIT_FOR_EVENT) {
             DB_WARNING_CLIENT(client, "send partly, wait for fd ready.");
         } else if (client->state == STATE_READ_QUERY_RESULT_MORE) {
@@ -349,18 +349,20 @@ void StateMachine::_print_query_time(SmartSocket client) {
             stat_info->num_returned_rows : stat_info->num_affected_rows;
     }
 
-    if (client->state != STATE_ERROR && client->state != STATE_ERROR_REUSE) {
+    // 降级去备库后不再统计，table_id序列不一样，防止再次判断降级流程
+    if (!ctx->use_backup) {
         int64_t index_id = 0; //0 没有使用索引，否则选index_ids中的第一个，对于join涉及多个索引可能展示不完整 TODO
+        int64_t err_count = stat_info->error_code != 1000;
         if (ctx->index_ids.size() > 1) {
             index_id = *ctx->index_ids.begin();
         } else if (ctx->index_ids.size() == 1) {
             index_id = *ctx->index_ids.begin();
             index_recommend_st << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time,
-                                rows, stat_info->num_scan_rows, stat_info->num_filter_rows, ctx->field_range_type);
+                                rows, stat_info->num_scan_rows, stat_info->num_filter_rows, ctx->field_range_type, err_count);
         }
         std::map<int32_t, int> field_range_type;
         sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id, stat_info->total_time,
-                                rows, stat_info->num_scan_rows, stat_info->num_filter_rows, field_range_type);
+                                rows, stat_info->num_scan_rows, stat_info->num_filter_rows, field_range_type, err_count);
     }
 
     if (ctx->mysql_cmd == COM_QUERY
@@ -420,13 +422,11 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     sql = iter->second->sql;
                 }
             }
-            uint64_t out[2];
-            butil::MurmurHash3_x64_128(stat_info->sample_sql.str().c_str(), stat_info->sample_sql.str().size(), 0x1234, out);
             RE2::GlobalReplace(&sql, "\\s+", " ");
             DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
-                    "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row[%d] bufsize=[%d] "
-                    "key=[%d] changeid=[%lu] logid=[%lu] family_ip=[%s] cache=[%d] stmt_name=[%s] "
-                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%llu] sqllen=[%d] sql=[%s] id=[%ld]",
+                    "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%d] scan_row=[%d] bufsize=[%d] "
+                    "key=[%d] changeid=[%lu] logid=[%lu] traceid=[%s] family_ip=[%s] cache=[%d] stmt_name=[%s] "
+                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%lu] sqllen=[%lu] sql=[%s] id=[%ld] bkup=[%d]",
                     stat_info->family.c_str(),
                     stat_info->table.c_str(),
                     op_type,
@@ -451,6 +451,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->partition_key,
                     stat_info->version,
                     stat_info->log_id,
+                    stat_info->trace_id.c_str(),
                     stat_info->server_ip.c_str(),
                     stat_info->hit_cache,
                     ctx->prepare_stmt_name.c_str(),
@@ -460,10 +461,11 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->old_txn_id,
                     stat_info->old_seq_id,
                     ctx->get_runtime_state()->optimize_1pc(),
-                    out[0],
+                    stat_info->sign,
                     sql.length(),
                     sql.c_str(),
-                    client->last_insert_id);
+                    client->last_insert_id,
+                    ctx->use_backup);
         }
     } else {
         if ('\x0e' == ctx->mysql_cmd) {
@@ -489,7 +491,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 ctx->type,
                 client->username.c_str());
         }
-    }
+    } 
+    SchemaFactory::use_backup.set_bthread_local(false);
     ctx->mysql_cmd = COM_SLEEP;
     client->last_active = time(NULL);
     return;
@@ -635,6 +638,7 @@ int StateMachine::_read_packet_header(SmartSocket sock) {
     sock->current_packet_len = header[0] | header[1] << 8 | header[2] << 16;
     sock->packet_len += sock->current_packet_len;
     sock->packet_id = header[3];
+    sock->last_packet_id = header[3];
     memset(sock->self_buf->_data, 0, PACKET_HEADER_LEN);
     if (sock->current_packet_len == (int)PACKET_LEN_MAX) { // if packet >= 16M need read next packet
         sock->has_multi_packet = true;
@@ -687,7 +691,7 @@ int StateMachine::_query_read(SmartSocket sock) {
         DB_FATAL("s==NULL");
         return RET_ERROR;
     }
-    sock->query_ctx.reset(new (std::nothrow)QueryContext(sock->user_info, sock->current_db));
+    sock->reset_query_ctx(new (std::nothrow)QueryContext(sock->user_info, sock->current_db));
     if (!sock->query_ctx) {
         DB_FATAL("create query context instance failed");
         return RET_ERROR;
@@ -999,6 +1003,21 @@ bool StateMachine::_query_process(SmartSocket client) {
             client->state = STATE_READ_QUERY_RESULT;
         } else if (boost::iequals(client->query_ctx->sql, SQL_SELECT_DATABASE)) {
             ret = _handle_client_query_select_database(client);
+        } else if (boost::istarts_with(client->query_ctx->sql, SQL_HANDLE)) {
+            size_t pos = 0;
+            std::string sql = client->query_ctx->sql;
+            while ((pos = sql.find("  ")) != std::string::npos) {
+                sql = sql.replace(pos, 2, " ");
+            }
+            client->query_ctx->sql = sql;
+            if (boost::istarts_with(client->query_ctx->sql, SQL_HANDLE_ABNORMAL_REGIONS)) {
+                _handle_client_query_handle_abnormal_regions(client);
+            } else if (boost::istarts_with(client->query_ctx->sql, SQL_HANDLE_ADD_PRIVILEGE)) {
+                _handle_client_query_handle_add_privilege(client);
+            } else {
+                _wrapper->make_simple_ok_packet(client);
+                client->state = STATE_READ_QUERY_RESULT;
+            }
         } else if (boost::istarts_with(client->query_ctx->sql, SQL_SHOW)) {
             size_t pos = 0;
             std::string sql = client->query_ctx->sql;
@@ -1131,10 +1150,6 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
         boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
         boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
     }
-//    re2::RE2 ignore_reg("(\\/\\*.*?\\*\\/)", option);
-//    if (RE2::GlobalReplace(&(ctx->sql), ignore_reg, " ")) {
-//        DB_WARNING("global replace sql.");
-//    }
 }
 
 int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
@@ -1170,6 +1185,10 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd()) {
                 ctx->row_ttl_duration = json_iter->value.GetInt64();
                 DB_DEBUG("row_ttl_duration: %ld", ctx->row_ttl_duration);
+            }
+            json_iter = root.FindMember("X-B3-TraceId");
+            if (json_iter != root.MemberEnd() && json_iter->value.IsString()) {
+                ctx->stat_info.trace_id = json_iter->value.GetString();
             }
         } catch (...) {
             DB_WARNING("parse extra file error [%s]", json_str.c_str());
@@ -1492,6 +1511,7 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         {pb::DATE, "DATE"},
         {pb::HLL, "HLL"},
         {pb::BITMAP, "BITMAP"},
+        {pb::TDIGEST, "TDIGEST"},
     };
     static std::map<pb::IndexType, std::string> index_map = {
         {pb::I_PRIMARY, "PRIMARY KEY"},
@@ -1649,9 +1669,6 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
             }
         }
         oss << " ]";
-    }
-    if (info.ttl_duration > 0) {
-        oss << ", \"ttl_duration\":" << info.ttl_duration;
     }
 
     if (info.partition_num > 1) {
@@ -2042,6 +2059,151 @@ bool StateMachine::_handle_client_query_show_table_status(SmartSocket client) {
     return true;
 }
 
+bool StateMachine::_handle_client_query_handle_abnormal_regions(SmartSocket client) {
+    if (client == nullptr || client->query_ctx == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+    static std::map<std::string, pb::RecoverOpt> opt_map = {
+        {"remove_illegal_peer", pb::DO_REMOVE_ILLEGAL_PEER},
+        {"remove_error_peer", pb::DO_REMOVE_PEER},
+        {"set_peer", pb::DO_SET_PEER},
+        {"init_peer", pb::DO_INIT_REGION}
+    };
+
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+    std::string opt = "";
+    std::string resource_tag = "";
+    if (split_vec.size() == 4) {
+        opt = split_vec[3];
+    } else if (split_vec.size() == 5) {
+        opt = split_vec[3];
+        resource_tag = split_vec[4];
+    } else {
+        client->state = STATE_ERROR;
+        DB_FATAL("param invalid");
+        return false;
+    }
+    auto iter = opt_map.find(opt);
+    if (iter == opt_map.end()) {
+        DB_WARNING("param invalid opt:%s", opt.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+    pb::RecoverOpt recover_opt = iter->second;
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_RECOVERY_ALL_REGION);
+    request.set_recover_opt(recover_opt);
+    if (resource_tag != "") {
+        request.add_resource_tags(resource_tag);
+    }
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    std::vector< std::vector<std::string> > rows;
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if (response.has_recover_response()) {
+        auto&  recover_response = response.recover_response();
+        std::vector<pb::PeerStateInfo> recover_region_way;
+        recover_region_way.reserve(5);
+        for (auto& peer_info : recover_response.illegal_regions()) {
+            recover_region_way.emplace_back(peer_info);
+        }
+        for (auto& peer_info : recover_response.set_peer_regions()) {
+            recover_region_way.emplace_back(peer_info);
+        }
+        for (auto& peer_info : recover_response.inited_regions()) {
+            recover_region_way.emplace_back(peer_info);
+        }
+        for (auto& peer_info : recover_region_way) {
+            std::vector<std::string> row;
+            row.emplace_back(std::to_string(peer_info.table_id()));
+            row.emplace_back(std::to_string(peer_info.region_id()));
+            row.emplace_back(opt);
+            row.emplace_back(peer_info.peer_id() + "@" + pb::PeerStatus_Name(peer_info.peer_status()));
+            rows.emplace_back(row);
+        }
+    }
+
+    std::vector<std::string> names = {"table_id", "region_id", "handle_region_opt", "peer"};
+    std::vector<ResultField> fields;
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        fields.emplace_back(field);
+    }
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+
+bool StateMachine::_handle_client_query_handle_add_privilege(SmartSocket client) {
+    if (client == nullptr || client->query_ctx == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+    std::string db = "";
+    pb::RW rw  = pb::WRITE;
+    if (split_vec.size() == 4) {
+        db = split_vec[2];
+        if (boost::iequals(split_vec[3], "READ")) {
+            rw = pb::READ;
+        }
+    } else {
+        client->state = STATE_ERROR;
+        DB_FATAL("param invalid");
+        return false;
+    }
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_ADD_PRIVILEGE);
+    auto pri = request.mutable_user_privilege();
+    pri->set_username(client->user_info->username);
+    pri->set_namespace_name(client->user_info->namespace_);
+    auto add_db = pri->add_privilege_database();
+    add_db->set_database(db);
+    add_db->set_database_rw(rw);
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    std::vector< std::vector<std::string> > rows;
+    std::vector<std::string> row;
+    row.emplace_back(response.ShortDebugString());
+    rows.emplace_back(row);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+
+    std::vector<std::string> names = {"result"};
+    std::vector<ResultField> fields;
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        fields.emplace_back(field);
+    }
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
 bool StateMachine::_handle_client_query_show_abnormal_regions(SmartSocket client) {
     if (client == nullptr || client->query_ctx == nullptr) {
         DB_FATAL("param invalid");
@@ -2075,17 +2237,17 @@ bool StateMachine::_handle_client_query_show_abnormal_regions(SmartSocket client
         row.push_back(std::to_string(region_info.table_id()));
         row.push_back(std::to_string(region_info.region_id()));
         if (region_info.is_healthy()) {
-            row.push_back("healthy");
+            row.emplace_back("healthy");
         } else {
-            row.push_back("unhealthy");
+            row.emplace_back("unhealthy");
         }
         for (auto& peer_info : region_info.peer_status_infos()) {
-            row.push_back(peer_info.peer_id() + "@" + pb::PeerStatus_Name(peer_info.peer_status()));
+            row.emplace_back(peer_info.peer_id() + "@" + pb::PeerStatus_Name(peer_info.peer_status()));
         }
         if (max_size < row.size()) {
             max_size = row.size();
         }
-        rows.push_back(row);
+        rows.emplace_back(row);
     }
 
     for (auto& row : rows) {
@@ -2097,8 +2259,10 @@ bool StateMachine::_handle_client_query_show_abnormal_regions(SmartSocket client
     }
 
     std::vector<std::string> names = { "table_name", "table_id", "region_id", "region_status" };
-    for (size_t i = 1; i <= max_size - 4; i++) {
-        names.push_back("peer" + std::to_string(i));
+    if (max_size > 4) {
+        for (size_t i = 1; i <= max_size - 4; i++) {
+            names.emplace_back("peer" + std::to_string(i));
+        }
     }
 
     std::vector<ResultField> fields;
@@ -2106,7 +2270,7 @@ bool StateMachine::_handle_client_query_show_abnormal_regions(SmartSocket client
         ResultField field;
         field.name = name;
         field.type = MYSQL_TYPE_STRING;
-        fields.push_back(field);
+        fields.emplace_back(field);
     }
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {
@@ -2376,24 +2540,42 @@ bool StateMachine::_handle_client_query_show_socket(SmartSocket client) {
         fields.push_back(field);
     } while (0);
 
-    std::map<std::string, int> ip_map;
+    do {
+        ResultField field;
+        field.name = "username";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    std::map<std::string, std::map<std::string, int>> ip_map;
     EpollInfo* epoll_info = NetworkServer::get_instance()->get_epoll_info();
     for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
         SmartSocket sock = epoll_info->get_fd_mapping(idx);
         if (sock == NULL || sock->is_free || sock->fd == -1 || sock->ip == "") {
             continue;
         }
-        ip_map[sock->ip]++;
+        ip_map[sock->ip][sock->username]++;
     }
     // Make rows.
     std::vector< std::vector<std::string> > rows;
 
     for (auto& pair : ip_map) {
-        std::vector<std::string> row;
-        row.push_back(pair.first);
-        row.push_back(std::to_string(pair.second));
-        rows.push_back(row);
+        for (auto& pair2 : pair.second) {
+            std::vector<std::string> row;
+            row.push_back(pair.first);
+            row.push_back(std::to_string(pair2.second));
+            row.push_back(pair2.first);
+            rows.push_back(row);
+        }
     }
+
+    std::sort(rows.begin(), rows.end(), 
+        [](const std::vector<std::string>& left, const std::vector<std::string>& right) {
+            int l = atoi(left[1].c_str());
+            int r = atoi(right[1].c_str());
+            return l < r;
+    });
 
     // Make mysql packet.
     MysqlWrapper* wrapper = MysqlWrapper::get_instance();
@@ -2862,7 +3044,11 @@ bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
         return false;
     }
     SchemaFactory* factory = SchemaFactory::get_instance();
-    std::string full_name = client->user_info->namespace_ + "." + db + "." + table;
+    std::string namespace_ = client->user_info->namespace_;
+    if (db == "information_schema") {
+        namespace_ = "INTERNAL";
+    }
+    std::string full_name = namespace_ + "." + db + "." + table;
     int64_t table_id = -1;
     if (factory->get_table_id(full_name, table_id) != 0) {
         client->state = STATE_ERROR;
@@ -3056,7 +3242,7 @@ void StateMachine::client_free(SmartSocket sock, EpollInfo* epoll_info) {
         return;
     }
     if (sock->txn_id != 0) {
-        sock->query_ctx.reset(new (std::nothrow)QueryContext(sock->user_info, sock->current_db));
+        sock->reset_query_ctx(new (std::nothrow)QueryContext(sock->user_info, sock->current_db));
         sock->query_ctx->sql = "rollback";
         _handle_client_query_common_query(sock);
     }
@@ -3064,7 +3250,7 @@ void StateMachine::client_free(SmartSocket sock, EpollInfo* epoll_info) {
         sock->user_info->connection_dec();
     }
     _print_query_time(sock);
-    sock->query_ctx.reset(new QueryContext);
+    sock->reset_query_ctx(new QueryContext);
     if (sock->fd > 0 && sock->fd < (int)CONFIG_MPL_EPOLL_MAX_SIZE) {
         epoll_info->delete_fd_mapping(sock->fd);
     }
@@ -3264,7 +3450,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     }
     client->query_ctx->stat_info.query_plan_time = cost.get_time();
     if (client->query_ctx->explain_type == SHOW_PLAN) {
-        client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
+        client->on_commit_rollback();
         pb::Plan plan;
         ExecNode::create_pb_plan(0, &plan, client->query_ctx->root);
         std::string plan_str = "logical_plan:" + client->query_ctx->plan.DebugString() + "\n" +

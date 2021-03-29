@@ -13,10 +13,20 @@
 // limitations under the License.
 
 #include "baikal_heartbeat.h"
+#include "task_fetcher.h"
 namespace baikaldb {
 
-void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request) {
-    SchemaFactory* factory = SchemaFactory::get_instance();
+void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup) {
+    SchemaFactory* factory = nullptr;
+    if (is_backup) {
+        factory = SchemaFactory::get_backup_instance();
+    } else {
+        factory = SchemaFactory::get_instance();
+    }
+    if (!factory->is_inited()) {
+        return;
+    }
+
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
         auto& table_statistics_mapping = schema.table_statistics_mapping;
         for (auto& info_pair : schema.table_info_mapping) {
@@ -67,11 +77,24 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
     };
     request.set_last_updated_index(factory->last_updated_index());
     factory->schema_info_scope_read(schema_read_recallback);
-    
+    TaskFactory<pb::RegionDdlWork>::get_instance()->construct_heartbeat(request, 
+        &pb::BaikalHeartBeatRequest::add_region_ddl_works);
+    TaskFactory<pb::DdlWorkInfo>::get_instance()->construct_heartbeat(request, 
+        &pb::BaikalHeartBeatRequest::add_ddl_works);
+    request.set_can_do_ddlwork(true);
 }
 
-void BaikalHeartBeat::process_heart_beat_response(const pb::BaikalHeartBeatResponse& response) {
-    SchemaFactory* factory = SchemaFactory::get_instance();
+void BaikalHeartBeat::process_heart_beat_response(const pb::BaikalHeartBeatResponse& response, bool is_backup) {
+    SchemaFactory* factory = nullptr;
+    if (is_backup) {
+        factory = SchemaFactory::get_backup_instance();
+    } else {
+        factory = SchemaFactory::get_instance();
+    }
+    if (!factory->is_inited()) {
+        return;
+    }
+
     for (auto& info : response.schema_change_info()) {
         factory->update_table(info);
     }
@@ -90,6 +113,15 @@ void BaikalHeartBeat::process_heart_beat_response(const pb::BaikalHeartBeatRespo
         response.last_updated_index() > factory->last_updated_index()) {
         factory->set_last_updated_index(response.last_updated_index());
     }
+    
+    TaskFactory<pb::RegionDdlWork>::get_instance()->process_heartbeat(response, 
+        static_cast<
+            const google::protobuf::RepeatedPtrField<pb::RegionDdlWork>& (pb::BaikalHeartBeatResponse::*)() const
+        >(&pb::BaikalHeartBeatResponse::region_ddl_works));
+    TaskFactory<pb::DdlWorkInfo>::get_instance()->process_heartbeat(response, 
+        static_cast<
+            const google::protobuf::RepeatedPtrField<pb::DdlWorkInfo>& (pb::BaikalHeartBeatResponse::*)() const
+        >(&pb::BaikalHeartBeatResponse::ddl_works));
 }
 
 void BaikalHeartBeat::process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response) {
@@ -125,6 +157,7 @@ bool BinlogNetworkServer::init() {
     pb::BaikalHeartBeatResponse response;
     //1、构造心跳请求
    BaikalHeartBeat::construct_heart_beat_request(request);
+   request.set_can_do_ddlwork(false);
     //2、发送请求
     if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
         //处理心跳

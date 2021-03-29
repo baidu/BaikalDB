@@ -36,8 +36,17 @@ public:
     void set_txn_cmd(pb::TxnCmdType cmd) {
         _txn_cmd = cmd;
     }
+
+    void set_txn_timeout(int64_t timeout) {
+        _txn_timeout = timeout;
+    }
+
+    int64_t get_txn_timeout() const {
+        return _txn_timeout;
+    }
 private:
     pb::TxnCmdType     _txn_cmd = pb::TXN_INVALID;
+    int64_t            _txn_timeout = 0;
 };
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

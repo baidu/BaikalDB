@@ -282,6 +282,7 @@ bool MysqlWrapper::make_err_packet(SmartSocket sock, MysqlErrCode err_code, cons
     DataBuffer* send_buf = sock->send_buf;
     if (send_buf->_size > 0) {
         send_buf->byte_array_clear();
+        sock->packet_id = sock->last_packet_id;
     }
     MysqlErrorItem* item = _err_handler->get_error_item_by_code(err_code);
     if (item == nullptr) {

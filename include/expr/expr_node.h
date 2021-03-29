@@ -69,6 +69,17 @@ public:
         }
         return false;
     }
+    bool has_agg() {
+        if (_node_type == pb::AGG_EXPR) {
+            return true;
+        }
+        for (auto c : _children) {
+            if (c->has_agg()) {
+                return true;
+            }
+        }
+        return false;
+    }
     virtual bool is_place_holder() {
         return false;
     }
@@ -127,6 +138,9 @@ public:
             _children[idx]->find_place_holder(placeholders);
         }
     }
+
+    virtual void replace_slot_ref_to_literal(const std::set<int64_t>& sign_set,
+                    std::map<int64_t, std::vector<ExprNode*>>& literal_maps);
 
     ExprNode* get_slot_ref(int32_t tuple_id, int32_t slot_id);
     ExprNode* get_parent(ExprNode* child);
@@ -219,12 +233,20 @@ public:
     int32_t slot_id() const {
         return _slot_id;
     }
+
+    void disable_replace_agg_to_slot() {
+        _replace_agg_to_slot = false;
+    }
+
+    void print_expr_info();
+    
 protected:
     pb::ExprNodeType _node_type;
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
     bool    _is_constant = true;
     bool    _has_null = false;
+    bool    _replace_agg_to_slot = true;
     int32_t _tuple_id = -1;
     int32_t _slot_id = -1;
     // 过滤条件对应的index_id值，用于过滤条件剪枝使用

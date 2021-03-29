@@ -23,6 +23,9 @@
 #include "parser.h"
 
 namespace baikaldb {
+
+DEFINE_int64(store_row_number_to_check_memory, 1024, "do memory limit when row number more than #, defalut: 1024");
+
 // TODO 临时代码，后面删除
 // 为了baikalStore能兼容老的baikaldb
 int RocksdbScanNode::select_index_for_store() {
@@ -96,9 +99,6 @@ int RocksdbScanNode::select_index_for_store() {
             case pb::I_FULLTEXT:
                 _multi_reverse_index.push_back(i);
                 break;
-            case pb::I_RECOMMEND:
-                _multi_reverse_index.push_back(i);
-                return i;
             default:
                 break;
         }
@@ -167,17 +167,6 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             if (slot_id > 0) {
                 _index_slot_field_map[slot_id] = f.id;
             }
-        }
-    } else if (_index_info->type == pb::I_RECOMMEND) {
-        int32_t userid_field_id = get_field_id_by_name(_table_info->fields, "userid");
-        int32_t source_field_id = get_field_id_by_name(_table_info->fields, "source");
-        auto userid_slot_id = state->get_slot_id(_tuple_id, userid_field_id);
-        auto source_slot_id = state->get_slot_id(_tuple_id, source_field_id);
-        if (userid_slot_id > 0) {
-            _index_slot_field_map[userid_slot_id] = userid_field_id;
-        }
-        if (source_slot_id > 0) {
-            _index_slot_field_map[source_slot_id] = source_field_id;
         }
     }
     for (auto& slot : _tuple_desc->slots()) {
@@ -433,9 +422,6 @@ int RocksdbScanNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "index null:%d", ret);
         return -1;
     }
-    if (_index_info->type == pb::I_RECOMMEND) {
-        state->set_sort_use_index();
-    } 
     if (_sort_use_index) {
         state->set_sort_use_index();
     }
@@ -537,7 +523,6 @@ int RocksdbScanNode::open(RuntimeState* state) {
         }
         _reverse_index = reverse_index_map[_index_id];
         //DB_NOTICE("word:%s", str_to_hex(word).c_str());
-        //bool dont_seek = _index_info->type == pb::I_RECOMMEND;
         // seek性能太差了，倒排索引都不做seek
         bool dont_seek = true;
         ret = _reverse_index->search(txn->get_txn(), *_pri_info, *_table_info, 
@@ -582,18 +567,25 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     ON_SCOPE_EXIT(([this, state]() {
         state->set_num_scan_rows(_scan_rows);
     }));
+    int ret = 0;
     if (_index_id == _table_id) {
         if (_use_get) {
-            return get_next_by_table_get(state, batch, eos);
+            ret =  get_next_by_table_get(state, batch, eos);
         } else {
-            return get_next_by_table_seek(state, batch, eos);
+            ret =  get_next_by_table_seek(state, batch, eos);
         }
     } else {
         if (_use_get) {
-            return get_next_by_index_get(state, batch, eos);
+            ret =  get_next_by_index_get(state, batch, eos);
         } else {
-            return get_next_by_index_seek(state, batch, eos);
+            ret =  get_next_by_index_seek(state, batch, eos);
         }
+    }
+    if (ret < 0) {
+        return ret;
+    }
+    if (0 != memory_limit_exceeded(state, batch)) {
+        return -1;
     }
     return 0;
 }
@@ -716,6 +708,39 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
         ++_num_rows_returned;
     }
 }
+    
+int RocksdbScanNode::lock_primary(RuntimeState* state, MemRow* row) {
+    SmartRecord record = TableRecord::new_record(_table_id);
+    for (auto& field : _pri_info->fields) {
+        int32_t field_id = field.id;
+        int32_t slot_id = _field_slot[field_id];
+        record->set_value(record->get_field_by_tag(field_id), row->get_value(_tuple_id, slot_id));
+    }
+    int ret = state->txn()->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true);
+    if (ret == -3 || ret == -2 || ret == -4) {
+        DB_DEBUG("DDL_LOG key is deleted, skip. error[%d]", ret);
+        return 0;
+    }
+    if (ret != 0) {
+        DB_FATAL("lock key error.");
+        return -1;
+    }
+    for (auto& pair: _field_ids) {
+        int32_t field_id = pair.first;
+        int32_t slot_id = _field_slot[field_id];
+        row->set_value(_tuple_id, slot_id, record->get_value(record->get_field_by_tag(field_id)));
+    }
+    return 0;
+}
+
+int RocksdbScanNode::memory_limit_exceeded(RuntimeState* state, RowBatch* batch) {
+    if (_scan_rows > FLAGS_store_row_number_to_check_memory) {
+        if (0 != state->memory_limit_exceeded(batch->used_bytes_size())) {
+            return -1;
+        }
+    }
+    return 0;
+}
 
 int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
     int64_t index_filter_cnt = 0;
@@ -777,6 +802,11 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 ++index_filter_cnt;
                 continue;
             }
+            if (_lock == pb::LOCK_GET) {
+                if (lock_primary(state, row.get()) != 0) {
+                    return -1;
+                }
+            }
             batch->move_row(std::move(row));
             ++_num_rows_returned;
         } else {
@@ -807,10 +837,10 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             // scan filt column
             for (auto& field_id : _filt_field_ids) {
                 FieldInfo* field_info = _field_ids[field_id];
-                int ret = _table_iter->get_column(_tuple_id, *field_info, nullptr, &row_batch);
+                _table_iter->get_column(_tuple_id, *field_info, nullptr, &row_batch);
             }
             // filt
-            if (filter.get() != nullptr) {
+            if (filter != nullptr) {
                 for (row_batch.reset(); !row_batch.is_traverse_over(); row_batch.next()) {
                     std::unique_ptr<MemRow>& row = row_batch.get_row();
                     if (!need_copy(row.get(), _index_conjuncts)) {
@@ -821,17 +851,22 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             // scan trivial column
             for (auto& field_id : _trivial_field_ids) {
                 FieldInfo* field_info = _field_ids[field_id];
-                int ret = _table_iter->get_column(_tuple_id, *field_info, filter.get(), &row_batch);
+                _table_iter->get_column(_tuple_id, *field_info, filter.get(), &row_batch);
             }
 
             // move to row batch
             for (row_batch.reset(); !row_batch.is_traverse_over(); row_batch.next()) {
                 ++_scan_rows;
                 std::unique_ptr<MemRow>& row = row_batch.get_row();
-                if (filter  && filter->test(row_batch.index())) {
+                if (filter != nullptr && filter->test(row_batch.index())) {
                     state->inc_num_filter_rows();
                     ++index_filter_cnt;
                     continue;
+                }
+                if (_lock == pb::LOCK_GET) {
+                    if (lock_primary(state, row.get()) != 0) {
+                        return -1;
+                    }
                 }
                 batch->move_row(std::move(row));
                 ++_num_rows_returned;

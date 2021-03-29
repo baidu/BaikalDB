@@ -38,7 +38,6 @@ public:
                         FilterNode* filter_node,
                         SortNode* sort_node,
                         JoinNode* join_node,
-                        bool* has_recommend,
                         bool* index_has_null,
                         std::map<int32_t, int>& field_range_type,
                         const std::string& sample_sql);
@@ -53,12 +52,12 @@ private:
         int64_t table_id, FulltextInfoNode* fulltext_index_node);
     
     bool is_field_has_arrow_reverse_index(int64_t table_id, int64_t field_id, int64_t* index_id_ptr) {
-        auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
+        auto table_ptr = _factory->get_table_info_ptr(table_id);
         if (table_ptr != nullptr) {
             auto iter = table_ptr->arrow_reverse_fields.find(field_id);
             if (iter != table_ptr->arrow_reverse_fields.end()) {
                 *index_id_ptr = iter->second;
-                auto index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(*index_id_ptr);
+                auto index_ptr = _factory->get_index_info_ptr(*index_id_ptr);
                 if (index_ptr != nullptr) {
                     return index_ptr->state == pb::IS_PUBLIC;   
                 }
@@ -66,6 +65,8 @@ private:
         }
         return false;
     }
+
+    SchemaFactory* _factory = SchemaFactory::get_instance();
 
 };
 }

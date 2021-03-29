@@ -94,6 +94,12 @@ struct TableSource : public Node {
     TableSource() {
         node_type = NT_TABLE_SOURCE;
     }
+    virtual bool is_complex_node() {
+        if (derived_table != nullptr) {
+            return true;
+        }
+        return false;
+    }
     virtual void to_stream(std::ostream& os) const override {
         if (derived_table != nullptr) {
             os << " " << derived_table;
@@ -126,6 +132,7 @@ struct JoinNode : public Node {
     bool is_natural = false;
     bool is_straight = false;
     JoinNode() {
+        is_complex = true;
         node_type = NT_JOIN;
     }
     virtual void set_print_sample(bool print_sample_) {
@@ -187,6 +194,18 @@ struct GroupByClause : public Node {
     GroupByClause() {
         node_type = NT_GROUP_BY;
     }
+    virtual bool is_complex_node() {
+        if (is_complex) {
+            return true;
+        }
+        for (int i = 0; i < items.size(); i++) {
+            if (items[i]->is_complex_node()) {
+                is_complex = true;
+                return true;
+            }
+        }
+        return false;
+    }
     virtual void set_print_sample(bool print_sample_) {
         print_sample = print_sample_;
         for (int i = 0; i < items.size(); i++) {
@@ -207,6 +226,18 @@ struct OrderByClause : public Node {
     Vector<ByItem*> items;
     OrderByClause() {
         node_type = NT_ORDER_BY;
+    }
+    virtual bool is_complex_node() {
+        if (is_complex) {
+            return true;
+        }
+        for (int i = 0; i < items.size(); i++) {
+            if (items[i]->is_complex_node()) {
+                is_complex = true;
+                return true;
+            }
+        }
+        return false;
     }
     virtual void set_print_sample(bool print_sample_) {
         print_sample = print_sample_;
@@ -231,6 +262,20 @@ struct LimitClause : public Node {
        node_type = NT_LIMIT;
        offset = nullptr;
        count = nullptr;
+    }
+    virtual bool is_complex_node() {
+        if (is_complex) {
+            return true;
+        }
+        if (offset->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (count->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
     }
     virtual void set_print_sample(bool print_sample_) {
         print_sample = print_sample_;
@@ -272,6 +317,13 @@ struct SelectField : public Node {
     SelectField() {
         node_type = NT_SELECT_FEILD;
         as_name = nullptr;
+    }
+    virtual bool is_complex_node() {
+        if (expr != nullptr) {
+            return expr->is_complex_node();
+        } else {
+            return false;
+        }
     }
     virtual void set_print_sample(bool print_sample_) {
         print_sample = print_sample_;
@@ -461,6 +513,42 @@ struct SelectStmt : public DmlNode {
     SelectStmt() {
         node_type = NT_SELECT;
     }
+    virtual bool is_complex_node() {
+        if (is_complex) {
+            return true;
+        }
+        for (int i = 0; i < fields.size(); i++) {
+            if (fields[i]->is_complex_node()) {
+                is_complex = true;
+                return true;
+            }
+        }
+        if (table_refs != nullptr && table_refs->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (where != nullptr && where->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (group != nullptr && group->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (having != nullptr && having->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (order != nullptr && order->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (limit != nullptr && limit->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
+    }
     virtual void set_print_sample(bool print_sample_) {
         print_sample = print_sample_;
         for (int i = 0; i < fields.size(); i++) {
@@ -531,6 +619,7 @@ struct UnionStmt : public DmlNode {
     SelectLock lock = SL_NONE;
     bool is_in_braces = false;
     UnionStmt() {
+        is_complex = true;
         node_type = NT_UNION;
     }
     virtual void set_print_sample(bool print_sample_) {
@@ -685,6 +774,146 @@ struct ExplainStmt : public DmlNode {
     String format;
     ExplainStmt() {
         node_type = NT_EXPLAIN;
+    }
+};
+
+enum OnDuplicateKeyHandle : unsigned char {
+    ON_DUPLICATE_KEY_ERROR   = 0,
+    ON_DUPLICATE_KEY_IGNORE  = 1,
+    ON_DUPLICATE_KEY_REPLACE = 2
+};
+
+
+enum LoadFieldType {
+    LOAD_TERMINATED = 0,
+    LOAD_ENCLOSED   = 1,
+    LOAD_ESCAPED    = 2
+};
+
+struct FieldItem : public Node {
+     FieldItem() {
+       node_type = NT_FIELDS_ITEM;
+    }
+    LoadFieldType type = LOAD_TERMINATED;
+    String value;
+    bool opt_enclosed = false;
+};
+
+struct LinesClause : public Node {
+     LinesClause() {
+       node_type = NT_LINES;
+    }
+    String starting;
+    String terminated;
+};
+
+struct FieldsClause : public Node {
+    FieldsClause() {
+       node_type = NT_FIELDS;
+    }
+    String terminated;
+    String enclosed;
+    String escaped;
+    bool opt_enclosed = false;
+};
+
+struct LoadDataStmt : public DdlNode {
+    LoadDataStmt() {
+        node_type = NT_LOAD_DATA;
+    }
+    int32_t ignore_lines = 0;
+    bool    is_local;
+    String  path;
+    String char_set;
+    FieldsClause* fields_info = nullptr;
+    LinesClause*  lines_info = nullptr;
+    TableName* table_name = nullptr;
+    OnDuplicateKeyHandle on_duplicate_handle = ON_DUPLICATE_KEY_IGNORE;
+    Vector<ColumnName*>  columns;
+    Vector<Assignment*> set_list;
+
+    virtual void to_stream(std::ostream& os) const override {
+        os << "LOAD DATA ";
+        if (is_local) {
+            os << "LOCAL ";
+        }
+        os << "INFILE ";
+        if (!path.empty()) {
+            os << "'" << path << "' ";
+        }
+        switch (on_duplicate_handle) {
+            case ON_DUPLICATE_KEY_ERROR:
+            case ON_DUPLICATE_KEY_IGNORE:
+                os << "IGNORE ";
+                break;
+            case ON_DUPLICATE_KEY_REPLACE:
+                os << "REPLACE ";
+                break;
+        }
+        os << "INTO TABLE ";
+        table_name->to_stream(os);
+        if (!char_set.empty()) {
+            os << " CHARACTER SET " << char_set << " ";
+        }
+        if (fields_info != nullptr) {
+            if (!fields_info->terminated.empty()) {
+                if (fields_info->terminated.is_print()) {
+                    os << "TERMINATED BY '" << fields_info->terminated << "'";
+                } else {
+                    os << "TERMINATED BY NONPRINT";
+                }
+            }
+            if (!fields_info->enclosed.empty() && fields_info->enclosed.is_print()) {
+                if (!fields_info->opt_enclosed) {
+                    os << " ENCLOSED BY '" << fields_info->enclosed << "'";
+                } else {
+                    os << " OPTIONALLY ENCLOSED BY '" << fields_info->enclosed << "'";
+                }
+            } else if (!fields_info->enclosed.empty()) {
+                os << "ENCLOSED BY NONPRINT";
+            }
+            if (!fields_info->escaped.empty() && fields_info->escaped.is_print()) {
+                os << " ESCAPED BY '" << fields_info->escaped << "'";
+            } else if (!fields_info->escaped.empty()) {
+                os << "ESCAPED BY NONPRINT";
+            }
+        }
+        if (lines_info != nullptr) {
+            os << " LINES ";
+            if (!lines_info->starting.empty() && lines_info->starting.is_print()) {
+                os << "STARTING BY '" << lines_info->starting << "'";
+            } else if (!lines_info->starting.empty()) {
+                os << "STARTING BY NONPRINT";
+            }
+            if (!lines_info->terminated.empty() && lines_info->terminated.is_print()) {
+                os << "TERMINATED BY '" << lines_info->terminated << "'";
+            } else if (!lines_info->terminated.empty()) {
+                os << "TERMINATED BY NONPRINT";
+            }
+        }
+        if (ignore_lines > 0) {
+            os << " IGNORE " << ignore_lines;
+        }
+
+        if (columns.size() > 0) {
+            os << " (";
+            for (int i = 0; i < columns.size(); i++) {
+                columns[i]->to_stream(os);
+                if (i < columns.size() - 1) {
+                    os << ", ";
+                }
+            }
+            os << ")";
+        }
+        if (set_list.size() > 0) {
+            os << " SET ";
+            for (int i = 0; i < set_list.size(); i++) {
+                set_list[i]->to_stream(os);
+                if (i < set_list.size() - 1) {
+                    os << ", ";
+                }
+            }
+        }
     }
 };
 

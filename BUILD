@@ -88,6 +88,7 @@ cc_library(
         "//external:braft",
         "//external:arrow",
         "//external:croaring",
+        "//external:tcmalloc_and_profiler",
         ":cc_baikaldb_internal_proto",
     ],
     visibility = ["//visibility:public"],
@@ -349,6 +350,7 @@ cc_library(
         ":common",
         ":reverse",
         ":sqlparser",
+        ":exec2",
     ],
     visibility = ["//visibility:public"],
 )

@@ -29,10 +29,15 @@
 #include "reverse_common.h"
 #include "fn_manager.h"
 #include "schema_factory.h"
+#include "qos.h"
+#include "memory_profile.h"
 
 namespace baikaldb {
 DECLARE_int32(store_port);
+DECLARE_bool(use_fulltext_wordweight_segment);
+DECLARE_bool(use_fulltext_wordseg_wordrank_segment);
 DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
+DEFINE_int64(store_sql_memory_bytes_limit, 17179869184, "minimum memory use size , defalut: 16G");
 } // namespace baikaldb
 DEFINE_bool(stop_server_before_core, true, "stop_server_before_core");
 
@@ -66,8 +71,8 @@ int main(int argc, char **argv) {
     baikaldb_version.set_value(BAIKALDB_REVISION);
 #endif
 
-    google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
+    google::ParseCommandLineFlags(&argc, &argv, true);
     srand((unsigned)time(NULL));
     boost::filesystem::path remove_path("init.success");
     boost::filesystem::remove_all(remove_path); 
@@ -95,24 +100,33 @@ int main(int argc, char **argv) {
     baikaldb::Tokenizer::get_instance()->init();
 #ifdef BAIDU_INTERNAL
     //init wordrank_client
-    std::unique_ptr<drpc::NLPCClient> wordrank_client_ptr(new drpc::NLPCClient());
-    std::unique_ptr<drpc::NLPCClient> wordseg_client_ptr(new drpc::NLPCClient());
-    baikaldb::wordrank_client = wordrank_client_ptr.get();
-    baikaldb::wordseg_client = wordseg_client_ptr.get();
     ret = ::drpc::init_env(baikaldb::FLAGS_wordrank_conf);
     if (ret < 0) {
         DB_WARNING("wordrank init_env failed");
         return -1;
     }
-    if (baikaldb::wordrank_client->init("nlpc_wordrank_208") != 0) {
-        DB_WARNING("init wordrank agent failed");
-        return -1;
+    if (baikaldb::FLAGS_use_fulltext_wordseg_wordrank_segment) {
+        baikaldb::wordrank_client = new drpc::NLPCClient();
+        baikaldb::wordseg_client = new drpc::NLPCClient();
+        if (baikaldb::wordrank_client->init("nlpc_wordrank_208") != 0) {
+            DB_WARNING("init wordrank agent failed");
+            return -1;
+        }
+
+        if (baikaldb::wordseg_client->init("nlpc_wordseg_3016") != 0) {
+            DB_WARNING("init wordseg agent failed");
+            return -1;
+        }
     }
 
-    if (baikaldb::wordseg_client->init("nlpc_wordseg_3016") != 0) {
-        DB_WARNING("init wordseg agent failed");
-        return -1;
+    if (baikaldb::FLAGS_use_fulltext_wordweight_segment) {
+        baikaldb::wordweight_client = new drpc::NLPCClient();
+        if (baikaldb::wordweight_client->init("nlpc_wordweight_1121") != 0) {
+            DB_WARNING("init wordweight agent failed");
+            return -1;
+        }
     }
+
     DB_WARNING("init nlpc success");
 #endif
     /* 
@@ -156,6 +170,14 @@ int main(int argc, char **argv) {
         return -1;
     }
     DB_WARNING("add raft to baidu-rpc server success");
+    baikaldb::StoreQos* store_qos = baikaldb::StoreQos::get_instance();
+    ret = store_qos->init();
+    if (ret < 0) {
+        DB_FATAL("store qos init fail");
+        return -1;
+    }
+    baikaldb::MemoryGCHandler::get_instance()->init();
+    baikaldb::MemTrackerPool::get_instance()->init(baikaldb::FLAGS_store_sql_memory_bytes_limit);
     //注册处理Store逻辑的service服务
     baikaldb::Store* store = baikaldb::Store::get_instance();
     std::vector<std::int64_t> init_region_ids;
@@ -188,6 +210,10 @@ int main(int argc, char **argv) {
     store->shutdown_raft();
     store->close();
     DB_WARNING("store close success");
+    store_qos->close();
+    DB_WARNING("store qos close success");
+    baikaldb::MemoryGCHandler::get_instance()->close();
+    baikaldb::MemTrackerPool::get_instance()->close();
     // exit if server.join is blocked
     baikaldb::Bthread bth;
     bth.run([]() {

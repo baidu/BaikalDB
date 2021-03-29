@@ -43,9 +43,9 @@ public:
     int init(int64_t region_id, bool use_ttl);
 
     // -1 means insert error (already exists)
-    int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id);
+    int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id, int64_t txn_timeout = 0);
 
-    void remove_txn(uint64_t txn_id, bool mark_finished = true);
+    void remove_txn(uint64_t txn_id, bool mark_finished);
 
     SmartTransaction get_txn(uint64_t txn_id) {
         std::unique_lock<std::mutex> lock(_map_mutex);
@@ -90,9 +90,7 @@ public:
 
     void on_leader_stop_rollback();
 
-    void on_leader_stop_rollback(uint64_t txn_id);
-
-    void on_leader_start_recovery(Region* region);
+    void clear_orphan_transactions();
 
     void get_prepared_txn_info(std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn, bool for_num_rows);
 

@@ -55,6 +55,8 @@ struct QueryStat {
     std::string table;
     std::string server_ip;
     std::ostringstream sample_sql;
+    std::string trace_id;
+    uint64_t    sign = 0;
     int64_t     table_id = -1;
 
     MysqlErrCode error_code;
@@ -99,6 +101,8 @@ struct QueryStat {
         table_id = -1;
         server_ip.clear();
         sample_sql.str("");
+        trace_id.clear();
+        sign = 0;
 
         error_code          = ER_ERROR_FIRST;
         error_msg.str("");
@@ -210,7 +214,6 @@ public:
     NetworkSocket*      client_conn = nullptr; // used for baikaldb
     // the insertion records, not grouped by region yet
     std::vector<SmartRecord>            insert_records;
-    bool                has_recommend = false;
 
     bool                succ_after_logical_plan = false;
     bool                succ_after_physical_plan = false;
@@ -220,11 +223,12 @@ public:
     bool                is_prepared = false;   // flag for stmt_execute
     bool                is_select = false;
     bool                need_destroy_tree = false;
-    int64_t             prepared_table_id = -1;
     bool                has_derived_table = false;
     bool                has_information_schema = false;
+    bool                is_complex = false;
+    bool                use_backup = false;
+    int64_t             prepared_table_id = -1;
     ExprParams          expr_params;
-    std::string         current_table_name;
     // field: column_id
     std::map<std::string, int32_t> field_column_id_mapping;
     // tuple_id: field: slot_id
@@ -232,8 +236,10 @@ public:
     // tuple_id: slot_id: column_id
     std::map<int64_t, std::map<int32_t, int32_t>>     slot_column_mapping;
     std::map<int64_t, std::shared_ptr<QueryContext>> derived_table_ctx_mapping;
-    // 当前sql涉及的tuple
+    // 当前sql涉及的所有tuple
     std::set<int64_t>   current_tuple_ids;
+    // 当前sql涉及的表的tuple
+    std::set<int64_t>   current_table_tuple_ids;
     bool                open_binlog = false;
 
     // user can scan data in specific region by comments 

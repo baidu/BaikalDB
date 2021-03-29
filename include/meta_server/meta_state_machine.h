@@ -24,7 +24,9 @@ public:
     MetaStateMachine(const braft::PeerId& peerId):
                 CommonStateMachine(0, "meta_raft", "/meta_server", peerId),
                 _bth(&BTHREAD_ATTR_SMALL),
-                _healthy_check_start(false) {
+                _healthy_check_start(false),
+                _baikal_heart_beat("baikal_heart_beat"),
+                _store_heart_beat("store_heart_beat") {
         bthread_mutex_init(&_load_balance_mutex, NULL);            
         bthread_mutex_init(&_migrate_mutex, NULL);            
     }
@@ -129,6 +131,8 @@ private:
 
     bool _unsafe_decision = false;
     int64_t _applied_index = 0;
+    bvar::LatencyRecorder   _baikal_heart_beat;
+    bvar::LatencyRecorder   _store_heart_beat;
 };
 
 } //namespace baikaldb

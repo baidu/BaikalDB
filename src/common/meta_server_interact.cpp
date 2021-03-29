@@ -21,10 +21,18 @@ DEFINE_int32(meta_request_timeout, 30000,
 DEFINE_int32(meta_connect_timeout, 5000, 
             "meta as server connect timeout, default:5000ms");
 DEFINE_string(meta_server_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "meta server bns");
+DEFINE_string(backup_meta_server_bns, "", "backup_meta_server_bns");
 DEFINE_int64(time_between_meta_connect_error_ms, 0, "time_between_meta_connect_error_ms. default(0ms)");
 
-int MetaServerInteract::init() {
-    return init_internal(FLAGS_meta_server_bns);
+int MetaServerInteract::init(bool is_backup) {
+    if (is_backup) {
+        if (!FLAGS_backup_meta_server_bns.empty()) {
+            return init_internal(FLAGS_backup_meta_server_bns);
+        }
+    } else {
+        return init_internal(FLAGS_meta_server_bns);
+    }
+    return 0;
 }
 
 int MetaServerInteract::init_internal(const std::string& meta_bns) {
@@ -47,6 +55,7 @@ int MetaServerInteract::init_internal(const std::string& meta_bns) {
         DB_FATAL("meta server bns pool init fail. bns_name:%s", meta_server_addr.c_str());
         return -1;
     }
+    _is_inited = true;
     return 0; 
 }
 }

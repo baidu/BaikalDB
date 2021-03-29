@@ -131,6 +131,8 @@ void FunctionManager::register_operators() {
     register_object_ret("upper", upper, pb::STRING);
     register_object_ret("lower", lower, pb::STRING);
     register_object_ret("lower_gbk", lower_gbk, pb::STRING);
+    register_object_ret("ucase", upper, pb::STRING);
+    register_object_ret("lcase", lower, pb::STRING);
     register_object_ret("concat", concat, pb::STRING);
     register_object_ret("substr", substr, pb::STRING);
     register_object_ret("left", left, pb::STRING);
@@ -175,6 +177,7 @@ void FunctionManager::register_operators() {
     register_object_ret("datediff", datediff, pb::UINT32);
     register_object_ret("date_add", date_add, pb::DATETIME);
     register_object_ret("date_sub", date_sub, pb::DATETIME);
+    register_object_ret("extract", extract, pb::UINT32);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);
@@ -218,6 +221,11 @@ void FunctionManager::register_operators() {
     register_object_ret("rb_maximum", rb_maximum, pb::UINT32);
     register_object_ret("rb_rank", rb_rank, pb::UINT32);
     register_object_ret("rb_jaccard_index", rb_jaccard_index, pb::DOUBLE);
+    // tdigest funcs
+    register_object_ret("tdigest_build", tdigest_build, pb::TDIGEST);
+    register_object_ret("tdigest_add", tdigest_add, pb::TDIGEST);
+    register_object_ret("tdigest_percentile", tdigest_percentile, pb::DOUBLE);
+    register_object_ret("tdigest_location", tdigest_location, pb::DOUBLE);
 
     register_object_ret("version", version, pb::STRING);
 }

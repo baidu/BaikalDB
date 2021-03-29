@@ -274,9 +274,9 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
 
     if (txn != nullptr) {
         read_options.snapshot = txn->get_snapshot();
-        _iter = txn->get_txn()->GetIterator(read_options, _data_cf);
+        _iter = new myrocksdb::Iterator(txn->get_txn()->GetIterator(read_options, _data_cf));
     } else {
-        _iter = _db->new_iterator(read_options, RocksWrapper::DATA_CF);
+        _iter = new myrocksdb::Iterator(_db->new_iterator(read_options, RocksWrapper::DATA_CF));
     }
     if (!_iter) {
         DB_FATAL("create iterator failed: %ld", index_id);
@@ -337,12 +337,12 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
         MutTableKey key(primary_key);
         key.replace_i32(table_id, sizeof(int64_t));
         key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
-        rocksdb::Iterator* iter;
+        myrocksdb::Iterator* iter;
         if (_txn != nullptr) {
             read_options.snapshot = txn->get_snapshot();
-            iter = _txn->GetIterator(read_options, _data_cf);
+            iter = new myrocksdb::Iterator(_txn->GetIterator(read_options, _data_cf));
         } else {
-            iter = _db->new_iterator(read_options, RocksWrapper::DATA_CF);
+            iter = new myrocksdb::Iterator(_db->new_iterator(read_options, RocksWrapper::DATA_CF));
         }
         if (!iter) {
             DB_FATAL("create iterator failed: %d", field_id);
@@ -503,7 +503,7 @@ int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const Fi
     if (slot_id == 0) {
         return -1;
     }
-    rocksdb::Iterator* iter = _column_iters[field_id];
+    myrocksdb::Iterator* iter = _column_iters[field_id];
     MutTableKey prefix_key;
     prefix_key.append_i64(_region);
     prefix_key.append_i32(_pri_info->id);

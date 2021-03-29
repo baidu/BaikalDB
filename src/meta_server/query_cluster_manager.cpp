@@ -108,6 +108,24 @@ void QueryClusterManager::get_instance_info(const pb::QueryRequest* request,
     }
 }
 
+void QueryClusterManager::get_instance_param(const pb::QueryRequest* request,
+                                        pb::QueryResponse* response) {
+    ClusterManager* manager = ClusterManager::get_instance();
+    {
+        BAIDU_SCOPED_LOCK(manager->_instance_param_mutex);
+        if (!request->has_resource_tag() || request->resource_tag() == "") {
+            for (auto iter : manager->_instance_param_map) {
+                *(response->add_instance_params()) = iter.second;
+            }
+        } else {
+            auto iter = manager->_instance_param_map.find(request->resource_tag());
+            if (iter != manager->_instance_param_map.end()) {
+                *(response->add_instance_params()) = iter->second;
+            }
+        }
+    }
+}
+
 void QueryClusterManager::get_flatten_instance(const pb::QueryRequest* request,
                                         pb::QueryResponse* response) {
     ClusterManager* manager = ClusterManager::get_instance(); 

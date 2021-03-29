@@ -38,6 +38,7 @@ enum MysqlType : uint8_t {
     MYSQL_TYPE_NEWDATE, 
     MYSQL_TYPE_VARCHAR,
     MYSQL_TYPE_BIT,
+    MYSQL_TYPE_TDIGEST = 242,
     MYSQL_TYPE_BITMAP = 243,
     MYSQL_TYPE_HLL = 244,
     MYSQL_TYPE_JSON = 245,
@@ -71,7 +72,7 @@ struct ResultField {
     std::string     org_table;
     std::string     name;       // Name of column
     std::string     org_name;
-    uint16_t        charsetnr = 0;  // Character.
+    uint16_t        charsetnr = 0;
     uint32_t        length = 0;     // Width of column (create length).
     uint8_t         type = 0;       // Type of field. See mysql_com.h for types.
     uint16_t        flags = 1;      // Div flags.
@@ -325,6 +326,7 @@ inline uint8_t to_mysql_type(pb::PrimitiveType type) {
         case pb::HLL:
             return MYSQL_TYPE_LONGLONG;
         case pb::BITMAP:
+        case pb::TDIGEST:
             return MYSQL_TYPE_STRING;
         default:
             return MYSQL_TYPE_STRING;
@@ -363,6 +365,7 @@ inline std::string to_mysql_type_string(pb::PrimitiveType type) {
             return "timestamp";
         case pb::HLL:
         case pb::BITMAP:
+        case pb::TDIGEST:
             return "binary";
         default:
             return "text";
@@ -405,6 +408,7 @@ inline std::string to_mysql_type_full_string(pb::PrimitiveType type) {
             return "timestamp(0)";
         case pb::HLL:
         case pb::BITMAP:
+        case pb::TDIGEST:
             return "binary";
         default:
             return "text";

@@ -38,11 +38,14 @@ DEFINE_int32(epoll_timeout, 2000, "Epoll wait timeout in epoll_wait().");
 DEFINE_int32(check_interval, 10, "interval for conn idle timeout");
 DEFINE_int32(connect_idle_timeout_s, 1800, "connection idle timeout threshold (second)");
 DEFINE_int32(slow_query_timeout_s, 60, "slow query threshold (second)");
-DEFINE_int64(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
+DEFINE_int32(backup_pv_threshold, 50, "backup_pv_threshold");
+DEFINE_double(backup_error_percent, 0.5, "use backup table if backup_error_percent > 0.5");
 DEFINE_int64(health_check_interval_us, 5 * 1000 * 1000, "health_check_interval_us");
+DEFINE_bool(need_health_check, true, "need_health_check");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
+DECLARE_int32(baikal_heartbeat_interval_us);
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 
@@ -51,8 +54,10 @@ void NetworkServer::report_heart_beat() {
         TimeCost cost;
         pb::BaikalHeartBeatRequest request;
         pb::BaikalHeartBeatResponse response;
+        _heart_beat_count << 1;
         //1、construct heartbeat request
         BaikalHeartBeat::construct_heart_beat_request(request);
+        request.set_physical_room(_physical_room);
         int64_t construct_req_cost = cost.get_time();
         cost.reset();
         //2、send heartbeat request to meta server
@@ -64,6 +69,26 @@ void NetworkServer::report_heart_beat() {
         } else {
             DB_WARNING("send heart beat request to meta server fail");
         }
+
+        if (MetaServerInteract::get_backup_instance()->is_inited()) {
+            request.Clear();
+            response.Clear();
+            //1、construct heartbeat request
+            BaikalHeartBeat::construct_heart_beat_request(request, true);
+            int64_t construct_req_cost = cost.get_time();
+            cost.reset();
+            //2、send heartbeat request to meta server
+            if (MetaServerInteract::get_backup_instance()->send_request("baikal_heartbeat", request, response) == 0) {
+                //处理心跳
+                BaikalHeartBeat::process_heart_beat_response(response, true);
+                DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
+                        construct_req_cost, cost.get_time());
+            } else {
+                DB_WARNING("send heart beat request to meta server fail");
+            }
+        }
+
+        _heart_beat_count << -1;
         bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
     }
 }
@@ -248,6 +273,22 @@ void NetworkServer::print_agg_sql() {
         struct tm tm;
         time(&timep);
         localtime_r(&timep, &tm);
+
+        struct CountErr {
+            int64_t count = 0;
+            int64_t err = 0;
+            CountErr() {
+            }
+            CountErr(int64_t count, int64_t err) : count(count), err(err) {
+            }
+            CountErr& operator+=(const CountErr& other) {
+                count += other.count;
+                err += other.err;
+                return *this;
+            }
+        };
+
+        std::map<int64_t, CountErr> table_count_err;
         
         for (auto& pair : sample.internal_map) {
             if (!pair.first.empty()) {
@@ -267,14 +308,29 @@ void NetworkServer::print_agg_sql() {
                     std::string field_desc = "-";
                     index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
                     butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
-                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter=[%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] sql_agg: %s "
-                        "op_version_desc=[%ld\t%s\t%s\t%s]", 
+                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter="
+                            "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] sql_agg: %s "
+                            "op_version_desc=[%ld\t%s\t%s\t%s]", 
                         1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
                         pair2.second.sum, pair2.second.count,
                         pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
-                        pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
-                        out[0], hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),
+                        pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows, pair2.second.err_count,
+                        out[0], hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),  
                         version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str());
+                    table_count_err[pair2.second.table_id] += CountErr(pair2.second.count, pair2.second.err_count);
+                }
+            }
+        }
+        for (auto& pair : table_count_err) {
+            // 10s pv>50 出错率>0.5则读路由去备库
+            if (pair.second.count > FLAGS_backup_pv_threshold && 
+                    pair.second.err * 1.0 / pair.second.count > FLAGS_backup_error_percent) {
+                int64_t table_id = pair.first;
+                auto tbl_ptr = factory->get_table_info_ptr(table_id);
+                if (tbl_ptr != nullptr && tbl_ptr->have_backup) {
+                    tbl_ptr->need_read_backup = true;
+                    DB_FATAL("table_id: %ld, %s use backup, count:%ld, err:%ld", 
+                            table_id, tbl_ptr->name.c_str(), pair.second.count, pair.second.err);
                 }
             }
         }
@@ -300,6 +356,10 @@ static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
         }
     }
     if (old_status != new_status) {
+        // double check for dead status
+        if (old_status == pb::NORMAL) {
+            new_status = pb::FAULTY;
+        }
         SchemaFactory::get_instance()->update_instance(addr, new_status);
     }
 }
@@ -426,22 +486,23 @@ void NetworkServer::connection_timeout_check() {
                 continue;
             }
             time_now = time(NULL);
-            if (sock->query_ctx != nullptr && 
-                    sock->query_ctx->mysql_cmd != COM_SLEEP) {
+            auto ctx = sock->get_query_ctx();
+            if (ctx != nullptr && 
+                    ctx->mysql_cmd != COM_SLEEP) {
                 if (need_cancel_addrs.size() > 0) {
                     // cancel dead addr 
-                    sock->query_ctx->get_runtime_state()->cancel_rpc(need_cancel_addrs, sock->fd);
+                    sock->cancel_rpc(need_cancel_addrs, sock->fd);
                     DB_WARNING("%lu addrs is dead, cancel", need_cancel_addrs.size());
                 }
 
-                int query_time_diff = time_now - sock->query_ctx->stat_info.start_stamp.tv_sec;
+                int query_time_diff = time_now - ctx->stat_info.start_stamp.tv_sec;
                 if (query_time_diff > FLAGS_slow_query_timeout_s) {
                     DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][sql=%s]",
                             query_time_diff, sock->fd, sock->ip.c_str(), sock->port,
                             time_now, sock->last_active,
                             sock->user_info->username.c_str(),
-                            sock->query_ctx->stat_info.log_id,
-                            sock->query_ctx->sql.c_str());
+                            ctx->stat_info.log_id,
+                            ctx->sql.c_str());
                     continue;
                 }
             }
@@ -482,11 +543,17 @@ void NetworkServer::graceful_shutdown() {
 NetworkServer::NetworkServer():
         _is_init(false),
         _shutdown(false),
-        _epoll_info(NULL) {
+        _epoll_info(NULL),
+        _heart_beat_count("heart_beat_count") {
 }
 
 NetworkServer::~NetworkServer() {
     // Free epoll info.
+    _conn_check_bth.join();
+    _heartbeat_bth.join();
+    _other_heartbeat_bth.join();
+    _agg_sql_bth.join();
+    _health_check_bth.join();
     if (_epoll_info != NULL) {
         delete _epoll_info;
         _epoll_info = NULL;
@@ -527,11 +594,22 @@ bool NetworkServer::init() {
     // init val 
     _driver_thread_num = bthread::FLAGS_bthread_concurrency;
     TimeCost cost;
+    butil::EndPoint addr;
+    addr.ip = butil::my_ip();
+    addr.port = FLAGS_baikal_port; 
+    std::string address = endpoint2str(addr).c_str(); 
+    int ret = get_physical_room(address, _physical_room);
+    if (ret < 0) {
+        DB_FATAL("get physical room fail");
+        return false;
+    }
+    DB_NOTICE("get physical_room %s", _physical_room.c_str());
     // 先把meta数据都获取到
     pb::BaikalHeartBeatRequest request;
     pb::BaikalHeartBeatResponse response;
     //1、构造心跳请求
     BaikalHeartBeat::construct_heart_beat_request(request);
+    request.set_physical_room(_physical_room);
     //2、发送请求
     if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
         //处理心跳
@@ -585,6 +663,7 @@ bool NetworkServer::start() {
     }
     DB_WARNING("db server init success");
     if (0 != make_worker_process()) {
+        _shutdown = true;
         DB_FATAL("Start event loop failed.");
         return false;
     }
@@ -639,7 +718,10 @@ int NetworkServer::make_worker_process() {
     _heartbeat_bth.run([this]() {report_heart_beat();});
     _other_heartbeat_bth.run([this]() {report_other_heart_beat();});
     _agg_sql_bth.run([this]() {print_agg_sql();});
-    _health_check_bth.run([this]() {store_health_check();});
+    if (FLAGS_need_health_check) {
+        _health_check_bth.run([this]() {store_health_check();});
+    }
+
 
     // Create listen socket.
     _service = create_listen_socket();

@@ -313,7 +313,7 @@ SET(DEP_INC
         ${BRPC_INCLUDE_DIR}
         ${BRAFT_INCLUDE_DIR}
 
-        ${TCMALLOC_INCLUDE_DIR}
+        ${GPERFTOOLS_INCLUDE_DIR}
         )
 
 SET(DEP_LIB

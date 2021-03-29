@@ -47,14 +47,16 @@ public:
     //input_exprs 既是输入参数，也是输出参数
     //output:能推的条件尽量下推，不能推的条件做一个filter node, 连接到节点的上边
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
-        //DB_WARNING("node:%ld is predicating pushdown", this);
+
+    virtual void remove_additional_predicate(std::vector<ExprNode*>& input_exprs);
     void add_filter_node(const std::vector<ExprNode*>& input_exprs);
     
-    void get_node(pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
-    ExecNode* get_node(pb::PlanNodeType node_type);
+    void get_node(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
+    ExecNode* get_node(const pb::PlanNodeType node_type);
     ExecNode* get_parent() {
         return _parent;
     }
+    void join_get_scan_nodes(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     bool need_seperate();
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
@@ -68,6 +70,13 @@ public:
             e->close(state);
         }
     }
+    virtual void reset(RuntimeState* state) {
+        _num_rows_returned = 0;
+        _return_empty = false;
+        for (auto e : _children) {
+            e->reset(state);
+        }
+    }
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return NULL;
     }
@@ -76,10 +85,34 @@ public:
             _children[idx]->find_place_holder(placeholders);
         }
     }
+    virtual void replace_slot_ref_to_literal(const std::set<int64_t>& sign_set, std::map<int64_t, std::vector<ExprNode*>>& literal_maps) {
+        for (auto child : _children) {
+            if (child->node_type() == pb::JOIN_NODE || child->node_type() == pb::APPLY_NODE) {
+                continue;
+            }
+            child->replace_slot_ref_to_literal(sign_set, literal_maps);
+        }
+    }
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output) {
         for (auto child : _children) {
             child->show_explain(output);
         }
+    }
+
+    ExecNode* get_specified_node(const pb::PlanNodeType node_type) {
+        if (node_type == _node_type) {
+            return this;
+        }
+        for (auto child : _children) {
+            if (child->node_type() == pb::JOIN_NODE || child->node_type() == pb::APPLY_NODE) {
+                return nullptr;
+            }
+            ExecNode* exec_node = child->get_specified_node(node_type);
+            if (exec_node != nullptr) {
+                return exec_node;
+            }
+        }
+        return nullptr;
     }
     void set_parent(ExecNode* parent_node) {
         _parent = parent_node;
@@ -96,6 +129,13 @@ public:
             return ;
         }
         _children.push_back(exec_node);
+        exec_node->set_parent(this);
+    }
+    void add_child(ExecNode* exec_node, size_t idx) {
+        if (exec_node == nullptr || idx > _children.size()) {
+            return ;
+        }
+        _children.insert(_children.begin() + idx, exec_node);
         exec_node->set_parent(this);
     }
     void clear_children() {
@@ -145,6 +185,12 @@ public:
     }
     void set_limit(int64_t limit) {
         _limit = limit;
+    }
+    virtual void reset_limit(int64_t limit) {
+        _limit = limit;
+        for (auto child : _children) {
+            child->reset_limit(limit);
+        }
     }
     int64_t get_limit() {
         return _limit;

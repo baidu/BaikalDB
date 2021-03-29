@@ -18,6 +18,7 @@
 #include "insert_planner.h"
 #include "delete_planner.h"
 #include "update_planner.h"
+#include "transaction_planner.h"
 #include "exec_node.h"
 #include "packet_node.h"
 #include "literal.h"
@@ -164,6 +165,7 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     prepare_ctx->cur_db = _ctx->cur_db;
     prepare_ctx->user_info = _ctx->user_info;
     prepare_ctx->row_ttl_duration = _ctx->row_ttl_duration;
+    prepare_ctx->is_complex = _ctx->is_complex;
     prepare_ctx->client_conn = client;
     prepare_ctx->get_runtime_state()->set_client_conn(client);
     prepare_ctx->sql = stmt_sql;
@@ -236,6 +238,7 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     // ttl沿用prepare的注释
     DB_DEBUG("row_ttl_duration %ld", prepare_ctx->row_ttl_duration);
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
+    _ctx->is_complex = prepare_ctx->is_complex;
     _ctx->mutable_tuple_descs()->assign(tuple_descs.begin(), tuple_descs.end());
     // TODO dml的plan复用
     if (!prepare_ctx->is_select) {

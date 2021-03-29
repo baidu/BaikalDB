@@ -25,9 +25,9 @@
 
 using google::protobuf::FileDescriptor;
 namespace baikaldb {
-
+BthreadLocal<bool> SchemaFactory::use_backup;
 int SchemaFactory::init() {
-    if (_is_init) {
+    if (_is_inited) {
         return 0;
     }
     int ret = bthread::execution_queue_start(&_table_queue_id, nullptr, 
@@ -50,7 +50,7 @@ int SchemaFactory::init() {
         DB_FATAL("execution_queue_start error, %d", ret);
         return -1;
     }
-    _is_init = true;
+    _is_inited = true;
     return 0;
 }
 
@@ -236,7 +236,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     auto& global_index_id_mapping = background.global_index_id_mapping;
 
     //DB_WARNING("table:%s", table.ShortDebugString().c_str());
-    if (!_is_init) {
+    if (!_is_inited) {
         DB_FATAL("SchemaFactory not initialized");
         return -1;
     }
@@ -302,6 +302,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     tbl_info.id = table_id;
     tbl_info.db_id = database_id;
     tbl_info.partition_num = table.partition_num(); //TODO
+    tbl_info.timestamp = table.timestamp(); 
     if (!table.has_byte_size_per_record() || table.byte_size_per_record() < 1) {
         tbl_info.byte_size_per_record = 1;
     } else {
@@ -312,8 +313,19 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     } else {
         tbl_info.region_split_lines = table.region_size() / tbl_info.byte_size_per_record;
     }
+    //DB_WARNING("schema_conf:%s", table.schema_conf().ShortDebugString().c_str());
     if (table.has_schema_conf()) {
         update_schema_conf(_tbl_name, table.schema_conf(), tbl_info.schema_conf);
+        auto bk = table.schema_conf().backup_table();
+        if (bk == pb::BT_AUTO) {
+            tbl_info.have_backup = true;
+        } else if (bk == pb::BT_READ) {
+            tbl_info.have_backup = true;
+            tbl_info.need_read_backup = true;
+        } else if (bk == pb::BT_WRITE) {
+            tbl_info.have_backup = true;
+            tbl_info.need_write_backup = true;
+        }
     }
 
     if (table.partition_num() > 1 && table.has_partition_info()) {
@@ -450,7 +462,8 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             field_info.default_expr_value.str_val = field_info.default_value;
             field_info.default_expr_value.cast_to(field_info.type);
         }
-        if (field_info.type == pb::STRING || field_info.type == pb::HLL || field_info.type == pb::BITMAP) {
+        if (field_info.type == pb::STRING || field_info.type == pb::HLL
+            || field_info.type == pb::BITMAP || field_info.type == pb::TDIGEST) {
             field_info.size = -1;
         } else {
             field_info.size = get_num_size(field_info.type);
@@ -593,6 +606,13 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     idx_info.short_name = lower_index_name;
     idx_info.type = index.index_type();
     idx_info.state = index.state();
+    if (idx_info.state == pb::IS_WRITE_ONLY) {
+        auto time = butil::gettimeofday_us();
+        DB_DEBUG("update write_only timestamp %ld", time);
+        idx_info.write_only_time = time;
+    } else {
+        idx_info.write_only_time = -1;
+    }
     idx_info.segment_type = index.segment_type();
     if (index.has_hint_status()) {
         idx_info.index_hint_status = index.hint_status();
@@ -631,7 +651,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
         } else if (idx_info.length != -1) {
             idx_info.length += info->size;
         }
-        if (idx_info.type == pb::I_FULLTEXT || idx_info.type == pb::I_RECOMMEND) {
+        if (idx_info.type == pb::I_FULLTEXT) {
             DB_NOTICE("table %ld index %ld insert reverse field %d", 
                 table_info.id, idx_info.id, info->id);
             if (idx_info.storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
@@ -730,7 +750,7 @@ void SchemaFactory::update_regions_double_buffer(bthread::TaskIterator<RegionVec
         for (auto& region : *iter) {
             int64_t table_id = region.table_id();
             int p_id = region.partition_id();
-            DB_WARNING("update_region : %s, pid %d", region.DebugString().c_str(), p_id);
+            //DB_WARNING("update_region : %s, pid %d", region.DebugString().c_str(), p_id);
             const std::string& start_key = region.start_key();
             if (!start_key.empty() && start_key == region.end_key()) {
                 DB_WARNING("table id:%ld region id:%ld is empty can`t add to map",
@@ -2363,6 +2383,30 @@ int SchemaFactory::get_binlog_regions(int64_t table_id, pb::RegionInfo& region_i
         DB_WARNING("get table %ld binlog partition num error.", binlog_id);
         return -1;
     }
+}
+
+int SchemaFactory::is_unique_field_ids(int64_t table_id, const std::set<int32_t>& field_ids) {
+    auto table_info_ptr = get_table_info_ptr(table_id);
+    if (table_info_ptr == nullptr) {
+        return -1;
+    }
+    for (auto index_id : table_info_ptr->indices) {
+        auto index_ptr = get_index_info_ptr(index_id);
+        if (index_ptr != nullptr && index_ptr->state == pb::IS_PUBLIC
+          && (index_ptr->type == pb::I_PRIMARY || index_ptr->type == pb::I_UNIQ)) {
+            std::set<int32_t> tmp_field_ids;
+            for (auto& field : index_ptr->fields) {
+                tmp_field_ids.emplace(field.id);
+            }
+            for (auto i : field_ids) {
+                tmp_field_ids.erase(i);
+            }
+            if (tmp_field_ids.size() == 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_index, std::map<int64_t, pb::RegionInfo>& region_infos) {

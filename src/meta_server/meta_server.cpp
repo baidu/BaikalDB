@@ -29,6 +29,7 @@
 #include "query_region_manager.h"
 #include "meta_util.h"
 #include "meta_rocksdb.h"
+#include "ddl_manager.h"
 
 namespace baikaldb {
 DEFINE_int32(meta_port, 8010, "Meta port");
@@ -56,6 +57,7 @@ const std::string MetaServer::LOGICAL_CLUSTER_IDENTIFY(1, 0x01);
 const std::string MetaServer::LOGICAL_KEY = "logical_room";
 const std::string MetaServer::PHYSICAL_CLUSTER_IDENTIFY(1, 0x02);
 const std::string MetaServer::INSTANCE_CLUSTER_IDENTIFY(1, 0x03);
+const std::string MetaServer::INSTANCE_PARAM_CLUSTER_IDENTIFY(1, 0x04);
 
 const std::string MetaServer::PRIVILEGE_IDENTIFY(1, 0x03);
 
@@ -68,6 +70,7 @@ const std::string MetaServer::REGION_SCHEMA_IDENTIFY(1, 0x05);
 
 const std::string MetaServer::DDLWORK_IDENTIFY(1, 0x06);
 const std::string MetaServer::STATISTICS_IDENTIFY(1, 0x07);
+const std::string MetaServer::GLOBAL_DDLWORK_REGION_IDENTIFY(1, 0x08);
 const std::string MetaServer::MAX_IDENTIFY(1, 0xFF);
 
 MetaServer::~MetaServer() {}
@@ -122,6 +125,10 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     PrivilegeManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     ClusterManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     MetaServerInteract::get_instance()->init();
+    DDLManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+    DBManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+    DDLManager::get_instance()->launch_work();
+    DBManager::get_instance()->init();
 #ifdef BAIDU_INTERNAL
     _meta_interact_map["e0"] = new MetaServerInteract;
     _meta_interact_map["e0"]->init_internal(FLAGS_e0_meta_bns);
@@ -196,6 +203,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_DROP_LOGICAL
             || request->op_type() == pb::OP_DROP_INSTANCE
             || request->op_type() == pb::OP_UPDATE_INSTANCE 
+            || request->op_type() == pb::OP_UPDATE_INSTANCE_PARAM 
             || request->op_type() == pb::OP_MOVE_PHYSICAL) {
         ClusterManager::get_instance()->process_cluster_info(controller,
                                                request,
@@ -244,7 +252,10 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_DELETE_DDLWORK
             || request->op_type() == pb::OP_LINK_BINLOG
             || request->op_type() == pb::OP_UNLINK_BINLOG
-            || request->op_type() == pb::OP_SET_INDEX_HINT_STATUS) {
+            || request->op_type() == pb::OP_SET_INDEX_HINT_STATUS
+            || request->op_type() == pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK
+            || request->op_type() == pb::OP_SUSPEND_DDL_WORK
+            || request->op_type() == pb::OP_RESTART_DDL_WORK) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,
@@ -376,6 +387,8 @@ void MetaServer::query(google::protobuf::RpcController* controller,
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl =
         static_cast<brpc::Controller*>(controller);
+    const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
+    const char* remote_side = remote_side_tmp.c_str();
     uint64_t log_id = 0;
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
@@ -458,7 +471,22 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         break;                           
     }
     case pb::QUERY_REGION_PEER_STATUS: {
+        if (!_meta_state_machine->is_leader()) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("not leader");
+            response->set_leader(butil::endpoint2str(_meta_state_machine->get_leader()).c_str());
+            DB_WARNING("meta state machine is not leader, request: %s", request->ShortDebugString().c_str());
+            return;
+        }
         QueryRegionManager::get_instance()->get_region_peer_status(request, response);
+        break;                           
+    }
+    case pb::QUERY_GLOBAL_DDL_WORK: {
+        DDLManager::get_instance()->get_global_ddlwork_info(request, response);
+        break;
+    }
+    case pb::QUERY_INSTANCE_PARAM: {
+        QueryClusterManager::get_instance()->get_instance_param(request, response);
         break;                           
     }
     default: {
@@ -468,9 +496,9 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         response->set_errmsg("invalid op_type");
     }
     }
-    DB_NOTICE("query op_type_name:%s, time_cost:%ld, request: %s", 
+    DB_NOTICE("query op_type_name:%s, time_cost:%ld, log_id:%lu, ip:%s, request: %s", 
                 pb::QueryOpType_Name(request->op_type()).c_str(), 
-                time_cost.get_time(), request->ShortDebugString().c_str());
+                time_cost.get_time(), log_id, remote_side, request->ShortDebugString().c_str());
 }
 void MetaServer::raft_control(google::protobuf::RpcController* controller,
                               const pb::RaftControlRequest* request,
@@ -582,11 +610,16 @@ void MetaServer::tso_service(google::protobuf::RpcController* controller,
 static std::string bns_to_plat(const std::string& bns) {
     static std::map<std::string, std::string> mapping = {
         {"e0", "e0"},
+        {"e1", "e0"},
         {"holmes", "holmes"},
         {"hmkv", "holmes"},
+        {"hm", "holmes"},
         {"coffline", "coffline"},
         {"detect", "detect"},
+        {"taskonline", "detect"},
+        {"probe", "detect"},
         {"pinpai", "pinpai"},
+        {"ao", "pinpai"},
         {"aladdin", "aladdin"},
         {"qa", "qa"},
     };
@@ -717,5 +750,15 @@ bool MetaServer::have_data() {
            && _auto_incr_state_machine->have_data()
            && _tso_state_machine->have_data();
 }
+
+void MetaServer::close() {
+    _flush_bth.join();
+    _apply_region_bth.join();
+    DDLManager::get_instance()->shutdown();
+    DBManager::get_instance()->shutdown();
+    DDLManager::get_instance()->join();
+    DBManager::get_instance()->join();
+}
+
 }//namespace
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

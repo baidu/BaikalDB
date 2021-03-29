@@ -14,6 +14,7 @@
 
 #pragma once
 #include <cstdint>
+#include <cctype>
 #ifdef BAIDU_INTERNAL
 #include <base/arena.h>
 #else
@@ -171,6 +172,16 @@ struct String {
         }
         for (int idx = 0; idx < prefix_len; ++idx) {
             if (prefix[idx] != value[idx]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool is_print() {
+        size_t start = 0;
+        while (start < length) {
+            if (!std::isprint(value[start++])) {
                 return false;
             }
         }

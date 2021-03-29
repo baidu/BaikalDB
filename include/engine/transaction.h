@@ -26,6 +26,7 @@
 #include "proto/meta.interface.pb.h"
 #include "proto/store.interface.pb.h" 
 #include "trace_state.h"
+#include "my_rocksdb.h"
 
 namespace baikaldb {
 DECLARE_bool(disable_wal);
@@ -107,7 +108,6 @@ public:
     int begin();
     int begin(rocksdb::TransactionOptions txn_opt);
     // Wrap the close recovered (prepared) rocksdb Transaction after db restart
-    int begin(rocksdb::Transaction* txn);
     const rocksdb::Snapshot* get_snapshot() {
         return _snapshot;
     }
@@ -188,26 +188,39 @@ public:
             bool              check_region);
     int get_for_update(const std::string& key, std::string* value);
     rocksdb::Status put_kv_without_lock(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
-    int put_kv(const std::string& key, const std::string& value);
+    int put_kv(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
     int delete_kv(const std::string& key);
     
     int remove(int64_t region, IndexInfo& index, const SmartRecord key);
     int remove(int64_t region, IndexInfo& index, const TableKey&   key);
     int remove_columns(const TableKey& primary_key);
 
-    rocksdb::Transaction* get_txn() {
+    void print_txninfo_holding_lock(const std::string& key) {
+        auto lock_info = _db->get_db()->GetLockStatusData();
+        for (auto& it : lock_info) {
+            if (it.second.key.size() == key.size() && it.second.key == key) {
+                for (auto txn_id : it.second.ids) {
+                    DB_WARNING("holding lock, txn_id: %lu, cf_id: %u, key_hex: %s", 
+                        txn_id, it.first, str_to_hex(key).c_str());
+                }
+                break;
+            }
+        }
+    }
+
+    myrocksdb::Transaction* get_txn() {
         return _txn;
     }
 
-    uint64_t txn_id() {
+    uint64_t txn_id() const {
         return _txn_id;
     }
 
-    uint64_t rocksdb_txn_id() {
+    uint64_t rocksdb_txn_id() const {
         return _txn->GetID();
     }
 
-    int seq_id() {
+    int seq_id() const {
         return _seq_id;
     }
 
@@ -215,19 +228,39 @@ public:
         _seq_id = seq_id;
     }
 
-    bool is_prepared() {
+    void set_applied_seq_id(int seq_id) {
+        _applied_seq_id = seq_id;
+    }
+
+    bool is_prepared() const {
         return _is_prepared;
     }
 
-    bool is_rolledback() {
+    bool is_applying() const {
+        return _is_applying;
+    }
+
+    void set_applying(bool applying) {
+        _is_applying = applying;
+    }
+
+    bool need_check_rollback() const {
+        return _need_check_rollback;
+    }
+
+    void set_need_check_rollback(bool need_check) {
+        _need_check_rollback = need_check;
+    }
+
+    bool is_rolledback() const {
         return _is_rolledback;
     }
 
-    bool is_finished() {
+    bool is_finished() const {
         return _is_finished;
     }
 
-    bool in_process() {
+    bool in_process() const {
         return _in_process;
     }
 
@@ -237,6 +270,13 @@ public:
 
     int64_t prepare_time_us() {
         return _prepare_time_us;
+    }
+
+    void select_update_txn_status(int seq_id) {
+        _current_req_point_seq.clear();
+        _current_req_point_seq.insert(seq_id);
+        _in_process = false;
+        _seq_id = seq_id;
     }
 
     CachePlanMap& cache_plan_map() {
@@ -253,15 +293,13 @@ public:
         if (_cache_plan_map.count(seq_id) > 0) {
             return;
         }
-        pb::OpType op_type = plan_item.op_type();
-        if (op_type == pb::OP_INSERT || op_type == pb::OP_UPDATE || op_type == pb::OP_DELETE) {
-            _has_write = true;
-        }
         _cache_plan_map.insert(std::make_pair(seq_id, plan_item));
     }
 
     bool has_write() {
-        return _has_write;
+        BAIDU_SCOPED_LOCK(_cache_map_mutex);
+        // cache缓存OP_BEGIN/OP_INSERT/OP_UPDATE/OP_DELETE
+        return _cache_plan_map.size() > 1;
     }
 
     bool write_begin_index() {
@@ -271,29 +309,34 @@ public:
     void set_write_begin_index(bool flag) {
         _write_begin_index = flag;
     }
-    // return -1表示没有cache plan
+    // return -1表示没有dml cache plan
     int get_cache_plan_infos(pb::TransactionInfo& txn_info, bool for_num_rows) {
         BAIDU_SCOPED_LOCK(_cache_map_mutex);
-        if (_cache_plan_map.size() == 0) {
+        if (_cache_plan_map.size() < 2) {
             return -1;
         }
-        if (!_has_write) {
-            return -2;
-        }
         txn_info.set_txn_id(_txn_id);
+        txn_info.set_seq_id(_seq_id);
+        bool has_applied = false;
         if (!for_num_rows) {
-            txn_info.set_seq_id(_seq_id);
             txn_info.set_start_seq_id(1);
             txn_info.set_optimize_1pc(false);
             for (auto seq_id : _need_rollback_seq) {
                 txn_info.add_need_rollback_seq(seq_id);
             }
             for (auto& cache_plan : _cache_plan_map) {
-                txn_info.add_cache_plans()->CopyFrom(cache_plan.second);
+                if (cache_plan.first <= _applied_seq_id) {
+                    txn_info.add_cache_plans()->CopyFrom(cache_plan.second);
+                    has_applied = true;
+                }
             }
+        }
+        if (!has_applied) {
+            return -1;
         }
         txn_info.set_num_rows(num_increase_rows);
         txn_info.set_primary_region_id(_primary_region_id);
+        txn_info.set_txn_timeout(_txn_timeout);
         return 0;
     }
 
@@ -427,6 +470,14 @@ public:
         return _primary_region_id;
     }
 
+    void set_txn_timeout(int64_t timeout) {
+        _txn_timeout = timeout;
+    }
+
+    int64_t txn_timeout() const {
+        return _txn_timeout;
+    }
+
     bool is_primary_region() {
         if (_region_info != nullptr) {
             return (_region_info->region_id() == _primary_region_id);
@@ -443,7 +494,7 @@ public:
 
     void clear_current_req_point_seq() {
         _current_req_point_seq.clear();
-        _current_req_point_seq.insert(1);
+        _current_req_point_seq.insert(_seq_id);
     }
 
     size_t save_point_seq_size() {
@@ -491,12 +542,14 @@ private:
     
     // seq_id should be updated after each query execution regardless of success or failure 
     int                             _seq_id = 0;
+    int                             _applied_seq_id = 0;
     uint64_t                        _txn_id = 0;
+    bool                            _is_applying = false;
     bool                            _is_prepared = false;
     bool                            _is_finished = false;
     bool                            _is_rolledback = false;
+    bool                            _need_check_rollback = false;
     std::atomic<bool>               _in_process {false};
-    bool                            _has_write = false;
     bool                            _write_begin_index = true;
     int64_t                         _prepare_time_us = 0;
     std::stack<int>                 _save_point_seq;
@@ -512,7 +565,7 @@ private:
     rocksdb::WriteOptions           _write_opt;
     rocksdb::TransactionOptions     _txn_opt;
     
-    rocksdb::Transaction*           _txn = nullptr;
+    myrocksdb::Transaction*         _txn = nullptr;
     rocksdb::ColumnFamilyHandle*    _data_cf = nullptr;
     rocksdb::ColumnFamilyHandle*    _meta_cf = nullptr;
     const rocksdb::Snapshot*        _snapshot = nullptr;
@@ -528,8 +581,7 @@ private:
     bool                            _use_ttl = false;
     int64_t                         _read_ttl_timestamp_us = 0; //ttl读取时间
     int64_t                         _write_ttl_timestamp_us = 0; //ttl写入时间
-    static bvar::LatencyRecorder    rocksdb_put_time_cost;
-    static bvar::LatencyRecorder    rocksdb_get_time_cost;
+    int64_t                         _txn_timeout = 0;
 };
 
 typedef std::shared_ptr<Transaction> SmartTransaction;

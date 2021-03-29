@@ -161,6 +161,34 @@ TEST(test_parser, case_option) {
     {
         parser::SqlParser parser;
         //select distict
+        std::string sql_case = "select /*+asdmsad*/ case /*** 'ab' /***/ adgroup_id when 1378428934 "
+                "then 'true' else 'false' end from ideacontent limit 10";
+        parser.parse(sql_case);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_EQ(1, select_stmt->fields.size());
+        parser::SelectField* field = select_stmt->fields[0];
+        ASSERT_TRUE(field->expr != nullptr);
+        parser::ExprNode* expr = field->expr;
+        ASSERT_TRUE(expr->expr_type == parser::ET_FUNC);
+        parser::FuncExpr* func_expr = (parser::FuncExpr*)(expr);
+        ASSERT_TRUE(std::string(func_expr->fn_name.value) == std::string("case_expr_when"));
+        ASSERT_TRUE(func_expr->children.size() == 4);
+        for (auto i = 0; i < func_expr->children.size(); ++i) {
+            std::cout << func_expr->children[i]->to_string() << std::endl;
+        }
+        ASSERT_TRUE(func_expr->children.size() == 4);
+        ASSERT_FALSE(select_stmt->is_complex_node());
+        std::cout << select_stmt->to_string() << std::endl; 
+        select_stmt->set_print_sample(true);
+        std::cout << "sql2: ";
+        std::cout << select_stmt->to_string() << std::endl;
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
         std::string sql_case = "select case adgroup_id when 1378428934 "
                 "then 'true' else 'false' end from ideacontent limit 10";
         parser.parse(sql_case);
@@ -209,6 +237,7 @@ TEST(test_parser, case_option) {
         select_stmt->set_print_sample(true);
         std::cout << "sql2: ";
         std::cout << select_stmt->to_string() << std::endl;
+        ASSERT_FALSE(select_stmt->is_complex_node());
     } 
     {
         parser::SqlParser parser;
@@ -386,6 +415,22 @@ TEST(test_parser, case_option) {
     }
     {
         parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select /** ak 'a' a/\\bc**//*abc*/ '/***a\\'b\\'c \"***/' ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
         // select distictrow
         std::string sql_opt2 = "select all  sql_cache sql_calc_found_rows field_a ";
         parser.parse(sql_opt2);
@@ -530,6 +575,7 @@ TEST(test_parser, case_field) {
         ASSERT_TRUE(field->as_name.value != nullptr); 
         ASSERT_TRUE(std::string(field->as_name.value) == "alias");
         ASSERT_TRUE(field->wild_card == nullptr);
+        ASSERT_FALSE(select_stmt->is_complex_node());
     }
     {
         parser::SqlParser parser;
@@ -547,6 +593,7 @@ TEST(test_parser, case_field) {
         ASSERT_TRUE(field->as_name.value != nullptr); 
         ASSERT_TRUE(std::string(field->as_name.value) == "alias");
         ASSERT_TRUE(field->wild_card == nullptr);
+        ASSERT_FALSE(select_stmt->is_complex_node());
     }
     {
         parser::SqlParser parser;
@@ -981,6 +1028,7 @@ TEST(test_parser, case_having) {
         GroupByClause* group = select_stmt->group;
         ASSERT_EQ(2, group->items.size());
         ASSERT_TRUE(select_stmt->having != nullptr);
+        ASSERT_FALSE(select_stmt->is_complex_node());
     }
 }
 TEST(test_parser, case_table_refs) {
@@ -2401,6 +2449,7 @@ TEST(test_parser, case_table_refs) {
         ASSERT_TRUE(select_stmt->group == nullptr);
         ASSERT_TRUE(select_stmt->having == nullptr);
         ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->is_complex_node());
         ASSERT_TRUE(typeid(*(select_stmt->table_refs)) == typeid(parser::JoinNode));
         parser::JoinNode* join_node = (parser::JoinNode*)select_stmt->table_refs;
         ASSERT_EQ(parser::NT_JOIN, join_node->node_type);
@@ -2466,6 +2515,7 @@ TEST(test_parser, case_table_refs) {
         ASSERT_TRUE(select_stmt->group == nullptr);
         ASSERT_TRUE(select_stmt->having == nullptr);
         ASSERT_TRUE(select_stmt->table_refs != nullptr);
+        ASSERT_TRUE(select_stmt->is_complex_node());
         ASSERT_TRUE(typeid(*(select_stmt->table_refs)) == typeid(parser::JoinNode));
         parser::JoinNode* join_node = (parser::JoinNode*)select_stmt->table_refs;
         ASSERT_EQ(parser::NT_JOIN, join_node->node_type);
@@ -2661,6 +2711,7 @@ TEST(test_parser, case_union) {
         parser::ByItem* by_item = order_by->items[0];
         ASSERT_TRUE(by_item->expr != nullptr);
         ASSERT_TRUE(by_item->is_desc == false);
+        ASSERT_TRUE(union_stmt->is_complex_node());
     }
     {
         parser::SqlParser parser;
@@ -2856,6 +2907,7 @@ TEST(test_parser, case_anyorall_subselect) {
         ASSERT_TRUE(select_stmt->fields.size() == 2);
         ASSERT_TRUE(select_stmt->order != nullptr);
         ASSERT_TRUE(select_stmt->limit != nullptr);
+        ASSERT_TRUE(select_stmt->is_complex_node());
     }
 }
 
@@ -2877,6 +2929,7 @@ TEST(test_parser, case_in_subselect) {
         ASSERT_TRUE(select_stmt->fields.size() == 2);
         ASSERT_TRUE(select_stmt->order != nullptr);
         ASSERT_TRUE(select_stmt->limit != nullptr);
+        ASSERT_TRUE(select_stmt->is_complex_node());
     }
     {
         parser::SqlParser parser;
@@ -2894,6 +2947,7 @@ TEST(test_parser, case_in_subselect) {
         ASSERT_TRUE(select_stmt->fields.size() == 2);
         ASSERT_TRUE(select_stmt->order != nullptr);
         ASSERT_TRUE(select_stmt->limit != nullptr);
+        ASSERT_TRUE(select_stmt->is_complex_node());
     }
 }
 }  // namespace baikal

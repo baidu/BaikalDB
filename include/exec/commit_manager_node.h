@@ -49,7 +49,6 @@ public:
         ExecNode* rollback_node = _children[2];
         ExecNode* new_begin_node = nullptr;
         uint64_t old_txn_id = client_conn->txn_id;
-        uint64_t new_txn_id = client_conn->new_txn_id;
         if (_txn_cmd == pb::TXN_COMMIT_BEGIN) {
             new_begin_node = _children[3];
         }
@@ -86,17 +85,17 @@ public:
                     "pls rollback first: %lu log_id:%lu", state->txn_id, state->log_id());
                     return result;
             }
-            client_conn->on_begin(new_txn_id);
-            state->txn_id = new_txn_id;
+            client_conn->on_begin();
+            state->txn_id = client_conn->txn_id;
             client_conn->seq_id = 1;
             state->seq_id = 1;
             //DB_WARNING("client txn_id:%lu new_txn_id: %lu, %d log_id:%lu", 
-            //    old_txn_id, new_txn_id, client_conn->seq_id, state->log_id());
+            //    old_txn_id, client_conn->txn_id, client_conn->seq_id, state->log_id());
             ret = exec_begin_node(state, new_begin_node);
             _children.pop_back();
             if (ret < 0) {
                 DB_WARNING("begin new txn failed after commit, txn_id: %lu, new_txn_id: %lu log_id:%lu",
-                    old_txn_id, new_txn_id, state->log_id());
+                    old_txn_id, client_conn->txn_id, state->log_id());
                 result = -1;
             }
         }

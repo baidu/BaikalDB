@@ -73,6 +73,7 @@ int UpdatePlanner::plan() {
     if (!_ctx->is_prepared) {
         set_dml_txn_state(table_id);
     }
+    set_socket_txn_tid_set();
     return 0;
 }
 

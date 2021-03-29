@@ -43,6 +43,7 @@ public:
     }
     virtual int init(const pb::PlanNode& node) override;
     virtual int open(RuntimeState* state) override;
+    virtual void reset(RuntimeState* state);
     virtual void close(RuntimeState* state) override {
         ExecNode::close(state);
         if (_sub_query_node != nullptr) {
@@ -59,8 +60,11 @@ public:
         _on_dup_key_update_records.clear();
         _record_ids.clear();
         _index_keys_record_map.clear();
-        _index_info_map.clear();
-
+        _insert_scan_records.clear();
+        _del_scan_records.clear();
+        _seq_ids.clear();
+        _primary_record_key_record_map_construct = false;
+        _primary_record_key_record_map.clear();
         _has_conflict_record = true;
         _main_table_reversed = false;
         _affected_rows = 0;
@@ -76,6 +80,10 @@ public:
     }
     bool on_dup_key_update() {
         return _on_dup_key_update; 
+    }
+
+    void need_plan_router() {
+        _need_plan_router = true;
     }
 
     int basic_insert(RuntimeState* state);
@@ -158,6 +166,7 @@ private:
     RuntimeState* _sub_query_runtime_state;
     std::vector<ExprNode*>  _select_projections;
     ExecNode*               _sub_query_node = nullptr;
+    bool   _need_plan_router = false;
 };
 
 }

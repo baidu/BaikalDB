@@ -43,6 +43,8 @@ public:
     bool poll_events_add(SmartSocket sock, unsigned int events);
     bool poll_events_delete(SmartSocket sock);
 
+    bool all_txn_time_large_then(int64_t query_time, int64_t table_id);
+
 private:
     SmartSocket         _fd_mapping[CONFIG_MPL_EPOLL_MAX_SIZE]; // fd -> NetworkSocket.
     std::mutex          _mutex; // 保护_fd_mapping里的shared_ptr

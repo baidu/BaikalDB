@@ -89,9 +89,6 @@ public:
     std::unique_ptr<MemRow>& get_row(size_t i) {
         return _rows[i];
     }
-    const size_t& index() {
-        return _idx;
-    }
     void next() {
         _idx++;
     }
@@ -103,6 +100,17 @@ public:
         _rows.swap(batch._rows);
     }
 
+    int64_t used_bytes_size() {
+        int64_t used_size = 0;
+        for (size_t i = 0; i < size(); i++) {
+            used_size += _rows[i]->byte_size_long();
+        }
+        return used_size;
+    }
+
+    size_t index() {
+        return _idx;
+    }
 private:
     //采用unique_ptr来维护内存，减少内存占用
     //后续考虑直接用MemRow，因为MemRow内部也只有几个指针

@@ -94,7 +94,8 @@ int LogEntryReader::read_log_entry(int64_t region_id, int64_t start_log_index, i
             && store_req.op_type() != pb::OP_UPDATE
             && store_req.op_type() != pb::OP_PREPARE
             && store_req.op_type() != pb::OP_ROLLBACK
-            && store_req.op_type() != pb::OP_COMMIT) {
+            && store_req.op_type() != pb::OP_COMMIT
+            && store_req.op_type() != pb::OP_SELECT_FOR_UPDATE) {
             //DB_WARNING("log entry is not txn, region_id: %ld head.type: %d", region_id, store_req.op_type());
             continue;
         }
@@ -162,7 +163,8 @@ int LogEntryReader::read_txn_last_log_entry(int64_t region_id, int64_t start_log
             && store_req.op_type() != pb::OP_UPDATE
             && store_req.op_type() != pb::OP_PREPARE
             && store_req.op_type() != pb::OP_ROLLBACK
-            && store_req.op_type() != pb::OP_COMMIT) {
+            && store_req.op_type() != pb::OP_COMMIT
+            && store_req.op_type() != pb::OP_SELECT_FOR_UPDATE) {
             //DB_WARNING("log entry is not txn, region_id: %ld head.type: %d", region_id, store_req.op_type());
             continue;
         }

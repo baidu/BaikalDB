@@ -93,9 +93,10 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     if (_client_conn == nullptr) {
         return -1;
     }
-    _addr_callids_map.clear();
     txn_id = _client_conn->txn_id;
     _log_id = ctx->stat_info.log_id;
+    sign    = ctx->stat_info.sign;
+    _use_backup = ctx->use_backup;
     // prepare 复用runtime
     if (_is_inited) {
         return 0;
@@ -136,6 +137,33 @@ void RuntimeState::conn_id_cancel(uint64_t db_conn_id) {
         }
     }
 }
+
+int RuntimeState::memory_limit_exceeded(int64_t bytes) {
+    if (_mem_tracker == nullptr) {
+        BAIDU_SCOPED_LOCK(_mem_lock);
+        if (_mem_tracker == nullptr) {
+            _mem_tracker = baikaldb::MemTrackerPool::get_instance()->get_mem_tracker(_log_id);
+        }
+    }
+    _mem_tracker->consume(bytes);
+    _used_bytes += bytes;
+    if (_mem_tracker->check_bytes_limit()) {
+        DB_WARNING("log_id:%lu mempry limit Exceeded limit:%ld used:%ld.", _log_id, _mem_tracker->bytes_limit(), _used_bytes);
+        error_code = ER_TOO_BIG_SELECT;
+        error_msg.str("select reach memory limit");
+        return -1;
+    }
+    return 0;
+}
+
+int RuntimeState::memory_limit_release(int64_t bytes) {
+    if (_mem_tracker != nullptr) {
+        _mem_tracker->release(bytes);
+        DB_DEBUG("log_id:%lu mempry tracker release %ld bytes.", _log_id, bytes);
+    }
+    return 0;
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

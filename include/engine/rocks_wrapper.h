@@ -48,6 +48,9 @@ public:
     static const std::string BIN_LOG_CF;
     static const std::string DATA_CF;
     static const std::string METAINFO_CF;
+    static std::atomic<int64_t> raft_cf_remove_range_count;
+    static std::atomic<int64_t> data_cf_remove_range_count;
+    static std::atomic<int64_t> mata_cf_remove_range_count;
 
     virtual ~RocksWrapper() {}
     static RocksWrapper* get_instance() {
@@ -115,15 +118,7 @@ public:
             rocksdb::ColumnFamilyHandle* column_family, 
             const rocksdb::Slice& begin, 
             const rocksdb::Slice& end,
-            bool delete_files_in_range) {
-        if (delete_files_in_range) {
-            auto s = rocksdb::DeleteFilesInRange(_txn_db, column_family, &begin, &end, false);
-            if (!s.ok()) {
-                return s;
-            }
-        }
-        return _txn_db->DeleteRange(options, column_family, begin, end);
-    }
+            bool delete_files_in_range);
     
     rocksdb::Iterator* new_iterator(const rocksdb::ReadOptions& options, 
                                     rocksdb::ColumnFamilyHandle* family) {
@@ -215,5 +210,8 @@ private:
     rocksdb::ColumnFamilyOptions _data_cf_option;
     rocksdb::ColumnFamilyOptions _meta_info_option;
     uint64_t _flush_file_number = 0;
+    bvar::Adder<int64_t>     _raft_cf_remove_range_count;
+    bvar::Adder<int64_t>     _data_cf_remove_range_count;
+    bvar::Adder<int64_t>     _mata_cf_remove_range_count;
 };
 }

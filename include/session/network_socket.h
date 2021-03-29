@@ -22,6 +22,11 @@
 #include <mutex>
 #include <list>
 #include <unordered_map>
+#ifdef BAIDU_INTERNAL
+#include <baidu/rpc/channel.h>
+#else
+#include <brpc/channel.h>
+#endif
 #include "user_info.h"
 #include "type_utils.h"
 #include "common.h"
@@ -39,6 +44,7 @@ class DataBuffer;
 class ExecNode;
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
 typedef std::shared_ptr<BinlogContext> SmartBinlogContext;
+typedef std::shared_ptr<QueryContext> SmartQueryContex;
 
 enum SocketType {
     SERVER_SOCKET = 0,
@@ -69,13 +75,59 @@ struct NetworkSocket {
     ~NetworkSocket();
 
     bool reset_when_err();
-    void on_begin(uint64_t txn_id);
+    void on_begin();
     void on_commit_rollback();
     void update_old_txn_info();
     bool transaction_has_write();
     bool need_send_binlog();
     uint64_t get_global_conn_id();
     SmartBinlogContext get_binlog_ctx();
+    SmartQueryContex get_query_ctx();
+    void reset_query_ctx(QueryContext* ctx);
+    void cancel_rpc(const std::set<std::string>& addrs, int fd) {
+        BAIDU_SCOPED_LOCK(region_lock);
+        for (auto& addr : addrs) {
+            if (addr_callids_map.count(addr) == 0) {
+                continue;
+            }
+            for (auto& pair : addr_callids_map[addr]) {
+                brpc::StartCancel(pair.second);
+                DB_WARNING("cancel addr:%s, region_id: %ld, fd: %d", addr.c_str(), pair.first, fd);
+            }
+            addr_callids_map[addr].clear();
+        }
+    }
+    void insert_callid(const std::string addr, int64_t region_id, brpc::CallId callid) {
+        BAIDU_SCOPED_LOCK(region_lock);
+        addr_callids_map[addr].emplace(region_id, callid);
+    }
+
+    void insert_txn_tid(int64_t table_id) {
+        BAIDU_SCOPED_LOCK(txn_tid_set_lock);
+        DB_DEBUG("insert tid %ld", table_id);
+        txn_table_id_set.insert(table_id);
+    }
+
+    bool is_txn_tid_exist(int64_t table_id) {
+        BAIDU_SCOPED_LOCK(txn_tid_set_lock);
+        DB_DEBUG("is txn tid %ld exist", table_id);
+        return txn_table_id_set.count(table_id) == 1;
+    }
+
+    void clear_txn_tid_set() {
+        BAIDU_SCOPED_LOCK(txn_tid_set_lock);
+        DB_DEBUG("clear txn tid set");
+        txn_table_id_set.clear();
+    }
+    // TODO: instance_part may overflow and wrapped
+    uint64_t get_txn_id() {
+        uint64_t instance_part = server_instance_id & 0x7FFFFF;
+
+        uint64_t txn_id_part = txn_id_counter.fetch_add(1);
+
+        // TODO: request meta_server for a txn id
+        return (instance_part << 40 | (txn_id_part & 0xFFFFFFFFFFUL));
+    }
     // Socket basic infomation.
     bool                shutdown;
     int                 fd;           // Socket fd.
@@ -101,6 +153,7 @@ struct NetworkSocket {
     int             header_read_len;                // readed header length.
     bool            has_error_packet;               //
     int             packet_id;                      // Packet id for result packet(mysql protocal).
+    int             last_packet_id;
     int             packet_len;                     // Packet length for read packet.
     int             current_packet_len;
     int             packet_read_len;                // Current read length of packet.
@@ -118,6 +171,7 @@ struct NetworkSocket {
     std::shared_ptr<QueryContext>   query_ctx;      // Current query.
     SmartBinlogContext              binlog_ctx;     // for binlog
     bool                            open_binlog = false;
+    bool                            not_in_load_data = true;
 
     int64_t         conn_id = -1;            // The client connection ID in Mysql Client-Server Protocol
 
@@ -125,7 +179,6 @@ struct NetworkSocket {
     int64_t         primary_region_id = -1;  // used for txn like Percolator
     bool            autocommit = true;       // The autocommit flag set by SET AUTOCOMMIT=0/1
     uint64_t        txn_id = 0;              // ID of the current transaction, 0 means out-transaction query
-    uint64_t        new_txn_id = 0;          // For implicit commit commands (i.e. BEGIN after another BEGIN)
     int             seq_id = 0;              // The query sequence id within a transaction, starting from 1
     uint64_t        server_instance_id = 0;  // The global unique instance id of the current BaikalDB process, 
                                              // fetched from BaikalMeta when a BaikalDB instance starts,
@@ -134,6 +187,7 @@ struct NetworkSocket {
 
     std::map<int, CachePlan> cache_plans; // plan of queries in a transaction
     std::map<int64_t, pb::RegionInfo> region_infos;
+    std::map<std::string, std::map<int64_t, brpc::CallId>> addr_callids_map; 
 
     // prepare releated members
     uint64_t         stmt_id = 0;  // The statement ID auto_inc in Mysql Client-Server Protocol
@@ -142,6 +196,14 @@ struct NetworkSocket {
     std::unordered_map<std::string, pb::ExprNode> session_vars;
     std::unordered_map<std::string, pb::ExprNode> user_vars;
     static bvar::Adder<int64_t> bvar_prepare_count; 
+
+    //ddl
+    int64_t txn_start_time = 0;
+    int64_t txn_timeout = 0;
+    std::unordered_set<int64_t> txn_table_id_set;
+    bthread::Mutex txn_tid_set_lock;
+
+    static std::atomic<uint64_t> txn_id_counter;
 };
 
 class SocketFactory {

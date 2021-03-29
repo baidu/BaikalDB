@@ -57,10 +57,6 @@ enum IndexHintStatus {
     IHS_VIRTUAL = 3; // 虚拟索引，只选择不使用，选出虚拟索引后需重选
 };
 
-enum Charset {
-    UTF8 = 0;
-    GBK = 1;
-};
 //每个逻辑机房的副本数量。第一个逻辑机房为主机房. 目前leader均衡不考虑机房分布。
 message ReplicaDist {
     required string logical_room = 1;
@@ -161,7 +157,6 @@ enum IndexType {
     I_UNIQ          = 2;
     I_KEY           = 3;
     I_FULLTEXT      = 4; //query切词，word切词，node无额外信息
-    I_RECOMMEND     = 5; //query不切词，word不切词，node有额外信息
 };
 
 enum SegmentType {
@@ -173,6 +168,8 @@ enum SegmentType {
     S_BIGRAMS        = 5;  // 双字切词
     S_ES_STANDARD    = 6;  // 模拟es标准切词
     S_WORDRANK_Q2B_ICASE = 7;// 转小写，全角转半角后wordrank切词
+    S_WORDWEIGHT         = 8;
+    S_WORDWEIGHT_NO_FILTER  = 9;
 };  
 
 // 普通索引，默认的格式是format1
@@ -199,6 +196,7 @@ message IndexInfo {
     optional IndexState state           = 9;
     optional StorageType storage_type   = 10;
     optional IndexHintStatus hint_status = 11;
+    optional int64 drop_timestamp = 12;
 };
 
 //address format: ip:port
@@ -369,7 +367,32 @@ message RestoreRegionRequest {
     optional int64 restore_region_id = 1;
     optional int64 lower_region_id = 2;
     optional int64 upper_region_id = 3;
-}
+};
+
+message GlobalDdlRequest {
+    optional int64 table_id = 1;
+    optional int64 region_id = 2;
+    repeated string add_keys = 3;
+    repeated string add_vals = 4;
+    optional RegionDdlWork region_ddl_work = 5;
+};
+message ParamDesc {
+    optional string key     = 1;
+    optional string value   = 2; // 为通用，使用string，如果使用其他类型需要自己转成string
+};
+
+message InstanceParam {
+    optional string          resource_tag_or_address    = 1;
+    repeated ParamDesc       params                     = 2;
+};
+
+enum RecoverOpt {
+    DO_NONE                = 0;
+    DO_REMOVE_ILLEGAL_PEER = 1; // leader存在时，删除非法的peer
+    DO_REMOVE_PEER         = 2; // 3个peer存活2个，remove_peer
+    DO_SET_PEER            = 3; // 3个peer存活1个，set_peer
+    DO_INIT_REGION         = 4; // 3个peer都不在集群，init_peer
+};
 
 message MetaManagerRequest {
     required OpType              op_type                = 1; //一级操作符
@@ -391,10 +414,13 @@ message MetaManagerRequest {
     optional RegionMergeRequest  region_merge           = 17; //region merge请求
     optional bool                 need_merge            = 18; 
     repeated RegionInfo          region_infos           = 19; //add and update
-    optional DdlWorkInfo ddlwork_info                   = 20; //更新ddl work
+    optional DdlWorkInfo         ddlwork_info           = 20; //更新ddl work
     optional bool                add_delete_region      = 21; //添加被删除的region
     optional Statistics          statistics             = 22;
-    optional SchemaInfo binlog_info = 23;  //关联binlog表及普通表
+    optional SchemaInfo          binlog_info            = 23;  //关联binlog表及普通表
+    repeated InstanceParam       instance_params        = 24;
+    optional RecoverOpt          recover_opt            = 25;
+    optional GlobalDdlRequest global_ddl_request        = 26;
 };
 
 message MetaManagerResponse {
@@ -412,6 +438,7 @@ message MetaManagerResponse {
 message RegionRecoverResponse {
     repeated PeerStateInfo    set_peer_regions  = 1;
     repeated PeerStateInfo    inited_regions    = 2;
+    repeated PeerStateInfo    illegal_regions   = 3;
 };
 
 message SchemaHeartBeat {
@@ -497,7 +524,8 @@ message StoreHeartBeatResponse {
     repeated TransLeaderRequest trans_leader    = 7;
     repeated int64 trans_leader_table_id        = 8;
     repeated int64 trans_leader_count           = 9;
-    repeated DdlWorkInfo ddlwork_infos = 10;
+    repeated DdlWorkInfo ddlwork_infos          = 10;
+    repeated InstanceParam  instance_params     = 11;
 };
 
 message RegionHeartBeat {
@@ -522,6 +550,10 @@ message BaikalHeartBeatRequest {
     repeated BaikalSchemaHeartBeat schema_infos    = 1;
     optional int64        last_updated_index       = 2;
     optional bool         not_need_statistics      = 3; // meta能识别到时，说明baikaldb已经升级，不再通过该心跳更新统计信息
+    repeated RegionDdlWork region_ddl_works        = 4;
+    repeated DdlWorkInfo  ddl_works                = 5;
+    optional bool can_do_ddlwork                   = 6;
+    optional string physical_room                  = 7;
 };
 
 message BaikalOtherHeartBeat {
@@ -558,6 +590,8 @@ message BaikalHeartBeatResponse {
     repeated DataBaseInfo db_info                 = 8; //全部同步
     optional int64        last_updated_index      = 9;
     repeated Statistics   statistics              = 10;
+    repeated RegionDdlWork region_ddl_works              = 11;
+    repeated DdlWorkInfo  ddl_works           = 12;
 };
 
 enum QueryOpType {
@@ -580,6 +614,8 @@ enum QueryOpType {
     QUERY_REGION_IDS                              = 302;
     QUERY_DDLWORK                                 = 303;
     QUERY_REGION_PEER_STATUS                      = 304;
+    QUERY_INSTANCE_PARAM                          = 305;
+    QUERY_GLOBAL_DDL_WORK                         = 306;
 };
 
 message PhysicalInstance {
@@ -629,6 +665,8 @@ message QueryResponse {
     repeated DdlWorkInfo ddlwork_infos              = 19;
     repeated QueryDdlInfo query_ddl_infos           = 20;
     repeated RegionStateInfo    region_status_infos = 21;
+    repeated InstanceParam      instance_params     = 22;
+    repeated RegionDdlWork      region_ddl_infos    = 23;
 };
 
 message DdlPeerInfo {
@@ -791,8 +829,35 @@ message DdlWorkInfo {
     optional bool rollback                          = 7 [default=false];
     optional ErrCode           errcode              = 8;
     optional bool deleted                           = 9 [default=false]; 
+    optional DdlWorkStatus status                   = 10;
+    optional bool suspend                           = 11;
+    optional int64 update_timestamp                 = 12;
+    optional bool global                         = 13;
 };
 
+enum DdlWorkStatus {
+    DdlWorkIdle       = 1;
+    DdlWorkDoing      = 2;
+    DdlWorkDone       = 3;
+    DdlWorkFail       = 4;
+    DdlWorkDupUniq    = 5;
+    DdlWorkError      = 6;
+};
+ 
+message RegionDdlWork {
+    optional int64 table_id                         = 1;
+    optional int64 region_id                        = 2;
+    optional bytes start_key                        = 3;
+    optional bytes end_key                          = 4;
+    optional DdlWorkStatus status                   = 5;
+    optional OpType             op_type             = 6;
+    optional int64 index_id                         = 7;
+    optional string address                         = 8;
+    optional uint32 retry_time                      = 9;
+    optional int64 update_timestamp                 = 10;
+    optional int64 partition                        = 11;
+};
+ 
 message TableHeartBeat {
     optional int64 table_id       = 1;
     optional int64 version        = 2;

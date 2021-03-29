@@ -20,6 +20,7 @@
 #include "mut_table_key.h"
 #include "table_record.h"
 #include "item_batch.hpp"
+#include "my_rocksdb.h"
 
 namespace baikaldb {
 class Transaction;
@@ -151,10 +152,10 @@ protected:
     IndexInfo*              _index_info;
     IndexInfo*              _pri_info;
     pb::IndexType           _idx_type;
-    rocksdb::Iterator*      _iter = nullptr;
+    myrocksdb::Iterator*    _iter = nullptr;
     RocksWrapper*           _db;
     SchemaFactory*          _schema;
-    rocksdb::Transaction*   _txn = nullptr;
+    myrocksdb::Transaction* _txn = nullptr;
     bool                    _need_check_region;
     bool                    _forward;
     rocksdb::ColumnFamilyHandle* _data_cf;
@@ -162,7 +163,7 @@ protected:
     std::vector<int32_t> _field_slot;
 
     std::vector<std::string>                _primary_keys;
-    std::map<int32_t, rocksdb::Iterator*>   _column_iters;
+    std::map<int32_t, myrocksdb::Iterator*>   _column_iters;
 
     int _prefix_len = sizeof(int64_t) * 2;
 

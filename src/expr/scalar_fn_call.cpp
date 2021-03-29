@@ -14,6 +14,7 @@
 
 #include "scalar_fn_call.h"
 #include "slot_ref.h"
+#include "row_expr.h"
 #include "literal.h"
 #include "parser.h"
 
@@ -49,8 +50,18 @@ int ScalarFnCall::type_inferer() {
         case parser::FT_LE:
         case parser::FT_LT: {
             if (_children[0]->is_slot_ref() && _children[1]->is_constant()) {
-                for (size_t i = 1; i < _children.size(); i++) {
+                for (size_t i = 1; i < children_size(); i++) {
                     _children[i]->set_col_type(_children[0]->col_type());
+                }
+            } else if (_children[0]->is_row_expr() && !_children[0]->is_constant() && _children[1]->is_constant()) {
+                std::map<size_t, SlotRef*> slots;
+                static_cast<RowExpr*>(_children[0])->get_all_slot_ref(&slots);
+                for (uint32_t i = 1; i < children_size(); i++) {
+                    for (auto& pair : slots) {
+                        size_t idx = pair.first;
+                        pb::PrimitiveType tp = pair.second->col_type();
+                        _children[i]->children(idx)->set_col_type(tp);
+                    }
                 }
             }
             break;
