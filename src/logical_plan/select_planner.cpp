@@ -488,11 +488,11 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         return -1;
     }
     std::string select_name;
-    bool has_alias = false;
     if (!field->as_name.empty()) {
         select_name = field->as_name.value;
+        _select_names.emplace_back(select_name);
         std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
-        has_alias = true;
+        _select_alias_mapping.insert({select_name, (_select_names.size() - 1)});
     } else {
         if (field->expr->expr_type == parser::ET_COLUMN) {
             parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
@@ -500,16 +500,11 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         } else {
             select_name = field->expr->to_string();
         }
+        _select_names.emplace_back(select_name);
     }
-    _select_names.push_back(select_name);
-    _select_exprs.push_back(select_expr);
     
+    _select_exprs.emplace_back(select_expr);
     _ctx->field_column_id_mapping[select_name] = _column_id++;
-
-    if (has_alias) {
-//        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
-        _select_alias_mapping.insert({select_name, (_select_names.size() - 1)});
-    }
     return 0;
 }
 

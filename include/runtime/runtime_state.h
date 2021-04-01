@@ -350,12 +350,6 @@ public:
     }
     int memory_limit_exceeded(int64_t bytes);
     int memory_limit_release(int64_t bytes);
-    void used_bytes_release(int64_t bytes) {
-        _used_bytes -= bytes;
-        if (_used_bytes < 0) {
-            _used_bytes = 0;
-        }
-    }
 
 public:
     uint64_t          txn_id = 0;

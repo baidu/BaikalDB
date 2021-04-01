@@ -959,8 +959,8 @@ void Region::read_binlog(const pb::StoreReq* request,
         rocksdb::Status status = _rocksdb->get(rocksdb::ReadOptions(), binlog_cf, 
             rocksdb::Slice(buf, sizeof(int64_t)), &binlog_value);
         if (!status.ok()) {
-            DB_FATAL("get ts:%ld from rocksdb binlog cf fail, region_id: %ld",
-                    start_ts, _region_id);
+            DB_WARNING("get ts:%ld from rocksdb binlog cf fail: %s, region_id: %ld",
+                    start_ts, status.ToString().c_str(), _region_id);
             response->set_errcode(pb::GET_VALUE_FAIL); 
             response->set_errmsg("read binlog failed");            
             return;

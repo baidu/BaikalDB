@@ -459,7 +459,7 @@ void Store::query_binlog(google::protobuf::RpcController* controller,
     if (region == nullptr || region->removed()) {
         response->set_errcode(pb::REGION_NOT_EXIST);
         response->set_errmsg("region_id not exist in store");
-        DB_FATAL("region_id: %ld not exist in store, logid:%lu, remote_side: %s",
+        DB_WARNING("region_id: %ld not exist in store, logid:%lu, remote_side: %s",
                 request->region_id(), log_id, remote_side);
         return;
     }
@@ -747,7 +747,7 @@ void Store::send_heart_beat() {
         //处理心跳
         process_heart_beat_response(response);
     }
-    
+    _last_heart_time.reset();
     heart_beat_count << -1;
     DB_WARNING("heart beat");
 }
@@ -1382,6 +1382,11 @@ void Store::construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
     bool need_peer_balance = false;
     if (count % FLAGS_balance_periodicity == 0) {
         request.set_need_leader_balance(true);
+    }
+    // init_before_listen时会上报一次心跳
+    // 重启后第二次心跳或长时间心跳未上报时上报peer信息，保证无效region尽快shutdown
+    if (count == 2 || _last_heart_time.get_time() > FLAGS_store_heart_beat_interval_us * 4) {
+        need_peer_balance = true;
     }
     if (count % FLAGS_balance_periodicity == (FLAGS_balance_periodicity / 2)) {
         request.set_need_peer_balance(true);

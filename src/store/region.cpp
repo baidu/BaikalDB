@@ -2373,6 +2373,9 @@ void Region::on_apply(braft::Iterator& iter) {
             case pb::OP_CLEAR_APPLYING_TXN: {
                 clear_orphan_transactions(done, _applied_index, term);
                 _meta_writer->update_apply_index(_region_id, _applied_index, _data_index);
+                if (done) {
+                    leader_start();
+                }
                 break;
             }
             //split的各类请求传进的来的done类型各不相同，不走下边的if(done)逻辑，直接处理完成，然后continue
@@ -3111,7 +3114,6 @@ void Region::apply_clear_transactions_log() {
     task.done = c;
     _node.apply(task);
     clear_applying_txn_cond.wait();
-    leader_start();
 }
 
 void Region::on_shutdown() {
