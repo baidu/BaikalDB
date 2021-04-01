@@ -49,6 +49,12 @@ int SetKVPlanner::plan() {
             system_var = true;
             global_var = false;
             key = key.substr(8);
+        } else if (boost::algorithm::istarts_with(key, "@@isolation.")) {
+            //只为了兼容mysql，所有设置事务隔离级别的sql不做任何处理
+            //如果后续需要完善次功能需要修改sql paser
+            key = key.substr(12);
+            _ctx->succ_after_logical_plan = true;
+            return 0;
         } else if (boost::algorithm::istarts_with(key, "@@")) {
             system_var = true;
             global_var = false;

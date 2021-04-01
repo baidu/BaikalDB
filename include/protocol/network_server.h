@@ -53,6 +53,10 @@ public:
         return _epoll_info;
     }
 
+    uint64_t get_instance_id() {
+        return _instance_id;
+    }
+
 private:
     // For instance.
     NetworkServer();
@@ -96,5 +100,7 @@ private:
     Bthread         _health_check_bth;
     uint32_t        _driver_thread_num;
     uint64_t        _instance_id = 0;
+    std::string     _physical_room;
+    bvar::Adder<int64_t> _heart_beat_count;
 };
 } // namespace baikal

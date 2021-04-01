@@ -1062,12 +1062,42 @@ ExprValue date_sub(const std::vector<ExprValue>& input) {
     return ret;
 }
 
+ExprValue extract(const std::vector<ExprValue>& input) {
+    if (input.size() != 2 || input[0].is_null() || input[1].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue arg1 = input[0];
+    ExprValue arg2 = input[1];
+    ExprValue tmp(pb::UINT32);
+    time_t t = arg2.cast_to(pb::TIMESTAMP)._u.uint32_val;
+    struct tm tm;
+    localtime_r(&t, &tm);
+    if (input[0].str_val == "year") {
+        tmp._u.uint32_val = tm.tm_year + 1900;
+    } else if (input[0].str_val == "month") {
+        tmp._u.uint32_val = ++tm.tm_mon;
+    } else if (input[0].str_val == "day") {
+        tmp._u.uint32_val = tm.tm_mday;
+    } else if (input[0].str_val == "hour") {
+        tmp._u.uint32_val = tm.tm_hour;
+    } else if (input[0].str_val == "minute") {
+        tmp._u.uint32_val = tm.tm_min;
+    } else if (input[0].str_val == "second") {
+        tmp._u.uint32_val = tm.tm_sec;
+    } else {
+        return ExprValue::Null();
+    }
+    return tmp;
+}
+
 ExprValue hll_add(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();
     }
-    if (!input[0].is_hll()) {
+    if (input[0].is_null()) {
         (ExprValue&)input[0] = hll::hll_init();
+    } else if (!input[0].is_hll()) {
+        return ExprValue::Null();
     }
     for (size_t i = 1; i < input.size(); i++) {
         if (!input[i].is_null()) {
@@ -1241,11 +1271,10 @@ ExprValue rb_build(const std::vector<ExprValue>& input) {
 }
 
 ExprValue rb_and(const std::vector<ExprValue>& input) {
-    if (input.size() <= 1) {
+    if (input.size() == 0 || !input[0].is_bitmap()) {
         return ExprValue::Null();
     }
     ExprValue tmp = input[0];
-    tmp.cast_to(pb::BITMAP);
     for (uint32_t i = 1; i < input.size(); i++) {
         if (input[i].is_bitmap()) {
             *tmp._u.bitmap &= *input[i]._u.bitmap;
@@ -1268,11 +1297,10 @@ ExprValue rb_and_cardinality(const std::vector<ExprValue>& input) {
 */
 
 ExprValue rb_or(const std::vector<ExprValue>& input) {
-    if (input.size() <= 1) {
+    if (input.size() == 0 || !input[0].is_bitmap()) {
         return ExprValue::Null();
     }
     ExprValue tmp = input[0];
-    tmp.cast_to(pb::BITMAP);
     for (uint32_t i = 1; i < input.size(); i++) {
         if (input[i].is_bitmap()) {
             *tmp._u.bitmap |= *input[i]._u.bitmap;
@@ -1294,11 +1322,10 @@ ExprValue rb_or_cardinality(const std::vector<ExprValue>& input) {
 */
 
 ExprValue rb_xor(const std::vector<ExprValue>& input) {
-    if (input.size() <= 1) {
+    if (input.size() == 0 || !input[0].is_bitmap()) {
         return ExprValue::Null();
     }
     ExprValue tmp = input[0];
-    tmp.cast_to(pb::BITMAP);
     for (uint32_t i = 1; i < input.size(); i++) {
         if (input[i].is_bitmap()) {
             *tmp._u.bitmap ^= *input[i]._u.bitmap;
@@ -1319,11 +1346,10 @@ ExprValue rb_xor_cardinality(const std::vector<ExprValue>& input) {
 */
 
 ExprValue rb_andnot(const std::vector<ExprValue>& input) {
-    if (input.size() <= 1) {
+    if (input.size() == 0 || !input[0].is_bitmap()) {
         return ExprValue::Null();
     }
     ExprValue tmp = input[0];
-    tmp.cast_to(pb::BITMAP);
     for (uint32_t i = 1; i < input.size(); i++) {
         if (input[i].is_bitmap()) {
             *tmp._u.bitmap -= *input[i]._u.bitmap;
@@ -1345,7 +1371,7 @@ ExprValue rb_andnot_cardinality(const std::vector<ExprValue>& input) {
 
 ExprValue rb_cardinality(const std::vector<ExprValue>& input) {
     if (input.size() != 1 || !input[0].is_bitmap()) {
-        return ExprValue::Null();
+        return ExprValue::Uint64();
     }
     ExprValue tmp(pb::UINT64);
     tmp._u.uint64_val = input[0]._u.bitmap->cardinality();
@@ -1417,7 +1443,12 @@ ExprValue rb_contains_range(const std::vector<ExprValue>& input) {
 }
 
 ExprValue rb_add(const std::vector<ExprValue>& input) {
-    if (input.size() < 2 || !input[0].is_bitmap()) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    if (input[0].is_null()) {
+        (ExprValue&)input[0] = ExprValue::Bitmap();
+    } else if (!input[0].is_bitmap()) {
         return ExprValue::Null();
     }
     ExprValue result = input[0];
@@ -1425,7 +1456,7 @@ ExprValue rb_add(const std::vector<ExprValue>& input) {
         result._u.bitmap->add(input[i].get_numberic<uint32_t>());
     }
     (ExprValue&)input[0] = result;
-    return input[0];    
+    return input[0];
 }
 
 ExprValue rb_add_range(const std::vector<ExprValue>& input) {
@@ -1438,7 +1469,7 @@ ExprValue rb_add_range(const std::vector<ExprValue>& input) {
 }
 
 ExprValue rb_remove(const std::vector<ExprValue>& input) {
-    if (input.size() < 2 || !input[0].is_bitmap()) {
+    if (input.size() == 0 || !input[0].is_bitmap()) {
         return ExprValue::Null();
     }
     ExprValue tmp = input[0];
@@ -1473,7 +1504,7 @@ ExprValue rb_flip_range(const std::vector<ExprValue>& input) {
 }
 
 ExprValue rb_flip(const std::vector<ExprValue>& input) {
-    if (input.size() < 2 || !input[0].is_bitmap()) {
+    if (input.size() == 0 || !input[0].is_bitmap()) {
         return ExprValue::Null();
     }
     ExprValue tmp = input[0];
@@ -1525,6 +1556,57 @@ ExprValue rb_jaccard_index(const std::vector<ExprValue>& input) {
     } else {
         result._u.double_val = (input[0]._u.bitmap->jaccard_index(*input[1]._u.bitmap));
     }
+    return result;
+}
+
+ExprValue tdigest_build(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue result(pb::TDIGEST);
+    tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)result.str_val.data();
+    for (uint32_t i = 0; i < input.size(); i++) {
+        tdigest::td_add(t, input[i].get_numberic<double>(), 1);
+    }
+    return result;
+}
+ExprValue tdigest_add(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    if (input[0].is_null()) {
+        (ExprValue&)input[0] = ExprValue::Tdigest();
+    } else if (!input[0].is_tdigest()) {
+        return ExprValue::Null();
+    }
+    ExprValue result = input[0];
+    tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)result.str_val.data();
+    for (uint32_t i = 1; i < input.size(); i++) {
+        tdigest::td_add(t, input[i].get_numberic<double>(), 1);
+    }
+    return result;
+}
+ExprValue tdigest_percentile(const std::vector<ExprValue>& input) {
+    if (input.size() != 2 || !input[0].is_tdigest()) {
+        return ExprValue::Null();
+    }
+    if (input[1].get_numberic<double>() > 1.0 || input[1].get_numberic<double>() < 0.0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    ExprValue result(pb::DOUBLE);
+    tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)tmp.str_val.data();
+    result._u.double_val = tdigest::td_value_at(t, input[1].get_numberic<double>());
+    return result;
+}
+
+ExprValue tdigest_location(const std::vector<ExprValue>& input) {
+    if (input.size() != 2 || !input[0].is_tdigest()) {
+        return ExprValue::Null();
+    }
+    ExprValue result(pb::DOUBLE);
+    tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)input[0].str_val.data();
+    result._u.double_val = tdigest::td_quantile_of(t, input[1].get_numberic<double>());
     return result;
 }
 

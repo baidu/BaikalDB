@@ -39,8 +39,8 @@ namespace baikaldb {
 namespace hll {
 
 static int hll_pat_len(uint64_t hash_value, long *regp) {
-    uint64_t bit, index;
-    int count;
+    uint64_t bit = 0, index = 0;
+    int count = 0;
     index = hash_value & HLL_P_MASK; /* Register index. */
     hash_value >>= HLL_P; /* Remove bits used to address the register. */
     hash_value |= ((uint64_t)1<<HLL_Q); /* Make sure the loop terminates
@@ -56,6 +56,11 @@ static int hll_pat_len(uint64_t hash_value, long *regp) {
 }
 
 static bool is_hll_object(const std::string& hll) {
+    if (hll.size() < HLL_HDR_SIZE) {
+        DB_WARNING("hll has wrong size %lu", hll.size());
+        return false;
+    }
+
     struct hllhdr *hdr = (struct hllhdr *)hll.data();
 
     if (hdr->magic[0] != 'H' || hdr->magic[1] != 'Y' ||
@@ -63,12 +68,8 @@ static bool is_hll_object(const std::string& hll) {
         DB_WARNING("magic error");
         return false;
     }
-    if (hll.size() < HLL_HDR_SIZE) {
-        DB_WARNING("hll has wrong size %lu", hll.size());
-        return false;
-    }
 
-    if (hdr->encoding > HLL_MAX_ENCODING) {
+    if (hdr->encoding > HLL_MAX_ENCODING && hdr->encoding != HLL_RAW) {
         DB_WARNING("encoding error");
         return false;
     }
@@ -81,7 +82,7 @@ static bool is_hll_object(const std::string& hll) {
 }
 
 static int hll_dense_set(uint8_t *registers, long index, uint8_t count) {
-    uint8_t oldcount;
+    uint8_t oldcount = 0;
 
     HLL_DENSE_GET_REGISTER(oldcount,registers,index);
     if (count > oldcount) {
@@ -93,19 +94,17 @@ static int hll_dense_set(uint8_t *registers, long index, uint8_t count) {
 }
 
 static int hll_dense_add(uint8_t *registers, uint64_t hash_value) {
-    long index;
+    long index = 0;
     uint8_t count = hll_pat_len(hash_value, &index);
     return hll_dense_set(registers,index,count);
 }
 
 static void hll_dense_reghisto(uint8_t *registers, int* reghisto) {
-    int j;
-
     if (HLL_REGISTERS == 16384 && HLL_BITS == 6) {
         uint8_t *r = registers;
         unsigned long r0, r1, r2, r3, r4, r5, r6, r7, r8, r9,
                       r10, r11, r12, r13, r14, r15;
-        for (j = 0; j < 1024; j++) {
+        for (int j = 0; j < 1024; j++) {
             /* Handle 16 registers per iteration. */
             r0 = r[0] & 63;
             r1 = (r[0] >> 6 | r[1] << 2) & 63;
@@ -144,59 +143,12 @@ static void hll_dense_reghisto(uint8_t *registers, int* reghisto) {
             r += 12;
         }
     } else {
-        for(j = 0; j < HLL_REGISTERS; j++) {
+        for(int j = 0; j < HLL_REGISTERS; j++) {
             unsigned long reg;
             HLL_DENSE_GET_REGISTER(reg,registers,j);
             reghisto[reg]++;
         }
     }
-}
-
-static int hll_sparse_to_dense(std::string& hll) {
-    uint8_t *sparse = (uint8_t *)hll.data();
-    struct hllhdr *oldhdr = (struct hllhdr*)sparse;
-
-    if (oldhdr->encoding == HLL_DENSE) {
-        return 0;
-    }
-    std::string dense;
-    dense.resize(HLL_DENSE_SIZE);
-    struct hllhdr *hdr = (struct hllhdr*)dense.data();
-    *hdr = *oldhdr;
-    hdr->encoding = HLL_DENSE;
-
-    uint8_t *p   = (uint8_t*)sparse;
-    uint8_t *end = p + hll.size();
-    int idx = 0, runlen, regval;
-    p += HLL_HDR_SIZE;
-    while(p < end) {
-        if (HLL_SPARSE_IS_ZERO(p)) {
-            runlen = HLL_SPARSE_ZERO_LEN(p);
-            idx += runlen;
-            p++;
-        } else if (HLL_SPARSE_IS_XZERO(p)) {
-            runlen = HLL_SPARSE_XZERO_LEN(p);
-            idx += runlen;
-            p += 2;
-        } else {
-            runlen = HLL_SPARSE_VAL_LEN(p);
-            regval = HLL_SPARSE_VAL_VALUE(p);
-            if ((runlen + idx) > HLL_REGISTERS) break;
-            while(runlen--) {
-                HLL_DENSE_SET_REGISTER(hdr->registers,idx,regval);
-                idx++;
-            }
-            p++;
-        }
-    }
-    if (idx != HLL_REGISTERS) {
-        DB_WARNING("WRONG idx:%d", idx);
-        return -1;
-    }
-
-    hll = dense;
-    hdr = (struct hllhdr*)hll.data();
-    return 0;
 }
 
 static int hll_sparse_set_promote(std::string& hll, long index, uint8_t count) {
@@ -366,12 +318,117 @@ static int hll_sparse_set(std::string& hll, long index, uint8_t count) {
     return hll_sparse_set_update(hll, p - start, end - start);
 }
 
+int hll_sparse_to_dense(std::string& hll) {
+    uint8_t *sparse = (uint8_t *)hll.data();
+    struct hllhdr *oldhdr = (struct hllhdr*)sparse;
+
+    if (oldhdr->encoding == HLL_DENSE) {
+        return 0;
+    }
+    std::string dense;
+    dense.resize(HLL_DENSE_SIZE);
+    struct hllhdr *hdr = (struct hllhdr*)dense.data();
+    *hdr = *oldhdr;
+    hdr->encoding = HLL_DENSE;
+    if (oldhdr->encoding == HLL_RAW) {
+        uint8_t *max = oldhdr->registers;
+        for (int j = 0; j < HLL_REGISTERS; j++) {
+            if (max[j] == 0) continue;
+            hdr = (struct hllhdr *)dense.data();
+            switch (hdr->encoding) {
+            case HLL_DENSE: {
+                hll_dense_set(hdr->registers, j, max[j]);
+                break;
+            }
+            case HLL_SPARSE: {
+                hll_sparse_set(dense, j, max[j]);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    } else {
+        uint8_t *p   = (uint8_t*)sparse;
+        uint8_t *end = p + hll.size();
+        int idx = 0, runlen = 0, regval = 0;
+        p += HLL_HDR_SIZE;
+        while(p < end) {
+            if (HLL_SPARSE_IS_ZERO(p)) {
+                runlen = HLL_SPARSE_ZERO_LEN(p);
+                idx += runlen;
+                p++;
+            } else if (HLL_SPARSE_IS_XZERO(p)) {
+                runlen = HLL_SPARSE_XZERO_LEN(p);
+                idx += runlen;
+                p += 2;
+            } else {
+                runlen = HLL_SPARSE_VAL_LEN(p);
+                regval = HLL_SPARSE_VAL_VALUE(p);
+                if ((runlen + idx) > HLL_REGISTERS) break;
+                while(runlen--) {
+                    HLL_DENSE_SET_REGISTER(hdr->registers,idx,regval);
+                    idx++;
+                }
+                p++;
+            }
+        }
+        // != 16384
+        if (idx != HLL_REGISTERS) {
+            DB_WARNING("WRONG idx:%d", idx);
+            return -1;
+        }
+    }
+    hll = dense;
+    return 0;
+}
+
+int hll_raw_to_sparse(std::string& hll) {
+    uint8_t *raw = (uint8_t *)hll.data();
+    struct hllhdr *oldhdr = (struct hllhdr*)raw;
+    if (oldhdr->encoding != HLL_RAW) {
+        return 0;
+    }
+    std::string sparse;
+    hll_sparse_init(sparse);
+    struct hllhdr *hdr = (struct hllhdr*)sparse.data();
+    uint8_t *max = oldhdr->registers;
+    for (int j = 0; j < HLL_REGISTERS; j++) {
+        if (max[j] == 0) continue;
+        hdr = (struct hllhdr *)sparse.data();
+        switch (hdr->encoding) {
+        case HLL_DENSE: {
+            hll_dense_set(hdr->registers, j, max[j]);
+            break;
+        }
+        case HLL_SPARSE: {
+            hll_sparse_set(sparse, j, max[j]);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    hll = sparse;
+    return 0;
+}
+
 static int hll_sparse_add(std::string& hll, uint64_t hash_value) {
-    long index;
+    long index = 0;
     uint8_t count = hll_pat_len(hash_value, &index);
     return hll_sparse_set(hll, index, count);
 }
 
+static int hll_row_add(std::string& hll, uint64_t hash_value) {
+    long index = 0;
+    uint8_t count = hll_pat_len(hash_value, &index);
+    struct hllhdr *hdr = (struct hllhdr *)hll.data();
+    if (hdr->registers[index] < count) {
+        hdr->registers[index] = count;
+        HLL_INVALIDATE_CACHE(hdr);
+    }
+    return 0;
+}
 
 int hll_add(std::string& hll, uint64_t hash_value) {
     if (is_hll_object(hll)) { 
@@ -385,8 +442,11 @@ int hll_add(std::string& hll, uint64_t hash_value) {
                 return ret;
             }
             case HLL_SPARSE:
-                return hll_sparse_add(hll,hash_value);
+                return hll_sparse_add(hll, hash_value);
+            case HLL_RAW:
+                return hll_row_add(hll, hash_value);
             default:
+                DB_WARNING("unknown encode type");
                 return -1;
         }
     } else {
@@ -413,7 +473,7 @@ void hll_add(std::string* hll, uint64_t hash_value) {
 }
 
 static void hll_sparse_reghisto(uint8_t *sparse, int sparselen, bool* invalid, int* reghisto) {
-    int idx = 0, runlen, regval;
+    int idx = 0, runlen = 0, regval = 0;
     uint8_t *end = sparse+sparselen, *p = sparse;
     while(p < end) {
         if (HLL_SPARSE_IS_ZERO(p)) {
@@ -440,9 +500,29 @@ static void hll_sparse_reghisto(uint8_t *sparse, int sparselen, bool* invalid, i
     }
 }
 
+static void hll_row_reghisto(uint8_t *registers, int* reghisto) {
+    uint64_t *word = (uint64_t*) registers;
+    for (int j = 0; j < HLL_REGISTERS/8; j++) {
+        if (*word == 0) {
+            reghisto[0] += 8;
+        } else {
+            uint8_t *bytes = (uint8_t*) word;
+            reghisto[bytes[0]]++;
+            reghisto[bytes[1]]++;
+            reghisto[bytes[2]]++;
+            reghisto[bytes[3]]++;
+            reghisto[bytes[4]]++;
+            reghisto[bytes[5]]++;
+            reghisto[bytes[6]]++;
+            reghisto[bytes[7]]++;
+        }
+        word++;
+    }
+}
+
 static double hll_sigma(double x) {
     if (x == 1.) return INFINITY;
-    double zPrime;
+    double zPrime = 0.0;
     double y = 1;
     double z = x;
     do {
@@ -456,7 +536,7 @@ static double hll_sigma(double x) {
 
 static double hll_tau(double x) {
     if (x == 0. || x == 1.) return 0.;
-    double zPrime;
+    double zPrime = 0.0;
     double y = 1.0;
     double z = 1 - x;
     do {
@@ -470,7 +550,7 @@ static double hll_tau(double x) {
 
 uint64_t hll_estimate(const std::string& hll, bool* invalid) {
     struct hllhdr *hdr = (struct hllhdr *)hll.data();
-    uint64_t card;
+    uint64_t card = 0;
     if (HLL_VALID_CACHE(hdr)) {
         /* Just return the cached value. */
         card = (uint64_t)hdr->card[0];
@@ -484,7 +564,6 @@ uint64_t hll_estimate(const std::string& hll, bool* invalid) {
     } else {
         double m = HLL_REGISTERS;
         double E = 0.0;
-        int j;
         int reghisto[64] = {0};
 
         if (hdr->encoding == HLL_DENSE) {
@@ -492,12 +571,14 @@ uint64_t hll_estimate(const std::string& hll, bool* invalid) {
         } else if (hdr->encoding == HLL_SPARSE) {
             hll_sparse_reghisto(hdr->registers,
                          hll.size()-HLL_HDR_SIZE,invalid,reghisto);
+        } else if (hdr->encoding == HLL_RAW) {
+            hll_row_reghisto(hdr->registers,reghisto);
         } else {
             DB_WARNING("Unknown HyperLogLog encoding in hll_estimate()");
             return 0;
         }
         double z = m * hll_tau((m-reghisto[HLL_Q+1])/(double)m);
-        for (j = HLL_Q; j >= 1; --j) {
+        for (int j = HLL_Q; j >= 1; --j) {
             z += reghisto[j];
             z *= 0.5;
         }
@@ -547,27 +628,35 @@ uint64_t hll_estimate(const ExprValue& hll) {
 }
 
 int hll_merge_agg(std::string& hll1, std::string& hll2) {
-    if (hll_sparse_to_dense(hll1) < 0) {
+    if (!is_hll_object(hll1) || !is_hll_object(hll2)) {
+        DB_WARNING("waong hll object");
         return -1;
     }
     struct hllhdr *hdr1 = (struct hllhdr *)hll1.data();
+    if (hdr1->encoding != HLL_RAW) {
+        if (hll_sparse_to_dense(hll1) < 0) {
+            return -1;
+        }
+        hdr1 = (struct hllhdr *)hll1.data();
+    }
     struct hllhdr *hdr2 = (struct hllhdr *)hll2.data();
-    int i;
-
+    uint8_t *max = hdr1->registers;
     if (hdr2->encoding == HLL_DENSE) {
-        uint8_t val;
-
-        for (i = 0; i < HLL_REGISTERS; i++) {
+        uint8_t val = 0;
+        for (int i = 0; i < HLL_REGISTERS; i++) {
             HLL_DENSE_GET_REGISTER(val,hdr2->registers,i);
-            hll_dense_set(hdr1->registers,i,val);
+            if (hdr1->encoding != HLL_RAW) {
+                hll_dense_set(hdr1->registers,i,val);
+            } else {
+                if (val > max[i]) max[i] = val;
+            }
         }
     } else {
         uint8_t *p = (uint8_t *)hll2.data();
         uint8_t *end = p + hll2.size();
-        long runlen, regval;
-
+        long runlen = 0 , regval = 0;
         p += HLL_HDR_SIZE;
-        i = 0;
+        int i = 0;
         while(p < end) {
             if (HLL_SPARSE_IS_ZERO(p)) {
                 runlen = HLL_SPARSE_ZERO_LEN(p);
@@ -582,7 +671,11 @@ int hll_merge_agg(std::string& hll1, std::string& hll2) {
                 regval = HLL_SPARSE_VAL_VALUE(p);
                 if ((runlen + i) > HLL_REGISTERS) break;
                 while(runlen--) {
-                    hll_dense_set(hdr1->registers,i,regval);
+                    if (hdr1->encoding != HLL_RAW) {
+                        hll_dense_set(hdr1->registers,i,regval);
+                    } else {
+                        if (regval > max[i]) max[i] = regval;
+                    }
                     i++;
                 }
                 p++;
@@ -603,6 +696,12 @@ int hll_merge(uint8_t *max, std::string& hll) {
         for (i = 0; i < HLL_REGISTERS; i++) {
             HLL_DENSE_GET_REGISTER(val,hdr->registers,i);
             if (val > max[i]) max[i] = val;
+        }
+    } else if (hdr->encoding == HLL_RAW) {
+        for (i = 0; i < HLL_REGISTERS; i++) {
+            if (hdr->registers[i] > max[i]) {
+                max[i] = hdr->registers[i];
+            }
         }
     } else {
         uint8_t *p = (uint8_t *)hll.data();
@@ -637,11 +736,14 @@ int hll_merge(uint8_t *max, std::string& hll) {
 }
 
 int hll_merge(std::string& hll1, std::string& hll2) {
+    if (!is_hll_object(hll1) || !is_hll_object(hll2)) {
+        DB_WARNING("waong hll object");
+        return -1;
+    }
     uint8_t max[HLL_REGISTERS];
     memset(max,0,sizeof(max));
     int use_dense = 0;
-    struct hllhdr *hdr;
-    hdr = (struct hllhdr *)hll1.data();
+    struct hllhdr *hdr = (struct hllhdr *)hll1.data();
     if (hdr->encoding == HLL_DENSE) use_dense = 1;
     hdr = (struct hllhdr *)hll2.data();
     if (hdr->encoding == HLL_DENSE) use_dense = 1;
@@ -668,14 +770,13 @@ int hll_merge(std::string& hll1, std::string& hll2) {
     return 0;
 }
 
-ExprValue hll_init() {
-    ExprValue hll(pb::HLL);
+extern void hll_sparse_init(std::string& val) {
     int sparselen = HLL_HDR_SIZE +
                     (((HLL_REGISTERS+(HLL_SPARSE_XZERO_MAX_LEN-1)) /
                      HLL_SPARSE_XZERO_MAX_LEN)*2);
-    hll.str_val.resize(sparselen);
-    hll.str_val.replace(0, 4, "HYLL");
-    struct hllhdr *hdr = (struct hllhdr *)hll.str_val.data();
+    val.resize(sparselen);
+    val.replace(0, 4, "HYLL");
+    struct hllhdr *hdr = (struct hllhdr *)val.data();
     hdr->encoding = HLL_SPARSE;
     int aux = HLL_REGISTERS;
     uint8_t *p = hdr->registers;
@@ -686,6 +787,21 @@ ExprValue hll_init() {
         p += 2;
         aux -= xzero;
     }
+}
+
+ExprValue hll_init() {
+    ExprValue hll(pb::HLL);
+    hll_sparse_init(hll.str_val);
+    return hll;
+}
+
+ExprValue hll_row_init() {
+    ExprValue hll(pb::HLL);
+    int rowlen = HLL_HDR_SIZE + HLL_REGISTERS;
+    hll.str_val.resize(rowlen);
+    hll.str_val.replace(0, 4, "HYLL");
+    struct hllhdr *hdr = (struct hllhdr *)hll.str_val.data();
+    hdr->encoding = HLL_RAW;
     return hll;
 }
 

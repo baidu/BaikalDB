@@ -69,15 +69,65 @@ int Tokenizer::init() {
 #ifdef BAIDU_INTERNAL
 drpc::NLPCClient* wordrank_client;
 drpc::NLPCClient* wordseg_client;
+drpc::NLPCClient* wordweight_client;
+
+int Tokenizer::wordweight(std::string word, std::map<std::string, float>& term_map, bool is_filter) {
+    if (word.empty()) {
+        return 0;
+    }
+    if (wordweight_client == nullptr) {
+        DB_FATAL("not load wordweight dict.");
+        return -1;
+    }
+    int8_t status;
+    nlpc::ver_1_0_0::wordweight_outputPtr s_output = 
+        sofa::create<nlpc::ver_1_0_0::wordweight_output>();
+    nlpc::ver_1_0_0::wordweight_inputPtr s_input = ::sofa::create<nlpc::ver_1_0_0::wordweight_input>();
+    s_input->set_query(word);
+    status = nlpc_seg(*wordweight_client, word, s_output, s_input);
+    if (status != 0) {
+        DB_WARNING("segment failed, word[%s]", word.c_str());
+        return -1;
+    }
+    for (auto t : s_output->basic_result()) {
+        std::string term = t->word();
+        auto it = term_map.find(term);
+        if (it == term_map.end()) {
+            int32_t level = t->level();
+            float weight = t->weight();
+            auto trim_term = string_trim(term);
+            if (trim_term == "") {
+                continue;
+            }
+            if (is_filter && level == 0 && !float_equal(weight, 1)) {
+                continue;
+            }
+            term_map[term] = weight;
+        } else {
+            term_map[term] += t->weight();
+        }
+    }
+    return 0;   
+}
 
 int Tokenizer::wordrank(std::string word, std::map<std::string, float>& term_map) {
     if (word.empty()) {
         return 0;
     }
+
+    if (wordrank_client == nullptr) {
+        DB_FATAL("not load wordrank dict.");
+        return -1;
+    }
     int8_t status;
     nlpc::ver_1_0_0::wordrank_outputPtr s_output = 
         sofa::create<nlpc::ver_1_0_0::wordrank_output>();
-    status = nlpc_seg(*wordrank_client, word, s_output);
+    nlpc::ver_1_0_0::wordseg_inputPtr s_input = 
+                        sofa::create<nlpc::ver_1_0_0::wordseg_input>();
+    s_input->set_lang_id(0);
+    s_input->set_lang_para(0);
+    s_input->set_query(word);
+    status = nlpc_seg(*wordrank_client, word, s_output, s_input);
     if (status != 0) {
         //DB_WARNING("segment failed, word[%s]", word.c_str());
         return -1;
@@ -103,11 +153,20 @@ int Tokenizer::wordseg_basic(std::string word, std::map<std::string, float>& ter
     if (word.empty()) {
         return 0;
     }
+    if (wordseg_client == nullptr) {
+        DB_FATAL("not load wordseg dict.");
+        return -1;
+    }
     q2b_tolower_gbk(word);
     int8_t status;
     nlpc::ver_1_0_0::wordseg_outputPtr s_output =
         sofa::create<nlpc::ver_1_0_0::wordseg_output>();
-    status = nlpc_seg(*wordseg_client, word, s_output);
+    nlpc::ver_1_0_0::wordseg_inputPtr s_input = 
+                        sofa::create<nlpc::ver_1_0_0::wordseg_input>();
+    s_input->set_lang_id(0);
+    s_input->set_lang_para(0);
+    s_input->set_query(word);
+    status = nlpc_seg(*wordseg_client, word, s_output, s_input);
     if (status != 0) {
         //DB_WARNING("segment failed, word[%s]", word.c_str());
         return -1;
@@ -309,7 +368,7 @@ void Tokenizer::split_str_gbk(const std::string& word, std::vector<std::string>&
     } 
 }
 
-bool is_prefix_end(std::unique_ptr<rocksdb::Iterator>& iterator, uint8_t level) {
+bool is_prefix_end(std::unique_ptr<myrocksdb::Iterator>& iterator, uint8_t level) {
     if (iterator->Valid()) {
         uint8_t level_ = get_level_from_reverse_key(iterator->key());
         if (level == level_) {

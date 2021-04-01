@@ -89,6 +89,7 @@ ExprValue datediff(const std::vector<ExprValue>& input);
 ExprValue date_add(const std::vector<ExprValue>& input);
 ExprValue date_sub(const std::vector<ExprValue>& input);
 ExprValue weekday(const std::vector<ExprValue>& input);
+ExprValue extract(const std::vector<ExprValue>& input);
 // hll functions
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);
@@ -133,7 +134,10 @@ ExprValue rb_minimum(const std::vector<ExprValue>& input);
 ExprValue rb_maximum(const std::vector<ExprValue>& input);
 ExprValue rb_rank(const std::vector<ExprValue>& input);
 ExprValue rb_jaccard_index(const std::vector<ExprValue>& input);
-
+ExprValue tdigest_build(const std::vector<ExprValue>& input);
+ExprValue tdigest_add(const std::vector<ExprValue>& input);
+ExprValue tdigest_percentile(const std::vector<ExprValue>& input);
+ExprValue tdigest_location(const std::vector<ExprValue>& input);
 // other
 ExprValue version(const std::vector<ExprValue>& input);
 }

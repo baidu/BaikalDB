@@ -49,6 +49,7 @@
 
 namespace baikaldb {
 class Region;
+typedef std::shared_ptr<Region> SmartRegion;
 class Backup {
 public:
     Backup() = default;
@@ -109,11 +110,11 @@ private:
     int upload_sst_info(brpc::Controller* controller, BackupInfo& backup_info);
 
 
-    int backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index);
+    int backup_datainfo_streaming(brpc::StreamId sd, int64_t log_index, SmartRegion region_ptr);
 
     int upload_sst_info_streaming(
         brpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
-        bool ingest_store_latest_sst, const BackupInfo& backup_info);
+        bool ingest_store_latest_sst, const BackupInfo& backup_info, SmartRegion region_ptr);
 
     template<typename WritePolicy>
     int send_file(BackupInfo& backup_info, WritePolicy* pa, int64_t log_index) {

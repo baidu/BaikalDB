@@ -34,6 +34,7 @@ public:
     static const std::string LOGICAL_KEY;
     static const std::string PHYSICAL_CLUSTER_IDENTIFY;
     static const std::string INSTANCE_CLUSTER_IDENTIFY;
+    static const std::string INSTANCE_PARAM_CLUSTER_IDENTIFY;
  
     static const std::string PRIVILEGE_IDENTIFY;
 
@@ -45,7 +46,7 @@ public:
     static const std::string REGION_SCHEMA_IDENTIFY;
     static const std::string DDLWORK_IDENTIFY;
     static const std::string STATISTICS_IDENTIFY;
-    
+    static const std::string GLOBAL_DDLWORK_REGION_IDENTIFY;
     static const std::string MAX_IDENTIFY;
 
     virtual ~MetaServer();
@@ -109,10 +110,7 @@ public:
 
     void shutdown_raft();
     bool have_data();
-    void close() {
-        _flush_bth.join();
-        _apply_region_bth.join();
-    }
+    void close();
 
 private:
     MetaServerInteract* meta_proxy(const std::string& plat) {

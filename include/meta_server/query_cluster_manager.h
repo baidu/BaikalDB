@@ -28,6 +28,7 @@ public:
     void get_logical_info(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_physical_info(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_instance_info(const pb::QueryRequest* request, pb::QueryResponse* response);
+    void get_instance_param(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_flatten_instance(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_diff_region_ids(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_region_ids(const pb::QueryRequest* request, pb::QueryResponse* response);

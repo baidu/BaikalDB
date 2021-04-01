@@ -34,6 +34,7 @@
 #include "query_privilege_manager.h"
 #include "query_table_manager.h"
 #include "query_region_manager.h"
+#include "ddl_manager.h"
 #include "sst_file_writer.h"
 
 namespace baikaldb {
@@ -65,6 +66,7 @@ void MetaStateMachine::store_heartbeat(google::protobuf::RpcController* controll
     TimeCost step_time_cost;
     //判断instance是否是新增，同时更新instance的容量信息
     ClusterManager::get_instance()->process_instance_heartbeat_for_store(request->instance_info());
+    ClusterManager::get_instance()->process_instance_param_heartbeat_for_store(request, response);
     int64_t instance_time = step_time_cost.get_time();
     step_time_cost.reset();
 
@@ -91,7 +93,7 @@ void MetaStateMachine::store_heartbeat(google::protobuf::RpcController* controll
 
     TableManager::get_instance()->process_ddl_heartbeat_for_store(request, response, log_id);
     int64_t ddlwork_time = step_time_cost.get_time();
-
+    _store_heart_beat << time_cost.get_time();
     DB_DEBUG("store_heart_beat req[%s]", request->DebugString().c_str());
     DB_DEBUG("store_heart_beat resp[%s]", response->DebugString().c_str());
 
@@ -122,6 +124,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
         response->set_leader(_node.leader_id().to_string());
         return;
     }
+    DB_NOTICE("baikaldb request[%s]", request->ShortDebugString().c_str());
     TimeCost step_time_cost;
     ON_SCOPE_EXIT([]() {
         Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_broadcast();
@@ -150,11 +153,15 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     SchemaManager::get_instance()->process_baikal_heartbeat(request, response, log_id);
     int64_t schema_time = step_time_cost.get_time();
     step_time_cost.reset();
+    DBManager::get_instance()->process_baikal_heartbeat(request, response, cntl);
+    int64_t global_ddl_time = step_time_cost.get_time();
+    step_time_cost.reset();
+    _baikal_heart_beat << time_cost.get_time();
     DB_NOTICE("baikaldb:%s heart beat, wait_time:%ld, time_cost: %ld, cluster_time: %ld, "
-                "privilege_time: %ld, schema_time: %ld, log_id: %lu", 
+                "privilege_time: %ld, schema_time: %ld, global_ddl_time: %ld, log_id: %lu", 
                 butil::endpoint2str(cntl->remote_side()).c_str(),
                 wait_time, time_cost.get_time(),
-                cluster_time, privilege_time, schema_time,
+                cluster_time, privilege_time, schema_time, global_ddl_time,
                 log_id);
 }
 
@@ -282,6 +289,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         }
         case pb::OP_UPDATE_INSTANCE: {
             ClusterManager::get_instance()->update_instance(request, done);
+            break;
+        }
+        case pb::OP_UPDATE_INSTANCE_PARAM: {
+            ClusterManager::get_instance()->update_instance_param(request, done);
             break;
         }
         case pb::OP_MOVE_PHYSICAL: {
@@ -430,6 +441,17 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         }
         case pb::OP_SET_INDEX_HINT_STATUS: {
             TableManager::get_instance()->set_index_hint_status(request, iter.index(), done);
+            break;
+        }
+
+        case pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK: 
+        case pb::OP_SUSPEND_DDL_WORK:
+        case pb::OP_RESTART_DDL_WORK: {
+            DDLManager::get_instance()->raft_update_info(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_REMOVE_GLOBAL_INDEX_DATA: {
+            TableManager::get_instance()->remove_global_index_data(request, iter.index(), done);
             break;
         }
         default: {
@@ -606,6 +628,8 @@ void MetaStateMachine::on_leader_start() {
         DB_FATAL("store check thread has already started");    
     }
     CommonStateMachine::on_leader_start();
+    DDLManager::get_instance()->on_leader_start();
+    TableManager::get_instance()->on_leader_start();
     _is_leader.store(true);
 }
 
@@ -648,6 +672,9 @@ void MetaStateMachine::on_leader_stop() {
     RegionManager::get_instance()->clear_region_peer_state_map();
     DB_WARNING("leader stop");
     CommonStateMachine::on_leader_stop();
+    DBManager::get_instance()->clear_all_tasks();
+    DDLManager::get_instance()->clear_txn_info();
+    TableManager::get_instance()->on_leader_stop();
 }
 
 bool MetaStateMachine::whether_can_decide() {

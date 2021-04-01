@@ -22,7 +22,6 @@
 #include "meta_server_interact.hpp"
 
 namespace baikaldb {
-MetaServerInteract AutoInc::auto_incr_meta_inter;
 int AutoInc::analyze(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     if (ctx->insert_records.size() == 0) {
@@ -69,7 +68,11 @@ int AutoInc::analyze(QueryContext* ctx) {
     auto_increment_ptr->set_table_id(table_id);
     auto_increment_ptr->set_count(auto_id_count);
     auto_increment_ptr->set_start_id(max_id);
-    if (AutoInc::auto_incr_meta_inter.send_request("meta_manager", 
+    MetaServerInteract* interact = MetaServerInteract::get_auto_incr_instance();
+    if (ctx->use_backup) {
+        interact = MetaServerInteract::get_backup_instance();
+    }
+    if (interact->send_request("meta_manager", 
                                                           request, 
                                                           response) != 0) {
         DB_FATAL("gen id from meta_server fail, sql:%s", ctx->sql.c_str());

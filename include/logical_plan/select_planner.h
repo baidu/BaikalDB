@@ -35,8 +35,6 @@ public:
 
     virtual int plan() override;
 
-    virtual bool is_correlated_subquery() override;
-
 private:
 
     // methods to create plan nodes
@@ -65,7 +63,7 @@ private:
 
     int parse_limit();
 
-    int expr_subquery_rewrite();
+    int subquery_rewrite();
   
     bool is_full_export();
 

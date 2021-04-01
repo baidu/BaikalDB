@@ -106,6 +106,18 @@ inline const char* type_to_name(FuncType t) {
     return FUNC_FN_NAME_MAP[t];
 }
 
+bool FuncExpr::has_subquery() const {
+    for (int i = 0; i < children.size(); i++) {
+        ExprNode* expr_node = static_cast<ExprNode*>(children[i]);
+        if (expr_node->expr_type == ET_SUB_QUERY_EXPR
+            || expr_node->expr_type == ET_CMP_SUB_QUERY_EXPR
+            || expr_node->expr_type == ET_EXISTS_SUB_QUERY_EXPR) {
+            return true;
+        }
+    }
+    return false;
+}
+
 FuncExpr* FuncExpr::new_unary_op_node(FuncType t, Node* arg1, butil::Arena& arena) {
     FuncExpr* fun = new(arena.allocate(sizeof(FuncExpr)))FuncExpr();
     fun->func_type = t;

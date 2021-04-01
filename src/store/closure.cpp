@@ -32,15 +32,21 @@ void DMLClosure::Run() {
         response->set_errcode(pb::NOT_LEADER);
         response->set_leader(butil::endpoint2str(leader).c_str());
         response->set_errmsg("leader transfer");
-        //  发生切主，回滚当前dml
-        if (transaction != nullptr && region != nullptr) {
-            //uint64_t txn_id = transaction->txn_id();
-            if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
-                    int seq_id = transaction->seq_id();
-                    transaction->rollback_current_request();
-                    region->remove_readonly_txn(transaction.get());
-                    DB_WARNING("txn rollback region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
-                    region_id, log_id, transaction->txn_id(), seq_id, pb::OpType_Name(op_type).c_str());
+        if (status().error_code() != EPERM) {
+            // 发生错误，回滚当前dml
+            if (transaction != nullptr && region != nullptr) {
+                if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
+                        int seq_id = transaction->seq_id();
+                        transaction->rollback_current_request();
+                        DB_WARNING("txn rollback region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
+                        region_id, log_id, transaction->txn_id(), seq_id, pb::OpType_Name(op_type).c_str());
+                }
+            }
+        } else {
+            // 发生leader切换
+            if (transaction != nullptr && region != nullptr) {
+                DB_WARNING("leader changed region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
+                        region_id, log_id, transaction->txn_id(), transaction->seq_id(), pb::OpType_Name(op_type).c_str());
             }
         }
         DB_WARNING("region_id: %ld  status:%s ,leader:%s, log_id:%lu, remote_side: %s",
@@ -56,8 +62,8 @@ void DMLClosure::Run() {
     if (transaction != nullptr) {
         transaction->set_in_process(false);
     }
-    if (is_replay) {
-        replay_last_log_cond->decrease_signal();
+    if (is_clear_applying_txn) {
+        clear_applying_txn_cond->decrease_signal();
     }
     if (done) {
         done->Run();
@@ -198,7 +204,7 @@ void Dml1pcClosure::Run() {
                  cost.get_time());
         if (txn != nullptr) {
             txn->rollback();
-            state->is_fail = true;
+            state->err_code = pb::NOT_LEADER;
             state->raft_error_msg = status().error_cstr();
         }
     } 

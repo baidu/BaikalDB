@@ -37,7 +37,7 @@ using google::protobuf::FieldDescriptorProto;
 namespace baikaldb {
 DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
 DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
-DEFINE_int32(service_lock_concurrency, 40, "service_write concurrency, default:40");
+DEFINE_int32(service_lock_concurrency, 40, "service_lock_concurrency, Deprecated");
 DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
 DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
 DEFINE_int32(baikal_heartbeat_concurrency, 10, "baikal heartbeat concurrency, default:10");
@@ -46,6 +46,7 @@ DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
 DEFINE_bool(servitysinglelog, true, "diff servity message in seperate logfile");
+DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
         + (_end.tv_usec-_start.tv_usec); //macro second
@@ -291,7 +292,7 @@ bool is_digits(const std::string& str) {
     return std::all_of(str.begin(), str.end(), ::isdigit);
 }
 
-void stripslashes(std::string& str) {
+void stripslashes(std::string& str, bool is_gbk) {
     size_t slow = 0;
     size_t fast = 0;
     bool has_slash = false;
@@ -319,7 +320,7 @@ void stripslashes(std::string& str) {
             if (str[fast] == '\\') {
                 has_slash = true;
                 fast++;
-            } else if ((str[fast] & 0x80) != 0) {
+            } else if (is_gbk && (str[fast] & 0x80) != 0) {
                 //gbk中文字符处理
                 str[slow++] = str[fast++];
                 if (fast >= str.size()) {
@@ -401,6 +402,10 @@ void update_schema_conf_common(const std::string& table_name, const pb::SchemaCo
                     auto src_value = src_reflection->GetString(schema_conf, src_field);
                     dst_reflection->SetString(p_conf, dst_field, src_value);
                 } break;
+                case google::protobuf::FieldDescriptor::CPPTYPE_ENUM: {
+                    auto src_value = src_reflection->GetEnum(schema_conf, src_field);
+                    dst_reflection->SetEnum(p_conf, dst_field, src_value);
+                } break;
                 default: {
                     break;
                 }
@@ -430,7 +435,8 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::TIME,         FieldDescriptorProto::TYPE_SFIXED32},
         { pb::HLL,          FieldDescriptorProto::TYPE_BYTES},
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL},
-        { pb::BITMAP,       FieldDescriptorProto::TYPE_BYTES}
+        { pb::BITMAP,       FieldDescriptorProto::TYPE_BYTES},
+        { pb::TDIGEST,       FieldDescriptorProto::TYPE_BYTES}
     };
     if (_mysql_pb_type_mapping.count(type) == 0) {
         DB_WARNING("mysql_type %d not supported.", type);
@@ -533,14 +539,21 @@ std::string url_decode(const std::string& str) {
 }
 
 std::vector<std::string> string_split(const std::string &s, char delim) {
-  std::stringstream ss(s);
-  std::string item;
-  std::vector<std::string> elems;
-  while (std::getline(ss, item, delim)) {
-    elems.push_back(item);
-    // elems.push_back(std::move(item));
-  }
-  return elems;
+    std::stringstream ss(s);
+    std::string item;
+    std::vector<std::string> elems;
+    while (std::getline(ss, item, delim)) {
+        elems.emplace_back(item);
+        // elems.push_back(std::move(item));
+    }
+    return elems;
+}
+
+bool ends_with(const std::string &str, const std::string &ending) {
+    if (str.length() < ending.length()) {
+        return false;
+    }
+    return str.compare(str.length() - ending.length(), ending.length(), ending) == 0;
 }
 
 std::string string_trim(std::string& str) {

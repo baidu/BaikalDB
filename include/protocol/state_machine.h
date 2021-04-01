@@ -29,6 +29,7 @@ namespace baikaldb {
 
 const std::string SQL_SELECT                     = "select";
 const std::string SQL_SHOW                       = "show";
+const std::string SQL_HANDLE                     = "handle";
 const std::string SQL_EXPLAIN                    = "explain";
 const std::string SQL_KILL                       = "kill";
 const std::string SQL_USE                        = "use";
@@ -61,6 +62,8 @@ const std::string SQL_SHOW_PROCESSLIST           = "show processlist";
 const std::string SQL_SHOW_META                  = "show meta";
 const std::string SQL_SHOW_NAMESPACE             = "show namespace";
 const std::string SQL_DISABLE_INDEXS             = "show disable indexs";
+const std::string SQL_HANDLE_ABNORMAL_REGIONS    = "handle abnormal regions";
+const std::string SQL_HANDLE_ADD_PRIVILEGE       = "handle add_privilege";
 
 enum QUERY_TYPE {
     SQL_UNKNOWN_NUM                         = 0,
@@ -148,6 +151,8 @@ private:
     bool _handle_client_query_show_processlist(SmartSocket client);
     bool _handle_client_query_common_query(SmartSocket client);
 
+    bool _handle_client_query_handle_abnormal_regions(SmartSocket client);
+    bool _handle_client_query_handle_add_privilege(SmartSocket client);
     bool _handle_client_query_select_1(SmartSocket client);
     bool _handle_client_query_show_collation(SmartSocket client);
     bool _handle_client_query_show_warnings(SmartSocket client);

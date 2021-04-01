@@ -20,14 +20,10 @@ namespace baikaldb {
 DECLARE_string(meta_server_bns);
 class AutoInc {
 public:
-    static MetaServerInteract auto_incr_meta_inter;
     /* 
      * 计算自增id
      */
     int analyze(QueryContext* ctx);
-    static int init_meta_inter() {
-        return auto_incr_meta_inter.init_internal(FLAGS_meta_server_bns);
-    }
 };
 }
 

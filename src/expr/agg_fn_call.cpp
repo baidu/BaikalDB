@@ -42,6 +42,8 @@ int AggFnCall::init(const pb::ExprNode& node) {
         {"rb_xor_agg", RB_XOR_AGG},
         //{"rb_xor_cardinality_agg", RB_XOR_CARDINALITY_AGG},
         {"rb_build_agg", RB_BUILD_AGG},
+        {"tdigest_agg", TDIGEST_AGG},
+        {"tdigest_build_agg", TDIGEST_BUILD_AGG},
         {"group_concat", GROUP_CONCAT},
     };
     //所有agg都是非const的
@@ -124,13 +126,23 @@ int AggFnCall::type_inferer() {
             _col_type = pb::UINT64;
             return 0;
         }
-        case GROUP_CONCAT:
+        case TDIGEST_AGG:
+        case TDIGEST_BUILD_AGG: {
+            if (_children.size() == 0) {
+                DB_FATAL("children.size is 0");
+                return -1;
+            }
+            _col_type = pb::TDIGEST;
+            return 0;
+        }
+        case GROUP_CONCAT: {
             if (_children.size() == 0) {
                 DB_FATAL("children.size is 0");
                 return -1;
             }
             _col_type = pb::STRING;
             return 0;
+        }
         default:
             DB_WARNING("un-support agg type:%d", _agg_type);
             return -1;
@@ -191,12 +203,15 @@ int AggFnCall::open() {
         case RB_XOR_AGG:
         case RB_XOR_CARDINALITY_AGG:
         case RB_BUILD_AGG:
-        case GROUP_CONCAT:
+        case TDIGEST_AGG:
+        case TDIGEST_BUILD_AGG: 
+        case GROUP_CONCAT: {
             if (_children.size() == 0) {
                 DB_WARNING("_agg_type:%d , _children.size() == 0", _agg_type);
                 return -1;
             }
             break;
+        }
         default:
             return 0;
     }
@@ -284,8 +299,18 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
         }
         case HLL_ADD_AGG:
         case HLL_MERGE_AGG: {
-            if (dst_val.is_null()) {
-                dst->set_value(_tuple_id, _intermediate_slot_id, hll::hll_init());
+            if (_intermediate_val_map.count(key) == 0) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                intermediate_val.val = hll::hll_row_init();
+                if (dst_val.is_null()) {
+                    
+                    dst->set_value(_tuple_id, _intermediate_slot_id, hll::hll_row_init());
+                } else {
+                    dst_val.cast_to(pb::HLL);
+                    hll::hll_merge_agg(intermediate_val.val.str_val, dst_val.str_val);
+                    dst->set_value(_tuple_id, _intermediate_slot_id, intermediate_val.val);
+                }
+                intermediate_val.is_assign = true;
             }
             return 0;
         }
@@ -310,6 +335,22 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                     // and第一次需要特殊处理
                     intermediate_val.is_assign = true;
                 }
+            }
+            return 0;
+        }
+        case TDIGEST_AGG:
+        case TDIGEST_BUILD_AGG: {
+            if (_intermediate_val_map.count(key) == 0) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                if (dst_val.is_null()) {
+                    intermediate_val.val = ExprValue::Tdigest();
+                    dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Tdigest());
+                } else {
+                    dst_val.cast_to(pb::TDIGEST);
+                    intermediate_val.val = dst_val;
+                    dst->set_value(_tuple_id, _intermediate_slot_id, dst_val);
+                }
+                intermediate_val.is_assign = true;
             }
             return 0;
         }
@@ -387,27 +428,23 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
         case HLL_ADD_AGG: {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null()) {
-                std::string* hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
-                if (hll != NULL) {
-                    hll::hll_add(hll, value.hash());
-                }
+                auto& intermediate_val = _intermediate_val_map[key];
+                hll::hll_add(intermediate_val.val.str_val, value.hash());
             }
             return 0;
         }
         case HLL_MERGE_AGG: {
             ExprValue value = _children[0]->get_value(src);
-            if (!value.is_null()) {
-                std::string* hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
-                if (hll != NULL) {
-                    hll::hll_merge_agg(hll, &value.str_val);
-                }
+            if (!value.is_null() && value.is_hll()) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                hll::hll_merge_agg(intermediate_val.val.str_val, value.str_val);
             }
             return 0;
         }
         case RB_OR_AGG:
         case RB_OR_CARDINALITY_AGG: {
             ExprValue value = _children[0]->get_value(src);
-            if (!value.is_null()) {
+            if (!value.is_null() && value.is_bitmap()) {
                 auto& intermediate_val = _intermediate_val_map[key];
                 *intermediate_val.val._u.bitmap |= *value._u.bitmap;
             }
@@ -416,7 +453,7 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
         case RB_AND_AGG:
         case RB_AND_CARDINALITY_AGG: {
             ExprValue value = _children[0]->get_value(src);
-            if (!value.is_null()) {
+            if (!value.is_null() && value.is_bitmap()) {
                 auto& intermediate_val = _intermediate_val_map[key];
                 if (intermediate_val.is_assign) {
                     *intermediate_val.val._u.bitmap &= *value._u.bitmap;
@@ -430,7 +467,7 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
         case RB_XOR_AGG:
         case RB_XOR_CARDINALITY_AGG: {
             ExprValue value = _children[0]->get_value(src);
-            if (!value.is_null()) {
+            if (!value.is_null() && value.is_bitmap()) {
                 auto& intermediate_val = _intermediate_val_map[key];
                 *intermediate_val.val._u.bitmap ^= *value._u.bitmap;
             }
@@ -441,6 +478,26 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             if (!value.is_null()) {
                 auto& intermediate_val = _intermediate_val_map[key].val;
                 intermediate_val._u.bitmap->add(value.get_numberic<uint32_t>());
+            }
+            return 0;
+        }
+        case TDIGEST_AGG: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null() && value.is_tdigest()) {
+                auto& intermediate_val = _intermediate_val_map[key].val;
+                if (tdigest::is_td_object(value.str_val)) {
+                    tdigest::td_merge((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
+                            (tdigest::td_histogram_t *)value.str_val.data());
+                }
+            }
+            return 0;
+        }
+        case TDIGEST_BUILD_AGG: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key].val;
+                tdigest::td_add((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
+                        value.get_numberic<double>(), 1);
             }
             return 0;
         }
@@ -468,12 +525,20 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
     }
     //首行不需要merge
     if (src == dst) {
-        if (is_bitmap_agg()){
-            ExprValue dst_value = src->get_value(_tuple_id, _intermediate_slot_id);
-            dst_value.cast_to(pb::BITMAP);
+        ExprValue dst_value = src->get_value(_tuple_id, _intermediate_slot_id);
+        if (is_bitmap_agg() || is_tdigest_agg() || is_hll_agg()){
+            if (is_bitmap_agg()) {
+                dst_value.cast_to(pb::BITMAP);
+            } else if (is_tdigest_agg()) {
+                dst_value.cast_to(pb::TDIGEST);
+            }
             auto& intermediate_val = _intermediate_val_map[key];
             intermediate_val.is_assign = true;
-            intermediate_val.val = dst_value;
+            if (is_hll_agg()) {
+                hll::hll_merge_agg(intermediate_val.val.str_val, dst_value.str_val);
+            } else {
+                intermediate_val.val = dst_value;
+            }
         }
         return 0;
     }
@@ -521,12 +586,12 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
             }
             return 0;
         }
-        case HLL_ADD_AGG: 
+        case HLL_ADD_AGG:
         case HLL_MERGE_AGG: {
-            std::string* src_hll = src->mutable_string(_tuple_id, _intermediate_slot_id);
-            std::string* dst_hll = dst->mutable_string(_tuple_id, _intermediate_slot_id);
-            if (src_hll != NULL && dst_hll != NULL) {
-                hll::hll_merge_agg(dst_hll, src_hll);
+            ExprValue src_hll = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!src_hll.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key];
+                hll::hll_merge_agg(intermediate_val.val.str_val, src_hll.str_val);
             }
             return 0;
         }
@@ -566,6 +631,26 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
             }
             return 0;
         }
+        case TDIGEST_AGG: {
+            ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!src_value.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key].val;
+                if (tdigest::is_td_object(src_value.str_val)) {
+                    tdigest::td_merge((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
+                        (tdigest::td_histogram_t *)src_value.str_val.data());
+                }
+            }
+            return 0;
+        }
+        case TDIGEST_BUILD_AGG: {
+            ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!src_value.is_null()) {
+                auto& intermediate_val = _intermediate_val_map[key].val;
+                tdigest::td_add((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
+                        src_value.get_numberic<double>(), 1);
+            }
+            return 0;
+        }
         case GROUP_CONCAT: {
             ExprValue value = src->get_value(_tuple_id, _intermediate_slot_id);
             if (!value.is_null()) {
@@ -584,10 +669,15 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
 }
 int AggFnCall::finalize(const std::string& key, MemRow* dst) {
     if (_intermediate_slot_id == _final_slot_id) {
-        if (is_bitmap_agg()) {
+        if (is_bitmap_agg() || is_tdigest_agg() || is_hll_agg()) {
             auto& val = _intermediate_val_map[key];
             if (val.is_assign) {
-                dst->set_value(_tuple_id, _final_slot_id, _intermediate_val_map[key].val);
+                if (is_hll_agg()) {
+                    if (hll::hll_raw_to_sparse(val.val.str_val) < 0) {
+                        return -1;
+                    }
+                }
+                dst->set_value(_tuple_id, _final_slot_id, val.val);
             } else {
                 dst->set_value(_tuple_id, _final_slot_id,  ExprValue::Null());
             }

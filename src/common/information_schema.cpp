@@ -26,6 +26,8 @@ int InformationSchema::init() {
     init_region_status();
     init_columns();
     init_statistics();
+    init_schemata();
+    init_tables();
     return 0;
 }
 
@@ -454,6 +456,107 @@ void InformationSchema::init_statistics() {
                         records.emplace_back(record);
                     }
                 }
+            }
+            return records;
+    };
+}
+void InformationSchema::init_schemata() {
+    // 定义字段信息
+    FieldVec fields {
+        {"CATALOG_NAME", pb::STRING},
+        {"SCHEMA_NAME", pb::STRING},
+        {"DEFAULT_CHARACTER_SET_NAME", pb::STRING},
+        {"DEFAULT_COLLATION_NAME", pb::STRING},
+        {"SQL_PATH", pb::INT64},
+    };
+    int64_t table_id = construct_table("SCHEMATA", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+            auto* factory = SchemaFactory::get_instance();
+            std::vector<std::string> db_vec =  factory->get_db_list(state->client_conn()->user_info->all_database);
+            records.reserve(db_vec.size());
+            for (auto& db : db_vec) {
+                auto record = factory->new_record(table_id);
+                record->set_string(record->get_field_by_name("CATALOG_NAME"), "def");
+                record->set_string(record->get_field_by_name("SCHEMA_NAME"), db);
+                record->set_string(record->get_field_by_name("DEFAULT_CHARACTER_SET_NAME"), "utf8mb4");
+                record->set_string(record->get_field_by_name("DEFAULT_COLLATION_NAME"), "utf8mb4_bin");
+                records.emplace_back(record);
+            }
+            return records;
+    };
+}
+void InformationSchema::init_tables() {
+    // 定义字段信息
+    FieldVec fields {
+        {"TABLE_CATALOG", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"TABLE_NAME", pb::STRING},
+        {"TABLE_TYPE", pb::STRING},
+        {"ENGINE", pb::STRING},
+        {"VERSION", pb::INT64},
+        {"ROW_FORMAT", pb::STRING},
+        {"TABLE_ROWS", pb::INT64},
+        {"AVG_ROW_LENGTH", pb::INT64},
+        {"DATA_LENGTH", pb::INT64},
+        {"MAX_DATA_LENGTH", pb::INT64},
+        {"INDEX_LENGTH", pb::INT64},
+        {"DATA_FREE", pb::INT64},
+        {"AUTO_INCREMENT", pb::INT64},
+        {"CREATE_TIME", pb::DATETIME},
+        {"UPDATE_TIME", pb::DATETIME},
+        {"CHECK_TIME", pb::DATETIME},
+        {"TABLE_COLLATION", pb::STRING},
+        {"CHECKSUM", pb::INT64},
+        {"CREATE_OPTIONS", pb::STRING},
+        {"TABLE_COMMENT", pb::STRING},
+        {"TABLE_ID", pb::INT64},
+    };
+    int64_t table_id = construct_table("TABLES", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+            std::string namespace_ = state->client_conn()->user_info->namespace_;
+            std::string table_name;
+            auto* factory = SchemaFactory::get_instance();
+            auto tb_vec = factory->get_table_list(namespace_, state->client_conn()->user_info.get());
+            records.reserve(tb_vec.size());
+            for (auto& table_info : tb_vec) {
+                std::vector<std::string> items;
+                boost::split(items, table_info->name, boost::is_any_of("."));
+                std::string db = items[0];
+                auto record = factory->new_record(table_id);
+                record->set_string(record->get_field_by_name("TABLE_CATALOG"), "def");
+                record->set_string(record->get_field_by_name("TABLE_SCHEMA"), db);
+                record->set_string(record->get_field_by_name("TABLE_NAME"), table_info->short_name);
+                record->set_string(record->get_field_by_name("TABLE_TYPE"), "BASE TABLE");
+                record->set_string(record->get_field_by_name("ENGINE"), "Innodb");
+                record->set_int64(record->get_field_by_name("VERSION"), table_info->version);
+                record->set_string(record->get_field_by_name("ROW_FORMAT"), "Compact");
+                record->set_int64(record->get_field_by_name("TABLE_ROWS"), 0);
+                record->set_int64(record->get_field_by_name("AVG_ROW_LENGTH"), table_info->byte_size_per_record);
+                record->set_int64(record->get_field_by_name("DATA_LENGTH"), 0);
+                record->set_int64(record->get_field_by_name("MAX_DATA_LENGTH"), 0);
+                record->set_int64(record->get_field_by_name("INDEX_LENGTH"), 0);
+                record->set_int64(record->get_field_by_name("DATA_FREE"), 0);
+                record->set_int64(record->get_field_by_name("AUTO_INCREMENT"), 0);
+                ExprValue ct(pb::TIMESTAMP);
+                ct._u.uint32_val = table_info->timestamp;
+                record->set_value(record->get_field_by_name("CREATE_TIME"), ct.cast_to(pb::DATETIME));
+                record->set_string(record->get_field_by_name("TABLE_COLLATION"), "utf8_bin");
+                record->set_string(record->get_field_by_name("CREATE_OPTIONS"), "");
+                record->set_string(record->get_field_by_name("TABLE_COMMENT"), "");
+                record->set_int64(record->get_field_by_name("TABLE_ID"), table_info->id);
+                records.emplace_back(record);
             }
             return records;
     };

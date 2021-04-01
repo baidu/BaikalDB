@@ -75,6 +75,10 @@ enum NodeType {
     NT_DROP_DATABASE,
     NT_ALTER_TABLE,
     NT_ALTER_SEPC,
+    NT_FIELDS,
+    NT_FIELDS_ITEM,
+    NT_LINES,
+    NT_LOAD_DATA,
 
     NT_START_TRANSACTION,
     NT_COMMIT_TRANSACTION,
@@ -91,11 +95,24 @@ struct Node {
     virtual ~Node() {}
     NodeType node_type = NT_BASE;
     bool print_sample = false;
+    bool is_complex = false; // join和子查询认为是复杂查询
     virtual void set_print_sample(bool print_sample_) {
         print_sample = print_sample_;
         for (int i = 0; i < children.size(); i++) {
             children[i]->set_print_sample(print_sample_);
         }
+    }
+    virtual bool is_complex_node() {
+        if (is_complex) {
+            return true;
+        }
+        for (int i = 0; i < children.size(); i++) {
+            if (children[i]->is_complex_node()) {
+                is_complex = true;
+                return true;
+            }
+        }
+        return false;
     }
     // children 可以用来作为子树，函数参数，列表等功能
     Vector<Node*> children;

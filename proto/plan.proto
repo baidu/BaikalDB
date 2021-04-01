@@ -42,6 +42,9 @@ enum PlanNodeType {
     FULL_EXPORT_NODE = 33;
     DUAL_SCAN_NODE = 34;
     UNION_NODE = 35;
+    GLOBAL_DDL_MANAGER_NODE = 36;
+    APPLY_NODE = 37;
+    LOAD_NODE = 38;
 };
 
 enum TxnCmdType {
@@ -63,6 +66,8 @@ enum LockCmdType {
     LOCK_DML = 3;
     LOCK_GET_DML = 4;
     LOCK_NO  = 5; //不加锁的操作
+    LOCK_GLOBAL_DDL = 6;
+    LOCK_NO_GLOBAL_DDL = 7;
 };
 enum MatchMode {
     M_NONE = 0;
@@ -116,6 +121,7 @@ message ScanNode {
     optional Engine engine = 5;
     repeated int64 ignore_indexes = 6;
     optional FulltextIndex fulltext_index = 7;
+    optional LockCmdType lock = 8;
 };
 
 message LimitNode {
@@ -143,10 +149,12 @@ message FilterNode {
 };
 
 enum JoinType {
-    NULL_JOIN  = 0;
-    LEFT_JOIN  = 1;
-    RIGHT_JOIN = 2;
-    INNER_JOIN = 3;
+    NULL_JOIN           = 0;
+    LEFT_JOIN           = 1;
+    RIGHT_JOIN          = 2;
+    INNER_JOIN          = 3;
+    SEMI_JOIN           = 4;
+    ANTI_SEMI_JOIN      = 5;
 };
 
 message JoinNode {
@@ -157,6 +165,24 @@ message JoinNode {
     repeated int64          left_table_ids  = 5;
     repeated int32          right_tuple_ids = 6;
     repeated int64          right_table_ids = 7;
+};
+
+enum CompareType {
+    CMP_NULL  = 0;
+    CMP_ANY   = 1;
+    CMP_ALL   = 2;
+    CMP_SOME  = 3;
+};
+message ApplyNode {
+    required JoinType       join_type       = 1;
+    repeated Expr           conditions      = 2; //and分开的条件
+    repeated int32          left_tuple_ids  = 4;
+    repeated int64          left_table_ids  = 5;
+    repeated int32          right_tuple_ids = 6;
+    repeated int64          right_table_ids = 7;
+    optional bool           max_one_row     = 8;
+    optional CompareType    compare_type    = 9;
+    optional bool           is_select_field = 10;
 };
 
 message FetcherNode {
@@ -191,12 +217,19 @@ message LockPrimaryNode {
     optional bool         affect_primary = 5 [default = true];
     repeated int64        affect_index_ids = 6;
 };
+
+enum LockSecondaryType {
+    LST_COMMON = 0;
+    LST_GLOBAL_DDL = 1;
+};
+
 message LockSecondaryNode {
     required int64        table_id        = 1;
     required int64        global_index_id = 2;
     required LockCmdType  lock_type       = 3;
     repeated bytes        put_records     = 4;
     repeated bytes        delete_records  = 5;
+    optional LockSecondaryType lock_secondary_type = 6;
 };
 
 message DeleteNode {
@@ -226,12 +259,36 @@ message PacketNode {
 };
 
 message TransactionNode {
-    required TxnCmdType txn_cmd = 1;
+    required TxnCmdType txn_cmd     = 1;
+    optional int64  txn_timeout    = 2;
 };
 
 message KillNode {
     required uint64 db_conn_id = 1;
     optional bool is_query = 2;
+};
+
+message UnionNode {
+    optional int32 union_tuple_id = 1;
+};
+
+message LoadNode {
+    required int64                table_id = 1;
+    optional string               data_path = 3;
+    repeated SlotDescriptor       set_slots = 4;
+    repeated Expr                 set_exprs = 5;
+    repeated int32                field_ids = 6;
+    repeated int32                default_field_ids = 7;
+    repeated int32                ingore_field_indexes = 8;
+    optional int32                ignore_lines = 9;
+    optional bytes                terminated = 10;
+    optional bytes                enclosed = 11;
+    optional bytes                escaped = 12;
+    optional bytes                line_starting = 13;
+    optional bytes                line_terminated = 14;
+    optional bool                 opt_enclosed = 15;
+    optional int64                file_size = 16;
+    optional Charset              char_set = 17;
 };
 
 message DerivePlanNode {
@@ -251,6 +308,9 @@ message DerivePlanNode {
     optional KillNode kill_node = 14;
     optional LockPrimaryNode lock_primary_node = 15;
     optional LockSecondaryNode lock_secondary_node = 16;
+    optional UnionNode union_node = 17;
+    optional ApplyNode apply_node = 18;
+    optional LoadNode  load_node = 19;
 };
 
 message PlanNode {

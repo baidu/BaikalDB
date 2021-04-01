@@ -60,11 +60,24 @@ enum PrimitiveType {
     PLACE_HOLDER = 19;
     HEX = 20;
     BITMAP = 21;
+    TDIGEST = 22;
 };
 
 enum SchemaType {
     DYNAMIC = 1;
     STATIC = 2;
+};
+
+enum Charset {
+    UTF8 = 0;
+    GBK = 1;
+};
+
+enum BackupTable {
+    BT_NONE = 0;
+    BT_AUTO = 1;
+    BT_READ = 2;
+    BT_WRITE = 3;
 };
 
 message SchemaConf {
@@ -74,6 +87,7 @@ message SchemaConf {
     optional int64 op_version               = 4;
     optional string op_desc                 = 5;
     optional float filter_ratio             = 6;
+    optional BackupTable backup_table       = 7;
 };
 
 enum Engine {

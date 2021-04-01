@@ -29,6 +29,7 @@ DEFINE_int32(rocks_transaction_lock_timeout_ms, 20000, "rocksdb transaction_lock
 DEFINE_int32(rocks_default_lock_timeout_ms, 30000, "rocksdb default_lock_timeout(ms)");
 
 DEFINE_bool(rocks_use_partitioned_index_filters, false, "rocksdb use Partitioned Index Filters");
+DEFINE_bool(rocks_skip_stats_update_on_db_open, false, "rocks_skip_stats_update_on_db_open");
 DEFINE_int32(rocks_block_size, 64 * 1024, "rocksdb block_cache size, default: 64KB");
 DEFINE_int64(rocks_block_cache_size_mb, 8 * 1024, "rocksdb block_cache_size_mb, default: 8G");
 DEFINE_uint64(rocks_hard_pending_compaction_g, 256, "rocksdb hard_pending_compaction_bytes_limit , default: 256G");
@@ -59,8 +60,15 @@ const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log";
 const std::string RocksWrapper::DATA_CF     = "data";
 const std::string RocksWrapper::METAINFO_CF = "meta_info";
+std::atomic<int64_t> RocksWrapper::raft_cf_remove_range_count = {0};
+std::atomic<int64_t> RocksWrapper::data_cf_remove_range_count = {0};
+std::atomic<int64_t> RocksWrapper::mata_cf_remove_range_count = {0};
 
-RocksWrapper::RocksWrapper() : _is_init(false), _txn_db(nullptr) {}
+RocksWrapper::RocksWrapper() : _is_init(false), _txn_db(nullptr)
+    , _raft_cf_remove_range_count("raft_cf_remove_range_count")
+    , _data_cf_remove_range_count("data_cf_remove_range_count")
+    , _mata_cf_remove_range_count("mata_cf_remove_range_count") {
+}
 int32_t RocksWrapper::init(const std::string& path) {
     if (_is_init) {
         return 0;
@@ -78,14 +86,13 @@ int32_t RocksWrapper::init(const std::string& path) {
         table_options.cache_index_and_filter_blocks_with_high_priority = true;
         table_options.pin_l0_filter_and_index_blocks_in_cache= true;
         table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024, 
-            -1, false, FLAGS_rocks_high_pri_pool_ratio);
+            8, false, FLAGS_rocks_high_pri_pool_ratio);
         // 通过cache控制内存，不需要控制max_open_files
         FLAGS_rocks_max_open_files = -1;
     } else {
-        table_options.index_type = rocksdb::BlockBasedTableOptions::kHashSearch;
-        table_options.block_cache = rocksdb::NewLRUCache(64 * 1024 * 1024);
+        table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
+        table_options.block_cache = rocksdb::NewLRUCache(1024 * 1024 * 1024, 8);
     }
-    table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
     table_options.format_version = 4;
     
     table_options.block_size = FLAGS_rocks_block_size;
@@ -95,6 +102,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.IncreaseParallelism(FLAGS_max_background_jobs);
     db_options.create_if_missing = true;
     db_options.max_open_files = FLAGS_rocks_max_open_files;
+    db_options.skip_stats_update_on_db_open = FLAGS_rocks_skip_stats_update_on_db_open;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
     //打开后有些集群内存严重上涨
@@ -113,7 +121,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
     txn_db_options.default_lock_timeout = FLAGS_rocks_default_lock_timeout_ms;
     txn_db_options.custom_mutex_factory = std::shared_ptr<rocksdb::TransactionDBMutexFactory>(
-                              new TransactionDBBthreadFactory());
+                          new TransactionDBBthreadFactory());
 
     //todo 
     _log_cf_option.prefix_extractor.reset(
@@ -139,8 +147,9 @@ int32_t RocksWrapper::init(const std::string& path) {
     }
     _binlog_cf_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(sizeof(int64_t)));
-    _binlog_cf_option.OptimizeLevelStyleCompaction();
     _binlog_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
+    _binlog_cf_option.compression = rocksdb::kLZ4Compression;
+    _binlog_cf_option.compression_opts.enabled = true;
     _binlog_cf_option.compaction_style = rocksdb::kCompactionStyleFIFO;
     rocksdb::CompactionOptionsFIFO fifo_option;
     //如果观察到TTL无法让文件总数量少于配置的大小，RocksDB会暂时下降到基于大小的FIFO删除
@@ -293,6 +302,34 @@ int32_t RocksWrapper::init(const std::string& path) {
     DB_WARNING("rocksdb init success");
     return 0;
 }
+
+rocksdb::Status RocksWrapper::remove_range(const rocksdb::WriteOptions& options,
+        rocksdb::ColumnFamilyHandle* column_family, 
+        const rocksdb::Slice& begin, 
+        const rocksdb::Slice& end,
+        bool delete_files_in_range) {
+    auto raft_cf = get_raft_log_handle();
+    auto data_cf = get_data_handle();
+    auto mata_cf = get_meta_info_handle();
+    if (raft_cf != nullptr && column_family->GetID() == raft_cf->GetID()) {
+        _raft_cf_remove_range_count << 1;
+        raft_cf_remove_range_count++;
+    } else if (data_cf != nullptr && column_family->GetID() == data_cf->GetID()) {
+        _data_cf_remove_range_count << 1;
+        data_cf_remove_range_count++;
+    } else if (mata_cf != nullptr && column_family->GetID() == mata_cf->GetID()) {
+        _mata_cf_remove_range_count << 1;
+        mata_cf_remove_range_count++;
+    }
+    if (delete_files_in_range) {
+        auto s = rocksdb::DeleteFilesInRange(_txn_db, column_family, &begin, &end, false);
+        if (!s.ok()) {
+            return s;
+        }
+    }
+    return _txn_db->DeleteRange(options, column_family, begin, end);
+}
+
 int32_t RocksWrapper::delete_column_family(std::string cf_name) {
     if (_column_families.count(cf_name) == 0) {
         DB_FATAL("column_family: %s not exist", cf_name.c_str());

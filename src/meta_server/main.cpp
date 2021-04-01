@@ -27,6 +27,7 @@
 #include "meta_util.h"
 #include "meta_server.h"
 #include "rocks_wrapper.h"
+#include "memory_profile.h"
 
 namespace baikaldb {
 DECLARE_int32(meta_port);
@@ -40,8 +41,8 @@ int main(int argc, char **argv) {
     static bvar::Status<std::string> baikaldb_version("baikaldb_version", "");
     baikaldb_version.set_value(BAIKALDB_REVISION);
 #endif
-    google::ParseCommandLineFlags(&argc, &argv, true);
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
+    google::ParseCommandLineFlags(&argc, &argv, true);
     boost::filesystem::path remove_path("init.success");
     boost::filesystem::remove_all(remove_path); 
     // Initail log
@@ -139,6 +140,7 @@ int main(int argc, char **argv) {
         DB_FATAL("meta server init fail");
         return -1;
     }
+    baikaldb::MemoryGCHandler::get_instance()->init();
     if (!completely_deploy && use_bns) {
         // 循环等待数据加载成功, ip_list配置区分不了全新/更新部署
         while (!meta_server->have_data()) {
@@ -154,6 +156,7 @@ int main(int argc, char **argv) {
     DB_WARNING("recevie kill signal, begin to quit"); 
     meta_server->shutdown_raft();
     meta_server->close();
+    baikaldb::MemoryGCHandler::get_instance()->close();
     baikaldb::RocksWrapper::get_instance()->close();
     DB_WARNING("raft shut down, rocksdb close");
     server.Stop(0);

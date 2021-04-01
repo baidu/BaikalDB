@@ -21,6 +21,11 @@
 
 namespace baikaldb {
 
+enum class RouterPolicy : int8_t {
+    RP_RANGE = 0,
+    RP_REGION = 1
+};
+
 template<typename NodeType, typename LeafType>
 struct FulltextNode {
     struct FulltextChildType {
@@ -74,6 +79,24 @@ public:
     pb::PossibleIndex* router_index() const {
         return _router_index;
     }
+
+    void set_router_policy(RouterPolicy rp) {
+        _router_policy = rp;
+    }
+
+    RouterPolicy router_policy() const {
+        return _router_policy;
+    }
+
+    void set_router_index(pb::PossibleIndex* router_index) {
+        _router_index = router_index;
+    }
+    const google::protobuf::RepeatedPtrField<pb::RegionInfo>& old_region_infos() {
+        return _old_region_infos;
+    }
+    void set_old_region_infos(google::protobuf::RepeatedPtrField<pb::RegionInfo>&& region_infos) {
+        _old_region_infos = region_infos;
+    }
     pb::Engine engine() {
         return _engine;
     }
@@ -119,7 +142,7 @@ public:
 
     void add_access_path(const SmartPath& access_path) {
         //如果使用倒排索引，则不使用代价进行索引选择
-        if ((access_path->index_type == pb::I_FULLTEXT || access_path->index_type == pb::I_RECOMMEND) 
+        if ((access_path->index_type == pb::I_FULLTEXT) 
             && access_path->is_possible) {
             _use_fulltext = true;
         }
@@ -160,6 +183,9 @@ protected:
     int32_t _possible_index_cnt = 0;
     int32_t _cover_index_cnt = 0;
     std::map<int32_t, double> _filed_selectiy; //缓存，避免重复的filed_id多次调用代价接口
+    pb::LockCmdType _lock = pb::LOCK_NO;
+    RouterPolicy _router_policy = RouterPolicy::RP_RANGE;
+    google::protobuf::RepeatedPtrField<pb::RegionInfo> _old_region_infos;
     FulltextInfoTree _fulltext_index_tree; //目前只有两层，第一层为and，第二层为or。
     std::unique_ptr<pb::FulltextIndex> _fulltext_index_pb;
     bool _fulltext_use_arrow = false;

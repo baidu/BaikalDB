@@ -80,15 +80,8 @@ int SelectPlanner::plan() {
         return -1;        
     }
     // 非相关子查询优化
-    if (_ctx->expr_params.is_expr_subquery && !is_correlated_subquery()) {
-        if (is_full_export()) {
-            _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
-            _ctx->stat_info.error_msg << "full table export not allow in subquery, report to baikaldb RD";
-            return -1;
-        }
-        if (0 != expr_subquery_rewrite()) {
-            return -1;
-        }
+    if (0 != subquery_rewrite()) {
+        return -1;
     }
 
     create_scan_tuple_descs();
@@ -125,7 +118,7 @@ int SelectPlanner::plan() {
         return -1;
     }
     // join节点的叶子节点是scan_node
-    if (0 != create_join_and_scan_nodes(_join_root)) {
+    if (0 != create_join_and_scan_nodes(_join_root, _apply_root)) {
         return -1;
     }
     // for (uint32_t idx = 0; idx < _ctx->plan.nodes_size(); ++idx) {
@@ -158,6 +151,9 @@ bool SelectPlanner::is_full_export() {
     //    return false;
     //}
     if (_select->table_refs->node_type == parser::NT_JOIN) {
+        return false;
+    }
+    if (_apply_root != nullptr) {
         return false;
     }
     if (_select->select_opt != nullptr 
@@ -197,11 +193,20 @@ void SelectPlanner::get_slot_column_mapping() {
     }    
 }
 
-int SelectPlanner::expr_subquery_rewrite() {
-    if (_select_exprs.size() != 1 && _ctx->stat_info.error_code == ER_ERROR_FIRST) {
-        _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
-        _ctx->stat_info.error_msg << "Operand should contain 1 column(s)s";
-        return -1;
+int SelectPlanner::subquery_rewrite() {
+    if (!_ctx->expr_params.is_expr_subquery) {
+        return 0;
+    }
+    // 相关子查询判断，current_tuple_ids包含当前sql涉及的slot的tuple
+    for (auto tuple_id : _ctx->current_tuple_ids) {
+        if (_ctx->current_table_tuple_ids.count(tuple_id) == 0) {
+            _ctx->expr_params.is_correlated_subquery = true;
+            return 0;
+        }
+    }
+    // any/all只支持单值
+    if (_select_exprs.size() != 1) {
+        return 0;
     }
     pb::Expr expr = _select_exprs[0];
     pb::Expr agg_expr;
@@ -477,6 +482,7 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
     CreateExprOptions options;
     options.can_agg = true;
     options.is_select_field = true;
+    options.max_one_row = true;
     if (0 != create_expr_tree(field->expr, select_expr, options)) {
         DB_WARNING("create select expr failed");
         return -1;
@@ -531,25 +537,6 @@ int SelectPlanner::parse_select_fields() {
         }
     }
     return 0;
-}
-
-bool SelectPlanner::is_correlated_subquery() {
-    bool result = false;
-    for (auto& expr : _where_filters) {
-        std::set<int32_t> tuple_ids;
-        for (int32_t idx = 0; idx < expr.nodes_size(); ++idx) {
-            auto& node = expr.nodes(idx);
-            if (node.has_derive_node() && node.derive_node().has_tuple_id()) {
-                tuple_ids.emplace(node.derive_node().tuple_id());
-            }
-        }
-        if (tuple_ids.size() > 1) {
-            result = true;
-            break;
-        }
-    }
-    _ctx->expr_params.is_correlated_subquery = result;
-    return result;
 }
 
 int SelectPlanner::parse_where() {

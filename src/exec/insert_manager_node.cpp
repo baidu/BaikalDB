@@ -83,6 +83,10 @@ int InsertManagerNode::init_insert_info(InsertNode* insert_node) {
             _index_info_map[index_id] = info_ptr;
         }
         if (info_ptr->is_global) {
+            if (info_ptr->state == pb::IS_NONE) {
+                DB_NOTICE("index info is NONE, skip.");
+                continue;
+            }
             _affected_index_num++;
             if (info_ptr->type == pb::I_UNIQ) {
                 _uniq_index_number++;
@@ -122,8 +126,6 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
             return -1;
         }
     }
-    // 最后一个clild就是_sub_query_node
-    _children.pop_back();
     ret = _sub_query_node->open(_sub_query_runtime_state);
     if (ret < 0) {
         return ret;
@@ -198,7 +200,7 @@ int InsertManagerNode::open(RuntimeState* state) {
     }
     // no global index for InsertNode
     if (_children[0]->node_type() == pb::INSERT_NODE) {
-        if (_sub_query_node != nullptr) {
+        if (_sub_query_node != nullptr || _need_plan_router) {
             DMLNode* dml_node = static_cast<DMLNode*>(_children[0]);
             ret = get_region_infos(state, dml_node, _origin_records,
                 _del_scan_records, _region_infos);
@@ -587,6 +589,33 @@ int InsertManagerNode::expr_optimize(QueryContext* ctx) {
         }
     }
     return 0;
+}
+
+void InsertManagerNode::reset(RuntimeState* state) {
+    auto client_conn = state->client_conn();
+    // add dml node back
+    std::vector<ExecNode*> old_chilren = this->children();
+    this->clear_children();
+    if (_is_replace || _on_dup_key_update) {
+        size_t idx = 0;
+        for (auto& iter : client_conn->cache_plans) {
+            auto& plan_item = iter.second;
+            if (old_chilren.size() == 1 && (idx == _uniq_index_number + 1)) {
+                this->add_child(old_chilren[0]);
+            }
+            idx++;
+            this->add_child(iter.second.root);
+        }
+    } else {
+        for (auto& iter : client_conn->cache_plans) {
+            this->add_child(iter.second.root);
+        }
+        for (auto& child : old_chilren) {
+            this->add_child(child);
+        }
+    }
+    client_conn->cache_plans.clear();
+    ExecNode::reset(state);
 }
 
 int InsertManagerNode::reverse_main_table(RuntimeState* state) {

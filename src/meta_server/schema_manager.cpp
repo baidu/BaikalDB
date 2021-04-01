@@ -19,6 +19,7 @@
 #include "database_manager.h"
 #include "namespace_manager.h"
 #include "region_manager.h"
+#include "ddl_manager.h"
 #include "meta_util.h"
 #include "rocks_wrapper.h"
 
@@ -154,6 +155,12 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 return;
             } 
         }
+        if (request->op_type() == pb::OP_ADD_INDEX || request->op_type() == pb::OP_DROP_INDEX) {
+            auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+            uint32_t timestamp = std::chrono::seconds(std::time(nullptr)).count();
+            mutable_request->mutable_ddlwork_info()->set_begin_timestamp(
+                timestamp); 
+        }
         if (request->op_type() == pb::OP_UPDATE_TTL_DURATION 
                 && request->table_info().ttl_duration() == 0) {
             // 只能修改有ttl的表
@@ -208,7 +215,14 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
         return;
     }
     case pb::OP_UPDATE_INDEX_STATUS:
-    case pb::OP_DELETE_DDLWORK: {
+    case pb::OP_DELETE_DDLWORK: 
+    case pb::OP_REMOVE_GLOBAL_INDEX_DATA: {
+        _meta_state_machine->process(controller, request, response, done_guard.release());
+        return;
+    }
+    case pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK:
+    case pb::OP_SUSPEND_DDL_WORK:
+    case pb::OP_RESTART_DDL_WORK: {
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
@@ -438,7 +452,10 @@ int SchemaManager::load_snapshot() {
 
     std::string statistics_prefix = MetaServer::SCHEMA_IDENTIFY;
     statistics_prefix += MetaServer::STATISTICS_IDENTIFY;
-   
+
+    std::string global_ddl_region_prefix = MetaServer::SCHEMA_IDENTIFY;
+    global_ddl_region_prefix += MetaServer::GLOBAL_DDLWORK_REGION_IDENTIFY;
+ 
     for (; iter->Valid(); iter->Next()) {
         int ret = 0;
         if (iter->key().starts_with(region_prefix)) {
@@ -455,6 +472,8 @@ int SchemaManager::load_snapshot() {
             ret = TableManager::get_instance()->load_ddl_snapshot(iter->value().ToString());
         } else if (iter->key().starts_with(statistics_prefix)) {
             ret = TableManager::get_instance()->load_statistics_snapshot(iter->value().ToString());
+        } else if (iter->key().starts_with(global_ddl_region_prefix)) {
+            ret = DDLManager::get_instance()->load_region_ddl_snapshot(iter->value().ToString());
         } else {
             DB_FATAL("unsupport schema info when load snapshot, key:%s", iter->key().data());
         }

@@ -636,7 +636,7 @@ int MyRaftLogStorage::_construct_slice_array(void* head_buf, const butil::IOBuf&
     }
 
     int64_t ts = binlog_pb.binlog_desc().binlog_ts();
-    DB_WARNING("write binlog desc: %s, region_id: %ld", binlog_pb.binlog_desc().ShortDebugString().c_str(), _region_id);
+    // DB_WARNING("write binlog desc: %s, region_id: %ld", binlog_pb.binlog_desc().ShortDebugString().c_str(), _region_id);
     void* key_buf = arena.allocate(sizeof(int64_t));
     if (key_buf == NULL) {
         DB_FATAL("Fail to allocate mem, region_id: %ld", _region_id);

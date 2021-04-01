@@ -134,4 +134,20 @@ bool EpollInfo::poll_events_delete(SmartSocket sock) {
     return true;
 }
 
+bool EpollInfo::all_txn_time_large_then(int64_t query_time, int64_t table_id) {
+    for (auto i = 0; i < CONFIG_MPL_EPOLL_MAX_SIZE; ++i) {
+        auto smart_socket = get_fd_mapping(i);
+        if (smart_socket == nullptr) {
+            continue;
+        }
+        if (smart_socket->is_txn_tid_exist(table_id) && smart_socket->txn_start_time != 0) {
+            if (smart_socket->txn_start_time < query_time) {
+                DB_DEBUG("start_time %ld", smart_socket->txn_start_time);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace baikal

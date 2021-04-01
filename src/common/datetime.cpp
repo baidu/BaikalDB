@@ -195,6 +195,7 @@ time_t datetime_to_timestamp(uint64_t datetime) {
     tm.tm_hour = ((datetime >> 36) & 0x1F);
     tm.tm_min = ((datetime >> 30) & 0x3F);
     tm.tm_sec = ((datetime >> 24) & 0x3F);
+    tm.tm_isdst = 0;
     //int macrosec = (datetime & 0xFFFFFF);
 
     tm.tm_year -= 1900;
@@ -205,7 +206,8 @@ time_t datetime_to_timestamp(uint64_t datetime) {
 uint64_t timestamp_to_datetime(time_t timestamp) {
     uint64_t datetime = 0;
 
-    struct tm tm = *localtime(&timestamp);
+    struct tm tm;
+    localtime_r(&timestamp, &tm);
     tm.tm_year += 1900;
     tm.tm_mon++;
     uint64_t year_month = tm.tm_year * 13 + tm.tm_mon;

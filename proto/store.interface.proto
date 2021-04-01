@@ -48,6 +48,7 @@ message TransactionInfo {
     optional int64   commit_ts    = 13;  //事务commit的tso，用于恢复超时的prewrite binlog
     optional bool    open_binlog  = 14;
     optional bool    from_store        = 15;
+    optional int64  txn_timeout    = 16;
 };
 
 message KvOp {
@@ -104,6 +105,7 @@ message StoreReq {
     repeated uint64    commit_txn_ids   = 25;
     optional BinlogDesc binlog_desc     = 26;
     optional Binlog      binlog         = 27;
+    optional uint64      sql_sign       = 28; // sql 签名
 };
 
 message RowValue {
@@ -141,6 +143,7 @@ message StoreRes {
     optional int64  filter_rows   = 18;
     repeated bytes binlogs       = 19; //直接存储binlog序列化结果，由capture反序列化
     repeated int64 commit_ts     = 20; //与上面的binlog一一对应
+    optional PeerStatus region_status = 21;
 };
 message InitRegion {
     required RegionInfo region_info     = 1;

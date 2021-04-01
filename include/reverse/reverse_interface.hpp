@@ -247,6 +247,12 @@ int NewSchema<Node, List>::segment(
         case pb::S_WORDSEG_BASIC: 
             ret = Tokenizer::get_instance()->wordseg_basic(word, term_map);
             break;
+        case pb::S_WORDWEIGHT: 
+            ret = Tokenizer::get_instance()->wordweight(word, term_map, true);
+            break;
+        case pb::S_WORDWEIGHT_NO_FILTER: 
+            ret = Tokenizer::get_instance()->wordweight(word, term_map, false);
+            break;
 #endif
         default:
             DB_WARNING("un-support segment:%d", segment_type);
@@ -334,6 +340,13 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
             case pb::S_WORDSEG_BASIC: 
                 ret = Tokenizer::get_instance()->wordseg_basic(or_item, term_map);
                 break;
+            case pb::S_WORDWEIGHT:
+                ret = Tokenizer::get_instance()->wordweight(or_item, term_map, true);
+                break;
+            case pb::S_WORDWEIGHT_NO_FILTER:
+                ret = Tokenizer::get_instance()->wordweight(or_item, term_map, false);
+                break;
+
 #endif
             default:
                 DB_WARNING("un-support segment:%d", segment_type);

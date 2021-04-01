@@ -17,6 +17,8 @@
 #include "query_context.h"
 
 namespace baikaldb {
+DECLARE_int64(store_row_number_to_check_memory);
+
 int AggNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -32,27 +34,26 @@ int AggNode::init(const pb::PlanNode& node) {
             //如何释放资源
             return ret;
         }
-        _group_exprs.push_back(group_expr);
+        _group_exprs.emplace_back(group_expr);
     }
     //DB_NOTICE("_group_exprs: %d %s", node.derive_node().agg_node().group_exprs_size(), node.DebugString().c_str());
-    std::set<int> agg_slot_set;
     for (auto& expr : node.derive_node().agg_node().agg_funcs()) {
         if (expr.nodes_size() < 1 || expr.nodes(0).node_type() != pb::AGG_EXPR) {
             DB_WARNING("AggNode::init fail, expr.nodes_size:%d", expr.nodes_size());
             return -1;
         }
         int slot_id = expr.nodes(0).derive_node().slot_id();
-        if (agg_slot_set.count(slot_id) == 1) {
+        if (_agg_slot_set.count(slot_id) == 1) {
             continue;
         }
-        agg_slot_set.insert(slot_id);
+        _agg_slot_set.insert(slot_id);
         ExprNode* agg_call = nullptr;
         ret = ExprNode::create_tree(expr, &agg_call);
         if (ret < 0) {
             //如何释放资源
             return ret;
         }
-        _agg_fn_calls.push_back(static_cast<AggFnCall*>(agg_call));
+        _agg_fn_calls.emplace_back(static_cast<AggFnCall*>(agg_call));
     }
     //_group_tuple_id = node.derive_node().agg_node().group_tuple_id();
     _agg_tuple_id = node.derive_node().agg_node().agg_tuple_id();
@@ -79,6 +80,9 @@ int AggNode::expr_optimize(QueryContext* ctx) {
         return 0;
     }
     pb::TupleDescriptor* agg_tuple_desc = ctx->get_tuple_desc(_agg_tuple_id);
+    if (agg_tuple_desc == nullptr) {
+        return -1;
+    }
     //_intermediate_slot_id != _final_slot_id则type为pb::STRING
     //_final_slot_id type在AggExpr里会设置
     for (auto& slot : *agg_tuple_desc->mutable_slots()) {
@@ -141,7 +145,7 @@ int AggNode::open(RuntimeState* state) {
             }
             scan_time += cost.get_time();
             cost.reset();
-            process_row_batch(batch);
+            process_row_batch(state, batch);
             agg_time += cost.get_time();
             row_cnt += batch.size();
             // 对于用order by分组的特殊优化
@@ -183,7 +187,7 @@ void AggNode::encode_agg_key(MemRow* row, MutTableKey& key) {
     key.replace_u8(null_flag, 0);
 }
 
-void AggNode::process_row_batch(RowBatch& batch) {
+void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch) {
     for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
         std::unique_ptr<MemRow>& row = batch.get_row();
         MutTableKey key;
@@ -206,12 +210,21 @@ void AggNode::process_row_batch(RowBatch& batch) {
             AggFnCall::initialize_all(_agg_fn_calls, key.data(), *agg_row);
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);
+        } else {
+            memory_limit_release(state, cur_row);
         }
         if (_is_merger) {
             AggFnCall::merge_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
         } else {
             AggFnCall::update_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
         }
+    }
+}
+
+void AggNode::memory_limit_release(RuntimeState* state, MemRow* row) {
+    if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
+        state->used_bytes_release(row->byte_size_long());
+        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->byte_size_long());
     }
 }
 

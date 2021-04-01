@@ -17,8 +17,7 @@
 
 namespace baikaldb {
 
-DEFINE_bool(disable_writebatch_index, false,
-    "disable the indexing of transaction writebatch, if true the uncommitted data cannot be read");
+DEFINE_bool(replace_no_get, false, "no get before replace if true");
 
 int DMLNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
@@ -53,6 +52,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
     if (ttl_duration > 0) {
         _ttl_timestamp_us = butil::gettimeofday_us() + ttl_duration * 1000 * 1000;
     }
+    bool ttl = ttl_duration > 0;
 
     if (_global_index_id != 0) {
         _global_index_info = SchemaFactory::get_instance()->get_index_info_ptr(_global_index_id);
@@ -130,8 +130,8 @@ int DMLNode::init_schema_info(RuntimeState* state) {
                 }
             }
         }
-        // 如果更新主键，那么影响了全部索引
-        if (!_update_affect_primary) {
+        // 如果更新主键或ttl表，那么影响了全部索引
+        if (!_update_affect_primary && !ttl) {
             // cstore下只更新涉及列
             if (_table_info->engine == pb::ROCKSDB_CSTORE) {
                 for (size_t i = 0; i < _update_slots.size(); i++) {
@@ -202,7 +202,11 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         if (_is_replace) {
             old_record = record->clone(true);
         }
-        ret = _txn->get_update_primary(_region_id, *_pri_info, old_record, _field_ids, GET_LOCK, true);
+        if (FLAGS_replace_no_get && _is_replace && _all_indexes.size() == 1) {
+            ret = -2;
+        } else {
+            ret = _txn->get_update_primary(_region_id, *_pri_info, old_record, _field_ids, GET_LOCK, true);
+        }
         if (ret == -3) {
             //DB_WARNING_STATE(state, "key not in this region:%ld, %s", _region_id, record->to_string().c_str());
             return 0;

@@ -34,7 +34,8 @@ public:
         return 0;
     }
     virtual int open(RuntimeState* state) {
-        state->client_conn()->seq_id++;
+        auto client_conn = state->client_conn();
+        client_conn->seq_id++;
         int ret = exec_rollback_node(state, _children[0]);
         if (ret < 0) {
             // un-expected case since infinite retry of commit after prepare
@@ -42,23 +43,22 @@ public:
                     state->txn_id, state->log_id());
             return -1;
         }
-        uint64_t old_txn_id = state->client_conn()->txn_id;
-        uint64_t new_txn_id = state->client_conn()->new_txn_id;
-        state->client_conn()->on_commit_rollback();
+        uint64_t old_txn_id = client_conn->txn_id;
+        client_conn->on_commit_rollback();
 
         // start the new txn
         if (_txn_cmd == pb::TXN_ROLLBACK_BEGIN) {
-            state->client_conn()->on_begin(new_txn_id);
-            state->txn_id = new_txn_id;
-            state->client_conn()->seq_id = 1;
+            client_conn->on_begin();
+            state->txn_id = client_conn->txn_id;
+            client_conn->seq_id = 1;
             state->seq_id = 1;
             //DB_WARNING("client txn_id:%lu new_txn_id: %lu, %d log_id:%lu",
-            //        old_txn_id, new_txn_id, state->client_conn()->seq_id, state->log_id());
+            //        old_txn_id, client_conn->txn_id, state->client_conn()->seq_id, state->log_id());
             ret = exec_begin_node(state,  _children[1]);
             _children.pop_back();
             if (ret < 0) {
                 DB_WARNING("begin new txn failed after rollback, txn_id: %lu, new_txn_id: %lu log_id:%lu",
-                    old_txn_id, new_txn_id, state->log_id());
+                    old_txn_id, client_conn->txn_id, state->log_id());
                 return -1;
             }
         }

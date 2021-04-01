@@ -26,6 +26,7 @@ public:
     virtual ~SingleTxnManagerNode() {
     }
     virtual int open(RuntimeState* state);
+    virtual void reset(RuntimeState* state);
 };
 }
 

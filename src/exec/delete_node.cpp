@@ -16,7 +16,8 @@
 #include "delete_node.h"
 
 namespace baikaldb {
-DECLARE_bool(disable_writebatch_index);
+DEFINE_bool(disable_writebatch_index, false,
+    "disable the indexing of transaction writebatch, if true the uncommitted data cannot be read");
 int DeleteNode::init(const pb::PlanNode& node) { 
     int ret = 0;
     ret = ExecNode::init(node);

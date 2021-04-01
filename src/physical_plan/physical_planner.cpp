@@ -78,6 +78,11 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
+    // 子查询去相关
+    ret = DeCorrelate().analyze(ctx);
+    if (ret < 0) {
+        return ret;
+    }
     if (ctx->return_empty) {
         ctx->root->set_return_empty();
     }

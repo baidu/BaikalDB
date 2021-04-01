@@ -14,19 +14,16 @@
 
 namespace baikaldb {
 #ifdef BAIDU_INTERNAL
-template <typename OUT>
+template <typename OUT, typename IN>
 int Tokenizer::nlpc_seg(drpc::NLPCClient& client, 
              const std::string& word, 
-             OUT& s_output)
+             OUT& s_output,
+             IN& s_input)
 {
     if (word.empty()) {
         return -1;
     }
-    nlpc::ver_1_0_0::wordseg_inputPtr s_input = 
-                        sofa::create<nlpc::ver_1_0_0::wordseg_input>();
-    s_input->set_lang_id(0);
-    s_input->set_lang_para(0);
-    s_input->set_query(word);
+
     std::string str_input;
     //TimeCost tt;
     //序列化输入结构

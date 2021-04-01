@@ -59,7 +59,7 @@ TEST(test_hll, case_all) {
         last = cnt;
         uint64_t tmp = hll_estimate(hll);
         hll_cnt ++;
-        std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << fabs(tmp * 1.0 / cnt - 1) << std::endl;
+        //std::cout << " cnt: " << cnt << " hll: " << tmp << " : " << fabs(tmp * 1.0 / cnt - 1) << std::endl;
         sum += fabs(tmp * 1.0 / cnt - 1);
         if (fabs(1-tmp * 1.0 / cnt) > max) {
             max = fabs(1-tmp * 1.0 / cnt);
@@ -94,12 +94,24 @@ TEST(test_hll_performace, case_all) {
     }
     {
         ExprValue merge_hll = hll_init();
-        std::cout << "new:" << std::endl;
+        std::cout << "agg:" << std::endl;
         TimeCost cost;
         for (int i = 0; i < vec.size(); i++) {
             hll_merge_agg(merge_hll, vec[i]);
         }
         std::cout << hll_estimate(merge_hll) << "cost:" << cost.get_time() << std::endl;
+    }
+    {
+        ExprValue merge_hll = hll_row_init();
+        std::cout << "row:" << std::endl;
+        TimeCost cost;
+        for (int i = 0; i < vec.size(); i++) {
+            hll_merge_agg(merge_hll, vec[i]);
+        }
+        std::cout << hll_estimate(merge_hll) << "cost:" << cost.get_time() << std::endl;
+        std::cout << "old size: " << merge_hll.str_val.size() << std::endl;
+        hll_raw_to_sparse(merge_hll.str_val);
+        std::cout << "new size: " << merge_hll.str_val.size() << std::endl;
     }
 }
 

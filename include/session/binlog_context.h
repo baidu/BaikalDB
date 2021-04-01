@@ -38,12 +38,6 @@ namespace baikaldb {
 DECLARE_string(meta_server_bns);
 class TsoFetcher {
 public:
-    static MetaServerInteract tso_meta_inter;
-
-    static int init_meta_inter() {
-        return tso_meta_inter.init_internal(FLAGS_meta_server_bns);
-    }
-
     static int64_t get_tso();
 };
 

@@ -38,8 +38,27 @@ public:
         static MetaServerInteract _instance;
         return &_instance;
     }
+
+    static MetaServerInteract* get_auto_incr_instance() {
+        static MetaServerInteract _instance;
+        return &_instance;
+    }
+
+    static MetaServerInteract* get_tso_instance() {
+        static MetaServerInteract _instance;
+        return &_instance;
+    }
+
+    static MetaServerInteract* get_backup_instance() {
+        static MetaServerInteract _instance;
+        return &_instance;
+    }
+
     MetaServerInteract() {}
-    int init();
+    bool is_inited() {
+        return _is_inited;
+    }
+    int init(bool is_backup = false);
     int init_internal(const std::string& meta_bns);
     template<typename Request, typename Response>
     int send_request(const std::string& service_name,
@@ -131,8 +150,9 @@ public:
     }
 private:
     brpc::Channel _bns_channel;
-    int32_t _request_timeout;
-    int32_t _connect_timeout;
+    int32_t _request_timeout = 30000;
+    int32_t _connect_timeout = 5000;
+    bool _is_inited = false;
     std::mutex _master_leader_mutex;
     butil::EndPoint _master_leader_address;
 };

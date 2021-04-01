@@ -24,6 +24,7 @@ public:
     virtual ~LockPrimaryNode() {}
     virtual int init(const pb::PlanNode& pb_node);
     virtual int open(RuntimeState* state);
+    virtual void reset(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);    
     void set_affected_index_ids(const std::vector<int64_t>& ids) {
         _affected_index_ids = ids;

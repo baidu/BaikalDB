@@ -24,7 +24,9 @@ int UnionNode::init(const pb::PlanNode& node) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
-    _node_type = pb::UNION_NODE; 
+    _node_type = pb::UNION_NODE;
+    const pb::UnionNode& union_node = node.derive_node().union_node();
+    _union_tuple_id = union_node.union_tuple_id();
     return 0;
 }
 
@@ -55,7 +57,10 @@ int UnionNode::open(RuntimeState* state) {
             }
         }
     }
-    _tuple_desc = state->get_tuple_desc(0);
+    _tuple_desc = state->get_tuple_desc(_union_tuple_id);
+    if (_tuple_desc == nullptr) {
+        return -1;
+    }
     _mem_row_desc = state->mem_row_desc();
     _mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
     _sorter = std::make_shared<Sorter>(_mem_row_compare.get());

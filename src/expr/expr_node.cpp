@@ -81,6 +81,9 @@ void ExprNode::const_pre_calc() {
     }
     // 111 > aaa => aaa < 111
     children_swap();
+    if (!_replace_agg_to_slot) {
+        return;
+    }
     //把agg expr替换成slot ref
     for (auto& c : _children) {
         if (c->node_type() == pb::AGG_EXPR) {
@@ -140,6 +143,23 @@ void ExprNode::get_all_slot_ids(std::unordered_set<int32_t>& slot_ids) {
     }
     for (auto& child : _children) {
         child->get_all_slot_ids(slot_ids);
+    }
+}
+
+void ExprNode::replace_slot_ref_to_literal(const std::set<int64_t>& sign_set,
+                std::map<int64_t, std::vector<ExprNode*>>& literal_maps) {
+    for (size_t i = 0; i < _children.size(); i++) {
+        if (_children[i]->node_type() == pb::SLOT_REF) {
+            int64_t sign = _children[i]->tuple_id() << 16 | _children[i]->slot_id();
+            if (sign_set.find(sign) != sign_set.end()) {
+                ExprNode* expr = new Literal;
+                delete _children[i];
+                _children[i] = expr;
+                literal_maps[sign].emplace_back(expr);
+            }
+            continue;
+        }
+        _children[i]->replace_slot_ref_to_literal(sign_set, literal_maps);
     }
 }
 
@@ -316,6 +336,18 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
             return -1;
     }
     return -1;
+}
+
+void ExprNode::print_expr_info() {
+    if (_node_type == pb::FUNCTION_CALL) {
+        DB_WARNING("node_type: %s fn %s", pb::ExprNodeType_Name(_node_type).c_str(), static_cast<ScalarFnCall*>(this)->fn().DebugString().c_str());
+    } else {
+        DB_WARNING("node_type: %s tuple_id:%d slot_id:%d", pb::ExprNodeType_Name(_node_type).c_str(),
+            _tuple_id, _slot_id);
+    }
+    for (auto& child : _children) {
+        child->print_expr_info();
+    }
 }
 
 }

@@ -17,7 +17,6 @@
 
 namespace baikaldb {
 
-MetaServerInteract TsoFetcher::tso_meta_inter;
 int64_t TsoFetcher::get_tso() {
     pb::TsoRequest request;
     request.set_op_type(pb::OP_GEN_TSO);
@@ -27,7 +26,7 @@ int64_t TsoFetcher::get_tso() {
     int ret = 0;
     for (;;) {
         retry_time++;
-        ret = TsoFetcher::tso_meta_inter.send_request("tso_service", request, response);
+        ret = MetaServerInteract::get_tso_instance()->send_request("tso_service", request, response);
         if (ret < 0) {
             if (response.errcode() == pb::RETRY_LATER && retry_time < 5) {
                 bthread_usleep(tso::update_timestamp_interval_ms * 1000LL);

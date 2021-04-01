@@ -33,24 +33,24 @@ public:
     virtual ~ReverseIndexBase() {
     }
     //倒排表的1、2、3级倒排链表merge函数
-    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third, bool force_remove_third = false) = 0;
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third) = 0;
     //新加正排 创建倒排索引
     virtual int insert_reverse(
-                       rocksdb::Transaction* txn,
+                       myrocksdb::Transaction* txn,
                        pb::StoreReq* req,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
     //删除正排 删除倒排索引
     virtual int delete_reverse(
-                       rocksdb::Transaction* txn,
+                       myrocksdb::Transaction* txn,
                        pb::StoreReq* req,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
     //单索引检索接口，fast为true，性能会提高，但会出现ms级别的不一致性
     virtual int search(
-                       rocksdb::Transaction* txn,
+                       myrocksdb::Transaction* txn,
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
@@ -64,7 +64,7 @@ public:
     //获取1、2level倒排集合和3level倒排，用于Parser获取底层数据
     /*
     virtual int get_reverse_list_two(
-                       rocksdb::Transaction* txn,  
+                       myrocksdb::Transaction* txn,  
                        const std::string& term, 
                        MessageSP& list_new_ptr,
                        MessageSP& list_old_ptr,
@@ -72,7 +72,7 @@ public:
     */
     //返回exe，用来给多个倒排索引字段join
     virtual int create_executor(
-                    rocksdb::Transaction* txn,
+                    myrocksdb::Transaction* txn,
                     const IndexInfo& index_info,
                     const TableInfo& table_info,
                     const std::string& search_data,
@@ -94,7 +94,7 @@ public:
     using PostingNodeT = ReverseNode;
     SchemaBase() {
     }
-    void init(ReverseIndexBase *reverse, rocksdb::Transaction *txn, 
+    void init(ReverseIndexBase *reverse, myrocksdb::Transaction *txn, 
             const KeyRange& key_range, std::vector<ExprNode*> conjuncts, bool is_fast) {
         _reverse = reverse;
         _txn = txn;
@@ -161,7 +161,7 @@ protected:
     BooleanExecutorBase<PostingNodeT>* _exe = NULL;
     const ReverseNode* _cur_node = NULL;
     ReverseIndexBase *_reverse;
-    rocksdb::Transaction *_txn;//读取时用的transaction，由调用者释放
+    myrocksdb::Transaction *_txn;//读取时用的transaction，由调用者释放
     KeyRange _key_range;
     bool _is_fast = false;
     IndexInfo _index_info;
@@ -203,23 +203,23 @@ public:
     }
     ~ReverseIndex(){}
 
-    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third, bool force_remove_third = false);
+    virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third);
     //0:success    -1:fail
     virtual int insert_reverse(
-                        rocksdb::Transaction* txn,
+                        myrocksdb::Transaction* txn,
                         pb::StoreReq* req,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
     //0:success    -1:fail
     virtual int delete_reverse(
-                        rocksdb::Transaction* txn,
+                        myrocksdb::Transaction* txn,
                         pb::StoreReq* req,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
     virtual int search(
-                       rocksdb::Transaction* txn,
+                       myrocksdb::Transaction* txn,
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
@@ -227,29 +227,42 @@ public:
                        std::vector<ExprNode*> conjuncts, 
                        bool is_fast = false); 
     virtual bool valid() {
-        return _schema->valid();
+        auto schema_info = bthread_local_schema();
+        if (schema_info == nullptr) {
+            return false;
+        }
+        return schema_info->schema->valid();
     }
     // release immediately
     virtual void clear() {
         TimeCost timer;
-        for (auto& ptr : _schema_ptrs) {
+        auto schema_info = bthread_local_schema();
+        if (schema_info == nullptr) {
+            return;
+        }
+        for (auto& ptr : schema_info->schema_ptrs) {
             delete ptr;
             ptr = nullptr;
         }
+        schema_info->schema_ptrs.clear();
         DB_NOTICE("reverse delete time:%ld", timer.get_time());
     }
     virtual int get_next(SmartRecord record) {
         //DB_WARNING("schema get_next()");
-        return _schema->next(record);
+        auto schema_info = bthread_local_schema();
+        if (schema_info == nullptr) {
+            return -1;
+        }
+        return schema_info->schema->next(record);
     }
     virtual int get_reverse_list_two(
-                       rocksdb::Transaction* txn,  
+                       myrocksdb::Transaction* txn,  
                        const std::string& term, 
                        ReverseListSptr& list_new,
                        ReverseListSptr& list_old,
                        bool is_fast = false);
     virtual int create_executor(
-                    rocksdb::Transaction* txn,
+                    myrocksdb::Transaction* txn,
                     const IndexInfo& index_info,
                     const TableInfo& table_info,
                     const std::string& search_data,
@@ -268,21 +281,62 @@ public:
         _cached_list_length = length;
     }
     void print_reverse_statistic_log() {
-        _schema->print_statistic_log();
+        auto schema_info = bthread_local_schema();
+        if (schema_info == nullptr) {
+            return;
+        }
+        schema_info->schema->print_statistic_log();
     }
     virtual void add_field(const std::string& name, int32_t field_id) {
         _name_field_id_map[name] = field_id;
     }
     
     BooleanExecutorBase<typename Schema::PostingNodeT>* get_executor() {
-        auto exe_ptr = _schema->exe();
-        _schema->exe() = nullptr;
+        auto schema_info = bthread_local_schema();
+        if (schema_info == nullptr) {
+            return nullptr;
+        }
+        auto exe_ptr = schema_info->schema->exe();
+        schema_info->schema->exe() = nullptr;
         return exe_ptr;
     }
 private:
+struct BthreadLocal {
+    Schema* schema = nullptr;
+    std::vector<Schema*> schema_ptrs;
+    static void deleter(void* data) {
+        delete static_cast<BthreadLocal*>(data);
+    }
+};
+
+class SchemaLocalKey {
+public:
+    ~SchemaLocalKey() {
+        bthread_key_delete(_schema_local_key);
+    }
+
+    static SchemaLocalKey* get_instance() {
+        static SchemaLocalKey _instance;
+        return &_instance;
+    }
+
+    void* get_specific() {
+        return bthread_getspecific(_schema_local_key);
+    }
+
+    int set_specific(void* data) {
+        return bthread_setspecific(_schema_local_key, data);
+    }
+
+private:
+    SchemaLocalKey() : _schema_local_key(INVALID_BTHREAD_KEY) {
+        bthread_key_create(&_schema_local_key, BthreadLocal::deleter);
+    }
+    bthread_key_t _schema_local_key;
+};
     //0:success    -1:fail
     int handle_reverse(
-                        rocksdb::Transaction* txn,
+                        myrocksdb::Transaction* txn,
                         pb::StoreReq* req,
                         pb::ReverseNodeType flag,
                         const std::string& word, 
@@ -292,12 +346,12 @@ private:
     //key = tableid_regionid_level
     int _create_reverse_key_prefix(uint8_t level, std::string& key);
     //remove out of range keys when split
-    int _reverse_remove_range_for_third_level(uint8_t prefix, bool force_remove_third);
+    int _reverse_remove_range_for_third_level(uint8_t prefix);
     //first(0/1) level merge to second(2) level
-    int _reverse_merge_to_second_level(std::unique_ptr<rocksdb::Iterator>&, uint8_t);
+    int _reverse_merge_to_second_level(std::unique_ptr<myrocksdb::Iterator>&, uint8_t);
     //get some level list
     int _get_level_reverse_list(
-                    rocksdb::Transaction* txn, 
+                    myrocksdb::Transaction* txn, 
                     uint8_t level, 
                     const std::string& term, 
                     ReverseListSptr& list,
@@ -305,15 +359,38 @@ private:
                     bool is_over_cache = false);
     //delete some level list
     int _delete_level_reverse_list(
-                    rocksdb::Transaction* txn, 
+                    myrocksdb::Transaction* txn, 
                     uint8_t level, 
                     const std::string& term);
     //对一条倒排链增加一个倒排节点
     int _insert_one_reverse_node( 
-                    rocksdb::Transaction* txn, 
+                    myrocksdb::Transaction* txn, 
                     pb::StoreReq* req,
                     const std::string& term, 
                     const ReverseNode* node);
+
+    static BthreadLocal* bthread_local_schema() {
+        void* data = SchemaLocalKey::get_instance()->get_specific();
+        if (data == nullptr) {
+            DB_FATAL("reverse bthread local schema is NULL");
+            return nullptr;
+        }
+
+        return static_cast<BthreadLocal*>(data);
+    }
+
+    static BthreadLocal* create_bthread_local_schema_if_null() {
+        void* data = SchemaLocalKey::get_instance()->get_specific();
+        if (data != nullptr) {
+            return static_cast<BthreadLocal*>(data);
+        }
+
+        // 新申请
+        BthreadLocal* local = new BthreadLocal();
+        SchemaLocalKey::get_instance()->set_specific(local);
+
+        return local;
+    }
 
 private:
     int64_t             _region_id;
@@ -323,9 +400,6 @@ private:
     RocksWrapper*       _rocksdb;
     KeyRange            _key_range;
     int64_t             _level_1_scan_count = 0;
-    // todo: replace thread_local because bthread will switch thread
-    static thread_local Schema* _schema;
-    static thread_local std::vector<Schema*> _schema_ptrs;
     Cache<std::string, ReverseListSptr> _cache;
     Cache<uint64_t, std::shared_ptr<std::map<std::string, ReverseNode>>> _seg_cache;
     pb::SegmentType _segment_type;
@@ -336,11 +410,7 @@ private:
     // 存储额外字段时需要
     std::map<std::string, int32_t> _name_field_id_map;
 };
-template<typename Schema>
-thread_local Schema* ReverseIndex<Schema>::_schema = nullptr;
 
-template<typename Schema>
-thread_local std::vector<Schema*> ReverseIndex<Schema>::_schema_ptrs;
 //多个倒排索引间做or操作，只读
 template<typename Schema>
 class MutilReverseIndex {
@@ -354,7 +424,7 @@ public:
         }
     }
     int search(
-            rocksdb::Transaction* txn,
+            myrocksdb::Transaction* txn,
             const IndexInfo& index_info,
             const TableInfo& table_info,
             const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
@@ -363,7 +433,7 @@ public:
             bool is_fast, bool bool_or); 
 
     int search(
-            rocksdb::Transaction* txn,
+            myrocksdb::Transaction* txn,
             const IndexInfo& index_info,
             const TableInfo& table_info,
             std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
@@ -433,7 +503,7 @@ private:
     int32_t _weight_field_id = 0;
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     bool _is_fast = false;
-    rocksdb::Transaction* _txn = nullptr;
+    myrocksdb::Transaction* _txn = nullptr;
     bool_executor_type _type = ReverseTrait<ReverseList>::executor_type;
 };
 } // end of namespace

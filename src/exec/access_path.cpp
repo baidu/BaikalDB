@@ -28,11 +28,15 @@ void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNod
     if (expr == nullptr) {
         return;
     }
+    if (range_fields.empty()) {
+        return;
+    }
     size_t row_idx = 0;
     for (; row_idx < range_fields.size() && 
             field_idx < index_info_ptr->fields.size(); row_idx++, field_idx++) {
         if (index_info_ptr->fields[field_idx].id == range_fields[row_idx]) {
             record->set_value(record->get_field_by_tag(range_fields[row_idx]), values[row_idx]);
+            hit_index_field_ids.insert(range_fields[row_idx]);
         } else {
             break;
         }
@@ -115,25 +119,24 @@ void AccessPath::calc_normal(Property& sort_property) {
                 auto range_func = [&left_open, &left_field_cnt, &right_open, &right_field_cnt, 
                      &range, this, field_cnt, field](
                         SmartRecord& left_record, SmartRecord& right_record) {
-                    if (range.is_row_expr) {
-                        size_t field_idx = field_cnt - 1;
+                    size_t field_idx = field_cnt - 1;
+                    if (range.left.size() == 1) {
+                        left_record->set_value(left_record->get_field_by_tag(field.id), range.left[0]);
+                        left_open = range.left_open;
+                        left_field_cnt = field_cnt;
+                        need_cut_index_range_condition.insert(range.left_expr);
+                    } else if (range.left.size() > 1) {
                         calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
-                                range.left_open, range.left, left_record, field_idx, &left_open, &left_field_cnt);
+                            range.left_open, range.left, left_record, field_idx, &left_open, &left_field_cnt);
+                    }
+                    if (range.right.size() == 1) {
+                        right_record->set_value(right_record->get_field_by_tag(field.id), range.right[0]);
+                        right_open = range.right_open;
+                        right_field_cnt = field_cnt;
+                        need_cut_index_range_condition.insert(range.right_expr);
+                    } else if (range.right.size() > 1) {
                         calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
-                                range.right_open, range.right, right_record, field_idx, &right_open, &right_field_cnt);
-                    } else {
-                        if (range.left_expr != nullptr) {
-                            left_record->set_value(left_record->get_field_by_tag(field.id), range.left[0]);
-                            left_open = range.left_open;
-                            left_field_cnt = field_cnt;
-                            need_cut_index_range_condition.insert(range.left_expr);
-                        }
-                        if (range.right_expr != nullptr) {
-                            right_record->set_value(right_record->get_field_by_tag(field.id), range.right[0]);
-                            right_open = range.right_open;
-                            right_field_cnt = field_cnt;
-                            need_cut_index_range_condition.insert(range.right_expr);
-                        }
+                            range.right_open, range.right, right_record, field_idx, &right_open, &right_field_cnt);
                     }
                 };
                 if (in_pred) {

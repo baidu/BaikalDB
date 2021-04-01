@@ -312,10 +312,12 @@ int PacketNode::open(RuntimeState* state) {
     _send_buf = state->send_buf();
     _wrapper = MysqlWrapper::get_instance();
     int ret = 0;
-    ret = ExecNode::open(state);
-    if (ret < 0) {
-        DB_WARNING("ExecNode::open fail:%d", ret);
-        return ret;
+    if (!_return_empty || op_type() == pb::OP_SELECT) {
+        ret = ExecNode::open(state);
+        if (ret < 0) {
+            DB_WARNING("ExecNode::open fail:%d", ret);
+            return ret;
+        }
     }
     if (_is_explain && state->explain_type == EXPLAIN_NULL) {
         handle_explain(state);

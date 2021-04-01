@@ -46,7 +46,8 @@ public:
     void add_peer(const pb::AddPeer* request,
                     pb::StoreRes* response,
                     google::protobuf::Closure* done);
-    int transfer_leader(const pb::TransLeaderRequest& trans_leader_request);
+    int transfer_leader(const pb::TransLeaderRequest& trans_leader_request, 
+            SmartRegion region, ExecutionQueue& queue);
     int init_region_to_store(const std::string instance_address,
                             const pb::InitRegion& init_region_request,
                             pb::StoreRes* store_response);

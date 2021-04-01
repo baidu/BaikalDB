@@ -24,11 +24,14 @@ public:
     virtual ~LockSecondaryNode() {}
     virtual int init(const pb::PlanNode& node);
     virtual int open(RuntimeState* state);
+    virtual void reset(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
 private:
     int insert_global_index(RuntimeState* state, SmartRecord record);
     int delete_global_index(RuntimeState* state, SmartRecord record);
     int put_global_index(RuntimeState* state, SmartRecord record);
+
+    pb::LockSecondaryType _lock_secondary_type = pb::LST_COMMON;
 };
 }
 

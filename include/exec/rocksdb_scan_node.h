@@ -95,6 +95,7 @@ private:
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos);
+    int lock_primary(RuntimeState* state, MemRow* row);
     int choose_index(RuntimeState* state);
     int select_index_for_store();
 
@@ -115,6 +116,8 @@ private:
         return false;
     }
     int choose_arrow_pb_reverse_index(const pb::ScanNode& node);
+
+    int memory_limit_exceeded(RuntimeState* state, RowBatch* batch);
 
 private:
     std::map<int32_t, FieldInfo*> _field_ids;

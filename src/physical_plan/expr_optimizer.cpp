@@ -17,6 +17,7 @@
 #include "agg_node.h"
 #include "sort_node.h"
 #include "join_node.h"
+#include "union_node.h"
 #include "expr_optimizer.h"
 
 namespace baikaldb {
@@ -28,6 +29,7 @@ void ExprOptimize::analyze_union(QueryContext* ctx, PacketNode* packet_node) {
     // todo：根据所有select的列进行类型推导
     auto select_ctx = ctx->sub_query_plans[0];
     ExecNode* select_plan = select_ctx->root;
+    UnionNode* union_node = static_cast<UnionNode*>(plan->get_node(pb::UNION_NODE));
     PacketNode* select_packet_node = static_cast<PacketNode*>(select_plan->get_node(pb::PACKET_NODE));
     AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
     std::vector<ExprNode*> group_exprs;
@@ -35,7 +37,7 @@ void ExprOptimize::analyze_union(QueryContext* ctx, PacketNode* packet_node) {
         group_exprs = *(agg_node->mutable_group_exprs());
     }
     auto select_projections = select_packet_node->mutable_projections();
-    pb::TupleDescriptor* tuple_desc = ctx->get_tuple_desc(0);
+    pb::TupleDescriptor* tuple_desc = ctx->get_tuple_desc(union_node->union_tuple_id());
     for (size_t i = 0; i < union_projections.size(); i++) {
         union_projections[i]->set_col_type(select_projections[i]->col_type());
         auto slot = tuple_desc->mutable_slots(i);

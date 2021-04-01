@@ -96,4 +96,17 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
     }
     return affected_rows;
 }
+
+void SingleTxnManagerNode::reset(RuntimeState* state) {
+    auto client_conn = state->client_conn();
+    // add begin back
+    CachePlan& plan_item = client_conn->cache_plans[1];
+    this->add_child(plan_item.root, 0);
+    client_conn->cache_plans.erase(1);
+    client_conn->on_begin();
+    state->txn_id = client_conn->txn_id;
+    state->seq_id = 1;
+    ExecNode::reset(state);
+}
+
 }

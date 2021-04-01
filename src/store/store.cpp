@@ -68,7 +68,11 @@ DEFINE_bool(use_approximate_size_to_split, false,
              "if approximate_size > 512M, then split");
 DEFINE_int64(gen_tso_interval_us, 500 * 1000LL, "gen_tso_interval_us, defalut(500ms)");
 DEFINE_int64(gen_tso_count, 100, "gen_tso_count, defalut(500)");
-Store::~Store() {}
+DEFINE_int64(rocks_cf_flush_remove_range_times, 10, "rocks_cf_flush_remove_range_times, defalut(10)");
+DEFINE_int64(rocks_force_flush_max_wals, 100, "rocks_force_flush_max_wals, defalut(100)");
+Store::~Store() {
+    bthread_mutex_destroy(&_param_mutex);
+}
 
 int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     butil::EndPoint addr;
@@ -302,6 +306,7 @@ void Store::init_region(google::protobuf::RpcController* controller,
             return;
         }
     }
+
     auto orgin_region = get_region(region_id);
     // 已经软删，遇到需要新建就马上删除让位
     if (orgin_region != nullptr && orgin_region->removed()) {
@@ -415,7 +420,8 @@ void Store::query(google::protobuf::RpcController* controller,
     brpc::Controller* cntl =
             static_cast<brpc::Controller*>(controller);
     uint64_t log_id = 0;
-    const char* remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
+    const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
+    const char* remote_side = remote_side_tmp.c_str();
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
@@ -443,7 +449,8 @@ void Store::query_binlog(google::protobuf::RpcController* controller,
     brpc::Controller* cntl =
             static_cast<brpc::Controller*>(controller);
     uint64_t log_id = 0;
-    const char* remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
+    const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
+    const char* remote_side = remote_side_tmp.c_str();
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
@@ -469,6 +476,9 @@ void Store::remove_region(google::protobuf::RpcController* controller,
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl =
             static_cast<brpc::Controller*>(controller);
+
+    const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
+    const char* remote_side = remote_side_tmp.c_str();
     DB_WARNING("receive remove region request, remote_side:%s, request:%s",
                 butil::endpoint2str(cntl->remote_side()).c_str(),
                 request->ShortDebugString().c_str());
@@ -565,6 +575,7 @@ void Store::get_applied_index(google::protobuf::RpcController* controller,
         response->set_errmsg("region not exist");
         return;
     }
+    response->set_region_status(region->region_status());
     response->set_applied_index(region->get_log_index());
     response->set_leader(butil::endpoint2str(region->get_leader()).c_str());
 }
@@ -726,6 +737,7 @@ void Store::send_heart_beat() {
     pb::StoreHeartBeatRequest request;
     pb::StoreHeartBeatResponse response;
     //1、构造心跳请求
+    heart_beat_count << 1;
     construct_heart_beat_request(request);
     print_heartbeat_info(request);
     //2、发送请求
@@ -735,6 +747,8 @@ void Store::send_heart_beat() {
         //处理心跳
         process_heart_beat_response(response);
     }
+    
+    heart_beat_count << -1;
     DB_WARNING("heart beat");
 }
 
@@ -818,16 +832,39 @@ void Store::flush_memtable_thread() {
         _rocksdb->get_db()->GetSortedWalFiles(vec);
         rocksdb_num_wals.set_value(vec.size());
 
-        //data cf有新的flush数据才需要flush meta，gc wal
-        if (last_file_number != _rocksdb->flush_file_number()) {
+        // wal 个数超过阈值100强制flush所有cf
+        bool force_flush = vec.size() > FLAGS_rocks_force_flush_max_wals ? true : false;
+
+        int64_t raft_count = RocksWrapper::raft_cf_remove_range_count.load();
+        int64_t data_count = RocksWrapper::data_cf_remove_range_count.load();
+        int64_t mata_count = RocksWrapper::mata_cf_remove_range_count.load();
+        if (force_flush || raft_count > FLAGS_rocks_cf_flush_remove_range_times) {
+            RocksWrapper::raft_cf_remove_range_count = 0;
+            rocksdb::FlushOptions flush_options;
+            auto status = _rocksdb->flush(flush_options, _rocksdb->get_raft_log_handle());
+            if (!status.ok()) {
+                DB_WARNING("flush log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
+            }
+        }
+        if (force_flush || data_count > FLAGS_rocks_cf_flush_remove_range_times) {
+            RocksWrapper::data_cf_remove_range_count = 0;
+            rocksdb::FlushOptions flush_options;
+            auto status = _rocksdb->flush(flush_options, _rocksdb->get_data_handle());
+            if (!status.ok()) {
+                DB_WARNING("flush data to rocksdb fail, err_msg:%s", status.ToString().c_str());
+            }
+        }
+        //last_file_number发生变化，data cf有新的flush数据需要flush meta，gc wal
+        if (force_flush || mata_count > FLAGS_rocks_cf_flush_remove_range_times || last_file_number != _rocksdb->flush_file_number()) {
             last_file_number = _rocksdb->flush_file_number();
+            RocksWrapper::mata_cf_remove_range_count = 0;
             rocksdb::FlushOptions flush_options;
             auto status = _rocksdb->flush(flush_options, _rocksdb->get_meta_info_handle());
             if (!status.ok()) {
-                DB_WARNING("flush meta info to rocksdb fail, err_msg:%s", status.ToString().c_str());
+                DB_WARNING("flush mata to rocksdb fail, err_msg:%s", status.ToString().c_str());
             }
-            DB_WARNING("flush meta info to rocksdb success, file_number:%lu", _rocksdb->flush_file_number());
         }
+
         /*
         status = _rocksdb->flush(flush_options, _rocksdb->get_data_handle());
         if (!status.ok()) {
@@ -1140,10 +1177,10 @@ void Store::whether_split_thread() {
                 continue;
             }
             //分区region，不分裂、不merge
-            if (ptr_region->get_partition_num() > 1) {
-                DB_NOTICE("partition region %ld not split.", region_ids[i]);
-                continue;
-            }
+            //if (ptr_region->get_partition_num() > 1) {
+            //    DB_NOTICE("partition region %ld not split.", region_ids[i]);
+            //    continue;
+            //}
             //设置计算存储分离开关
             ptr_region->set_separate_switch(_factory->get_separate_switch(ptr_region->get_table_id()));
             //update region_used_size
@@ -1392,6 +1429,19 @@ void Store::construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
 }
 
 void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& response) {
+    {
+        BAIDU_SCOPED_LOCK(_param_mutex);
+        for (auto& param : response.instance_params()) {
+            for (auto& item : param.params()) {
+                _param_map[item.key()] = item.value();
+            }
+        }
+        // 更新到qos param
+        for (auto& iter : _param_map) {
+            update_param(iter.first, iter.second);
+        }
+    }
+
     for (auto& schema_info : response.schema_change_info()) {
         update_schema_info(schema_info);
     }
@@ -1415,7 +1465,7 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
                 DB_FATAL("region_id: %ld not exist, may be removed", transfer_leader_request.region_id());
                 continue;
             }
-            region->transfer_leader(transfer_leader_request); 
+            region->transfer_leader(transfer_leader_request, region, _transfer_leader_queue); 
         }
     }
     for (auto& transfer_leader_request : response.trans_leader()) {
@@ -1431,7 +1481,7 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
             DB_FATAL("region_id: %ld not exist, may be removed", transfer_leader_request.region_id());
             continue;
         }
-        auto ret = region->transfer_leader(transfer_leader_request);
+        auto ret = region->transfer_leader(transfer_leader_request, region, _transfer_leader_queue);
         if (ret == 0) {
             table_trans_leader_count[table_id]--;
         }

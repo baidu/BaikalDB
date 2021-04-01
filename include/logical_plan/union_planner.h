@@ -65,6 +65,7 @@ private:
 
 private:
     parser::UnionStmt*           _union_stmt = nullptr;
+    int32_t                      _union_tuple_id = -1;
     pb::Expr                     _limit_offset;
     pb::Expr                     _limit_count;
     bool                         _is_distinct = false;

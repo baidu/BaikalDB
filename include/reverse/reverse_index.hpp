@@ -14,11 +14,11 @@
 
 namespace baikaldb {
 template <typename Schema>
-int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remove_third, bool force_remove_third) {
+int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remove_third) {
     _key_range = KeyRange(info.start_key(), info.end_key());
     if (need_remove_third) {
-        _reverse_remove_range_for_third_level(2, force_remove_third);
-        _reverse_remove_range_for_third_level(3, force_remove_third);
+        _reverse_remove_range_for_third_level(2);
+        _reverse_remove_range_for_third_level(3);
     }
     int8_t status = 0;
     TimeCost timer;
@@ -42,12 +42,13 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
     roptions.iterate_upper_bound = &upper_bound_slice;
     roptions.prefix_same_as_start = true;
     roptions.total_order_seek = false;
+    roptions.fill_cache = false;
     auto data_cf = _rocksdb->get_data_handle();
     if (data_cf == nullptr) {
         DB_WARNING("get rocksdb data column family failed");
         return -1;
     }
-    std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(roptions, data_cf));
+    std::unique_ptr<myrocksdb::Iterator> iter(new myrocksdb::Iterator(_rocksdb->new_iterator(roptions, data_cf)));
     usleep(200);
     iter->Seek(key);
     bool end_flag = is_prefix_end(iter, prefix);
@@ -93,7 +94,7 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
 
 template <typename Schema>
 int ReverseIndex<Schema>::handle_reverse(
-                                    rocksdb::Transaction* txn,
+                                    myrocksdb::Transaction* txn,
                                     pb::StoreReq* req,
                                     pb::ReverseNodeType flag,
                                     const std::string& word,
@@ -135,7 +136,7 @@ int ReverseIndex<Schema>::handle_reverse(
 
 template <typename Schema>
 int ReverseIndex<Schema>::insert_reverse(
-                                    rocksdb::Transaction* txn,
+                                    myrocksdb::Transaction* txn,
                                     pb::StoreReq* req,
                                     const std::string& word,
                                     const std::string& pk,
@@ -145,7 +146,7 @@ int ReverseIndex<Schema>::insert_reverse(
 
 template <typename Schema>
 int ReverseIndex<Schema>::delete_reverse(
-                                    rocksdb::Transaction* txn,
+                                    myrocksdb::Transaction* txn,
                                     pb::StoreReq* req,
                                     const std::string& word,
                                     const std::string& pk,
@@ -155,7 +156,7 @@ int ReverseIndex<Schema>::delete_reverse(
 
 template <typename Schema>
 int ReverseIndex<Schema>::search(
-                       rocksdb::Transaction* txn,
+                       myrocksdb::Transaction* txn,
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::string& search_data,
@@ -174,37 +175,43 @@ int ReverseIndex<Schema>::search(
 
 template <typename Schema>
 int ReverseIndex<Schema>::get_reverse_list_two(
-                                    rocksdb::Transaction* txn,  
+                                    myrocksdb::Transaction* txn,  
                                     const std::string& term, 
                                     ReverseListSptr& list_new_ptr,
                                     ReverseListSptr& list_old_ptr,
                                     bool is_fast) {
     rocksdb::ReadOptions roptions;
     roptions.prefix_same_as_start = true;
+    roptions.fill_cache = false;
     auto data_cf = _rocksdb->get_data_handle();
     if (data_cf == nullptr) {
         DB_WARNING("get rocksdb data column family failed");
         return 0;
     }
-    _schema->statistic().term_times.push_back(ItemStatistic());
-    ItemStatistic& item_statistic = 
-            _schema->statistic().term_times[_schema->statistic().term_times.size() - 1];
-    item_statistic.term = term;
+    ItemStatistic tmp_statistic;
+    ItemStatistic* item_statistic = &tmp_statistic;
+    auto schema_info = bthread_local_schema();
+    if (schema_info != nullptr) {
+        schema_info->schema->statistic().term_times.push_back(ItemStatistic());
+        item_statistic = &schema_info->schema->statistic().term_times[schema_info->schema->statistic().term_times.size() - 1];
+    }
+
+    item_statistic->term = term;
     TimeCost timer;
     TimeCost timer_tmp;
     if (is_fast) {
         _get_level_reverse_list(txn, 2, term, list_new_ptr, true);
 
-        item_statistic.is_fast = true;
-        item_statistic.get_new += timer_tmp.get_time();
+        item_statistic->is_fast = true;
+        item_statistic->get_new += timer_tmp.get_time();
         timer_tmp.reset();
     } else {
         std::string key_first_new;
         _create_reverse_key_prefix(_reverse_prefix, key_first_new);
         key_first_new.append(term);
-        std::unique_ptr<rocksdb::Iterator> iter_first_new(txn->GetIterator(roptions, data_cf));
+        std::unique_ptr<myrocksdb::Iterator> iter_first_new(new myrocksdb::Iterator(txn->GetIterator(roptions, data_cf)));
         iter_first_new->Seek(key_first_new);
-        item_statistic.seek_new += timer_tmp.get_time();
+        item_statistic->seek_new += timer_tmp.get_time();
         timer_tmp.reset();
         FirstLevelMSIterator<ReverseNode, ReverseList> iter_first(
                                             iter_first_new, 
@@ -217,14 +224,14 @@ int ReverseIndex<Schema>::get_reverse_list_two(
         SecondLevelMSIterator<ReverseNode, ReverseList> iter_second(
                                                             (ReverseList&)*second_list, 
                                                             _key_range);
-        item_statistic.get_two += timer_tmp.get_time();
+        item_statistic->get_two += timer_tmp.get_time();
         timer_tmp.reset();
         ReverseListSptr tmp_ptr(new ReverseList());
         level_merge<ReverseNode, ReverseList>(
                             &iter_first, &iter_second, 
                             (ReverseList&)*tmp_ptr, false);
         list_new_ptr = tmp_ptr;
-        item_statistic.merge_one_two += timer_tmp.get_time();
+        item_statistic->merge_one_two += timer_tmp.get_time();
         timer_tmp.reset();
     }
 
@@ -232,21 +239,21 @@ int ReverseIndex<Schema>::get_reverse_list_two(
     ReverseList* tmp = nullptr;
     tmp = (ReverseList*)list_new_ptr.get();
     if (tmp != nullptr) {
-        item_statistic.second_length = tmp->reverse_nodes_size();
+        item_statistic->second_length = tmp->reverse_nodes_size();
     }
     tmp = nullptr;
     tmp = (ReverseList*)list_old_ptr.get();
     if (tmp != nullptr) { 
-        item_statistic.third_length = tmp->reverse_nodes_size();
+        item_statistic->third_length = tmp->reverse_nodes_size();
     }
-    item_statistic.get_three += timer_tmp.get_time();
-    item_statistic.get_list += timer.get_time();
+    item_statistic->get_three += timer_tmp.get_time();
+    item_statistic->get_list += timer.get_time();
     return 0;
 }
 
 template <typename Schema>
 int ReverseIndex<Schema>::create_executor(
-                            rocksdb::Transaction* txn,
+                            myrocksdb::Transaction* txn,
                             const IndexInfo& index_info,
                             const TableInfo& table_info,
                             const std::string& search_data, 
@@ -254,15 +261,20 @@ int ReverseIndex<Schema>::create_executor(
                             std::vector<ExprNode*> conjuncts, 
                             bool is_fast) {
     TimeCost timer;
-    _schema = new Schema();
-    _schema_ptrs.push_back(_schema);
-    _schema->init(this, txn, _key_range, conjuncts, is_fast);
+    auto schema_info = create_bthread_local_schema_if_null();
+    if (schema_info == nullptr) {
+        return -1;
+    }
+    
+    schema_info->schema = new Schema();
+    schema_info->schema_ptrs.emplace_back(schema_info->schema);
+    schema_info->schema->init(this, txn, _key_range, conjuncts, is_fast);
     timer.reset();
-    _schema->set_index_info(index_info);
-    _schema->set_table_info(table_info);
-    _schema->set_index_search(this);
-    int ret = _schema->create_executor(search_data, mode, _segment_type);
-    _schema->statistic().bool_engine_time += timer.get_time();
+    schema_info->schema->set_index_info(index_info);
+    schema_info->schema->set_table_info(table_info);
+    schema_info->schema->set_index_search(this);
+    int ret = schema_info->schema->create_executor(search_data, mode, _segment_type);
+    schema_info->schema->statistic().bool_engine_time += timer.get_time();
     if (ret < 0) {
         DB_WARNING("create_executor fail, region:%ld, index:%ld", _region_id, _index_id);
         return -1;
@@ -281,7 +293,7 @@ int ReverseIndex<Schema>::_create_reverse_key_prefix(uint8_t level, std::string&
 }
 
 template <typename Schema>
-int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix, bool force_remove_third) {
+int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) {
     // 和merge在同一个线程调度，简化处理
     // 如果后续发现性能问题分开的话，需要这里和merge都要调整成GetForUpdate
     //int8_t status = 0;
@@ -297,6 +309,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix, 
     rocksdb::ReadOptions roptions;
     roptions.iterate_upper_bound = &upper_bound_slice;
     roptions.prefix_same_as_start = true;
+    roptions.fill_cache = false;
     auto data_cf = _rocksdb->get_data_handle();
     if (data_cf == nullptr) {
         DB_WARNING("get rocksdb data column family failed");
@@ -307,7 +320,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix, 
     int64_t scan_node_count = 0;
     int64_t remove_node_count = 0;
     TimeCost cost;
-    std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(roptions, data_cf));
+    std::unique_ptr<myrocksdb::Iterator> iter(new myrocksdb::Iterator(_rocksdb->new_iterator(roptions, data_cf)));
     for (iter->Seek(key); !is_prefix_end(iter, prefix); iter->Next()) {
         ++scan_rows;
         // 内部txn，不提交出作用域自动析构
@@ -336,7 +349,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix, 
         ReverseList& third_msg = static_cast<ReverseList&>(*third_level_list);
         int old_count = third_msg.reverse_nodes_size();
         scan_node_count += old_count;
-        if (old_count > 0 && !force_remove_third) {
+        if (old_count > 0) {
             std::string first_key = third_msg.reverse_nodes(0).key();
             std::string last_key = third_msg.reverse_nodes(old_count - 1).key();
             if (first_key >= _key_range.first &&
@@ -403,7 +416,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix, 
 
 template <typename Schema>
 int ReverseIndex<Schema>::_reverse_merge_to_second_level(
-                                std::unique_ptr<rocksdb::Iterator>& iterator, 
+                                std::unique_ptr<myrocksdb::Iterator>& iterator, 
                                 uint8_t prefix) {
     int8_t status;
     bool end_flag = is_prefix_end(iterator, prefix);
@@ -529,7 +542,7 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
 
 template <typename Schema>
 int ReverseIndex<Schema>::_get_level_reverse_list(
-                                    rocksdb::Transaction* txn, 
+                                    myrocksdb::Transaction* txn, 
                                     uint8_t level, 
                                     const std::string& term, 
                                     ReverseListSptr& list_ptr,
@@ -546,9 +559,10 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
     }
     ItemStatistic* item_statistic = nullptr;
     if (is_statistic) {
-        if (_schema) {
+        auto schema_info = bthread_local_schema();
+        if (schema_info && schema_info->schema) {
             item_statistic = 
-                &_schema->statistic().term_times[_schema->statistic().term_times.size() - 1];
+                &schema_info->schema->statistic().term_times[schema_info->schema->statistic().term_times.size() - 1];
         }
     }
     TimeCost time;
@@ -596,7 +610,7 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
 
 template <typename Schema>
 int ReverseIndex<Schema>::_delete_level_reverse_list(
-                                    rocksdb::Transaction* txn, 
+                                    myrocksdb::Transaction* txn, 
                                     uint8_t level, 
                                     const std::string& term) {
     std::string key;
@@ -618,7 +632,7 @@ int ReverseIndex<Schema>::_delete_level_reverse_list(
 
 template <typename Schema>
 int ReverseIndex<Schema>::_insert_one_reverse_node(
-                                    rocksdb::Transaction* txn, 
+                                    myrocksdb::Transaction* txn, 
                                     pb::StoreReq* req,
                                     const std::string& term,
                                     const ReverseNode* node) {
@@ -666,7 +680,7 @@ int ReverseIndex<Schema>::_insert_one_reverse_node(
 
 template <typename Schema>
 int MutilReverseIndex<Schema>::search(
-                       rocksdb::Transaction* txn,
+                       myrocksdb::Transaction* txn,
                        const IndexInfo& index_info,
                        const TableInfo& table_info,
                        const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
@@ -717,7 +731,7 @@ int MutilReverseIndex<Schema>::search(
 
 template <typename Schema>
 int MutilReverseIndex<Schema>::search(
-    rocksdb::Transaction* txn,
+    myrocksdb::Transaction* txn,
     const IndexInfo& index_info,
     const TableInfo& table_info,
     std::map<int64_t, ReverseIndexBase*>& reverse_index_map,

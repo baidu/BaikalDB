@@ -33,7 +33,7 @@ int64_t ScanNode::select_index() {
         int64_t index_id = pair.first;
         auto& path = pair.second;
         auto& pos_index = path->pos_index;
-        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        auto info_ptr = path->index_info_ptr;
         if (info_ptr == nullptr) {
             continue;
         }
@@ -96,8 +96,6 @@ int64_t ScanNode::select_index() {
             case pb::I_FULLTEXT:
                 _multi_reverse_index.push_back(index_id);
                 break;
-            case pb::I_RECOMMEND:
-                return index_id;
             default:
                 break;
         }
@@ -122,6 +120,7 @@ int ScanNode::init(const pb::PlanNode& node) {
     }
     _tuple_id = node.derive_node().scan_node().tuple_id();
     _table_id = node.derive_node().scan_node().table_id();
+    _lock = node.derive_node().scan_node().lock();
     if (node.derive_node().scan_node().has_engine()) {
         _engine = node.derive_node().scan_node().engine();
     }
@@ -136,6 +135,9 @@ int ScanNode::open(RuntimeState* state) {
         return ret;
     }
     _tuple_desc = state->get_tuple_desc(_tuple_id);
+    if (_tuple_desc == nullptr) {
+        return -1;
+    }
     return 0;
 }
 
@@ -435,11 +437,6 @@ int64_t ScanNode::pre_process_select_index() {
 }
 
 int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
-    auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
-    if (table_ptr == nullptr) {
-        DB_FATAL("table info not exist : %ld", _table_id);
-        return -1;
-    }
     pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     _router_index_id = _table_id; 
     _router_index = &_paths[_table_id]->pos_index;

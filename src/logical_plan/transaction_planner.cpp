@@ -24,8 +24,6 @@ int TransactionPlanner::plan() {
             DB_WARNING("begin a new transaction: %lu", client->txn_id);
         } else {
             plan_commit_and_begin_txn();
-            DB_WARNING("commit transaction %lu and begin new: %lu", 
-                client->txn_id, client->new_txn_id);
         }
     } else if (_ctx->stmt_type == parser::NT_COMMIT_TRANSACTION) {
         if (client->autocommit == true) {

@@ -101,9 +101,9 @@ void TSOStateMachine::gen_tso(const pb::TsoRequest* request, pb::TsoResponse* re
             int64_t physical = _tso_obj.current_timestamp.physical();
             if (physical != 0) {  
                 int64_t new_logical = _tso_obj.current_timestamp.logical() + count;
-                _tso_obj.current_timestamp.set_logical(new_logical);
                 if (new_logical < tso::max_logical) {
                     current.CopyFrom(_tso_obj.current_timestamp);
+                    _tso_obj.current_timestamp.set_logical(new_logical);
                     need_retry = false;
                 } else {
                     DB_WARNING("logical part outside of max logical interval, retry later, please check ntp time");

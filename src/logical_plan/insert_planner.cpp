@@ -37,7 +37,6 @@ int InsertPlanner::plan() {
     if (_ctx->row_ttl_duration > 0) {
         insert->set_row_ttl_duration(_ctx->row_ttl_duration);
     }
-    insert->set_is_replace(_insert_stmt->is_replace);
     
     // parse db.table in insert SQL
     if (0 != parse_db_table(insert)) {
@@ -75,6 +74,7 @@ int InsertPlanner::plan() {
     if (!_ctx->is_prepared) {
         set_dml_txn_state(_table_id);
     }
+    set_socket_txn_tid_set();
     return 0;
 }
 
@@ -204,7 +204,7 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
             _default_fields.push_back(field);
         }
     }
-    DB_WARNING("insert_node:%s", node->DebugString().c_str());
+    //DB_WARNING("insert_node:%s", node->DebugString().c_str());
     return 0;
 }
 

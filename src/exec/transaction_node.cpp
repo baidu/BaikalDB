@@ -26,6 +26,7 @@ int TransactionNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _txn_cmd = node.derive_node().transaction_node().txn_cmd();
+    _txn_timeout = node.derive_node().transaction_node().txn_timeout();
     return 0;
 }
 
@@ -68,7 +69,7 @@ int TransactionNode::open(RuntimeState* state) {
         return ret;
     } else if (_txn_cmd == pb::TXN_BEGIN_STORE) {
         SmartTransaction txn;
-        ret = txn_pool->begin_txn(state->txn_id, txn, state->primary_region_id());
+        ret = txn_pool->begin_txn(state->txn_id, txn, state->primary_region_id(), _txn_timeout);
         if (ret != 0) {
             DB_WARNING_STATE(state, "create txn failed: %lu:%d", state->txn_id, state->seq_id);
             return -1;
@@ -96,7 +97,7 @@ int TransactionNode::open(RuntimeState* state) {
                 region_id, state->txn_id, res.code(), res.ToString().c_str());
             ret = -1;
         }
-        txn_pool->remove_txn(state->txn_id);
+        txn_pool->remove_txn(state->txn_id, true);
         TxnLimitMap::get_instance()->erase(state->txn_id);
         return ret;
     } else if (_txn_cmd == pb::TXN_ROLLBACK_STORE) {
@@ -117,7 +118,7 @@ int TransactionNode::open(RuntimeState* state) {
             DB_FATAL("unknown error, region_id: %ld, txn_id: %lu, err_code: %d, err_msg: %s", 
                 region_id, state->txn_id, res.code(), res.ToString().c_str());
         }
-        txn_pool->remove_txn(state->txn_id);
+        txn_pool->remove_txn(state->txn_id, true);
         TxnLimitMap::get_instance()->erase(state->txn_id);
         return 0;
     }
@@ -129,6 +130,9 @@ void TransactionNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
     auto txn_node = pb_node->mutable_derive_node()->mutable_transaction_node();
     txn_node->set_txn_cmd(_txn_cmd);
+    if (_txn_timeout != 0) {
+        txn_node->set_txn_timeout(_txn_timeout);
+    }
 }
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

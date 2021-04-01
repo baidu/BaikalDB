@@ -113,6 +113,8 @@ int RegionControl::remove_log_entry(int64_t drop_region_id) {
     end_key.append_i64(drop_region_id);
     end_key.append_u64(UINT64_MAX);
     auto rocksdb = RocksWrapper::get_instance();
+    // sleep会，等待异步日志刷盘
+    bthread_usleep(1000 * 1000);
     auto status = rocksdb->remove_range(options,
                                     rocksdb->get_raft_log_handle(),
                                     start_key.data(),
@@ -348,31 +350,40 @@ void RegionControl::add_peer(const pb::AddPeer* request,
     node_add_peer(*request, new_instance, response, done_guard.release());
 }
 
-int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_request) {
+int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_request, 
+        SmartRegion region, ExecutionQueue& queue) {
     std::string new_leader = trans_leader_request.new_leader();
-    int64_t peer_applied_index = RpcSender::get_peer_applied_index(new_leader, _region_id);
-    if ((_region->_applied_index - peer_applied_index) * _region->_average_cost.load() 
-            > FLAGS_election_timeout_ms * 1000LL) {
-        DB_WARNING("peer applied index: %ld is less than applied index: %ld, average_cost: %ld",
-                    peer_applied_index, _region->_applied_index, _region->_average_cost.load());
-        return -1;
-    }
-    pb::RegionStatus expected_status = pb::IDLE;
-    if (!compare_exchange_strong(expected_status, pb::DOING)) {
-        DB_FATAL("region status is not idle when transfer leader, region_id: %ld", _region_id);
-        return -1;
-    } else {
-        DB_WARNING("region status to doning becase of transfer leader of heartbeat response,"
+    auto transfer_call = [this, region, new_leader]() {
+        int64_t peer_applied_index = RpcSender::get_peer_applied_index(new_leader, _region_id);
+        if ((region->_applied_index - peer_applied_index) * region->_average_cost.load() 
+                > FLAGS_election_timeout_ms * 1000LL) {
+            DB_WARNING("peer applied index: %ld is less than applied index: %ld, average_cost: %ld",
+                    peer_applied_index, region->_applied_index, region->_average_cost.load());
+            return;
+        }
+        if (region->_shutdown) {
+            DB_WARNING("region_id:%ld has REMOVE", region->get_region_id());
+            reset_region_status();
+            return;
+        }
+        pb::RegionStatus expected_status = pb::IDLE;
+        if (!compare_exchange_strong(expected_status, pb::DOING)) {
+            DB_FATAL("region status is not idle when transfer leader, region_id: %ld", _region_id);
+            return;
+        } else {
+            DB_WARNING("region status to doning becase of transfer leader of heartbeat response,"
                     " region_id: %ld", _region_id);
-    }
-    int ret = _region->_node.transfer_leadership_to(new_leader);
-    reset_region_status();
-    if (ret != 0) {
-        DB_WARNING("node:%s %s transfer leader fail",
-                        _region->_node.node_id().group_id.c_str(),
-                        _region->_node.node_id().peer_id.to_string().c_str());
-        return -1;
-    }
+        }
+        int ret = region->_node.transfer_leadership_to(new_leader);
+        reset_region_status();
+        if (ret != 0) {
+            DB_WARNING("node:%s %s transfer leader fail",
+                    region->_node.node_id().group_id.c_str(),
+                    region->_node.node_id().peer_id.to_string().c_str());
+            return;
+        }
+    };
+    queue.run(transfer_call);
     return 0;
 }
 

@@ -27,6 +27,9 @@
 #include "rapidjson/prettywriter.h"
 
 namespace baikaldb {
+
+DECLARE_int64(store_row_number_to_check_memory);
+
 int FilterNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -455,10 +458,44 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         } else {
             state->inc_num_filter_rows();
             ++where_filter_cnt;
+            memory_limit_release(state, row.get());
         }
         _child_row_batch.next();
     }
     return 0;
+}
+
+void FilterNode::memory_limit_release(RuntimeState* state, MemRow* row) {
+    if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
+        state->used_bytes_release(row->byte_size_long());
+        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->byte_size_long());
+    }
+}
+
+void FilterNode::remove_additional_predicate(std::vector<ExprNode*>& input_exprs) {
+    auto iter1 = _conjuncts.begin();
+    while (iter1 != _conjuncts.end()) {
+        auto iter2 = input_exprs.begin();
+        while (iter2 != input_exprs.end()) {
+            if (*iter1 == *iter2) {
+                iter1 = _conjuncts.erase(iter1);
+                auto remove_expr = *iter2;
+                remove_expr->close();
+                iter2 = input_exprs.erase(iter2);
+                delete remove_expr;
+                break;
+            } else {
+                ++iter2;
+            }
+        }
+        if (iter2 == input_exprs.end()) {
+            break;
+        }
+    }
+    _pruned_conjuncts.clear();
+    _child_row_batch.clear();
+    _child_row_idx = 0;
+    _child_eos = false;
 }
 
 void FilterNode::close(RuntimeState* state) {

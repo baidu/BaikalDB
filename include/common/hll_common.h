@@ -278,6 +278,8 @@ inline ExprValue& hll_merge_agg(ExprValue& hll1, ExprValue& hll2) {
     hll_merge_agg(hll1.str_val, hll2.str_val);
     return hll1;
 }
+extern int hll_sparse_to_dense(std::string& hll);
+extern int hll_raw_to_sparse(std::string& hll);
 inline int hll_merge_agg(std::string* hll1, std::string* hll2) {
     return hll_merge_agg(*hll1, *hll2);
 }
@@ -289,7 +291,9 @@ inline ExprValue& hll_merge(ExprValue& hll1, ExprValue& hll2) {
 inline int hll_merge(std::string* hll1, std::string* hll2) {
     return hll_merge(*hll1, *hll2);
 }
+extern void hll_sparse_init(std::string& val);
 extern ExprValue hll_init();
+extern ExprValue hll_row_init();
 
 } // namespace hll
 } // namespace baikaldb

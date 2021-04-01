@@ -65,6 +65,11 @@ void LockPrimaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     }
 }
 
+void LockPrimaryNode::reset(RuntimeState* state) {
+    _insert_records_by_region.clear();
+    _delete_records_by_region.clear();
+}
+
 int LockPrimaryNode::open(RuntimeState* state) {
     int ret = 0;
     ret = ExecNode::open(state);
@@ -256,7 +261,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
         //因为这边查到的值可能会被修改，后边锁二级索引还要用到输入的record, 所以要复制出来
         SmartRecord get_record = record->clone(true);
         auto ret = txn->get_update_secondary(_region_id, *_pri_info, *index_ptr, get_record, GET_LOCK, true);
-        if (ret == -3 || ret == -2) {
+        if (ret == -3 || ret == -2 || ret == -4) {
             continue;
         }
         if (ret == -1) {

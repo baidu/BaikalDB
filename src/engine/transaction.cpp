@@ -23,8 +23,6 @@ DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raf
 DECLARE_int32(rocks_transaction_lock_timeout_ms);
 // DEFINE_int32(rocks_transaction_expiration_ms, 600 * 1000, 
 //         "rocksdb transaction_expiration timeout(us)");
-bvar::LatencyRecorder Transaction::rocksdb_put_time_cost{"rocksdb_put_time_cost"};
-bvar::LatencyRecorder Transaction::rocksdb_get_time_cost{"rocksdb_get_time_cost"};
 
 int Transaction::begin() {
     rocksdb::TransactionOptions txn_opt;
@@ -49,10 +47,14 @@ int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
     txn_opt.lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms +
         butil::fast_rand_less_than(FLAGS_rocks_transaction_lock_timeout_ms);
     _txn_opt = txn_opt;
-    if (nullptr == (_txn = _db->begin_transaction(_write_opt, _txn_opt))) {
+    auto txn = _db->begin_transaction(_write_opt, _txn_opt);
+    if (txn == nullptr) {
         DB_WARNING("start_trananction failed");
         return -1;
     }
+
+    _txn = new myrocksdb::Transaction(txn);
+
     last_active_time = butil::gettimeofday_us();
     begin_time = last_active_time;
     if (_use_ttl) {
@@ -62,34 +64,6 @@ int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
     _current_req_point_seq.insert(1);
     _snapshot = _db->get_snapshot();
     return 0; 
-}
-
-int Transaction::begin(rocksdb::Transaction* txn) {
-    if (txn == nullptr) {
-        DB_WARNING("txn is nullptr");
-        return -1;
-    }
-    if (nullptr == (_db = RocksWrapper::get_instance())) {
-        DB_WARNING("get rocksdb instance failed");
-        return -1;
-    }
-    if (nullptr == (_data_cf = _db->get_data_handle())) {
-        DB_WARNING("get rocksdb data column family failed");
-        return -1;
-    }
-    _txn = txn;
-    last_active_time = butil::gettimeofday_us();
-    begin_time = last_active_time;
-    _is_prepared = true;
-    _prepare_time_us = last_active_time;
-    if (_use_ttl) {
-        _read_ttl_timestamp_us = last_active_time;
-    }
-    _in_process = true;
-    _current_req_point_seq.insert(1);
-    _snapshot = _db->get_snapshot();
-    //_pool->increase_prepared();
-    return 0;
 }
 
 int Transaction::get_full_primary_key(
@@ -427,13 +401,12 @@ rocksdb::Status Transaction::put_kv_without_lock(const std::string& key, const s
         value_slice_parts.num_parts = 1;
     }
     auto res = _txn->Put(_data_cf, key_slice_parts, value_slice_parts);
-    rocksdb_put_time_cost << cost.get_time();
     return res;
 }
 
-int Transaction::put_kv(const std::string& key, const std::string& value) {
+int Transaction::put_kv(const std::string& key, const std::string& value, int64_t ttl_timestamp_us) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
-    auto res = put_kv_without_lock(key, value, 0);
+    auto res = put_kv_without_lock(key, value, ttl_timestamp_us);
     if (!res.ok()) {
         DB_FATAL("put kv info fail, error: %s", res.ToString().c_str());
 
@@ -557,7 +530,6 @@ int Transaction::get_update_primary(
         DB_WARNING("invalid GetMode: %d", mode);
         return -1;
     }
-    rocksdb_get_time_cost << cost.get_time();
 
     if (res.ok()) {
         DB_DEBUG("lock ok and key exist");
@@ -605,11 +577,7 @@ int Transaction::get_update_primary(
         DB_WARNING("lock failed, busy: %s", res.ToString().c_str());
         return -1;
     } else if (res.IsTimedOut()) {
-        uint32_t cf_id = _data_cf->GetID();
-        std::vector<uint64_t> txn_ids = _txn->GetWaitingTxns(&cf_id, &_key.data());
-        for (auto txn_id : txn_ids) {
-            DB_WARNING("locked by id: %lu", txn_id);
-        }
+        print_txninfo_holding_lock(_key.data());        
         DB_WARNING("lock failed, timedout: %s", res.ToString().c_str());
         return -1;
     } else {
@@ -698,7 +666,6 @@ int Transaction::get_update_secondary(
         DB_WARNING("invalid GetMode: %d", mode);
         return -1;
     }
-    rocksdb_get_time_cost << cost.get_time();
     if (res.ok()) {
         DB_DEBUG("lock ok and key exist");
     } else if (res.IsNotFound()) {
@@ -708,6 +675,7 @@ int Transaction::get_update_secondary(
         DB_WARNING("lock failed, busy: %s", res.ToString().c_str());
         return -1;
     } else if (res.IsTimedOut()) {
+        print_txninfo_holding_lock(_key.data());
         DB_WARNING("lock failed, timedout: %s", res.ToString().c_str());
         return -1;
     } else {
@@ -899,9 +867,9 @@ void Transaction::rollback_to_point(int seq_id) {
     // 不管是否需要Rollback,_cache_plan_map对应的条目都需要erase
     // 因为_cache_plan_map会发给follower
     if (_save_point_seq.empty()) {
-        DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), seq_id, -1);
+        //DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), seq_id, -1);
     } else {
-        DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), seq_id, _save_point_seq.top());
+        //DB_WARNING("txn:%s seq_id:%d top_seq:%d", _txn->GetName().c_str(), seq_id, _save_point_seq.top());
     }
     _need_rollback_seq.insert(seq_id);
     {
@@ -913,8 +881,8 @@ void Transaction::rollback_to_point(int seq_id) {
         _save_point_seq.pop();
         _save_point_increase_rows.pop();
         _txn->RollbackToSavePoint();
-        DB_WARNING("txn:%s rollback cmd seq_id: %d, num_increase_rows: %ld", 
-            _txn->GetName().c_str(), seq_id, num_increase_rows);
+        // DB_WARNING("txn:%s rollback cmd seq_id: %d, num_increase_rows: %ld", 
+        //     _txn->GetName().c_str(), seq_id, num_increase_rows);
     }
 }
 
@@ -928,7 +896,6 @@ void Transaction::rollback_current_request() {
     int first_seq_id = *_current_req_point_seq.begin();
     for (auto it = _current_req_point_seq.rbegin(); it != _current_req_point_seq.rend(); ++it) {
         int seq_id = *it;
-        _seq_id = seq_id;
         if (first_seq_id == seq_id) {
             break;
         }
@@ -945,10 +912,10 @@ void Transaction::rollback_current_request() {
                 _txn->GetName().c_str(), first_seq_id, seq_id, num_increase_rows);
         }
     }
-    if (_seq_id == 1) {
-        _has_write = false;
-    }
+    _seq_id = first_seq_id;
+    _is_applying = false;
     _current_req_point_seq.clear();
+    _current_req_point_seq.insert(_seq_id);
 }
 
 // for cstore only, only put column which HasField in record
