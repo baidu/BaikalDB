@@ -4292,7 +4292,7 @@ void Region::write_local_rocksdb_for_split() {
         };
         copy_bth.run(read_and_write); 
     }
-    if (!_is_global_index) {
+    if (table_info.engine == pb::ROCKSDB_CSTORE && !_is_global_index) {
         // write all non-pk column values to cstore
         std::set<int32_t> pri_field_ids;
         for (auto& field_info : pk_info.fields) {
