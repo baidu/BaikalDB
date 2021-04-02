@@ -83,6 +83,9 @@ public:
     int64_t last_active_time() const {
         return _last_active_time;
     }
+    int64_t bytes_consumed() const {
+        return _bytes_consumed.load();
+    }
 private:
     int64_t _bytes_limit = 0;
     uint64_t _log_id = 0;

@@ -223,7 +223,7 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch) {
 
 void AggNode::memory_limit_release(RuntimeState* state, MemRow* row) {
     if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
-        state->used_bytes_release(row->byte_size_long());
+        state->memory_limit_release(row->byte_size_long());
         DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->byte_size_long());
     }
 }

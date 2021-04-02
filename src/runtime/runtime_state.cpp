@@ -148,7 +148,8 @@ int RuntimeState::memory_limit_exceeded(int64_t bytes) {
     _mem_tracker->consume(bytes);
     _used_bytes += bytes;
     if (_mem_tracker->check_bytes_limit()) {
-        DB_WARNING("log_id:%lu mempry limit Exceeded limit:%ld used:%ld.", _log_id, _mem_tracker->bytes_limit(), _used_bytes);
+        DB_WARNING("log_id:%lu mempry limit Exceeded limit:%ld consumed:%ld used:%ld.", _log_id,
+            _mem_tracker->bytes_limit(), _mem_tracker->bytes_consumed(), _used_bytes);
         error_code = ER_TOO_BIG_SELECT;
         error_msg.str("select reach memory limit");
         return -1;
@@ -160,6 +161,10 @@ int RuntimeState::memory_limit_release(int64_t bytes) {
     if (_mem_tracker != nullptr) {
         _mem_tracker->release(bytes);
         DB_DEBUG("log_id:%lu mempry tracker release %ld bytes.", _log_id, bytes);
+    }
+    _used_bytes -= bytes;
+    if (_used_bytes < 0) {
+        _used_bytes = 0;
     }
     return 0;
 }

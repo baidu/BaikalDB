@@ -311,6 +311,8 @@ private:
     
     //发送心跳的线程
     Bthread _heart_beat_bth;
+    // 上次心跳成功的时间
+    TimeCost  _last_heart_time;
     //判断是否需要分裂的线程
     Bthread _split_check_bth;
     //全文索引定时merge线程

@@ -1379,9 +1379,7 @@ void RegionManager::check_whether_illegal_peer(const pb::StoreHeartBeatRequest* 
             }
             return false;
         };
-        if (master_region_info->peers_size() >= replica_num
-                //&& (peer_info.log_index() != 0 || SchemaManager::get_instance()->get_unsafe_decision())
-                && master_region_info->log_index() > peer_info.log_index()) {
+        if (master_region_info->log_index() > peer_info.log_index()) {
             //判断该实例上的peer是不是该region的有效peer，如不是，则删除
             bool legal_peer = check_legal_peer(master_region_info);
             if (!legal_peer) {
