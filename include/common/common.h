@@ -370,7 +370,7 @@ private:
 template <typename T> 
 class BthreadLocal {
 public:
-    BthreadLocal() {
+    BthreadLocal() : _bthread_local_key(INVALID_BTHREAD_KEY) {
         bthread_key_create(&_bthread_local_key, [](void* data) {
             delete static_cast<T*>(data);
         });
@@ -403,7 +403,7 @@ public:
     }
 
 private:
-    bthread_key_t _bthread_local_key {INVALID_BTHREAD_KEY};
+    bthread_key_t _bthread_local_key;
 };
 // RAII
 class ScopeGuard {
