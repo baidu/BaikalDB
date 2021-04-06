@@ -149,6 +149,7 @@ message FieldInfo {
     optional bytes comment            = 9;
     optional bytes on_update_value    = 10;
     optional bytes encrypt            = 11; //指定加密字段
+    optional uint32 flag              = 12;
 };
 
 enum IndexType {

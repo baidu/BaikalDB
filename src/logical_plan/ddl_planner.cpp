@@ -142,6 +142,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
     if (!field->has_can_null()) {
         field->set_can_null(false);
     }
+    field->set_flag(column->type->flag);
     return 0;
 }
 

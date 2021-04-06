@@ -2867,6 +2867,7 @@ bool StateMachine::_handle_client_query_show_collation(SmartSocket client) {
     rows.push_back(row1);
     rows.push_back({"utf8_general_ci", "utf8", "33", "Yes", "Yes", "1"});
     rows.push_back({"utf8_bin", "utf8", "83", " ", "Yes", "1"});
+    rows.push_back({"binary", "binary", "63", " ", "Yes", "1"});
 
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {

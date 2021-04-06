@@ -2208,6 +2208,7 @@ int LogicalPlanner::create_term_slot_ref_node(
     node->mutable_derive_node()->set_tuple_id(slot.tuple_id()); //TODO
     node->mutable_derive_node()->set_slot_id(slot.slot_id());
     node->mutable_derive_node()->set_field_id(slot.field_id());
+    node->set_col_flag(field_info->flag);
     _ctx->ref_slot_id_mapping[slot.tuple_id()][col_expr->name.to_lower()] = slot.slot_id();
     return 0;
 }

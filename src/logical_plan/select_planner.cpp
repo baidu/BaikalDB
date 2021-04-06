@@ -400,6 +400,7 @@ void SelectPlanner::add_single_table_columns(const std::string& table_name, Tabl
         node->mutable_derive_node()->set_tuple_id(slot.tuple_id()); //TODO
         node->mutable_derive_node()->set_slot_id(slot.slot_id());
         node->mutable_derive_node()->set_field_id(slot.field_id());
+        node->set_col_flag(field.flag);
 
         std::string& select_name = field.short_name;
         _select_exprs.push_back(select_expr);

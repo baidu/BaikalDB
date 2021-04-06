@@ -142,6 +142,7 @@ struct FieldInfo {
     bool                auto_inc = false;
     bool                deleted = false;
     bool                noskip = false;
+    uint32_t            flag   = 0;
 };
 
 struct DistInfo {

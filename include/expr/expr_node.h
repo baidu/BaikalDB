@@ -34,6 +34,7 @@ public:
     virtual int init(const pb::ExprNode& node) {
         _node_type = node.node_type();
         _col_type = node.col_type();
+        _col_flag = node.col_flag();
         return 0;
     }
     virtual void children_swap() {}
@@ -185,6 +186,12 @@ public:
     void set_col_type(pb::PrimitiveType col_type) {
         _col_type = col_type;
     }
+    uint32_t col_flag() {
+        return _col_flag;
+    }
+    void set_col_flag(uint32_t col_flag) {
+        _col_flag = col_flag;
+    }
 
     void clear_filter_index() {
         _index_ids.clear();
@@ -244,6 +251,7 @@ protected:
     pb::ExprNodeType _node_type;
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
+    uint32_t _col_flag;
     bool    _is_constant = true;
     bool    _has_null = false;
     bool    _replace_agg_to_slot = true;

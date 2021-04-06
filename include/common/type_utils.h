@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string>
 #include "proto/common.pb.h"
+#include "parser.h"
 
 namespace baikaldb {
 
@@ -292,6 +293,15 @@ inline int32_t get_num_size(pb::PrimitiveType type) {
     }
 }
 
+inline bool is_binary(uint32_t flag) {
+    switch (flag) {
+        case parser::MYSQL_FIELD_FLAG_BLOB:
+        case parser::MYSQL_FIELD_FLAG_BINARY:
+            return true;
+        default:
+            return false;
+    }
+}
 
 inline uint8_t to_mysql_type(pb::PrimitiveType type) {
     switch (type) {

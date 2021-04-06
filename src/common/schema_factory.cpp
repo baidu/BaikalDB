@@ -434,6 +434,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 field_info.lower_short_name.begin(), ::tolower);
         field_info.lower_name = tbl_info.name + "." + field_info.lower_short_name;
         field_info.type = field.mysql_type();
+        field_info.flag = field.flag();
         field_info.can_null = field.can_null();
         field_info.auto_inc = field.auto_increment();
         field_info.deleted = field.deleted();

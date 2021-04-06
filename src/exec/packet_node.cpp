@@ -77,6 +77,14 @@ int PacketNode::expr_optimize(QueryContext* ctx) {
         if (is_uint(expr->col_type())) {
             _fields[i].flags |= 32;
         }
+//        DB_WARNING("col_type: %d, col_flag: %u", expr->col_type(), expr->col_flag());
+        if (is_binary(expr->col_flag()) && is_string(expr->col_type())) {
+            _fields[i].type = MYSQL_TYPE_BLOB;
+//            DB_WARNING("MYSQL_TYPE_BLOB: %s", _fields[i].name.c_str());
+            _fields[i].charsetnr = 0x3f;
+            _fields[i].flags |= parser::MYSQL_FIELD_FLAG_BINARY;
+            _fields[i].flags |= parser::MYSQL_FIELD_FLAG_BLOB;
+        }
         ++i;
     }
     ret = ExecNode::expr_optimize(ctx);
@@ -310,7 +318,9 @@ int PacketNode::open(RuntimeState* state) {
     _client = state->client_conn();
     if (FLAGS_field_charsetnr_set_by_client) {
         for (auto& field : _fields) {
-            field.charsetnr = _client->charset_num;
+            if (field.charsetnr == 0) {
+                field.charsetnr = _client->charset_num;
+            }
         }
     }
     _send_buf = state->send_buf();
