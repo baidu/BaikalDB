@@ -24,6 +24,9 @@ int DmlManagerNode::open(RuntimeState* state) {
         return -1;
     }
     client_conn->seq_id++;
+    if (_return_empty) {
+        return 0;
+    }
     ExecNode* dml_node = _children[0];
     ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, _op_type); 
     if (ret < 0) {

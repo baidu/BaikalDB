@@ -77,7 +77,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
         }
         if (index_has_null) {
             ctx->return_empty = true;
-            DB_WARNING("normal predicate compare whih null");
+            DB_WARNING("normal predicate compare with null");
             return 0;
         }
         if (ret < 0) {
