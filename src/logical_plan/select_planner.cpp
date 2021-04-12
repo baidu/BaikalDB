@@ -501,6 +501,7 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
             select_name = field->expr->to_string();
         }
         _select_names.emplace_back(select_name);
+        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
     }
     
     _select_exprs.emplace_back(select_expr);

@@ -874,6 +874,14 @@ void RegionManager::update_leader_status(const pb::StoreHeartBeatRequest* reques
         region_state.status = pb::NORMAL;
         _region_state_map.set(region_id, region_state);
         if (leader_region.peers_status_size() > 0) {
+            auto& region_info = leader_region.region();
+            if (region_info.has_start_key() && region_info.has_end_key()
+                && !region_info.start_key().empty() && !region_info.end_key().empty()) {
+                if (region_info.start_key() == region_info.end_key()) {
+                    _region_peer_state_map.erase(region_id);
+                    continue;
+                }
+            }
             RegionPeerState peer_state =  _region_peer_state_map.get(region_id);
             peer_state.legal_peers_state.clear();
             for (auto peer_status : leader_region.peers_status()) {
@@ -1611,6 +1619,7 @@ void RegionManager::erase_region_info(const std::vector<int64_t>& drop_region_id
     }
     for (auto drop_region_id : drop_region_ids) {
         _region_state_map.erase(drop_region_id);
+        _region_peer_state_map.erase(drop_region_id);
     }
 }
 

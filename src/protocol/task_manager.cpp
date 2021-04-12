@@ -22,7 +22,7 @@ void TaskManager::fetch_thread() {
         //process ddlwork
         pb::RegionDdlWork work;
         if (TaskFactory<pb::RegionDdlWork>::get_instance()->fetch_task(work) != 0) {
-            DB_WARNING("no write ddl region data task");
+            //DB_WARNING("no write ddl region data task");
         } else {
             _workers.run([work, this]() {
                 process_ddl_work(work);
