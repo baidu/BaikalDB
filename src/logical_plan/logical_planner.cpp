@@ -1384,6 +1384,10 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
             return 0;
         }
         if (FunctionManager::instance()->get_object(item->fn_name.to_lower()) == nullptr) {
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+                _ctx->stat_info.error_msg << "func: \'" << item->fn_name.c_str() << "\' not support";
+            }
             DB_WARNING("un-supported scala op or func: %s", item->fn_name.c_str());
             return -1;
         } 

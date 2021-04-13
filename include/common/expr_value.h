@@ -27,6 +27,12 @@
 #include "roaring.hh"
 
 namespace baikaldb {
+
+enum class ExprValueFlags {
+    F_NULL,
+    F_DECIMAL,
+};
+
 struct ExprValue {
     pb::PrimitiveType type;
     union {
@@ -43,10 +49,12 @@ struct ExprValue {
         double double_val;
         Roaring* bitmap;
     } _u;
+    ExprValueFlags     flags;
     std::string str_val;
 
     explicit ExprValue(pb::PrimitiveType type_ = pb::NULL_TYPE) : type(type_) {
         _u.int64_val = 0;
+        flags = ExprValueFlags::F_NULL;
         if (type_ == pb::BITMAP) {
             _u.bitmap = new(std::nothrow) Roaring();
         } else if (type_ == pb::TDIGEST) {
@@ -59,6 +67,7 @@ struct ExprValue {
     ExprValue(const ExprValue& other) {
         type = other.type;
         _u = other._u;
+        flags = other.flags;
         str_val = other.str_val;
         if (type == pb::BITMAP) {
             _u.bitmap = new(std::nothrow) Roaring();
@@ -72,6 +81,7 @@ struct ExprValue {
                 _u.bitmap = nullptr;
             }
             type = other.type;
+            flags = other.flags;
             _u = other._u;
             str_val = other.str_val;
             if (type == pb::BITMAP) {
@@ -85,6 +95,7 @@ struct ExprValue {
     ExprValue(ExprValue&& other) noexcept {
         type = other.type;
         _u = other._u;
+        flags = other.flags;
         str_val = other.str_val;
         if (type == pb::BITMAP) {
             other._u.bitmap = nullptr;
@@ -98,6 +109,7 @@ struct ExprValue {
                 _u.bitmap = nullptr;
             }
             type = other.type;
+            flags = other.flags;
             _u = other._u;
             if (type == pb::BITMAP) {
                 other._u.bitmap = nullptr;
@@ -571,7 +583,7 @@ struct ExprValue {
             case pb::TDIGEST:
                 return str_val;
             case pb::DATETIME:
-                return datetime_to_str(_u.uint64_val);
+                return datetime_to_str(_u.uint64_val, flags == ExprValueFlags::F_DECIMAL ? true : false);
             case pb::TIME:
                 return time_to_str(_u.int32_val);
             case pb::TIMESTAMP:

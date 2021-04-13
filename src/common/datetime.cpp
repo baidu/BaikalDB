@@ -32,7 +32,7 @@ std::string timestamp_to_str(time_t timestamp) {
 }
 // encode DATETIME to string format
 // ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
-std::string datetime_to_str(uint64_t datetime) {
+std::string datetime_to_str(uint64_t datetime, bool use_macrosec) {
     int year_month = ((datetime >> 46) & 0x1FFFF);
     int year = year_month / 13;
     int month = year_month % 13;
@@ -43,7 +43,7 @@ std::string datetime_to_str(uint64_t datetime) {
     int macrosec = (datetime & 0xFFFFFF);
 
     char buf[30] = {0};
-    if (macrosec > 0) {
+    if (macrosec > 0 && use_macrosec) {
         snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06d",
                 year, month, day, hour, minute, second, macrosec);
     } else {

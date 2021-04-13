@@ -61,7 +61,6 @@ CREATE { return CREATE; }
 CROSS { return CROSS; }
 CURRENT_DATE { un_reserved_keyword(yylval, yyscanner, parser); return CURRENT_DATE; }
 CURRENT_TIME { un_reserved_keyword(yylval, yyscanner, parser); return CURRENT_TIME; }
-CURRENT_TIMESTAMP { return CURRENT_TIMESTAMP; }
 CURRENT_USER { return CURRENT_USER; }
 DATABASE { return DATABASE; }
 DATABASES { return DATABASES; }
@@ -393,6 +392,7 @@ MAX { un_reserved_keyword(yylval, yyscanner, parser); return MAX; }
 MID { un_reserved_keyword(yylval, yyscanner, parser); return MID; }
 MIN { un_reserved_keyword(yylval, yyscanner, parser); return MIN; }
 NOW { un_reserved_keyword(yylval, yyscanner, parser); return NOW; }
+CURRENT_TIMESTAMP { un_reserved_keyword(yylval, yyscanner, parser); return CURRENT_TIMESTAMP; }
 UTC_TIMESTAMP { un_reserved_keyword(yylval, yyscanner, parser); return UTC_TIMESTAMP; }
 POSITION { un_reserved_keyword(yylval, yyscanner, parser); return POSITION; }
 SESSION_USER { un_reserved_keyword(yylval, yyscanner, parser); return SESSION_USER; }

@@ -74,6 +74,7 @@ ExprValue curdate(const std::vector<ExprValue>& input);
 ExprValue current_date(const std::vector<ExprValue>& input);
 ExprValue curtime(const std::vector<ExprValue>& input);
 ExprValue current_time(const std::vector<ExprValue>& input);
+ExprValue current_timestamp(const std::vector<ExprValue>& input);
 ExprValue day(const std::vector<ExprValue>& input);
 ExprValue dayname(const std::vector<ExprValue>& input);
 ExprValue dayofweek(const std::vector<ExprValue>& input);

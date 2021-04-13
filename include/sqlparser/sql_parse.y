@@ -440,6 +440,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     MID
     MIN
     NOW
+    CURRENT_TIMESTAMP
     UTC_TIMESTAMP
     POSITION
     SESSION_USER
@@ -2015,6 +2016,23 @@ FunctionCallNonKeyword:
         fun->fn_name = $1;
         $$ = fun; 
     }
+    | NOW '(' INTEGER_LIT ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CURRENT_TIMESTAMP '(' ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        $$ = fun; 
+    }
+    | CURRENT_TIMESTAMP '(' INTEGER_LIT ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
     | UTC_TIMESTAMP '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
@@ -2523,6 +2541,7 @@ AllIdent:
     | MID
     | MIN
     | NOW
+    | CURRENT_TIMESTAMP
     | UTC_TIMESTAMP
     | POSITION
     | SESSION_USER

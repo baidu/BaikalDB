@@ -196,6 +196,8 @@ public:
     int remove_columns(const TableKey& primary_key);
 
     void print_txninfo_holding_lock(const std::string& key) {
+        return;
+        //内部有pthread锁
         auto lock_info = _db->get_db()->GetLockStatusData();
         for (auto& it : lock_info) {
             if (it.second.key.size() == key.size() && it.second.key == key) {
