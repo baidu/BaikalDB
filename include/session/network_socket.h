@@ -140,7 +140,6 @@ struct NetworkSocket {
     uint32_t            use_times;    // This NetworkSocket be used times.
     bool                is_authed;    // Flag for login.
     bool                is_counted;   // is counted for user max_connection check
-    uint32_t            thread_idx;   // current thread id processing the socket
     std::mutex          mutex;        // mutex to protect socket from multi-thread process
     time_t              last_active;  // last active time of the socket
     timeval             connect_time;

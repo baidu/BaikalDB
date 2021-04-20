@@ -192,6 +192,7 @@ public:
     void rename_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_byte_size(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_split_lines(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void set_main_logical_room(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_schema_conf(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_statistics(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_dists(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -768,6 +769,12 @@ public:
             } 
         }
     }
+    int check_table_exist(const pb::SchemaInfo& schema_info,
+                            int64_t& table_id) {
+        int64_t namespace_id = 0;
+        int64_t database_id = 0;
+        return check_table_exist(schema_info, namespace_id, database_id, table_id);
+    }
 private:
     TableManager(): _max_table_id(0) {
         bthread_mutex_init(&_table_mutex, NULL);
@@ -813,12 +820,6 @@ private:
     int check_index(const pb::IndexInfo& index_info_to_check,
                    const pb::SchemaInfo& schema_info, int64_t& index_id);
 
-    int check_table_exist(const pb::SchemaInfo& schema_info,
-                            int64_t& table_id) {
-        int64_t namespace_id = 0;
-        int64_t database_id = 0;
-        return check_table_exist(schema_info, namespace_id, database_id, table_id);
-    }
     int alloc_field_id(pb::SchemaInfo& table_info, bool& has_auto_increment, TableMem& table_mem);
     int alloc_index_id(pb::SchemaInfo& table_info, TableMem& table_mem, int64_t& max_table_id_tmp);
     void construct_common_region(pb::RegionInfo* region_info, int32_t replica_num) {

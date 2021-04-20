@@ -74,8 +74,11 @@ private:
                               const std::string& value);
     int whether_dists_legal(pb::MetaManagerRequest* request, 
                             pb::MetaManagerResponse* response,
+                            std::string& candidate_logical_room,
                             uint64_t log_id);
-    
+    int whether_main_logical_room_legal(pb::MetaManagerRequest* request, 
+                            pb::MetaManagerResponse* response,
+                            uint64_t log_id);
     MetaStateMachine*                                   _meta_state_machine;
 }; //class
 

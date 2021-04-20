@@ -307,6 +307,46 @@ TEST(test_compare, case_all) {
     std::cout << dt2._u.uint32_val << " " << dt2.get_string() << " " << dt2.hash() << "\n";
     std::cout << &dt2._u << " " << &dt2._u.int8_val << " " << &dt2._u.int32_val << " " <<
         &dt2._u.uint64_val << "\n";
+    {
+        ExprValue tmp(pb::STRING);
+        tmp.str_val = "ec8f147a-9c41-4093-a1f0-01d70f73e8fd";
+        std::cout << tmp.str_val << ":" << tmp.hash() << std::endl;
+    }
+    {
+        ExprValue tmp(pb::STRING);
+        tmp.str_val = "1b164e54-ffb3-445a-9631-a3da77e5a7e8";
+        std::cout << tmp.str_val << ":" << tmp.hash() << std::endl;
+    }
+    {
+        ExprValue tmp(pb::STRING);
+        tmp.str_val = "58f706d7-fc10-478f-ad1c-2a1772c35d46";
+        std::cout << tmp.str_val << ":" << tmp.hash() << std::endl;
+    }
+    {
+        ExprValue tmp(pb::STRING);
+        tmp.str_val = "be69ea04-2065-488d-8817-d57fe2b77734";
+        std::cout << tmp.str_val << ":" << tmp.hash() << std::endl;
+    }
+    {
+        ExprValue tmp(pb::INT64);
+        tmp._u.int64_val = 127;
+        std::cout << tmp._u.int64_val << ":" << tmp.hash() << std::endl;
+    }
+    {
+        ExprValue tmp(pb::INT64);
+        tmp._u.int64_val = 128;
+        std::cout << tmp._u.int64_val << ":" << tmp.hash() << std::endl;
+    }
+    {
+        ExprValue tmp(pb::INT64);
+        tmp._u.int64_val = 65535;
+        std::cout << tmp._u.int64_val << ":" << tmp.hash() << std::endl;
+    }
+    {
+        ExprValue tmp(pb::INT64);
+        tmp._u.int64_val = 65536;
+        std::cout << tmp._u.int64_val << ":" << tmp.hash() << std::endl;
+    }
 }
 
 TEST(type_merge, type_merge) {

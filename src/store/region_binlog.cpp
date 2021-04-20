@@ -37,6 +37,7 @@ DEFINE_int64(binlog_scan_timeout_us, 30 * 1000 * 1000LL, "binlog scan timeout us
 DEFINE_int64(binlog_warn_timeout_minute, 2 * 60, "binlog warn timeout min : 2h");
 DEFINE_int64(read_binlog_max_size_bytes, 100 * 1024 * 1024, "100M");
 DEFINE_int64(read_binlog_timeout_us, 10 * 1000 * 1000, "10s");
+DEFINE_int64(check_point_rollback_interval_s, 60, "60s");
 
 inline std::string ts_to_datetime(int64_t ts) {
     return timestamp_to_str(tso::get_timestamp_internal(ts));
@@ -518,8 +519,13 @@ void Region::binlog_update_map_when_scan(const std::map<std::string, ExprValue>&
 
         auto iter = _binlog_param.ts_binlog_map.find(start_ts);
         if (iter == _binlog_param.ts_binlog_map.end()) {
-            DB_FATAL("region_id: %ld, type: %s, start_ts: %ld can not find in map, ts: %ld, txn_id: %ld", 
-                _region_id, binlog_type_name(binlog_type), start_ts, ts, txn_id);
+            if (binlog_type == ROLLBACK_BINLOG) {
+                DB_WARNING("region_id: %ld, type: %s, start_ts: %ld can not find in map, ts: %ld, txn_id: %ld", 
+                    _region_id, binlog_type_name(binlog_type), start_ts, ts, txn_id);
+            } else {
+                DB_FATAL("region_id: %ld, type: %s, start_ts: %ld can not find in map, ts: %ld, txn_id: %ld", 
+                    _region_id, binlog_type_name(binlog_type), start_ts, ts, txn_id);
+            }
             return;
         } else {
             _binlog_param.ts_binlog_map.erase(start_ts);
@@ -663,8 +669,17 @@ int Region::binlog_update_check_point() {
     //write check point
     if (_binlog_param.check_point_ts > check_point_ts) {
         // check point 变小说明写入ts小于check point，告警
-        DB_FATAL("region_id: %ld, new check point ts: %ld, < old check point ts: %ld", 
-                    _region_id, check_point_ts, _binlog_param.check_point_ts);
+        if (tso::get_timestamp_internal(_binlog_param.check_point_ts) - tso::get_timestamp_internal(check_point_ts)
+             > FLAGS_check_point_rollback_interval_s) {
+            DB_WARNING("region_id: %ld, new check point ts: %ld, %s, < old check point ts: %ld, %s, "
+                "check point rollback interval too long", 
+                _region_id, check_point_ts, ts_to_datetime(check_point_ts).c_str(), 
+                _binlog_param.check_point_ts, ts_to_datetime(_binlog_param.check_point_ts).c_str());
+        } else {
+            DB_WARNING("region_id: %ld, new check point ts: %ld, %s, < old check point ts: %ld, %s", 
+                _region_id, check_point_ts, ts_to_datetime(check_point_ts).c_str(), 
+                _binlog_param.check_point_ts, ts_to_datetime(_binlog_param.check_point_ts).c_str());
+        }
     } else if (_binlog_param.check_point_ts == check_point_ts) {
         return 0;
     }
@@ -716,7 +731,7 @@ int Region::write_binlog_record(SmartRecord record) {
 //partion_key,       default 0
 //start_ts,          default -1
 //primary_region_id, default -1
-int Region::write_binlog_value(std::map<std::string, ExprValue> field_value_map) {
+int Region::write_binlog_value(const std::map<std::string, ExprValue>& field_value_map) {
     SmartTable  table_ptr = _factory->get_table_info_ptr(get_table_id());
     SmartRecord record    = _factory->new_record(get_table_id());
 

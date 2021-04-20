@@ -27,13 +27,11 @@ public:
                 _healthy_check_start(false),
                 _baikal_heart_beat("baikal_heart_beat"),
                 _store_heart_beat("store_heart_beat") {
-        bthread_mutex_init(&_load_balance_mutex, NULL);            
-        bthread_mutex_init(&_migrate_mutex, NULL);            
+        bthread_mutex_init(&_param_mutex, NULL);        
     }
     
     virtual ~MetaStateMachine() {
-        bthread_mutex_destroy(&_load_balance_mutex);
-        bthread_mutex_destroy(&_migrate_mutex);
+        bthread_mutex_destroy(&_param_mutex);
     }
 
     void store_heartbeat(google::protobuf::RpcController* controller,             
@@ -76,32 +74,32 @@ public:
     bool whether_can_decide();
 
     void set_global_load_balance(bool open) {
-        BAIDU_SCOPED_LOCK(_load_balance_mutex);
+        BAIDU_SCOPED_LOCK(_param_mutex);
         _global_load_balance = open;
         _resource_load_balance.clear();
     }
     void set_load_balance(const std::string& resource_tag, bool open) {
-        BAIDU_SCOPED_LOCK(_load_balance_mutex);
+        BAIDU_SCOPED_LOCK(_param_mutex);
         _resource_load_balance[resource_tag] = open;
     }
     bool get_load_balance(const std::string& resource_tag) {
-        BAIDU_SCOPED_LOCK(_load_balance_mutex);
+        BAIDU_SCOPED_LOCK(_param_mutex);
         if (_resource_load_balance.find(resource_tag) != _resource_load_balance.end()) {
                 return _resource_load_balance[resource_tag];
         }
         return _global_load_balance;
     }
     void set_global_migrate(bool open) {
-        BAIDU_SCOPED_LOCK(_migrate_mutex);
+        BAIDU_SCOPED_LOCK(_param_mutex);
         _global_migrate = open;
         _resource_migrate.clear();
     }
     void set_migrate(const std::string& resource_tag, bool open) {
-        BAIDU_SCOPED_LOCK(_migrate_mutex);
+        BAIDU_SCOPED_LOCK(_param_mutex);
         _resource_migrate[resource_tag] = open;
     }
     bool get_migrate(const std::string& resource_tag) {
-        BAIDU_SCOPED_LOCK(_migrate_mutex);
+        BAIDU_SCOPED_LOCK(_param_mutex);
         if (_resource_migrate.find(resource_tag) != _resource_migrate.end()) {
             return _resource_migrate[resource_tag];
         }
@@ -121,11 +119,11 @@ private:
     int64_t _leader_start_timestmap;
     Bthread _bth;    
     bool _healthy_check_start;
-    bthread_mutex_t         _load_balance_mutex;
+
+    bthread_mutex_t         _param_mutex;
     bool _global_load_balance = true;
     std::map<std::string, bool> _resource_load_balance;
-    
-    bthread_mutex_t         _migrate_mutex;
+
     bool _global_migrate = true;
     std::map<std::string, bool> _resource_migrate;
 

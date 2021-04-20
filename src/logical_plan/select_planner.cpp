@@ -404,6 +404,7 @@ void SelectPlanner::add_single_table_columns(const std::string& table_name, Tabl
         std::string& select_name = field.short_name;
         _select_exprs.push_back(select_expr);
         _select_names.push_back(select_name);
+        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
         _ctx->ref_slot_id_mapping[slot.tuple_id()][select_name] = slot.slot_id();
         _ctx->field_column_id_mapping[select_name] = _column_id++;
     }

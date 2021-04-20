@@ -656,6 +656,77 @@ void RegionManager::add_region_info(const std::vector<int64_t>& new_add_region_i
         }
     }
 }
+
+void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatRequest* request,
+                    pb::StoreHeartBeatResponse* response,
+                    std::set<int64_t>& trans_leader_region_ids) {
+    std::string instance = request->instance_info().address();
+    for (auto& leader_region : request->leader_regions()) {
+        int64_t table_id = leader_region.region().table_id();
+        int64_t region_id = leader_region.region().region_id();
+        int64_t replica_num = 0;
+        auto ret = TableManager::get_instance()->get_replica_num(table_id, replica_num);
+        if (ret < 0) {
+            DB_WARNING("table_id: %ld region_id: %ld", table_id, region_id);
+            continue;
+        }
+        if (leader_region.status() != pb::IDLE) {
+            continue;
+        }
+        if (leader_region.region().peers_size() != replica_num) {
+            continue;
+        }
+        std::string main_logical_room;
+        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
+        // 未设置main_logical_room的直接跳过
+        if (main_logical_room.empty()) {
+            continue;
+        }
+        std::string leader_logical_room = ClusterManager::get_instance()->get_logical_room(instance);
+        // leader在主机房直接跳过
+        //DB_WARNING("instance: %s region_id:%ld do main_logical_room check leader_logical_room:%s main_logical_room:%s",
+        //    instance.c_str(), region_id, leader_logical_room.c_str(), main_logical_room.c_str());
+        if (leader_logical_room == main_logical_room) {
+            continue;
+        }
+        // 选择主机房进行transfer
+        std::vector<std::string> candicate_instances;
+        candicate_instances.reserve(3);
+        for (auto& peer : leader_region.region().peers()) {
+            if (peer == instance) {
+                continue;
+            }
+            std::string logical_room = ClusterManager::get_instance()->get_logical_room(peer);
+            pb::Status st = ClusterManager::get_instance()->get_instance_status(peer);
+            if (st != pb::NORMAL) {
+                candicate_instances.clear();
+                DB_WARNING("region_id:%ld instance: %s peer: %s not NORMAL not transfer leader",
+                    region_id, instance.c_str(), peer.c_str());
+                break;
+            }
+            if (logical_room == main_logical_room) {
+                candicate_instances.emplace_back(peer);
+            }
+        }
+        if (!candicate_instances.empty()) {
+            size_t random_index = butil::fast_rand() % candicate_instances.size(); 
+            std::string& selected_instance = candicate_instances[random_index];
+            pb::TransLeaderRequest transfer_request;
+            // 不设置table_id让store与load_balance分开处理
+            // transfer_request.set_table_id(table_id);
+            transfer_request.set_region_id(region_id);
+            transfer_request.set_old_leader(instance);
+            transfer_request.set_new_leader(selected_instance);
+            add_leader_count(selected_instance, table_id);
+            trans_leader_region_ids.emplace(region_id);
+            *(response->add_trans_leader()) = transfer_request;
+            DB_WARNING("instance: %s region_id:%ld do leader transfer leader_logical_room:%s "
+                " main_logical_room:%s transfer_request:%s", instance.c_str(), region_id, leader_logical_room.c_str(),
+                main_logical_room.c_str(), transfer_request.ShortDebugString().c_str());
+        }
+    }
+}
+
 void RegionManager::leader_load_balance(bool whether_can_decide,
             bool load_balance,
             const pb::StoreHeartBeatRequest* request,
@@ -667,7 +738,11 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
         table_leader_counts[table_id]++;
     }
     set_instance_leader_count(instance, table_leader_counts);
-  
+
+    std::set<int64_t> trans_leader_region_ids;
+    
+    leader_main_logical_room_check(request, response, trans_leader_region_ids);
+
     if (!request->need_leader_balance()) {
         return;
     }
@@ -677,6 +752,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
                     resource_tag.c_str(), instance.c_str());
         return;
     }
+
     if (!load_balance) {
         DB_WARNING("meta state machine close leader load balance, resource_tag: %s, instance: %s", 
                     resource_tag.c_str(), instance.c_str());
@@ -684,15 +760,23 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
     }
     DB_WARNING("leader load balance, resource_tag: %s, instance: %s", 
                 resource_tag.c_str(), instance.c_str());
-    int64_t instance_count = ClusterManager::get_instance()->get_instance_count(resource_tag); //机器数量
     //记录以表的维度出发，每个表应该transfer leader的数量
     std::unordered_map<int64_t, int64_t> transfer_leader_count;
     //记录以表的维度出发，每台机器上应有的平均leader的数量
     std::unordered_map<int64_t, int64_t> average_leader_counts;
+    std::map<std::string, int64_t> room_count;
+    int64_t total_instance_count = ClusterManager::get_instance()->
+        get_instance_count(resource_tag, &room_count);
     for (auto& table_leader_count : table_leader_counts) {
         int64_t average_leader_count = INT_FAST64_MAX;
         int64_t table_id = table_leader_count.first;
         int64_t region_count = TableManager::get_instance()->get_region_count(table_id);
+        std::string main_logical_room;
+        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
+        int64_t instance_count = total_instance_count;
+        if (!main_logical_room.empty()) {
+            instance_count = room_count[main_logical_room];
+        }
         if (instance_count != 0) {
             average_leader_count = region_count / instance_count;
         }
@@ -721,6 +805,9 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
     for (auto& leader_region : request->leader_regions()) {
         int64_t table_id = leader_region.region().table_id();
         int64_t region_id = leader_region.region().region_id();
+        if (trans_leader_region_ids.count(region_id) > 0) {
+            continue;
+        }
         int64_t replica_num = 0;
         auto ret = TableManager::get_instance()->get_replica_num(table_id, replica_num);
         if (ret < 0) {
@@ -738,15 +825,21 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
                 || transfer_leader_count[table_id] == 0) {
             continue;
         }
+        std::string main_logical_room;
+        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
         int64_t leader_count_for_transfer_peer = INT_FAST64_MAX;
         std::string transfer_to_peer;
         for (auto& peer : leader_region.region().peers()) {
             if (peer == instance) {
                 continue;
             }
+            std::string logical_room = ClusterManager::get_instance()->get_logical_room(peer);
             auto st = ClusterManager::get_instance()->get_instance_status(peer);
             if (st != pb::NORMAL) {
                 break;
+            }
+            if (!main_logical_room.empty() && logical_room != main_logical_room) {
+                continue;
             }
             int64_t leader_count = get_leader_count(peer, table_id);
             if (leader_count < average_leader_counts[table_id]
@@ -755,7 +848,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
                 leader_count_for_transfer_peer = leader_count;
             }
         }
-        if (transfer_to_peer.size() != 0) { 
+        if (!transfer_to_peer.empty()) { 
             pb::TransLeaderRequest transfer_request;
             transfer_request.set_table_id(table_id);
             transfer_request.set_region_id(region_id);

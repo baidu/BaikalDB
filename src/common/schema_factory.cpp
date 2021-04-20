@@ -373,6 +373,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     tbl_info.tbl_proto->set_name(table_name);
     tbl_info.namespace_ = _namespace;
     tbl_info.resource_tag = table.resource_tag();
+    tbl_info.main_logical_room = table.main_logical_room();
     tbl_info.charset = table.charset();
     tbl_info.engine = pb::ROCKSDB;
     if (table.has_engine()) {

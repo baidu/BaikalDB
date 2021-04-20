@@ -831,7 +831,7 @@ private:
     void read_binlog(const pb::StoreReq* request, pb::StoreRes* response);
     void apply_binlog(const pb::StoreReq& request, braft::Closure* done);
     int write_binlog_record(SmartRecord record);
-    int write_binlog_value(std::map<std::string, ExprValue> field_value_map);
+    int write_binlog_value(const std::map<std::string, ExprValue>& field_value_map);
     int64_t binlog_get_int64_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     
     std::string binlog_get_str_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);

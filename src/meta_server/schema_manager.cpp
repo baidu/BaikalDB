@@ -111,7 +111,8 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_DROP_INDEX: 
     case pb::OP_LINK_BINLOG:
     case pb::OP_UNLINK_BINLOG:
-    case pb::OP_SET_INDEX_HINT_STATUS:{
+    case pb::OP_SET_INDEX_HINT_STATUS:
+    case pb::OP_UPDATE_MAIN_LOGICAL_ROOM: {
         if (!request->has_table_info()) { 
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
                     "no schema_info", request->op_type(), log_id);
@@ -128,7 +129,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no region_split_lines", request->op_type(), log_id);
             return;
-        }        
+        }      
         if (request->op_type() == pb::OP_UPDATE_SCHEMA_CONF
                 && !request->table_info().has_schema_conf()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
@@ -140,7 +141,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no new table name", request->op_type(), log_id);
             return;
-        } 
+        }
         if (request->op_type() == pb::OP_CREATE_TABLE
                 && !request->table_info().has_upper_table_name()) {
             auto ret = pre_process_for_create_table(request, response, log_id);
@@ -150,7 +151,15 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
         }
         if (request->op_type() == pb::OP_UPDATE_DISTS) {
             auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
-            auto ret = whether_dists_legal(mutable_request, response, log_id);
+            std::string main_logical_room;
+            auto ret = whether_dists_legal(mutable_request, response, main_logical_room, log_id);
+            if (ret < 0) {
+                return;
+            } 
+        }
+        if (request->op_type() == pb::OP_UPDATE_MAIN_LOGICAL_ROOM) {
+            auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+            auto ret = whether_main_logical_room_legal(mutable_request, response, log_id);
             if (ret < 0) {
                 return;
             } 
@@ -567,12 +576,13 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
     std::string main_logical_room;
     //用户指定了跨机房部署
-    auto ret = whether_dists_legal(mutable_request, response, log_id);
+    auto ret = whether_dists_legal(mutable_request, response, main_logical_room, log_id);
     if (ret != 0) {
         return ret;
     }
-
-    main_logical_room = request->table_info().main_logical_room();
+    if (request->table_info().has_main_logical_room()) {
+        main_logical_room = request->table_info().main_logical_room();
+    }
     total_region_count = partition_num * total_region_count;
     std::string resource_tag = request->table_info().resource_tag();
     boost::trim(resource_tag);
@@ -785,6 +795,7 @@ int SchemaManager::load_max_id_snapshot(const std::string& max_id_prefix,
 }
 int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
                         pb::MetaManagerResponse* response,
+                        std::string& candidate_logical_room,
                         uint64_t log_id) {
     if (request->table_info().dists_size() == 0) {
         return 0;
@@ -803,10 +814,12 @@ int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
         return -1;
     }
     if (request->table_info().main_logical_room().size() == 0) {
+        int max_count = 0;
+        // 副本数量最多的机房是主机房
         for (auto& dist : request->table_info().dists()) {
-            if (dist.count() > 0) {
-                request->mutable_table_info()->set_main_logical_room(dist.logical_room());
-                break;
+            if (dist.count() > max_count) {
+                max_count = dist.count();
+                candidate_logical_room = dist.logical_room();
             }
         }
     }
@@ -814,6 +827,43 @@ int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
     if (total_count != request->table_info().replica_num()) {
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                 "replica num not match", request->op_type(), log_id);
+        return -1;
+    }
+    return 0;
+}
+int SchemaManager::whether_main_logical_room_legal(pb::MetaManagerRequest* request,
+                        pb::MetaManagerResponse* response,
+                        uint64_t log_id) {
+    if (!request->table_info().has_main_logical_room()) {
+        return 0;
+    }
+    int64_t table_id = 0;
+    if (TableManager::get_instance()->check_table_exist(request->table_info(), table_id) != 0) {
+        DB_WARNING("check table exist fail, request:%s", request->ShortDebugString().c_str());
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                "table not exist", request->op_type(), log_id);
+        return -1;
+    }
+    pb::SchemaInfo schema_pb;
+    if (TableManager::get_instance()->get_table_info(table_id, schema_pb) != 0) {
+        DB_WARNING("check table exist fail, request:%s", request->ShortDebugString().c_str());
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                "table not exist", request->op_type(), log_id);
+        return -1;
+    }
+    //检验逻辑机房是否存在
+    bool found = false;
+    for (auto& dist : schema_pb.dists()) {
+        std::string logical_room = dist.logical_room();
+        if (logical_room == request->table_info().main_logical_room()) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        DB_WARNING("main_logical_room not match, request:%s", request->ShortDebugString().c_str());
+        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                "main_logical_room not match", request->op_type(), log_id);
         return -1;
     }
     return 0;

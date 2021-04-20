@@ -26,12 +26,10 @@ int DMLNode::expr_optimize(QueryContext* ctx) {
         DB_WARNING("expr type_inferer fail:%d", ret);
         return ret;
     }
-    for (auto expr : _update_exprs) {
-        ret = expr->expr_optimize();
-        if (ret < 0) {
-            DB_WARNING("expr type_inferer fail:%d", ret);
-            return ret;
-        }
+    ret = common_expr_optimize(&_update_exprs);
+    if (ret < 0) {
+        DB_WARNING("common_expr_optimize fail");
+        return ret;
     }
     return 0;
 }

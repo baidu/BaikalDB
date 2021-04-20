@@ -42,6 +42,7 @@ public:
      *     -2 - EMPTY_RESULT
      */
     virtual int expr_optimize(QueryContext* ctx);
+    int common_expr_optimize(std::vector<ExprNode*>* exprs);
 
     //input: 需要下推的条件
     //input_exprs 既是输入参数，也是输出参数

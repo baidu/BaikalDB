@@ -306,15 +306,29 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     DB_WARNING("replica_num: %ld", replica_num);
                 }
                 json_iter = root.FindMember("dists");
+                std::set<std::string> logical_room_set;
                 if (json_iter != root.MemberEnd()) {
                     if (json_iter->value.IsArray()) {
                         for (size_t i = 0; i < json_iter->value.Size(); i++) {
                             const rapidjson::Value& dist_value = json_iter->value[i];
                             auto* dist = table.add_dists();
-                            dist->set_logical_room(dist_value["logical_room"].GetString());
+                            std::string logical_room = dist_value["logical_room"].GetString();
+                            dist->set_logical_room(logical_room);
                             dist->set_count(dist_value["count"].GetInt());
+                            logical_room_set.emplace(logical_room);
                         }
                     }
+                }
+                json_iter = root.FindMember("main_logical_room");
+                if (json_iter != root.MemberEnd()) {
+                    std::string main_logical_room = json_iter->value.GetString();
+                    if (logical_room_set.count(main_logical_room) == 0) {
+                        _ctx->stat_info.error_code = ER_SP_LABEL_MISMATCH;
+                        _ctx->stat_info.error_msg << "main_logical_room: "<<main_logical_room << " mismatch";
+                        return -1;
+                    }
+                    table.set_main_logical_room(main_logical_room);
+                    DB_WARNING("main_logical_room: %s", main_logical_room.c_str());
                 }
                 json_iter = root.FindMember("region_split_lines");
                 if (json_iter != root.MemberEnd()) {

@@ -69,12 +69,10 @@ int AggNode::expr_optimize(QueryContext* ctx) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
     }
-    for (auto expr : _group_exprs) {
-        ret = expr->expr_optimize();
-        if (ret < 0) {
-            DB_WARNING("expr type_inferer fail:%d", ret);
-            return ret;
-        }
+    ret = common_expr_optimize(&_group_exprs);
+    if (ret < 0) {
+        DB_WARNING("common_expr_optimize fail");
+        return ret;
     }
     if (_agg_tuple_id < 0) {
         return 0;

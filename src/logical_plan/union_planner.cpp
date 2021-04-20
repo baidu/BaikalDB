@@ -109,7 +109,9 @@ void UnionPlanner::parse_dual_fields() {
         node->mutable_derive_node()->set_tuple_id(slot_desc.tuple_id());
         node->mutable_derive_node()->set_slot_id(slot_desc.slot_id());
         _name_slot_id_mapping[field_name] = slot_desc.slot_id();
-        _ctx->field_column_id_mapping[field_name] = _column_id++;
+        std::string select_name = field_name; 
+        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
+        _ctx->field_column_id_mapping[select_name] = _column_id++;
         _select_exprs.push_back(select_expr);
     }
     _ctx->add_tuple(tuple_desc);
