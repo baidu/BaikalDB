@@ -144,6 +144,7 @@ public:
         }
         bthread_mutex_destroy(&_commit_meta_mutex);
         bthread_mutex_destroy(&_commit_ts_map_lock);
+        bthread_mutex_destroy(&_binlog_param_lock);
     }
 
     void shutdown() {
@@ -195,6 +196,7 @@ public:
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
         bthread_mutex_init(&_commit_meta_mutex, NULL);
         bthread_mutex_init(&_commit_ts_map_lock, NULL);
+        bthread_mutex_init(&_binlog_param_lock, NULL);
         _region_control.store_status(_region_info.status());
         _is_global_index = _region_info.has_main_table_id() &&
                    _region_info.main_table_id() != 0 &&
@@ -994,6 +996,7 @@ private:
     // txn_id:commit_ts
     std::map<uint64_t, int64_t> _commit_ts_map;
     bthread_mutex_t _commit_ts_map_lock;
+    bthread_mutex_t _binlog_param_lock;
     BthreadCond _binlog_cond;
     BinlogParam _binlog_param;
     std::string     _rocksdb_start;

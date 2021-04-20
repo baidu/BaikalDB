@@ -549,6 +549,7 @@ void Region::binlog_update_map_when_scan(const std::map<std::string, ExprValue>&
 
 //on_apply中只有相关start_ts/commit_ts/rollback_ts和map区间有重合时才可以更新map
 int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map) {
+    std::unique_lock<bthread_mutex_t> lck(_binlog_param_lock);
     int ret = 0;
     BinlogDesc binlog_desc;
     int64_t ts = binlog_get_int64_val("ts", field_value_map);
@@ -588,11 +589,16 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
     if (ts > _binlog_param.max_ts_in_map) {
         DB_WARNING("region_id: %ld, type: %s, txn_id: %ld start_ts: %ld, %s commit_ts: %ld, %s max_ts: %ld dont update map", 
             _region_id, binlog_type_name(type), txn_id, start_ts, ts_to_datetime(start_ts).c_str(), ts, ts_to_datetime(ts).c_str(), _binlog_param.max_ts_in_map);
-        return 0;
-    } else {
+//        return 0;
+//    } else {
+    }
+    {
         if (type == FAKE_BINLOG) {
             if (ts <= _binlog_param.min_ts_in_map) {
                 DB_WARNING("region_id: %ld, ts: %ld, FAKE BINLOG < min_ts_in_map: %ld", _region_id, ts, _binlog_param.min_ts_in_map);
+                return 0;
+            }
+            if (_binlog_param.ts_binlog_map.size() > 0) {
                 return 0;
             }
             binlog_desc.binlog_type = type;
@@ -623,6 +629,9 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
             }
         }
 
+        if (ts > _binlog_param.max_ts_in_map) {
+               _binlog_param.max_ts_in_map = ts;
+        }
         if (_binlog_param.ts_binlog_map.size() > 0) {
             _binlog_param.min_ts_in_map = _binlog_param.ts_binlog_map.begin()->first;
         } else {
@@ -635,6 +644,7 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
 
 //扫描一轮或者新写入binlog之后，更新map，更新扫描进度点
 int Region::binlog_update_check_point() {
+    std::unique_lock<bthread_mutex_t> lck(_binlog_param_lock);
     if (_binlog_param.max_ts_in_map == -1 || _binlog_param.min_ts_in_map == -1) {
         return 0;
     }
@@ -680,6 +690,7 @@ int Region::binlog_update_check_point() {
                 _region_id, check_point_ts, ts_to_datetime(check_point_ts).c_str(), 
                 _binlog_param.check_point_ts, ts_to_datetime(_binlog_param.check_point_ts).c_str());
         }
+        return 0;
     } else if (_binlog_param.check_point_ts == check_point_ts) {
         return 0;
     }
@@ -808,6 +819,7 @@ void Region::apply_binlog(const pb::StoreReq& request, braft::Closure* done) {
         }
 
         binlog_update_map_when_apply(field_value_map);
+        binlog_update_check_point();
     } else {
         DB_FATAL("region_id: %ld field value invailde", _region_id);
     }

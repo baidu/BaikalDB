@@ -248,7 +248,7 @@ int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
     _flush_bth.run([this]() {flush_memtable_thread();});
     _snapshot_bth.run([this]() {snapshot_thread();});
     _txn_clear_bth.run([this]() {txn_clear_thread();});
-    _binlog_scan_bth.run([this]() {binlog_scan_thread();});
+//    _binlog_scan_bth.run([this]() {binlog_scan_thread();});
     _binlog_timeout_check_bth.run([this]() {binlog_timeout_check_thread();});
     _binlog_fake_bth.run([this]() {binlog_fake_thread();});
     _has_prepared_tran = true;
