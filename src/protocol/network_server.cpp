@@ -650,7 +650,7 @@ void NetworkServer::stop() {
         // 待现有工作处理完成，需要获取锁
         if (sock->mutex.try_lock()) {
             sock->shutdown = true;
-            MachineDriver::get_instance()->dispatch(sock, _epoll_info, true, false);
+            MachineDriver::get_instance()->dispatch(sock, _epoll_info, true);
         }
     }
     return;
@@ -709,8 +709,7 @@ SmartSocket NetworkServer::create_listen_socket() {
 }
 
 int NetworkServer::make_worker_process() {
-    _last_time.resize(_driver_thread_num);
-    if (MachineDriver::get_instance()->init(_driver_thread_num, _last_time) != 0) {
+    if (MachineDriver::get_instance()->init(_driver_thread_num) != 0) {
         DB_FATAL("Failed to init machine driver.");
         exit(-1);
     }

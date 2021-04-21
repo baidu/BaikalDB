@@ -49,6 +49,7 @@ DEFINE_string(coffline_meta_bns, "group.opera-coffline-baikalMeta-000-bj.FENGCHA
 DEFINE_string(detect_meta_bns, "group.opera-detect-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(pinpai_meta_bns, "group.opera-pinpai-baikalMeta-000-cm.FENGCHAO.all", "");
 DEFINE_string(aladdin_meta_bns, "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all", "");
+DEFINE_string(atomkv_meta_bns, "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all", "");
 DEFINE_string(qa_meta_bns, "group.opera-qa-qabaikalMeta-000-ct.FENGCHAO.all", "");
 #endif
 
@@ -148,6 +149,8 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     _meta_interact_map["pinpai"]->init_internal(FLAGS_pinpai_meta_bns);
     _meta_interact_map["aladdin"] = new MetaServerInteract;
     _meta_interact_map["aladdin"]->init_internal(FLAGS_aladdin_meta_bns);
+    _meta_interact_map["atomkv"] = new MetaServerInteract;
+    _meta_interact_map["atomkv"]->init_internal(FLAGS_atomkv_meta_bns);
     _meta_interact_map["qa"] = new MetaServerInteract;
     _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
 #endif
@@ -255,7 +258,8 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_SET_INDEX_HINT_STATUS
             || request->op_type() == pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK
             || request->op_type() == pb::OP_SUSPEND_DDL_WORK
-            || request->op_type() == pb::OP_RESTART_DDL_WORK) {
+            || request->op_type() == pb::OP_RESTART_DDL_WORK
+            || request->op_type() == pb::OP_UPDATE_MAIN_LOGICAL_ROOM) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,
@@ -621,6 +625,7 @@ static std::string bns_to_plat(const std::string& bns) {
         {"pinpai", "pinpai"},
         {"ao", "pinpai"},
         {"aladdin", "aladdin"},
+        {"atomkv", "atomkv"},
         {"qa", "qa"},
     };
     std::vector<std::string> vec;

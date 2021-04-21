@@ -199,7 +199,6 @@ public:
 
     uint8_t             mysql_cmd = COM_SLEEP;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
-    int32_t             thread_idx;
     int64_t             row_ttl_duration = 0; // used for /*{"duration": xxx}*/ insert ...
     QueryStat           stat_info;      // query execute result status info
     std::shared_ptr<UserInfo> user_info;

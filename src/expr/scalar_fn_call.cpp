@@ -31,6 +31,10 @@ int ScalarFnCall::init(const pb::ExprNode& node) {
         return -1;
     }
     _fn = node.fn();
+    // rand不是const
+    if (node_type() == pb::FUNCTION_CALL && _fn.name() == "rand") {
+        _is_constant = false;
+    }
     return 0;
 }
 

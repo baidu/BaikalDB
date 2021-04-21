@@ -263,6 +263,7 @@ struct TableInfo {
     std::string             short_name;
     std::string             namespace_;
     std::string             resource_tag;
+    std::string             main_logical_room;
     std::vector<int64_t>    indices; // include pk
     std::vector<FieldInfo>  fields;
     std::vector<DistInfo>   dists;

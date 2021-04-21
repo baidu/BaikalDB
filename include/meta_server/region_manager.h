@@ -100,6 +100,10 @@ public:
                     const pb::StoreHeartBeatRequest* request,
                     pb::StoreHeartBeatResponse* response);
     
+    void leader_main_logical_room_check(const pb::StoreHeartBeatRequest* request,
+                    pb::StoreHeartBeatResponse* response,
+                    std::set<int64_t>& trans_leader_region_ids);
+    
     void peer_load_balance(const std::unordered_map<int64_t, int64_t>& add_peer_counts,
                 std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
                 const std::string& instance,

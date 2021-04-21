@@ -156,7 +156,8 @@ public:
         return count;
     }
     
-    int64_t get_instance_count(const std::string& resource_tag) {
+    int64_t get_instance_count(const std::string& resource_tag, 
+            std::map<std::string, int64_t>* room_count = nullptr) {
         int64_t count = 0; 
         BAIDU_SCOPED_LOCK(_instance_mutex);
         for (auto& instance_info : _instance_info) {
@@ -164,6 +165,9 @@ public:
                 && (instance_info.second.instance_status.state == pb::NORMAL
                 || instance_info.second.instance_status.state == pb::FAULTY)) {
                 ++count;
+                if (room_count != nullptr) {
+                    (*room_count)[instance_info.second.logical_room]++;
+                }
             }
         }
         return count;

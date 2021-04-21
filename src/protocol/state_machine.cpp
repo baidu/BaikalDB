@@ -1670,6 +1670,9 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         }
         oss << " ]";
     }
+    if (!info.main_logical_room.empty()) {
+        oss << ", \"main_logical_room\": \"" << info.main_logical_room << "\"";
+    }
 
     if (info.partition_num > 1) {
         oss << ", \"column\":\"" << info.partition_info.field_info().field_name() << "\"";
@@ -3359,7 +3362,6 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         //client->state = STATE_ERROR;
         return false;
     }
-    client->query_ctx->thread_idx = client->thread_idx;
     client->query_ctx->client_conn = client.get();
     client->query_ctx->stat_info.sql_length = client->query_ctx->sql.size();
     client->query_ctx->charset = client->charset_name;

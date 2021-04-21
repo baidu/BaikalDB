@@ -281,7 +281,7 @@ void TableManager::update_table_internal(const pb::MetaManagerRequest& request, 
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
-    set_table_pb(mem_schema_pb);  
+    set_table_pb(mem_schema_pb);
     std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
     put_incremental_schemainfo(apply_index, schema_infos);   
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
@@ -790,6 +790,16 @@ void TableManager::update_split_lines(const pb::MetaManagerRequest& request,
         });
 }
 
+void TableManager::set_main_logical_room(const pb::MetaManagerRequest& request,
+                                      const int64_t apply_index,
+                                      braft::Closure* done) {
+    update_table_internal(request, apply_index, done, 
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+                mem_schema_pb.set_main_logical_room(request.table_info().main_logical_room());
+                mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+        });
+}
+
 void TableManager::update_schema_conf(const pb::MetaManagerRequest& request,
                                        const int64_t apply_index,
                                        braft::Closure* done) {
@@ -899,12 +909,20 @@ void TableManager::update_dists(const pb::MetaManagerRequest& request,
             mem_schema_pb.set_version(mem_schema_pb.version() + 1);
             mem_schema_pb.clear_dists();
             mem_schema_pb.clear_main_logical_room();
+            std::string main_logical_room;
+            if (request.table_info().has_main_logical_room()) {
+                main_logical_room = request.table_info().main_logical_room();
+            }
+            bool found = false;
             for (auto& dist : request.table_info().dists()) {
                 auto dist_ptr = mem_schema_pb.add_dists();
                 *dist_ptr = dist;
+                if (main_logical_room == dist.logical_room()) {
+                    found = true;
+                }
             }
-            if (request.table_info().has_main_logical_room()) {
-                mem_schema_pb.set_main_logical_room(request.table_info().main_logical_room());
+            if (found) {
+                mem_schema_pb.set_main_logical_room(main_logical_room);
             }
             if (request.table_info().has_replica_num()) {
                 mem_schema_pb.set_replica_num(request.table_info().replica_num());
@@ -1566,7 +1584,7 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
             *(init_region_request.mutable_schema_info()) = simple_table_info;
             init_region_request.set_snapshot_times(2);
             init_regions->push_back(init_region_request);
-            DB_WARNING("init_region_request: %s", init_region_request.DebugString().c_str());
+            DB_WARNING("init_region_request: %s", init_region_request.ShortDebugString().c_str());
             ++instance_count;
         }
     }

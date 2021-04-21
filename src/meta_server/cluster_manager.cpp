@@ -1079,8 +1079,7 @@ bool ClusterManager::whether_legal_for_select_instance(
     if (_instance_info.find(candicate_instance) == _instance_info.end()) {
         return false;
     }
-    if (logical_room.size() != 0
-            && _instance_info[candicate_instance].logical_room != logical_room) {
+    if (!logical_room.empty() && _instance_info[candicate_instance].logical_room != logical_room) {
         return false;
     }
     if (_instance_info[candicate_instance].instance_status.state != pb::NORMAL

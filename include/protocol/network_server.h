@@ -91,8 +91,6 @@ private:
     SmartSocket     _service = nullptr;  // Server socket.
     EpollInfo*      _epoll_info = nullptr;      // Epoll info and fd mapping.
 
-    // the last action time for each thread
-    std::vector<ThreadTimeStamp> _last_time;
     Bthread         _conn_check_bth;
     Bthread         _heartbeat_bth;
     Bthread         _other_heartbeat_bth;

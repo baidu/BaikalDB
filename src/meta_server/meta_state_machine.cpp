@@ -391,6 +391,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->update_split_lines(request, iter.index(), done);
             break;
         }
+        case pb::OP_UPDATE_MAIN_LOGICAL_ROOM: {
+            TableManager::get_instance()->set_main_logical_room(request, iter.index(), done);
+            break;
+        }
         case pb::OP_UPDATE_SCHEMA_CONF: {
             TableManager::get_instance()->update_schema_conf(request, iter.index(), done);
             break;
@@ -680,7 +684,7 @@ void MetaStateMachine::on_leader_stop() {
 bool MetaStateMachine::whether_can_decide() {
     return _node.is_leader() &&
             ((butil::gettimeofday_us()- _leader_start_timestmap) >
-                2LL * FLAGS_balance_periodicity * FLAGS_store_heart_beat_interval_us );
+                2LL * FLAGS_balance_periodicity * FLAGS_store_heart_beat_interval_us);
 }
 }//namespace
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

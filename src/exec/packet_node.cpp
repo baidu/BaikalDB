@@ -64,13 +64,12 @@ int PacketNode::init(const pb::PlanNode& node) {
 int PacketNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
     int i = 0;
-    for (auto expr : _projections) {
-        //类型推导
-        ret = expr->expr_optimize();
-        if (ret < 0) {
-            DB_WARNING("type_inferer fail");
-            return ret;
-        }
+    ret = common_expr_optimize(&_projections);
+    if (ret < 0) {
+        DB_WARNING("common_expr_optimize fail");
+        return ret;
+    }
+    for (auto& expr : _projections) {
         //db table_name先不填，后续有影响再填
         _fields[i].type = to_mysql_type(expr->col_type());
         _fields[i].flags = 1;

@@ -27,8 +27,6 @@ class DriverTaskHandler;
 class MachineDriver;
 //const int PID_MAX = 65536;
 
-// pair<thread_id, last active timestamp of the thread>
-typedef std::pair<pid_t, time_t> ThreadTimeStamp;
 typedef std::shared_ptr<DriverTask> SmartDriverTask;
 
 // 将ExecutorUnit封装成可以执行的任务
@@ -79,7 +77,7 @@ public:
 
     static void* bthread_callback(void* void_arg);
 
-    int init(uint32_t thread_num, std::vector<ThreadTimeStamp> &time_stamp);
+    int init(uint32_t thread_num);
     void stop() {}
     void join() {}
 
@@ -92,9 +90,7 @@ public:
 
 public:
     // map from tid(sys allocated) to thread index (0 to n-1) 
-    //int32_t                         _thread_idx_mapping[PID_MAX];
     std::mutex                      _mutex;
-    std::vector<ThreadTimeStamp>*   _time_stamp;
     std::atomic<int>*               _max_idx;
     uint32_t                        _thread_num;
 

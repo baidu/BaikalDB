@@ -181,6 +181,15 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
 
     if (_multi_reverse_index.size() > 0) {
+        // 索引条件下推，减少主表查询次数
+        index_condition_pushdown();
+        for (auto expr : _index_conjuncts) {
+            ret = expr->open();
+            if (ret < 0) {
+                DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
+                return ret;
+            }
+        }
         for (auto id : _multi_reverse_index) {
             const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(id);
             auto index_id = pos_index.index_id();
@@ -256,9 +265,6 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     // 索引条件下推，减少主表查询次数
     index_condition_pushdown();
     for (auto expr : _index_conjuncts) {
-        //pb::Expr pb;
-        //ExprNode::create_pb_expr(&pb, expr);
-        //DB_NOTICE("where:%s", pb.ShortDebugString().c_str());
         ret = expr->open();
         if (ret < 0) {
             DB_WARNING_STATE(state, "Expr::open fail:%d", ret);

@@ -82,7 +82,7 @@ public:
         }
         return 0;
     }
-    const std::string& get_resource_tag(const int64_t& database_id) {
+    const std::string get_resource_tag(const int64_t& database_id) {
          BAIDU_SCOPED_LOCK(_database_mutex);
          if (_database_info_map.find(database_id) == _database_info_map.end()) {
              return "";

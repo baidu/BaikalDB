@@ -61,6 +61,41 @@ int ExecNode::expr_optimize(QueryContext* ctx) {
     return ret;
 }
 
+int ExecNode::common_expr_optimize(std::vector<ExprNode*>* exprs) {
+    int ret = 0;
+    for (auto& expr : *exprs) {
+        //类型推导
+        ret = expr->expr_optimize();
+        if (ret < 0) {
+            DB_WARNING("type_inferer fail");
+            return ret;
+        }
+        if (expr->is_row_expr()) {
+            continue;
+        }
+        if (!expr->is_constant()) {
+            continue;
+        }
+        if (expr->is_literal()) {
+            continue;
+        }
+        // place holder被替换会导致下一次exec参数对不上
+        // TODO 后续得考虑普通查询计划复用，表达式如何对上
+        if (expr->has_place_holder()) {
+            continue;
+        }
+        ret = expr->open();
+        if (ret < 0) {
+            return ret;
+        }
+        ExprValue value = expr->get_value(nullptr);
+        expr->close();
+        delete expr;
+        expr = new Literal(value);
+    }
+    return ret;
+}
+
 int ExecNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     if (_children.size() > 0) {
         _children[0]->predicate_pushdown(input_exprs); 

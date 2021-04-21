@@ -19,13 +19,7 @@
 
 namespace baikaldb {
 
-int MachineDriver::init(uint32_t thread_num, std::vector<ThreadTimeStamp> &time_stamp) {
-    _time_stamp = &time_stamp;
-    for (uint32_t idx = 0; idx < thread_num; ++idx) {
-        // thread id initialized to -1
-        (*_time_stamp)[idx].first = -1;
-        (*_time_stamp)[idx].second = time(NULL);
-    }
+int MachineDriver::init(uint32_t thread_num) {
     _thread_num = thread_num;
     _max_idx = new std::atomic<int>(0);
     return 0;
@@ -47,24 +41,6 @@ void* MachineDriver::bthread_callback(void* void_arg) {
     //     DB_FATAL("tid: %d overflow PID_MAX", tid);
     //     exit(-1);
     // }
-    static thread_local int thread_idx = -1;
-    if (thread_idx == -1) {
-        _driver->_mutex.lock();
-        thread_idx = (*_driver->_max_idx)++;
-        _driver->_mutex.unlock();
-        DB_NOTICE("tid: %d, idx: %d", tid, thread_idx);
-    }
-
-    task->socket->thread_idx = thread_idx;
-    if ((uint32_t)thread_idx >= _driver->_thread_num) {
-        DB_FATAL("tid: %d, thread_idx: %d, _thread_num: %d", tid, thread_idx, _driver->_thread_num);
-        exit(-1);
-    }
-    // get real thread id only for the first thread call
-    if ((*_driver->_time_stamp)[thread_idx].first == -1) {
-        (*_driver->_time_stamp)[thread_idx].first = tid;
-    }
-    (*_driver->_time_stamp)[thread_idx].second = time(NULL);
 
     StateMachine::get_instance()->run_machine(task->socket, task->epoll_info, task->shutdown);
     task->socket->mutex.unlock();

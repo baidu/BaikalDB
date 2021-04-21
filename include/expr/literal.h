@@ -188,6 +188,9 @@ public:
     }
 
     void cast_to_col_type(pb::PrimitiveType type) {
+        if (is_datetime_specic(type) && _value.is_numberic()) {
+            _value.cast_to(pb::STRING);
+        }
         _value.cast_to(type);
         value_to_node_type();
     }

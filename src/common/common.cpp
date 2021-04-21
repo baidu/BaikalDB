@@ -471,7 +471,7 @@ int get_physical_room(const std::string& ip_and_port_str, std::string& physical_
     physical_room = std::string(host, begin + 1, end - begin -1);
     return 0;
 #else
-    physical_room = FLAGS_default_physical_room;  
+    physical_room = FLAGS_default_physical_room;
     return 0;
 #endif
 }
