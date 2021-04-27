@@ -229,6 +229,7 @@ void FunctionManager::register_operators() {
     register_object_ret("tdigest_location", tdigest_location, pb::DOUBLE);
 
     register_object_ret("version", version, pb::STRING);
+    register_object_ret("last_insert_id", last_insert_id, pb::INT64);
 }
 
 int FunctionManager::init() {

@@ -141,6 +141,7 @@ ExprValue tdigest_percentile(const std::vector<ExprValue>& input);
 ExprValue tdigest_location(const std::vector<ExprValue>& input);
 // other
 ExprValue version(const std::vector<ExprValue>& input);
+ExprValue last_insert_id(const std::vector<ExprValue>& input);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

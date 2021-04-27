@@ -670,7 +670,7 @@ int PacketNode::pack_ok(int num_affected_rows, NetworkSocket* client) {
     if (_send_buf->_size > 0) {
         _send_buf->byte_array_clear();
     }
-    int64_t last_insert_id = (op_type() == pb::OP_INSERT)? client->last_insert_id : 0;
+    int64_t last_insert_id = (op_type() == pb::OP_INSERT || op_type() == pb::OP_UPDATE)? client->last_insert_id : 0;
 
     DataBuffer tmp_buf;
     tmp_buf.byte_array_append_length_coded_binary(0);

@@ -542,6 +542,9 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         auto expr = _update_exprs[i];
         record->set_value(record->get_field_by_tag(slot.field_id()),
                 expr->get_value(row).cast_to(slot.slot_type()));
+        if (expr->has_last_insert_id()) {
+            state->last_insert_id = expr->get_value(row).cast_to(slot.slot_type()).get_numberic<int64_t>();
+        }
     }
     ret = insert_row(state, record, true);
     if (ret < 0) {

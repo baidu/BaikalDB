@@ -1375,7 +1375,7 @@ int LogicalPlanner::handle_scalar_subquery(const parser::FuncExpr* func_item,
 int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item, 
         pb::Expr& expr, parser::FuncType op, const CreateExprOptions& options) {
     if (op == parser::FT_COMMON) {
-        if (item->fn_name.to_lower() == "last_insert_id") {
+        if (item->fn_name.to_lower() == "last_insert_id" && item->children.size() == 0) {
             pb::ExprNode* node = expr.add_nodes();
             node->set_node_type(pb::INT_LITERAL);
             node->set_col_type(pb::INT64);

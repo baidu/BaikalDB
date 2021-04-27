@@ -1744,6 +1744,9 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         response.set_scan_rows(state.num_scan_rows());
         response.set_filter_rows(state.num_filter_rows());
         response.set_errcode(pb::SUCCESS);
+        if (state.last_insert_id != INT64_MIN) {
+            response.set_last_insert_id(state.last_insert_id);
+        }
     } else {
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("txn commit failed.");
@@ -2352,6 +2355,9 @@ void Region::on_apply(braft::Iterator& iter) {
                     }
                     if (res.has_filter_rows()) {
                         ((DMLClosure*)done)->response->set_filter_rows(res.filter_rows());
+                    }
+                    if (res.has_last_insert_id()) {
+                        ((DMLClosure*)done)->response->set_last_insert_id(res.last_insert_id());
                     }
                 }
                 //DB_WARNING("dml_1pc %s", res.trace_nodes().DebugString().c_str());

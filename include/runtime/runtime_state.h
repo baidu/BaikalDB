@@ -374,6 +374,7 @@ public:
     std::string       raft_error_msg;
     ExplainType       explain_type = EXPLAIN_NULL;
     std::shared_ptr<CMsketch> cmsketch = nullptr;
+    int64_t         last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
 
     // global index ddl 使用
     int32_t             ddl_scan_size = 0;

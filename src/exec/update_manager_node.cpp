@@ -144,7 +144,7 @@ int UpdateManagerNode::open(RuntimeState* state) {
             record->encode(*row);
             _partition_record = record;
         }
-        update_record(record);
+        update_record(state, record);
         if (open_binlog) {
             std::string* row = _update_binlog.add_insert_rows();
             record->encode(*row);
@@ -181,7 +181,7 @@ int UpdateManagerNode::open(RuntimeState* state) {
     return ret;
 }
 
-void UpdateManagerNode::update_record(SmartRecord record) {
+void UpdateManagerNode::update_record(RuntimeState* state, SmartRecord record) {
     _update_row->clear();
     MemRow* row = _update_row.get();
     if (_tuple_desc != nullptr) {
@@ -196,6 +196,10 @@ void UpdateManagerNode::update_record(SmartRecord record) {
         auto expr = _update_exprs[i];
         record->set_value(record->get_field_by_tag(slot.field_id()),
             expr->get_value(row).cast_to(slot.slot_type()));
+        if (expr->has_last_insert_id()) {
+            state->last_insert_id = expr->get_value(row).cast_to(slot.slot_type()).get_numberic<int64_t>();
+            state->client_conn()->last_insert_id = state->last_insert_id;
+        }
     }
 }
 }

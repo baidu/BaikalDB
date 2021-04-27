@@ -53,7 +53,7 @@ public:
     void set_update_exprs(std::vector<ExprNode*>& update_exprs) {
         _update_exprs = update_exprs;
     }
-    void update_record(SmartRecord record);
+    void update_record(RuntimeState* state, SmartRecord record);
 
 private:
     int64_t _table_id = -1;

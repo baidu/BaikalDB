@@ -21,6 +21,7 @@
 #include "proto/plan.pb.h"
 #include "proto/meta.interface.pb.h"
 #include "mem_row_descriptor.h"
+#include "runtime_state.h"
 
 namespace baikaldb { 
 

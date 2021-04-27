@@ -93,6 +93,14 @@ public:
     bool has_null() const {
         return _has_null;
     }
+    virtual bool has_last_insert_id() const {
+        for (auto c : _children) {
+            if (c->has_last_insert_id()) {
+                return true;
+            }
+        }
+        return false;
+    }
     bool is_row_expr() {
         return _node_type == pb::ROW_EXPR;
     }

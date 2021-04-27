@@ -144,6 +144,7 @@ message StoreRes {
     repeated bytes binlogs       = 19; //直接存储binlog序列化结果，由capture反序列化
     repeated int64 commit_ts     = 20; //与上面的binlog一一对应
     optional PeerStatus region_status = 21;
+    optional int64 last_insert_id = 22;
 };
 message InitRegion {
     required RegionInfo region_info     = 1;
