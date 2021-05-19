@@ -85,7 +85,6 @@ enum OpType {
     OP_RESTORE_REGION                       = 148; //恢复store误删的region
     OP_OPEN_UNSAFE_DECISION                 = 149; //开启删表和log_index=0时自动删除region逻辑10分钟
     OP_SET_INSTANCE_MIGRATE                 = 150; //手工置实例状态为MIGRATE，迁移用
-    OP_PREPARE_V2                           = 151; // deprecated
     OP_ADD_ID_FOR_AUTO_INCREMENT            = 152; //添加自增主键
     OP_DROP_ID_FOR_AUTO_INCREMENT           = 153; //删除自增主键
     OP_CLOSE_LOAD_BALANCE                   = 154;

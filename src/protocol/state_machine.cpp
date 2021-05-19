@@ -16,6 +16,7 @@
 #include <boost/algorithm/string.hpp>
 #include "network_server.h"
 #include "query_context.h"
+#include "store_interact.hpp"
 #include <rapidjson/reader.h>
 #include <rapidjson/document.h>
 #include <boost/algorithm/string/join.hpp>
@@ -1051,6 +1052,8 @@ bool StateMachine::_query_process(SmartSocket client) {
                 ret = _handle_client_query_show_warnings(client);
             } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_REGION)) {
                 ret = _handle_client_query_show_region(client);
+            } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_STORE_REGION)) {
+                ret = _handle_client_query_show_store_region(client);
             } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_SOCKET)) {
                 ret = _handle_client_query_show_socket(client);
             } else if (boost::starts_with(client->query_ctx->sql, SQL_SHOW_PROCESSLIST)) {
@@ -2475,9 +2478,16 @@ bool StateMachine::_handle_client_query_show_virtual_index(SmartSocket client) {
 }
 
 bool StateMachine::_handle_client_query_show_region(SmartSocket client) {
-    int region_id_pos = client->query_ctx->sql.find("_");
-    int64_t region_id = strtoll(client->query_ctx->sql.substr(region_id_pos + 1).c_str(), NULL, 10);
-    DB_WARNING("region_id: %ld", region_id);
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+    if (split_vec.size() != 4) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    int64_t table_id = strtoll(split_vec[2].c_str(), NULL, 10);
+    int64_t region_id = strtoll(split_vec[3].c_str(), NULL, 10);
+    DB_WARNING("table_id:%ld, region_id: %ld", table_id, region_id);
 
     // Make fields.
     std::vector<ResultField> fields;
@@ -2502,7 +2512,88 @@ bool StateMachine::_handle_client_query_show_region(SmartSocket client) {
 
     SchemaFactory* factory = SchemaFactory::get_instance();
     pb::RegionInfo region_info;
-    if (factory->get_region_info(region_id, region_info) == 0) {
+    if (factory->get_region_info(table_id, region_id, region_info) == 0) {
+        int64_t table_id = region_info.table_id();
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        auto index_info = factory->get_index_info(table_id);
+        TableKey start_key(region_info.start_key());
+        TableKey end_key(region_info.end_key());
+        region_info.set_start_key(start_key.decode_start_key_string(index_info));
+        region_info.set_end_key(end_key.decode_start_key_string(index_info));
+        std::vector<std::string> row;
+        row.push_back(std::to_string(region_id));
+        row.push_back(region_info.ShortDebugString().c_str());
+        rows.push_back(row);
+    } else {
+        DB_WARNING("region: %ld does not exist", region_id);
+    }
+
+    // Make mysql packet.
+    MysqlWrapper* wrapper = MysqlWrapper::get_instance();
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool StateMachine::_handle_client_query_show_store_region(SmartSocket client) {
+    if (client == nullptr || client->query_ctx == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, client->query_ctx->sql,
+            boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+    if (split_vec.size() != 5) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    std::string store_addr = split_vec[3];
+    int64_t region_id = strtoll(split_vec[4].c_str(), NULL, 10);
+    DB_WARNING("region_id: %ld", region_id);
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    do {
+        ResultField field;
+        field.name = "region_id";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    do {
+        ResultField field;
+        field.name = "region_info";
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.push_back(field);
+    } while (0);
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+
+    pb::RegionIds req;
+    req.add_region_ids(region_id);
+    pb::StoreRes res;
+    StoreInteract interact(store_addr);
+    interact.send_request("query_region", req, res);
+    pb::RegionInfo region_info;
+    if (res.regions_size() == 1) {
+        region_info = res.regions(0);
+        int64_t table_id = region_info.table_id();
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        auto index_info = factory->get_index_info(table_id);
+        TableKey start_key(region_info.start_key());
+        TableKey end_key(region_info.end_key());
+        region_info.set_start_key(start_key.decode_start_key_string(index_info));
+        region_info.set_end_key(end_key.decode_start_key_string(index_info));
         std::vector<std::string> row;
         row.push_back(std::to_string(region_id));
         row.push_back(region_info.ShortDebugString().c_str());

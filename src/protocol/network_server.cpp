@@ -41,7 +41,7 @@ DEFINE_int32(slow_query_timeout_s, 60, "slow query threshold (second)");
 DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
 DEFINE_int32(backup_pv_threshold, 50, "backup_pv_threshold");
 DEFINE_double(backup_error_percent, 0.5, "use backup table if backup_error_percent > 0.5");
-DEFINE_int64(health_check_interval_us, 5 * 1000 * 1000, "health_check_interval_us");
+DEFINE_int64(health_check_interval_us, 10 * 1000 * 1000, "health_check_interval_us");
 DEFINE_bool(need_health_check, true, "need_health_check");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
@@ -308,7 +308,7 @@ void NetworkServer::print_agg_sql() {
                     std::string field_desc = "-";
                     index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
                     butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
-                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter="
+                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_err="
                             "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] sql_agg: %s "
                             "op_version_desc=[%ld\t%s\t%s\t%s]", 
                         1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
@@ -385,7 +385,7 @@ void NetworkServer::store_health_check() {
             brpc::ChannelOptions option;
             option.max_retry = 1;
             option.connect_timeout_ms = 1000;
-            option.timeout_ms = 5000;
+            option.timeout_ms = 2000;
             int ret = channel.Init(addr.c_str(), &option);
             if (ret != 0) {
                 DB_WARNING("init failed, addr:%s, ret:%d", addr.c_str(), ret);
@@ -436,7 +436,7 @@ void NetworkServer::connection_timeout_check() {
         std::unordered_map<std::string, InstanceDBStatus> info_map;
         factory->get_all_instance_status(&info_map);
         for (auto& pair : info_map) {
-            if (pair.second.status == pb::DEAD) {
+            if (pair.second.status == pb::DEAD && pair.second.need_cancel) {
                 need_cancel_addrs.emplace(pair.first);
             }
         }
@@ -445,6 +445,9 @@ void NetworkServer::connection_timeout_check() {
         if (need_cancel_addrs.size() > max_dead_cnt) {
             DB_WARNING("too many dead instance, size: %lu/%lu", need_cancel_addrs.size(), info_map.size());
             need_cancel_addrs.clear();
+        }
+        for (auto& addr : need_cancel_addrs) {
+            factory->update_instance_canceled(addr);
         }
 
         time_t time_now = time(NULL);

@@ -321,6 +321,14 @@ public:
         _open_binlog = flag;
     }
 
+    void set_single_txn_need_separate_execute(bool flag) {
+        _single_txn_need_separate_execute = flag;
+    }
+
+    bool single_txn_need_separate_execute() {
+        return _single_txn_need_separate_execute || _open_binlog;
+    }
+
     bool is_expr_subquery() {
         return _is_expr_subquery;
     }
@@ -381,6 +389,7 @@ private:
     bool _is_cancelled = false;
     bool _eos          = false;
     bool _open_binlog  = false;
+    bool _single_txn_need_separate_execute  = false;
     bool _is_expr_subquery = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
     MemRowDescriptor _mem_row_desc;

@@ -85,8 +85,7 @@ int InsertPlanner::gen_select_plan() {
         if (ret < 0) {
             return -1;
         }
-        size_t columns_size = _select_names.size();
-        if (_fields.size() + _default_fields.size() != columns_size) {
+        if (_fields.size() != _select_names.size()) {
             _ctx->stat_info.error_code = ER_WRONG_VALUE_COUNT_ON_ROW;
             _ctx->stat_info.error_msg << "Column count doesn't match value count at row 1";
             return -1;            
@@ -170,10 +169,8 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
     auto& tbl = *tbl_ptr;
     if (_insert_stmt->columns.size() == 0) {
         _fields = tbl.fields;
-        if (_ctx->new_prepared) {
-            for (auto& field : _fields) {
-                node->add_field_ids(field.id);
-            }
+        for (auto& field : _fields) {
+            node->add_field_ids(field.id);
         }
         return 0;
     }
@@ -195,9 +192,7 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
         }
         _fields.push_back(*field_info);
         field_ids.insert(field_info->id);
-        if (_ctx->new_prepared) {
-            node->add_field_ids(field_info->id);
-        }
+        node->add_field_ids(field_info->id);
     }
     for (auto& field : tbl.fields) {
         if (field_ids.count(field.id) == 0) {
@@ -238,28 +233,12 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
                 }
             }
             for (auto& field : _default_fields) {
-                if (0 != fill_default_value(row, field)) {
+                if (0 != _factory->fill_default_value(row, field)) {
                     return -1;
                 }
             }
             _ctx->insert_records.push_back(row);
         }
-    }
-    return 0;
-}
-
-int InsertPlanner::fill_default_value(SmartRecord record, FieldInfo& field) {
-    if (field.default_expr_value.is_null()) {
-        return 0;
-    }
-    ExprValue default_value = field.default_expr_value;
-    if (field.default_value == "(current_timestamp())") {
-        default_value = ExprValue::Now();
-        default_value.cast_to(field.type);
-    }
-    if (0 != record->set_value(record->get_field_by_tag(field.id), default_value)) {
-        DB_WARNING("fill insert value failed");
-        return -1;
     }
     return 0;
 }
@@ -302,7 +281,7 @@ int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartR
     delete expr;
     // fill default
     if (value.is_null()) {
-        return fill_default_value(record, field);
+        return _factory->fill_default_value(record, field);
     }
     if (0 != record->set_value(record->get_field_by_tag(field.id), value)) {
         DB_WARNING("fill insert value failed");

@@ -149,6 +149,9 @@ int LoadNode::open(RuntimeState* state) {
 }
 
 ExprValue LoadNode::create_field_value(FieldInfo& field_info, std::string& str_val, bool& is_legal) {
+    if (str_val == "NULL" || str_val == "null") {
+        return ExprValue::Null();
+    }
     switch (field_info.type) {
         case pb::BOOL: {
             ExprValue value(pb::BOOL);

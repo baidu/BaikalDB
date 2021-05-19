@@ -94,11 +94,6 @@ int main(int argc, char* argv[]) {
                         local->scan_rate_limiting();
                     }
 
-                    // 统计
-                    if (local) {
-                        local->scan_statistics_adder();
-                    }
-
                     bthread_usleep(FLAGS_qos_sleep_us);
                     if (local_time.get_time() > FLAGS_peer_thread_us) {
                         break;

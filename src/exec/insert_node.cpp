@@ -45,7 +45,7 @@ int InsertNode::init(const pb::PlanNode& node) {
         _update_exprs.push_back(up_expr);
     }
     for (auto id : insert_node.field_ids()) {
-        _prepared_field_ids.push_back(id);
+        _selected_field_ids.push_back(id);
     }
 
     for (auto& expr : insert_node.insert_values()) {
@@ -170,12 +170,12 @@ int InsertNode::expr_optimize(QueryContext* ctx) {
 }
 
 int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert_records) {
-    if (_prepared_field_ids.size() == 0) {
+    if (_selected_field_ids.size() == 0) {
         DB_WARNING("not execute a prepared stmt");
         return 0;
     }
-    if ((_insert_values.size() % _prepared_field_ids.size()) != 0) {
-        DB_WARNING("_prepared_field_ids should not be empty()");
+    if ((_insert_values.size() % _selected_field_ids.size()) != 0) {
+        DB_WARNING("_selected_field_ids should not be empty()");
         return -1;
     }
     auto tbl_ptr = _factory->get_table_info_ptr(_table_id);
@@ -192,7 +192,7 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
     for (auto& field : tbl.fields) {
         table_field_map.insert({field.id, &field});
     }
-    for (auto id : _prepared_field_ids) {
+    for (auto id : _selected_field_ids) {
         if (table_field_map.count(id) == 0) {
             DB_WARNING("No field for field id: %d", id);
             return -1;
@@ -205,11 +205,11 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
             default_fields.push_back(&field);
         }
     }
-    size_t row_size = _insert_values.size() / _prepared_field_ids.size();
+    size_t row_size = _insert_values.size() / _selected_field_ids.size();
     for (size_t row_idx = 0; row_idx < row_size; ++row_idx) {
         SmartRecord row = _factory->new_record(_table_id);
-        for (size_t col_idx = 0; col_idx < _prepared_field_ids.size(); ++col_idx) {
-            size_t idx = row_idx * _prepared_field_ids.size() + col_idx;
+        for (size_t col_idx = 0; col_idx < _selected_field_ids.size(); ++col_idx) {
+            size_t idx = row_idx * _selected_field_ids.size() + col_idx;
             ExprNode* expr = _insert_values[idx];
             if (0 != expr->open()) {
                 DB_WARNING("expr open fail");
@@ -225,14 +225,8 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
             expr->close();
         }
         for (auto& field : default_fields) {
-            ExprValue default_value = field->default_expr_value;
-            if (field->default_value == "(current_timestamp())") {
-                default_value = ExprValue::Now();
-                default_value.cast_to(field->type);
-            }
-            if (0 != row->set_value(row->get_field_by_idx(field->pb_idx), default_value)) {
-                DB_WARNING("fill insert value failed");
-                return -1;
+            if (0 != _factory->fill_default_value(row, *field)) {
+                    return -1;
             }
         }
 

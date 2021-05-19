@@ -35,6 +35,7 @@ struct DMLClosure : public braft::Closure {
     BthreadCond* clear_applying_txn_cond;
     bool is_clear_applying_txn = false;
     int64_t txn_num_increase_rows = 0;
+    int64_t applied_index = 0;
 };
 
 struct BinlogClosure : public braft::Closure {

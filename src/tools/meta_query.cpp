@@ -35,7 +35,10 @@ int fun_level(std::map<int64_t, const pb::QueryRegion*>& region_map, const pb::Q
     if (info.parent() == 0) {
         return 0;
     } else {
-        return 1 + fun_level(region_map, *region_map[info.parent()]);
+        if (region_map.count(info.parent()) == 1) {
+            return 1 + fun_level(region_map, *region_map[info.parent()]);
+        }
+        return 0;
     }
 };
 

@@ -2339,20 +2339,29 @@ void TableManager::partition_update_startkey_regionid_map(int64_t table_id, std:
                  table_id, str_to_hex(min_start_key).c_str());
         return;
     }
+    int del_count = 0;
+    MergeStatus tmp_status = MERGE_IDLE;
     while (iter != startkey_regiondesc_map.end()) {
         if (!max_end_key.empty() && iter->first == max_end_key) {
             break;
         }
         auto delete_iter = iter++;
-        DB_WARNING("table_id:%ld startkey:%s regiong_id:%ld merge_status:%d, erase",
+        DB_WARNING("table_id:%ld startkey:%s region_id:%ld merge_status:%d, erase",
                    table_id, str_to_hex(delete_iter->first).c_str(), 
                    delete_iter->second.region_id, delete_iter->second.merge_status);
+        tmp_status = delete_iter->second.merge_status;
         startkey_regiondesc_map.erase(delete_iter->first);
+        del_count++;
+    }
+
+    // 1个region替换1个时，merge_status不变:改了peers
+    if (key_id_map.size() != 1 || del_count != 1) {
+        tmp_status = MERGE_IDLE;
     }
     for (auto& key_id : key_id_map) {
         RegionDesc region;
         region.region_id = key_id.second;
-        region.merge_status = MERGE_IDLE;
+        region.merge_status = tmp_status;
         startkey_regiondesc_map[key_id.first] = region;
         DB_WARNING("table_id:%ld, startkey:%s region_id:%ld insert", 
                    table_id, str_to_hex(key_id.first).c_str(), key_id.second);

@@ -51,10 +51,13 @@ public:
     //std::vector<int32_t>& field_ids() {
     //    return _field_ids;
     //}
+    std::vector<int32_t>& prepared_field_ids() {
+        return _selected_field_ids;
+    }
 
 private:
     std::vector<SmartRecord> _records;
-    std::vector<int32_t>     _prepared_field_ids;
+    std::vector<int32_t>     _selected_field_ids;
     std::vector<ExprNode*>   _insert_values;
 };
 }

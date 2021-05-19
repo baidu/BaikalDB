@@ -47,7 +47,7 @@ inline int map_idx(int64_t region_id) {
     return region_id % max_region_map_count;
 }
 
-
+using DoubleBufRegion = butil::DoublyBufferedData<std::unordered_map<int64_t, SmartRegion>>;
 
 class Store : public pb::StoreService {
 public:
@@ -188,35 +188,59 @@ public:
         return _has_prepared_tran;
     }
     SmartRegion get_region(int64_t region_id) {
-        if (_region_mapping.count(region_id) == 0) {
-            return SmartRegion();
-        } else {
-            return _region_mapping.get(region_id);
+        DoubleBufRegion::ScopedPtr ptr;
+        if (_region_mapping.Read(&ptr) == 0) {
+            auto iter = ptr->find(region_id);
+            if (iter != ptr->end()) {
+                return iter->second;
+            } 
         }
+        return SmartRegion();
     }
     void set_region(SmartRegion& region) {
         if (region == NULL) {
             return;
         }
-        auto region_id = region->get_region_id();
-        _region_mapping.set(region_id, region);
+        auto call = [](std::unordered_map<int64_t, SmartRegion>& map, const SmartRegion& region) {
+            map[region->get_region_id()] = region;
+            return 1;
+        };
+        _region_mapping.Modify(call, region);
     }
     void erase_region(int64_t region_id) {
-        _region_mapping.erase(region_id);
+        auto call = [](std::unordered_map<int64_t, SmartRegion>& map, int64_t region_id) {
+            map.erase(region_id);
+            return 1;
+        };
+        _region_mapping.Modify(call, region_id);
     }
-    void traverse_region_map(const std::function<void(SmartRegion& region)>& call) {
-        _region_mapping.traverse(call);
+    void traverse_region_map(const std::function<void(const SmartRegion& region)>& call) {
+        DoubleBufRegion::ScopedPtr ptr;
+        if (_region_mapping.Read(&ptr) == 0) {
+            for (auto& pair : *ptr) {
+                call(pair.second);
+            }
+        }
     }
-    void traverse_copy_region_map(const std::function<void(SmartRegion& region)>& call) {
-        _region_mapping.traverse_copy(call);
+    void traverse_copy_region_map(const std::function<void(const SmartRegion& region)>& call) {
+        std::unordered_map<int64_t, SmartRegion> copy_map;
+        {
+            DoubleBufRegion::ScopedPtr ptr;
+            if (_region_mapping.Read(&ptr) == 0) {
+                copy_map = *ptr;
+            }
+        }
+        for (auto& pair : copy_map) {
+            call(pair.second);
+        }
     }
     void shutdown_raft() {
         _shutdown = true;
-        traverse_copy_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](const SmartRegion& region) {
             region->shutdown();
         });
         DB_WARNING("all region was shutdown");
-        traverse_copy_region_map([](SmartRegion& region) {
+        traverse_copy_region_map([](const SmartRegion& region) {
             region->join();
         });
         DB_WARNING("all region was join");
@@ -302,7 +326,7 @@ private:
     MetaWriter*                             _meta_writer = nullptr;
     
     // region_id => Region handler
-    ThreadSafeMap<int64_t, SmartRegion> _region_mapping;
+    DoubleBufRegion _region_mapping;
 
     //metaServer交互类
     MetaServerInteract _meta_server_interact;

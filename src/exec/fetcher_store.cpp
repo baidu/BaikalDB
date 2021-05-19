@@ -567,14 +567,14 @@ void FetcherStore::choose_opt_instance(pb::RegionInfo& info, std::string& addr) 
 
 int FetcherStore::memory_limit_exceeded(RuntimeState* state, MemRow* row) {
     if (row_cnt > FLAGS_db_row_number_to_check_memory) {
-        if (0 != state->memory_limit_exceeded(row->byte_size_long())) {
+        if (0 != state->memory_limit_exceeded(row->used_size())) {
             BAIDU_SCOPED_LOCK(region_lock);
             state->error_code = ER_TOO_BIG_SELECT;
             state->error_msg.str("select reach memory limit");
             return -1;
         }
     }
-    used_bytes += row->byte_size_long();
+    used_bytes += row->used_size();
     return 0;
 }
 

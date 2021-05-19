@@ -631,7 +631,8 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
             }
             return 0;
         }
-        case TDIGEST_AGG: {
+        case TDIGEST_AGG:
+        case TDIGEST_BUILD_AGG: {
             ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
             if (!src_value.is_null()) {
                 auto& intermediate_val = _intermediate_val_map[key].val;
@@ -639,15 +640,6 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
                     tdigest::td_merge((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
                         (tdigest::td_histogram_t *)src_value.str_val.data());
                 }
-            }
-            return 0;
-        }
-        case TDIGEST_BUILD_AGG: {
-            ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
-            if (!src_value.is_null()) {
-                auto& intermediate_val = _intermediate_val_map[key].val;
-                tdigest::td_add((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
-                        src_value.get_numberic<double>(), 1);
             }
             return 0;
         }

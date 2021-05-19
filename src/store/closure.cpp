@@ -18,17 +18,16 @@ namespace baikaldb {
 DECLARE_int64(print_time_us);
 void DMLClosure::Run() {
     int64_t region_id = 0;
-    butil::EndPoint leader;
-    if (region != nullptr) {
-        region->real_writing_decrease();
-        region_id = region->get_region_id();
-        leader = region->get_leader();
-    }
     uint64_t log_id = 0;
     if (cntl != nullptr && cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
     if (!status().ok()) {
+        butil::EndPoint leader;
+        if (region != nullptr) {
+            region_id = region->get_region_id();
+            leader = region->get_leader();
+        }
         response->set_errcode(pb::NOT_LEADER);
         response->set_leader(butil::endpoint2str(leader).c_str());
         response->set_errmsg("leader transfer");
@@ -59,7 +58,9 @@ void DMLClosure::Run() {
             transaction->clear_current_req_point_seq();
         }
     }
+    uint64_t txn_id = 0;
     if (transaction != nullptr) {
+        txn_id = transaction->txn_id();
         transaction->set_in_process(false);
     }
     if (is_clear_applying_txn) {
@@ -68,22 +69,23 @@ void DMLClosure::Run() {
     if (done) {
         done->Run();
     }
-    if (region != nullptr && (op_type == pb::OP_INSERT || op_type == pb::OP_DELETE || op_type == pb::OP_UPDATE)) {
-        region->update_average_cost(cost.get_time());
-    }
     static bvar::LatencyRecorder raft_total_cost("raft_total_cost");
-    raft_total_cost << cost.get_time();
-    if (cost.get_time() > FLAGS_print_time_us) {
-        DB_NOTICE("dml log_id:%lu, type:%s, raft_total_cost:%ld, region_id: %ld, "
-                    "qps:%ld, average_cost:%ld, num_prepared:%d remote_side:%s",
+    int64_t raft_cost = cost.get_time();
+    raft_total_cost << raft_cost;
+    if (raft_cost > FLAGS_print_time_us) {
+        DB_NOTICE("dml log_id:%lu, txn_id:%lu, type:%s, raft_total_cost:%ld, region_id: %ld, "
+                "applied_index:%ld, num_prepared:%d remote_side:%s",
                     log_id, 
+                    txn_id,
                     pb::OpType_Name(op_type).c_str(), 
-                    cost.get_time(), 
+                    raft_cost,
                     region_id, 
-                    (region != nullptr)?region->get_qps():0, 
-                    (region != nullptr)?region->get_average_cost():0, 
+                    applied_index,
                     (region != nullptr)?region->num_prepared():0, 
                     remote_side.c_str());
+    }
+    if (region != nullptr) {
+        region->real_writing_decrease();
     }
     delete this;
 }

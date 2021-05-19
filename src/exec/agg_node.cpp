@@ -131,6 +131,7 @@ int AggNode::open(RuntimeState* state) {
         bool eos = false;
         do {
             if (state->is_cancelled()) {
+                _iter = _hash_map.begin();
                 DB_WARNING_STATE(state, "cancelled");
                 return 0;
             }
@@ -138,6 +139,7 @@ int AggNode::open(RuntimeState* state) {
             RowBatch batch;
             ret = child->get_next(state, &batch, &eos);
             if (ret < 0) {
+                _iter = _hash_map.begin();
                 DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
                 return ret;
             }
@@ -166,7 +168,6 @@ int AggNode::open(RuntimeState* state) {
         AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get());
         _hash_map.insert(key.data(), row.release());
     }
-    //等hash_map构建完毕后才取位置
     _iter = _hash_map.begin();
     return 0;
 }
@@ -221,8 +222,8 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch) {
 
 void AggNode::memory_limit_release(RuntimeState* state, MemRow* row) {
     if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
-        state->memory_limit_release(row->byte_size_long());
-        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->byte_size_long());
+        state->memory_limit_release(row->used_size());
+        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->used_size());
     }
 }
 

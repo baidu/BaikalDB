@@ -57,6 +57,7 @@ const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
 const std::string SQL_SHOW_COLLATION             = "show collation";
 const std::string SQL_SHOW_WARNINGS              = "show warnings";
 const std::string SQL_SHOW_REGION                = "show region";
+const std::string SQL_SHOW_STORE_REGION          = "show store region";
 const std::string SQL_SHOW_SOCKET                = "show socket";
 const std::string SQL_SHOW_PROCESSLIST           = "show processlist";
 const std::string SQL_SHOW_META                  = "show meta";
@@ -147,6 +148,7 @@ private:
     bool _handle_client_query_show_schema_conf(SmartSocket client);
     bool _handle_client_query_show_virtual_index(SmartSocket client);
     bool _handle_client_query_show_region(SmartSocket client);
+    bool _handle_client_query_show_store_region(SmartSocket client);
     bool _handle_client_query_show_socket(SmartSocket client);
     bool _handle_client_query_show_processlist(SmartSocket client);
     bool _handle_client_query_common_query(SmartSocket client);
