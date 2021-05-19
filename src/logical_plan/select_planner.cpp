@@ -318,11 +318,12 @@ int SelectPlanner::create_agg_node() {
 
         for (uint32_t idx = 0; idx < _select_exprs.size(); ++idx) {
             pb::Expr* expr = agg->add_group_exprs();
-            if (_select_exprs[idx].nodes_size() != 1) {
-                DB_WARNING("invalid distinct expr");
-                return -1;
-            }
-            expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
+            expr->CopyFrom(_select_exprs[idx]);
+//            if (_select_exprs[idx].nodes_size() != 1) {
+//                DB_WARNING("invalid distinct expr");
+//                return -1;
+//            }
+//            expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
         }
         agg->set_agg_tuple_id(-1);
         return 0;
