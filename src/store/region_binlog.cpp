@@ -49,7 +49,7 @@ int Region::get_primary_region_info(int64_t primary_region_id, pb::RegionInfo& r
     pb::QueryRequest query_request;
     pb::QueryResponse query_response;
     query_request.set_op_type(pb::QUERY_REGION);
-    query_request.set_region_id(primary_region_id);
+    query_request.add_region_ids(primary_region_id);
     if (meta_server_interact.send_request("query", query_request, query_response) != 0) {
         DB_FATAL("send query request to meta server fail primary_region_id: %ld "
                 "region_id:%ld res: %s", primary_region_id, _region_id, query_response.ShortDebugString().c_str());

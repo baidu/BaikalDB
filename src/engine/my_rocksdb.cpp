@@ -18,6 +18,7 @@
 namespace baikaldb {
 
 namespace myrocksdb {
+DEFINE_int32(rocksdb_cost_sample, 100, "rocksdb_cost_sample");
 
 void Iterator::Seek(const rocksdb::Slice& target) {
     QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
@@ -26,18 +27,19 @@ void Iterator::Seek(const rocksdb::Slice& target) {
     if (local != nullptr) {
         local->get_rate_limiting();
     }
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
 
     TimeCost cost;
     // 执行
     _iter->Seek(target);
-
-    // 统计
-    if (local != nullptr) {
-        local->get_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_seek_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_seek_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_seek_time_cost << cost.get_time();
-
 }
 
 void Iterator::SeekForPrev(const rocksdb::Slice& target) {
@@ -48,16 +50,18 @@ void Iterator::SeekForPrev(const rocksdb::Slice& target) {
         local->get_rate_limiting();
     }
 
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
     TimeCost cost;
     // 执行
     _iter->SeekForPrev(target);
-
-    // 统计
-    if (local != nullptr) {
-        local->get_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_seek_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_seek_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_seek_time_cost << cost.get_time();
 }
 
 void Iterator::Next() { 
@@ -67,17 +71,19 @@ void Iterator::Next() {
     if (local != nullptr) {
         local->scan_rate_limiting();
     }
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
 
     TimeCost cost;
     // 执行
     _iter->Next();
-
-    // 统计
-    if (local != nullptr) {
-        local->scan_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_scan_time << (total_time / count);
+        RocksdbVars::get_instance()->rocksdb_scan_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_scan_time_cost << cost.get_time();
 
     return; 
 }
@@ -89,17 +95,19 @@ void Iterator::Prev() {
     if (local != nullptr) {
         local->scan_rate_limiting();
     }
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
 
     // 执行
     TimeCost cost;
     _iter->Prev();
-
-    // 统计
-    if (local != nullptr) {
-        local->scan_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_scan_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_scan_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_scan_time_cost << cost.get_time();
 
     return; 
 }
@@ -114,16 +122,18 @@ rocksdb::Status Transaction::Get(const rocksdb::ReadOptions& options,
         local->get_rate_limiting();
     }
 
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
     // 执行
     TimeCost cost;
     auto s = _txn->Get(options, column_family, key, value);
-
-    // 统计
-    if (local != nullptr) {
-        local->get_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_get_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_get_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_get_time_cost << cost.get_time();
 
     return s;
 }
@@ -138,16 +148,18 @@ rocksdb::Status Transaction::Get(const rocksdb::ReadOptions& options,
         local->get_rate_limiting();
     }
 
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
     // 执行
     TimeCost cost;
     auto s = _txn->Get(options, column_family, key, pinnable_val);
-
-    // 统计
-    if (local != nullptr) {
-        local->get_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_get_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_get_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_get_time_cost << cost.get_time();
 
     return s;
 }
@@ -162,16 +174,18 @@ rocksdb::Status Transaction::GetForUpdate(const rocksdb::ReadOptions& options,
         local->get_rate_limiting();
     }
 
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
     // 执行
     TimeCost cost;
     auto s = _txn->GetForUpdate(options, column_family, key, value);
-
-    // 统计
-    if (local != nullptr) {
-        local->get_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_get_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_get_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_get_time_cost << cost.get_time();
 
     return s;
 }
@@ -186,36 +200,52 @@ rocksdb::Status Transaction::GetForUpdate(const rocksdb::ReadOptions& options,
         local->get_rate_limiting();
     }
 
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
     // 执行
     TimeCost cost;
     auto s = _txn->GetForUpdate(options, column_family, key, pinnable_val);
-
-    // 统计
-    if (local != nullptr) {
-        local->get_statistics_adder();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_get_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_get_count << count;
+        total_time = 0;
+        count = 0;
     }
-
-    RocksdbVars::get_instance()->rocksdb_get_time_cost << cost.get_time();
 
     return s;    
 }
 
 rocksdb::Status Transaction::Put(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key,
                     const rocksdb::Slice& value) {
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
     TimeCost cost;
     auto s = _txn->Put(column_family, key, value);
-
-    RocksdbVars::get_instance()->rocksdb_put_time_cost << cost.get_time();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_put_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_put_count << count;
+        total_time = 0;
+        count = 0;
+    }
 
     return s;
 }
 
 rocksdb::Status Transaction::Put(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::SliceParts& key,
                     const rocksdb::SliceParts& value) {
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
     TimeCost cost;
     auto s = _txn->Put(column_family, key, value);
-
-    RocksdbVars::get_instance()->rocksdb_put_time_cost << cost.get_time();
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_put_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_put_count << count;
+        total_time = 0;
+        count = 0;
+    }
     
     return s;
 }

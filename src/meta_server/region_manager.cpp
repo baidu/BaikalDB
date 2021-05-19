@@ -1584,7 +1584,7 @@ void RegionManager::migirate_region_for_store(const std::string& instance) {
 //报警，需要人工处理
 void RegionManager::region_healthy_check_function() {
     std::vector<int64_t> region_ids;
-    auto check_func = [this, &region_ids](const int64_t region_id, RegionStateInfo& region_state) {
+    auto check_func = [this, &region_ids](const int64_t& region_id, RegionStateInfo& region_state) {
         if (butil::gettimeofday_us() - region_state.timestamp >
             FLAGS_store_heart_beat_interval_us * FLAGS_region_faulty_interval_times) {
             region_ids.push_back(region_id);
@@ -2066,7 +2066,7 @@ void RegionManager::recovery_all_region(const pb::MetaManagerRequest& request,
         resource_tags.insert(resource_tag);
     }
     std::map<int64_t, std::set<std::string>> region_peers_map;
-    auto get_peers_func = [&region_peers_map, recover_opt](const int64_t region_id, RegionPeerState& region_state) {
+    auto get_peers_func = [&region_peers_map, recover_opt](const int64_t& region_id, RegionPeerState& region_state) {
         for (auto& pair : region_state.legal_peers_state) {
             if (pair.second.peer_status() == pb::STATUS_NORMAL 
                 && (butil::gettimeofday_us() - pair.second.timestamp() >

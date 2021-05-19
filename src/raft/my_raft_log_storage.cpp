@@ -377,10 +377,6 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
                 entries.front()->id.term, _region_id);
         return -1;
     }
-    Concurrency::get_instance()->raft_write_concurrency.increase_wait();
-    ON_SCOPE_EXIT([]() {
-        Concurrency::get_instance()->raft_write_concurrency.decrease_broadcast();
-    });
 
     //construct data
     SlicePartsVec kv_raftlog_vec; //存储raftlog
@@ -410,23 +406,30 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
         batch.Put(_binlog_handle, iter->first, iter->second);
     }
 
-    auto status = _db->write(options, &batch);
-    if (!status.ok()) {
-        DB_FATAL("Fail to write db, region_id: %ld, err_mes:%s",
-                        _region_id, status.ToString().c_str());
-        return -1;
-    }
-
-    // update _term map and _last_log_index after success
-    BAIDU_SCOPED_LOCK(_mutex);
-    for (auto iter = entries.begin(); iter != entries.end(); ++iter) {
-        if (_term_map.append((*iter)->id) != 0) {
-            DB_FATAL("Fail to update _term_map, region_id: %ld", _region_id);
-            _term_map.truncate_suffix(_last_log_index.load());
+    {
+        Concurrency::get_instance()->raft_write_concurrency.increase_wait();
+        ON_SCOPE_EXIT([]() {
+                Concurrency::get_instance()->raft_write_concurrency.decrease_broadcast();
+                });
+        auto status = _db->write(options, &batch);
+        if (!status.ok()) {
+            DB_FATAL("Fail to write db, region_id: %ld, err_mes:%s",
+                    _region_id, status.ToString().c_str());
             return -1;
         }
     }
-    _last_log_index.fetch_add(entries.size());
+    {
+        // update _term map and _last_log_index after success
+        BAIDU_SCOPED_LOCK(_mutex);
+        for (auto iter = entries.begin(); iter != entries.end(); ++iter) {
+            if (_term_map.append((*iter)->id) != 0) {
+                DB_FATAL("Fail to update _term_map, region_id: %ld", _region_id);
+                _term_map.truncate_suffix(_last_log_index.load());
+                return -1;
+            }
+        }
+        _last_log_index.fetch_add(entries.size());
+    }
     //DB_WARNING("append_entry, entries.size:%ld, time_cost:%ld, region_id: %ld",
     //            entries.size(), time_cost.get_time(), _region_id);
     return (int)entries.size();

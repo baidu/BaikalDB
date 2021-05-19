@@ -467,8 +467,8 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
 
 void FilterNode::memory_limit_release(RuntimeState* state, MemRow* row) {
     if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
-        state->memory_limit_release(row->byte_size_long());
-        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->byte_size_long());
+        state->memory_limit_release(row->used_size());
+        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->used_size());
     }
 }
 

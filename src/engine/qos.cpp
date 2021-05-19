@@ -132,20 +132,8 @@ QosBthreadLocal::~QosBthreadLocal() {
     if (_sqlqos_ptr != nullptr) {
         // sql统计
         _sqlqos_ptr->sql_statistics_adder(1);
-    }
-}
-
-void QosBthreadLocal::get_statistics_adder() {
-    if (_sqlqos_ptr != nullptr) {
-        _sqlqos_ptr->get_statistics_adder(1, _get_need_statistics);
-        _get_need_statistics = false;
-    }
-}
-
-void QosBthreadLocal::scan_statistics_adder() {
-    if (_sqlqos_ptr != nullptr) {
-        _sqlqos_ptr->scan_statistics_adder(_get_token_weight, _scan_need_statistics);
-        _scan_need_statistics = false;
+        _sqlqos_ptr->get_statistics_adder(_get_count, _get_statistics_count);
+        _sqlqos_ptr->scan_statistics_adder(_scan_count, _scan_statistics_count);
     }
 }
 
@@ -167,24 +155,17 @@ void QosBthreadLocal::rate_limiting(int64_t tokens, bool* need_statistics) {
     RocksdbVars::get_instance()->qos_fetch_tokens_count << tokens;
 }
 
-void SqlQos::get_statistics_adder(int64_t count, bool need_statistics) {
-    _last_time  = butil::gettimeofday_us();
-    if (need_statistics) {
-        _get_statistics.adder(count);
-    }
+void SqlQos::get_statistics_adder(int64_t count, int64_t statistics_count) {
     _get_real.adder(count);
+    _get_statistics.adder(statistics_count);
 }
 
-void SqlQos::scan_statistics_adder(int64_t count, bool need_statistics) {
-    _last_time  = butil::gettimeofday_us();
-    if (need_statistics) {
-        _scan_statistics.adder(count);
-    }
-    _scan_real.adder(1);
+void SqlQos::scan_statistics_adder(int64_t count, int64_t statistics_count) {
+    _scan_real.adder(count);
+    _scan_statistics.adder(statistics_count);
 }
 
 void SqlQos::sql_statistics_adder(int64_t count) {
-    _last_time  = butil::gettimeofday_us();
     _sql_statistics.adder(count);
 }
 
@@ -266,24 +247,22 @@ void StoreQos::token_bucket_modify() {
                     max_token, global_extended_token, total_consume_token, compression_ratio);
 
     {
-        BAIDU_SCOPED_LOCK(_mutex);
         int64_t now = butil::gettimeofday_us();
-        for (auto iter : _sign_sqlqos_map) {
+        DoubleBufQos::ScopedPtr ptr;
+        if (_sign_sqlqos_map.Read(&ptr) != 0) {
+            return;
+        }
+        for (auto iter : *ptr) {
 
             int64_t get_qps  = iter.second->rocksdb_get_qps();
             int64_t scan_qps = iter.second->rocksdb_scan_qps();
             int64_t consume_token = (get_qps + scan_qps / get_token_weight) * compression_ratio;
-            if (consume_token < 100) {
-                // 速率小于100不使用承诺令牌桶限流
-                // 置承诺令牌桶为无效
-                iter.second->set_committed_valid(false);
-                DB_WARNING("sign: %lu, not use committed token bucket", iter.first);
-            } else {
-                // 修改承诺令牌桶速率
-                iter.second->reset_committed_rate(consume_token);
+            // 修改承诺令牌桶速率
+            iter.second->reset_committed_rate(consume_token);
+            total_consume_token -= consume_token;
+            if (consume_token != 0) {
                 DB_WARNING("sign: %lu, committed rate: %ld", iter.first, consume_token);
             }
-            total_consume_token -= consume_token;
 
         }
 

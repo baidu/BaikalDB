@@ -382,14 +382,16 @@ struct SchemaMapping {
 using DoubleBufferedTable = butil::DoublyBufferedData<SchemaMapping>;
 
 struct InstanceDBStatus {
-    InstanceDBStatus() : InstanceDBStatus(pb::NORMAL, "") {}
-    InstanceDBStatus(pb::Status status, const std::string& logical_room) :
-        status(status), logical_room(logical_room) {}
     // NORMAL 正常
     // FAULTY 故障
     // DEAD hang住假死，需要做rpc cancel
-    pb::Status status;
+    pb::Status status = pb::NORMAL;
+    // 只cancel一次，cancel操作后设置false
+    bool need_cancel = true;
     std::string logical_room;
+    // 正常探测CHECK_COUNT次后才置NORMAL
+    int64_t normal_count = 0;
+    static const int64_t CHECK_COUNT = 5;
 };
 struct IdcMapping {
     // store => logical_room
@@ -436,13 +438,10 @@ public:
     void update_table(const pb::SchemaInfo& table);
     //void update_table(DoubleBufferedTable& double_buffered_table, const pb::SchemaInfo& table);
 
-    static int update_tables_double_buffer(
-            void* meta, bthread::TaskIterator<pb::SchemaInfo>& iter);
-    void update_tables_double_buffer(bthread::TaskIterator<pb::SchemaInfo>& iter);
-
     // _sync系统初始化的时候调用，防止meta信息获取延迟导致系统不可用
     void update_tables_double_buffer_sync(const SchemaVec& tables);
 
+    void update_instance_canceled(const std::string& addr);
     void update_instance(const std::string& addr, pb::Status s);
     int update_instance_internal(IdcMapping& idc_mapping, const std::string& addr, pb::Status s);
     void update_idc(const pb::IdcInfo& idc_info);
@@ -521,6 +520,14 @@ public:
 
     IndexInfo get_index_info(int64_t indexid);
     SmartIndex get_index_info_ptr(int64_t indexid);
+    // split使用的index_info，只加不删
+    IndexInfo* get_split_index_info(int64_t indexid) {
+        auto iter = _split_index_map.read()->seek(indexid);
+        if (iter != nullptr) {
+            return *iter;
+        }
+        return nullptr;
+    }
 
     std::string get_index_name(int64_t index_id);
 
@@ -545,7 +552,6 @@ public:
                     int64_t& index_id);
 
     // functions for region info access
-    int get_region_info(int64_t region_id, pb::RegionInfo& info);
     int get_region_info(int64_t table_id, int64_t region_id, pb::RegionInfo& info);
 
     int get_region_capacity(int64_t global_index_id, int64_t& region_capacity);
@@ -624,7 +630,7 @@ public:
         } else {
             DB_WARNING("read double_buffer_idc error.");
         }
-        return {pb::NORMAL, ""};
+        return InstanceDBStatus();
     }
     int get_all_instance_status(std::unordered_map<std::string, InstanceDBStatus>* info_map) {
         DoubleBufferedIdc::ScopedPtr idc_ptr;
@@ -849,6 +855,8 @@ public:
         return _virtual_index_info.reset();
     }
     int is_unique_field_ids(int64_t table_id, const std::set<int32_t>& field_ids);
+
+    int fill_default_value(SmartRecord record, FieldInfo& field);
 private:
     SchemaFactory() {
         _is_inited = false;
@@ -869,7 +877,7 @@ private:
                                            pb::SchemaConf& mem_conf);
     // 全量更新
     void update_index(TableInfo& info, const pb::IndexInfo& index,
-            const pb::IndexInfo* pk_indexi, SchemaMapping& background);
+            const pb::IndexInfo* pk_index, SchemaMapping& background);
     //delete table和index
     void delete_table(const pb::SchemaInfo& table, SchemaMapping& background);
 
@@ -885,7 +893,9 @@ private:
     std::unordered_map<std::string, std::shared_ptr<UserInfo>> _user_info_mapping;
     
     DoubleBufferedTable _double_buffer_table;
-    bthread::ExecutionQueueId<pb::SchemaInfo> _table_queue_id = {0};
+    // index_id => IndexInfo*
+    // 提供给SplitCompactionFilter使用，使用普通双buf，split减少开销
+    DoubleBuffer<butil::FlatMap<int64_t, IndexInfo*>> _split_index_map;
 
     DoubleBufferedIdc _double_buffer_idc;
 
@@ -893,7 +903,6 @@ private:
     bthread::ExecutionQueueId<RegionVec> _region_queue_id = {0};
 
     DoubleBufferStringSet _double_buffer_big_sql;
-    bthread::ExecutionQueueId<std::string> _big_sql_queue_id = {0};
 
     std::string _physical_room;
     std::string _logical_room;

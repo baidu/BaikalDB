@@ -317,11 +317,12 @@ message RegionMergeRequest {
 };
 
 message RegionMergeResponse {
-    required int64 dst_region_id = 1;
-    required string dst_instance = 2;
-    required bytes dst_start_key = 3;
-    required bytes dst_end_key   = 4;
-    required int64  version      = 5;
+    optional int64 dst_region_id = 1;
+    optional string dst_instance = 2;
+    optional bytes dst_start_key = 3;
+    optional bytes dst_end_key   = 4;
+    optional int64  version      = 5;
+    optional RegionInfo dst_region = 6;
 };
 message RegionSplitRequest {
     required int64 region_id     = 1; 
@@ -633,7 +634,7 @@ message QueryRequest {
     optional string namespace_name                = 6;
     optional string database                      = 7;
     optional string table_name                    = 8;
-    optional int64  region_id                     = 9;
+    repeated int64  region_ids                    = 9;
     optional string old_leader                    = 10;
     optional string new_leader                    = 11;
     optional string old_peers                     = 12;

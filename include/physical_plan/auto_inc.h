@@ -24,6 +24,11 @@ public:
      * 计算自增id
      */
     int analyze(QueryContext* ctx);
+
+    int update_auto_inc(SmartTable table_info_ptr,
+                               NetworkSocket* client_conn,
+                               bool use_backup,
+                               std::vector<SmartRecord>& insert_records);
 };
 }
 

@@ -29,7 +29,7 @@ class MemRowDescriptor;
 class MemRow final {
 friend MemRowDescriptor;
 public:
-    explicit MemRow(int size) : _tuples(size), _tuples_assignd(size) {
+    explicit MemRow(int size) : _tuples(size), _tuples_assignd(size), _used_size(0) {
     }
 
     ~MemRow() {
@@ -62,6 +62,7 @@ public:
         if (in.size() > 0) {
             tuple->ParseFromString(in);
         }
+        _used_size += in.size();
     }
 
     void to_string(int32_t tuple_id, std::string* out);
@@ -72,6 +73,7 @@ public:
             t->Clear();
         }
         std::fill(_tuples_assignd.begin(), _tuples_assignd.end(), false);
+        _used_size = 0;
     }
 
     std::string* mutable_string(int32_t tuple_id, int32_t slot_id);
@@ -92,6 +94,7 @@ public:
         if (tuple == nullptr) {
             return -1;
         }
+        _used_size += value.size();
         const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
         auto field = descriptor->field(slot_id - 1);
         return MessageHelper::set_value(field, tuple, value);
@@ -140,9 +143,18 @@ public:
         return used_size;
     }
 
-    private:
+    void update_used_size(int64_t size) {
+        _used_size += size;
+    }
+
+    int64_t used_size() const {
+        return _used_size + 9 * _tuples.size() + sizeof(MemRow);
+    }
+
+private:
     std::vector<google::protobuf::Message*> _tuples;
     std::vector<bool> _tuples_assignd;
+    int64_t _used_size;
 };
 }
 

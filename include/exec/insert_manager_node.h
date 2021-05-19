@@ -126,6 +126,9 @@ public:
     void set_table_id(int64_t table_id) {
         _table_id = table_id;
     }
+    void set_selected_field_ids(std::vector<int32_t>& field_ids) {
+        _selected_field_ids.insert(_selected_field_ids.begin(), field_ids.begin(), field_ids.end());
+    }
     void process_binlog(RuntimeState* state, bool save_data);
 
 private:
@@ -155,6 +158,8 @@ private:
     // index_id -> <key->record_id>
     std::map<int64_t, std::map<std::string, std::set<int32_t>>> _index_keys_record_map;
     std::map<int64_t, SmartIndex> _index_info_map;
+
+    std::vector<int32_t>     _selected_field_ids;
 
     // 主表返回的主键key->record映射
     std::map<std::string, SmartRecord> _primary_record_key_record_map;

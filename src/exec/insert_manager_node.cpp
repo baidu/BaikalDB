@@ -19,6 +19,7 @@
 #include "network_socket.h"
 #include "type_utils.h"
 #include "binlog_context.h"
+#include "auto_inc.h"
 #include <set>
 
 namespace baikaldb {
@@ -65,6 +66,7 @@ int InsertManagerNode::init_insert_info(InsertNode* insert_node) {
     _values_tuple_id = insert_node->values_tuple_id();
     _is_replace = insert_node->is_replace();
     _need_ignore = insert_node->need_ignore();
+    _selected_field_ids = insert_node->prepared_field_ids();
     _table_info = _factory->get_table_info_ptr(_table_id);
     if (_table_info == nullptr) {
         DB_WARNING("no table found with table_id: %ld", _table_id);
@@ -114,11 +116,33 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
         DB_WARNING("no table found with table_id: %ld", _table_id);
         return -1;
     }
-    for (size_t i = 0; i < _table_info->fields.size(); i++) {
+    std::unordered_map<int32_t, FieldInfo*> table_field_map;
+    std::unordered_set<int32_t> insert_prepared_field_ids;
+    std::vector<FieldInfo*>  default_fields;
+
+    for (auto& field : _table_info->fields) {
+        table_field_map.insert({field.id, &field});
+    }
+    for (auto id : _selected_field_ids) {
+        if (table_field_map.count(id) == 0) {
+            DB_WARNING("No field for field id: %d", id);
+            return -1;
+        }
+        insert_prepared_field_ids.insert(id);
+    }
+    for (auto& field : _table_info->fields) {
+        if (insert_prepared_field_ids.count(field.id) == 0) {
+            default_fields.push_back(&field);
+        }
+    }
+    for (size_t i = 0; i < _select_projections.size(); i++) {
         pb::PrimitiveType sub_type = _select_projections[i]->col_type();
         bool is_literal = _select_projections[i]->is_literal();
         pb::ExprNodeType node_type = _select_projections[i]->node_type();
-        pb::PrimitiveType insert_type = _table_info->fields[i].type;
+        pb::PrimitiveType insert_type = table_field_map[_selected_field_ids[i]]->type;
+        if (_table_info->auto_inc_field_id == table_field_map[_selected_field_ids[i]]->id && sub_type == pb::NULL_TYPE) {
+            continue;
+        }
         if (!is_compatible_type(sub_type, insert_type, is_literal || (node_type == pb::FUNCTION_CALL))) {
             state->error_code = ER_TRUNCATED_WRONG_VALUE_FOR_FIELD;
             state->error_msg << "Incorrect cloumn type expect " << pb::PrimitiveType_Name(insert_type);
@@ -149,12 +173,20 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
             for (size_t i = 0; i < _select_projections.size(); i++) {
                 auto expr = _select_projections[i];
                 ExprValue result = expr->get_value(row).cast_to(expr->col_type());
-                record->set_value(record->get_field_by_idx(i), result);
+                record->set_value(record->get_field_by_idx(_selected_field_ids[i] - 1), result);
+            }
+            for (auto& field : default_fields) {
+                if (0 != _factory->fill_default_value(record, *field)) {
+                    return -1;
+                }
             }
             _origin_records.push_back(record);
             //DB_WARNING("record:%s", record->debug_string().c_str());
         }
     } while (!eos);
+    if (_table_info->auto_inc_field_id != -1) {
+        return AutoInc().update_auto_inc(_table_info, state->client_conn(), state->use_backup(), _origin_records);
+    }
     return  0;
 }
 
@@ -597,7 +629,6 @@ void InsertManagerNode::reset(RuntimeState* state) {
     if (_is_replace || _on_dup_key_update) {
         size_t idx = 0;
         for (auto& iter : client_conn->cache_plans) {
-            auto& plan_item = iter.second;
             if (old_chilren.size() == 1 && (idx == _uniq_index_number + 1)) {
                 this->add_child(old_chilren[0]);
             }

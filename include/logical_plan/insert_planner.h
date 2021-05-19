@@ -40,7 +40,6 @@ private:
 
     int gen_select_plan();
 
-    int fill_default_value(SmartRecord record, FieldInfo& field);
     int fill_record_field(const parser::ExprNode* item, SmartRecord record, FieldInfo& field);
 
 private:

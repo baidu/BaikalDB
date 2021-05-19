@@ -23,8 +23,8 @@
 
 namespace baikaldb {
 class SplitCompactionFilter : public rocksdb::CompactionFilter {
-typedef std::unordered_map<int64_t, std::pair<std::string, std::string> > KeyMap;
-typedef butil::DoublyBufferedData<KeyMap> DoubleBufKey;
+typedef butil::FlatMap<int64_t, std::string*> KeyMap;
+typedef DoubleBuffer<KeyMap> DoubleBufKey;
 public:
     static SplitCompactionFilter* get_instance() {
         static SplitCompactionFilter _instance;
@@ -50,13 +50,8 @@ public:
         }
         TableKey table_key(key);
         int64_t region_id = table_key.extract_i64(0);
-        //std::string start_key;
-        std::string end_key;
-        int ret = get_end_key(region_id, &end_key);
-        if (ret < 0) {
-            return false;
-        }
-        if (/*start_key.empty() &&*/ end_key.empty()) {
+        std::string* end_key = get_end_key(region_id);
+        if (end_key == nullptr || end_key->empty()) {
             return false;
         }
         int64_t index_id = table_key.extract_i64(sizeof(int64_t));
@@ -64,7 +59,7 @@ public:
         if ((index_id & SIGN_MASK_32) != 0) {
             index_id = index_id >> 32;
         }
-        auto index_info = _factory->get_index_info_ptr(index_id);
+        auto index_info = _factory->get_split_index_info(index_id);
         if (index_info == nullptr) {
             return false;
         }
@@ -72,48 +67,51 @@ public:
         //int ret1 = 0;
         int ret2 = 0;
         if (index_info->type == pb::I_PRIMARY || index_info->is_global) {
-            ret2 = end_key.empty()? 1 : end_key.compare(0, std::string::npos, 
+            ret2 = end_key->compare(0, std::string::npos, 
                     key.data() + prefix_len, key.size() - prefix_len);
            // DB_WARNING("split compaction filter, region_id: %ld, index_id: %ld, end_key: %s, key: %s, ret: %d",
            //     region_id, index_id, rocksdb::Slice(end_key).ToString(true).c_str(), 
            //     key.ToString(true).c_str(), ret2);
             return (ret2 <= 0);
         } else if (index_info->type == pb::I_UNIQ || index_info->type == pb::I_KEY) {
-            auto pk_info = _factory->get_index_info_ptr(index_info->pk);
+            auto pk_info = _factory->get_split_index_info(index_info->pk);
             if (pk_info == nullptr) {
                 return false;
             }
             rocksdb::Slice key_slice(key);
             key_slice.remove_prefix(sizeof(int64_t) * 2);
             return !Transaction::fits_region_range(key_slice, value, 
-                nullptr, &end_key, *pk_info, *index_info);
+                nullptr, end_key, *pk_info, *index_info);
         }
         return false;
     }
 
-    void set_range_key(int64_t region_id, const std::string& start_key, const std::string& end_key) {
-        auto call = [this, region_id, start_key, end_key](KeyMap& key_map) -> int {
-            key_map[region_id] = std::make_pair(start_key, end_key);
-            return 1;
+    void set_end_key(int64_t region_id, const std::string& end_key) {
+        std::string* old_key = get_end_key(region_id);
+        // 已存在不更新
+        if (old_key != nullptr && *old_key == end_key) {
+            return;
+        }
+        auto call = [region_id, end_key](KeyMap& key_map) {
+            std::string* new_key = new std::string(end_key);
+            key_map[region_id] = new_key;
         };
-        _range_key_map.Modify(call);
+        _range_key_map.modify(call);
     }
 
-    int get_end_key(int64_t region_id, std::string* end_key) const {
-        DoubleBufKey::ScopedPtr ptr;
-        if (_range_key_map.Read(&ptr) == 0) {
-            auto iter = ptr->find(region_id);
-            if (iter != ptr->end()) {
-                *end_key = iter->second.second;
-                return 0;
-            }
+    std::string* get_end_key(int64_t region_id) const {
+        auto iter = _range_key_map.read()->seek(region_id);
+        if (iter != nullptr) {
+            return *iter;
         }
-        return -1;
+        return nullptr;
     }
 
 private:
     SplitCompactionFilter() {
         _factory = SchemaFactory::get_instance();
+        _range_key_map.read_background()->init(12301);
+        _range_key_map.read()->init(12301);
     }
 
     // region_id => end_key

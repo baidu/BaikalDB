@@ -354,11 +354,12 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
         SmartRegion region, ExecutionQueue& queue) {
     std::string new_leader = trans_leader_request.new_leader();
     auto transfer_call = [this, region, new_leader]() {
+        int64_t average_cost = region->_dml_time_cost.latency();
         int64_t peer_applied_index = RpcSender::get_peer_applied_index(new_leader, _region_id);
-        if ((region->_applied_index - peer_applied_index) * region->_average_cost.load() 
+        if ((region->_applied_index - peer_applied_index) * average_cost 
                 > FLAGS_election_timeout_ms * 1000LL) {
             DB_WARNING("peer applied index: %ld is less than applied index: %ld, average_cost: %ld",
-                    peer_applied_index, region->_applied_index, region->_average_cost.load());
+                    peer_applied_index, region->_applied_index, average_cost);
             return;
         }
         if (region->_shutdown) {

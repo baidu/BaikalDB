@@ -445,6 +445,7 @@ int Separate::separate_load(QueryContext* ctx) {
         manager_node->set_region_infos(insert_node->region_infos());
         manager_node->add_child(insert_node);
         manager_node->set_table_id(main_table_id);
+        manager_node->set_selected_field_ids(insert_node->prepared_field_ids());
     } else {
         separate_global_insert(manager_node.get(), insert_node);
     }
@@ -478,6 +479,7 @@ int Separate::separate_insert(QueryContext* ctx) {
         manager_node->set_region_infos(insert_node->region_infos());
         manager_node->add_child(insert_node);
         manager_node->set_table_id(main_table_id);
+        manager_node->set_selected_field_ids(insert_node->prepared_field_ids());
     } else {
         separate_global_insert(manager_node.get(), insert_node);
     }
@@ -490,6 +492,8 @@ int Separate::separate_insert(QueryContext* ctx) {
         }
         manager_node->set_sub_query_runtime_state(sub_query_ctx->get_runtime_state().get());
         ExecNode* sub_query_plan = sub_query_ctx->root;
+        // 单语句事务DML默认会和Prepare一起发送
+        ctx->get_runtime_state()->set_single_txn_need_separate_execute(true);
         PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
         manager_node->steal_projections(packet_node->mutable_projections());
         manager_node->set_sub_query_node(packet_node->children(0));

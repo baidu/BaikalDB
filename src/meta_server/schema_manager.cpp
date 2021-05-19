@@ -658,7 +658,7 @@ int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* re
                         table_id, request->region_merge().src_start_key(), 
                         request->region_merge().src_end_key(), partition_id);
     if (dst_region_id <= 0) {
-        DB_WARNING("can`t find dst merge region request: %s, src region id:%ld, log_id:%ld",
+        DB_WARNING("can`t find dst merge region request: %s, src region id:%ld, log_id:%lu",
                  request->ShortDebugString().c_str(), src_region_id, log_id);
         ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                            "dst merge region not exist", request->op_type(), log_id);
@@ -680,6 +680,7 @@ int SchemaManager::pre_process_for_merge_region(const pb::MetaManagerRequest* re
     region_merge->set_dst_end_key(dst_region->end_key());
     region_merge->set_dst_region_id(dst_region->region_id());  
     region_merge->set_version(dst_region->version());
+    region_merge->mutable_dst_region()->CopyFrom(*dst_region);
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
     DB_WARNING("find dst merge region instance:%s, table_id:%ld, src region id:%ld, "

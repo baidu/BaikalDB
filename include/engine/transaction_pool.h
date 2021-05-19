@@ -30,12 +30,8 @@ public:
     }
 
     void close() {
-        std::unique_lock<std::mutex> lock(_map_mutex);
-        auto iter = _txn_map.begin();
-        while (iter != _txn_map.end()) {
-            iter->second = nullptr;
-            iter = _txn_map.erase(iter);
-        }
+        _txn_map.clear();
+        _txn_count = 0;
     }
 
     TransactionPool() : _num_prepared_txn(0), _txn_count(0) {}
@@ -48,20 +44,15 @@ public:
     void remove_txn(uint64_t txn_id, bool mark_finished);
 
     SmartTransaction get_txn(uint64_t txn_id) {
-        std::unique_lock<std::mutex> lock(_map_mutex);
-        if (_txn_map.count(txn_id) == 0) {
-            return nullptr;
-        }
-        return _txn_map[txn_id];
+        return _txn_map.get(txn_id);
     }
     // -1 not found;
     int get_finished_txn_affected_rows(uint64_t txn_id) {
-        std::unique_lock<std::mutex> lock(_map_mutex);
-        if (_finished_txn_map.read()->count(txn_id) == 1) {
-            return _finished_txn_map.read()->at(txn_id);
+        if (_finished_txn_map.read()->exist(txn_id)) {
+            return _finished_txn_map.read()->get(txn_id);
         }
-        if (_finished_txn_map.read_background()->count(txn_id) == 1) {
-            return _finished_txn_map.read_background()->at(txn_id);
+        if (_finished_txn_map.read_background()->exist(txn_id)) {
+            return _finished_txn_map.read_background()->get(txn_id);
         }
         return -1;
     }
@@ -108,11 +99,10 @@ private:
     bool _use_ttl = false;
 
     // txn_id => txn handler mapping
-    std::unordered_map<uint64_t, SmartTransaction>  _txn_map;
+    ThreadSafeMap<uint64_t, SmartTransaction>  _txn_map;
     // txn_id => affected_rows use for idempotent
-    DoubleBuffer<std::unordered_map<uint64_t, int>> _finished_txn_map;
+    DoubleBuffer<ThreadSafeMap<uint64_t, int>> _finished_txn_map;
     TimeCost _clean_finished_txn_cost;
-    std::mutex _map_mutex;
 
     BthreadCond  _num_prepared_txn;  // total number of prepared transactions
     std::atomic<int32_t> _txn_count;

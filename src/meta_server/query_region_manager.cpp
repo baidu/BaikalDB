@@ -134,13 +134,8 @@ void QueryRegionManager::get_flatten_region(const pb::QueryRequest* request, pb:
         pb::QueryRegion query_region_info;
         construct_query_region(region_info.get(), &query_region_info);
 
-        std::multimap<std::string, pb::QueryRegion> id_regions;
-        if (table_regions.find(region_info->table_name()) != table_regions.end()) {
-            id_regions = table_regions[region_info->table_name()];
-        }
-        id_regions.insert(std::pair<std::string, pb::QueryRegion>
+        table_regions[region_info->table_name()].insert(std::pair<std::string, pb::QueryRegion>
                 (region_info->start_key(), query_region_info));
-        table_regions[region_info->table_name()] = id_regions;
     }
     for (auto& table_region : table_regions) {
         for (auto& id_regions : table_region.second) {
@@ -198,7 +193,7 @@ void QueryRegionManager::check_region_and_update(const std::unordered_map<int64_
 void QueryRegionManager::get_region_info(const pb::QueryRequest* request,
                                             pb::QueryResponse* response) {
     RegionManager* manager = RegionManager::get_instance();
-    if (!request->has_region_id()) {
+    if (request->region_ids_size() == 0) {
         std::vector<SmartRegionInfo> region_infos;
         manager->traverse_region_map([&region_infos](SmartRegionInfo& region_info) {
             region_infos.push_back(region_info);
@@ -208,15 +203,16 @@ void QueryRegionManager::get_region_info(const pb::QueryRequest* request,
             *region_pb = *region_info;
         }    
     } else {
-        int64_t region_id = request->region_id();
-        SmartRegionInfo region_ptr = manager->_region_info_map.get(region_id);
-        if (region_ptr != nullptr) {
-            auto region_pb = response->add_region_infos();
-            *region_pb = *region_ptr;
-        } else {
-            response->set_errmsg("region info not exist");
-            response->set_errcode(pb::REGION_NOT_EXIST);
-        }    
+        for (int64_t region_id : request->region_ids()) {
+            SmartRegionInfo region_ptr = manager->_region_info_map.get(region_id);
+            if (region_ptr != nullptr) {
+                auto region_pb = response->add_region_infos();
+                *region_pb = *region_ptr;
+            } else {
+                response->set_errmsg("region info not exist");
+                response->set_errcode(pb::REGION_NOT_EXIST);
+            }    
+        }
     }    
 }
 void QueryRegionManager::get_region_info_per_instance(const std::string& instance, 
@@ -294,7 +290,7 @@ void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request,
         TableManager::get_instance()->get_table_by_resource_tag("", table_id_name_map);
     }
     
-    auto func = [&table_id_name_map, response](const int64_t region_id, RegionPeerState& region_state) {
+    auto func = [&table_id_name_map, response](const int64_t& region_id, RegionPeerState& region_state) {
         int64_t table_id = 0;
         std::vector<pb::PeerStateInfo> region_peer_status_vec;
         for (auto& pair : region_state.legal_peers_state) {
@@ -362,7 +358,7 @@ void QueryRegionManager::send_transfer_leader(const pb::QueryRequest* request, p
     boost::trim(old_leader);
     std::string new_leader = request->new_leader();
     boost::trim(new_leader);
-    std::int64_t region_id = request->region_id();
+    int64_t region_id = request->region_ids_size() == 1 ? request->region_ids(0) : 0;
     if (region_id == 0 || old_leader.size() == 0 || new_leader.size() == 0) {
         DB_FATAL("input param error, request:%s", request->ShortDebugString().c_str());
         response->set_errcode(pb::INPUT_PARAM_ERROR);
@@ -391,7 +387,7 @@ void QueryRegionManager::send_set_peer(const pb::QueryRequest* request, pb::Quer
     boost::trim(new_peers);
     std::string old_peers = request->old_peers();
     boost::trim(old_peers);
-    std::int64_t region_id = request->region_id();
+    int64_t region_id = request->region_ids_size() == 1 ? request->region_ids(0) : 0;
     if (region_id == 0 || new_peers.size() == 0 || old_peers.size() == 0 || leader.size() == 0) {
         DB_FATAL("input param error, request:%s", request->ShortDebugString().c_str());
         response->set_errcode(pb::INPUT_PARAM_ERROR);

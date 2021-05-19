@@ -330,10 +330,10 @@ void DBManager::init() {
                 }
             }
             for (auto& cast_task_ptr : broadcast_task_tmp_vec) {
-                auto delete_heartbeat_timeout_txn_work = [&cast_task_ptr](ThreadSafeMap<std::string, MemDdlWork>& work_map){
+                auto delete_heartbeat_timeout_txn_work = [&cast_task_ptr](ThreadSafeMap<std::string, MemDdlWork>& work_map) {
                     std::vector<std::string> timeout_instance_vec;
                     timeout_instance_vec.reserve(5);
-                    work_map.traverse_with_key_value([&cast_task_ptr, &timeout_instance_vec](std::string instance, MemDdlWork& work){
+                    work_map.traverse_with_key_value([&cast_task_ptr, &timeout_instance_vec](const std::string& instance, MemDdlWork& work) {
                         if (butil::gettimeofday_us() - work.update_timestamp >
                             FLAGS_baikal_heartbeat_interval_us * 30) {
                             DB_WARNING("instance %s txn work heartbeat timeout.", instance.c_str());
@@ -351,7 +351,7 @@ void DBManager::init() {
             auto faulty_dbs = get_faulty_baikaldb();
             for (const auto& faulty_db : faulty_dbs) {
                 _common_task_map.update(faulty_db, [this](CommonTaskMap& db_task_map) {
-                    auto re_launch_task_func = [this](std::unordered_map<TaskId, MemRegionDdlWork>& task_map){
+                    auto re_launch_task_func = [this](std::unordered_map<TaskId, MemRegionDdlWork>& task_map) {
                         for (auto& task : task_map) {
                             auto task_id = std::to_string(task.second.region_info.table_id()) + "_" + 
                                 std::to_string(task.second.region_info.region_id());

@@ -17,7 +17,6 @@
 #include "expr_optimizer.h"
 #include "index_selector.h"
 #include "limit_calc.h"
-#include "physical_planner.h"
 #include "plan_router.h"
 #include "predicate_pushdown.h"
 #include "join_reorder.h"

@@ -15,6 +15,7 @@
 #include "information_schema.h"
 #include <boost/algorithm/string/join.hpp>
 #include "runtime_state.h"
+#include "meta_server_interact.hpp"
 #include "schema_factory.h"
 #include "network_socket.h"
 #include "scalar_fn_call.h"
@@ -56,6 +57,7 @@ void InformationSchema::init_partition_split_info() {
         {"partition_key", pb::STRING},
         {"table_name", pb::STRING},
         {"split_info", pb::STRING},
+        {"split_rows", pb::STRING},
     };
     int64_t table_id = construct_table("PARTITION_SPLIT_INFO", fields);
     // 定义操作
@@ -106,6 +108,8 @@ void InformationSchema::init_partition_split_info() {
             factory->get_all_region_by_table_id(condition_table_id, &region_infos);
             std::string last_partition_key;
             std::vector<std::string> last_keys;
+            std::vector<int64_t> last_region_ids;
+            int64_t last_id = 0;
             std::string partition_key;
             auto type1 = index_ptr->fields[0].type;
             auto type2 = index_ptr->fields[1].type;
@@ -116,26 +120,58 @@ void InformationSchema::init_partition_split_info() {
                 partition_key = start_key.decode_start_key_string(type1, pos);
                 if (partition_key != last_partition_key) {
                     if (last_keys.size() > 1) {
+                        std::vector<std::string> rows;
+                        for (auto id : last_region_ids) {
+                            pb::QueryRequest req;
+                            req.set_op_type(pb::QUERY_REGION);
+                            req.add_region_ids(id);
+                            pb::QueryResponse res;
+                            MetaServerInteract::get_instance()->send_request("query", req, res);
+                            if (res.region_infos_size() == 1) {
+                                rows.emplace_back(std::to_string(res.region_infos(0).num_table_lines()));
+                            } else {
+                                rows.emplace_back("0");
+                            }
+                        }
                         auto record = factory->new_record(table_id);
                         record->set_string(record->get_field_by_name("partition_key"), last_partition_key);
                         record->set_string(record->get_field_by_name("table_name"), table_name);
                         record->set_string(record->get_field_by_name("split_info"), boost::join(last_keys, ","));
+                        record->set_string(record->get_field_by_name("split_rows"), boost::join(rows, ","));
                         records.emplace_back(record);
                     }
                     last_partition_key = partition_key;
                     last_keys.clear();
+                    last_region_ids.clear();
+                    last_region_ids.emplace_back(last_id);
                 }
                 last_keys.emplace_back(start_key.decode_start_key_string(type2, pos));
+                last_region_ids.emplace_back(pair.second.region_id());
+                last_id = pair.second.region_id();
             }
             if (last_keys.size() > 1) {
+                std::vector<std::string> rows;
+                for (auto id : last_region_ids) {
+                    pb::QueryRequest req;
+                    req.set_op_type(pb::QUERY_REGION);
+                    req.add_region_ids(id);
+                    pb::QueryResponse res;
+                    MetaServerInteract::get_instance()->send_request("query", req, res);
+                    if (res.region_infos_size() == 1) {
+                        rows.emplace_back(std::to_string(res.region_infos(0).num_table_lines()));
+                    } else {
+                        rows.emplace_back("0");
+                    }
+                }
                 auto record = factory->new_record(table_id);
                 record->set_string(record->get_field_by_tag(1), last_partition_key);
                 record->set_string(record->get_field_by_tag(2), table_name);
                 record->set_string(record->get_field_by_tag(3), boost::join(last_keys, ","));
+                record->set_string(record->get_field_by_name("split_rows"), boost::join(rows, ","));
                 records.emplace_back(record);
             }
             return records;
-    };
+        };
 }
 
 void InformationSchema::init_region_status() {

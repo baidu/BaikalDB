@@ -30,6 +30,7 @@
 #include <base/time.h>
 #include <base/third_party/murmurhash3/murmurhash3.h>
 #include <base/containers/doubly_buffered_data.h>
+#include <base/containers/flat_map.h>
 #include <base/endpoint.h>
 #include <base/base64.h>
 #include <webfoot_naming.h>
@@ -41,6 +42,7 @@
 #include <butil/time.h>
 #include <butil/third_party/murmurhash3/murmurhash3.h>
 #include <butil/containers/doubly_buffered_data.h>
+#include <butil/containers/flat_map.h>
 #include <butil/endpoint.h>
 #include <butil/base64.h>
 #include <butil/fast_rand.h>
@@ -503,7 +505,7 @@ public:
             }
         }
     }
-    void traverse_with_key_value(const std::function<void(const KEY key, VALUE& value)>& call) {
+    void traverse_with_key_value(const std::function<void(const KEY& key, VALUE& value)>& call) {
         for (uint32_t i = 0; i < MAP_COUNT; i++) {
             BAIDU_SCOPED_LOCK(_mutex[i]);
             for (auto& pair : _map[i]) {
@@ -582,9 +584,14 @@ private:
     DISALLOW_COPY_AND_ASSIGN(ThreadSafeMap);
 };
 
-template <typename T>
+// 通常使用butil::DoublyBufferedData
+// 只在几个自己控制gc和写很少，需要很高性能时候使用这个
+template <typename T, int64_t SLEEP = 1000>
 class DoubleBuffer {
 public:
+    DoubleBuffer() {
+        bthread::execution_queue_start(&_queue_id, nullptr, run_function, (void*)this);
+    }
     T* read() {
         return _data + _index;
     }
@@ -594,9 +601,31 @@ public:
     void swap() {
         _index = ! _index;
     }
+    void modify(const std::function<void(T&)>& fn) {
+        bthread::execution_queue_execute(_queue_id, fn);
+    }
 private:
+    ExecutionQueue _queue;
     T _data[2];
     int _index = 0;
+    static int run_function(void* meta, bthread::TaskIterator<std::function<void(T&)>>& iter) {
+        if (iter.is_queue_stopped()) {
+            return 0;
+        }
+        DoubleBuffer* db = (DoubleBuffer*)meta;
+        std::vector<std::function<void(T&)>> vec;
+        for (; iter; ++iter) {
+            (*iter)(*db->read_background());
+            vec.emplace_back(*iter);
+        }
+        db->swap();
+        bthread_usleep(SLEEP);
+        for (auto& c : vec) {
+            c(*db->read_background());
+        }
+        return 0;
+    }
+    bthread::ExecutionQueueId<std::function<void(T&)>> _queue_id = {0};
 };
 
 DECLARE_int64(incremental_info_gc_time);
@@ -823,10 +852,22 @@ struct RocksdbVars {
         return &_instance;
     }
 
-    bvar::LatencyRecorder    rocksdb_put_time_cost;
-    bvar::LatencyRecorder    rocksdb_get_time_cost;
-    bvar::LatencyRecorder    rocksdb_scan_time_cost;
-    bvar::LatencyRecorder    rocksdb_seek_time_cost;
+    bvar::IntRecorder     rocksdb_put_time;
+    bvar::Adder<int64_t>     rocksdb_put_count;
+    bvar::Window<bvar::IntRecorder> rocksdb_put_time_cost_latency;
+    bvar::PerSecond<bvar::Adder<int64_t> > rocksdb_put_time_cost_qps;
+    bvar::IntRecorder     rocksdb_get_time;
+    bvar::Adder<int64_t>     rocksdb_get_count;
+    bvar::Window<bvar::IntRecorder> rocksdb_get_time_cost_latency;
+    bvar::PerSecond<bvar::Adder<int64_t> > rocksdb_get_time_cost_qps;
+    bvar::IntRecorder     rocksdb_scan_time;
+    bvar::Adder<int64_t>     rocksdb_scan_count;
+    bvar::Window<bvar::IntRecorder> rocksdb_scan_time_cost_latency;
+    bvar::PerSecond<bvar::Adder<int64_t> > rocksdb_scan_time_cost_qps;
+    bvar::IntRecorder     rocksdb_seek_time;
+    bvar::Adder<int64_t>     rocksdb_seek_count;
+    bvar::Window<bvar::IntRecorder> rocksdb_seek_time_cost_latency;
+    bvar::PerSecond<bvar::Adder<int64_t> > rocksdb_seek_time_cost_qps;
     bvar::LatencyRecorder    qos_fetch_tokens_wait_time_cost;
     bvar::Adder<int64_t>     qos_fetch_tokens_wait_count;
     bvar::Adder<int64_t>     qos_fetch_tokens_count;
@@ -835,13 +876,17 @@ struct RocksdbVars {
     bvar::PerSecond<bvar::Adder<int64_t> > qos_token_waste_qps;
     // 统计未提交的binlog最大时间
     bvar::Maxer<int64_t>     binlog_not_commit_max_cost;
-    bvar::Window<bvar::Maxer<int64_t> > binlog_not_commit_max_cost_minute;
+    bvar::Window<bvar::Maxer<int64_t>> binlog_not_commit_max_cost_minute;
 
 private:
-    RocksdbVars(): rocksdb_put_time_cost("rocksdb_put_time_cost"), 
-                   rocksdb_get_time_cost("rocksdb_get_time_cost"), 
-                   rocksdb_scan_time_cost("rocksdb_scan_time_cost"),
-                   rocksdb_seek_time_cost("rocksdb_seek_time_cost"),
+    RocksdbVars(): rocksdb_put_time_cost_latency("rocksdb_put_time_cost_latency", &rocksdb_put_time, -1),
+                   rocksdb_put_time_cost_qps("rocksdb_put_time_cost_qps", &rocksdb_put_count),
+                   rocksdb_get_time_cost_latency("rocksdb_get_time_cost_latency", &rocksdb_get_time, -1),
+                   rocksdb_get_time_cost_qps("rocksdb_get_time_cost_qps", &rocksdb_get_count),
+                   rocksdb_scan_time_cost_latency("rocksdb_scan_time_cost_latency", &rocksdb_scan_time, -1),
+                   rocksdb_scan_time_cost_qps("rocksdb_scan_time_cost_qps", &rocksdb_scan_count),
+                   rocksdb_seek_time_cost_latency("rocksdb_seek_time_cost_latency", &rocksdb_seek_time, -1),
+                   rocksdb_seek_time_cost_qps("rocksdb_seek_time_cost_qps", &rocksdb_seek_count),
                    qos_fetch_tokens_wait_time_cost("qos_fetch_tokens_wait_time_cost"),
                    qos_fetch_tokens_wait_count("qos_fetch_tokens_wait_count"),
                    qos_fetch_tokens_qps("qos_fetch_tokens_qps", &qos_fetch_tokens_count),

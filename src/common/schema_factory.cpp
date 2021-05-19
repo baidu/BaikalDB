@@ -30,49 +30,26 @@ int SchemaFactory::init() {
     if (_is_inited) {
         return 0;
     }
-    int ret = bthread::execution_queue_start(&_table_queue_id, nullptr, 
-            update_tables_double_buffer, (void*)this);
-    if (ret != 0) {
-        DB_FATAL("execution_queue_start error, %d", ret);
-        return -1;
-    }
 
-    ret = bthread::execution_queue_start(&_region_queue_id, nullptr, 
+    _split_index_map.read_background()->init(12301);
+    _split_index_map.read()->init(12301);
+
+    int ret = bthread::execution_queue_start(&_region_queue_id, nullptr, 
             update_regions_double_buffer, (void*)this);
     if (ret != 0) {
         DB_FATAL("execution_queue_start error, %d", ret);
         return -1;
     }
 
-    ret = bthread::execution_queue_start(&_big_sql_queue_id, nullptr, 
-                update_big_sql_double_buffer, (void*)this);
-    if (ret != 0) {
-        DB_FATAL("execution_queue_start error, %d", ret);
-        return -1;
-    }
     _is_inited = true;
     return 0;
 }
 
 void SchemaFactory::update_table(const pb::SchemaInfo& table) {
-    //DB_NOTICE("update_table");
-    bthread::execution_queue_execute(_table_queue_id, table);
-}
-
-int SchemaFactory::update_tables_double_buffer(
-        void* meta, bthread::TaskIterator<pb::SchemaInfo>& iter) {
-    SchemaFactory* factory = (SchemaFactory*)meta;
-    factory->update_tables_double_buffer(iter);
-    return 0;
-}
-void SchemaFactory::update_tables_double_buffer(bthread::TaskIterator<pb::SchemaInfo>& iter) {
-    for (; iter; ++iter) {
-        std::function<int(SchemaMapping& schema_mapping, const pb::SchemaInfo& table)> update_func =
-            std::bind(&SchemaFactory::update_table_internal, this, std::placeholders::_1, std::placeholders::_2);
-        //DB_NOTICE("update_table double_buffer");
-        delete_table_region_map(*iter);
-        _double_buffer_table.Modify(update_func, *iter);
-    }
+    std::function<int(SchemaMapping& schema_mapping, const pb::SchemaInfo& table)> update_func =
+        std::bind(&SchemaFactory::update_table_internal, this, std::placeholders::_1, std::placeholders::_2);
+    delete_table_region_map(table);
+    _double_buffer_table.Modify(update_func, table);
 }
 
 void SchemaFactory::update_tables_double_buffer_sync(const SchemaVec& tables) {
@@ -83,6 +60,17 @@ void SchemaFactory::update_tables_double_buffer_sync(const SchemaVec& tables) {
         delete_table_region_map(table);
         _double_buffer_table.Modify(update_func, table);
     }
+}
+
+void SchemaFactory::update_instance_canceled(const std::string& addr) {
+    auto call_func = [](IdcMapping& idc_mapping, const std::string& addr) {
+        if (idc_mapping.instance_info_mapping.count(addr) == 0) {
+            return 0;
+        }
+        idc_mapping.instance_info_mapping[addr].need_cancel = false;
+        return 1;
+    };
+    _double_buffer_idc.Modify(call_func, addr);
 }
 
 void SchemaFactory::update_instance(const std::string& addr, pb::Status s) {
@@ -96,13 +84,24 @@ void SchemaFactory::update_instance(const std::string& addr, pb::Status s) {
 }
 
 int SchemaFactory::update_instance_internal(IdcMapping& idc_mapping, const std::string& addr, pb::Status s) {
-    //0：不更新，非0：更新
-    auto& map = idc_mapping.instance_info_mapping;
-    std::string logical_room;
-    if (map.count(addr) == 1) {
-        logical_room = map[addr].logical_room;
+    if (idc_mapping.instance_info_mapping.count(addr) == 0) {
+        return 0;
     }
-    idc_mapping.instance_info_mapping[addr] = {s, logical_room};
+    pb::Status old_s = idc_mapping.instance_info_mapping[addr].status;
+    if (s == pb::NORMAL && old_s == pb::DEAD) {
+        if (++idc_mapping.instance_info_mapping[addr].normal_count >= InstanceDBStatus::CHECK_COUNT) {
+            idc_mapping.instance_info_mapping[addr].status = s;
+            DB_WARNING("addr:%s DEAD to NORMAL", addr.c_str());
+        }
+    } else {
+        idc_mapping.instance_info_mapping[addr].normal_count = 0;
+        idc_mapping.instance_info_mapping[addr].status = s;
+        if (s == pb::DEAD) {
+            idc_mapping.instance_info_mapping[addr].need_cancel = true;
+        }
+        DB_WARNING("addr:%s %s to %s", addr.c_str(), 
+                pb::Status_Name(old_s).c_str(), pb::Status_Name(s).c_str());
+    }
     return 1;
 }
 
@@ -134,30 +133,14 @@ int SchemaFactory::update_idc_internal(IdcMapping& idc_mapping, const pb::IdcInf
         if (iter == idc_mapping.physical_logical_mapping.end()) {
             continue;
         }
-        pb::Status s = pb::NORMAL;
-        if (tmp_map.count(address) == 1) {
-            s = tmp_map[address].status;
-        }
-        idc_mapping.instance_info_mapping[address] = {s, iter->second};
+        tmp_map[address].logical_room = iter->second;
+        idc_mapping.instance_info_mapping[address] = tmp_map[address];
     }
     return 1;
 }
 
 void SchemaFactory::update_big_sql(const std::string& sql) {
-    bthread::execution_queue_execute(_big_sql_queue_id, sql);
-}
-
-int SchemaFactory::update_big_sql_double_buffer(
-        void* meta, bthread::TaskIterator<std::string>& iter) {
-    SchemaFactory* factory = (SchemaFactory*)meta;
-    factory->update_big_sql_double_buffer(iter);
-    return 0;
-}
-
-void SchemaFactory::update_big_sql_double_buffer(bthread::TaskIterator<std::string>& iter) {
-    for (; iter; ++iter) {
-        _double_buffer_big_sql.Modify(set_insert, *iter);
-    }
+    _double_buffer_big_sql.Modify(set_insert, sql);
 }
 
 bool SchemaFactory::is_big_sql(const std::string& sql) {
@@ -583,7 +566,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     auto& index_name_id_mapping = background.index_name_id_mapping;
     SmartIndex idx_info_ptr = std::make_shared<IndexInfo>();
     std::string old_idx_name;
-    //如果表存在，需要清空里面的内容
+    //如果存在，需要清空里面的内容
     if (index_info_mapping.count(index.index_id()) != 0) {
         *idx_info_ptr = *index_info_mapping[index.index_id()];
         IndexInfo& idx_info = *idx_info_ptr;
@@ -719,6 +702,16 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
             idx_info.overlap = true;
         }
     }
+    _split_index_map.modify([idx_info](butil::FlatMap<int64_t, IndexInfo*>& map) {
+        if (map.seek(idx_info.id) == nullptr) {
+            // index的字段等信息不会修改，修改也是按照新增删除索引方式做的
+            // 范围判断只需要这些不会修改的字段
+            IndexInfo* new_info = new IndexInfo;
+            *new_info = idx_info;
+            map[idx_info.id] = new_info;
+        }
+    });
+
     index_info_mapping[idx_info.id] = idx_info_ptr;
     std::string fullname = idx_info.name;
     if (!old_idx_name.empty() && old_idx_name != fullname) {
@@ -1634,11 +1627,6 @@ int SchemaFactory::get_region_info(int64_t table_id, int64_t region_id, pb::Regi
     return it->second->get_region_info(region_id, info);
 }
 
-int SchemaFactory::get_region_info(int64_t region_id, pb::RegionInfo& info) {
-    // todo
-    return 0;
-}
-
 int SchemaFactory::get_table_id(const std::string& table_name, int64_t& table_id) {
     DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {
@@ -2406,6 +2394,22 @@ int SchemaFactory::is_unique_field_ids(int64_t table_id, const std::set<int32_t>
                 return 1;
             }
         }
+    }
+    return 0;
+}
+
+int SchemaFactory::fill_default_value(SmartRecord record, FieldInfo& field) {
+    if (field.default_expr_value.is_null()) {
+        return 0;
+    }
+    ExprValue default_value = field.default_expr_value;
+    if (field.default_value == "(current_timestamp())") {
+        default_value = ExprValue::Now();
+        default_value.cast_to(field.type);
+    }
+    if (0 != record->set_value(record->get_field_by_tag(field.id), default_value)) {
+        DB_WARNING("fill insert value failed");
+        return -1;
     }
     return 0;
 }

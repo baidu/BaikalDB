@@ -181,10 +181,6 @@ public:
                 _address(address),
                 _region_info(region_info),
                 _region_id(region_id),
-                _statistics_queue(_statistics_items,
-                    RECV_QUEUE_SIZE * sizeof(StatisticsInfo), butil::NOT_OWN_STORAGE),
-                _qps(1),
-                _average_cost(50000),
                 _node(groupId, peerId),
                 _is_leader(false),
                 _shutdown(false),
@@ -562,12 +558,6 @@ public:
         return _time_cost.reset();
     }
 
-    int64_t get_qps() {
-        return _qps.load();
-    }
-    int64_t get_average_cost() {
-        return _average_cost.load(); 
-    }
     void set_num_table_lines(int64_t table_line) {
         MetaWriter::get_instance()->update_num_table_lines(_region_id, table_line);
         _num_table_lines.store(table_line);
@@ -818,12 +808,12 @@ private:
     };
 
     struct BinlogParam {
-        std::map<int64_t, BinlogDesc> ts_binlog_map;
-        int64_t min_ts_in_map  = -1;
-        int64_t max_ts_in_map  = -1;
-        int64_t check_point_ts = -1;
-        int64_t oldest_ts      = -1;
-        bool    binlog_restart = false;
+        std::map<int64_t, BinlogDesc> ts_binlog_map; // 用于缓存prewrite binlog元数据，便于收到commit binlog时快速反查
+        int64_t min_ts_in_map  = -1; // ts_binlog_map中最小ts，每一轮扫描之后更新
+        int64_t max_ts_in_map  = -1; // ts_binlog_map中最大ts，如果收到比max ts还大的binlog，则直接写rocksdb不更新map，map靠之后定时线程更新
+        int64_t check_point_ts = -1; // 检查点，检查点之前的binlog都已经commit，重启之后从检查点开始扫描
+        int64_t oldest_ts      = -1; // rocksdb中最小ts，如果region 某个peer迁移，binlog数据不迁移则oldest_ts改为当前ts
+        bool    binlog_restart = false; // 重启标记
     };
 
         //binlog function
@@ -876,15 +866,14 @@ private:
         //compaction时候删掉多余的数据
         if (_is_binlog_region) {
             //binlog region把start key和end key设置为空，防止filter把数据删掉
-            SplitCompactionFilter::get_instance()->set_range_key(
-                    _region_id, "", "");
+            SplitCompactionFilter::get_instance()->set_end_key(
+                    _region_id, "");
         } else {
-            SplitCompactionFilter::get_instance()->set_range_key(
+            SplitCompactionFilter::get_instance()->set_end_key(
                     _region_id,
-                    region_info.start_key(),
                     region_info.end_key());
         }
-        DB_WARNING("region_id: %ld, start_ke: %s, end_key: %s", _region_id, 
+        DB_WARNING("region_id: %ld, start_key: %s, end_key: %s", _region_id, 
             rocksdb::Slice(region_info.start_key()).ToString(true).c_str(), 
             rocksdb::Slice(region_info.end_key()).ToString(true).c_str());
     }
@@ -935,11 +924,7 @@ private:
     bool       _legal_region = true;
 
     TimeCost                        _time_cost; //上次收到请求的时间，每次收到请求都重置一次
-    std::mutex                      _queue_lock;    
-    butil::BoundedQueue<StatisticsInfo> _statistics_queue;
-    StatisticsInfo _statistics_items[RECV_QUEUE_SIZE];
-    std::atomic<int64_t> _qps;
-    std::atomic<int64_t> _average_cost;
+    bvar::LatencyRecorder _dml_time_cost;
     bool                                _restart = false;
     //计算存储分离开关，在store定时任务中更新，避免每次dml都访问schema factory
     bool                                _storage_compute_separate = false;

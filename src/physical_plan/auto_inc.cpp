@@ -37,9 +37,17 @@ int AutoInc::analyze(QueryContext* ctx) {
     if (table_info_ptr == nullptr || table_info_ptr->auto_inc_field_id == -1) {
         return 0;
     }
+    
+    return update_auto_inc(table_info_ptr, ctx->client_conn, ctx->use_backup, ctx->insert_records);
+}
+
+int AutoInc::update_auto_inc(SmartTable table_info_ptr,
+                           NetworkSocket* client_conn,
+                           bool use_backup,
+                           std::vector<SmartRecord>& insert_records) {
     int auto_id_count = 0;
     int64_t max_id = 0;
-    for (auto& record : ctx->insert_records) {
+    for (auto& record : insert_records) {
             auto field = record->get_field_by_tag(table_info_ptr->auto_inc_field_id);
             ExprValue value = record->get_value(field);
             // 兼容mysql，值为0会分配自增id
@@ -65,30 +73,27 @@ int AutoInc::analyze(QueryContext* ctx) {
     pb::MetaManagerResponse response;
     request.set_op_type(pb::OP_GEN_ID_FOR_AUTO_INCREMENT);
     auto auto_increment_ptr = request.mutable_auto_increment();
-    auto_increment_ptr->set_table_id(table_id);
+    auto_increment_ptr->set_table_id(table_info_ptr->id);
     auto_increment_ptr->set_count(auto_id_count);
     auto_increment_ptr->set_start_id(max_id);
     MetaServerInteract* interact = MetaServerInteract::get_auto_incr_instance();
-    if (ctx->use_backup) {
+    if (use_backup) {
         interact = MetaServerInteract::get_backup_instance();
     }
-    if (interact->send_request("meta_manager", 
-                                                          request, 
-                                                          response) != 0) {
-        DB_FATAL("gen id from meta_server fail, sql:%s", ctx->sql.c_str());
+    if (interact->send_request("meta_manager", request, response) != 0) {
+        DB_FATAL("gen id from meta_server fail");
         return -1; 
     }
     
     if (auto_id_count == 0) {
         if (max_id > 0) {
-            ctx->client_conn->last_insert_id = max_id;
+            client_conn->last_insert_id = max_id;
         }
         return 0;
     }
     int64_t start_id = response.start_id();
-    auto client = ctx->client_conn;
-    client->last_insert_id = start_id;
-    for (auto& record : ctx->insert_records) {
+    client_conn->last_insert_id = start_id;
+    for (auto& record : insert_records) {
         auto field = record->get_field_by_tag(table_info_ptr->auto_inc_field_id);
         ExprValue value = record->get_value(field);
         if (value.is_null() || value.get_numberic<int64_t>() == 0) {
@@ -98,11 +103,12 @@ int AutoInc::analyze(QueryContext* ctx) {
         }
     }
     if (start_id != (int64_t)response.end_id()) {
-        DB_FATAL("gen id count not equal to request id count, sql:%s", ctx->sql.c_str());
+        DB_FATAL("gen id count not equal to request id count");
         return -1;
     }
     return 0;
 }
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

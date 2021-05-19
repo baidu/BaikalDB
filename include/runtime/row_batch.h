@@ -103,7 +103,7 @@ public:
     int64_t used_bytes_size() {
         int64_t used_size = 0;
         for (size_t i = 0; i < size(); i++) {
-            used_size += _rows[i]->byte_size_long();
+            used_size += _rows[i]->used_size();
         }
         return used_size;
     }
