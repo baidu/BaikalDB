@@ -118,7 +118,7 @@ int LoadPlanner::parse_load_info(pb::LoadNode* node, pb::InsertNode* insert_node
         DB_WARNING("invalid database or table:%s.%s", database.c_str(), table.c_str());
         return -1;
     }
-    _table_id = _plan_table_ctx->table_info[database + "." + table]->id;
+    _table_id = _plan_table_ctx->table_info[try_to_lower(database + "." + table)]->id;
     node->set_table_id(_table_id);
     insert_node->set_table_id(_table_id);
     std::string tmp_path = _load_stmt->path.to_string();

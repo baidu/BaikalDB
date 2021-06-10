@@ -947,6 +947,17 @@ extern std::string string_trim(std::string& str);
 extern const std::string& rand_peer(pb::RegionInfo& info);
 extern void other_peer_to_leader(pb::RegionInfo& info);
 
+DECLARE_bool(disambiguate_select_name);
+DECLARE_bool(schema_ignore_case);
+inline std::string try_to_lower(const std::string& str) {
+    if (FLAGS_schema_ignore_case) {
+        std::string tmp = str;
+        std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::tolower);
+        return tmp;
+    }
+    return str;
+}
+
 inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
     butil::MurmurHash3_x64_128(key.c_str(), key.size(), 1234, out);

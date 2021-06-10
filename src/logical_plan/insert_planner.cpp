@@ -119,7 +119,7 @@ int InsertPlanner::parse_db_table(pb::InsertNode* node) {
         DB_WARNING("invalid database or table:%s.%s", database.c_str(), table.c_str());
         return -1;
     }
-    _table_id = _plan_table_ctx->table_info[database + "." + table]->id;
+    _table_id = _plan_table_ctx->table_info[try_to_lower(database + "." + table)]->id;
     node->set_table_id(_table_id);
     //DB_WARNING("db:%s, tbl:%s, tbl_id:%lu", database.c_str(), table.c_str(), _table_id);
     return 0;

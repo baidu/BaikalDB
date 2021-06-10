@@ -406,9 +406,9 @@ void SelectPlanner::add_single_table_columns(const std::string& table_name, Tabl
         std::string& select_name = field.short_name;
         _select_exprs.push_back(select_expr);
         _select_names.push_back(select_name);
-        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
-        _ctx->ref_slot_id_mapping[slot.tuple_id()][select_name] = slot.slot_id();
-        _ctx->field_column_id_mapping[select_name] = _column_id++;
+//        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
+        _ctx->ref_slot_id_mapping[slot.tuple_id()][field.lower_short_name] = slot.slot_id();
+        _ctx->field_column_id_mapping[field.lower_short_name] = _column_id++;
     }
 }
 
@@ -452,7 +452,7 @@ int SelectPlanner::parse_select_star(parser::SelectField* field) {
                 }
                 DB_WARNING("no database found for field: %s", table_name.c_str());
                 return -1;
-            } else if (dbs.size() > 1) {
+            } else if (dbs.size() > 1 && !FLAGS_disambiguate_select_name) {
                 if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                     _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
                     _ctx->stat_info.error_msg << "table  \'" << table_name << "\' is ambiguous";

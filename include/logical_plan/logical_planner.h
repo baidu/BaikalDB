@@ -142,8 +142,8 @@ protected:
         const std::string& alias);
 
     std::unordered_set<std::string> get_possible_databases(const std::string& table) {
-        if ( _plan_table_ctx->table_dbs_mapping.count(table) != 0) {
-            return _plan_table_ctx->table_dbs_mapping[table];
+        if ( _plan_table_ctx->table_dbs_mapping.count(try_to_lower(table)) != 0) {
+            return _plan_table_ctx->table_dbs_mapping[try_to_lower(table)];
         }
         return std::unordered_set<std::string>();
     }
@@ -157,7 +157,7 @@ protected:
     }
 
     TableInfo* get_table_info_ptr(const std::string& table) {
-        auto iter = _plan_table_ctx->table_info.find(table);
+        auto iter = _plan_table_ctx->table_info.find(try_to_lower(table));
         if (iter != _plan_table_ctx->table_info.end()) {
             return iter->second.get();
         }
@@ -165,7 +165,7 @@ protected:
     }
 
     FieldInfo* get_field_info_ptr(const std::string& field) {
-        auto iter = _plan_table_ctx->field_info.find(field);
+        auto iter = _plan_table_ctx->field_info.find(try_to_lower(field));
         if (iter != _plan_table_ctx->field_info.end()) {
             return iter->second;
         }

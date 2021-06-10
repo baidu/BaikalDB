@@ -1233,14 +1233,19 @@ bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
     std::string db_name = db;
     std::transform(db_name.begin(), db_name.end(), db_name.begin(), ::tolower);
     if (db_name != "information_schema") {
-        db_name = db;
+        db_name = try_to_lower(db);
     }
-    if (std::find(dbs.begin(), dbs.end(), db_name) == dbs.end()) {
+    auto iter = std::find_if(dbs.begin(), dbs.end(), [db_name](std::string& db) {
+        return db_name == try_to_lower(db);
+    });
+    if (iter == dbs.end()) {
         _wrapper->make_err_packet(client, ER_DBACCESS_DENIED_ERROR,
                 "Access denied for user '%s' to database '%s'",
                 client->user_info->username.c_str(), db.c_str());
         client->state = STATE_READ_QUERY_RESULT;
         return false;
+    } else {
+        db_name = *iter;
     }
     // Set current database.
     client->query_ctx->cur_db = db_name;

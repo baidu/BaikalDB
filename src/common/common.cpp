@@ -47,6 +47,9 @@ DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
 DEFINE_bool(servitysinglelog, true, "diff servity message in seperate logfile");
 DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
+DEFINE_bool(schema_ignore_case, false, "whether ignore case when match db/table name");
+DEFINE_bool(disambiguate_select_name, false, "whether use the first when select name is ambiguous, default false");
+
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
         + (_end.tv_usec-_start.tv_usec); //macro second
