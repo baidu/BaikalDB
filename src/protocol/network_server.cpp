@@ -308,7 +308,7 @@ void NetworkServer::print_agg_sql() {
                     std::string field_desc = "-";
                     index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
                     butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
-                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_err="
+                    DB_NOTICE_LONG("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_err="
                             "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] sql_agg: %s "
                             "op_version_desc=[%ld\t%s\t%s\t%s]", 
                         1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
