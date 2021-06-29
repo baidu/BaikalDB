@@ -170,6 +170,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     }
     // LOCK_PRIMARY_NODE目前无法区分update与insert，暂用update兼容
     bool delete_before_put_primary = !_update_affect_primary &&
+            (_ttl_timestamp_us == 0) &&
             (is_update || _node_type == pb::LOCK_PRIMARY_NODE);
     bool need_increase = true;
     auto& reverse_index_map = state->reverse_index_map();
