@@ -149,8 +149,6 @@ public:
     void snapshot_thread();
     void txn_clear_thread();
     
-    void binlog_scan_thread();
-
     void binlog_timeout_check_thread();
 
     void binlog_fake_thread();
@@ -278,8 +276,6 @@ public:
         DB_WARNING("snapshot bth join");
         _txn_clear_bth.join();
         DB_WARNING("txn_clear bth join");
-        _binlog_scan_bth.join();
-        DB_WARNING("binlog scan bth join");
         _binlog_timeout_check_bth.join();
         DB_WARNING("binlog timeout check bth join");
         _binlog_fake_bth.join();
@@ -352,8 +348,6 @@ private:
     Bthread _snapshot_bth;
     // thread for transaction monitor and clear
     Bthread _txn_clear_bth;
-    // binlog定时扫描线程
-    Bthread _binlog_scan_bth;
     // binlog没有及时commit或rollback的事务定时检查
     Bthread _binlog_timeout_check_bth;
     // 定时fake binlog线程
