@@ -142,8 +142,6 @@ public:
         for (auto& pair : _reverse_index_map) {
             delete pair.second;
         }
-        bthread_mutex_destroy(&_commit_meta_mutex);
-        bthread_mutex_destroy(&_commit_ts_map_lock);
     }
 
     void shutdown() {
@@ -161,7 +159,6 @@ public:
         _real_writing_cond.wait();
         _disable_write_cond.wait();
         _multi_thread_cond.wait();
-        _binlog_cond.wait();
         DB_WARNING("_multi_thread_cond wait success, region_id: %ld", _region_id);
         _txn_pool.close();
     }
@@ -189,8 +186,6 @@ public:
                 _region_control(this, region_id),
                 _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)){
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
-        bthread_mutex_init(&_commit_meta_mutex, NULL);
-        bthread_mutex_init(&_commit_ts_map_lock, NULL);
         _region_control.store_status(_region_info.status());
         _is_global_index = _region_info.has_main_table_id() &&
                    _region_info.main_table_id() != 0 &&
@@ -666,14 +661,14 @@ public:
         _storage_compute_separate = is_separate;
     }
     void lock_commit_meta_mutex() {
-        bthread_mutex_lock(&_commit_meta_mutex); 
+        _commit_meta_mutex.lock();
     }
     void unlock_commit_meta_mutex() {
-        bthread_mutex_unlock(&_commit_meta_mutex);
+        _commit_meta_mutex.unlock();
     }
 
     void put_commit_ts(const uint64_t txn_id, int64_t commit_ts) {
-        std::unique_lock<bthread_mutex_t> lck(_commit_ts_map_lock);
+        std::unique_lock<bthread::Mutex> lck(_commit_ts_map_lock);
         _commit_ts_map[txn_id] = commit_ts;
         if (_commit_ts_map.size() > 100000) {
             // 一天阈值
@@ -690,7 +685,7 @@ public:
     }
 
     int64_t get_commit_ts(uint64_t txn_id, int64_t start_ts) {
-        std::unique_lock<bthread_mutex_t> lck(_commit_ts_map_lock);
+        std::unique_lock<bthread::Mutex> lck(_commit_ts_map_lock);
         if (_commit_ts_map.count(txn_id) == 0) {
             return -1;
         }
@@ -761,7 +756,7 @@ public:
 
     bool can_use_approximate_split();
 
-    void binlog_scan();
+    int binlog_scan_when_restart();
 
     void binlog_timeout_check(int64_t rollback_ts);
     
@@ -813,7 +808,6 @@ private:
         int64_t max_ts_in_map  = -1; // ts_binlog_map中最大ts，如果收到比max ts还大的binlog，则直接写rocksdb不更新map，map靠之后定时线程更新
         int64_t check_point_ts = -1; // 检查点，检查点之前的binlog都已经commit，重启之后从检查点开始扫描
         int64_t oldest_ts      = -1; // rocksdb中最小ts，如果region 某个peer迁移，binlog数据不迁移则oldest_ts改为当前ts
-        bool    binlog_restart = false; // 重启标记
     };
 
         //binlog function
@@ -828,9 +822,9 @@ private:
     
     void binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, std::vector<int32_t>& field_slot);
     void binlog_get_field_values(std::map<std::string, ExprValue>& field_value_map, SmartRecord record);
-    void binlog_reset_on_snapshot_load_restart();
+    int binlog_reset_on_snapshot_load_restart();
     
-    void binlog_reset_on_snapshot_load();
+    int binlog_reset_on_snapshot_load();
     void binlog_update_map_when_scan(const std::map<std::string, ExprValue>& field_value_map);
     int binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map);
     int binlog_update_check_point();
@@ -966,7 +960,7 @@ private:
 
     RegionControl                           _region_control;
     MetaWriter*                             _meta_writer = nullptr;
-    bthread_mutex_t                         _commit_meta_mutex;
+    bthread::Mutex                         _commit_meta_mutex;
     scoped_refptr<braft::FileSystemAdaptor>  _snapshot_adaptor = nullptr;
     std::mutex          _region_ddl_lock;    
     pb::StoreRegionDdlInfo     _region_ddl_info;
@@ -978,8 +972,8 @@ private:
     bool _is_binlog_region = false; //是否为binlog region
     // txn_id:commit_ts
     std::map<uint64_t, int64_t> _commit_ts_map;
-    bthread_mutex_t _commit_ts_map_lock;
-    BthreadCond _binlog_cond;
+    bthread::Mutex  _commit_ts_map_lock;
+    bthread::Mutex  _binlog_param_mutex;
     BinlogParam _binlog_param;
     std::string     _rocksdb_start;
     std::string     _rocksdb_end;

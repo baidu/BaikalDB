@@ -1328,7 +1328,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
         if (op_type == pb::OP_COMMIT) {
             num_table_lines += txn_num_increase_rows; 
         }
-        bthread_mutex_lock(&_commit_meta_mutex);    
+        _commit_meta_mutex.lock();  
         _meta_writer->write_pre_commit(_region_id, txn_id, num_table_lines, applied_index);
         //DB_WARNING("region_id: %ld lock and write_pre_commit success,"
         //            " num_table_lines: %ld, applied_index: %ld , txn_id: %lu, op_type: %s",
@@ -1339,7 +1339,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
             //DB_WARNING("region_id: %ld relase commit meta mutex,"
             //            "applied_index: %ld , txn_id: %lu",
             //            _region_id, applied_index, txn_id);
-            bthread_mutex_unlock(&_commit_meta_mutex); 
+            _commit_meta_mutex.unlock();
         }        
     }));
     SmartState state_ptr = std::make_shared<RuntimeState>();
@@ -1707,7 +1707,7 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
     }
     if (state.txn_id != 0) {
         // pre_commit 与 commit 之间不能open snapshot
-        bthread_mutex_lock(&_commit_meta_mutex);
+        _commit_meta_mutex.lock();
         _meta_writer->write_pre_commit(_region_id, state.txn_id, tmp_num_table_lines, applied_index); 
         //DB_WARNING("region_id: %ld lock and write_pre_commit success,"
         //            " num_table_lines: %ld, applied_index: %ld , txn_id: %lu",
@@ -1719,7 +1719,7 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
             //DB_WARNING("region_id: %ld release commit meta mutex, "
             //    " num_table_lines: %ld, applied_index: %ld , txn_id: %lu",
             //    _region_id, tmp_num_table_lines, applied_index, txn_id);
-            bthread_mutex_unlock(&_commit_meta_mutex); 
+            _commit_meta_mutex.unlock();
         }        
     }));
     auto res = txn->commit();
@@ -3317,7 +3317,10 @@ int Region::on_snapshot_load(braft::SnapshotReader* reader) {
         DB_WARNING("region_id: %ld, restart no snapshot sst", _region_id);
         on_snapshot_load_for_restart(reader, prepared_log_entrys);
         if (_is_binlog_region) {
-            binlog_reset_on_snapshot_load_restart();
+            int ret_binlog = binlog_reset_on_snapshot_load_restart();
+            if (ret_binlog != 0) {
+                return -1;
+            }
         }
     } else if (!boost::filesystem::exists(snapshot_meta_file)) {
         DB_FATAL(" region_id: %ld, no meta_sst file", _region_id);
@@ -3378,7 +3381,10 @@ int Region::on_snapshot_load(braft::SnapshotReader* reader) {
             DB_FATAL("clear txn infos from rocksdb fail when on snapshot load, region_id: %ld", _region_id);
             return -1;
         }
-        binlog_reset_on_snapshot_load();
+        int ret_binlog = binlog_reset_on_snapshot_load();
+        if (ret_binlog != 0) {
+            return -1;
+        }
         DB_WARNING("success load snapshot, ingest sst file, region_id: %ld", _region_id);
     }
     // 读出来applied_index, 重放事务指令会把applied index覆盖, 因此必须在回放指令之前把applied index提前读出来

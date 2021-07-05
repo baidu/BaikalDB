@@ -52,8 +52,6 @@ DEFINE_int64(flush_region_interval_us, 10 * 60 * 1000 * 1000LL,
             "flush region interval, defalut(10 min)");
 DEFINE_int64(transaction_clear_interval_ms, 5000LL,
             "transaction clear interval, defalut(5s)");
-DEFINE_int64(binlog_scan_interval_ms, 3000LL,
-            "binlog scan interval, defalut(3s)");
 DEFINE_int64(binlog_timeout_check_ms, 10 * 1000LL,
             "binlog timeout check interval, defalut(10s)");
 DEFINE_int64(binlog_fake_ms, 30 * 1000LL,
@@ -244,7 +242,6 @@ int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
     _flush_bth.run([this]() {flush_memtable_thread();});
     _snapshot_bth.run([this]() {snapshot_thread();});
     _txn_clear_bth.run([this]() {txn_clear_thread();});
-    _binlog_scan_bth.run([this]() {binlog_scan_thread();});
     _binlog_timeout_check_bth.run([this]() {binlog_timeout_check_thread();});
     _binlog_fake_bth.run([this]() {binlog_fake_thread();});
     _has_prepared_tran = true;
@@ -888,17 +885,6 @@ void Store::txn_clear_thread() {
         });
         bthread_usleep_fast_shutdown(FLAGS_transaction_clear_interval_ms * 1000, _shutdown);
 
-    }
-}
-
-void Store::binlog_scan_thread() {
-    while (!_shutdown) {
-        traverse_copy_region_map([](const SmartRegion& region) {
-            if (region->is_binlog_region()) {
-                region->binlog_scan();
-            }
-        });
-        bthread_usleep_fast_shutdown(FLAGS_binlog_scan_interval_ms * 1000, _shutdown);
     }
 }
 
