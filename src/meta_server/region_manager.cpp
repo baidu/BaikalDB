@@ -27,6 +27,7 @@ DECLARE_int32(concurrency_num);
 DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(region_faulty_interval_times);
+DECLARE_int32(balance_add_peer_num);
 
 //增加或者更新region信息
 //如果是增加，则需要更新表信息, 只有leader的上报会调用该接口
@@ -878,6 +879,7 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
             continue;
         }
         int64_t count = add_peer_count.second;
+        int32_t add_peer_num = 0;
         if (instance_regions.find(table_id) == instance_regions.end()) {
             continue;
         }
@@ -930,10 +932,11 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
             add_peer.add_new_peers(new_instance);
             add_peer_requests.push_back(std::pair<std::string, pb::AddPeer>(master_region_info->leader(), add_peer));
             --count;
+            ++add_peer_num;
             if (count <= 0) {
                 break;
             }
-            if (add_peer_requests.size() > 10) {
+            if (add_peer_num > FLAGS_balance_add_peer_num) {
                 break;
             }
         } 
