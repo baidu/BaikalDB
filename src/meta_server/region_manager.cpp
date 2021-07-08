@@ -786,7 +786,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
         }
         average_leader_counts[table_id] = average_leader_count;
         if (table_leader_count.second > (average_leader_count + average_leader_count * 5 / 100)) {
-            transfer_leader_count[table_id] = 
+            transfer_leader_count[table_id] =
                 2 * (table_leader_count.second - average_leader_count);
             response->add_trans_leader_table_id(table_id);
             response->add_trans_leader_count(table_leader_count.second - average_leader_count);
@@ -843,7 +843,8 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
                 continue;
             }
             int64_t leader_count = get_leader_count(peer, table_id);
-            if (leader_count < average_leader_counts[table_id]
+            if (leader_count < average_leader_counts[table_id] + average_leader_counts[table_id] * 10 / 100
+                    && leader_count < table_leader_counts[table_id]
                     && leader_count < leader_count_for_transfer_peer) {
                 transfer_to_peer = peer;
                 leader_count_for_transfer_peer = leader_count;
@@ -858,6 +859,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
             transfer_leader_count[table_id]--;
             *(response->add_trans_leader()) = transfer_request;
             add_leader_count(transfer_to_peer, table_id);
+            table_leader_counts[table_id]--;
         } 
     }
 }
