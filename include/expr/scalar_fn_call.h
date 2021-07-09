@@ -33,11 +33,11 @@ public:
         ExprNode::transfer_pb(pb_node);
         pb_node->mutable_fn()->CopyFrom(_fn);
     }
-    bool has_last_insert_id() const {
+    ExprNode* get_last_insert_id() {
         if (_fn.name() == "last_insert_id") {
-            return true;
+            return this;
         }
-        return ExprNode::has_last_insert_id();
+        return ExprNode::get_last_insert_id();
     }
 private:
     ExprValue multi_eq_value(MemRow* row) {

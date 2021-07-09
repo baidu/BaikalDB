@@ -57,7 +57,7 @@ public:
         if (end_key == nullptr || end_key->empty()) {
             return false;
         }
-        if (get_binlog_region(region_id) == 0) {
+        if (is_binlog_region(region_id)) {
             static int64_t ttl_ms = FLAGS_rocks_binlog_ttl_days * 24 * 60 * 60 * 1000;
             rocksdb::Slice pure_key(key);
             pure_key.remove_prefix(2 * sizeof(int64_t));
@@ -132,15 +132,15 @@ public:
         _binlog_region_id_set.Modify(call);
     }
 
-    int get_binlog_region(int64_t region_id) const {
+    bool is_binlog_region(int64_t region_id) const {
         DoubleBufBinlog::ScopedPtr ptr;
         if (_binlog_region_id_set.Read(&ptr) == 0) {
             auto iter = ptr->find(region_id);
             if (iter != ptr->end()) {
-                return 0;
+                return true;
             }
         }
-        return -1;
+        return false;
     }
 
 private:

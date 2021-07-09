@@ -14,7 +14,6 @@
 // limitations under the License.
 
 #include <gflags/gflags.h>
-#include "brpc/reloadable_flags.h"
 
 namespace baikaldb{
 DEFINE_int64(store_heart_beat_interval_us, 30 * 1000 * 1000, "store heart interval (30 s)");
@@ -23,7 +22,5 @@ DEFINE_int32(region_faulty_interval_times, 3, "region faulty interval times of h
 DEFINE_int32(store_faulty_interval_times, 3, "store faulty interval times of heart beat");
 DEFINE_int32(store_dead_interval_times, 60, "store dead interval times of heart beat");
 DEFINE_int32(healthy_check_interval_times, 1, "meta state machine healthy check interval times of heart beat");
-DEFINE_int32(balance_add_peer_num, 10, "add peer num each time, default(10)");
-BRPC_VALIDATE_GFLAG(balance_add_peer_num, brpc::PositiveInteger);
 }
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

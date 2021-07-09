@@ -93,13 +93,13 @@ public:
     bool has_null() const {
         return _has_null;
     }
-    virtual bool has_last_insert_id() const {
+    virtual ExprNode* get_last_insert_id() {
         for (auto c : _children) {
-            if (c->has_last_insert_id()) {
-                return true;
+            if (c->get_last_insert_id() != nullptr) {
+                return c;
             }
         }
-        return false;
+        return nullptr;
     }
     bool is_row_expr() {
         return _node_type == pb::ROW_EXPR;
@@ -259,7 +259,7 @@ protected:
     pb::ExprNodeType _node_type;
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
-    uint32_t _col_flag;
+    uint32_t _col_flag = 0;
     bool    _is_constant = true;
     bool    _has_null = false;
     bool    _replace_agg_to_slot = true;
