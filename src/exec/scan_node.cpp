@@ -89,6 +89,11 @@ int64_t ScanNode::select_index() {
         if (path->hint == AccessPath::IGNORE_INDEX) {
             prefix_ratio_index_score = 0;
         }
+
+        // 使用了force index, 则primary优先级最低
+        if (_has_force_index && path->hint != AccessPath::FORCE_INDEX) {
+	    prefix_ratio_index_score = 0;
+	}
         prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, index_id));
 
         // 优先选倒排，没有就取第一个
@@ -106,6 +111,12 @@ int64_t ScanNode::select_index() {
     }
     // ratio * 10(=0...9)相同的possible index中，按照PRIMARY, UNIQUE, KEY的优先级选择
     for (auto iter = prefix_ratio_id_mapping.crbegin(); iter != prefix_ratio_id_mapping.crend(); ++iter) {
+        if (_paths[iter->second]->is_virtual) {
+            if ( _virtual_index_selected == 0) {
+                _virtual_index_selected = iter->second;
+            }
+            continue;
+        }
         return iter->second;
     }
     return _table_id;
@@ -291,7 +302,6 @@ bool ScanNode::full_coverage(const std::unordered_set<int32_t>& smaller, const s
             return false;
         }
     }
-
     return true;
 }
 
@@ -306,18 +316,15 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
         }
 
         if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
-            outer_path->is_possible = false;
             return -1;
         }
 
         if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
-            inner_path->is_possible = false;
             return -2;
         }
 
         if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
-            inner_path->is_possible = false;
             return -2;
         }
 
@@ -327,13 +334,11 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
         }
 
         if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
-            outer_path->is_possible = false;
             return -1;
         }
 
         if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
-            outer_path->is_possible = false;
             return -1;
         }
     } else {
@@ -342,13 +347,11 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
         }
 
         if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
-            inner_path->is_possible = false;
             return -2;
         }
 
         if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
-            inner_path->is_possible = false;
             return -2;
         }
     }
@@ -356,29 +359,9 @@ int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
     return 0;
 }
 
-void ScanNode::inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter) {
-    auto inner_loop_iter = outer_loop_iter;
-    while ((++inner_loop_iter) != _paths.end()) {
-        if (!inner_loop_iter->second->is_possible || inner_loop_iter->second->is_virtual) {
-            continue;
-        }
+// 主键或唯一索引命中。
 
-        if (inner_loop_iter->second->index_type != pb::I_PRIMARY && 
-            inner_loop_iter->second->index_type != pb::I_UNIQ &&
-            inner_loop_iter->second->index_type != pb::I_KEY) {
-            continue;
-        }
-
-        int ret = compare_two_path(outer_loop_iter->second, inner_loop_iter->second);
-        if (ret == -1) {
-            // outer被干掉，跳出循环
-            break;
-        }
-    }
-}
-
-// 两两比较，根据一些简单规则干掉次优索引
-int64_t ScanNode::pre_process_select_index() {
+int64_t ScanNode::select_unique_index() {
     if (_paths.empty()) {
         return 0;
     }
@@ -386,64 +369,101 @@ int64_t ScanNode::pre_process_select_index() {
     if (_use_fulltext) {
         return 0;
     }
-
-    int possible_cnt = 0;
-    int cover_index_cnt = 0;
-    int64_t possible_index = 0;
-    for (auto outer_loop_iter = _paths.begin(); outer_loop_iter != _paths.end(); outer_loop_iter++) {
-        if (!outer_loop_iter->second->is_possible || outer_loop_iter->second->is_virtual) {
+    //判断是否有强制索引
+    _has_force_index = false;
+    for (auto index_iter = _paths.begin(); index_iter != _paths.end(); index_iter ++ ) {
+	if (index_iter->second->hint == AccessPath::FORCE_INDEX) {
+	    _has_force_index = true;
+	}
+    }
+    int64_t ret_index_id = 0;
+    for (auto index_iter = _paths.begin(); index_iter != _paths.end(); index_iter ++ ) {
+        if (!index_iter->second->is_possible) {
             continue;
         }
+        if (index_iter->second->index_type == pb::I_PRIMARY || 
+            index_iter->second->index_type == pb::I_UNIQ) {
+            if (index_iter->second->index_field_ids.size() 
+                == index_iter->second->hit_index_field_ids.size() && ret_index_id == 0) {
+                // 主键或唯一键全命中，直接选择
+                if (_has_force_index && index_iter->second->hint != AccessPath::FORCE_INDEX) {
+		    continue;
+		}
+                if (index_iter->second->is_virtual) {
+                    //虚拟索引命中。
+                    if (_virtual_index_selected == 0) {
+                        _virtual_index_selected = index_iter->second->index_id;
+                    }
+                    continue;
+                } else {
+                    ret_index_id = index_iter->second->index_id;
+                }
+            }
+            continue;
+        }
+    }
+    return ret_index_id;
+}
 
-        if (outer_loop_iter->second->index_type != pb::I_PRIMARY && 
+//计算可选择的索引
+void ScanNode::calc_possible_index() {
+    if (_use_fulltext) {
+        return;
+    }
+    for (auto outer_loop_iter = _paths.begin(); outer_loop_iter != _paths.end(); outer_loop_iter ++ ) {
+        if (!outer_loop_iter->second->is_possible) {
+            continue;
+        }
+        if (outer_loop_iter->second->index_type != pb::I_PRIMARY &&
             outer_loop_iter->second->index_type != pb::I_UNIQ &&
             outer_loop_iter->second->index_type != pb::I_KEY) {
             continue;
         }
-
-        if (outer_loop_iter->second->index_type == pb::I_PRIMARY || 
-            outer_loop_iter->second->index_type == pb::I_UNIQ) {
-            if (outer_loop_iter->second->index_field_ids.size() 
-                == outer_loop_iter->second->hit_index_field_ids.size()) {
-                // 主键或唯一键全命中，直接选择
-                return outer_loop_iter->second->index_id;
+        if (outer_loop_iter->second->hit_index_field_ids.empty() &&
+            !outer_loop_iter->second->is_sort_index) {
+            outer_loop_iter->second->is_possible = false;
+            continue;
+        }
+        auto inner_loop_iter = outer_loop_iter;
+        while ((++inner_loop_iter) != _paths.end()) {
+            if (!inner_loop_iter->second->is_possible) {
+                continue;
+            }
+            if (inner_loop_iter->second->index_type != pb::I_PRIMARY && 
+                inner_loop_iter->second->index_type != pb::I_UNIQ &&
+                inner_loop_iter->second->index_type != pb::I_KEY) {
+                continue;
+            }
+            int ret = compare_two_path(outer_loop_iter->second, inner_loop_iter->second);
+            if (ret == -1 && !inner_loop_iter->second->is_virtual) {
+                outer_loop_iter->second->is_possible = false;
+                break;
+            }
+            if (ret == -2 && !inner_loop_iter->second->is_virtual) {
+                inner_loop_iter->second->is_possible = false;
             }
         }
-
-        inner_loop_and_compare(outer_loop_iter);
-        if (outer_loop_iter->second->is_possible) {
-            possible_cnt++;
-            possible_index = outer_loop_iter->second->index_id;
+        if (!outer_loop_iter->second->is_possible) {
+            continue;
         }
-        if (outer_loop_iter->second->is_cover_index()) {
-            cover_index_cnt++;
+        if (outer_loop_iter->second->is_cover_index()){
+            _cover_index_cnt ++;
         }
+        _possible_index_cnt ++;
     }
-
-    _cover_index_cnt = cover_index_cnt;
-    _possible_index_cnt = possible_cnt;
-    // 仅有一个possible index直接选择这个索引
-    if (possible_cnt == 1) {
-        return possible_index;
-    }
-
-    // 没有possible index 选择 primary index
-    if (possible_cnt == 0) {
-        return _table_id;
-    }
-
-    return 0;
-
 }
+
 
 int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
     pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     _router_index_id = _table_id; 
     _router_index = &_paths[_table_id]->pos_index;
-    // 预处理，使用倒排索引的sql不进行预处理，如果select_idx大于0则已经选出索引
-    int64_t select_idx = pre_process_select_index();
-
-    if (select_idx == 0) {
+    _virtual_index_selected = 0;
+ 
+    //判断是否命中主键或唯一索引。
+    int64_t select_idx = select_unique_index();
+    if (select_idx == 0){
+        calc_possible_index();
         if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
             && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext) {
             DB_DEBUG("table %ld has statistics", _table_id);
@@ -451,17 +471,12 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
         } else {
             select_idx = select_index();
         }
-    } 
+    }
 
-    if (_paths[select_idx]->is_virtual) {
-        // 虚拟索引需要重新选择
-        _router_index_id = -1;
-        _router_index = nullptr;
-        _multi_reverse_index.clear();
-        _paths[select_idx]->is_possible = false; // 确保下次不再选择该虚拟索引
+    //若虚拟索引被选中，更新
+    if (_virtual_index_selected != 0) {
         std::string& name = _paths[select_idx]->index_info_ptr->short_name;
-        SchemaFactory::get_instance()->update_virtual_index_info(select_idx, name, sample_sql);
-        return select_index_in_baikaldb(sample_sql);
+        SchemaFactory::get_instance()->update_virtual_index_info(_virtual_index_selected, name, sample_sql);
     }
 
     //DB_WARNING("idx:%ld table:%ld", select_idx, _table_id);

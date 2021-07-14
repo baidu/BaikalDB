@@ -895,6 +895,7 @@ int LogicalPlanner::create_join_node_from_table_name(const parser::TableName* ta
             std::string(), false,
             std::vector<std::string>{}, 
             std::vector<std::string>{}, 
+            std::vector<std::string>{}, 
             join_root_ptr);
 }
 
@@ -908,21 +909,26 @@ int LogicalPlanner::create_join_node_from_table_source(const parser::TableSource
         return -1;
     }
     std::vector<std::string> use_index_names;
+    std::vector<std::string> force_index_names;
     std::vector<std::string> ignore_index_names;
     for (int i = 0; i < table_source->index_hints.size(); ++i) {
-        if (table_source->index_hints[i]->hint_type == parser::IHT_HINT_USE
-                || table_source->index_hints[i]->hint_type == parser::IHT_HINT_FORCE) {
+        if (table_source->index_hints[i]->hint_type == parser::IHT_HINT_USE) {
             for (int j = 0; j < table_source->index_hints[i]->index_name_list.size(); ++j) {
                 use_index_names.push_back(table_source->index_hints[i]->index_name_list[j].value);
             }
         }
+        if (table_source->index_hints[i]->hint_type == parser::IHT_HINT_FORCE) {
+            for (int j = 0; j < table_source->index_hints[i]->index_name_list.size(); ++j) {
+                force_index_names.push_back(table_source->index_hints[i]->index_name_list[j].value);
+            }
+	}
         if (table_source->index_hints[i]->hint_type == parser::IHT_HINT_IGNORE) {
             for (int j = 0; j < table_source->index_hints[i]->index_name_list.size(); ++j) {
                 ignore_index_names.push_back(table_source->index_hints[i]->index_name_list[j].value);
             }
         }
     }
-    return create_join_node_from_terminator(db, table, alias, is_derived_table, use_index_names, ignore_index_names, join_root_ptr);
+    return create_join_node_from_terminator(db, table, alias, is_derived_table, use_index_names, force_index_names, ignore_index_names, join_root_ptr);
 }
 
 int LogicalPlanner::create_join_node_from_terminator(const std::string db, 
@@ -930,6 +936,7 @@ int LogicalPlanner::create_join_node_from_terminator(const std::string db,
             const std::string alias, 
             const bool is_derived_table,
             const std::vector<std::string>& use_index_names, 
+            const std::vector<std::string>& force_index_names, 
             const std::vector<std::string>& ignore_index_names, 
             JoinMemTmp** join_root_ptr) {
     if (0 != add_table(db, table, alias, is_derived_table)) {
@@ -963,6 +970,16 @@ int LogicalPlanner::create_join_node_from_terminator(const std::string db,
     //如果用户指定了use_index, 则主键永远放到use_index里
     if ((*join_root_ptr)->use_indexes.size() != 0) {
         (*join_root_ptr)->use_indexes.insert(table_id);
+    }
+    for (auto& index_name : force_index_names) {
+        int64_t index_id = 0;
+        auto ret = _factory->get_index_id(table_id, index_name, index_id);
+        if (ret != 0) {
+            DB_WARNING("index_name: %s in table:%s not exist", 
+                        index_name.c_str(), alias_full_name.c_str());
+            return -1;
+        }
+        (*join_root_ptr)->force_indexes.insert(index_id);
     }
     for (auto& index_name : ignore_index_names) {
         int64_t index_id = 0;
@@ -2511,6 +2528,9 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTm
         for (auto index_id : join_root->use_indexes) {
             scan->add_use_indexes(index_id);
         }
+        for (auto index_id : join_root->force_indexes) {
+	    scan->add_force_indexes(index_id);
+	}
         for (auto index_id : join_root->ignore_indexes) {
             scan->add_ignore_indexes(index_id);
         }

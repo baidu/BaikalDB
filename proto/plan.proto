@@ -122,6 +122,7 @@ message ScanNode {
     repeated int64 ignore_indexes = 6;
     optional FulltextIndex fulltext_index = 7;
     optional LockCmdType lock = 8;
+    repeated int64 force_indexes = 9;
 };
 
 message LimitNode {

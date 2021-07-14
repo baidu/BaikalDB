@@ -157,8 +157,6 @@ public:
 
     int compare_two_path(SmartPath outer_path, SmartPath inner_path);
 
-    void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
-
     void set_fulltext_index_tree(const FulltextInfoTree& tree) {
         _fulltext_index_tree = tree;
     }
@@ -166,8 +164,8 @@ public:
     int create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextIndex* root);
     int create_fulltext_index_tree();
 
-// 两两比较，根据一些简单规则干掉次优索引
-    int64_t pre_process_select_index();
+    void calc_possible_index();
+    int64_t select_unique_index();
     
 protected:
     pb::Engine _engine = pb::ROCKSDB;
@@ -189,6 +187,8 @@ protected:
     FulltextInfoTree _fulltext_index_tree; //目前只有两层，第一层为and，第二层为or。
     std::unique_ptr<pb::FulltextIndex> _fulltext_index_pb;
     bool _fulltext_use_arrow = false;
+    int64_t _virtual_index_selected = 0;
+    bool _has_force_index = false;
 };
 }
 
