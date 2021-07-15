@@ -168,6 +168,8 @@ std::unique_ptr<ScanNode> GlobalDDLPlanner::create_scan_node() {
     scan_node->init(_ctx->plan.nodes(0));
     _ctx->client_conn->txn_id = 0;
     set_dml_txn_state(_table_id);
+    _ctx->open_binlog = false;
+    _ctx->client_conn->open_binlog = false;
 
     scan_node->set_router_index_id(_table_id);
     pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->

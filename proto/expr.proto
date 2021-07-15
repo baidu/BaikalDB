@@ -63,6 +63,7 @@ message ExprNode {
     required int32 num_children = 3;
     optional Function fn = 4;
     optional DeriveExprNode derive_node = 5;
+    optional uint32 col_flag = 6;
 };
 
 message Expr {

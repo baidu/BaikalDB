@@ -290,6 +290,7 @@ int Region::init(bool new_region, int32_t snapshot_times) {
         //binlog region把start key和end key设置为空，防止filter把数据删掉
         SplitCompactionFilter::get_instance()->set_end_key(
                 _region_id, "");
+        SplitCompactionFilter::get_instance()->set_binlog_region(_region_id);
     } else {
         SplitCompactionFilter::get_instance()->set_end_key(
                 _region_id,
@@ -1743,6 +1744,9 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         response.set_scan_rows(state.num_scan_rows());
         response.set_filter_rows(state.num_filter_rows());
         response.set_errcode(pb::SUCCESS);
+        if (state.last_insert_id != INT64_MIN) {
+            response.set_last_insert_id(state.last_insert_id);
+        }
     } else {
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("txn commit failed.");
@@ -2351,6 +2355,9 @@ void Region::on_apply(braft::Iterator& iter) {
                     }
                     if (res.has_filter_rows()) {
                         ((DMLClosure*)done)->response->set_filter_rows(res.filter_rows());
+                    }
+                    if (res.has_last_insert_id()) {
+                        ((DMLClosure*)done)->response->set_last_insert_id(res.last_insert_id());
                     }
                 }
                 //DB_WARNING("dml_1pc %s", res.trace_nodes().DebugString().c_str());
@@ -4291,7 +4298,7 @@ void Region::write_local_rocksdb_for_split() {
         };
         copy_bth.run(read_and_write); 
     }
-    if (!_is_global_index) {
+    if (table_info.engine == pb::ROCKSDB_CSTORE && !_is_global_index) {
         // write all non-pk column values to cstore
         std::set<int32_t> pri_field_ids;
         for (auto& field_info : pk_info.fields) {

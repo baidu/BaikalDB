@@ -28,7 +28,6 @@ DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second")
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
 DECLARE_int64(print_time_us);
 DECLARE_string(meta_server_bns);
-
 void StateMachine::run_machine(SmartSocket client,
         EpollInfo* epoll_info,
         bool shutdown) {
@@ -492,7 +491,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 ctx->type,
                 client->username.c_str());
         }
-    } 
+    }
     SchemaFactory::use_backup.set_bthread_local(false);
     ctx->mysql_cmd = COM_SLEEP;
     client->last_active = time(NULL);
@@ -521,8 +520,10 @@ int StateMachine::_auth_read(SmartSocket sock) {
     }
     if (charset_num == 28) {
         sock->charset_name = "gbk";
+        sock->charset_num = 28;
     } else if (charset_num == 33) {
         sock->charset_name = "utf8";
+        sock->charset_num = 33;
     } else {
         DB_TRACE_CLIENT(sock, "unknown charset num: %u, charset will be set as gbk.",
             charset_num);
@@ -994,8 +995,10 @@ bool StateMachine::_query_process(SmartSocket client) {
             re2::RE2 reg(".*gbk.*", option);
             if (RE2::FullMatch(client->query_ctx->sql, reg)) {
                 client->charset_name = "gbk";
+                client->charset_num = 28;
             } else {
                 client->charset_name = "utf8";
+                client->charset_num = 33;
             }
             if (reg.error_code() != 0) {
                 DB_WARNING("charset regex match error.");
@@ -1230,14 +1233,19 @@ bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
     std::string db_name = db;
     std::transform(db_name.begin(), db_name.end(), db_name.begin(), ::tolower);
     if (db_name != "information_schema") {
-        db_name = db;
+        db_name = try_to_lower(db);
     }
-    if (std::find(dbs.begin(), dbs.end(), db_name) == dbs.end()) {
+    auto iter = std::find_if(dbs.begin(), dbs.end(), [db_name](std::string& db) {
+        return db_name == try_to_lower(db);
+    });
+    if (iter == dbs.end()) {
         _wrapper->make_err_packet(client, ER_DBACCESS_DENIED_ERROR,
                 "Access denied for user '%s' to database '%s'",
                 client->user_info->username.c_str(), db.c_str());
         client->state = STATE_READ_QUERY_RESULT;
         return false;
+    } else {
+        db_name = *iter;
     }
     // Set current database.
     client->query_ctx->cur_db = db_name;
@@ -2664,7 +2672,7 @@ bool StateMachine::_handle_client_query_show_socket(SmartSocket client) {
         }
     }
 
-    std::sort(rows.begin(), rows.end(), 
+    std::sort(rows.begin(), rows.end(),
         [](const std::vector<std::string>& left, const std::vector<std::string>& right) {
             int l = atoi(left[1].c_str());
             int r = atoi(right[1].c_str());
@@ -2864,6 +2872,7 @@ bool StateMachine::_handle_client_query_show_collation(SmartSocket client) {
     rows.push_back(row1);
     rows.push_back({"utf8_general_ci", "utf8", "33", "Yes", "Yes", "1"});
     rows.push_back({"utf8_bin", "utf8", "83", " ", "Yes", "1"});
+    rows.push_back({"binary", "binary", "63", " ", "Yes", "1"});
 
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {

@@ -966,7 +966,7 @@ void Region::read_binlog(const pb::StoreReq* request,
         }
     }
 
-    if (return_nr == 0 && max_fake_binlog != 0) {
+    if (return_nr == 0 && max_fake_binlog != 0 && begin_ts < max_fake_binlog) {
         pb::StoreReq fake_binlog;
         DB_WARNING("region_id: %ld, fake binlog ts: %ld, %s", _region_id, max_fake_binlog, ts_to_datetime(max_fake_binlog).c_str());
         fake_binlog.set_op_type(pb::OP_FAKE_BINLOG);

@@ -66,16 +66,24 @@ enum MysqlType : unsigned char {
     MYSQL_TYPE_GEOMETRY     = 255
 };
 
+// https://github.com/mysql/mysql-server/blob/8.0/include/mysql_com.h
 enum MysqlFieldFlag {
-    MYSQL_FIELD_FLAG_NOT_NULL = 0,
-    MYSQL_FIELD_FLAG_PRI_KEY,
-    MYSQL_FIELD_FLAG_UNIQ_KEY,
-    MYSQL_FIELD_FLAG_MULTI_KEY,
-    MYSQL_FIELD_FLAG_BLOB,
-    MYSQL_FIELD_FLAG_UNSIGNED,
-    MYSQL_FIELD_FLAG_ZEROFILL,
-    MYSQL_FIELD_FLAG_BINARY,
-    MYSQL_FIELD_FLAG_AUTO_INC
+    MYSQL_FIELD_FLAG_NOT_NULL       = 1 << 0,
+    MYSQL_FIELD_FLAG_PRI_KEY        = 1 << 1,
+    MYSQL_FIELD_FLAG_UNIQ_KEY       = 1 << 2,
+    MYSQL_FIELD_FLAG_MULTI_KEY      = 1 << 3,
+    MYSQL_FIELD_FLAG_BLOB           = 1 << 4,
+    MYSQL_FIELD_FLAG_UNSIGNED       = 1 << 5,
+    MYSQL_FIELD_FLAG_ZEROFILL       = 1 << 6,
+    MYSQL_FIELD_FLAG_BINARY         = 1 << 7,
+    MYSQL_FIELD_FLAG_ENUM           = 1 << 8,
+    MYSQL_FIELD_FLAG_AUTO_INC       = 1 << 9,
+    MYSQL_FIELD_FLAG_Timestamp      = 1 << 10,
+    MYSQL_FIELD_FLAG_SET            = 1 << 11,
+    MYSQL_FIELD_FLAG_NODEFAULTVALUE = 1 << 12,
+    MYSQL_FIELD_FLAG_ONUPDATENOW    = 1 << 13,
+    MYSQL_FIELD_FLAG_PARTKEY        = 1 << 14,
+    MYSQL_FIELD_FLAG_NUM            = 1 << 15
 };
 
 enum ColumnOptionType : unsigned char {

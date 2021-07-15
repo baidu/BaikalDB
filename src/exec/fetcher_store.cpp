@@ -35,16 +35,16 @@ DEFINE_int32(fetcher_connect_timeout, 1000,
                     "store as server connect timeout, default:1000ms");
 DEFINE_int64(db_row_number_to_check_memory, 10240, "do memory limit when row number more than #, defalut: 10240");
 DEFINE_bool(fetcher_follower_read, true, "where allow follower read for fether");
-                    
+
 ErrorType FetcherStore::send_request(
         RuntimeState* state,
         ExecNode* store_request,
         pb::RegionInfo& info,
         pb::TraceNode* trace_node,
-        int64_t old_region_id, 
-        int64_t region_id, 
-        uint64_t log_id, 
-        int retry_times, 
+        int64_t old_region_id,
+        int64_t region_id,
+        uint64_t log_id,
+        int retry_times,
         int start_seq_id,
         int current_seq_id,
         pb::OpType op_type) {
@@ -54,7 +54,7 @@ ErrorType FetcherStore::send_request(
     if (trace_node != nullptr) {
         req.set_is_trace(true);
     }
-    
+
     if (state->explain_type == ANALYZE_STATISTICS) {
         if (state->cmsketch != nullptr) {
             pb::AnalyzeInfo* info = req.mutable_analyze_info();
@@ -66,7 +66,7 @@ ErrorType FetcherStore::send_request(
     }
     ScopeGuard auto_update_trace([&]() {
         if (trace_node != nullptr) {
-            std::string desc = "baikalDB FetcherStore send_request " 
+            std::string desc = "baikalDB FetcherStore send_request "
                                + pb::ErrCode_Name(res.errcode());
             trace_node->set_description(trace_node->description() + " " + desc);
             trace_node->set_total_time(total_cost.get_time());
@@ -93,9 +93,9 @@ ErrorType FetcherStore::send_request(
     }
     //DB_WARNING("region_info; txn: %ld, %s, %lu", _txn_id, info.ShortDebugString().c_str(), records.size());
     if (retry_times >= 5) {
-        DB_WARNING("region_id: %ld, txn_id: %lu, log_id:%lu rpc error; retry:%d", 
+        DB_WARNING("region_id: %ld, txn_id: %lu, log_id:%lu rpc error; retry:%d",
             region_id, state->txn_id, log_id, retry_times);
-        return E_FATAL;    
+        return E_FATAL;
     }
     // for exec next_statement_after_begin, begin must be added
     if (current_seq_id == 2 && state->single_sql_autocommit() == false) {
@@ -106,7 +106,7 @@ ErrorType FetcherStore::send_request(
         BAIDU_SCOPED_LOCK(state->client_conn()->region_lock);
         if (state->client_conn()->region_infos.count(region_id) == 0) {
             //DB_WARNING("start seq id is reset to 1, region_id: %ld", region_id);
-            start_seq_id = 1;    
+            start_seq_id = 1;
         }
     }
     TimeCost cost;
@@ -155,7 +155,7 @@ ErrorType FetcherStore::send_request(
     // DB_WARNING("txn_id: %lu, start_seq_id: %d, autocommit:%d", _txn_id, start_seq_id, state->autocommit());
     // 将缓存的plan中seq_id >= start_seq_id的部分追加到request中
     // rollback cmd does not need to send cache
-    //DB_WARNING("op_type: %d, start_seq_id:%d, cache_plans_size: %d", 
+    //DB_WARNING("op_type: %d, start_seq_id:%d, cache_plans_size: %d",
     //            op_type, start_seq_id, client_conn->cache_plans.size());
     if (start_seq_id >= 0 && op_type != pb::OP_COMMIT) {
         for (auto& pair : client_conn->cache_plans) {
@@ -172,7 +172,7 @@ ErrorType FetcherStore::send_request(
             if (op_type == pb::OP_ROLLBACK && plan_item.op_type != pb::OP_BEGIN) {
                 continue;
             }
-            if (plan_item.tuple_descs.size() > 0 && 
+            if (plan_item.tuple_descs.size() > 0 &&
                 plan_item.op_type != pb::OP_BEGIN &&
                 static_cast<DMLNode*>(plan_item.root)->global_index_id() != info.table_id()
                 ) {
@@ -210,7 +210,7 @@ ErrorType FetcherStore::send_request(
     brpc::Channel channel;
     brpc::ChannelOptions option;
     option.max_retry = 1;
-    option.connect_timeout_ms = FLAGS_fetcher_connect_timeout; 
+    option.connect_timeout_ms = FLAGS_fetcher_connect_timeout;
     option.timeout_ms = FLAGS_fetcher_request_timeout;
     int ret = 0;
     std::string addr = info.leader();
@@ -228,7 +228,7 @@ ErrorType FetcherStore::send_request(
     }
     ret = channel.Init(addr.c_str(), &option);
     if (ret != 0) {
-        DB_WARNING("channel init failed, addr:%s, ret:%d, region_id: %ld, log_id:%lu", 
+        DB_WARNING("channel init failed, addr:%s, ret:%d, region_id: %ld, log_id:%lu",
                 addr.c_str(), ret, region_id, log_id);
         return E_FATAL;
     }
@@ -242,16 +242,16 @@ ErrorType FetcherStore::send_request(
     DB_DEBUG("fetch store req: %s", req.DebugString().c_str());
     DB_DEBUG("fetch store res: %s", res.DebugString().c_str());
     if (cost.get_time() > FLAGS_print_time_us || retry_times > 0) {
-        DB_WARNING("entry_ms:%ld, %ld, %ld, %ld, %ld, lock:%ld, wait region_id: %ld version:%ld time:%ld rpc_time: %ld log_id:%lu txn_id: %lu, ip:%s", 
-                entry_ms, entry_ms2, entry_ms3, entry_ms4, entry_ms5, client_lock_tm, region_id, 
+        DB_WARNING("entry_ms:%ld, %ld, %ld, %ld, %ld, lock:%ld, wait region_id: %ld version:%ld time:%ld rpc_time: %ld log_id:%lu txn_id: %lu, ip:%s",
+                entry_ms, entry_ms2, entry_ms3, entry_ms4, entry_ms5, client_lock_tm, region_id,
                 info.version(), cost.get_time(), query_time.get_time(), log_id, state->txn_id,
                 butil::endpoint2str(cntl.remote_side()).c_str());
     }
     if (cntl.Failed()) {
-        DB_WARNING("call failed region_id: %ld, errcode:%d, error:%s, log_id:%lu", 
+        DB_WARNING("call failed region_id: %ld, errcode:%d, error:%s, log_id:%lu",
                 region_id, cntl.ErrorCode(), cntl.ErrorText().c_str(), log_id);
         // 只有网络相关错误码才重试
-        if (cntl.ErrorCode() != ETIMEDOUT && 
+        if (cntl.ErrorCode() != ETIMEDOUT &&
                 cntl.ErrorCode() != ECONNREFUSED &&
                 cntl.ErrorCode() != EHOSTDOWN &&
                 cntl.ErrorCode() != ECANCELED) {
@@ -264,7 +264,7 @@ ErrorType FetcherStore::send_request(
     }
     if (res.errcode() == pb::NOT_LEADER) {
         int last_seq_id = res.has_last_seq_id()? res.last_seq_id() : 0;
-        DB_WARNING("NOT_LEADER, region_id: %ld, addr:%s retry:%d, new_leader:%s, log_id:%lu", 
+        DB_WARNING("NOT_LEADER, region_id: %ld, addr:%s retry:%d, new_leader:%s, log_id:%lu",
                 region_id, addr.c_str(), retry_times, res.leader().c_str(), log_id);
 
         if (res.leader() != "0.0.0.0:0") {
@@ -285,7 +285,7 @@ ErrorType FetcherStore::send_request(
     }
     if (res.errcode() == pb::TXN_FOLLOW_UP) {
         int last_seq_id = res.has_last_seq_id()? res.last_seq_id() : 0;
-        DB_WARNING("TXN_FOLLOW_UP, region_id: %ld, retry:%d, log_id:%lu, op:%d, start_seq_id:%d last_seq_id:%d", 
+        DB_WARNING("TXN_FOLLOW_UP, region_id: %ld, retry:%d, log_id:%lu, op:%d, start_seq_id:%d last_seq_id:%d",
                 region_id, retry_times, log_id, op_type, start_seq_id, last_seq_id + 1);
         //对于commit，rollback, 直接忽略返回成功
         //其他命令需要重发缓存
@@ -297,7 +297,7 @@ ErrorType FetcherStore::send_request(
     }
     //todo 需要处理分裂情况
     if (res.errcode() == pb::VERSION_OLD) {
-        DB_WARNING("VERSION_OLD, region_id: %ld, start_seq_id:%d retry:%d, now:%s, log_id:%lu", 
+        DB_WARNING("VERSION_OLD, region_id: %ld, start_seq_id:%d retry:%d, now:%s, log_id:%lu",
                 region_id, start_seq_id, retry_times, info.ShortDebugString().c_str(), log_id);
         if (res.regions_size() >= 2) {
             auto regions = res.regions();
@@ -306,7 +306,7 @@ ErrorType FetcherStore::send_request(
                 for (auto r : res.regions()) {
                     DB_WARNING("version region:%s", r.ShortDebugString().c_str());
                     if (end_key_compare(r.end_key(), info.end_key()) > 0) {
-                        DB_WARNING("region:%ld r.end_key:%s > info.end_key:%s", 
+                        DB_WARNING("region:%ld r.end_key:%s > info.end_key:%s",
                                    r.region_id(),
                                    str_to_hex(r.end_key()).c_str(),
                                    str_to_hex(info.end_key()).c_str());
@@ -318,7 +318,7 @@ ErrorType FetcherStore::send_request(
                 //merge场景，踢除当前region，继续走下面流程
                 for (auto r : res.regions()) {
                     if (r.region_id() == region_id) {
-                        DB_WARNING("merge can`t add this region:%s", 
+                        DB_WARNING("merge can`t add this region:%s",
                                    r.ShortDebugString().c_str());
                         continue;
                     }
@@ -334,7 +334,7 @@ ErrorType FetcherStore::send_request(
             //bthread_usleep(retry_times * FLAGS_retry_interval_us);
             if (op_type == pb::OP_PREPARE && client_conn->transaction_has_write()) {
                 state->set_optimize_1pc(false);
-                DB_WARNING("TransactionNote: disable optimize_1pc due to split: txn_id: %lu, seq_id: %d, region_id: %ld", 
+                DB_WARNING("TransactionNote: disable optimize_1pc due to split: txn_id: %lu, seq_id: %d, region_id: %ld",
                 state->txn_id, current_seq_id, region_id);
             }
             for (auto& r : regions) {
@@ -359,10 +359,10 @@ ErrorType FetcherStore::send_request(
             int last_seq_id = res.has_last_seq_id()? res.last_seq_id() : start_seq_id;
             for (auto& r : regions) {
                 ErrorType ret;
-                ret = send_request(state, store_request, r, trace_node, old_region_id, r.region_id(), 
+                ret = send_request(state, store_request, r, trace_node, old_region_id, r.region_id(),
                          log_id, retry_times, last_seq_id, current_seq_id, op_type);
                 if (ret != E_OK) {
-                    DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu", 
+                    DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu",
                             r.region_id(), log_id, state->txn_id);
                     return ret;
                 }
@@ -373,13 +373,13 @@ ErrorType FetcherStore::send_request(
             regions.Clear();
             for (auto r : res.regions()) {
                 if (r.region_id() != region_id) {
-                    DB_WARNING("not the same region:%s", 
+                    DB_WARNING("not the same region:%s",
                                r.ShortDebugString().c_str());
                     return E_FATAL;
                 }
-                if (!(r.start_key() <= info.start_key() && 
+                if (!(r.start_key() <= info.start_key() &&
                         end_key_compare(r.end_key(), info.end_key()) >= 0)) {
-                    DB_FATAL("store region not overlap local region, region_id:%ld", 
+                    DB_FATAL("store region not overlap local region, region_id:%ld",
                             region_id);
                     return E_FATAL;
                 }
@@ -398,29 +398,29 @@ ErrorType FetcherStore::send_request(
                         client_conn->region_infos[region_id].set_leader(r_copy.leader());
                     }
                 }
-                ret = send_request(state, store_request, r_copy, trace_node, old_region_id, r_copy.region_id(), 
+                ret = send_request(state, store_request, r_copy, trace_node, old_region_id, r_copy.region_id(),
                                    log_id, retry_times + 1, last_seq_id, current_seq_id, op_type);
                 if (ret != E_OK) {
-                    DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu", 
+                    DB_WARNING("retry failed, region_id: %ld, log_id:%lu, txn_id: %lu",
                                r_copy.region_id(), log_id, state->txn_id);
                     return E_FATAL;
                 }
-            } 
+            }
             return E_OK;
         }
         return E_FATAL;
     }
     if (res.errcode() == pb::TXN_IS_ROLLBACK) {
-        DB_WARNING("TXN_IS_ROLLBACK, region_id:%ld, txn_id:%lu, new_leader:%s, log_id:%lu op_type:%s", 
+        DB_WARNING("TXN_IS_ROLLBACK, region_id:%ld, txn_id:%lu, new_leader:%s, log_id:%lu op_type:%s",
                 region_id, state->txn_id, res.leader().c_str(), log_id, pb::OpType_Name(op_type).c_str());
         return E_RETURN;
     }
     if (res.errcode() == pb::REGION_NOT_EXIST || res.errcode() == pb::INTERNAL_ERROR) {
-        DB_WARNING("REGION_NOT_EXIST, region_id:%ld, retry:%d, new_leader:%s, log_id:%lu", 
+        DB_WARNING("REGION_NOT_EXIST, region_id:%ld, retry:%d, new_leader:%s, log_id:%lu",
                 region_id, retry_times, res.leader().c_str(), log_id);
         other_normal_peer_to_leader(info, addr);
         //bthread_usleep(retry_times * FLAGS_retry_interval_us);
-        return send_request(state, store_request, info, trace_node, old_region_id, region_id, log_id, 
+        return send_request(state, store_request, info, trace_node, old_region_id, region_id, log_id,
                    retry_times + 1, start_seq_id, current_seq_id, op_type);
     }
     if (res.errcode() != pb::SUCCESS) {
@@ -429,7 +429,7 @@ ErrorType FetcherStore::send_request(
             state->error_code = (MysqlErrCode)res.mysql_errcode();
             state->error_msg.str(res.errmsg());
         }
-        DB_WARNING("errcode:%d, mysql_errcode:%d, msg:%s, failed, instance:%s region_id:%ld, log_id:%lu", 
+        DB_WARNING("errcode:%d, mysql_errcode:%d, msg:%s, failed, instance:%s region_id:%ld, log_id:%lu",
                 res.errcode(), res.mysql_errcode(), res.errmsg().c_str(), addr.c_str(), region_id, log_id);
         if (state->error_code == ER_DUP_ENTRY) {
             return E_WARNING;
@@ -471,6 +471,9 @@ ErrorType FetcherStore::send_request(
     }
     if (res.has_filter_rows()) {
         filter_rows += res.filter_rows();
+    }
+    if (res.has_last_insert_id()) {
+        client_conn->last_insert_id = res.last_insert_id();
     }
     if (op_type != pb::OP_SELECT && op_type != pb::OP_SELECT_FOR_UPDATE) {
         affected_rows += res.affected_rows();
@@ -520,7 +523,7 @@ ErrorType FetcherStore::send_request(
         split_region_batch[region_id] = batch;
     }
     if (cost.get_time() > FLAGS_print_time_us) {
-        DB_WARNING("parse region:%ld time:%ld rows:%lu log_id:%lu ", 
+        DB_WARNING("parse region:%ld time:%ld rows:%lu log_id:%lu ",
                 region_id, cost.get_time(), batch->size(), log_id);
     }
     return E_OK;
@@ -544,7 +547,7 @@ void FetcherStore::choose_opt_instance(pb::RegionInfo& info, std::string& addr) 
             normal_peers.push_back(peer);
         }
     }
-    if (std::find(candicate_peers.begin(), candicate_peers.end(), addr) 
+    if (std::find(candicate_peers.begin(), candicate_peers.end(), addr)
             != candicate_peers.end()) {
         return;
     }
@@ -553,7 +556,7 @@ void FetcherStore::choose_opt_instance(pb::RegionInfo& info, std::string& addr) 
         addr = candicate_peers[i];
         return;
     }
-    if (std::find(normal_peers.begin(), normal_peers.end(), addr) 
+    if (std::find(normal_peers.begin(), normal_peers.end(), addr)
             != normal_peers.end()) {
         return;
     }
@@ -625,7 +628,7 @@ void FetcherStore::other_normal_peer_to_leader(pb::RegionInfo& info, std::string
 }
 
 int64_t FetcherStore::get_commit_ts() {
-    int64_t timestamp = TsoFetcher::get_tso();    
+    int64_t timestamp = TsoFetcher::get_tso();
     if (timestamp < 0) {
         return -1;
     }
@@ -651,7 +654,7 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
                     binlog_cond.decrease_signal();
                 });
                 if (op_type == pb::OP_PREPARE) {
-                    int64_t timestamp = TsoFetcher::get_tso();    
+                    int64_t timestamp = TsoFetcher::get_tso();
                     if (timestamp < 0) {
                         DB_WARNING("get tso failed log_id: %lu txn_id:%lu op_type:%s", log_id, state->txn_id,
                             pb::OpType_Name(op_type).c_str());
@@ -702,7 +705,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
     } else if (op_type == pb::OP_ROLLBACK) {
         binlog->set_type(pb::BinlogType::ROLLBACK);
         req.set_op_type(pb::OP_ROLLBACK_BINLOG);
-        binlog_desc->set_binlog_ts(binlog_ctx->start_ts());     
+        binlog_desc->set_binlog_ts(binlog_ctx->start_ts());
     } else {
         // todo DDL
     }
@@ -718,7 +721,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
         cntl.set_log_id(log_id);
         brpc::ChannelOptions option;
         option.max_retry = 1;
-        option.connect_timeout_ms = FLAGS_fetcher_connect_timeout; 
+        option.connect_timeout_ms = FLAGS_fetcher_connect_timeout;
         option.timeout_ms = FLAGS_fetcher_request_timeout;
         std::string addr = info.leader();
         if (retry_times == 0) {
@@ -728,7 +731,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
         }
         ret = channel.Init(addr.c_str(), &option);
         if (ret != 0) {
-            DB_WARNING("binlog channel init failed, addr:%s, ret:%d, log_id:%lu", 
+            DB_WARNING("binlog channel init failed, addr:%s, ret:%d, log_id:%lu",
                     addr.c_str(), ret, log_id);
             return E_FATAL;
         }
@@ -737,10 +740,10 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
 
         pb::StoreService_Stub(&channel).query_binlog(&cntl, &req, &res, NULL);
         if (cntl.Failed()) {
-            DB_WARNING("binlog call failed  errcode:%d, error:%s, region_id:%ld log_id:%lu", 
+            DB_WARNING("binlog call failed  errcode:%d, error:%s, region_id:%ld log_id:%lu",
                 cntl.ErrorCode(), cntl.ErrorText().c_str(), region_id, log_id);
             // 只有网络相关错误码才重试
-            if (cntl.ErrorCode() != ETIMEDOUT && 
+            if (cntl.ErrorCode() != ETIMEDOUT &&
                     cntl.ErrorCode() != ECONNREFUSED &&
                     cntl.ErrorCode() != EHOSTDOWN &&
                     cntl.ErrorCode() != ECANCELED) {
@@ -750,10 +753,10 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
             bthread_usleep(FLAGS_retry_interval_us);
             continue;
         }
-        //DB_WARNING("binlog fetch store req: %s log_id:%lu", req.DebugString().c_str(), log_id);                                                                                                                                               
+        //DB_WARNING("binlog fetch store req: %s log_id:%lu", req.DebugString().c_str(), log_id);
         //DB_WARNING("binlog fetch store res: %s log_id:%lu", res.DebugString().c_str(), log_id);
         if (res.errcode() == pb::NOT_LEADER) {
-            DB_WARNING("binlog NOT_LEADER, addr:%s region_id:%ld retry:%d, new_leader:%s, log_id:%lu", addr.c_str(), 
+            DB_WARNING("binlog NOT_LEADER, addr:%s region_id:%ld retry:%d, new_leader:%s, log_id:%lu", addr.c_str(),
                 region_id, retry_times, res.leader().c_str(), log_id);
 
             if (res.leader() != "0.0.0.0:0") {
@@ -766,7 +769,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
             retry_times++;
             bthread_usleep(retry_times * FLAGS_retry_interval_us);
         } else if (res.errcode() == pb::VERSION_OLD) {
-            DB_WARNING("VERSION_OLD, region_id: %ld, retry:%d, now:%s, log_id:%lu", 
+            DB_WARNING("VERSION_OLD, region_id: %ld, retry:%d, now:%s, log_id:%lu",
                     region_id, retry_times, info.ShortDebugString().c_str(), log_id);
             for (auto r : res.regions()) {
                 DB_WARNING("new version region:%s", r.ShortDebugString().c_str());
@@ -775,7 +778,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
             req.set_region_id(info.region_id());
             req.set_region_version(info.version());
         } else if (res.errcode() != pb::SUCCESS) {
-            DB_WARNING("errcode:%d, failed, instance:%s region_id:%ld retry:%d log_id:%lu", 
+            DB_WARNING("errcode:%d, failed, instance:%s region_id:%ld retry:%d log_id:%lu",
                     res.errcode(), addr.c_str(), region_id, retry_times, log_id);
             return E_FATAL;
         } else {
@@ -818,7 +821,7 @@ int FetcherStore::run(RuntimeState* state,
     if (region_infos.size() == 0) {
         DB_WARNING("region_infos size == 0, op_type:%s", pb::OpType_Name(op_type).c_str());
         return E_OK;
-    } 
+    }
     // 预分配空洞
     for (auto& pair : region_infos) {
         start_key_sort.emplace(pair.second.start_key(), pair.first);
@@ -852,7 +855,7 @@ int FetcherStore::run(RuntimeState* state,
         }
         skip_region_set.insert(info_iter->first);
     }
-    
+
     // 保证primary region执行commit/rollback成功,其他region请求异步执行(死循环FixMe)
     if ((op_type == pb::OP_COMMIT || op_type == pb::OP_ROLLBACK)
         && skip_region_set.count(client_conn->primary_region_id) == 0) {
@@ -1028,14 +1031,14 @@ int FetcherStore::run(RuntimeState* state,
     if (error != E_OK) {
         if (error == E_FATAL
                 || error == E_BIG_SQL) {
-            DB_FATAL("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d op_type: %s", 
+            DB_FATAL("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d op_type: %s",
                     log_id, state->txn_id, current_seq_id, pb::OpType_Name(op_type).c_str());
             if (error == E_BIG_SQL) {
                 state->error_code = ER_SQL_TOO_BIG;
                 state->error_msg.str("sql too big");
             }
         } else {
-            DB_WARNING("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d op_type: %s", 
+            DB_WARNING("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d op_type: %s",
                     log_id, state->txn_id, current_seq_id, pb::OpType_Name(op_type).c_str());
         }
         return -1;
@@ -1077,7 +1080,7 @@ int FetcherStore::run(RuntimeState* state,
     }
     state->set_num_scan_rows(state->num_scan_rows() + scan_rows.load());
     state->set_num_filter_rows(state->num_filter_rows() + filter_rows.load());
-    //DB_WARNING("fetcher time:%ld, txn_id: %lu, log_id:%lu, batch_size:%lu", 
+    //DB_WARNING("fetcher time:%ld, txn_id: %lu, log_id:%lu, batch_size:%lu",
     //        cost.get_time(), state->txn_id, log_id, region_batch.size());
     return affected_rows.load();
 }

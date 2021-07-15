@@ -229,6 +229,7 @@ void FunctionManager::register_operators() {
     register_object_ret("tdigest_location", tdigest_location, pb::DOUBLE);
 
     register_object_ret("version", version, pb::STRING);
+    register_object_ret("last_insert_id", last_insert_id, pb::INT64);
 }
 
 int FunctionManager::init() {
@@ -338,6 +339,10 @@ void FunctionManager::complete_fn_simple(pb::Function& fn, int num_args,
 
 void FunctionManager::complete_fn(pb::Function& fn, int num_args, 
         pb::PrimitiveType arg_type, pb::PrimitiveType ret_type) {
+    if (fn.return_type() == ret_type) {
+        // 避免prepare模式反复执行此函数,导致fn.name没有清理的bug
+        return;
+    }
     fn.clear_arg_types();
     fn.clear_return_type();
     std::string arg_str;
@@ -374,7 +379,7 @@ void FunctionManager::complete_fn(pb::Function& fn, int num_args,
     }
     for (int i = 0; i < num_args; i++) {
         fn.add_arg_types(arg_type);
-        fn.set_name(fn.name() + arg_str);
+        fn.set_name(fn.name() + arg_str); // 此处name没有清理,反复执行会导致内容增长
     }
     fn.set_return_type(ret_type);
 }

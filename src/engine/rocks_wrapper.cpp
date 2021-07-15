@@ -55,6 +55,8 @@ DEFINE_int32(rocks_binlog_ttl_days, 7, "binlog ttl default 7 days");
 DEFINE_int32(level0_file_num_compaction_trigger, 5, "Number of files to trigger level-0 compaction");
 DEFINE_int32(max_bytes_for_level_base, 1024 * 1024 * 1024, "total size of level 1.");
 DEFINE_bool(enable_bottommost_compression, false, "enable zstd for bottommost_compression");
+DEFINE_int32(target_file_size_base, 128 * 1024 * 1024, "target_file_size_base");
+
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log";
@@ -133,7 +135,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     _log_cf_option.level0_file_num_compaction_trigger = 5;
     _log_cf_option.level0_slowdown_writes_trigger = 10;
     _log_cf_option.level0_stop_writes_trigger = FLAGS_stop_write_sst_cnt;
-    _log_cf_option.target_file_size_base = 128 * 1024 * 1024;
+    _log_cf_option.target_file_size_base = FLAGS_target_file_size_base;
     _log_cf_option.max_bytes_for_level_base = 1024 * 1024 * 1024;
     _log_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
 
@@ -171,7 +173,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.level0_slowdown_writes_trigger = 10;
     _data_cf_option.level0_stop_writes_trigger = FLAGS_stop_write_sst_cnt;
     _data_cf_option.hard_pending_compaction_bytes_limit = FLAGS_rocks_hard_pending_compaction_g * 1073741824ull;
-    _data_cf_option.target_file_size_base = 128 * 1024 * 1024;
+    _data_cf_option.target_file_size_base = FLAGS_target_file_size_base;
     _data_cf_option.max_bytes_for_level_multiplier = FLAGS_rocks_level_multiplier;
     _data_cf_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
 

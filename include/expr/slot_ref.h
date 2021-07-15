@@ -42,6 +42,7 @@ public:
         s->_slot_id = _slot_id;
         s->_node_type = _node_type;
         s->_col_type = _col_type;
+        s->_col_flag = _col_flag;
         return s;
     }
 

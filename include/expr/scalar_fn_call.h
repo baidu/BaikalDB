@@ -33,6 +33,12 @@ public:
         ExprNode::transfer_pb(pb_node);
         pb_node->mutable_fn()->CopyFrom(_fn);
     }
+    ExprNode* get_last_insert_id() {
+        if (_fn.name() == "last_insert_id") {
+            return this;
+        }
+        return ExprNode::get_last_insert_id();
+    }
 private:
     ExprValue multi_eq_value(MemRow* row) {
         for (size_t i = 0; i < children(0)->children_size(); i++) {

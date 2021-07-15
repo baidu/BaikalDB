@@ -1623,6 +1623,14 @@ ExprValue version(const std::vector<ExprValue>& input) {
     tmp.str_val = FLAGS_db_version;
     return tmp;
 }
+
+ExprValue last_insert_id(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::INT64);
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

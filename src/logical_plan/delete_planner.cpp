@@ -100,7 +100,7 @@ int DeletePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[_current_tables[0]];
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
     int64_t table_id = info.table_id;
     _ctx->prepared_table_id = table_id;
     if (!_ctx->is_prepared) {
@@ -111,7 +111,7 @@ int DeletePlanner::plan() {
 }
 
 int DeletePlanner::create_delete_node() {
-    if (_current_tables.size() != 1 || _plan_table_ctx->table_tuple_mapping.count(_current_tables[0]) == 0) {
+    if (_current_tables.size() != 1 || _plan_table_ctx->table_tuple_mapping.count(try_to_lower(_current_tables[0])) == 0) {
         DB_WARNING("invalid sql format: %s", _ctx->sql.c_str());
         return -1;
     }
@@ -119,7 +119,7 @@ int DeletePlanner::create_delete_node() {
         DB_WARNING("not support correlation subquery sql format: %s", _ctx->sql.c_str());
         return -1;
     }
-    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[_current_tables[0]];
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
     int64_t table_id = info.table_id;
 
     pb::PlanNode* delete_node = _ctx->add_plan_node();

@@ -20,6 +20,7 @@
 
 namespace baikaldb {
 DEFINE_int32(expect_bucket_count, 100, "expect_bucket_count");
+DEFINE_bool(field_charsetnr_set_by_client, false, "set charsetnr by client");
 int PacketNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -75,6 +76,14 @@ int PacketNode::expr_optimize(QueryContext* ctx) {
         _fields[i].flags = 1;
         if (is_uint(expr->col_type())) {
             _fields[i].flags |= 32;
+        }
+//        DB_WARNING("col_type: %d, col_flag: %u", expr->col_type(), expr->col_flag());
+        if (is_binary(expr->col_flag()) && is_string(expr->col_type())) {
+            _fields[i].type = MYSQL_TYPE_BLOB;
+//            DB_WARNING("MYSQL_TYPE_BLOB: %s", _fields[i].name.c_str());
+            _fields[i].charsetnr = 0x3f;
+            _fields[i].flags |= parser::MYSQL_FIELD_FLAG_BINARY;
+            _fields[i].flags |= parser::MYSQL_FIELD_FLAG_BLOB;
         }
         ++i;
     }
@@ -307,7 +316,13 @@ int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
 
 int PacketNode::open(RuntimeState* state) {
     _client = state->client_conn();
-
+    if (FLAGS_field_charsetnr_set_by_client) {
+        for (auto& field : _fields) {
+            if (field.charsetnr == 0) {
+                field.charsetnr = _client->charset_num;
+            }
+        }
+    }
     _send_buf = state->send_buf();
     _wrapper = MysqlWrapper::get_instance();
     int ret = 0;
@@ -655,7 +670,7 @@ int PacketNode::pack_ok(int num_affected_rows, NetworkSocket* client) {
     if (_send_buf->_size > 0) {
         _send_buf->byte_array_clear();
     }
-    int64_t last_insert_id = (op_type() == pb::OP_INSERT)? client->last_insert_id : 0;
+    int64_t last_insert_id = (op_type() == pb::OP_INSERT || op_type() == pb::OP_UPDATE)? client->last_insert_id : 0;
 
     DataBuffer tmp_buf;
     tmp_buf.byte_array_append_length_coded_binary(0);

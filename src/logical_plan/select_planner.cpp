@@ -318,11 +318,12 @@ int SelectPlanner::create_agg_node() {
 
         for (uint32_t idx = 0; idx < _select_exprs.size(); ++idx) {
             pb::Expr* expr = agg->add_group_exprs();
-            if (_select_exprs[idx].nodes_size() != 1) {
-                DB_WARNING("invalid distinct expr");
-                return -1;
-            }
-            expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
+            expr->CopyFrom(_select_exprs[idx]);
+//            if (_select_exprs[idx].nodes_size() != 1) {
+//                DB_WARNING("invalid distinct expr");
+//                return -1;
+//            }
+//            expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
         }
         agg->set_agg_tuple_id(-1);
         return 0;
@@ -400,13 +401,14 @@ void SelectPlanner::add_single_table_columns(const std::string& table_name, Tabl
         node->mutable_derive_node()->set_tuple_id(slot.tuple_id()); //TODO
         node->mutable_derive_node()->set_slot_id(slot.slot_id());
         node->mutable_derive_node()->set_field_id(slot.field_id());
+        node->set_col_flag(field.flag);
 
         std::string& select_name = field.short_name;
         _select_exprs.push_back(select_expr);
         _select_names.push_back(select_name);
-        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
-        _ctx->ref_slot_id_mapping[slot.tuple_id()][select_name] = slot.slot_id();
-        _ctx->field_column_id_mapping[select_name] = _column_id++;
+//        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
+        _ctx->ref_slot_id_mapping[slot.tuple_id()][field.lower_short_name] = slot.slot_id();
+        _ctx->field_column_id_mapping[field.lower_short_name] = _column_id++;
     }
 }
 
@@ -450,7 +452,7 @@ int SelectPlanner::parse_select_star(parser::SelectField* field) {
                 }
                 DB_WARNING("no database found for field: %s", table_name.c_str());
                 return -1;
-            } else if (dbs.size() > 1) {
+            } else if (dbs.size() > 1 && !FLAGS_disambiguate_select_name) {
                 if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                     _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
                     _ctx->stat_info.error_msg << "table  \'" << table_name << "\' is ambiguous";

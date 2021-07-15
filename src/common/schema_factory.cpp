@@ -170,7 +170,7 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
     }
     auto tbl_info_ptr = table_info_mapping[table_id];
     auto& tbl_info = *tbl_info_ptr;
-    std::string full_name = tbl_info.namespace_ + "." + tbl_info.name;
+    std::string full_name = try_to_lower(tbl_info.namespace_ + "." + tbl_info.name);
     DB_WARNING("full_name: %s, %ld", full_name.c_str(), table_name_id_mapping.size());
     table_name_id_mapping.erase(full_name);
     DB_WARNING("full_name deleted: %ld", table_name_id_mapping.size());
@@ -434,6 +434,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 field_info.lower_short_name.begin(), ::tolower);
         field_info.lower_name = tbl_info.name + "." + field_info.lower_short_name;
         field_info.type = field.mysql_type();
+        field_info.flag = field.flag();
         field_info.can_null = field.can_null();
         field_info.auto_inc = field.auto_increment();
         field_info.deleted = field.deleted();
@@ -498,12 +499,12 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     }
 
     // create name => id mapping
-    db_name_id_mapping[_namespace + "." + _db_name] = database_id;
+    db_name_id_mapping[try_to_lower(_namespace + "." + _db_name)] = database_id;
 
     DB_WARNING("db_name_id_mapping: %s->%ld", std::string(_namespace + "." + _db_name).c_str(), 
         database_id);
 
-    std::string _db_table(_namespace + "." + _db_name + "." + _tbl_name);
+    std::string _db_table(try_to_lower(_namespace + "." + _db_name + "." + _tbl_name));
     //old_tbl_name = _namespace + "." + old_tbl_name;
     //if (!old_tbl_name.empty() && old_tbl_name != _db_table) {
         //table_name_id_mapping.erase(old_tbl_name);
@@ -1155,12 +1156,12 @@ int SchemaFactory::update_virtual_index_internal(SchemaMapping& background, cons
     auto& index_info_mapping = background.index_info_mapping;
     auto& table_name_id_mapping = background.table_name_id_mapping;
 
-    if (table_name_id_mapping.count(table_full_name) == 0) {
+    if (table_name_id_mapping.count(try_to_lower(table_full_name)) == 0) {
         DB_WARNING("can not find table_name: %s", table_full_name.c_str());
         return 0;
     }
 
-    int64_t table_id = table_name_id_mapping[table_full_name];
+    int64_t table_id = table_name_id_mapping[try_to_lower(table_full_name)];
 
     if (table_info_mapping.count(table_id) == 0) {
         DB_WARNING("can not find table_id: %ld", table_id);
@@ -1247,12 +1248,12 @@ int SchemaFactory::drop_virtual_index_internal(SchemaMapping& background, const 
     auto& table_name_id_mapping = background.table_name_id_mapping;
     auto& index_name_id_mapping = background.index_name_id_mapping;
 
-    if (table_name_id_mapping.count(table_full_name) == 0) {
+    if (table_name_id_mapping.count(try_to_lower(table_full_name)) == 0) {
         DB_WARNING("can not find table_name: %s", table_full_name.c_str());
         return 0;
     }
 
-    int64_t table_id = table_name_id_mapping[table_full_name];
+    int64_t table_id = table_name_id_mapping[try_to_lower(table_full_name)];
 
     if (table_info_mapping.count(table_id) == 0) {
         DB_WARNING("can not find table_id: %ld", table_id);
@@ -1634,10 +1635,10 @@ int SchemaFactory::get_table_id(const std::string& table_name, int64_t& table_id
         return -1; 
     }
     auto& table_name_id_mapping = table_ptr->table_name_id_mapping;
-    if (table_name_id_mapping.count(table_name) == 0) {
+    if (table_name_id_mapping.count(try_to_lower(table_name)) == 0) {
         return -1;
     }
-    table_id = table_name_id_mapping.at(table_name);
+    table_id = table_name_id_mapping.at(try_to_lower(table_name));
     return 0;
 }
 int SchemaFactory::get_region_capacity(int64_t global_index_id, int64_t& region_capacity) {
@@ -1883,10 +1884,10 @@ int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
         return -1;
     }
     auto& db_name_id_mapping = table_ptr->db_name_id_mapping;
-    if (db_name_id_mapping.count(db_name) == 0) {
+    if (db_name_id_mapping.count(try_to_lower(db_name)) == 0) {
         return -1;
     }
-    db_id = db_name_id_mapping.at(db_name);
+    db_id = db_name_id_mapping.at(try_to_lower(db_name));
     return 0;
 }
 bool SchemaFactory::exist_tableid(int64_t table_id) {

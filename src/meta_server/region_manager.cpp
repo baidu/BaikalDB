@@ -21,12 +21,15 @@
 #include "meta_util.h"
 #include "table_manager.h"
 #include "meta_rocksdb.h"
+#include "brpc/reloadable_flags.h"
 
 namespace baikaldb {
 DECLARE_int32(concurrency_num);
 DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(region_faulty_interval_times);
+DEFINE_int32(balance_add_peer_num, 10, "add peer num each time, default(10)");
+BRPC_VALIDATE_GFLAG(balance_add_peer_num, brpc::PositiveInteger);
 
 //增加或者更新region信息
 //如果是增加，则需要更新表信息, 只有leader的上报会调用该接口
@@ -785,7 +788,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
         }
         average_leader_counts[table_id] = average_leader_count;
         if (table_leader_count.second > (average_leader_count + average_leader_count * 5 / 100)) {
-            transfer_leader_count[table_id] = 
+            transfer_leader_count[table_id] =
                 2 * (table_leader_count.second - average_leader_count);
             response->add_trans_leader_table_id(table_id);
             response->add_trans_leader_count(table_leader_count.second - average_leader_count);
@@ -842,7 +845,8 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
                 continue;
             }
             int64_t leader_count = get_leader_count(peer, table_id);
-            if (leader_count < average_leader_counts[table_id]
+            if (leader_count < average_leader_counts[table_id] + average_leader_counts[table_id] * 10 / 100
+                    && leader_count < table_leader_counts[table_id]
                     && leader_count < leader_count_for_transfer_peer) {
                 transfer_to_peer = peer;
                 leader_count_for_transfer_peer = leader_count;
@@ -857,6 +861,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
             transfer_leader_count[table_id]--;
             *(response->add_trans_leader()) = transfer_request;
             add_leader_count(transfer_to_peer, table_id);
+            table_leader_counts[table_id]--;
         } 
     }
 }
@@ -878,6 +883,7 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
             continue;
         }
         int64_t count = add_peer_count.second;
+        int32_t add_peer_num = 0;
         if (instance_regions.find(table_id) == instance_regions.end()) {
             continue;
         }
@@ -930,10 +936,11 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
             add_peer.add_new_peers(new_instance);
             add_peer_requests.push_back(std::pair<std::string, pb::AddPeer>(master_region_info->leader(), add_peer));
             --count;
+            ++add_peer_num;
             if (count <= 0) {
                 break;
             }
-            if (add_peer_requests.size() > 10) {
+            if (add_peer_num > FLAGS_balance_add_peer_num) {
                 break;
             }
         } 

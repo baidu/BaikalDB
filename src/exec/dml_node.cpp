@@ -169,7 +169,9 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         _indexes_ptr = &_all_indexes;
     }
     // LOCK_PRIMARY_NODE目前无法区分update与insert，暂用update兼容
-    bool delete_before_put_primary = !_update_affect_primary &&
+    // 由于cstore的字段是分开存储的,不涉及主键与ttl时,可以优化为更新部分涉及字段.
+    bool cstore_update_fields_partly = !_update_affect_primary &&
+            (_ttl_timestamp_us == 0) &&
             (is_update || _node_type == pb::LOCK_PRIMARY_NODE);
     bool need_increase = true;
     auto& reverse_index_map = state->reverse_index_map();
@@ -248,7 +250,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                         DB_WARNING_STATE(state, "remove fail, table_id:%ld ,ret:%d", _table_id, ret);
                         return -1;
                     }
-                    delete_before_put_primary = true;
+                    cstore_update_fields_partly = true;
                     ++affected_rows;
                 } else {
                     DB_WARNING_STATE(state, "insert row must not exist, index:%ld, ret:%d", _table_id, ret);
@@ -381,9 +383,9 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         }
     }
     // 列存为节省空间, 插入默认值或空值时不会put
-    // delete_before_put_primary为true时表示更新前旧值尚未被删除
+    // cstore_update_fields_partly为true时更新前旧值尚未被删除
     ret = _txn->put_primary(_region_id, *_pri_info, record,
-                            delete_before_put_primary ? &_update_field_ids : nullptr);
+                            cstore_update_fields_partly ? &_update_field_ids : nullptr);
     if (ret < 0) {
         DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;
@@ -542,6 +544,10 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         auto expr = _update_exprs[i];
         record->set_value(record->get_field_by_tag(slot.field_id()),
                 expr->get_value(row).cast_to(slot.slot_type()));
+        auto last_insert_id_expr = expr->get_last_insert_id();
+        if (last_insert_id_expr != nullptr) {
+            state->last_insert_id = last_insert_id_expr->get_value(row).get_numberic<int64_t>();
+        }
     }
     ret = insert_row(state, record, true);
     if (ret < 0) {

@@ -47,7 +47,9 @@ int UpdateNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([&num_affected_rows](TraceLocalNode& local_node) {
         local_node.set_affect_rows(num_affected_rows);
     }));
-
+    if (_return_empty) {
+        return 0;
+    }
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {

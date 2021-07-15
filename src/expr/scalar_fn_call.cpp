@@ -44,6 +44,10 @@ int ScalarFnCall::type_inferer() {
     if (ret < 0) {
         return ret;
     }
+    if (_fn_call != NULL) {
+        // 避免重复执行后续逻辑
+        return ret;
+    }
     // 兼容mysql， predicate 处理成列的类型
     switch (_fn.fn_op()) { 
         case parser::FT_EQ:

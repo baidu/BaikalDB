@@ -22,9 +22,12 @@
 #include "transaction.h"
 
 namespace baikaldb {
+DECLARE_int32(rocks_binlog_ttl_days);
 class SplitCompactionFilter : public rocksdb::CompactionFilter {
 typedef butil::FlatMap<int64_t, std::string*> KeyMap;
 typedef DoubleBuffer<KeyMap> DoubleBufKey;
+typedef std::unordered_set<int64_t> BinlogSet;
+typedef butil::DoublyBufferedData<BinlogSet> DoubleBufBinlog;
 public:
     static SplitCompactionFilter* get_instance() {
         static SplitCompactionFilter _instance;
@@ -52,6 +55,20 @@ public:
         int64_t region_id = table_key.extract_i64(0);
         std::string* end_key = get_end_key(region_id);
         if (end_key == nullptr || end_key->empty()) {
+            return false;
+        }
+        if (is_binlog_region(region_id)) {
+            static int64_t ttl_ms = FLAGS_rocks_binlog_ttl_days * 24 * 60 * 60 * 1000;
+            rocksdb::Slice pure_key(key);
+            pure_key.remove_prefix(2 * sizeof(int64_t));
+            int64_t commit_tso = ttl_decode(pure_key);
+            int64_t expire_ts_ms = (commit_tso >> tso::logical_bits) + ttl_ms;
+            int64_t current_ts_ms = tso::clock_realtime_ms();
+//            DB_WARNING("binglog compaction filter, region_id: %ld, ttl_tso: %ld, commit_tso: %ld, expire_tso: %ld, current_tso: %ld",
+//                       region_id, ttl_ms, commit_tso, expire_ts_ms, current_ts_ms);
+            if (current_ts_ms > expire_ts_ms) {
+                return true;
+            }
             return false;
         }
         int64_t index_id = table_key.extract_i64(sizeof(int64_t));
@@ -107,6 +124,25 @@ public:
         return nullptr;
     }
 
+    void set_binlog_region(int64_t region_id) {
+        auto call = [this, region_id](BinlogSet& region_id_set) -> int {
+            region_id_set.insert(region_id);
+            return 1;
+        };
+        _binlog_region_id_set.Modify(call);
+    }
+
+    bool is_binlog_region(int64_t region_id) const {
+        DoubleBufBinlog::ScopedPtr ptr;
+        if (_binlog_region_id_set.Read(&ptr) == 0) {
+            auto iter = ptr->find(region_id);
+            if (iter != ptr->end()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 private:
     SplitCompactionFilter() {
         _factory = SchemaFactory::get_instance();
@@ -116,6 +152,7 @@ private:
 
     // region_id => end_key
     mutable DoubleBufKey _range_key_map;
+    mutable DoubleBufBinlog _binlog_region_id_set;
     SchemaFactory* _factory;
 };
 }//namespace

@@ -481,17 +481,17 @@ int LogicalPlanner::add_derived_table(const std::string& database, const std::st
     DatabaseInfo db;
     db.name = database;
     db.namespace_ = _ctx->user_info->namespace_;
-    if (_plan_table_ctx->table_dbs_mapping[table].count(database) == 0) {
-        _plan_table_ctx->table_dbs_mapping[table].emplace(database);
+    if (_plan_table_ctx->table_dbs_mapping[try_to_lower(table)].count(database) == 0) {
+        _plan_table_ctx->table_dbs_mapping[try_to_lower(table)].emplace(database);
     }
-    _plan_table_ctx->database_info.emplace(database, db);
+    _plan_table_ctx->database_info.emplace(try_to_lower(database), db);
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
     TableInfo& tbl_info = *tbl_info_ptr;
     tbl_info.id = --_plan_table_ctx->derived_table_id;
     tbl_info.namespace_ = _ctx->user_info->namespace_;
     std::string table_name = database + "." + table;
     tbl_info.name = table_name;
-    bool ok = _plan_table_ctx->table_info.emplace(table_name, tbl_info_ptr).second;
+    bool ok = _plan_table_ctx->table_info.emplace(try_to_lower(table_name), tbl_info_ptr).second;
     if (ok) {
         ScanTupleInfo* tuple_info = get_scan_tuple(table_name, tbl_info.id);
         _ctx->derived_table_ctx_mapping[tuple_info->tuple_id] = _ctx->sub_query_plans.back();
@@ -515,7 +515,7 @@ int LogicalPlanner::add_derived_table(const std::string& database, const std::st
             tbl_info.fields.push_back(field_info);
         }
         for (auto& field : tbl_info.fields) {
-            _plan_table_ctx->field_info.emplace(field.lower_name, &field);
+            _plan_table_ctx->field_info.emplace(try_to_lower(field.lower_name), &field);
         }
     } else if (_table_names.count(table_name) != 0) {
         DB_WARNING("Not unique table/alias, db:%s, table:%s alias:%s", 
@@ -551,7 +551,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
     }
 
     DatabaseInfo db;
-    if (_plan_table_ctx->database_info.count(database) == 0) {
+    if (_plan_table_ctx->database_info.count(try_to_lower(database)) == 0) {
         int64_t databaseid = -1;
         if (0 != _factory->get_database_id(_namespace + "." + database_name, databaseid)) {
             DB_WARNING("unknown _namespace:%s database: %s", _namespace.c_str(), database.c_str());
@@ -566,16 +566,16 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             _ctx->stat_info.error_msg << "database " << database << " not exist";
             return -1;
         }
-        _plan_table_ctx->database_info.emplace(database, db);
+        _plan_table_ctx->database_info.emplace(try_to_lower(database), db);
     } else {
-        db = _plan_table_ctx->database_info[database];
+        db = _plan_table_ctx->database_info[try_to_lower(database)];
     }
     // 后续的计算，全部以alias为准，无alias则使用表名
     std::string alias_name = alias.empty() ? table : alias;
     std::string alias_full_name = database + "." + alias_name;
     std::string org_table_full_name = database + "." + table;
     int64_t tableid = -1;
-    if (_plan_table_ctx->table_info.count(alias_full_name) == 0) {
+    if (_plan_table_ctx->table_info.count(try_to_lower(alias_full_name)) == 0) {
         std::string table_name = table;
         if (_ctx->has_information_schema) {
             std::transform(table_name.begin(), table_name.end(), table_name.begin(), ::toupper);
@@ -634,13 +634,13 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         for (auto& field : tbl.fields) {
             std::string& col_name = field.lower_short_name;
             _plan_table_ctx->field_tbls_mapping[col_name].emplace(alias_full_name);
-            _plan_table_ctx->field_info.emplace(alias_full_name + "." + col_name, &field);
+            _plan_table_ctx->field_info.emplace(try_to_lower(alias_full_name + "." + col_name), &field);
         }
 
-        _plan_table_ctx->table_info.emplace(alias_full_name, tbl_ptr);
+        _plan_table_ctx->table_info.emplace(try_to_lower(alias_full_name), tbl_ptr);
         _table_names.emplace(alias_full_name);
-        if (_plan_table_ctx->table_dbs_mapping[alias_name].count(database) == 0) {
-            _plan_table_ctx->table_dbs_mapping[alias_name].emplace(database);
+        if (_plan_table_ctx->table_dbs_mapping[try_to_lower(alias_name)].count(database) == 0) {
+            _plan_table_ctx->table_dbs_mapping[try_to_lower(alias_name)].emplace(database);
         }
     } else if (_table_names.count(alias_full_name) != 0) {
         DB_WARNING("Not unique table/alias, db:%s, table:%s alias:%s", 
@@ -836,49 +836,49 @@ int LogicalPlanner::parse_using_cols(const parser::Vector<parser::ColumnName*>& 
 }
 int LogicalPlanner::fill_join_table_infos(JoinMemTmp* join_node_mem) {
     for (auto& table_name : join_node_mem->left_node->left_full_table_names) {
-        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
-        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
-        if (join_node_mem->left_full_table_names.count(table_name) != 0) {
+        int64_t table_id = _plan_table_ctx->table_info[try_to_lower(table_name)]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[try_to_lower(table_name)].tuple_id;
+        if (join_node_mem->left_full_table_names.count(try_to_lower(table_name)) != 0) {
             DB_WARNING("not support self join");
             return -1;
         }
         join_node_mem->join_node.add_left_tuple_ids(tuple_id);
         join_node_mem->join_node.add_left_table_ids(table_id);
-        join_node_mem->left_full_table_names.insert(table_name);
+        join_node_mem->left_full_table_names.insert(try_to_lower(table_name));
     } 
     for (auto& table_name : join_node_mem->left_node->right_full_table_names) {
-        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
-        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
-        if (join_node_mem->left_full_table_names.count(table_name) != 0) {
+        int64_t table_id = _plan_table_ctx->table_info[try_to_lower(table_name)]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[try_to_lower(table_name)].tuple_id;
+        if (join_node_mem->left_full_table_names.count(try_to_lower(table_name)) != 0) {
             DB_WARNING("not support self join");
             return -1;
         }
         join_node_mem->join_node.add_left_tuple_ids(tuple_id);
         join_node_mem->join_node.add_left_table_ids(table_id);
-        join_node_mem->left_full_table_names.insert(table_name);
+        join_node_mem->left_full_table_names.insert(try_to_lower(table_name));
     }
 
     for (auto& table_name : join_node_mem->right_node->left_full_table_names) {
-        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
-        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
-        if (join_node_mem->right_full_table_names.count(table_name) != 0) {
+        int64_t table_id = _plan_table_ctx->table_info[try_to_lower(table_name)]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[try_to_lower(table_name)].tuple_id;
+        if (join_node_mem->right_full_table_names.count(try_to_lower(table_name)) != 0) {
             DB_WARNING("not support self join");
             return -1;
         }
         join_node_mem->join_node.add_right_tuple_ids(tuple_id);
         join_node_mem->join_node.add_right_table_ids(table_id);
-        join_node_mem->right_full_table_names.insert(table_name);
+        join_node_mem->right_full_table_names.insert(try_to_lower(table_name));
     }
     for (auto& table_name : join_node_mem->right_node->right_full_table_names) {
-        int64_t table_id = _plan_table_ctx->table_info[table_name]->id;
-        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[table_name].tuple_id;
-        if (join_node_mem->right_full_table_names.count(table_name) != 0) {
+        int64_t table_id = _plan_table_ctx->table_info[try_to_lower(try_to_lower(table_name))]->id;
+        int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[try_to_lower(table_name)].tuple_id;
+        if (join_node_mem->right_full_table_names.count(try_to_lower(table_name)) != 0) {
             DB_WARNING("not support self join");
             return -1;
         }
         join_node_mem->join_node.add_right_tuple_ids(tuple_id);
         join_node_mem->join_node.add_right_table_ids(table_id);
-        join_node_mem->right_full_table_names.insert(table_name);
+        join_node_mem->right_full_table_names.insert(try_to_lower(table_name));
     }
     return 0;
 }
@@ -945,8 +945,8 @@ int LogicalPlanner::create_join_node_from_terminator(const std::string db,
     join_node_mem->left_full_table_names.insert(alias_full_name);
     join_node_mem->is_derived_table = is_derived_table;
     //这些表在这些map中肯定存在，不需要再判断
-    int64_t table_id = _plan_table_ctx->table_info[alias_full_name]->id;
-    int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[alias_full_name].tuple_id;
+    int64_t table_id = _plan_table_ctx->table_info[try_to_lower(alias_full_name)]->id;
+    int32_t tuple_id = _plan_table_ctx->table_tuple_mapping[try_to_lower(alias_full_name)].tuple_id;
     join_node_mem->join_node.add_left_tuple_ids(tuple_id);
     join_node_mem->join_node.add_left_table_ids(table_id);
     *join_root_ptr = join_node_mem.release();
@@ -1375,7 +1375,7 @@ int LogicalPlanner::handle_scalar_subquery(const parser::FuncExpr* func_item,
 int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item, 
         pb::Expr& expr, parser::FuncType op, const CreateExprOptions& options) {
     if (op == parser::FT_COMMON) {
-        if (item->fn_name.to_lower() == "last_insert_id") {
+        if (item->fn_name.to_lower() == "last_insert_id" && item->children.size() == 0) {
             pb::ExprNode* node = expr.add_nodes();
             node->set_node_type(pb::INT_LITERAL);
             node->set_col_type(pb::INT64);
@@ -1985,7 +1985,7 @@ std::string LogicalPlanner::get_field_alias_name(const parser::ColumnName* colum
             }
             DB_WARNING("no database found for field: %s", column->to_string().c_str());
             return "";
-        } else if (dbs.size() > 1) {
+        } else if (dbs.size() > 1 && !FLAGS_disambiguate_select_name) {
             if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                 _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
                 _ctx->stat_info.error_msg << "column  \'" << column->name << "\' is ambiguous";
@@ -2019,15 +2019,17 @@ std::string LogicalPlanner::get_field_alias_name(const parser::ColumnName* colum
             if (meet_tables.size() == 1) {
                 return meet_tables[0];
             }
-            for (auto& t : meet_tables) {
-                DB_WARNING("ambiguous field_name: %s t:%s", column->to_string().c_str(),
-                    t.c_str());
+            if (!FLAGS_disambiguate_select_name) {
+                for (auto& t : meet_tables) {
+                    DB_WARNING("ambiguous field_name: %s t:%s", column->to_string().c_str(),
+                        t.c_str());
+                }
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
+                    _ctx->stat_info.error_msg << "column \'" << column->name << "\' is ambiguous";
+                }
+                return "";
             }
-            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
-                _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
-                _ctx->stat_info.error_msg << "column \'" << column->name << "\' is ambiguous";
-            }
-            return "";
         }
         alias_name += *tables.begin();
         return alias_name;
@@ -2040,11 +2042,11 @@ std::string LogicalPlanner::get_field_alias_name(const parser::ColumnName* colum
 
 ScanTupleInfo* LogicalPlanner::get_scan_tuple(const std::string& table_name, int64_t table_id) {
     ScanTupleInfo* tuple_info = nullptr;
-    auto iter = _plan_table_ctx->table_tuple_mapping.find(table_name);
+    auto iter = _plan_table_ctx->table_tuple_mapping.find(try_to_lower(table_name));
     if (iter != _plan_table_ctx->table_tuple_mapping.end()) {
         tuple_info = &(iter->second);
     } else {
-        tuple_info = &(_plan_table_ctx->table_tuple_mapping[table_name]);
+        tuple_info = &(_plan_table_ctx->table_tuple_mapping[try_to_lower(table_name)]);
         tuple_info->tuple_id = _plan_table_ctx->tuple_cnt++;
         tuple_info->table_id = table_id;
         tuple_info->slot_cnt = 1;
@@ -2115,7 +2117,7 @@ int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr
     }
     std::string lower_name = column->name.to_lower();
     int match_count = _select_alias_mapping.count(lower_name);
-    if (match_count > 1) {
+    if (match_count > 1 && !FLAGS_disambiguate_select_name) {
         DB_WARNING("column name: %s is ambiguous", column->name.c_str());
         return -2;
     } else if (match_count == 0) {
@@ -2208,6 +2210,7 @@ int LogicalPlanner::create_term_slot_ref_node(
     node->mutable_derive_node()->set_tuple_id(slot.tuple_id()); //TODO
     node->mutable_derive_node()->set_slot_id(slot.slot_id());
     node->mutable_derive_node()->set_field_id(slot.field_id());
+    node->set_col_flag(field_info->flag);
     _ctx->ref_slot_id_mapping[slot.tuple_id()][col_expr->name.to_lower()] = slot.slot_id();
     return 0;
 }
