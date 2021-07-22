@@ -477,6 +477,61 @@ ExprValue rtrim(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue lpad(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::STRING);
+    std::string str = input[0].get_string();
+    int64_t len = input[1].get_numberic<int64_t>();
+    if (len <= 0 || len > UINT16_MAX) {
+        return ExprValue::Null();
+    }
+    if (len <= str.length()) {
+        tmp.str_val.append(str.begin(), str.begin() + len);
+        return tmp;
+    }
+    std::string padstr = input[2].get_string();
+    if (padstr.length() == 0) {
+        return ExprValue::Null();
+    }
+    size_t padlen = len - str.length();
+    while (padlen > padstr.length()) {
+        tmp.str_val.append(padstr);
+        padlen -= padstr.length();
+    }
+    tmp.str_val.append(padstr.begin(), padstr.begin() + padlen);
+    tmp.str_val.append(str);
+    return tmp;
+}
+ExprValue rpad(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::STRING);
+    std::string str = input[0].get_string();
+    int64_t len = input[1].get_numberic<int64_t>();
+    if (len <= 0 || len > UINT16_MAX) {
+        return ExprValue::Null();
+    }
+    if (len <= str.length()) {
+        tmp.str_val.append(str.begin(), str.begin() + len);
+        return tmp;
+    }
+    std::string padstr = input[2].get_string();
+    if (padstr.length() == 0) {
+        return ExprValue::Null();
+    }
+    tmp.str_val.append(str);
+    size_t padlen = len - str.length();
+    while (padlen > padstr.length()) {
+        tmp.str_val.append(padstr);
+        padlen -= padstr.length();
+    }
+    tmp.str_val.append(padstr.begin(), padstr.begin() + padlen);
+    return tmp;
+}
+
 ExprValue concat_ws(const std::vector<ExprValue>& input) {
     if (input.size() < 2) {
         return ExprValue::Null();

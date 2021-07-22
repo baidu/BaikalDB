@@ -149,8 +149,8 @@ void FunctionManager::register_operators() {
     register_object_ret("reverse", reverse, pb::STRING);
     register_object_ret("locate", locate, pb::INT32);
     register_object_ret("substring_index", substring_index, pb::STRING);
-    register_object_ret("lpad", locate, pb::STRING);
-    register_object_ret("rpad", locate, pb::STRING);
+    register_object_ret("lpad", lpad, pb::STRING);
+    register_object_ret("rpad", rpad, pb::STRING);
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);
