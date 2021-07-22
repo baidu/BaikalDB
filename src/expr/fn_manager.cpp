@@ -148,6 +148,8 @@ void FunctionManager::register_operators() {
     register_object_ret("repeat", repeat, pb::STRING);
     register_object_ret("reverse", reverse, pb::STRING);
     register_object_ret("locate", locate, pb::INT32);
+    register_object_ret("lpad", locate, pb::STRING);
+    register_object_ret("rpad", locate, pb::STRING);
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::UINT32);
@@ -163,6 +165,7 @@ void FunctionManager::register_operators() {
     register_object_ret("curtime", curtime, pb::TIME);
     register_object_ret("current_time", current_time, pb::TIME);
     register_object_ret("current_timestamp", current_timestamp, pb::TIMESTAMP);
+    register_object_ret("timestamp", timestamp, pb::TIMESTAMP);
     register_object_ret("day", day, pb::UINT32);
     register_object_ret("dayname", dayname, pb::STRING);
     register_object_ret("dayofweek", dayofweek, pb::UINT32);

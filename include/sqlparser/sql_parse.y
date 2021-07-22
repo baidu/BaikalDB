@@ -260,6 +260,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TRAILING
     YEAR_MONTH
     PRIMARY
+    CURRENT_TIMESTAMP
 
 %token<string>
     /* The following tokens belong to UnReservedKeyword. */
@@ -441,7 +442,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     MID
     MIN
     NOW
-    CURRENT_TIMESTAMP
     UTC_TIMESTAMP
     POSITION
     SESSION_USER
@@ -2023,6 +2023,11 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
+    | CURRENT_TIMESTAMP {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        $$ = fun; 
+    }
     | CURRENT_TIMESTAMP '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
@@ -2037,6 +2042,12 @@ FunctionCallNonKeyword:
     | UTC_TIMESTAMP '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
+        $$ = fun;
+    }
+    | TIMESTAMP '(' ExprList ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children = $3->children;
         $$ = fun;
     }
     | FunctionNameDateArithMultiForms '(' Expr ',' Expr ')' {
