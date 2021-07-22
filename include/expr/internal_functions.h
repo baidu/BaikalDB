@@ -62,6 +62,8 @@ ExprValue repeat(const std::vector<ExprValue>& input);
 ExprValue reverse(const std::vector<ExprValue>& input);
 ExprValue locate(const std::vector<ExprValue>& input);
 ExprValue substring_index(const std::vector<ExprValue>& input);
+ExprValue lpad(const std::vector<ExprValue>& input);
+ExprValue rpad(const std::vector<ExprValue>& input);
 
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);
@@ -76,6 +78,7 @@ ExprValue current_date(const std::vector<ExprValue>& input);
 ExprValue curtime(const std::vector<ExprValue>& input);
 ExprValue current_time(const std::vector<ExprValue>& input);
 ExprValue current_timestamp(const std::vector<ExprValue>& input);
+ExprValue timestamp(const std::vector<ExprValue>& input);
 ExprValue day(const std::vector<ExprValue>& input);
 ExprValue dayname(const std::vector<ExprValue>& input);
 ExprValue dayofweek(const std::vector<ExprValue>& input);

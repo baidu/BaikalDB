@@ -759,6 +759,19 @@ ExprValue current_timestamp(const std::vector<ExprValue>& input) {
 ExprValue utc_timestamp(const std::vector<ExprValue>& input) {
     return ExprValue::UTC_TIMESTAMP();
 }
+
+ExprValue timestamp(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input.size() > 2) {
+        return ExprValue::Null();
+    }
+    ExprValue arg1 = input[0];
+    ExprValue ret = arg1.cast_to(pb::DATETIME).cast_to(pb::TIMESTAMP);
+    if (input.size() == 2) {
+        ret._u.uint32_val += time_to_sec(std::vector<ExprValue>(input.begin() + 1, input.end()))._u.int32_val;
+    }
+    return ret;
+}
+
 ExprValue date_format(const std::vector<ExprValue>& input) {
     if (input.size() != 2) {
         return ExprValue::Null();
