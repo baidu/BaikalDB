@@ -3355,7 +3355,7 @@ int Region::on_snapshot_load(braft::SnapshotReader* reader) {
                 return -1;
             }
             _meta_writer->read_applied_index(_region_id, &_applied_index, &_data_index);
-            boost::filesystem::path snapshot_first_data_file = meta_sst_file + "0";
+            boost::filesystem::path snapshot_first_data_file = data_sst_file + "0";
             //如果新的_data_index和old_data_index一样，则不需要清理数据，而且leader也不会发送数据
             //如果存在data_sst并且是重启过程，则清理后走重启故障恢复
             if (_data_index > old_data_index || 
@@ -3368,8 +3368,28 @@ int Region::on_snapshot_load(braft::SnapshotReader* reader) {
                         _region_id, _data_index, old_data_index);
             }
         } else {
-            DB_WARNING("region_id: %ld is new, no need clear_data. region_info: %s",
-                        _region_id, _region_info.ShortDebugString().c_str());
+            // check snapshot size
+            uint64_t peer_data_size = 0;
+            uint64_t peer_meta_size = 0;
+            RpcSender::get_peer_snapshot_size(butil::endpoint2str(get_leader()).c_str(), 
+                    _region_id, &peer_data_size, &peer_meta_size);
+            DB_WARNING("region_id: %ld is new, no need clear_data, "
+                    "send_data_size:%lu, recieve_data_size:%lu."
+                    "send_meta_size:%lu, recieve_meta_size:%lu."
+                    "region_info: %s",
+                        _region_id, peer_data_size, snapshot_data_size(),
+                        peer_meta_size, snapshot_meta_size(),
+                        _region_info.ShortDebugString().c_str());
+            if (peer_data_size != 0 && snapshot_data_size() != 0 && peer_data_size != snapshot_data_size()) {
+                DB_FATAL("check snapshot size fail, send_data_size:%lu, recieve_data_size:%lu, region_id: %ld", 
+                        peer_data_size, snapshot_data_size(), _region_id);
+                return -1;
+            }
+            if (peer_meta_size != 0 && snapshot_meta_size() != 0 && peer_meta_size != snapshot_meta_size()) {
+                DB_FATAL("check snapshot size fail, send_data_size:%lu, recieve_data_size:%lu, region_id: %ld", 
+                        peer_meta_size, snapshot_meta_size(), _region_id);
+                return -1;
+            }
             int ret_meta = RegionControl::ingest_meta_sst(meta_sst_file, _region_id);
             if (ret_meta < 0) {
                 DB_FATAL("ingest sst fail, region_id: %ld", _region_id);

@@ -25,6 +25,8 @@ public:
                             int64_t request_version);
 
     static int64_t get_peer_applied_index(const std::string& peer, int64_t region_id);
+    static void get_peer_snapshot_size(const std::string& peer, int64_t region_id, 
+            uint64_t* data_size, uint64_t* meta_size);
     static int send_query_method(const pb::StoreReq& request, 
                 const std::string& instance, 
                 int64_t receive_region_id);

@@ -87,9 +87,25 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
                 _region_id, time_cost.get_time());
         return 0;
     }
+    if (offset > iter_context->offset) {
+        DB_FATAL("region_id: %ld, retry last_offset, offset biger fail "
+                "time_cost: %ld, last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
+                _region_id, time_cost.get_time(), _last_offset, offset, iter_context->offset, size);
+        return -1;
+    }
     if (offset < iter_context->offset) {
-        iter_context->offset = 0;
-        iter_context->iter->Seek(iter_context->prefix);
+        // 缓存上一个包，重试一次可以恢复
+        if (_last_offset == offset) {
+            *portal = _last_package;
+            DB_FATAL("region_id: %ld, retry last_offset time_cost: %ld, "
+                    "off:%lu, ctx->off:%lu, size:%lu, ret_size:%lu", 
+                    _region_id, time_cost.get_time(), offset, iter_context->offset, size, _last_package.size());
+            return _last_package.size();
+        }
+        DB_FATAL("region_id: %ld, retry last_offset fail time_cost: %ld, "
+                "last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
+                _region_id, time_cost.get_time(), _last_offset, offset, iter_context->offset, size);
+        return -1;
     }
 
     size_t count = 0;
@@ -104,7 +120,14 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         if (!iter_context->iter->Valid()
                 || !iter_context->iter->key().starts_with(iter_context->prefix)) {
             iter_context->done = true;
+            //portal->append((void*)iter_context->offset, sizeof(size_t));
             DB_WARNING("region_id: %ld snapshot read over, total size: %ld", _region_id, iter_context->offset);
+            auto region = Store::get_instance()->get_region(_region_id);
+            if (iter_context->is_meta_sst) {
+                region->set_snapshot_meta_size(iter_context->offset);
+            } else {
+                region->set_snapshot_data_size(iter_context->offset);
+            }
             break;
         }
         // debug meta region_info applied_index
@@ -143,42 +166,35 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
                 DB_FATAL("read txn info fail, may be has removed, region_id: %ld", _region_id);
                 iter_context->iter->Next();
                 continue;
-                //return -1;
             }
             for (auto& txn_info : txn_infos) {
                 ++key_num;
-                if (iter_context->offset >= offset) {
-                    read_size += serialize_to_iobuf(portal, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id, txn_info.first));
-                    read_size += serialize_to_iobuf(portal, rocksdb::Slice(txn_info.second));
-                } else {
-                    read_size += serialize_to_iobuf(nullptr, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id, txn_info.first));
-                    read_size += serialize_to_iobuf(nullptr, rocksdb::Slice(txn_info.second));
-                }
+                read_size += serialize_to_iobuf(portal, MetaWriter::get_instance()->transcation_pb_key(_region_id, txn_id, txn_info.first));
+                read_size += serialize_to_iobuf(portal, rocksdb::Slice(txn_info.second));
             }
             
         } else {
             key_num++;
-            if (iter_context->offset >= offset) {
-                read_size += serialize_to_iobuf(portal, iter_context->iter->key());
-                read_size += serialize_to_iobuf(portal, iter_context->iter->value());
-            } else {
-                read_size += serialize_to_iobuf(nullptr, iter_context->iter->key());
-                read_size += serialize_to_iobuf(nullptr, iter_context->iter->value());
-            } 
+            read_size += serialize_to_iobuf(portal, iter_context->iter->key());
+            read_size += serialize_to_iobuf(portal, iter_context->iter->value());
         }
         count += read_size;
         ++_num_lines;
         iter_context->offset += read_size;
         iter_context->iter->Next();
     }
-    DB_DEBUG("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld, off:%lu, size:%lu", 
-                _region_id, count, key_num, time_cost.get_time(), offset, size);
+    DB_WARNING("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld, "
+            "off:%lu, size:%lu, last_off:%lu, last_count:%lu", 
+                _region_id, count, key_num, time_cost.get_time(), offset, size, 
+                _last_offset, _last_package.size());
+    _last_offset = offset;
+    _last_package = *portal;
     return count;
 }
 
 bool RocksdbReaderAdaptor::close() {
     if (_closed) {
-        DB_DEBUG("file has been closed, region_id: %ld, num_lines: %ld, path: %s", 
+        DB_WARNING("file has been closed, region_id: %ld, num_lines: %ld, path: %s", 
                 _region_id, _num_lines, _path.c_str());
         return true;
     }
@@ -252,11 +268,7 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
     if (data.size() == 0) {
         DB_WARNING("write sst file path: %s data len = 0, region_id: %ld", path.c_str(), _region_id);
     }
-    std::string region_info_key = MetaWriter::get_instance()->region_info_key(_region_id);
-    std::string applied_index_key = MetaWriter::get_instance()->applied_index_key(_region_id);
-    std::vector<std::string> keys;
-    std::vector<std::string> values;
-    auto ret = parse_from_iobuf(data, keys, values);
+    auto ret = iobuf_to_sst(data);
     if (ret < 0) {
         DB_FATAL("write sst file path: %s failed, received invalid data, data len: %lu, region_id: %ld",
                 path.c_str(), data.size(), _region_id);
@@ -264,37 +276,12 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
     }
     // 大region addpeer中重置time_cost，防止version=0超时删除
     _region_ptr->reset_timecost();
-    for (size_t i = 0; i < keys.size(); ++i) {
-        // debug meta region_info
-        if (_is_meta) {
-            if (keys[i] == region_info_key) {
-                pb::RegionInfo region_info;
-                region_info.ParseFromString(values[i]);
-                DB_WARNING("region_id: %ld meta_sst recv region_info:%s", 
-                        _region_id, region_info.ShortDebugString().c_str());
-            }
-            if (keys[i] == applied_index_key) {
-                DB_WARNING("region_id: %ld meta_sst recv applied_index:%ld", _region_id,
-                        TableKey(values[i]).extract_i64(0));
-            }
-        }
-        auto s = _writer->put(rocksdb::Slice(keys[i]), rocksdb::Slice(values[i]));
-        if (!s.ok()) {            
-            DB_FATAL("write sst file path: %s failed, err: %s, region_id: %ld", 
-                        path.c_str(), s.ToString().c_str(), _region_id);
-            return -1;
-        }
-        _count++;
-    }
-    //_data_size += data.size();
+    _data_size += data.size();
 
     if (!_is_meta && _writer->file_size() >= SST_FILE_LENGTH) {
-        DB_WARNING("rocksdb sst write, region_id: %ld, path: %s, offset: %lu, file_size:%lu, total_count: %lu",
-                _region_id, path.c_str(), offset, _writer->file_size(), _count);
         if (!finish_sst()) {
             return -1;
         }
-        //_data_size = 0;
         _count = 0;
         ++_sst_idx;
         path = _path + std::to_string(_sst_idx);
@@ -304,12 +291,15 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
                     path.c_str(), s.ToString().c_str(), _region_id);
             return -1;
         }
+        DB_WARNING("rocksdb sst write, region_id: %ld, path: %s, offset: %lu, "
+                "file_size:%lu, total_count: %lu, all_size:%lu",
+                _region_id, path.c_str(), offset, _writer->file_size(), _count, _data_size);
     }
-    if (_is_meta) {
+    //if (_is_meta) {
         DB_WARNING("rocksdb sst write, region_id: %ld, path: %s, offset: %lu, data.size: %ld,"
-                " keys size: %ld, file_size: %lu, total_count: %lu", _region_id, path.c_str(), offset, data.size(),
-                keys.size(), _writer->file_size(), _count);
-    }
+                " file_size: %lu, total_count: %lu", _region_id, path.c_str(), offset, data.size(),
+                _writer->file_size(), _count);
+    //}
     return data.size();
 }
 
@@ -319,6 +309,11 @@ bool SstWriterAdaptor::close() {
         return true;
     }
     _closed = true;
+    if (_is_meta) {
+        _region_ptr->set_snapshot_meta_size(_data_size);
+    } else {
+        _region_ptr->set_snapshot_data_size(_data_size);
+    }
     return finish_sst();
 }
 
@@ -328,8 +323,8 @@ bool SstWriterAdaptor::finish_sst() {
         path += std::to_string(_sst_idx);
     }
     if (_count > 0) {
-        DB_WARNING("_writer finished, path: %s, region_id: %ld, file_size: %lu, total_count: %ld",
-                path.c_str(), _region_id, _writer->file_size(), _count);
+        DB_WARNING("_writer finished, path: %s, region_id: %ld, file_size: %lu, total_count: %ld, all_size:%lu",
+                path.c_str(), _region_id, _writer->file_size(), _count, _data_size);
         auto s = _writer->finish();
         if (!s.ok()) {
             DB_FATAL("finish sst file path: %s failed, err: %s, region_id: %ld", 
@@ -346,45 +341,98 @@ bool SstWriterAdaptor::finish_sst() {
     }
     return true;
 }
+/*
+inline int iobuf_to_slices(const butil::IOBuf& data, size_t size, std::vector<rocksdb::Slice>* vec) {
+    for (size_t i = 0; i < data.backing_block_num(); i++) {
+        auto piece = data.backing_block(i);
+        if (piece.size() >= size) {
+            vec->emplace_back(piece.data(), size);
+            return 0;
+        } else {
+            vec->emplace_back(piece.data(), piece.size());
+            size -= piece.size();
+        }
+    }
+    return -1;
+}
+*/
 
-int SstWriterAdaptor::parse_from_iobuf(const butil::IOBuf& data, std::vector<std::string>& keys, std::vector<std::string>& values) {
-    size_t pos = 0;
-    while (pos < data.size()) {
-        if ((data.size() - pos) < sizeof(size_t)) {
+int SstWriterAdaptor::iobuf_to_sst(butil::IOBuf data) {
+    std::string region_info_key = MetaWriter::get_instance()->region_info_key(_region_id);
+    std::string applied_index_key = MetaWriter::get_instance()->applied_index_key(_region_id);
+    char key_buf[1024];
+    // 10k的栈应该可以满足大部分场景
+    char value_buf[10 * 1024];
+    while (!data.empty()) {
+        size_t key_size = 0;
+        size_t nbytes = data.cutn((void*)&key_size, sizeof(size_t));
+        if (nbytes < sizeof(size_t)) {
             DB_FATAL("read key size from iobuf fail, region_id: %ld", _region_id);
             return -1;
         }
-        size_t key_size = 0;
-        data.copy_to((void*)&key_size, sizeof(size_t), pos);
-
-        pos += sizeof(size_t);
-        std::string key;
-        if ((data.size() - pos) < key_size) {
+        rocksdb::Slice key;
+        std::unique_ptr<char[]> big_key_buf; 
+        // sst_file_writer不支持SliceParts，使用fetch可以尽量0拷贝
+        if (key_size <= sizeof(key_buf)) {
+            key.data_ = static_cast<const char*>(data.fetch(key_buf, key_size));
+        } else {
+            big_key_buf.reset(new char[key_size]);
+            //DB_WARNING("region_id: %ld, key_size: %ld too big", _region_id, key_size);
+            key.data_ = static_cast<const char*>(data.fetch(big_key_buf.get(), key_size));
+        }
+        key.size_ = key_size;
+        if (key.data_ == nullptr) {
             DB_FATAL("read key from iobuf fail, region_id: %ld, key_size: %ld", 
                     _region_id, key_size);
             return -1;
         }
-        data.copy_to(&key, key_size, pos);
+        data.pop_front(key_size);
 
-        pos += key_size;
-        keys.push_back(key);
-        if ((data.size() - pos) < sizeof(size_t)) {
+        size_t value_size = 0;
+        nbytes = data.cutn((void*)&value_size, sizeof(size_t));
+        if (nbytes < sizeof(size_t)) {
             DB_FATAL("read value size from iobuf fail, region_id: %ld", _region_id);
             return -1;
         }
-        size_t value_size = 0;
-        data.copy_to((void*)&value_size, sizeof(size_t), pos);
-
-        pos += sizeof(size_t);
-        std::string value;
-        if ((data.size() - pos) < value_size) {
+        rocksdb::Slice value;
+        std::unique_ptr<char[]> big_value_buf; 
+        if (value_size <= sizeof(value_buf)) {
+            if (value_size > 0) {
+                value.data_ = static_cast<const char*>(data.fetch(value_buf, value_size));
+            }
+        } else {
+            big_value_buf.reset(new char[value_size]);
+            //DB_WARNING("region_id: %ld, value_size: %ld too big", _region_id, value_size);
+            value.data_ = static_cast<const char*>(data.fetch(big_value_buf.get(), value_size));
+        }
+        value.size_ = value_size;
+        if (value.data_ == nullptr) {
             DB_FATAL("read value from iobuf fail, region_id: %ld, value_size: %ld", 
                     _region_id, value_size);
             return -1;
         }
-        data.copy_to(&value, value_size, pos);
-        pos += value_size;
-        values.push_back(value);
+        data.pop_front(value_size);
+        // debug meta region_info
+        if (_is_meta) {
+            if (key == region_info_key) {
+                pb::RegionInfo region_info;
+                region_info.ParseFromArray(value.data(), value.size());
+                DB_WARNING("region_id: %ld meta_sst recv region_info:%s", 
+                        _region_id, region_info.ShortDebugString().c_str());
+            }
+            if (key == applied_index_key) {
+                DB_WARNING("region_id: %ld meta_sst recv applied_index:%ld", _region_id,
+                        TableKey(value).extract_i64(0));
+            }
+        }
+        _count++;
+        
+        auto s = _writer->put(key, value);
+        if (!s.ok()) {            
+            DB_FATAL("write sst file failed, err: %s, region_id: %ld", 
+                        s.ToString().c_str(), _region_id);
+            return -1;
+        }
     }
     return 0;
 }
@@ -611,7 +659,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
     iter_context->reading = true;
     auto reader = new RocksdbReaderAdaptor(_region_id, path, this, sc, is_meta_reader);
     reader->open();
-    DB_DEBUG("region_id: %ld open reader: path: %s, time_cost: %ld", 
+    DB_WARNING("region_id: %ld open reader: path: %s, time_cost: %ld", 
                 _region_id, path.c_str(), time_cost.get_time());
     return reader;
 }
@@ -717,7 +765,7 @@ void RocksdbFileSystemAdaptor::close(const std::string& path) {
     }
     auto& snapshot_ctx = iter->second;
     if (is_snapshot_data_file(path)) {
-        DB_DEBUG("read snapshot data file close, path: %s", path.c_str());
+        DB_WARNING("read snapshot data file close, path: %s", path.c_str());
         snapshot_ctx.first->data_context->reading = false;
     } else {
         DB_WARNING("read snapshot meta data file close, path: %s", path.c_str());

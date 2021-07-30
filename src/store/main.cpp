@@ -53,7 +53,12 @@ void sigsegv_handler(int signum, siginfo_t* info, void* ptr) {
     strings = backtrace_symbols(buffer, nptrs);
     if (strings != NULL) {
         for (int j = 0; j < nptrs; j++) {
-            DB_FATAL("%s", strings[j]);
+            int status = 0;
+            char* name = abi::__cxa_demangle(strings[j], nullptr, nullptr, &status);
+            DB_FATAL("orgin:%s", strings[j]);
+            if (name != nullptr) {
+                DB_FATAL("%s", name);
+            }
         }
     }
     server.Stop(0);
