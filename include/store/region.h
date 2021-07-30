@@ -735,6 +735,18 @@ public:
     std::shared_ptr<Region> get_ptr() {
         return shared_from_this();
     }
+    uint64_t snapshot_data_size() const {
+        return _snapshot_data_size;
+    }
+    void set_snapshot_data_size(size_t size) {
+        _snapshot_data_size = size;
+    }
+    uint64_t snapshot_meta_size() const {
+        return _snapshot_meta_size;
+    }
+    void set_snapshot_meta_size(size_t size) {
+        _snapshot_meta_size = size;
+    }
     uint64_t get_approx_size() const {
         //分裂后一段时间每超过10分钟，或者超过10%的数据量diff则需要重新获取
         if (_approx_info.time_cost.get_time() > 10 * 60 * 1000 * 1000LL && 
@@ -899,6 +911,8 @@ private:
     std::mutex          _region_lock;    
     //split后缓存分裂出去的region信息供baikaldb使用
     std::vector<pb::RegionInfo> _new_region_infos;
+    size_t _snapshot_data_size = 0;
+    size_t _snapshot_meta_size = 0;
     pb::RegionInfo      _new_region_info;
     int64_t             _region_id;
     

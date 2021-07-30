@@ -121,6 +121,12 @@ message IndexRecords {
     repeated bytes  records         = 2;  
 };
 
+message RegionRaftStat {
+    optional int64 applied_index    = 1;
+    optional uint64 snapshot_data_size = 2;
+    optional uint64 snapshot_meta_size = 3;
+};
+
 message StoreRes {
     required ErrCode errcode        = 1;
     optional bytes errmsg          = 2;
@@ -145,6 +151,7 @@ message StoreRes {
     repeated int64 commit_ts     = 20; //与上面的binlog一一对应
     optional PeerStatus region_status = 21;
     optional int64 last_insert_id = 22;
+    optional RegionRaftStat region_raft_stat = 23;
 };
 message InitRegion {
     required RegionInfo region_info     = 1;
@@ -222,6 +229,7 @@ service StoreService {
     rpc add_peer(AddPeer) returns (StoreRes);
 
     //get region的applied_index, 用来分裂完成后优化选择transfer leader的对象
+    //复用，获取snapshot数据大小，用作校验
     rpc get_applied_index(GetAppliedIndex) returns (StoreRes);
 
     rpc compact_region(RegionIds) returns (StoreRes);

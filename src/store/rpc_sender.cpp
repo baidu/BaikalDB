@@ -48,6 +48,20 @@ int64_t RpcSender::get_peer_applied_index(const std::string& peer, int64_t regio
     return 0;
 }
 
+void RpcSender::get_peer_snapshot_size(const std::string& peer, int64_t region_id,
+        uint64_t* data_size, uint64_t* meta_size) {
+    pb::GetAppliedIndex request;
+    request.set_region_id(region_id);
+    pb::StoreRes response;
+    
+    StoreInteract store_interact(peer);
+    auto ret = store_interact.send_request("get_applied_index", request, response);
+    if (ret == 0) {
+        *data_size = response.region_raft_stat().snapshot_data_size();
+        *meta_size = response.region_raft_stat().snapshot_meta_size();
+    }
+}
+
 int RpcSender::send_query_method(const pb::StoreReq& request,
                                         const std::string& instance,
                                         int64_t receive_region_id) {

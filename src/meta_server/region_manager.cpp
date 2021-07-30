@@ -21,7 +21,11 @@
 #include "meta_util.h"
 #include "table_manager.h"
 #include "meta_rocksdb.h"
+#ifdef BAIDU_INTERNAL
+#include "baidu/rpc/reloadable_flags.h"
+#else
 #include "brpc/reloadable_flags.h"
+#endif
 
 namespace baikaldb {
 DECLARE_int32(concurrency_num);
@@ -29,7 +33,11 @@ DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(region_faulty_interval_times);
 DEFINE_int32(balance_add_peer_num, 10, "add peer num each time, default(10)");
+#ifdef BAIDU_INTERNAL
+BAIDU_RPC_VALIDATE_GFLAG(balance_add_peer_num, brpc::PositiveInteger);
+#else
 BRPC_VALIDATE_GFLAG(balance_add_peer_num, brpc::PositiveInteger);
+#endif
 
 //增加或者更新region信息
 //如果是增加，则需要更新表信息, 只有leader的上报会调用该接口

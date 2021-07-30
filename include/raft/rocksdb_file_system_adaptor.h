@@ -130,6 +130,8 @@ private:
     bool _is_meta_reader = false;
     bool _closed = true;
     size_t _num_lines = 0;
+    butil::IOPortal _last_package;
+    off_t _last_offset = 0;
 };
 
 class SstWriterAdaptor : public braft::FileAdaptor {
@@ -153,7 +155,7 @@ protected:
 
 private:
     bool finish_sst();
-    int parse_from_iobuf(const butil::IOBuf& data, std::vector<std::string>& keys, std::vector<std::string>& values);
+    int iobuf_to_sst(butil::IOBuf data);
     int64_t _region_id;
     SmartRegion _region_ptr;
     std::string _path;

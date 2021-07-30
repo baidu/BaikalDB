@@ -569,6 +569,9 @@ void Store::get_applied_index(google::protobuf::RpcController* controller,
     }
     response->set_region_status(region->region_status());
     response->set_applied_index(region->get_log_index());
+    response->mutable_region_raft_stat()->set_applied_index(region->get_log_index());
+    response->mutable_region_raft_stat()->set_snapshot_data_size(region->snapshot_data_size());
+    response->mutable_region_raft_stat()->set_snapshot_meta_size(region->snapshot_meta_size());
     response->set_leader(butil::endpoint2str(region->get_leader()).c_str());
 }
 
