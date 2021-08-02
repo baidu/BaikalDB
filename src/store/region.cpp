@@ -2431,8 +2431,11 @@ int Region::select_sample(RuntimeState& state, ExecNode* root, const pb::Analyze
                 if (count > 0) {
                     int32_t random = butil::fast_rand() % count; 
                     if (random < sample_cnt) {
+                        state.memory_limit_release(sample_batch.get_row(random)->used_size());
                         sample_batch.replace_row(std::move(batch.get_row()), random);
-                    }
+                    } else {
+			state.memory_limit_release(batch.get_row()->used_size());
+		    }
                 }
             }
         }
