@@ -1603,7 +1603,7 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         // if txn in pool (new_txn == false), remove it from pool
         // else directly delete it
         if (!is_new_txn) {
-            _txn_pool.remove_txn(state.txn_id, false);
+            _txn_pool.remove_txn(state.txn_id, true);
         }
     });
     auto txn = state.txn();
