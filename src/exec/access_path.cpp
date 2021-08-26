@@ -22,6 +22,7 @@
 
 namespace baikaldb {
 using namespace range;
+DEFINE_int32(max_in_records_num, 10000, "max_in_records_num");
 
 void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
         std::vector<ExprValue>& values, SmartRecord record, size_t field_idx, bool* out_open, int* out_field_cnt) {
@@ -103,6 +104,9 @@ void AccessPath::calc_normal(Property& sort_property) {
     SmartRecord left_record = record_template->clone(false);
     SmartRecord right_record = record_template->clone(false);
     std::vector<RecordRange> in_records;
+    // offset: in条件组合展开后的步长,用于非首字段的对应
+    // hit_fields_cnt: in_row_expr谓词匹配的字段个数,用于判断是否可以剪切
+    std::map< ExprNode*, std::pair<uint32_t, uint32_t>> in_row_expr_map; // <in_row_expr,<offset, hit_fields_cnt>
     int field_cnt = 0;
     for (auto& field : index_info_ptr->fields) {
         bool field_break = false;
@@ -171,7 +175,8 @@ void AccessPath::calc_normal(Property& sort_property) {
                     like_prefix = true;
                     field_break = true;
                 } else if (range.is_row_expr) {
-                    if (all_in_index(range.left_row_field_ids, index_field_ids)) {
+                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids) &&
+                            in_row_expr_map[*range.conditions.begin()].second == range.left_row_field_ids.size()) {
                         need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                     }
                 } else {
@@ -179,29 +184,58 @@ void AccessPath::calc_normal(Property& sort_property) {
                 }
                 break;
             case IN:
-                if (in_pred && *range.conditions.begin() != in_row_expr) {
-                    field_break = true;
-                    break;
-                }
-                if (in_records.empty()) {
-                    for (auto value : range.eq_in_values) {
-                        RecordRange rg;
-                        rg.left_record = left_record->clone(true);
-                        rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), value);
-                        in_records.push_back(rg);
-                    }
-                } else {
-                    if (in_records.size() == range.eq_in_values.size()) {
-                        for (size_t vi = 0; vi < range.eq_in_values.size(); vi++) {
-                            auto rg = in_records[vi];
-                            rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), range.eq_in_values[vi]);
+                if (range.is_row_expr && in_row_expr_map.count(*range.conditions.begin()) == 1) {
+                    // in_row_expr的非首个字段不组合展开,按offset填充,例如(a, b) in ((1,2))的b
+                    uint32_t offset = in_row_expr_map[*range.conditions.begin()].first;
+                    // flat fill other row_expr field value exclude the first.
+                    if (in_records.size() % range.eq_in_values.size() == 0) {
+                        size_t vs = range.eq_in_values.size();
+                        size_t vi = 0;
+                        size_t i = 0;
+                        for (auto& rg : in_records) {
+                            rg.left_record->set_value(
+                                    rg.left_record->get_field_by_tag(field.id), range.eq_in_values[vi]);
+                            if ((++i) == offset) {
+                                i = 0;
+                                vi = ((++vi) % vs);
+                            }
                         }
                     } else {
-                        DB_FATAL("inx:%ld in_records.size() %lu != values.size() %lu ", 
+                        DB_FATAL("inx:%ld in_records.size() %lu != values.size()'s multiples %lu ",
                                 index_id, in_records.size(), range.eq_in_values.size());
                         field_break = true;
                         break;
                     }
+                    in_row_expr_map[*range.conditions.begin()].second++;
+                } else {
+                    // 第一次in_records size为0,不受限制
+                    if (in_records.size() * range.eq_in_values.size() > FLAGS_max_in_records_num) {
+                        field_break = true;
+                        break;
+                    }
+                    if(in_records.empty()) {
+                        RecordRange rg;
+                        rg.left_record = left_record->clone(true);
+                        in_records.push_back(rg);
+                    }
+                    if (range.is_row_expr) {
+                        // in_row_expr的首个字段进行组合展开,并记录展开offset,用于后续字段映射
+                        // 例如: a in ("a1", "a2") and (b, c) in (("b1","c1")), 则b与a组合展开后,如下
+                        // (("a1", "b1") ("a2", "b1")),则b的offset = in_records.size();
+                        in_row_expr_map[*range.conditions.begin()] = std::pair<uint32_t, uint32_t>(in_records.size(), 1);
+                    }
+                    std::vector<RecordRange> comb_in_records;
+                    for (auto value : range.eq_in_values) {
+                        for (auto record : in_records) {
+                            RecordRange rg;
+                            rg.left_record = record.left_record->clone(true);
+                            rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), value);
+                            comb_in_records.push_back(rg);
+                        }
+                    }
+                    in_records.swap(comb_in_records);
+                    comb_in_records.clear();
+
                 }
                 ++field_cnt;
                 hit_index_field_ids.insert(field.id);
@@ -212,7 +246,10 @@ void AccessPath::calc_normal(Property& sort_property) {
                 in_pred = true;
                 if (range.is_row_expr) {
                     in_row_expr = *range.conditions.begin();
-                    if (all_in_index(range.left_row_field_ids, index_field_ids)) {
+                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids)&&
+                            in_row_expr_map[*range.conditions.begin()].second == range.left_row_field_ids.size()) {
+                        // (a,b) IN (("a1", "b1")) and (b,c) IN (("b1","c2")) hit_index_field_ids=(a,b,c),
+                        // (a,b)与(b,c)都包含于hit_index_field_ids中,需要进一步判断字段b是那个pred命中的.
                         need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                     }
                 } else {

@@ -19,6 +19,7 @@
 #include "parser.h"
 #include "runtime_state.h"
 #include "query_context.h"
+#include "row_expr.h"
 #include "rapidjson/rapidjson.h"
 #include "rapidjson/reader.h"
 #include "rapidjson/writer.h"
@@ -54,6 +55,7 @@ struct SlotPredicate {
     std::vector<ExprNode*> lt_le_preds;
     std::vector<ExprNode*> gt_ge_preds;
     std::vector<ExprNode*> in_preds;
+    SlotRef* slot_ref = nullptr;
     bool need_cut() {
         return (eq_preds.size() + lt_le_preds.size() + gt_ge_preds.size() + in_preds.size()) > 1;
     }
@@ -113,28 +115,90 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
         // 取交集
         std::map<std::string, ExprNode*> and_map;
         std::map<std::string, ExprNode*> out_map;
-        for (uint32_t i = 1; i < preds.in_preds[0]->children_size(); i++) {
-            auto lit = preds.in_preds[0]->children(i);
-            if (!lit->is_constant()) {
-                return 0;
-            }
-            and_map[lit->get_value(nullptr).get_string()] = lit;
-        }
-        for (uint32_t j = 1; j < preds.in_preds.size(); j++) {
-            for (uint32_t i = 1; i < preds.in_preds[j]->children_size(); i++) {
-                auto lit = preds.in_preds[j]->children(i);
+        if (preds.in_preds[0]->children(0)->is_row_expr()) {
+            for (uint32_t i = 1; i < preds.in_preds[0]->children_size(); i++) {
+                auto lit = preds.in_preds[0]->children(i);
                 if (!lit->is_constant()) {
-                    cut_preds.clear();
                     return 0;
                 }
-                const auto& key = lit->get_value(nullptr).get_string();
-                if (and_map.count(key) == 1) {
-                    out_map[key] = and_map[key];
+                int ret = preds.in_preds[0]->children(0)->open();
+                if (ret < 0) {
+                    DB_WARNING("expr open fail:%d", ret);
+                    return 0;
                 }
+                int idx = static_cast<RowExpr*>(preds.in_preds[0]->children(0))->get_slot_ref_idx(
+                        preds.slot_ref->tuple_id(), preds.slot_ref->slot_id());
+                if (idx < 0) {
+                    DB_WARNING("get_slot_ref_idx fail:%d", idx);
+                    return 0;
+                }
+                and_map[static_cast<RowExpr*>(lit)->get_value(nullptr, idx).get_string()] = lit;
+            }
+        } else {
+            for (uint32_t i = 1; i < preds.in_preds[0]->children_size(); i++) {
+                auto lit = preds.in_preds[0]->children(i);
+                if (!lit->is_constant()) {
+                    return 0;
+                }
+                and_map[lit->get_value(nullptr).get_string()] = lit;
+            }
+        }
+        for (uint32_t j = 1; j < preds.in_preds.size(); j++) {
+            std::set<int> row_keep;
+            if (preds.in_preds[j]->children(0)->is_row_expr()) {
+                int ret = preds.in_preds[j]->children(0)->open();
+                if (ret < 0) {
+                    DB_WARNING("expr open fail:%d", ret);
+                    return 0;
+                }
+                int idx = static_cast<RowExpr*>(preds.in_preds[j]->children(0))->get_slot_ref_idx(
+                        preds.slot_ref->tuple_id(), preds.slot_ref->slot_id());
+                if (idx < 0) {
+                    DB_WARNING("get_slot_ref_idx fail:%d", idx);
+                    return 0;
+                }
+                row_keep.clear();
+                for (uint32_t i = 1; i < preds.in_preds[j]->children_size(); i++) {
+                    auto lit = preds.in_preds[j]->children(i);
+                    if (!lit->is_constant()) {
+                        cut_preds.clear();
+                        return 0;
+                    }
+                    const auto& key = static_cast<RowExpr*>(lit)->get_value(nullptr, idx).get_string();
+                    if (and_map.count(key) == 1) {
+                        out_map[key] = and_map[key];
+                        row_keep.insert(i);
+                        DB_DEBUG("row_keep: %s, idx:%d", key.c_str(), i);
+                    }
+                }
+                // in_row_expr因为条件里还有其它字段,不能剪切整个preds,可以剪切部分行
+                // 例如 a in ("a1", "a2") and (a, b) in (("a1","b1"), ("a3","b3"))
+                // in_row_pred (a, b)可以剪切为:(("a1","b1"))
+                if (row_keep.size() == 0) {
+                       return -1;
+                }
+                // 反过来删
+                for (uint32_t i = preds.in_preds[j]->children_size() - 1; i >= 1; i--) {
+                    if (row_keep.count(i) == 0) {
+                        preds.in_preds[j]->del_child(i);
+                    }
+                }
+            } else {
+                for (uint32_t i = 1; i < preds.in_preds[j]->children_size(); i++) {
+                    auto lit = preds.in_preds[j]->children(i);
+                    if (!lit->is_constant()) {
+                        cut_preds.clear();
+                        return 0;
+                    }
+                    const auto& key = lit->get_value(nullptr).get_string();
+                    if (and_map.count(key) == 1) {
+                        out_map[key] = and_map[key];
+                    }
+                }
+                cut_preds.emplace(preds.in_preds[j]);
             }
             out_map.swap(and_map);
             out_map.clear();
-            cut_preds.emplace(preds.in_preds[j]);
         }
         if (and_map.empty()) {
             return -1;
@@ -258,6 +322,38 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         }
         if (expr->children_size() < 2) {
             continue;
+        }
+        // 处理in_row_expr
+        if (expr->children(0)->is_row_expr() && expr->node_type() == pb::IN_PREDICATE) {
+            RowExpr* row_expr = static_cast<RowExpr*>(expr->children(0));
+            std::map<size_t, SlotRef*> slots;
+            std::map<size_t, std::vector<ExprValue>> values;
+            row_expr->get_all_slot_ref(&slots);
+            // TODO 对于非全部slot的也可以处理
+            if (slots.size() != row_expr->children_size()) {
+                continue;
+            }
+            bool all_const = true;
+            bool all_row_expr = true;
+            for (uint32_t i = 1; i < expr->children_size(); i++) {
+                if (!expr->children(i)->is_constant()) {
+                    all_const = false;
+                    break;
+                }
+                if (!expr->children(i)->is_row_expr()) {
+                    all_row_expr = false;
+                    break;
+                }
+            }
+            if (!all_const || !all_row_expr) {
+                break;
+            }
+            for (auto& pair : slots) {
+                SlotRef* slot_ref = pair.second;
+                int64_t sign = (slot_ref->tuple_id() << 16) + slot_ref->slot_id();
+                pred_map[sign].in_preds.push_back(expr);
+                pred_map[sign].slot_ref = slot_ref;
+            }
         }
         if (!expr->children(0)->is_slot_ref()) {
             continue;
