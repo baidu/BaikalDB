@@ -412,6 +412,7 @@ void IndexSelector::hit_field_range(ExprNode* expr,
         case pb::IN_PREDICATE: {
             if (field_range_map[field_id].type != NONE &&
                 field_range_map[field_id].eq_in_values.size() <= values.size()) {
+                // 1个字段对应多个in preds时 例如: a in ("a1", "a2") and (a, b) in (("a1","b1")),取数量少的pred
                 return;
             }
             field_range_map[field_id].eq_in_values = values;

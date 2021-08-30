@@ -22,7 +22,7 @@
 
 namespace baikaldb {
 using namespace range;
-DEFINE_int32(max_in_records_num, 10000, "max_in_records_num");
+DEFINE_uint64(max_in_records_num, 10000, "max_in_records_num");
 
 void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
         std::vector<ExprValue>& values, SmartRecord record, size_t field_idx, bool* out_open, int* out_field_cnt) {
@@ -175,13 +175,15 @@ void AccessPath::calc_normal(Property& sort_property) {
                     like_prefix = true;
                     field_break = true;
                 } else if (range.is_row_expr) {
-                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids) &&
-                            in_row_expr_map[*range.conditions.begin()].second == range.left_row_field_ids.size()) {
+                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids)) {
                         need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                     }
                 } else {
                     need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                 }
+                break;
+            case LIKE:
+                field_break = true;
                 break;
             case IN:
                 if (range.is_row_expr && in_row_expr_map.count(*range.conditions.begin()) == 1) {
@@ -213,7 +215,7 @@ void AccessPath::calc_normal(Property& sort_property) {
                         field_break = true;
                         break;
                     }
-                    if(in_records.empty()) {
+                    if (in_records.empty()) {
                         RecordRange rg;
                         rg.left_record = left_record->clone(true);
                         in_records.push_back(rg);
@@ -226,6 +228,7 @@ void AccessPath::calc_normal(Property& sort_property) {
                     }
                     std::vector<RecordRange> comb_in_records;
                     for (auto value : range.eq_in_values) {
+                        // 为保持前面已处理字段步长稳定性, 当前字段需要写在外层循环与in_records进行展开.
                         for (auto record : in_records) {
                             RecordRange rg;
                             rg.left_record = record.left_record->clone(true);
@@ -246,7 +249,7 @@ void AccessPath::calc_normal(Property& sort_property) {
                 in_pred = true;
                 if (range.is_row_expr) {
                     in_row_expr = *range.conditions.begin();
-                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids)&&
+                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids) &&
                             in_row_expr_map[*range.conditions.begin()].second == range.left_row_field_ids.size()) {
                         // (a,b) IN (("a1", "b1")) and (b,c) IN (("b1","c2")) hit_index_field_ids=(a,b,c),
                         // (a,b)与(b,c)都包含于hit_index_field_ids中,需要进一步判断字段b是那个pred命中的.

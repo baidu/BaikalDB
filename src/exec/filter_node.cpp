@@ -86,15 +86,46 @@ struct SlotPredicate {
 };
 
 static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
-    auto replace_slot = [](ExprValue eq, ExprNode* expr) {
+    auto get_slot_ref_idx = [&preds](ExprNode* expr) {
+        if (!expr->is_row_expr()) {
+            return -1;
+        }
+        RowExpr* row = static_cast<RowExpr*>(expr);
+        int ret = row->open();
+        if (ret < 0) {
+            DB_WARNING("expr open fail:%d", ret);
+            return -1;
+        }
+        return row->get_slot_ref_idx(preds.slot_ref->tuple_id(), preds.slot_ref->slot_id());
+    };
+    auto replace_slot = [&get_slot_ref_idx](ExprValue eq, ExprNode* expr) {
         Literal* lit = new Literal(eq);
-        expr->replace_child(0, lit);
+        if (expr->children(0)->is_row_expr()) {
+            int idx = get_slot_ref_idx(expr->children(0));
+            if (idx < 0) {
+                DB_WARNING("get_slot_ref_idx fail:%d", idx);
+                return;
+            }
+            expr->children(0)->replace_child(idx, lit);
+        } else {
+            expr->replace_child(0, lit);
+        }
         expr->const_pre_calc();
     };
     // has eq, replace all other exprs can be constant
     if (preds.eq_preds.size() > 0) {
         DB_NOTICE("enter eq_preds");
-        ExprValue eq = preds.eq_preds[0]->children(1)->get_value(nullptr);
+        ExprValue eq;
+        if (preds.eq_preds[0]->children(0)->is_row_expr()) {
+            int idx = get_slot_ref_idx(preds.eq_preds[0]->children(0));
+            if (idx < 0) {
+                DB_WARNING("get_slot_ref_idx fail:%d", idx);
+                return 0;
+            }
+            eq = static_cast<RowExpr*>(preds.eq_preds[0]->children(1))->get_value(nullptr, idx);
+        } else {
+            eq = preds.eq_preds[0]->children(1)->get_value(nullptr);
+        }
         for (size_t i = 1; i < preds.eq_preds.size(); i++) {
             replace_slot(eq, preds.eq_preds[i]);
         }
@@ -115,24 +146,19 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
         // 取交集
         std::map<std::string, ExprNode*> and_map;
         std::map<std::string, ExprNode*> out_map;
+        int idx0 = -1;
         if (preds.in_preds[0]->children(0)->is_row_expr()) {
+            idx0 = get_slot_ref_idx(preds.in_preds[0]->children(0));
+            if (idx0 < 0) {
+                DB_WARNING("get_slot_ref_idx fail:%d", idx0);
+                return 0;
+            }
             for (uint32_t i = 1; i < preds.in_preds[0]->children_size(); i++) {
                 auto lit = preds.in_preds[0]->children(i);
                 if (!lit->is_constant()) {
                     return 0;
                 }
-                int ret = preds.in_preds[0]->children(0)->open();
-                if (ret < 0) {
-                    DB_WARNING("expr open fail:%d", ret);
-                    return 0;
-                }
-                int idx = static_cast<RowExpr*>(preds.in_preds[0]->children(0))->get_slot_ref_idx(
-                        preds.slot_ref->tuple_id(), preds.slot_ref->slot_id());
-                if (idx < 0) {
-                    DB_WARNING("get_slot_ref_idx fail:%d", idx);
-                    return 0;
-                }
-                and_map[static_cast<RowExpr*>(lit)->get_value(nullptr, idx).get_string()] = lit;
+                and_map[static_cast<RowExpr*>(lit)->get_value(nullptr, idx0).get_string()] = lit;
             }
         } else {
             for (uint32_t i = 1; i < preds.in_preds[0]->children_size(); i++) {
@@ -144,20 +170,13 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
             }
         }
         for (uint32_t j = 1; j < preds.in_preds.size(); j++) {
-            std::set<int> row_keep;
+            // TODO (a , b) in (("a1", "b1")) and (b, c) in (("b1", "c1")) 合并为 (a,b,c) in (("a1","b1","c1"))
             if (preds.in_preds[j]->children(0)->is_row_expr()) {
-                int ret = preds.in_preds[j]->children(0)->open();
-                if (ret < 0) {
-                    DB_WARNING("expr open fail:%d", ret);
-                    return 0;
-                }
-                int idx = static_cast<RowExpr*>(preds.in_preds[j]->children(0))->get_slot_ref_idx(
-                        preds.slot_ref->tuple_id(), preds.slot_ref->slot_id());
+                int idx = get_slot_ref_idx(preds.in_preds[j]->children(0));
                 if (idx < 0) {
                     DB_WARNING("get_slot_ref_idx fail:%d", idx);
                     return 0;
                 }
-                row_keep.clear();
                 for (uint32_t i = 1; i < preds.in_preds[j]->children_size(); i++) {
                     auto lit = preds.in_preds[j]->children(i);
                     if (!lit->is_constant()) {
@@ -167,20 +186,6 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
                     const auto& key = static_cast<RowExpr*>(lit)->get_value(nullptr, idx).get_string();
                     if (and_map.count(key) == 1) {
                         out_map[key] = and_map[key];
-                        row_keep.insert(i);
-                        DB_DEBUG("row_keep: %s, idx:%d", key.c_str(), i);
-                    }
-                }
-                // in_row_expr因为条件里还有其它字段,不能剪切整个preds,可以剪切部分行
-                // 例如 a in ("a1", "a2") and (a, b) in (("a1","b1"), ("a3","b3"))
-                // in_row_pred (a, b)可以剪切为:(("a1","b1"))
-                if (row_keep.size() == 0) {
-                       return -1;
-                }
-                // 反过来删
-                for (uint32_t i = preds.in_preds[j]->children_size() - 1; i >= 1; i--) {
-                    if (row_keep.count(i) == 0) {
-                        preds.in_preds[j]->del_child(i);
                     }
                 }
             } else {
@@ -203,7 +208,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
         if (and_map.empty()) {
             return -1;
         }
-        std::set<ExprNode*> keep;
+        std::set<std::string> keep;
         for (auto& pair : and_map) {
             auto v = pair.second->get_value(nullptr);
             bool need_keep = true;
@@ -234,7 +239,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
                 cut_preds.emplace(expr);
             }
             if (need_keep) {
-                keep.emplace(pair.second);
+                keep.emplace(pair.first);
             }
         }
         if (keep.size() == 0) {
@@ -243,11 +248,30 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
         // 反过来删
         for (uint32_t i = preds.in_preds[0]->children_size() - 1; i >= 1; i--) {
             auto lit = preds.in_preds[0]->children(i);
-            if (keep.count(lit) == 0) {
+            const auto& key = lit->is_row_expr() ?
+                    static_cast<RowExpr*>(lit)->get_value(nullptr, idx0).get_string():
+                    lit->get_value(nullptr).get_string();
+            if (keep.count(key) == 0) {
                 preds.in_preds[0]->del_child(i);
             }
         }
-        DB_NOTICE("in size:%lu", preds.in_preds[0]->children_size());
+        // in_row_expr因为条件里还有其它字段,不能剪切整个preds,可以剪切部分行
+        // 例如 a in ("a1", "a2") and (a, b) in (("a1","b1"), ("a3","b3"))
+        // in_row_pred (a, b)可以剪切为:(("a1","b1"))
+        for (uint32_t j = 1; j < preds.in_preds.size(); j++) {
+            if (preds.in_preds[j]->children(0)->is_row_expr()) {
+                int idx = get_slot_ref_idx(preds.in_preds[j]->children(0));
+                // 反过来删
+                for (uint32_t i = preds.in_preds[j]->children_size() - 1; i >= 1; i--) {
+                    auto lit = preds.in_preds[j]->children(i);
+                    const auto& key = static_cast<RowExpr*>(lit)->get_value(nullptr, idx).get_string();
+                    if (keep.count(key) == 0) {
+                        preds.in_preds[j]->del_child(i);
+                    }
+                }
+            }
+        }
+        DB_NOTICE("in size:%lu", preds.in_preds[0]->children_size() -1);
 
         return 0;
     }
@@ -324,7 +348,18 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             continue;
         }
         // 处理in_row_expr
-        if (expr->children(0)->is_row_expr() && expr->node_type() == pb::IN_PREDICATE) {
+        // in_row_expr的preds只有涉及字段全部匹配索引才会在index_selector环节别裁剪掉, 此处仅裁剪 in里面的记录
+        // 例如： key idx_abcd(a, b, c, d),
+        // 条件: (a, b) in (("a1", "b1"), ("a2","b2")) and (b , c) in (("b1", "c1"), ("b2","c2")，("b3","c3"))，
+        // b字段同时对应了2个in条件，则b字段只会使用in的值较少的一个，本例为会使用(a,b)
+        // 条件:(a,b)全部字段匹配索引将会在index_selector环节被裁剪掉
+        // 条件:(b, c)只会索引匹配字段c,因为b字段已经被(a, b)匹配了, 条件保留,但("b3","c3")会被裁剪掉,裁剪后:(b,c) in (("b1", "c1"),("b2","c2"));
+        // 索引的ranges将被展开为,相当于:(a,b) in (("a1", "b1"), ("a2","b2")) and c in ("c1","c2")
+        // a1, b1, c1
+        // a2, b2, c1
+        // a1, b1, c2
+        // a2, b2, c2
+        if (expr->children(0)->is_row_expr()) {
             RowExpr* row_expr = static_cast<RowExpr*>(expr->children(0));
             std::map<size_t, SlotRef*> slots;
             std::map<size_t, std::vector<ExprValue>> values;
@@ -346,13 +381,30 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
                 }
             }
             if (!all_const || !all_row_expr) {
-                break;
+                continue;
             }
             for (auto& pair : slots) {
                 SlotRef* slot_ref = pair.second;
                 int64_t sign = (slot_ref->tuple_id() << 16) + slot_ref->slot_id();
-                pred_map[sign].in_preds.push_back(expr);
                 pred_map[sign].slot_ref = slot_ref;
+                if (expr->node_type() == pb::IN_PREDICATE) {
+                    pred_map[sign].in_preds.push_back(expr);
+                } else if (expr->node_type() == pb::FUNCTION_CALL) {
+                    int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
+                    switch (fn_op) {
+                        case parser::FT_EQ:
+                            pred_map[sign].eq_preds.push_back(expr);
+                            break;
+                        case parser::FT_GE:
+                        case parser::FT_GT:
+                        case parser::FT_LE:
+                        case parser::FT_LT:
+                            // TODO
+                            break;
+                        default:
+                            break;
+                    }
+                }
             }
         }
         if (!expr->children(0)->is_slot_ref()) {
@@ -415,6 +467,8 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             continue;
         }
         if (expr->is_constant()) {
+            // TODO 对于非全部constant的也可以处理
+            // 例如: a = "a1" and (a, b) in ("a2", "b1"), 会被替换换为("a1", b) in ("a2", "b1")
             ret = expr->open();
             if (ret < 0) {
                 DB_WARNING("expr open fail:%d", ret);
