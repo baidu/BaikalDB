@@ -94,6 +94,12 @@ struct TableSource : public Node {
     TableSource() {
         node_type = NT_TABLE_SOURCE;
     }
+    virtual void set_print_sample(bool print_sample_) {
+        print_sample = print_sample_;
+        if (derived_table != nullptr) {
+            derived_table->set_print_sample(print_sample_);
+        }
+    }
     virtual bool is_complex_node() {
         if (derived_table != nullptr) {
             return true;
@@ -671,6 +677,9 @@ struct InsertStmt : public DmlNode {
         print_sample = print_sample_;
         for (int i = 0; i < lists.size(); i++) {
             lists[i]->set_print_sample(print_sample_);
+        }
+        if (subquery_stmt != nullptr) {
+            subquery_stmt->set_print_sample(print_sample_);
         }
         for (int i = 0; i < on_duplicate.size(); i++) {
             on_duplicate[i]->set_print_sample(print_sample_);

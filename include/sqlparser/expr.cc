@@ -213,7 +213,7 @@ void FuncExpr::to_stream(std::ostream& os) const {
             os << children[0] << " IS" << not_str[is_not] << " UNKNOWN";
             break;
         case FT_IN:
-            if (print_sample) {
+            if (print_sample && !has_subquery()) {
                 os << children[0] << not_str[is_not] << " IN (?)"; 
             } else {
                 os << children[0] << not_str[is_not] << " IN " << children[1]; 
