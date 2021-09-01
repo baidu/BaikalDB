@@ -221,6 +221,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_INDEX_REGION_DDL_WORK
             || request->op_type() == pb::OP_SUSPEND_DDL_WORK
             || request->op_type() == pb::OP_UPDATE_MAIN_LOGICAL_ROOM
+            || request->op_type() == pb::OP_UPDATE_TABLE_COMMENT
             || request->op_type() == pb::OP_ADD_LEARNER
             || request->op_type() == pb::OP_DROP_LEARNER
             || request->op_type() == pb::OP_RESTART_DDL_WORK) {
