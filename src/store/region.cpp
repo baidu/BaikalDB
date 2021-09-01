@@ -53,6 +53,7 @@ namespace baikaldb {
 DEFINE_bool(use_fulltext_wordweight_segment, true, "load wordweight dict");
 DEFINE_bool(use_fulltext_wordseg_wordrank_segment, true, "load wordseg wordrank dict");
 DEFINE_int32(election_timeout_ms, 1000, "raft election timeout(ms)");
+DEFINE_int32(transfer_leader_timeout_ms, 1000, "raft transfer_leader timeout(ms)");
 DEFINE_int32(skew, 5, "split skew, default : 45% - 55%");
 DEFINE_int32(reverse_level2_len, 5000, "reverse index level2 length, default : 5000");
 DEFINE_string(raftlog_uri, "myraftlog://my_raft_log?id=", "raft log uri");
@@ -4953,7 +4954,7 @@ void Region::complete_split() {
         return;
     }
     int64_t average_cost = _dml_time_cost.latency();
-    if ((_applied_index - max_applied_index) * average_cost > FLAGS_election_timeout_ms * 1000LL) {
+    if ((_applied_index - max_applied_index) * average_cost > FLAGS_transfer_leader_timeout_ms * 1000LL) {
         DB_WARNING("peer applied index: %ld is less than applied index: %ld, average_cost: %ld",
                     max_applied_index, _applied_index, average_cost);
         return;

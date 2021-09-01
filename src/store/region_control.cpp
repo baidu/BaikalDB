@@ -27,6 +27,7 @@ namespace baikaldb {
 DECLARE_string(snapshot_uri);
 DECLARE_string(stable_uri);
 DECLARE_int32(election_timeout_ms);
+DECLARE_int32(transfer_leader_timeout_ms);
 DEFINE_int32(compact_interval, 1, "compact_interval xx (s)");
 int RegionControl::remove_data(int64_t drop_region_id) {
     rocksdb::WriteOptions options;
@@ -357,7 +358,7 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
         int64_t average_cost = region->_dml_time_cost.latency();
         int64_t peer_applied_index = RpcSender::get_peer_applied_index(new_leader, _region_id);
         if ((region->_applied_index - peer_applied_index) * average_cost 
-                > FLAGS_election_timeout_ms * 1000LL) {
+                > FLAGS_transfer_leader_timeout_ms * 1000LL) {
             DB_WARNING("peer applied index: %ld is less than applied index: %ld, average_cost: %ld",
                     peer_applied_index, region->_applied_index, average_cost);
             return;
