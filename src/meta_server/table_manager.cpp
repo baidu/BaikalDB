@@ -4025,7 +4025,8 @@ void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, 
                 for (const auto& index_info : request.table_info().indexs()) {
                     auto index_iter = mem_schema_pb.mutable_indexs()->begin();
                     for (; index_iter != mem_schema_pb.mutable_indexs()->end(); index_iter++) {
-                        if (index_iter->index_name() == index_info.index_name() &&
+                        // 索引匹配不区分大小写
+                        if (boost::algorithm::iequals(index_iter->index_name(), index_info.index_name()) &&
                             index_iter->index_type() != pb::I_PRIMARY &&
                             index_iter->hint_status() != index_info.hint_status()) {
                             index_iter->set_hint_status(index_info.hint_status());
