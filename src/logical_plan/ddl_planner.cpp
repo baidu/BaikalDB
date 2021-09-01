@@ -392,6 +392,12 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         return -1;
                     }
                 }
+                json_iter = root.FindMember("comment");
+                if (json_iter != root.MemberEnd()) {
+                    std::string comment = json_iter->value.GetString();
+                    table.set_comment(comment);
+                    DB_WARNING("comment: %s", comment.c_str());
+                }
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", option->str_value.value);
                 return -1;

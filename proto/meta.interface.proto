@@ -125,11 +125,12 @@ message SchemaInfo {
     repeated SplitKey split_keys            = 36;
     optional SchemaConf schema_conf         = 37; //一些可以随意修改的配置放在这里
     optional int64 ttl_duration             = 38; //0表示无ttl，>0表示有ttl，建表时指定
-    optional BinlogInfo    binlog_info = 39;
-    optional PartitionInfo partition_info = 40;
-    optional bool is_binlog = 41;
-    optional FieldInfo link_field = 42;
-    optional int32 region_num = 43;
+    optional BinlogInfo    binlog_info      = 39;
+    optional PartitionInfo partition_info   = 40;
+    optional bool is_binlog                 = 41;
+    optional FieldInfo link_field           = 42;
+    optional int32 region_num               = 43;
+    optional string comment                 = 44;
 };
 
 message PartitionRegion {
