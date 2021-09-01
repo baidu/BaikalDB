@@ -289,6 +289,7 @@ struct TableInfo {
     std::vector<FieldInfo>  fields;
     std::vector<DistInfo>   dists;
     int64_t                 replica_num = 3;
+    std::string             comment;
     //table字段不变的话不需要重新构建动态pb
     std::string             fields_sign;
     TTLInfo                 ttl_info;

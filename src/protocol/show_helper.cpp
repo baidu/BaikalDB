@@ -557,6 +557,9 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
     oss << " DEFAULT CHARSET=" << charset_map[info.charset];
     oss <<" AVG_ROW_LENGTH=" << info.byte_size_per_record;
     oss << " COMMENT='{\"resource_tag\":\"" << info.resource_tag << "\"";
+    if (!info.comment.empty()) {
+        oss << ", \"comment\":\"" << info.comment << "\"";
+    }
     oss << ", \"replica_num\":" << info.replica_num;
     oss << ", \"region_split_lines\":" << info.region_split_lines;
     if (info.ttl_info.ttl_duration_s > 0) {
