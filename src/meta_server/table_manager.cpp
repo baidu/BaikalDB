@@ -946,6 +946,16 @@ void TableManager::update_ttl_duration(const pb::MetaManagerRequest& request,
         });
 }
 
+void TableManager::update_table_comment(const pb::MetaManagerRequest& request,
+                                const int64_t apply_index,
+                                braft::Closure* done) {
+    update_table_internal(request, apply_index, done,
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+            mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+            mem_schema_pb.set_comment(request.table_info().comment());
+        });
+}
+
 void TableManager::add_field(const pb::MetaManagerRequest& request,
                              const int64_t apply_index,
                              braft::Closure* done) {

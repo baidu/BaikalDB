@@ -120,4 +120,5 @@ enum OpType {
     OP_RESTART_DDL_WORK                     = 184; 
     OP_REMOVE_GLOBAL_INDEX_DATA             = 185;
     OP_UPDATE_MAIN_LOGICAL_ROOM             = 186;
+    OP_UPDATE_TABLE_COMMENT                 = 187; //修改表的comment
 };

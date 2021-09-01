@@ -259,7 +259,8 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK
             || request->op_type() == pb::OP_SUSPEND_DDL_WORK
             || request->op_type() == pb::OP_RESTART_DDL_WORK
-            || request->op_type() == pb::OP_UPDATE_MAIN_LOGICAL_ROOM) {
+            || request->op_type() == pb::OP_UPDATE_MAIN_LOGICAL_ROOM
+            || request->op_type() == pb::OP_UPDATE_TABLE_COMMENT) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,

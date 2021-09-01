@@ -563,7 +563,6 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         return -1;
     }
     if (spec->spec_type == parser::ALTER_SPEC_TABLE_OPTION) {
-        alter_request.set_op_type(pb::OP_UPDATE_BYTE_SIZE);
         if (spec->table_options.size() > 1) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
             _ctx->stat_info.error_msg << "Alter with multiple table_options is not supported in this version";
@@ -571,7 +570,92 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         }
         parser::TableOption* table_option = spec->table_options[0];
         if (table_option->type == parser::TABLE_OPT_AVG_ROW_LENGTH) {
+            alter_request.set_op_type(pb::OP_UPDATE_BYTE_SIZE);
             table->set_byte_size_per_record(table_option->uint_value);
+        } else if (table_option->type == parser::TABLE_OPT_COMMENT) {
+            rapidjson::Document root;
+            try {
+                root.Parse<0>(table_option->str_value.value);
+                if (root.HasParseError()) {
+                    // 兼容mysql语法
+                    alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
+                    table->set_comment(table_option->str_value.value);
+                    rapidjson::ParseErrorCode code = root.GetParseError();
+                    DB_WARNING("parse create table json comments error [code:%d][%s]",
+                        code, table_option->str_value.value);
+                    return 0;
+                }
+                auto json_iter = root.FindMember("resource_tag");
+                if (json_iter != root.MemberEnd()) {
+                    alter_request.set_op_type(pb::OP_MODIFY_RESOURCE_TAG);
+                    std::string resource_tag = json_iter->value.GetString();
+                    table->set_resource_tag(resource_tag);
+                    DB_WARNING("resource_tag: %s", resource_tag.c_str());
+                }
+                // TODO json_iter = root.FindMember("namespace");
+                // TODO json_iter = root.FindMember("replica_num");
+                json_iter = root.FindMember("dists");
+                std::set<std::string> logical_room_set;
+                if (json_iter != root.MemberEnd()) {
+                    alter_request.set_op_type(pb::OP_UPDATE_DISTS);
+                    if (json_iter->value.IsArray()) {
+                        for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                            const rapidjson::Value& dist_value = json_iter->value[i];
+                            auto* dist = table->add_dists();
+                            std::string logical_room = dist_value["logical_room"].GetString();
+                            dist->set_logical_room(logical_room);
+                            dist->set_count(dist_value["count"].GetInt());
+                            logical_room_set.emplace(logical_room);
+                        }
+                    }
+                }
+                json_iter = root.FindMember("main_logical_room");
+                if (json_iter != root.MemberEnd()) {
+                    alter_request.set_op_type(pb::OP_UPDATE_MAIN_LOGICAL_ROOM);
+                    std::string main_logical_room = json_iter->value.GetString();
+                    table->set_main_logical_room(main_logical_room);
+                    DB_WARNING("main_logical_room: %s", main_logical_room.c_str());
+                }
+                json_iter = root.FindMember("region_split_lines");
+                if (json_iter != root.MemberEnd()) {
+                    alter_request.set_op_type(pb::OP_UPDATE_SPLIT_LINES);
+                    int64_t region_split_lines = json_iter->value.GetInt64();
+                    table->set_region_split_lines(region_split_lines);
+                    DB_WARNING("region_split_lines: %ld", region_split_lines);
+                }
+                json_iter = root.FindMember("ttl_duration");
+                if (json_iter != root.MemberEnd()) {
+                    int64_t ttl_duration = json_iter->value.GetInt64();
+                    table->set_ttl_duration(ttl_duration);
+                    DB_WARNING("ttl_duration: %ld", ttl_duration);
+                }
+                json_iter = root.FindMember("storage_compute_separate");
+                if (json_iter != root.MemberEnd()) {
+                    alter_request.set_op_type(pb::OP_UPDATE_SCHEMA_CONF);
+                    int64_t separate = json_iter->value.GetInt64();
+                    auto* schema_conf = table->mutable_schema_conf();
+                    if (separate == 0) {
+                        schema_conf->set_storage_compute_separate(false);
+                    } else {
+                        schema_conf->set_storage_compute_separate(true);
+                    }
+                    DB_WARNING("storage_compute_separate: %ld", separate);
+                }
+                // TODO json_iter = root.FindMember("region_num");
+                // TODO json_iter = root.FindMember("partition_type");
+                json_iter = root.FindMember("comment");
+                if (json_iter != root.MemberEnd()) {
+                    alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
+                    std::string comment = json_iter->value.GetString();
+                    table->set_comment(comment);
+                    DB_WARNING("comment: %s", comment.c_str());
+                }
+            } catch (...) {
+                // 兼容mysql语法
+                alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
+                table->set_comment(table_option->str_value.value);
+                DB_WARNING("parse alter table json comments error [%s]", table_option->str_value.value);
+            }
         } else {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
             _ctx->stat_info.error_msg << "Alter table option type unsupported: " << table_option->type;

@@ -112,7 +112,8 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_LINK_BINLOG:
     case pb::OP_UNLINK_BINLOG:
     case pb::OP_SET_INDEX_HINT_STATUS:
-    case pb::OP_UPDATE_MAIN_LOGICAL_ROOM: {
+    case pb::OP_UPDATE_MAIN_LOGICAL_ROOM:
+    case pb::OP_UPDATE_TABLE_COMMENT: {
         if (!request->has_table_info()) { 
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
                     "no schema_info", request->op_type(), log_id);
@@ -134,6 +135,12 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 && !request->table_info().has_schema_conf()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no schema_conf", request->op_type(), log_id);
+            return;
+        }
+        if (request->op_type() == pb::OP_UPDATE_TABLE_COMMENT
+                && !request->table_info().has_comment()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no table comment", request->op_type(), log_id);
             return;
         }
         if (request->op_type() == pb::OP_RENAME_TABLE
