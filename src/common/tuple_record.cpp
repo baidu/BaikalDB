@@ -61,9 +61,14 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
         while (iter != fields.end() && field_num > static_cast<uint64_t>(iter->first)) {
             auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
             //add default value
-            MessageHelper::set_value(field, message, iter->second->default_expr_value);
+            ExprValue default_value = iter->second->default_expr_value;
+            if (iter->second->default_value == "(current_timestamp())") {
+                default_value = ExprValue::Now();
+                default_value.cast_to(iter->second->type);
+            }
+            MessageHelper::set_value(field, message, default_value);
             if (record == nullptr) {
-                (*mem_row)->update_used_size(iter->second->default_expr_value.size());
+                (*mem_row)->update_used_size(default_value.size());
             }
             iter++;
         }
@@ -218,7 +223,15 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
     while (iter != fields.end()) {
         auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
         //add default value
-        MessageHelper::set_value(field, message, iter->second->default_expr_value);
+        ExprValue default_value = iter->second->default_expr_value;
+        if (iter->second->default_value == "(current_timestamp())") {
+            default_value = ExprValue::Now();
+            default_value.cast_to(iter->second->type);
+        }
+        MessageHelper::set_value(field, message, default_value);
+        if (record == nullptr) {
+            (*mem_row)->update_used_size(default_value.size());
+        }
         iter++;
     }
     return 0;

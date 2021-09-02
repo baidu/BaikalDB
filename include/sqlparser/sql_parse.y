@@ -100,7 +100,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     CONVERT
     CREATE
     CROSS
-    CURRENT_TIMESTAMP
     CURRENT_USER
     DATABASE
     DATABASES
@@ -260,7 +259,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TRAILING
     YEAR_MONTH
     PRIMARY
-    CURRENT_TIMESTAMP
 
 %token<string>
     /* The following tokens belong to UnReservedKeyword. */
@@ -434,6 +432,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     COUNT
     CURDATE
     CURTIME
+    CURRENT_TIMESTAMP
     DATE_ADD
     DATE_SUB
     EXTRACT
@@ -478,6 +477,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     OptCollate
     DBName
     FunctionNameCurtime
+    FunctionNameCurTimestamp
     FunctionaNameCurdate
     FunctionaNameDateRelate
     FunctionNameDateArithMultiForms
@@ -3077,7 +3077,7 @@ ColumnOption:
         option->expr = $2;
         $$ = option;
     }
-    | ON UPDATE CURRENT_TIMESTAMP
+    | ON UPDATE FunctionCallCurTimestamp
     {
         FuncExpr* current_timestamp = new_node(FuncExpr);
         current_timestamp->func_type = FT_COMMON;
@@ -3095,7 +3095,7 @@ ColumnOption:
         $$ = option;
     }
     ;
-
+    
 SignedLiteral:
     Literal {}
     | '+' NumLiteral {
@@ -3114,7 +3114,7 @@ SignedLiteral:
     ;
 
 DefaultValue:
-    CURRENT_TIMESTAMP
+    FunctionCallCurTimestamp
     {
         FuncExpr* current_timestamp = new_node(FuncExpr);
         current_timestamp->func_type = FT_COMMON;
@@ -3125,6 +3125,14 @@ DefaultValue:
     {
         $$ = $1;
     }
+
+FunctionCallCurTimestamp:
+    FunctionNameCurTimestamp
+    | FunctionNameCurTimestamp '(' ')'
+    ;
+FunctionNameCurTimestamp:
+    CURRENT_TIMESTAMP | NOW
+    ;
 
 PrimaryOpt:
     {}
