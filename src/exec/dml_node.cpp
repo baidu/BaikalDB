@@ -77,6 +77,11 @@ int DMLNode::init_schema_info(RuntimeState* state) {
             }
         }
     }
+    for (auto& field_info : _table_info->fields) {
+        if (!field_info.can_null) {
+            _can_not_null_field_ids.insert(field_info.id);
+        }
+    }
     // update and on_dup_key_update need all fields
     // delete and insert/replace need get index fields
     if (_node_type == pb::UPDATE_NODE || _on_dup_key_update) {
@@ -162,6 +167,22 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     //DB_WARNING_STATE(state, "insert record: %s", record->debug_string().c_str());
     int ret = 0;
     int affected_rows = 0;
+    // check not null fields
+    for (auto field_id : _can_not_null_field_ids) {
+        auto field = record->get_field_by_tag(field_id);
+        if (record->is_null(field)) {
+            auto field_info = _table_info->get_field_ptr(field_id);
+            if (field_info == nullptr) {
+                 DB_WARNING("field not found id:%d", field_id);
+                 return -1;
+            }
+            std::string& field_name = field_info->lower_short_name;
+            DB_WARNING_STATE(state, "filed_id:%s can not null", field_name.c_str());
+            state->error_code = ER_NO_DEFAULT_FOR_FIELD;
+            state->error_msg << "Field '" << field_name << "' doesn't have a default value";
+            return -1;
+        }
+    }
     // update更新部分索引，会在update_row里指定索引
     // insert/relace语义需要更新全部索引
     // LOCK_PRIMARY_NODE在全局索引中相当于update

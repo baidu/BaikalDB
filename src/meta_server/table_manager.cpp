@@ -1976,6 +1976,12 @@ int TableManager::alloc_field_id(pb::SchemaInfo& table_info, bool& has_auto_incr
 int TableManager::alloc_index_id(pb::SchemaInfo& table_info, TableMem& table_mem, int64_t& max_table_id_tmp) {
     bool has_primary_key = false;
     std::string table_name = table_info.table_name();
+    std::set<std::string> can_null_fields;
+    for (auto i = 0; i < table_info.fields_size(); ++i) {
+        if (table_info.fields(i).can_null()) {
+            can_null_fields.insert(table_info.fields(i).field_name());
+        }
+    }
     //分配index_id， 序列与table_id共享, 必须有primary_key 
     for (auto i = 0; i < table_info.indexs_size(); ++i) {
         std::string index_name = table_info.indexs(i).index_name();
@@ -1983,6 +1989,12 @@ int TableManager::alloc_index_id(pb::SchemaInfo& table_info, TableMem& table_mem
             std::string field_name = table_info.indexs(i).field_names(j);
             if (table_mem.field_id_map.find(field_name) == table_mem.field_id_map.end()) {
                 DB_WARNING("filed name:%s of index was not exist in table:%s", 
+                            field_name.c_str(),
+                            table_name.c_str());
+                return -1;
+            }
+            if (can_null_fields.count(field_name) == 1) {
+                DB_WARNING("filed name:%s of index is not allowed NULL in table:%s",
                             field_name.c_str(),
                             table_name.c_str());
                 return -1;
@@ -2996,7 +3008,29 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "fields info fail");
         return;
     }
+    std::set<std::string> can_null_fields;
+    auto table_mem_iter = _table_info_map.find(table_id);
+    if (table_mem_iter == _table_info_map.end()) {
+        DB_WARNING("table_id:[%ld] not exist.", table_id);
+        return;
+    }
+    auto &&table_info = table_mem_iter->second.schema_pb;
+    for (auto i = 0; i < table_info.fields_size(); ++i) {
+        if (table_info.fields(i).can_null()) {
+            can_null_fields.insert(table_info.fields(i).field_name());
+        }
+    }
+    for (auto& field_name : first_index_fields) {
+        if (can_null_fields.count(field_name) == 1) {
+            DB_WARNING("filed name:%s of index is not allowed NULL in table:%s",
+                        field_name.c_str(),
+                        table_info.table_name().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "fields info fail. index fields can not null");
+            return;
+        }
+    }
     DB_DEBUG("DDL_LOG[add_index] check field success.");
+
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
         DB_WARNING("DDL_LOG[add_index] table not in table_info_map, request:%s", request.DebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not in table_info_map");

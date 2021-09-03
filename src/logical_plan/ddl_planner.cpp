@@ -107,6 +107,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
         return -1;
     }
     field->set_mysql_type(data_type);
+    field->set_can_null(true);
     int option_len = column->options.size();
     for (int opt_idx = 0; opt_idx < option_len; ++opt_idx) {
         parser::ColumnOption* col_option = column->options[opt_idx];
@@ -128,6 +129,12 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             index->set_index_type(pb::I_UNIQ);
             index->add_field_names(col_name);
         } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL) {
+            if (col_option->expr->expr_type == parser::ET_LITETAL) {
+                if (static_cast<parser::LiteralExpr*>(col_option->expr)->literal_type
+                        == parser::LT_NULL) {
+                    continue;
+                }
+            }
             field->set_default_value(col_option->expr->to_string());
         } else if (col_option->type == parser::COLUMN_OPT_COMMENT) {
             field->set_comment(col_option->expr->to_string());
