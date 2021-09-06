@@ -213,7 +213,12 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                 size_t idx = pair.first;
                 SlotRef* slot = pair.second;
                 int32_t field_id = slot->field_id();
+                if (field_range_map[field_id].type != NONE &&
+                    field_range_map[field_id].eq_in_values.size() <= values[idx].size()) {
+                    continue;
+                }
                 field_range_map[field_id].eq_in_values = values[idx];
+                field_range_map[field_id].conditions.clear();
                 field_range_map[field_id].conditions.insert(expr);
                 field_range_map[field_id].type = IN;
                 field_range_map[field_id].is_row_expr = true;
@@ -405,7 +410,13 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             }
         }
         case pb::IN_PREDICATE: {
+            if (field_range_map[field_id].type != NONE &&
+                field_range_map[field_id].eq_in_values.size() <= values.size()) {
+                // 1个字段对应多个in preds时 例如: a in ("a1", "a2") and (a, b) in (("a1","b1")),取数量少的pred
+                return;
+            }
             field_range_map[field_id].eq_in_values = values;
+            field_range_map[field_id].conditions.clear();
             field_range_map[field_id].conditions.insert(expr);
             if (values.size() == 1) {
                 field_range_map[field_id].type = EQ;
