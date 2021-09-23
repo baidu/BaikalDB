@@ -403,6 +403,99 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             packet_node->clear_children();
             manager_node.release();
         }
+
+        // sort_node, limit_node pushdown,暂不考虑子查询
+        JoinNode* join_node = static_cast<JoinNode*>(join);
+        if ((join_node->join_type() != pb::LEFT_JOIN
+                && join_node->join_type() != pb::RIGHT_JOIN)
+                || ctx->sub_query_plans.size() > 0) {
+            continue;
+        }
+        LimitNode* limit_node = nullptr;
+        AggNode* agg_node = nullptr;
+        SortNode* sort_node = nullptr;
+        ExecNode* parent = join_node->get_parent();
+        while (parent->node_type() != pb::JOIN_NODE &&
+               parent != ctx->root) {
+            if (parent->node_type() == pb::LIMIT_NODE) {
+                limit_node = static_cast<LimitNode*>(parent);
+            }
+            if (parent->node_type() == pb::AGG_NODE) {
+                agg_node = static_cast<AggNode*>(parent);
+            }
+            if (parent->node_type() == pb::SORT_NODE) {
+                sort_node = static_cast<SortNode*>(parent);
+            }
+            parent = parent->get_parent();
+        }
+        if (agg_node != nullptr) {
+            continue;
+        } else if (limit_node != nullptr) {
+            parent = limit_node;
+        } else if (sort_node != nullptr) {
+            parent = sort_node->get_parent();
+        } else {
+            continue;
+        }
+        bool need_pushdown = true;
+        std::unordered_set<int32_t> *tuple_ids = nullptr;
+        ExecNode* node = nullptr;
+        if (join_node->join_type() == pb::LEFT_JOIN) {
+            tuple_ids = join_node->left_tuple_ids();
+            node = join_node->children(0);
+        } else if (join_node->join_type() == pb::RIGHT_JOIN) {
+            tuple_ids = join_node->right_tuple_ids();
+            node = join_node->children(1);
+        }
+        ExecNode* join_child = node;
+        while (node->children_size() > 0) {
+            if (node->node_type() == pb::JOIN_NODE) {
+                break;
+            }
+            if (node->node_type() == pb::SELECT_MANAGER_NODE) {
+                break;
+            }
+            node = node->children(0);
+        }
+        if (sort_node != nullptr) {
+            for (auto expr : sort_node->slot_order_exprs()) {
+                if(!join_node->expr_in_tuple_ids(*tuple_ids, expr)) {
+                    need_pushdown = false;
+                    break;
+                }
+            }
+        }
+        ExecNode* start = parent->children(0);
+        ExecNode* end = join->get_parent();
+        if (start == join) {
+            need_pushdown = false;
+        }
+        if (!need_pushdown) {
+            continue;
+        }
+        if (node->node_type() == pb::SELECT_MANAGER_NODE) {
+            // parent(limit)->sort->filter->join->manager->child =>
+            // parent(limit)->join->manager->sort->filter->child
+            SelectManagerNode* manager_node = static_cast<SelectManagerNode*>(node);
+            ExecNode* child = manager_node->children(0);
+
+            end->clear_children();
+            end->add_child(child);
+            manager_node->clear_children();
+            manager_node->add_child(start);
+            parent->replace_child(start, join);
+            if (sort_node != nullptr) {
+                manager_node->init_sort_info(sort_node);
+            }
+        } else if (node->node_type() == pb::JOIN_NODE) {
+            // parent(limit)->sort->filter->join->join_child->join2 =>
+            // parent(limit)->join->sort->filter->join_child->join2
+            ExecNode* child = join_child;
+            end->clear_children();
+            end->add_child(child);
+            join->replace_child(join_child, start);
+            parent->replace_child(start, join);
+        }
     }
     return 0;
 }
