@@ -104,6 +104,12 @@ public:
                                MemRow* inner_mem_row,
                                bool& matched);
     int construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_row);
+    std::unordered_set<int32_t>* left_tuple_ids() {
+        return &_left_tuple_ids;
+    }
+    std::unordered_set<int32_t>* right_tuple_ids() {
+        return &_right_tuple_ids;
+    }
 
 protected:
     pb::JoinType _join_type;
