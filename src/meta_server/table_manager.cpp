@@ -434,6 +434,10 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
     int64_t drop_table_id = 0;
     auto ret = check_table_exist(request.table_info(), namespace_id, database_id, drop_table_id);
     if (ret < 0) {
+        if (request.table_info().if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "table not exist");
+            return;
+        }
         DB_WARNING("input table not exit, request: %s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
         return;

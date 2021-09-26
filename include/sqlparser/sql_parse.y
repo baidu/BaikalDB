@@ -4483,6 +4483,14 @@ AsOrToOpt:
     | TO
     {}
 
+ColumnPosOpt:
+    {}
+    | FIRST ColumnName
+    {}
+    | AFTER ColumnName
+    {}
+    ;
+
 AlterSpec:
     TableOptionList
     {
@@ -4493,7 +4501,7 @@ AlterSpec:
         }
         $$ = spec;
     }
-    | ADD ColumnKwdOpt ColumnDef
+    | ADD ColumnKwdOpt ColumnDef ColumnPosOpt
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_ADD_COLUMN;

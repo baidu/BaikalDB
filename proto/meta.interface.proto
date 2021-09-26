@@ -131,6 +131,7 @@ message SchemaInfo {
     optional FieldInfo link_field           = 42;
     optional int32 region_num               = 43;
     optional string comment                 = 44;
+    optional bool  if_exist                 = 45;
 };
 
 message PartitionRegion {
