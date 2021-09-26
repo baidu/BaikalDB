@@ -317,10 +317,13 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             try {
                 root.Parse<0>(option->str_value.value);
                 if (root.HasParseError()) {
+                    // 兼容mysql语法
+                    table.set_comment(option->str_value.value);
                     rapidjson::ParseErrorCode code = root.GetParseError();
                     DB_WARNING("parse create table json comments error [code:%d][%s]", 
                         code, option->str_value.value);
-                    return -1;
+                    continue;
+//                    return -1;
                 }
                 auto json_iter = root.FindMember("resource_tag");
                 if (json_iter != root.MemberEnd()) {
@@ -423,8 +426,10 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     DB_WARNING("comment: %s", comment.c_str());
                 }
             } catch (...) {
+                // 兼容mysql语法
+                table.set_comment(option->str_value.value);
                 DB_WARNING("parse create table json comments error [%s]", option->str_value.value);
-                return -1;
+//                return -1;
             }
         } else if (option->type == parser::TABLE_OPT_PARTITION) {
             // range 分区这里进行配置。
@@ -503,6 +508,7 @@ int DDLPlanner::parse_drop_table(pb::SchemaInfo& table) {
     }
     table.set_table_name(table_name->table.value);
     table.set_namespace_name(_ctx->user_info->namespace_);
+    table.set_if_exist(stmt->if_exist);
     DB_WARNING("drop table: %s.%s.%s", 
         table.namespace_name().c_str(), table.database().c_str(), table.table_name().c_str());
     return 0;
