@@ -39,6 +39,9 @@ public:
     void add_conjunct(ExprNode* conjunct) {
         _conjuncts.push_back(conjunct);
     }
+    const std::vector<ExprNode*>& pruned_conjuncts() {
+        return _pruned_conjuncts;
+    }
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
