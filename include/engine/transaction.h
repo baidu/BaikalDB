@@ -196,14 +196,15 @@ public:
     int remove_columns(const TableKey& primary_key);
 
     void print_txninfo_holding_lock(const std::string& key) {
-        return;
+//        return;
         //内部有pthread锁
         auto lock_info = _db->get_db()->GetLockStatusData();
         for (auto& it : lock_info) {
             if (it.second.key.size() == key.size() && it.second.key == key) {
                 for (auto txn_id : it.second.ids) {
-                    DB_WARNING("holding lock, txn_id: %lu, cf_id: %u, key_hex: %s", 
-                        txn_id, it.first, str_to_hex(key).c_str());
+                    DB_WARNING("holding lock, txn_id: %lu, rocksdb_txn_id: %lu, "
+                            "cf_id: %u, key_hex: %s",
+                            _txn_id, txn_id, it.first, str_to_hex(key).c_str());
                 }
                 break;
             }
