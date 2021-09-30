@@ -3035,6 +3035,14 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
     }
     DB_DEBUG("DDL_LOG[add_index] check field success.");
 
+    if (request.table_info().indexs(0).is_global() && (table_info.ttl_duration() > 0)) {
+        DB_WARNING("ttl table: %s can not support to add global index: %s",
+                    table_info.table_name().c_str(),
+                    request.table_info().indexs(0).index_name().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "ttl table is not support add global index");
+        return;
+    }
+
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
         DB_WARNING("DDL_LOG[add_index] table not in table_info_map, request:%s", request.DebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not in table_info_map");
