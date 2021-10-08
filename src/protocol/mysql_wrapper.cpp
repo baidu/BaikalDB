@@ -44,21 +44,24 @@ int MysqlWrapper::handshake_send(SmartSocket sock) {
 
     // Send handshake package.
     const uint8_t packet_handshake_2[] =
-        "\x26\x4f\x37\x58"
-        "\x43\x7a\x6c\x53"  // auth-plugin-data-part-1
+        ""                  // connection id
+        "\x26\x4f\x37\x58"  // auth-plugin-data-part-1
+        "\x43\x7a\x6c\x53"  //
         "\x00"              // filter
         "\x0c\xa2"          // capability flags (lower 2 bytes)
         "\x1c"              // server language encoding :cp 1257 change to gbk
         "\x02\x00"          // server status
-        "\x00\x00"          // capability flags (upper 2 bytes)
-        "\x00"              // length of auth-plugin-data
+        "\x08\x00"          // capability flags (upper 2 bytes), CLIENT_PLUGIN_AUTH
+        "\x15"              // length of auth-plugin-data
         "\x00\x00\x00\x00"
         "\x00\x00\x00\x00"
         "\x00\x00"          // 10bytes reserved
         "\x21\x25\x65\x57"
         "\x62\x35\x42\x66"
         "\x6f\x34\x62\x49"
-        "\x00";             // auth-plugin-data-part-2 len=13
+        "\x00"              // auth-plugin-data-part-2 len=13
+        "mysql_native_password\x00";    // auth-plugin name
+
 
     size_t len1 = sizeof(packet_handshake_1) - 1;
     size_t len2 = sizeof(packet_handshake_2) - 1;
