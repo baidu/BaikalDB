@@ -162,7 +162,7 @@ void FuncExpr::to_stream(std::ostream& os) const {
         default:
             break;
     }
-    os << "(";
+//    os << "(";
     switch (func_type) {
         case FT_COMMON: {
         case FT_AGG:
@@ -237,7 +237,7 @@ void FuncExpr::to_stream(std::ostream& os) const {
         default:
             break;
     }
-    os << ")";
+//    os << ")";
 };
 
 void SubqueryExpr::to_stream(std::ostream& os) const {

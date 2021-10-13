@@ -1595,14 +1595,14 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
         oss << (field.can_null ? "NULL " : "NOT NULL ");
         if (!field.default_expr_value.is_null()) {
             oss << "DEFAULT ";
-            if (field.default_value == "(current_timestamp())") {
+            if (field.default_value == "current_timestamp()") {
                 oss << "CURRENT_TIMESTAMP ";
             } else {
                 oss << "'" << field.default_value << "' ";
             }
         }
         if (!field.on_update_value.empty()) {
-            if (field.on_update_value == "(current_timestamp())") {
+            if (field.on_update_value == "current_timestamp()") {
                 oss << "ON UPDATE " << "CURRENT_TIMESTAMP ";
             }
         }

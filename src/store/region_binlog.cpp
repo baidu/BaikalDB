@@ -724,7 +724,7 @@ int Region::write_binlog_value(const std::map<std::string, ExprValue>& field_val
                 continue;
             }
             ExprValue default_value = field.default_expr_value;
-            if (field.default_value == "(current_timestamp())") {
+            if (field.default_value == "current_timestamp()") {
                 default_value = ExprValue::Now();
                 default_value.cast_to(field.type);
             }

@@ -62,7 +62,7 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
             auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
             //add default value
             ExprValue default_value = iter->second->default_expr_value;
-            if (iter->second->default_value == "(current_timestamp())") {
+            if (iter->second->default_value == "current_timestamp()") {
                 default_value = ExprValue::Now();
                 default_value.cast_to(iter->second->type);
             }
@@ -224,7 +224,7 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
         auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
         //add default value
         ExprValue default_value = iter->second->default_expr_value;
-        if (iter->second->default_value == "(current_timestamp())") {
+        if (iter->second->default_value == "current_timestamp()") {
             default_value = ExprValue::Now();
             default_value.cast_to(iter->second->type);
         }

@@ -2407,7 +2407,7 @@ int SchemaFactory::fill_default_value(SmartRecord record, FieldInfo& field) {
         return 0;
     }
     ExprValue default_value = field.default_expr_value;
-    if (field.default_value == "(current_timestamp())") {
+    if (field.default_value == "current_timestamp()") {
         default_value = ExprValue::Now();
         default_value.cast_to(field.type);
     }
