@@ -22,6 +22,11 @@
 #include "binlog_context.h"
 #include "dml_node.h"
 #include "trace_state.h"
+#ifdef BAIDU_INTERNAL
+#include "baidu/rpc/reloadable_flags.h"
+#else
+#include "brpc/reloadable_flags.h"
+#endif
 
 namespace baikaldb {
 
@@ -29,6 +34,11 @@ DEFINE_int64(retry_interval_us, 500 * 1000, "retry interval ");
 DEFINE_int32(single_store_concurrency, 20, "max request for one store");
 DEFINE_int64(max_select_rows, 10000000, "query will be fail when select too much rows");
 DEFINE_int64(print_time_us, 10000, "print log when time_cost > print_time_us(us)");
+#ifdef BAIDU_INTERNAL
+BAIDU_RPC_VALIDATE_GFLAG(print_time_us, brpc::NonNegativeInteger);
+#else
+BRPC_VALIDATE_GFLAG(print_time_us, brpc::NonNegativeInteger);
+#endif
 DEFINE_int32(fetcher_request_timeout, 100000,
                     "store as server request timeout, default:10000ms");
 DEFINE_int32(fetcher_connect_timeout, 1000,
