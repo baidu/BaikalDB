@@ -143,6 +143,7 @@ struct FieldInfo {
     bool                deleted = false;
     bool                noskip = false;
     uint32_t            flag   = 0;
+    uint32_t            timestamp = 0;
 };
 
 struct DistInfo {

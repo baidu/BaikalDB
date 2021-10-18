@@ -446,9 +446,19 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         field_info.default_value = field.default_value();
         field_info.on_update_value = field.on_update_value();
         if (field.has_default_value()) {
-            field_info.default_expr_value.type = pb::STRING;
-            field_info.default_expr_value.str_val = field_info.default_value;
-            field_info.default_expr_value.cast_to(field_info.type);
+            if (field.default_value() == "current_timestamp()" ||
+                field.default_value() == "(current_timestamp())") {
+                field_info.default_expr_value = ExprValue::Now();
+            } else {
+                field_info.default_expr_value.type = pb::STRING;
+                field_info.default_expr_value.str_val = field_info.default_value;
+                field_info.default_expr_value.cast_to(field_info.type);
+            }
+        }
+        if (field.has_timestamp()) {
+            field_info.timestamp = field.timestamp();
+        } else {
+            field_info.timestamp = tbl_info.timestamp;
         }
         if (field_info.type == pb::STRING || field_info.type == pb::HLL
             || field_info.type == pb::BITMAP || field_info.type == pb::TDIGEST) {
@@ -2407,7 +2417,8 @@ int SchemaFactory::fill_default_value(SmartRecord record, FieldInfo& field) {
         return 0;
     }
     ExprValue default_value = field.default_expr_value;
-    if (field.default_value == "current_timestamp()") {
+    if (field.default_value == "current_timestamp()" ||
+        field.default_value == "(current_timestamp())") {
         default_value = ExprValue::Now();
         default_value.cast_to(field.type);
     }

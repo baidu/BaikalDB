@@ -158,7 +158,8 @@ int UpdatePlanner::parse_kv_list() {
             DB_WARNING("create update value expr failed");
             return -1;
         }
-        if (field_info->on_update_value == "current_timestamp()") {
+        if (field_info->on_update_value == "current_timestamp()" ||
+            field_info->on_update_value == "(current_timestamp())") {
             if (value_expr.nodes(0).node_type() == pb::NULL_LITERAL) {
                 auto node = value_expr.mutable_nodes(0);
                 node->set_num_children(0);
@@ -173,7 +174,8 @@ int UpdatePlanner::parse_kv_list() {
         if (update_field_ids.count(field.id) != 0) {
             continue;
         }
-        if (field.on_update_value == "current_timestamp()") {
+        if (field.on_update_value == "current_timestamp()" ||
+            field.on_update_value == "(current_timestamp())") {
             pb::Expr value_expr;
             auto node = value_expr.add_nodes();
             node->set_num_children(0);

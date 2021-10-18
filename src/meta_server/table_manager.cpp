@@ -994,6 +994,7 @@ void TableManager::add_field(const pb::MetaManagerRequest& request,
         pb::FieldInfo* add_field = mem_schema_pb.add_fields();
         *add_field = field;
         add_field->set_field_id(++tmp_max_field_id);
+        add_field->set_timestamp(time(NULL));
         add_field_id_map[field.field_name()] = tmp_max_field_id;
     }
     mem_schema_pb.set_version(mem_schema_pb.version() + 1);
