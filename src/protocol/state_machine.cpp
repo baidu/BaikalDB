@@ -1713,6 +1713,10 @@ bool StateMachine::_handle_client_query_show_create_table(SmartSocket client) {
 }
 
 bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
+    bool is_like_pattern = false;
+    std::string like_pattern;
+    re2::RE2::Options option;
+    std::unique_ptr<re2::RE2> regex_ptr;
     if (client == nullptr) {
         DB_FATAL("param invalid");
         //client->state = STATE_ERROR;
@@ -1795,6 +1799,24 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
     } else if (split_vec.size() == 7) {
         db = remove_quote(split_vec[6].c_str(), '`');
         table = remove_quote(split_vec[4].c_str(), '`');
+    } else if (split_vec.size() == 9) {
+        is_like_pattern = true;
+        std::string like_str;
+        db = remove_quote(split_vec[6].c_str(), '`');
+        table = remove_quote(split_vec[4].c_str(), '`');
+        like_str = remove_quote(split_vec[8].c_str(), '"');
+        like_str = remove_quote(like_str.c_str(), '\'');
+        for (auto ch : like_str) {
+            if (ch == '%') {
+                like_pattern.append(".*");
+            } else {
+                like_pattern.append(1, ch);
+            }
+        }
+        option.set_utf8(false);
+        option.set_case_sensitive(false);
+        regex_ptr.reset(new re2::RE2(like_pattern, option));
+
     } else {
         client->state = STATE_ERROR;
         return false;
@@ -1830,6 +1852,12 @@ bool StateMachine::_handle_client_query_show_full_columns(SmartSocket client) {
         std::vector<std::string> split_vec;
         boost::split(split_vec, field.name,
                 boost::is_any_of(" \t\n\r."), boost::token_compress_on);
+        if (is_like_pattern) {
+            if (!RE2::FullMatch(split_vec[split_vec.size() - 1], *regex_ptr)) {
+                DB_NOTICE("not match");
+                continue;
+            }
+        }
         row.push_back(split_vec[split_vec.size() - 1]);
         row.push_back("NULL");
         row.push_back(PrimitiveType_Name(field.type));
