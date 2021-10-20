@@ -18,6 +18,8 @@
 namespace baikaldb {
 
 DEFINE_bool(replace_no_get, false, "no get before replace if true");
+DEFINE_bool(strict_mode_not_null_fields_check, false,
+            "return failed when not null field's value is null if true");
 
 int DMLNode::expr_optimize(QueryContext* ctx) {
     int ret = 0;
@@ -177,10 +179,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                  return -1;
             }
             std::string& field_name = field_info->lower_short_name;
-            DB_WARNING_STATE(state, "filed_id:%s can not null", field_name.c_str());
-            state->error_code = ER_NO_DEFAULT_FOR_FIELD;
-            state->error_msg << "Field '" << field_name << "' doesn't have a default value";
-            return -1;
+            DB_WARNING_STATE(state, "filed_name: %s can not null", field_name.c_str());
+            if (FLAGS_strict_mode_not_null_fields_check) {
+                state->error_code = ER_NO_DEFAULT_FOR_FIELD;
+                state->error_msg << "Field '" << field_name << "' doesn't have a default value";
+                return -1;
+            }
         }
     }
     // update更新部分索引，会在update_row里指定索引
