@@ -53,6 +53,7 @@ private:
     void init_statistics();
     void init_schemata();
     void init_tables();
+    void init_routines();
 
     std::unordered_map<std::string, pb::SchemaInfo> _tables;
     //InformationSchema在baikaldb端运行
