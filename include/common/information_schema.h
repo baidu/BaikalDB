@@ -54,6 +54,8 @@ private:
     void init_schemata();
     void init_tables();
     void init_virtual_index_influence_info();
+    void init_routines();
+
     std::unordered_map<std::string, pb::SchemaInfo> _tables;
     //InformationSchema在baikaldb端运行
     //处理逻辑函数指针参数state和相关的conditions可选用

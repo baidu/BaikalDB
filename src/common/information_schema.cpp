@@ -30,6 +30,7 @@ int InformationSchema::init() {
     init_schemata();
     init_tables();
     init_virtual_index_influence_info();
+    init_routines();
     return 0;
 }
 
@@ -646,6 +647,49 @@ void InformationSchema::init_virtual_index_influence_info() {
                 record->set_string(record->get_field_by_name("sample_sql"), infuenced_sql);
                 records.emplace_back(record);
             }
+            return records;
+    };
+}
+void InformationSchema::init_routines() {
+    // 定义字段信息
+    FieldVec fields {
+        {"SPECIFIC_NAME", pb::STRING},
+        {"ROUTINE_CATALOG", pb::STRING},
+        {"ROUTINE_SCHEMA", pb::STRING},
+        {"ROUTINE_NAME", pb::STRING},
+        {"ROUTINE_TYPE", pb::STRING},
+        {"DATA_TYPE", pb::STRING},
+        {"CHARACTER_MAXIMUM_LENGTH", pb::INT64},
+        {"CHARACTER_OCTET_LENGTH", pb::INT64},
+        {"NUMERIC_PRECISION", pb::UINT64},
+        {"NUMERIC_SCALE", pb::INT64},
+        {"DATETIME_PRECISION", pb::UINT64},
+        {"CHARACTER_SET_NAME", pb::STRING},
+        {"COLLATION_NAME", pb::STRING},
+        {"DTD_IDENTIFIER", pb::STRING},
+        {"ROUTINE_BODY", pb::STRING},
+        {"ROUTINE_DEFINITION" , pb::STRING},
+        {"EXTERNAL_NAME" , pb::STRING},
+        {"EXTERNAL_LANGUAGE" , pb::STRING},
+        {"PARAMETER_STYLE", pb::STRING},
+        {"IS_DETERMINISTIC", pb::STRING},
+        {"SQL_DATA_ACCESS", pb::STRING},
+        {"SQL_PATH", pb::STRING},
+        {"SECURITY_TYPE", pb::STRING},
+        {"CREATED",  pb::STRING},
+        {"LAST_ALTERED",  pb::DATETIME},
+        {"SQL_MODE", pb::DATETIME},
+        {"ROUTINE_COMMENT", pb::STRING},
+        {"DEFINER", pb::STRING},
+        {"CHARACTER_SET_CLIENT", pb::STRING},
+        {"COLLATION_CONNECTION", pb::STRING},
+        {"DATABASE_COLLATION", pb::STRING},
+    };
+    int64_t table_id = construct_table("ROUTINES", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
             return records;
     };
 }
