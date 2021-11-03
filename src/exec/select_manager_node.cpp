@@ -56,7 +56,7 @@ int SelectManagerNode::open(RuntimeState* state) {
         ret = open_global_index(state, scan_node, router_index_id, main_table_id);
     } 
     if (ret < 0) {
-        DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
+        DB_WARNING("select manager fetcher manager node open fail, txn_id: %lu, log_id:%lu",
                 state->txn_id, state->log_id());
         return ret;
     }
