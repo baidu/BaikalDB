@@ -17,6 +17,7 @@
 #include "exec_node.h"
 #include "filter_node.h"
 #include "join_node.h"
+#include "apply_node.h"
 #include "query_context.h"
 
 namespace baikaldb {
@@ -26,7 +27,8 @@ public:
         ExecNode* plan = ctx->root;
         //目前只要有join节点的话才做谓词下推
         JoinNode* join = static_cast<JoinNode*>(plan->get_node(pb::JOIN_NODE));
-        if (join == NULL) {
+        ApplyNode* apply = static_cast<ApplyNode*>(plan->get_node(pb::APPLY_NODE));
+        if (join == NULL && apply == NULL) {
             //DB_WARNING("has no join, not predicate")
             return 0;
         }
