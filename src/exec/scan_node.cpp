@@ -263,6 +263,9 @@ int64_t ScanNode::select_index_by_cost() {
         } else if (!path->is_possible) {
             continue;
         }
+        if (_has_force_index && path->hint != AccessPath::FORCE_INDEX) {
+            continue;
+        }
         
         int64_t index_id = pair.first;
         path->calc_cost(nullptr, _filed_selectiy);
