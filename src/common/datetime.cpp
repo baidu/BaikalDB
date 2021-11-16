@@ -419,4 +419,54 @@ int32_t seconds_to_time(int32_t seconds) {
     }
     return time;
 }
+
+bool tz_to_second(const char* time_zone, int32_t& result) {
+    if (strcmp(time_zone, "SYSTEM") == 0) {
+        result = 0;
+        time_t time_utc;
+        struct tm tm_local;
+        time(&time_utc);
+ 
+        localtime_r(&time_utc, &tm_local);
+ 
+        time_t time_local;
+        struct tm tm_gmt;
+ 
+        time_local = mktime(&tm_local);
+ 
+        gmtime_r(&time_utc, &tm_gmt);
+        int hour = tm_local.tm_hour - tm_gmt.tm_hour;
+        if (hour < -12) {
+            hour += 24; 
+        } else if (hour > 12) {
+            hour -= 24;
+        }
+        result = hour * 3600;
+        return true;
+    }
+    int minu = 1;
+    if (strlen(time_zone) != 6) {
+        return false;
+    }
+    char minu_char = time_zone[0];
+    if (minu_char == '-' ){
+        minu = -1;
+    } else if (minu_char != '+') {
+        return false;
+    }
+    if (time_zone[3] != ':') {
+        return false;
+    }
+    if (!isdigit(time_zone[1]) || !isdigit(time_zone[2]) || !isdigit(time_zone[4]) || !isdigit(time_zone[5])) {
+        return false;
+    }
+    int hour = 10 * (time_zone[1] - '0') + time_zone[2] - '0';
+    int min = 10 * (time_zone[4] - '0') + time_zone[5] - '0';
+    if (hour > 12 || min > 59) {
+        return false;
+    }
+    result =  (hour * 3600 + min * 60 ) * minu;
+    return true;
+}
+
 }  // baikaldb

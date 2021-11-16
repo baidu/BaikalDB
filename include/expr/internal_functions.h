@@ -71,6 +71,8 @@ ExprValue from_unixtime(const std::vector<ExprValue>& input);
 ExprValue now(const std::vector<ExprValue>& input);
 ExprValue utc_timestamp(const std::vector<ExprValue>& input);
 ExprValue date_format(const std::vector<ExprValue>& input);
+ExprValue time_format(const std::vector<ExprValue>& input);
+ExprValue convert_tz(const std::vector<ExprValue>& input);
 ExprValue timediff(const std::vector<ExprValue>& input);
 ExprValue timestampdiff(const std::vector<ExprValue>& input);
 ExprValue curdate(const std::vector<ExprValue>& input);
@@ -105,6 +107,7 @@ ExprValue case_when(const std::vector<ExprValue>& input);
 ExprValue case_expr_when(const std::vector<ExprValue>& input);
 ExprValue if_(const std::vector<ExprValue>& input);
 ExprValue ifnull(const std::vector<ExprValue>& input);
+ExprValue isnull(const std::vector<ExprValue>& input);
 ExprValue nullif(const std::vector<ExprValue>& input);
 // MurmurHash sign
 ExprValue murmur_hash(const std::vector<ExprValue>& input);

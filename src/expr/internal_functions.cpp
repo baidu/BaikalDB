@@ -846,6 +846,59 @@ ExprValue date_format(const std::vector<ExprValue>& input) {
     format_result.str_val = s;
     return format_result;
 }
+
+ExprValue time_format(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    ExprValue tmp = input[0];
+    struct tm t_result;
+    uint32_t second = str_to_time(tmp.str_val.c_str());
+    
+    t_result.tm_hour = (second >> 12) & 0x3FF;
+    t_result.tm_min = (second >> 6) & 0x3F;
+    t_result.tm_sec = second & 0x3F;
+    char s[DATE_FORMAT_LENGTH];
+    std::string format = input[1].str_val;
+    boost::replace_all(format, "\%i", "\%M");
+    boost::replace_all(format, "\%s", "\%S");
+    boost::replace_all(format, "\%h", "\%I");
+    strftime(s, sizeof(s), format.c_str(), &t_result);
+    ExprValue format_result(pb::STRING);
+    format_result.str_val = s;
+    return format_result;
+}
+
+ExprValue convert_tz(const std::vector<ExprValue>& input) {
+    if (input.size() != 3){
+        return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    ExprValue time = input[0];
+    ExprValue from_tz = input[1];
+    ExprValue to_tz = input[2];
+    int from_tz_second, to_tz_second;
+    if (!tz_to_second(from_tz.str_val.c_str(), from_tz_second)) {
+        return ExprValue::Null();
+    }
+    if (!tz_to_second(to_tz.str_val.c_str(), to_tz_second)) {
+        return ExprValue::Null();
+    }
+    int second_diff = to_tz_second - from_tz_second;
+    ExprValue ret = time.cast_to(pb::TIMESTAMP);
+    ret._u.uint32_val += second_diff;
+    return ret.cast_to(pb::DATETIME);
+}
+
 ExprValue timediff(const std::vector<ExprValue>& input) {
     if (input.size() < 2) {
         return ExprValue::Null();
@@ -1317,6 +1370,19 @@ ExprValue ifnull(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     return input[0].is_null() ? input[1] : input[0];
+}
+
+ExprValue isnull(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::BOOL);
+    if (input[0].is_null()) {
+        tmp._u.bool_val = true;
+    } else {
+        tmp._u.bool_val = false;
+    }
+   return tmp;
 }
 
 ExprValue nullif(const std::vector<ExprValue>& input) {

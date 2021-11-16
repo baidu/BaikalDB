@@ -56,5 +56,8 @@ inline std::string date_to_str(uint32_t date) {
     snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
     return std::string(buf);
 }
+
+extern bool tz_to_second(const char *time_zone, int32_t& result);
+
 } // namespace baikaldb
 

@@ -1402,6 +1402,20 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
             node->mutable_derive_node()->set_int_val(_ctx->client_conn->last_insert_id);
             return 0;
         }
+        if (item->fn_name.to_lower() == "database") {
+            pb::ExprNode* node = expr.add_nodes();
+            if (_ctx->client_conn->current_db == "") {
+                node->set_node_type(pb::NULL_LITERAL);
+                node->set_col_type(pb::NULL_TYPE);
+            } else{
+                node->set_node_type(pb::STRING_LITERAL);
+                node->set_col_type(pb::STRING);
+                node->set_num_children(0);
+                node->mutable_derive_node()->set_string_val(_ctx->client_conn->current_db);
+            }
+
+            return 0;
+        }
         if (FunctionManager::instance()->get_object(item->fn_name.to_lower()) == nullptr) {
             if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                 _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;

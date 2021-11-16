@@ -28,6 +28,10 @@ int SetKVPlanner::plan() {
     for (int idx = 0; idx < var_len; ++idx) {
         parser::VarAssign* var_assign = var_list[idx];
         std::string key(var_assign->key.value);
+        if (key.empty()) {
+            _ctx->succ_after_logical_plan = true;
+            return 0;
+        }
         if (var_assign->value == nullptr) {
             DB_WARNING("var_assign->value is null: %s", var_assign->key.value);
             return -1;

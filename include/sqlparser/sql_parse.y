@@ -1832,6 +1832,11 @@ FunctionCall:
         fun->children = $3->children;
         $$ = fun;
     }
+    | DATABASE '(' ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "database";
+        $$ = fun;
+    }
     ;
 
 BuildInFun:
@@ -4234,6 +4239,13 @@ VarAssignItem:
         VarAssign* assign = new_node(VarAssign);
         assign->key = $1;
         assign->value = LiteralExpr::make_int("1", parser->arena);
+        $$ = assign;
+    }
+    | VarName EQ_OP DEFAULT
+    {
+        VarAssign* assign = new_node(VarAssign);
+        assign->key = "";
+        assign->value = LiteralExpr::make_string("", parser->arena);
         $$ = assign;
     }
     | VarName ASSIGN_OP Expr
