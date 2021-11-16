@@ -80,9 +80,9 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         }
     }
     for (auto& field_info : _table_info->fields) {
-        if (!field_info.can_null) {
-            _can_not_null_field_ids.insert(field_info.id);
-        }
+     if (!field_info.can_null) {
+         _can_not_null_fields.push_back(&field_info);
+     }
     }
     // update and on_dup_key_update need all fields
     // delete and insert/replace need get index fields
@@ -170,17 +170,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     int ret = 0;
     int affected_rows = 0;
     // check not null fields
-    for (auto field_id : _can_not_null_field_ids) {
-        auto field = record->get_field_by_tag(field_id);
-        if (record->is_null(field)) {
-            auto field_info = _table_info->get_field_ptr(field_id);
-            if (field_info == nullptr) {
-                 DB_WARNING("field not found id:%d", field_id);
-                 return -1;
-            }
-            std::string& field_name = field_info->lower_short_name;
-            DB_WARNING_STATE(state, "filed_name: %s can not null", field_name.c_str());
-            if (FLAGS_strict_mode_not_null_fields_check) {
+    if (FLAGS_strict_mode_not_null_fields_check) {
+        for (auto field_info : _can_not_null_fields) {
+            auto field = record->get_field_by_tag(field_info->id);
+            if (record->is_null(field)) {
+                std::string& field_name = field_info->lower_short_name;
+                // DB_WARNING_STATE(state, "filed_name: %s can not null", field_name.c_str());
                 state->error_code = ER_NO_DEFAULT_FOR_FIELD;
                 state->error_msg << "Field '" << field_name << "' doesn't have a default value";
                 return -1;
