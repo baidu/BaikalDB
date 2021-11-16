@@ -379,6 +379,7 @@ int64_t ScanNode::select_unique_index() {
 	    _has_force_index = true;
 	}
     }
+    return 0;
     int64_t ret_index_id = 0;
     for (auto index_iter = _paths.begin(); index_iter != _paths.end(); index_iter ++ ) {
         if (!index_iter->second->is_possible) {

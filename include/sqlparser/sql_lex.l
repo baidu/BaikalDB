@@ -511,6 +511,8 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 [][] { return yytext[0]; }
 
 "/*"([*]*(([^*/])+([/])*)*)*"*/" {/* comment; do nothing */}
+"--"([^\n])*"\n" {/* single line comment; do nothing */}                                                                                                                                                    
+"#"([^\n])*"\n" {/* single line comment; do nothing */}
 
 . { return CHINESE_DOT; }
 
