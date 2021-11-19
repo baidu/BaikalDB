@@ -145,6 +145,9 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
     //重新做路由选择
     for (auto& exec_node : scan_nodes) {
         RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
+        if (scan_node->engine() == pb::INFORMATION_SCHEMA) {
+            continue;
+        }
         ExecNode* parent_node_ptr = scan_node->get_parent();
         FilterNode* filter_node = nullptr;
         if (parent_node_ptr->node_type() == pb::WHERE_FILTER_NODE
