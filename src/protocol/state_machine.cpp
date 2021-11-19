@@ -512,7 +512,14 @@ int StateMachine::_auth_read(SmartSocket sock) {
     }
     // Get charset.
     uint8_t *packet = sock->self_buf->_data;
-    uint32_t off = PACKET_HEADER_LEN + 8;
+    uint32_t off = PACKET_HEADER_LEN;
+    uint64_t capability  = 0;
+    if (RET_SUCCESS != _wrapper->protocol_get_length_fixed_int(packet, sock->packet_len + PACKET_HEADER_LEN, off, 4, capability)) {
+        DB_WARNING("read capability failed");
+        return RET_ERROR;
+    }
+
+    off = PACKET_HEADER_LEN + 8;
     uint8_t charset_num = 0;
     if (RET_SUCCESS != _wrapper->protocol_get_char(packet, sock->packet_len + PACKET_HEADER_LEN, off, &charset_num)) {
         DB_FATAL_CLIENT(sock, "get charset_num failed, off=%d, len=1", off);
@@ -597,14 +604,13 @@ int StateMachine::_auth_read(SmartSocket sock) {
     }
 
     // set current_db
-    if ((unsigned int)(sock->packet_len + PACKET_HEADER_LEN) > off) {
+    sock->current_db.clear();
+    if (capability & CLIENT_CONNECT_WITH_DB) {
         if (0 != _wrapper->protocol_get_string(packet,
                 sock->packet_len + PACKET_HEADER_LEN, off, sock->current_db)) {
             DB_FATAL_CLIENT(sock, "current_db is wrong");
             return RET_AUTH_FAILED;
         }
-    } else {
-        sock->current_db.clear();
     }
     return RET_SUCCESS;
 }

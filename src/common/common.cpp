@@ -439,7 +439,8 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::HLL,          FieldDescriptorProto::TYPE_BYTES},
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL},
         { pb::BITMAP,       FieldDescriptorProto::TYPE_BYTES},
-        { pb::TDIGEST,       FieldDescriptorProto::TYPE_BYTES}
+        { pb::TDIGEST,      FieldDescriptorProto::TYPE_BYTES},
+        { pb::NULL_TYPE,    FieldDescriptorProto::TYPE_BOOL}
     };
     if (_mysql_pb_type_mapping.count(type) == 0) {
         DB_WARNING("mysql_type %d not supported.", type);

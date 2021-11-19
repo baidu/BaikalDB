@@ -92,8 +92,8 @@ int64_t ScanNode::select_index() {
 
         // 使用了force index, 则primary优先级最低
         if (_has_force_index && path->hint != AccessPath::FORCE_INDEX) {
-	    prefix_ratio_index_score = 0;
-	}
+            prefix_ratio_index_score = 0;
+        }
         prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, index_id));
 
         // 优先选倒排，没有就取第一个
@@ -375,11 +375,10 @@ int64_t ScanNode::select_unique_index() {
     //判断是否有强制索引
     _has_force_index = false;
     for (auto index_iter = _paths.begin(); index_iter != _paths.end(); index_iter ++ ) {
-	if (index_iter->second->hint == AccessPath::FORCE_INDEX) {
-	    _has_force_index = true;
-	}
+        if (index_iter->second->hint == AccessPath::FORCE_INDEX) {
+            _has_force_index = true;
+        }
     }
-    return 0;
     int64_t ret_index_id = 0;
     for (auto index_iter = _paths.begin(); index_iter != _paths.end(); index_iter ++ ) {
         if (!index_iter->second->is_possible) {
@@ -391,8 +390,8 @@ int64_t ScanNode::select_unique_index() {
                 == index_iter->second->hit_index_field_ids.size() && ret_index_id == 0) {
                 // 主键或唯一键全命中，直接选择
                 if (_has_force_index && index_iter->second->hint != AccessPath::FORCE_INDEX) {
-		    continue;
-		}
+                    continue;
+                }
                 if (index_iter->second->is_virtual) {
                     //虚拟索引命中。
                     if (_virtual_index_selected == 0) {

@@ -428,8 +428,7 @@ void InformationSchema::init_referential_constraints() {
         {"UPDATE_RULE", pb::STRING},
         {"DELETE_RULE", pb::STRING},
         {"TABLE_NAME", pb::STRING},
-        {"REFERENCED_TABLE_NAME", pb::STRING},
-        {"REFERENCED_COLUMN_NAME", pb::STRING}
+        {"REFERENCED_TABLE_NAME", pb::STRING}
     };
     int64_t table_id = construct_table("REFERENTIAL_CONSTRAINTS", fields);
     // 定义操作

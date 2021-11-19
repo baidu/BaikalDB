@@ -236,6 +236,12 @@ void FunctionManager::register_operators() {
 
     register_object_ret("version", version, pb::STRING);
     register_object_ret("last_insert_id", last_insert_id, pb::INT64);
+    register_object_ret("cast_to_date", cast_to_date, pb::DATE);
+    register_object_ret("cast_to_time", cast_to_time, pb::TIME);
+    register_object_ret("cast_to_datetime", cast_to_datetime, pb::DATETIME);
+    register_object_ret("cast_to_string", cast_to_string, pb::STRING);
+    register_object_ret("cast_to_signed", cast_to_signed, pb::INT64);
+    register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::INT64);
 }
 
 int FunctionManager::init() {
