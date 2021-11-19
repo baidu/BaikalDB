@@ -1863,6 +1863,54 @@ ExprValue last_insert_id(const std::vector<ExprValue>& input) {
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::INT64);
 }
+
+ExprValue cast_to_date(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DATE);
+}
+
+ExprValue cast_to_datetime(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DATETIME);
+}
+
+ExprValue cast_to_time(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::TIME);
+}
+
+ExprValue cast_to_string(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::STRING);
+}
+
+ExprValue cast_to_signed(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::INT64);
+}
+
+ExprValue cast_to_unsigned(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::UINT64);
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */
