@@ -757,16 +757,44 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
 
     } else if (spec->spec_type == parser::ALTER_SPEC_DROP_INDEX) {
-        //drop index 转换成屏蔽
-        alter_request.set_op_type(pb::OP_SET_INDEX_HINT_STATUS);
+        int64_t table_id = 0;
+        std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
+        if (0 != SchemaFactory::get_instance()->get_table_id(table_full_name, table_id)) {
+            DB_WARNING("unknown table: %s", table_full_name.c_str());
+            _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+            _ctx->stat_info.error_msg << "table: " << table_full_name << " not exist";
+            return -1;
+        }
         if (spec->index_name.empty()) {
             DB_WARNING("index_name is null.");
             return -1;
         }
-
-        pb::IndexInfo* index = table->add_indexs();
-        index->set_index_name(spec->index_name.value);
-        index->set_hint_status(pb::IHS_DISABLE);
+        std::string index_name = spec->index_name.to_string();
+        int64_t index_id = 0;
+        auto ret = _factory->get_index_id(table_id, index_name, index_id);
+        if (ret != 0) {
+            DB_WARNING("index_name: %s in table:%s not exist",
+                        index_name.c_str(), table_full_name.c_str());
+            return -1;
+        }
+        auto index_info = _factory->get_index_info_ptr(index_id);
+        if (index_info == nullptr) {
+            DB_WARNING("index_info: %s in table:%s is null",
+                        index_name.c_str(), table_full_name.c_str());
+            return -1;
+        }
+        if (index_info->index_hint_status == pb::IHS_DISABLE) {
+            // 屏蔽的索引直接drop index
+            alter_request.set_op_type(pb::OP_DROP_INDEX);
+            pb::IndexInfo* index = table->add_indexs();
+            index->set_index_name(spec->index_name.value);
+        } else {
+            //drop index 转换成屏蔽
+            alter_request.set_op_type(pb::OP_SET_INDEX_HINT_STATUS);
+            pb::IndexInfo* index = table->add_indexs();
+            index->set_index_name(spec->index_name.value);
+            index->set_hint_status(pb::IHS_DISABLE);
+        }
         // 删除虚拟索引
         if (spec->is_virtual_index) {
             std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
