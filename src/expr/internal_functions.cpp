@@ -858,7 +858,7 @@ ExprValue time_format(const std::vector<ExprValue>& input) {
     }
     ExprValue tmp = input[0];
     struct tm t_result;
-    uint32_t second = str_to_time(tmp.str_val.c_str());
+    uint32_t second = tmp.cast_to(pb::TIME)._u.int32_val;
     
     t_result.tm_hour = (second >> 12) & 0x3FF;
     t_result.tm_min = (second >> 6) & 0x3F;
