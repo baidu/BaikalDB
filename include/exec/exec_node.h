@@ -72,6 +72,7 @@ public:
             e->close(state);
         }
     }
+
     virtual void reset(RuntimeState* state) {
         _num_rows_returned = 0;
         _return_empty = false;

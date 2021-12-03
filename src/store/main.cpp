@@ -18,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <gflags/gflags.h>
 #include <signal.h>
+#include <cxxabi.h>
 #include<execinfo.h>
 #include <stdio.h>
 #include <string>
@@ -37,7 +38,7 @@ DECLARE_int32(store_port);
 DECLARE_bool(use_fulltext_wordweight_segment);
 DECLARE_bool(use_fulltext_wordseg_wordrank_segment);
 DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
-DEFINE_int64(store_sql_memory_bytes_limit, 17179869184, "minimum memory use size , defalut: 16G");
+DEFINE_int64(store_sql_memory_bytes_limit, 17179869184, "minimum memory use size , default: 16G");
 } // namespace baikaldb
 DEFINE_bool(stop_server_before_core, true, "stop_server_before_core");
 

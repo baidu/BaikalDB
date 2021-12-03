@@ -60,7 +60,7 @@ public:
     bool is_initialize(const std::string& key, MemRow* dst);
     // 聚合函数逻辑
     // 初始化分配内存
-    int initialize(const std::string& key, MemRow* dst);
+    int initialize(const std::string& key, int64_t& used_size, MemRow* dst);
     // update每次更新一行
     int update(const std::string& key, MemRow* src, MemRow* dst);
     // merge表示store预聚合后，最终merge到一起
@@ -68,7 +68,9 @@ public:
     // 对于avg这种，需要最终计算结果
     int finalize(const std::string& key, MemRow* dst);
 
-    static bool all_is_initialize(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* dst) {
+    static bool all_is_initialize(std::vector<AggFnCall*>& agg_calls,
+            const std::string& key,
+            MemRow* dst) {
         for (auto call : agg_calls) {
             if (!call->is_initialize(key, dst)) {
                 return false;
@@ -77,9 +79,12 @@ public:
         return true;
     }
 
-    static void initialize_all(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* dst) {
+    static void initialize_all(std::vector<AggFnCall*>& agg_calls,
+            const std::string& key,
+            int64_t& used_size,
+            MemRow* dst) {
         for (auto call : agg_calls) {
-            call->initialize(key, dst);
+            call->initialize(key, used_size, dst);
         }
     }
     static void update_all(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* src, MemRow* dst) {

@@ -12,17 +12,18 @@
 #include "parser.h"
 #include "qos.h"
 #include <vector>
-DEFINE_int64(qos_rate,          100, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_burst,          100000, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_count,          100000, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_bthread_count,          10, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_committed_rate,          100, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_extended_rate,          100, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_globle_rate,          100, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_sum,          60, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_get_value,          60, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(qos_sleep_us,          1000, "max_tokens_per_second, defalut: 10w");
-DEFINE_int64(peer_thread_us,        1000*1000, "max_tokens_per_second, defalut: 10w");
+#include "baikal_client.h"
+DEFINE_int64(qos_rate,          100, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_burst,          100000, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_count,          100000, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_bthread_count,          10, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_committed_rate,          100, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_extended_rate,          100, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_globle_rate,          100, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_sum,          60, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_get_value,          60, "max_tokens_per_second, default: 10w");
+DEFINE_int64(qos_sleep_us,          1000, "max_tokens_per_second, default: 10w");
+DEFINE_int64(peer_thread_us,        1000*1000, "max_tokens_per_second, default: 10w");
 
 
 namespace baikaldb {
@@ -48,7 +49,63 @@ void test_func() {
         bthread_usleep(100*1000);
     }
 }
-    
+
+int qos_test1(baikal::client::Service* baikaldb) {
+    TimeCost time_cost;
+    BthreadCond concurrency_cond(-FLAGS_qos_bthread_count);
+    std::atomic<int> count = {0};
+    while (true) {
+        auto func = [baikaldb, &time_cost, &concurrency_cond, &count] () {
+            std::shared_ptr<BthreadCond> auto_decrease(&concurrency_cond, 
+                                [](BthreadCond* cond) { cond->decrease_signal();});
+            std::string sql = "INSERT INTO TEST.qos_test values ";
+            for (int i = 0; i < 100; i++) {
+                int c = ++count;
+                if(c>1000000){exit(0);}
+                sql += "(" + std::to_string(c) + ",1," + std::to_string(c) + ",1,1),";
+            }
+
+            sql.pop_back();
+
+            baikal::client::ResultSet result_set;
+            int ret = baikaldb->query(0, sql, &result_set);
+            if (ret != 0) {
+                DB_FATAL("atom_test failed");
+            } else {
+                DB_WARNING("atom_test succ");
+            }
+        };
+
+        Bthread bth;
+        concurrency_cond.increase_wait();
+        bth.run(func);
+    }
+    concurrency_cond.wait(-FLAGS_qos_bthread_count);
+    return 0;
+}
+
+int qos_test2(baikal::client::Service* baikaldb) {
+    for (int i = 0; i < FLAGS_qos_bthread_count; i++) {
+        auto func = [baikaldb] () {
+            static std::vector<std::string> f = {"id4", "id5"}; 
+            int i = butil::fast_rand() % 2;
+
+            std::string sql = "select " + f[i] + " from TEST.qos_test where id2 = 1 and id3= 22";
+
+            baikal::client::ResultSet result_set;
+            int ret = baikaldb->query(0, sql, &result_set);
+            if (ret != 0) {
+                DB_FATAL("qos_test failed");
+            } else {
+                DB_WARNING("qos_test succ");
+            }
+        };
+
+        Bthread bth;
+        bth.run(func);
+    }
+    return 0;
+}
 
 
 } // namespace baikaldb
@@ -56,17 +113,27 @@ void test_func() {
 using namespace baikaldb;
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
-    // baikaldb::TokenBucket token_bucket;
-    // token_bucket.reset_rate(FLAGS_qos_rate, FLAGS_qos_burst);
-    // baikaldb::TimeCost cost;
-    // for (int i = 0; i < FLAGS_qos_count; i++) {
-    //     int64_t time;
-    //     while( token_bucket.consume(1,time) <= 0){
-    //         // DB_WARNING("%d, %ld", i, time);
-    //     }
-    // }
+    baikal::client::Manager tmp_manager;
+    int ret = tmp_manager.init("conf", "baikal_client.conf");
+    if (ret != 0) {
+        DB_FATAL("baikal client init fail:%d", ret);
+        return 0;
+    }
+
+    auto baikaldb = tmp_manager.get_service("baikaldb");
+    if (baikaldb == nullptr) {
+        baikaldb = tmp_manager.get_service("baikaldb_gbk");
+        if (baikaldb == nullptr) {
+            baikaldb = tmp_manager.get_service("baikaldb_utf8");
+            if (baikaldb == nullptr) {
+                DB_FATAL("get_service failed");
+                return -1;
+            }
+        }
+    }
+
     baikaldb::StoreQos* store_qos = baikaldb::StoreQos::get_instance();
-    int ret = store_qos->init();
+    ret = store_qos->init();
     if (ret < 0) {
         DB_FATAL("store qos init fail");
         return -1;
@@ -81,8 +148,7 @@ int main(int argc, char* argv[]) {
                 if (i % 2 == 0) {
                     sign= 124;
                 }
-
-                StoreQos::get_instance()->create_bthread_local(baikaldb::QOS_SELECT,sign);
+                StoreQos::get_instance()->create_bthread_local(baikaldb::QOS_SELECT,sign,123);
                 
                 baikaldb::QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
                 DB_WARNING("local:%p", local);

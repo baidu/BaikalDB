@@ -26,8 +26,11 @@
 namespace baikaldb {
 DECLARE_string(snapshot_uri);
 DECLARE_string(stable_uri);
-DECLARE_int32(election_timeout_ms);
+DECLARE_int64(transfer_leader_catchup_time_threshold);
+DECLARE_int64(store_heart_beat_interval_us);
 DEFINE_int32(compact_interval, 1, "compact_interval xx (s)");
+DEFINE_bool(allow_compact_range, true, "allow_compact_range");
+DEFINE_bool(allow_blocking_flush, true, "allow_blocking_flush");
 int RegionControl::remove_data(int64_t drop_region_id) {
     rocksdb::WriteOptions options;
     MutTableKey start_key;
@@ -90,7 +93,7 @@ void RegionControl::compact_data_in_queue(int64_t region_id) {
     in_compact_regions[region_id] = true;
     Store::get_instance()->compact_queue().run([region_id]() {
         if (in_compact_regions.count(region_id) == 1) {
-            if (!Store::get_instance()->is_shutdown()) {
+            if (!Store::get_instance()->is_shutdown() && FLAGS_allow_compact_range) {
                 RegionControl::compact_data(region_id);
                 in_compact_regions.erase(region_id);
                 bthread_usleep(FLAGS_compact_interval * 1000 * 1000LL);
@@ -181,11 +184,27 @@ int RegionControl::ingest_data_sst(const std::string& data_sst_file, int64_t reg
     // TODO 修改恢复流程，可以减少一次文件copy
     ifo.move_files = move_files;
     ifo.write_global_seqno = false;
+    ifo.allow_blocking_flush = FLAGS_allow_blocking_flush;
     auto data_cf = rocksdb->get_data_handle();
     auto res = rocksdb->ingest_external_file(data_cf, {data_sst_file}, ifo);
     if (!res.ok()) {
-        DB_WARNING("Error while adding file %s, Error %s, region_id: %ld",
-                data_sst_file.c_str(), res.ToString().c_str(), region_id);
+        DB_WARNING("ingest file %s fail, Error %s, region_id: %ld",
+            data_sst_file.c_str(), res.ToString().c_str(), region_id);
+        if (!FLAGS_allow_blocking_flush) {
+            rocksdb::FlushOptions flush_options;
+            res = rocksdb->flush(flush_options, data_cf);
+            if (!res.ok()) {
+                DB_WARNING("flush data to rocksdb fail, err_msg:%s", res.ToString().c_str());
+                return -1;
+            }
+            res = rocksdb->ingest_external_file(data_cf, {data_sst_file}, ifo);
+            if (!res.ok()) {
+                DB_WARNING("Error while adding file %s, Error %s, region_id: %ld",
+                    data_sst_file.c_str(), res.ToString().c_str(), region_id);
+                return -1;
+            }
+            return 0;
+        }
         return -1;
     }
     return 0;
@@ -210,7 +229,15 @@ void RegionControl::sync_do_snapshot() {
     BthreadCond sync_sign;
     sync_sign.increase();
     ConvertToSyncClosure* done = new ConvertToSyncClosure(sync_sign, _region_id);
-    _region->_node.snapshot(done);
+    if (!_region->is_learner()) {
+        _region->_node.snapshot(done);
+    } else {
+        if (_region->_learner != nullptr) {
+            _region->_learner->snapshot(done);
+        } else {
+            DB_FATAL("region_id %ld learner is nullptr.", _region_id);
+        }
+    }
     sync_sign.wait(); 
     DB_WARNING("region_id: %ld sync_do_snapshot success", _region_id);
 }
@@ -231,6 +258,7 @@ void RegionControl::raft_control(google::protobuf::RpcController* controller,
         if (response != NULL) {
             response->set_errcode(pb::NOT_LEADER);
             response->set_errmsg("not leader");
+            response->set_leader(butil::endpoint2str(_region->get_leader()).c_str());
         }
         return;
     }
@@ -278,6 +306,11 @@ void RegionControl::add_peer(const pb::AddPeer& add_peer, SmartRegion region, Ex
         }
         DB_WARNING("start init_region, region_id: %ld, wait_time:%ld", 
                 region->get_region_id(), cost.get_time());
+        if (cost.get_time() > FLAGS_store_heart_beat_interval_us * 5) {
+            DB_WARNING("region_id: %ld add peer timeout", region->get_region_id());
+            control.reset_region_status();
+            return;
+        }
         if (control.legal_for_add_peer(add_peer, NULL) != 0) {
             control.reset_region_status();
             return;
@@ -301,6 +334,11 @@ void RegionControl::add_peer(const pb::AddPeer& add_peer, SmartRegion region, Ex
 void RegionControl::add_peer(const pb::AddPeer* request,
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done) {
+    auto reset_status_if_not_spit = [this, &request]() {
+        if (!request->is_split()) {
+            reset_region_status(); 
+        }
+    };
     brpc::ClosureGuard done_guard(done);
     std::set<std::string> old_peers;
     for (auto& old_peer : request->old_peers()) {
@@ -324,26 +362,30 @@ void RegionControl::add_peer(const pb::AddPeer* request,
         return;
     }
     pb::RegionStatus expected_status = pb::IDLE;
-    if (!compare_exchange_strong(expected_status, pb::DOING)) {
+    if (!request->is_split() && !compare_exchange_strong(expected_status, pb::DOING)) {
         DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
         response->set_errcode(pb::INTERNAL_ERROR);
         response->set_errmsg("new region fail");
         return;
     }
-    DB_WARNING("region status to doing becase of add peer of request, region_id: %ld",
+    DB_WARNING("region status to doing because of add peer of request, region_id: %ld",
                 _region_id);
     if (legal_for_add_peer(*request, response) != 0) {
-        reset_region_status();
+        reset_status_if_not_spit();
         return;
     }
     pb::InitRegion init_request;
     construct_init_region_request(init_request);
+    init_request.set_is_split(request->is_split());
+    if (request->is_split()) {
+        init_request.mutable_region_info()->set_can_add_peer(false);
+    }
     if (init_region_to_store(new_instance, init_request, response) != 0) {
-        reset_region_status();
+        reset_status_if_not_spit();
         return;
     }
     if (legal_for_add_peer(*request, response) != 0) {
-        reset_region_status();
+        reset_status_if_not_spit();
         _region->start_thread_to_remove_region(_region_id, new_instance);
         return;
     }
@@ -354,12 +396,16 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
         SmartRegion region, ExecutionQueue& queue) {
     std::string new_leader = trans_leader_request.new_leader();
     auto transfer_call = [this, region, new_leader]() {
-        int64_t average_cost = region->_dml_time_cost.latency();
-        int64_t peer_applied_index = RpcSender::get_peer_applied_index(new_leader, _region_id);
-        if ((region->_applied_index - peer_applied_index) * average_cost 
-                > FLAGS_election_timeout_ms * 1000LL) {
-            DB_WARNING("peer applied index: %ld is less than applied index: %ld, average_cost: %ld",
-                    peer_applied_index, region->_applied_index, average_cost);
+        int64_t peer_applied_index = 0;
+        int64_t peer_dml_latency = 0;
+        if (region == nullptr) {
+            return;
+        }
+        RpcSender::get_peer_applied_index(new_leader, _region_id, peer_applied_index, peer_dml_latency);
+        if ((region->_applied_index - peer_applied_index) * peer_dml_latency
+                > (FLAGS_transfer_leader_catchup_time_threshold)) {
+            DB_WARNING("peer applied index: %ld is less than applied index: %ld, peer_dml_latency: %ld",
+                    peer_applied_index, region->_applied_index, peer_dml_latency);
             return;
         }
         if (region->_shutdown) {
@@ -423,9 +469,6 @@ int RegionControl::init_region_to_store(const std::string instance_address,
                    " region_id: %ld, instance:%s, errcode:%s",
                    region_id, instance_address.c_str(),
                    pb::ErrCode_Name(response.errcode()).c_str());
-        if (response.errcode() != pb::REGION_ALREADY_EXIST) {
-            _region->start_thread_to_remove_region(region_id, instance_address);
-        }
         return -1;
     }
     DB_WARNING("send init region to store:%s success, region_id: %ld, cost: %ld",
@@ -455,6 +498,7 @@ int RegionControl::legal_for_add_peer(const pb::AddPeer& add_peer, pb::StoreRes*
         if (response != NULL) {
             response->set_errcode(pb::NOT_LEADER);
             response->set_errmsg("not leader");
+            response->set_leader(butil::endpoint2str(_region->get_leader()).c_str());
         }
         return -1;
     }
@@ -466,8 +510,8 @@ int RegionControl::legal_for_add_peer(const pb::AddPeer& add_peer, pb::StoreRes*
         }
         return -1;
     }
-    if ((_region->_region_info.has_can_add_peer() && !_region->_region_info.can_add_peer())
-            || _region->_region_info.version() < 1) {
+    if (!add_peer.is_split() && ((_region->_region_info.has_can_add_peer() && !_region->_region_info.can_add_peer())
+            || _region->_region_info.version() < 1)) {
         DB_WARNING("region_id: %ld can not add peer, can_add_peer:%d, region_version:%ld",
                   _region_id, _region->_region_info.can_add_peer(), _region->_region_info.version());
         if (response != NULL) {
@@ -529,6 +573,9 @@ void RegionControl::node_add_peer(const pb::AddPeer& add_peer,
     add_peer_done->done = done;
     add_peer_done->response = response;
     add_peer_done->new_instance = new_instance;
+    if (add_peer.is_split()) {
+        add_peer_done->is_split = true;
+    }
     //done方法中会把region_status重置为IDLE
     braft::PeerId add_peer_instance;
     add_peer_instance.parse(new_instance);

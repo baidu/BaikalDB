@@ -190,7 +190,7 @@ void AccessPath::calc_normal(Property& sort_property) {
                     // in_row_expr的非首个字段不组合展开,按offset填充,例如(a, b) in ((1,2))的b
                     uint32_t offset = in_row_expr_map[*range.conditions.begin()].first;
                     // flat fill other row_expr field value exclude the first.
-                    if (in_records.size() % range.eq_in_values.size() == 0) {
+                    if (range.eq_in_values.size() > 0 && in_records.size() % range.eq_in_values.size() == 0) {
                         size_t vs = range.eq_in_values.size();
                         size_t vi = 0;
                         size_t i = 0;
@@ -218,7 +218,7 @@ void AccessPath::calc_normal(Property& sort_property) {
                     if (in_records.empty()) {
                         RecordRange rg;
                         rg.left_record = left_record->clone(true);
-                        in_records.push_back(rg);
+                        in_records.emplace_back(rg);
                     }
                     if (range.is_row_expr) {
                         // in_row_expr的首个字段进行组合展开,并记录展开offset,用于后续字段映射
@@ -227,13 +227,14 @@ void AccessPath::calc_normal(Property& sort_property) {
                         in_row_expr_map[*range.conditions.begin()] = std::pair<uint32_t, uint32_t>(in_records.size(), 1);
                     }
                     std::vector<RecordRange> comb_in_records;
+                    comb_in_records.reserve(range.eq_in_values.size() * in_records.size());
                     for (auto value : range.eq_in_values) {
                         // 为保持前面已处理字段步长稳定性, 当前字段需要写在外层循环与in_records进行展开.
                         for (auto record : in_records) {
                             RecordRange rg;
                             rg.left_record = record.left_record->clone(true);
                             rg.left_record->set_value(rg.left_record->get_field_by_tag(field.id), value);
-                            comb_in_records.push_back(rg);
+                            comb_in_records.emplace_back(rg);
                         }
                     }
                     in_records.swap(comb_in_records);

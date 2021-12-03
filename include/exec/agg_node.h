@@ -48,8 +48,9 @@ public:
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
-    void process_row_batch(RuntimeState* state, RowBatch& batch);
-    void memory_limit_release(RuntimeState* state, MemRow* row);
+    void process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& used_size, int64_t& release_size);
+    void memory_limit_release(RuntimeState* state, int64_t size);
+    int memory_limit_exceeded(RuntimeState* state, int64_t size);
     std::vector<ExprNode*>* mutable_group_exprs() {
         return &_group_exprs;
     }

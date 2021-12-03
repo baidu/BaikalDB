@@ -21,123 +21,35 @@
 #include "slot_ref.h"
 #include "runtime_state.h"
 #include "parser.h"
+#include "qos.h"
 
 namespace baikaldb {
 
-DEFINE_int64(store_row_number_to_check_memory, 1024, "do memory limit when row number more than #, defalut: 1024");
-
-// TODO 临时代码，后面删除
-// 为了baikalStore能兼容老的baikaldb
-int RocksdbScanNode::select_index_for_store() {
-    std::multimap<uint32_t, int> prefix_ratio_id_mapping;
-    std::set<int32_t> primary_fields;
-    for (int i = 0; i < _pb_node.derive_node().scan_node().indexes_size(); i++) {
-        auto& pos_index = _pb_node.derive_node().scan_node().indexes(i);
-        int64_t index_id = pos_index.index_id();
-        auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (info_ptr == nullptr) {
-            continue;
-        }
-        IndexInfo& info = *info_ptr;
-        auto index_state = info.state;
-        if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
-                index_id, pb::IndexState_Name(index_state).c_str());
-            continue;
-        }
-
-        int field_count = 0;
-        for (auto& range : pos_index.ranges()) {
-            if (range.has_left_field_cnt() && range.left_field_cnt() > 0) {
-                field_count = std::max(field_count, range.left_field_cnt());
-            }
-            if (range.has_right_field_cnt() && range.right_field_cnt() > 0) {
-                field_count = std::max(field_count, range.right_field_cnt());
-            }
-        }
-        if (info.fields.size() == 0) {
-            continue;
-        }
-        uint16_t prefix_ratio_round = field_count * 100 / info.fields.size();
-        uint16_t index_priority = 0;
-        if (info.type == pb::I_PRIMARY) {
-            for (int j = 0; j < field_count; j++) {
-                primary_fields.insert(info.fields[j].id);
-            }
-            index_priority = 300;
-        } else if (info.type == pb::I_UNIQ) {
-            index_priority = 200;
-        } else if (info.type == pb::I_KEY) {
-            index_priority = 100 + field_count;
-        } else {
-            index_priority = 0;
-        }
-        // 普通索引如果都包含在主键里，则不选
-        if (info.type == pb::I_UNIQ || info.type == pb::I_KEY) {
-            bool contain_by_primary = true;
-            for (int j = 0; j < field_count; j++) {
-                if (primary_fields.count(info.fields[j].id) == 0) {
-                    contain_by_primary = false;
-                    break;
-                }
-            }
-            if (contain_by_primary) {
-                continue;
-            }
-        }
-        // sort index 权重调整到全命中unique或primary索引之后
-        if (pos_index.has_sort_index() && field_count > 0) {
-            prefix_ratio_round = 100;
-            index_priority = 190;
-        }
-        uint32_t prefix_ratio_index_score = (prefix_ratio_round << 16) | index_priority;
-        //DB_WARNING("scan node insert prefix_ratio_index_score:%u, i: %d", prefix_ratio_index_score, i);
-        prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, i));
-
-        // 优先选倒排，没有就取第一个
-        switch (info.type) {
-            case pb::I_FULLTEXT:
-                _multi_reverse_index.push_back(i);
-                break;
-            default:
-                break;
-        }
-    }
-    if (choose_arrow_pb_reverse_index(_pb_node.derive_node().scan_node()) != 0) {
-        DB_WARNING("choose arrow pb reverse index error.");
-        return -1;
-    }
-    // ratio * 10(=0...9)相同的possible index中，按照PRIMARY, UNIQUE, KEY的优先级选择
-    //DB_WARNING("prefix_ratio_id_mapping.size: %d", prefix_ratio_id_mapping.size());
-    for (auto iter = prefix_ratio_id_mapping.crbegin(); iter != prefix_ratio_id_mapping.crend(); ++iter) {
-        //DB_WARNING("prefix_ratio_index_score:%u, i: %d", iter->first, iter->second);
-        return iter->second;
-    }
-    return 0;
-}
+DEFINE_int64(store_row_number_to_check_memory, 1024, "do memory limit when row number more than #, default: 1024");
+DEFINE_bool(reverse_seek_first_level, false, "reverse index seek first level, default(false)");
 
 int RocksdbScanNode::choose_index(RuntimeState* state) {
     // 做完logical plan还没有索引
-    if (_pb_node.derive_node().scan_node().indexes_size() == 0) {
+    auto& scan_pb = _pb_node.derive_node().scan_node();
+    if (scan_pb.indexes_size() == 0) {
         DB_FATAL_STATE(state, "no index");
         return -1;
     }
 
-    //TODO 索引选择已经在baikaldb做了，后续删除store的选择
-    int idx = select_index_for_store();
-    if (_multi_reverse_index.size() > 0) {
-        idx = _multi_reverse_index[0];
-    }
-
-    const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(idx);
+    const pb::PossibleIndex& pos_index = scan_pb.indexes(0);
     if (_pb_node.derive_node().scan_node().has_fulltext_index()) {
         _new_fulltext_tree = true;
     }
+    bool use_fulltext = false;
+
     _index_id = pos_index.index_id();
     _index_info = _factory->get_index_info_ptr(_index_id);
     if (_index_info == nullptr || _index_info->id == -1) {
         DB_WARNING_STATE(state, "no index_info found for index id: %ld", _index_id);
         return -1;
+    }
+    if (_index_info->type == pb::I_FULLTEXT) {
+        use_fulltext = true;
     }
 
     int ret = 0;
@@ -180,7 +92,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         _is_covering_index = true;
     }
 
-    if (_multi_reverse_index.size() > 0) {
+    if (use_fulltext) {
         // 索引条件下推，减少主表查询次数
         index_condition_pushdown();
         for (auto expr : _index_conjuncts) {
@@ -190,8 +102,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
                 return ret;
             }
         }
-        for (auto id : _multi_reverse_index) {
-            const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(id);
+        for (auto& pos_index : scan_pb.indexes()) {
             auto index_id = pos_index.index_id();
             auto index_info = _factory->get_index_info_ptr(index_id);
             if (index_info == nullptr|| index_info->id == -1) {
@@ -294,6 +205,15 @@ int RocksdbScanNode::init(const pb::PlanNode& node) {
     if (_pri_info == nullptr) {
         DB_WARNING("pri info not found _table_id:%ld", _table_id);
         return -1;
+    }
+    _is_ddl_work = node.derive_node().scan_node().is_ddl_work();
+    _ddl_index_id = node.derive_node().scan_node().ddl_index_id();
+    if (_is_ddl_work) {
+        _ddl_index_info = _factory->get_index_info_ptr(_ddl_index_id);
+        if (_ddl_index_info == nullptr) {
+            DB_WARNING("ddl index info not found _index_id:%ld", _ddl_index_id);
+            return -1;
+        }
     }
     return 0;
 }
@@ -438,15 +358,20 @@ int RocksdbScanNode::open(RuntimeState* state) {
     // 用数组映射slot，提升性能
     _field_slot.resize(_table_info->fields.back().id + 1);
     for (auto& slot : _tuple_desc->slots()) {
+        if (slot.field_id() > _field_slot.size() - 1) {
+            DB_WARNING("vector out of range, region_id: %ld, field_id: %d", _region_id, slot.field_id());
+            return -1;
+        }
         _field_slot[slot.field_id()] = slot.slot_id();
         if (pri_field_ids.count(slot.field_id()) == 0) {
             auto field = _table_info->get_field_ptr(slot.field_id());
             if (field == nullptr) {
-                DB_WARNING("field not found id:%d", slot.field_id());
+                DB_WARNING("field not found region_id: %ld, field_id: %d", _region_id, slot.field_id());
                 return -1;
             }
             // 这两个倒排的特殊字段
-            if (field->short_name != "__weight" && field->short_name != "__pic_scores") {
+            if (field->short_name != "__weight" && 
+                field->short_name != "__querywords" ) {
                 _field_ids[slot.field_id()] = field;
             }
         }
@@ -477,10 +402,12 @@ int RocksdbScanNode::open(RuntimeState* state) {
 
             if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
                 _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                    reverse_index_map, true, _pb_node.derive_node().scan_node().fulltext_index());
+                    reverse_index_map, !FLAGS_reverse_seek_first_level, 
+                    _pb_node.derive_node().scan_node().fulltext_index());
             } else if (_storage_type == pb::ST_ARROW) {
                 _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                    reverse_index_map, true, _pb_node.derive_node().scan_node().fulltext_index());
+                    reverse_index_map, !FLAGS_reverse_seek_first_level, 
+                    _pb_node.derive_node().scan_node().fulltext_index());
             } else {
                 DB_FATAL("fulltext storage type error");
                 return -1;
@@ -506,7 +433,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                     common_reverse_indexes.push_back(static_cast<ReverseIndex<CommonSchema>*>(index_ptr));
                 }
                 _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                    common_reverse_indexes, _query_words, _match_modes, true, !_bool_and);
+                    common_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
             } else if (_storage_type == pb::ST_ARROW) {
                 std::vector<ReverseIndex<ArrowSchema>*> arrow_reverse_indexes;
                 arrow_reverse_indexes.reserve(4);
@@ -514,7 +441,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                     arrow_reverse_indexes.push_back(static_cast<ReverseIndex<ArrowSchema>*>(index_ptr));
                 }
                 _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
-                    arrow_reverse_indexes, _query_words, _match_modes, true, !_bool_and);
+                    arrow_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
             } else {
                 DB_FATAL("fulltext storage type error");
                 return -1;
@@ -530,9 +457,8 @@ int RocksdbScanNode::open(RuntimeState* state) {
         _reverse_index = reverse_index_map[_index_id];
         //DB_NOTICE("word:%s", str_to_hex(word).c_str());
         // seek性能太差了，倒排索引都不做seek
-        bool dont_seek = true;
         ret = _reverse_index->search(txn->get_txn(), *_pri_info, *_table_info, 
-                _query_words[0], _match_modes[0], _index_conjuncts, dont_seek);
+                _query_words[0], _match_modes[0], _index_conjuncts, !FLAGS_reverse_seek_first_level);
         if (ret < 0) {
             return ret;
         }
@@ -573,6 +499,12 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     ON_SCOPE_EXIT(([this, state]() {
         state->set_num_scan_rows(_scan_rows);
     }));
+
+    // 检查是否需要拒绝
+    if (StoreQos::get_instance()->need_reject()) {
+        return -1;
+    }
+    
     int ret = 0;
     if (_index_id == _table_id) {
         if (_use_get) {
@@ -587,9 +519,12 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             ret =  get_next_by_index_seek(state, batch, eos);
         }
     }
+    // 更新qos统计信息
+    StoreQos::get_instance()->update_statistics();
     if (ret < 0) {
         return ret;
     }
+
     if (0 != memory_limit_exceeded(state, batch)) {
         return -1;
     }
@@ -722,7 +657,11 @@ int RocksdbScanNode::lock_primary(RuntimeState* state, MemRow* row) {
         int32_t slot_id = _field_slot[field_id];
         record->set_value(record->get_field_by_tag(field_id), row->get_value(_tuple_id, slot_id));
     }
-    int ret = state->txn()->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true);
+    int64_t ttl_duration = 0;
+    if (state->txn() == nullptr) {
+        return -1;
+    }
+    int ret = state->txn()->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true, ttl_duration);
     if (ret == -3 || ret == -2 || ret == -4) {
         DB_DEBUG("DDL_LOG key is deleted, skip. error[%d]", ret);
         return 0;
@@ -736,6 +675,112 @@ int RocksdbScanNode::lock_primary(RuntimeState* state, MemRow* row) {
         int32_t slot_id = _field_slot[field_id];
         row->set_value(_tuple_id, slot_id, record->get_value(record->get_field_by_tag(field_id)));
     }
+    if (ttl_duration > 0) {
+        state->ttl_timestamp_vec.emplace_back(ttl_duration);
+    }
+    return 0;
+}
+
+int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
+    SmartRecord record = TableRecord::new_record(_table_id);
+    for (auto& field : _pri_info->fields) {
+        int32_t field_id = field.id;
+        int32_t slot_id = _field_slot[field_id];
+        record->set_value(record->get_field_by_tag(field_id), row->get_value(_tuple_id, slot_id));
+    }
+    auto txn = state->txn();
+    if (txn == nullptr) {
+        DB_FATAL("txn is nullptr");
+        return -1;
+    }
+    int64_t ttl_duration = 0;
+    int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true, ttl_duration);
+    if (ret == -3 || ret == -2 || ret == -4) {
+        DB_DEBUG("DDL_LOG key is deleted, skip. error[%d]", ret);
+        return 0;
+    }
+    if (ret != 0) {
+        DB_FATAL("lock key error.");
+        return -1;
+    }
+    txn->set_write_ttl_timestamp_us(ttl_duration);
+    if (_ddl_index_info->type == pb::I_FULLTEXT) {
+        MutTableKey pk_key;
+        ret = record->encode_key(*_pri_info, pk_key, -1, false, false);
+        if (ret < 0) {
+            DB_WARNING("DDL_LOG record [%s] encode key failed[%d].", record->to_string().c_str(), ret);
+            return -1;
+        }
+        std::string new_pk_str = pk_key.data();
+
+        auto field = record->get_field_by_tag(_ddl_index_info->fields[0].id);
+        if (record->is_null(field)) {
+            DB_DEBUG("DDL_LOG record [%s] record field is_null.", record->to_string().c_str());
+            return 0;
+        }
+        std::string word;
+        ret = record->get_reverse_word(*_ddl_index_info, word);
+        if (ret < 0) {
+            DB_WARNING("DDL_LOG record [%s] get_reverse_word failed[%d], index_id: %ld.", 
+                record->to_string().c_str(), ret, _ddl_index_info->id);
+            return -1;
+        }
+
+        DB_DEBUG("reverse debug, record[%s]", record->to_string().c_str());
+        auto& reverse_index_map = state->reverse_index_map();
+        ret = reverse_index_map[_ddl_index_info->id]->insert_reverse(txn->get_txn(), nullptr, word, new_pk_str, record);
+        if (ret < 0) {
+            DB_WARNING("DDL_LOG record [%s] insert_reverse failed[%d], index_id: %ld.", 
+                record->to_string().c_str(), ret, _ddl_index_info->id);
+            return -1;
+        }
+        return 0;
+    }
+    for (auto& pair: _field_ids) {
+        int32_t field_id = pair.first;
+        int32_t slot_id = _field_slot[field_id];
+        row->set_value(_tuple_id, slot_id, record->get_value(record->get_field_by_tag(field_id)));
+    }
+    SmartRecord exist_record = record->clone();
+    ret = txn->get_update_secondary(_region_id, *_pri_info, *_ddl_index_info, exist_record, GET_LOCK, true);
+    if (ret == 0) {
+        MutTableKey key;
+        MutTableKey exist_key;
+        if (record->encode_key(*_pri_info, key, -1, false, false) == 0 && 
+            exist_record->encode_key(*_pri_info, exist_key, -1, false, false) == 0) {
+
+            if (key.data().compare(exist_key.data()) == 0) {
+                DB_NOTICE("same pk val.");
+                return 0;
+            } else if (_ddl_index_info->type == pb::I_UNIQ) {
+                DB_WARNING("not same pk value record %s exist_record %s.", record->to_string().c_str(), 
+                    exist_record->to_string().c_str());
+                state->error_code = ER_DUP_ENTRY;
+                state->error_msg << "Duplicate entry: '" << 
+                        record->get_index_value(*_ddl_index_info) << "' for key '" << _ddl_index_info->short_name << "'";
+                return -1;
+            }
+        } else {
+            DB_FATAL("encode key error record %s exist_record %s.", record->to_string().c_str(), 
+                exist_record->to_string().c_str());
+            state->error_code = ER_DUP_ENTRY;
+            state->error_msg << "Duplicate entry: '" << 
+                    record->get_index_value(*_ddl_index_info) << "' for key '" << _ddl_index_info->short_name << "'";
+            return -1;
+        }
+    }
+    // ret == -3 means the primary_key returned by get_update_secondary is out of the region
+    // (dirty data), this does not affect the insertion
+    if (ret != -2 && ret != -3 && ret != -4) {
+        DB_WARNING_STATE(state, "insert rocksdb failed, index:%ld, ret:%d", _ddl_index_info->id, ret);
+        return -1;
+    }
+    ret = txn->put_secondary(_region_id, *_ddl_index_info, record);
+    if (ret < 0) {
+        DB_WARNING_STATE(state, "put index:%ld fail:%d, table_id:%ld", _ddl_index_info->id, ret, _table_id);
+        return ret;
+    }
+    //DB_WARNING_STATE(state,"put index record:%s", record->debug_string().c_str());
     return 0;
 }
 
@@ -754,6 +799,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
         local_node.add_index_filter_rows(index_filter_cnt);
         local_node.set_scan_rows(_scan_rows);
     }));
+    state->ttl_timestamp_vec.clear();
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -809,8 +855,16 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
             if (_lock == pb::LOCK_GET) {
-                if (lock_primary(state, row.get()) != 0) {
-                    return -1;
+                if (!_is_ddl_work) {
+                    // 加全局二级索引
+                    if (lock_primary(state, row.get()) != 0) {
+                        return -1;
+                    }
+                } else {
+                    // 加局部索引
+                    if (index_ddl_work(state, row.get()) != 0) {
+                        return -1;
+                    }
                 }
             }
             batch->move_row(std::move(row));
@@ -870,8 +924,14 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                     continue;
                 }
                 if (_lock == pb::LOCK_GET) {
-                    if (lock_primary(state, row.get()) != 0) {
-                        return -1;
+                    if (!_is_ddl_work) {
+                        if (lock_primary(state, row.get()) != 0) {
+                            return -1;
+                        }
+                    } else {
+                        if (index_ddl_work(state, row.get()) != 0) {
+                            return -1;
+                        }
                     }
                 }
                 batch->move_row(std::move(row));
@@ -1012,6 +1072,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 }
                 continue;
             }
+            //DB_NOTICE("record_after:%s", record->debug_string().c_str());
             for (auto slot : _tuple_desc->slots()) {
                 auto field = record->get_field_by_tag(slot.field_id());
                 row->set_value(slot.tuple_id(), slot.slot_id(),
@@ -1041,50 +1102,6 @@ void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     }
 }
 
-int RocksdbScanNode::choose_arrow_pb_reverse_index(const pb::ScanNode& node) {
-    if (_multi_reverse_index.size() > 1) {
-        int pb_type_num = 0;
-        int arrow_type_num = 0;
-        std::vector<int> pb_indexs;
-        std::vector<int> arrow_indexs;
-        pb_indexs.reserve(4);
-        arrow_indexs.reserve(4);
-        pb::StorageType filter_type = pb::ST_UNKNOWN;
-        for (auto id : _multi_reverse_index) {
-            const pb::PossibleIndex& pos_index = node.indexes(id);
-            auto index_id = pos_index.index_id();
-            DB_DEBUG("reverse_filter index [%ld]", index_id);
-            pb::StorageType type = pb::ST_UNKNOWN;
-            if (SchemaFactory::get_instance()->get_index_storage_type(index_id, type) == -1) {
-                DB_FATAL("get index storage type error index [%ld]", index_id);
-                return -1;
-            }
-
-            if (type == pb::ST_PROTOBUF_OR_FORMAT1) {
-                pb_indexs.push_back(index_id);
-                ++pb_type_num;
-            } else if (type == pb::ST_ARROW) {
-                arrow_indexs.push_back(index_id);
-                ++arrow_type_num;
-            }
-        }
-        filter_type = pb_type_num <= arrow_type_num ? pb::ST_PROTOBUF_OR_FORMAT1 : pb::ST_ARROW;
-        DB_DEBUG("reverse_filter type[%s]", pb::StorageType_Name(filter_type).c_str());
-        auto remove_indexs_func = [this](std::vector<int>& to_remove_indexs) {
-            _multi_reverse_index.erase(std::remove_if(_multi_reverse_index.begin(), _multi_reverse_index.end(), [&to_remove_indexs](const int& index) {
-                return std::find(to_remove_indexs.begin(), to_remove_indexs.end(), index) 
-                    != to_remove_indexs.end() ? true : false;
-            }), _multi_reverse_index.end());
-        };
-
-        if (filter_type == pb::ST_PROTOBUF_OR_FORMAT1) {
-            remove_indexs_func(pb_indexs);
-        } else if (filter_type == pb::ST_ARROW) {
-            remove_indexs_func(arrow_indexs);
-        }
-    }
-    return 0;
-}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

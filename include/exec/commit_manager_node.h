@@ -75,7 +75,7 @@ public:
                 ret = exec_rollback_node(state, rollback_node);
             }
         } else {
-            DB_WARNING("TransactionNote: optimize_1pc, no commit: txn_id: %lu log_id:%lu", state->txn_id, state->log_id());
+            //DB_WARNING("TransactionNote: optimize_1pc, no commit: txn_id: %lu log_id:%lu", state->txn_id, state->log_id());
         }
         client_conn->on_commit_rollback();
         int result = ret;

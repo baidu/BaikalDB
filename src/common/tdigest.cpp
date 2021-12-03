@@ -36,10 +36,10 @@ typedef struct node {
 } node_t;
 struct td_histogram {
     char magic[4];      // "TDGT"
-    // compression is a setting used to configure the size of centroids when merged.
-    double compression;
     // cap is the total size of nodes
     int cap;
+    // compression is a setting used to configure the size of centroids when merged.
+    double compression;
     // merged_nodes is the number of merged nodes at the front of nodes.
     int merged_nodes;
     // unmerged_nodes is the number of buffered nodes.
@@ -66,6 +66,9 @@ static void merge(td_histogram_t *h);
 ////////////////////////////////////////////////////////////////////////////////
 size_t td_required_buf_size(double compression) {
     return sizeof(td_histogram_t) + (cap_from_compression(compression) * sizeof(node_t));
+}
+size_t td_actual_size(td_histogram_t *h) {
+    return sizeof(td_histogram_t) + ((h->merged_nodes + h->unmerged_nodes) * sizeof(node_t));
 }
 // td_init will initialize a td_histogram_t inside buf which is buf_size bytes.
 // If buf_size is too small (smaller than compression + 1) or buf is NULL,
@@ -210,9 +213,7 @@ double td_value_at(td_histogram_t *h, double q) {
     return m * x + nl->mean;
 }
 double td_trimmed_mean(td_histogram_t *h, double lo, double hi) {
-    if (should_merge(h)) {
-        merge(h);
-    }
+    merge(h);
     double total_count = h->merged_count;
     double left_tail_count = lo * total_count;
     double right_tail_count = hi * total_count;
@@ -315,11 +316,28 @@ bool is_td_object(const std::string& td) {
         DB_WARNING("magic error");
         return false;
     }
-    if (td.size() != td_required_buf_size(COMPRESSION)) {
-        DB_WARNING("size error size:%ld", td.size());
+    if (td.size() < td_actual_size(t)) {
+        DB_WARNING("size error size:%lu, td_actual_size:%lu", td.size(), td_actual_size(t));
         return false;
     }
     return true;
+}
+
+void td_serialize(std::string& td) {
+    if (!is_td_object(td)) {
+        return;
+    }
+    td_histogram_t* t = (td_histogram_t*)td.data();
+    merge(t);
+    td.resize(td_actual_size(t));
+}
+
+void td_normallize(std::string& td) {
+    if (!is_td_object(td)) {
+        return;
+    }
+    td_histogram_t* t = (td_histogram_t*)td.data();
+    td.resize(td_required_buf_size(t->compression));
 }
 
 } // namespace tdigest

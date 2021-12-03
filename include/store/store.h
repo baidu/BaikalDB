@@ -83,6 +83,11 @@ public:
                        pb::StoreRes* response,
                        google::protobuf::Closure* done);
 
+    void async_apply_log_entry(google::protobuf::RpcController* controller,
+                              const pb::BatchStoreReq* request,
+                              pb::BatchStoreRes* response,
+                              google::protobuf::Closure* done);
+
     virtual void query_binlog(google::protobuf::RpcController* controller,
                        const pb::StoreReq* request,
                        pb::StoreRes* response,
@@ -143,7 +148,7 @@ public:
 
     void reverse_merge_thread();
     void ttl_remove_thread();
-    void delay_remove_region_thread();
+    void delay_remove_data_thread();
 
     void flush_memtable_thread();
     void snapshot_thread();
@@ -157,7 +162,7 @@ public:
 
     void process_merge_request(int64_t table_id, int64_t region_id);
     //发送请求到metasever, 分配region_id 和 instance
-    void process_split_request(int64_t table_id, int64_t region_id, bool tail_split, std::string split_key);
+    void process_split_request(int64_t table_id, int64_t region_id, bool tail_split, const std::string& split_key, int64_t key_term);
    
     //将region_id的状态由DOING->IDLE, 在raft_control的done方法中调用
     void reset_region_status(int64_t region_id);
@@ -268,7 +273,7 @@ public:
         DB_WARNING("merge bth check bth join");
         _ttl_bth.join();
         DB_WARNING("ttl bth check bth join");
-        _delay_remove_region_bth.join();
+        _delay_remove_data_bth.join();
         DB_WARNING("delay_remove_region_bth bth check bth join");
         _flush_bth.join();
         DB_WARNING("flush check bth join");
@@ -292,15 +297,16 @@ private:
     Store(): _split_num(0),
              _disk_total("disk_total", 0),
              _disk_used("disk_used", 0),
-             dml_time_cost("dml_time_cost"),
-             select_time_cost("select_time_cost"),
+             raft_total_cost("raft_total_cost", 60),
+             dml_time_cost("dml_time_cost", 60),
+             select_time_cost("select_time_cost", 60),
              heart_beat_count("heart_beat_count") {
         bthread_mutex_init(&_param_mutex, NULL);
     }
     
     int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
-    void update_schema_info(const pb::SchemaInfo& request);
+    void update_schema_info(const pb::SchemaInfo& table, std::map<int64_t, int64_t>* reverse_index_map);
 
     //判断分裂在3600S内是否完成，不完成，则自动删除该region
     void check_region_legal_complete(int64_t region_id);
@@ -340,7 +346,7 @@ private:
     //TTL定期删除过期数据
     Bthread _ttl_bth;
     //延迟删除region
-    Bthread _delay_remove_region_bth;
+    Bthread _delay_remove_data_bth;
 
     //定时flush region meta信息，确保rocksdb的wal正常删除
     Bthread _flush_bth;
@@ -364,6 +370,7 @@ private:
     ExecutionQueue _transfer_leader_queue;
 
     bool _has_prepared_tran = true;
+    bool _has_binlog_region = false;
     BthreadCond _get_tso_cond {-1};
     bthread_mutex_t _param_mutex;
     std::map<std::string, std::string> _param_map;
@@ -383,6 +390,7 @@ public:
     }
     std::unordered_map<int64_t, std::set<uint64_t>> prepared_txns;
     std::set<int64_t>   doing_snapshot_regions;
+    bvar::LatencyRecorder raft_total_cost;
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
     bvar::Adder<int64_t>  heart_beat_count;

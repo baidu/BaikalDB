@@ -24,9 +24,10 @@ public:
                             int64_t recevie_region_id,
                             int64_t request_version);
 
-    static int64_t get_peer_applied_index(const std::string& peer, int64_t region_id);
+    static void get_peer_applied_index(const std::string& peer, int64_t region_id,
+                            int64_t& applied_index, int64_t& dml_latency);
     static void get_peer_snapshot_size(const std::string& peer, int64_t region_id, 
-            uint64_t* data_size, uint64_t* meta_size);
+            uint64_t* data_size, uint64_t* meta_size, int64_t* snapshot_index);
     static int send_query_method(const pb::StoreReq& request, 
                 const std::string& instance, 
                 int64_t receive_region_id);
@@ -34,7 +35,10 @@ public:
                                  pb::StoreRes& response,
                                  const std::string& instance,
                                  int64_t receive_region_id);
-
+    static int send_async_apply_log(const pb::BatchStoreReq& request,
+                                    pb::BatchStoreRes& response,
+                                    const std::string& instance,
+                                    butil::IOBuf* attachment_data);
     static void send_remove_region_method(int64_t drop_region_id, const std::string& instance);
     static int send_init_region_method(const std::string& instance_address, 
                 const pb::InitRegion& init_region_request, 

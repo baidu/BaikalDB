@@ -88,6 +88,7 @@ cc_library(
         "//external:braft",
         "//external:arrow",
         "//external:croaring",
+        "//external:re2",
         "//external:tcmalloc_and_profiler",
         ":cc_baikaldb_internal_proto",
         ":sqlparser",

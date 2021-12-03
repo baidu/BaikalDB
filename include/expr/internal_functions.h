@@ -61,6 +61,7 @@ ExprValue replace(const std::vector<ExprValue>& input);
 ExprValue repeat(const std::vector<ExprValue>& input);
 ExprValue reverse(const std::vector<ExprValue>& input);
 ExprValue locate(const std::vector<ExprValue>& input);
+ExprValue substring_index(const std::vector<ExprValue>& input);
 
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);
@@ -137,6 +138,9 @@ ExprValue rb_rank(const std::vector<ExprValue>& input);
 ExprValue rb_jaccard_index(const std::vector<ExprValue>& input);
 ExprValue tdigest_build(const std::vector<ExprValue>& input);
 ExprValue tdigest_add(const std::vector<ExprValue>& input);
+ExprValue tdigest_merge(const std::vector<ExprValue>& input);
+ExprValue tdigest_total_sum(const std::vector<ExprValue>& input);
+ExprValue tdigest_total_count(const std::vector<ExprValue>& input);
 ExprValue tdigest_percentile(const std::vector<ExprValue>& input);
 ExprValue tdigest_location(const std::vector<ExprValue>& input);
 // other

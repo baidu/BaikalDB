@@ -151,6 +151,7 @@ public:
 
     std::string decode_start_key_string(pb::PrimitiveType field_type, int& pos) const;
     std::string decode_start_key_string(IndexInfo& index) const;
+    std::string decode_start_key_string(const std::vector<pb::PrimitiveType>& types, int32_t dimension) const;
 
     int decode_field(Message* message,
             const Reflection* reflection,
@@ -159,7 +160,6 @@ public:
             int& pos) const;
 
     int skip_field(const FieldInfo& field_info, int& pos) const;
-
 private:
     bool             _full;  //full key or just a prefix
     rocksdb::Slice   _data;

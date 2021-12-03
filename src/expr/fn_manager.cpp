@@ -148,9 +148,10 @@ void FunctionManager::register_operators() {
     register_object_ret("repeat", repeat, pb::STRING);
     register_object_ret("reverse", reverse, pb::STRING);
     register_object_ret("locate", locate, pb::INT32);
+    register_object_ret("substring_index", substring_index, pb::STRING);
 
     // date funcs
-    register_object_ret("unix_timestamp", unix_timestamp, pb::UINT32);
+    register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);
     register_object_ret("from_unixtime", from_unixtime, pb::TIMESTAMP);
     register_object_ret("now", now, pb::DATETIME);
     register_object_ret("sysdate", now, pb::DATETIME);
@@ -225,6 +226,9 @@ void FunctionManager::register_operators() {
     // tdigest funcs
     register_object_ret("tdigest_build", tdigest_build, pb::TDIGEST);
     register_object_ret("tdigest_add", tdigest_add, pb::TDIGEST);
+    register_object_ret("tdigest_merge", tdigest_merge, pb::TDIGEST);
+    register_object_ret("tdigest_total_sum", tdigest_total_sum, pb::DOUBLE);
+    register_object_ret("tdigest_total_count", tdigest_total_count, pb::DOUBLE);
     register_object_ret("tdigest_percentile", tdigest_percentile, pb::DOUBLE);
     register_object_ret("tdigest_location", tdigest_location, pb::DOUBLE);
 

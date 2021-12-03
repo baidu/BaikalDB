@@ -25,19 +25,29 @@
 #include "table_manager.h"
 
 namespace baikaldb {
+
+DECLARE_int64(modify_learner_peer_interval_us);
+
 struct RegionStateInfo { 
     int64_t timestamp; //上次收到该实例心跳的时间戳
     pb::Status status; //实例状态
 };
 struct RegionPeerState {
-    std::map<std::string, pb::PeerStateInfo> legal_peers_state;  // peer in raft-group
-    std::map<std::string, pb::PeerStateInfo> ilegal_peers_state; // peer not in raft-group
+    std::vector<pb::PeerStateInfo> legal_peers_state;  // peer in raft-group
+    std::vector<pb::PeerStateInfo> ilegal_peers_state; // peer not in raft-group
 };
+
+struct RegionLearnerState {
+    std::map<std::string, pb::PeerStateInfo> learner_state_map;
+    TimeCost tc;
+};
+
 typedef std::shared_ptr<RegionStateInfo> SmartRegionStateInfo;
 class RegionManager {
 public:
     ~RegionManager() {
         bthread_mutex_destroy(&_instance_region_mutex);
+        bthread_mutex_destroy(&_instance_learner_mutex);
         bthread_mutex_destroy(&_count_mutex);
         bthread_mutex_destroy(&_doing_mutex);
     }
@@ -58,6 +68,8 @@ public:
     void add_peer_for_store(const std::string& instance, InstanceStateInfo status);
     // default for DEAD
     void delete_all_region_for_store(const std::string& instance, InstanceStateInfo status);
+
+    void remove_all_learner_for_store(const std::string& instance, const std::vector<int64_t>& learner_ids);
     void pre_process_remove_peer_for_store(const std::string& instance,
                                                 pb::Status status, std::vector<pb::RaftControlRequest>& requests); 
     void pre_process_add_peer_for_store(const std::string& instance, pb::Status status,
@@ -72,26 +84,35 @@ public:
     void get_region_info(const std::vector<int64_t>& region_ids,
                          std::vector<SmartRegionInfo>& region_infos);
 
-    void update_leader_status(const pb::StoreHeartBeatRequest* request);
+    void update_leader_status(const pb::StoreHeartBeatRequest* request, int64_t timestamp);
+
     void leader_heartbeat_for_region(const pb::StoreHeartBeatRequest* request, 
                                       pb::StoreHeartBeatResponse* response);
     void check_whether_update_region(int64_t region_id,
+                                     bool peer_changed,
                                      const pb::LeaderHeartBeat& leader_region,
-                                     const SmartRegionInfo& master_region_info,
-                                     const std::set<std::string>& peers_in_heart,
-                                     const std::set<std::string>& peers_in_master);
+                                     const SmartRegionInfo& master_region_info);
     //是否有超过replica_num数量的region, 这种region需要删掉多余的peer
     void check_peer_count(int64_t region_id,
                         const pb::LeaderHeartBeat& leader_region,
-                        const std::set<std::string>& peers_in_heart,
-                        const std::set<std::string>& peers_in_master,
                         std::unordered_map<int64_t, int64_t>& table_replica_nums,
                         std::unordered_map<int64_t, std::string>& table_resource_tags,
                         std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>>& table_replica_dists_maps,
-                        std::unordered_map<std::string, std::string>& peer_resource_tags,
                         std::vector<std::pair<std::string, pb::RaftControlRequest>>& remove_peer_requests,
+                        int32_t table_pk_prefix_dimension,
                         pb::StoreHeartBeatResponse* response);
     
+
+    void add_learner_peer(int64_t region_id,
+        std::vector<std::pair<std::string, pb::InitRegion>>& modify_learner_requests,
+        pb::RegionInfo* master_region_info,
+        const std::string& learner_resource_tag
+    );
+    void remove_learner_peer(int64_t region_id,
+        std::vector<std::pair<std::string, pb::RemoveRegion>>& modify_learner_requests,
+        pb::RegionInfo* master_region_info,
+        const std::vector<std::string>& candicate_remove_learners
+    );
     void check_whether_illegal_peer(const pb::StoreHeartBeatRequest* request,
                 pb::StoreHeartBeatResponse* response);
 
@@ -104,13 +125,39 @@ public:
                     pb::StoreHeartBeatResponse* response,
                     std::set<int64_t>& trans_leader_region_ids);
     
+    void leader_load_balance_on_pk_prefix(const std::string& instance,
+                                          const pb::StoreHeartBeatRequest* request,
+                                          std::unordered_map<int64_t, int64_t>& table_total_instance_counts,
+                                          std::unordered_map<int64_t, std::unordered_map<std::string, std::vector<int64_t>>>& pk_prefix_leader_region_map,
+                                          const std::set<int64_t>& trans_leader_region_ids,
+                                          std::unordered_map<int64_t, int64_t>& table_transfer_leader_count,
+                                          std::unordered_map<std::string, int64_t>& pk_prefix_leader_count,
+                                          pb::StoreHeartBeatResponse* response);
+    
+    void pk_prefix_load_balance(const std::unordered_map<std::string, int64_t>& add_peer_counts,
+                           std::unordered_map<std::string, std::vector<int64_t>>& instance_regions,
+                           const std::string& instance,
+                           const std::string& resource_tag,
+                           std::unordered_map<int64_t, std::string>& logical_rooms,
+                           std::unordered_map<std::string, int64_t>& pk_prefix_average_counts,
+                           std::unordered_map<int64_t, int64_t>& table_average_counts);
+    
     void peer_load_balance(const std::unordered_map<int64_t, int64_t>& add_peer_counts,
                 std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
                 const std::string& instance,
                 const std::string& resouce_tag,
                 std::unordered_map<int64_t, std::string>& logical_rooms,
-                std::unordered_map<int64_t, int64_t>& table_average_counts);
+                std::unordered_map<int64_t, int64_t>& table_average_counts,
+                std::unordered_map<int64_t, int32_t>& table_pk_prefix_dimension,
+                std::unordered_map<std::string, int64_t>& pk_prefix_average_counts);
    
+    void learner_load_balance(const std::unordered_map<int64_t, int64_t>& add_peer_counts,
+                std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
+                const std::string& instance,
+                const std::string& resouce_tag,
+                std::unordered_map<int64_t, std::string>& logical_rooms,
+                std::unordered_map<int64_t, int64_t>& table_average_counts);
+ 
     int load_region_snapshot(const std::string& value);
     void migirate_region_for_store(const std::string& instance);
     void region_healthy_check_function();
@@ -121,12 +168,20 @@ public:
         _region_state_map.clear();
         _region_peer_state_map.clear();
         _instance_region_map.clear();
+        _instance_learner_map.clear();
         _instance_leader_count.clear();
+        _instance_pk_prefix_leader_count.clear();
+        _remove_region_peer_on_pk_prefix.clear();
         _incremental_region_info.clear();
+        _region_learner_peer_state_map.clear();
     }
 
     void clear_region_peer_state_map() {
         _region_peer_state_map.clear();
+    }
+
+    void clear_region_learner_peer_state_map() {
+        _region_learner_peer_state_map.clear();
     }
 
 public:
@@ -155,6 +210,25 @@ public:
                 region_ids.push_back(region_id);
             }
         }
+    }
+    void get_learner_ids(const std::string& instance, std::vector<int64_t>& region_ids) {
+        BAIDU_SCOPED_LOCK(_instance_learner_mutex);
+        if (_instance_learner_map.find(instance) ==  _instance_learner_map.end()) {
+            return;
+        }
+        for (auto& table_ids : _instance_learner_map[instance]) {
+            for (auto& region_id : table_ids.second) {
+                region_ids.emplace_back(region_id);
+            }
+        }
+    }
+    void get_region_ids(const std::string& instance, 
+            std::unordered_map<int64_t, std::set<int64_t>>& table_region_ids) {
+        BAIDU_SCOPED_LOCK(_instance_region_mutex);
+        if (_instance_region_map.find(instance) ==  _instance_region_map.end()) {
+            return;
+        }
+        table_region_ids = _instance_region_map[instance];
     }
     void print_region_ids(const std::string& instance) {
         BAIDU_SCOPED_LOCK(_instance_region_mutex);
@@ -245,6 +319,19 @@ public:
                 }
             }
          }
+         {
+            BAIDU_SCOPED_LOCK(_instance_learner_mutex);
+            if (region_ptr != nullptr) {
+                for (auto& learner : region_ptr->learners()) {
+                    _instance_learner_map[learner][table_id].erase(region_id);
+                }
+            }
+            for (auto& learner : region_info.learners()) {
+                DB_DEBUG("set region learner instance %s table_id %ld region_id %ld", 
+                    learner.c_str(), table_id, region_id);
+                _instance_learner_map[learner][table_id].insert(region_id);
+            }
+         }
         auto ptr_region = std::make_shared<pb::RegionInfo>(region_info);
         _region_info_map.set(region_id, ptr_region);
     }
@@ -295,11 +382,37 @@ public:
                           result_table_ids, result_start_keys, result_end_keys);
     }
    
-    void set_instance_leader_count(const std::string& instance, const std::unordered_map<int64_t, int64_t>& table_leader_count) {
+    void set_instance_leader_count(const std::string& instance,
+                                   const std::unordered_map<int64_t, int64_t>& table_leader_count,
+                                   const std::unordered_map<std::string, int64_t>& pk_prefix_leader_count) {
         BAIDU_SCOPED_LOCK(_count_mutex);
         _instance_leader_count[instance] = table_leader_count;
+        _instance_pk_prefix_leader_count[instance] = pk_prefix_leader_count;
     }
-
+    int64_t get_pk_prefix_leader_count(const std::string& instance, const std::string& pk_prefix_key) {
+        BAIDU_SCOPED_LOCK(_count_mutex);
+        if (_instance_pk_prefix_leader_count.find(instance) == _instance_pk_prefix_leader_count.end()
+                || _instance_pk_prefix_leader_count[instance].count(pk_prefix_key) == 0) {
+            return 0;
+        }
+        return _instance_pk_prefix_leader_count[instance][pk_prefix_key];
+    }
+    void add_remove_peer_on_pk_prefix(const int64_t region_id, const std::string& logical_room) {
+        BAIDU_SCOPED_LOCK(_count_mutex);
+        _remove_region_peer_on_pk_prefix[region_id] = logical_room;
+    }
+    bool need_remove_peer_on_pk_prefix(const int64_t region_id, std::string& logical_room) {
+        BAIDU_SCOPED_LOCK(_count_mutex);
+        if (_remove_region_peer_on_pk_prefix.count(region_id) <= 0) {
+            return false;
+        }
+        logical_room = _remove_region_peer_on_pk_prefix[region_id];
+        return true;
+    }
+    void clear_remove_peer_on_pk_prefix(const int64_t region_id) {
+        BAIDU_SCOPED_LOCK(_count_mutex);
+        _remove_region_peer_on_pk_prefix.erase(region_id);
+    }
     int64_t get_leader_count(const std::string& instance, int64_t table_id) {
         BAIDU_SCOPED_LOCK(_count_mutex);
         if (_instance_leader_count.find(instance) == _instance_leader_count.end()
@@ -307,6 +420,17 @@ public:
             return 0;
         }
         return _instance_leader_count[instance][table_id];
+    }
+    int64_t get_leader_count(const std::string& instance) {
+        BAIDU_SCOPED_LOCK(_count_mutex);
+        if (_instance_leader_count.find(instance) == _instance_leader_count.end()) {
+            return 0;
+        }
+        int64_t cnt = 0;
+        for (auto& pair :  _instance_leader_count[instance]) {
+            cnt += pair.second;
+        }
+        return cnt;
     }
     void add_leader_count(const std::string& instance, int64_t table_id) {
         BAIDU_SCOPED_LOCK(_count_mutex);
@@ -334,31 +458,70 @@ public:
     ThreadSafeMap<int64_t, RegionPeerState>&  region_peer_state_map() {
         return _region_peer_state_map;
     }
+
+    bool can_modify_learner(int64_t region_id) {
+        bool can_modify_learner = false;
+        bool exist = _region_learner_peer_state_map.init_if_not_exist_else_update(
+            region_id, false, [&can_modify_learner](RegionLearnerState& state) {
+            DB_DEBUG("check can add learner time %ld", state.tc.get_time());
+            can_modify_learner = state.tc.get_time() > FLAGS_modify_learner_peer_interval_us;
+            if (can_modify_learner) {
+                state.tc.reset();
+            }
+        });
+
+        return !exist || can_modify_learner;
+    }
+
+    bool get_learner_health_status(const std::string& learner, int64_t region_id) {
+        bool status = true;
+        _region_learner_peer_state_map.update(region_id, [&status, &learner](RegionLearnerState& rls) {
+            auto learn_iter = rls.learner_state_map.find(learner);
+            if (learn_iter != rls.learner_state_map.end()) {
+                status = (learn_iter->second.peer_status() == pb::STATUS_NORMAL);
+            }
+        });
+        return status;
+    }
     void put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos);
     bool check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index); 
     
+    void send_add_learner_request(const std::vector<std::pair<std::string, pb::InitRegion>>& requests);
+    
 private:
     RegionManager(): _max_region_id(0) {
+        _doing_recovery = false;
+        _last_opt_times = butil::gettimeofday_us();
         bthread_mutex_init(&_instance_region_mutex, NULL);
+        bthread_mutex_init(&_instance_learner_mutex, NULL);
         bthread_mutex_init(&_count_mutex, NULL);
         bthread_mutex_init(&_doing_mutex, NULL);
     }
 private:
     int64_t                                             _max_region_id;
-    
+    int64_t                                             _last_opt_times;
+    std::atomic<bool>                                   _doing_recovery;
     //region_id 与table_id的映射关系, key:region_id, value:table_id
     ThreadSafeMap<int64_t, SmartRegionInfo>             _region_info_map;
     
     bthread_mutex_t                                     _instance_region_mutex;
+    bthread_mutex_t                                     _instance_learner_mutex;
     //实例和region_id的映射关系，在需要主动发送迁移实例请求时需要
     std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_region_map;
+    std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_learner_map;
 
     ThreadSafeMap<int64_t, RegionStateInfo>        _region_state_map;
     ThreadSafeMap<int64_t, RegionPeerState>        _region_peer_state_map;
+    ThreadSafeMap<int64_t, RegionLearnerState>        _region_learner_peer_state_map;
     //该信息只在meta_server的leader中内存保存, 该map可以单用一个锁
     bthread_mutex_t                                     _count_mutex;
     std::unordered_map<std::string, std::unordered_map<int64_t, int64_t>> _instance_leader_count;
+    // instance_tableID -> pk_prefix -> leader region count
+    std::unordered_map<std::string, std::unordered_map<std::string, int64_t>> _instance_pk_prefix_leader_count;
+    // region_id -> logical_room，处理store心跳发现大户不均，标记需要迁移的region_id及其候选store需要在的logical room
+    // check_peer_count发现region_id在map里，直接按照大户的维度删除peer数最多的candidate，否则按照table维度删除peer
+    std::unordered_map<int64_t, std::string>            _remove_region_peer_on_pk_prefix;
 
     bthread_mutex_t                                     _doing_mutex;
     std::set<std::string>                               _doing_migrate; 

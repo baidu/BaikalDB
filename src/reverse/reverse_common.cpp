@@ -14,6 +14,7 @@
 
 #include "reverse_common.h"
 #include <cctype>
+#include <unordered_set>
 #include <fstream>
 #include <gflags/gflags.h>
 #include "proto/reverse.pb.h"
@@ -65,13 +66,13 @@ int Tokenizer::init() {
     }
     return 0;
 }
-
 #ifdef BAIDU_INTERNAL
 drpc::NLPCClient* wordrank_client;
 drpc::NLPCClient* wordseg_client;
 drpc::NLPCClient* wordweight_client;
 
-int Tokenizer::wordweight(std::string word, std::map<std::string, float>& term_map, bool is_filter) {
+int Tokenizer::wordweight(std::string word, std::map<std::string, float>& term_map, 
+        bool is_filter, bool is_same_weight) {
     if (word.empty()) {
         return 0;
     }
@@ -107,6 +108,12 @@ int Tokenizer::wordweight(std::string word, std::map<std::string, float>& term_m
             term_map[term] += t->weight();
         }
     }
+    if (is_same_weight && term_map.size() > 0) {
+        float weight = 1.0 / term_map.size();
+        for (auto& pair : term_map) {
+            pair.second = weight;
+        }
+    }
     return 0;   
 }
 
@@ -137,14 +144,16 @@ int Tokenizer::wordrank(std::string word, std::map<std::string, float>& term_map
         term = s_output->nlpc_trunks_pb()[i]->buffer();
         //DB_WARNING("term rank:%s", term.c_str());
         auto it = term_map.find(term);
+        float weight = s_output->nlpc_trunks_pb()[i]->weight();
         if (it == term_map.end()) {
             int32_t rank = s_output->nlpc_trunks_pb()[i]->rank();
-            float weight = s_output->nlpc_trunks_pb()[i]->weight();
             if (rank == 0) {
                 continue;
             }
             term_map[term] = weight;
-        } 
+        } else {
+            term_map[term] += weight;
+        }
     }
     return 0;
 }
@@ -187,15 +196,54 @@ int Tokenizer::wordseg_basic(std::string word, std::map<std::string, float>& ter
             term_map[term] = 0;
         } 
     }
+    if (term_map.size() > 0) {
+        float weight = 1.0 / term_map.size();
+        for (auto& pair : term_map) {
+            pair.second = weight;
+        }
+    }
     return 0;
 }
+
 int Tokenizer::wordrank_q2b_icase(std::string word, std::map<std::string, float>& term_map) {
     q2b_tolower_gbk(word);
     return wordrank(word, term_map);
 }
 
-#endif
+int Tokenizer::wordrank_q2b_icase_unlimit(std::string word, std::map<std::string, float>& term_map) {
+    std::vector<Tokenizer::SeperateIndex> indexs = q2b_tolower_gbk_with_index(word);
+    size_t index_size = indexs.size();
+    size_t current_char = 0;
+    // wordrank 切出 256个 term后会停止，设置可切除长度为 512，超出的部分，需要根据标点进行细分。
+    const static size_t MAX_SEPARATOR_SIZE = 512;
+    for (size_t index = 0; index < index_size; index++) {
+        size_t current_index = index;
+        while (indexs[index].type != SeperateType::ST_MAJOR && index < index_size) {
+            index++;
+        }
+        if (indexs[index].index - current_char > MAX_SEPARATOR_SIZE) {
+            for (; current_index <= index; current_index++) {
+                if (current_index == index || indexs[current_index + 1].index - current_char + 1 > MAX_SEPARATOR_SIZE) {
+                    DB_DEBUG("get wordrank str : %s", word.substr(current_char, indexs[current_index].index - current_char + 1).c_str());
+                    if (wordrank(word.substr(current_char, indexs[current_index].index - current_char + 1), term_map) != 0) {
+                        return -1;
+                    }
+                    current_char = indexs[current_index].index;
+                }
+            }
+        } else {
+            DB_DEBUG("get wordrank str : %s", word.substr(current_char, indexs[index].index - current_char + 1).c_str());
+            if (wordrank(word.substr(current_char, indexs[index].index - current_char + 1), term_map) != 0) {
+                return -1;
+            }
+        }
 
+        current_char = indexs[index].index;
+    }
+    return 0;
+}
+
+#endif
 int Tokenizer::q2b_tolower_gbk(std::string& word) {
     size_t slow = 0;
     size_t fast = 0;
@@ -220,6 +268,51 @@ int Tokenizer::q2b_tolower_gbk(std::string& word) {
     return 0;
 }
 
+std::vector<Tokenizer::SeperateIndex> Tokenizer::q2b_tolower_gbk_with_index(std::string& word) {
+    std::vector<Tokenizer::SeperateIndex> sep_indexs;
+    sep_indexs.reserve(10);
+    const static std::unordered_set<char> MAJOR_SEP {'!', '.', ';', '?'};
+    size_t slow = 0;
+    size_t fast = 0;
+    while (fast < word.size()) {
+        if ((word[fast] & 0x80) != 0) {
+            if (_q2b_gbk.count(word.substr(fast, 2)) == 1) {
+                word[slow++] = _q2b_gbk[word.substr(fast++, 2)][0];
+                if (std::ispunct(word[slow - 1])) {
+                    DB_DEBUG("insert index %zd", slow - 1);
+                    if (MAJOR_SEP.count(word[slow - 1]) == 1) {
+                        sep_indexs.emplace_back(slow - 1, SeperateType::ST_MAJOR);
+                    } else {
+                        sep_indexs.emplace_back(slow - 1, SeperateType::ST_MINOR);
+                    }
+                }
+                fast++;
+            } else {
+                word[slow++] = word[fast++];
+                word[slow++] = word[fast++];
+            }
+        } else {
+            if (isupper(word[fast])) {
+                word[slow++] = ::tolower(word[fast++]);
+            } else {
+                word[slow++] = word[fast++];
+            }
+        }
+    }
+    word.resize(slow);
+    if (slow == 0) {
+        return sep_indexs;
+    }
+    if (sep_indexs.size() == 0) {
+        sep_indexs.emplace_back(slow - 1, SeperateType::ST_MAJOR);
+    } else {
+        if (sep_indexs.back().index != slow - 1) {
+            sep_indexs.emplace_back(slow - 1, SeperateType::ST_MAJOR);
+        }
+    }
+    return sep_indexs;
+}
+
 int Tokenizer::simple_seg_gbk(std::string word, uint32_t word_count, std::map<std::string, float>& term_map) {
     if (word.empty()) {
         return 0;
@@ -227,6 +320,7 @@ int Tokenizer::simple_seg_gbk(std::string word, uint32_t word_count, std::map<st
     uint32_t slow_pos = 0;
     uint32_t fast_pos = 0;
     uint32_t i = 0;
+    // 切第一个词
     for (uint32_t j = 0; i < word.size() && j < word_count; i++, j++) {
         if ((word[i] & 0x80) != 0) {
             i++;
@@ -236,8 +330,9 @@ int Tokenizer::simple_seg_gbk(std::string word, uint32_t word_count, std::map<st
             }
         }
     }
+
     if (i >= word.size()) {
-        term_map[word] = 0;
+        term_map[word] = 1.0;
         return 0;
     } else {
         fast_pos = i;
@@ -268,6 +363,13 @@ int Tokenizer::simple_seg_gbk(std::string word, uint32_t word_count, std::map<st
         if (it == term_map.end()) {
             term_map[term] = 0;
         } 
+    }
+
+    if (term_map.size() > 0) {
+        float weight = 1.0 / term_map.size();
+        for (auto& pair : term_map) {
+            pair.second = weight;
+        }
     }
     return 0;
 }
@@ -333,9 +435,14 @@ int Tokenizer::es_standard_gbk(std::string word, std::map<std::string, float>& t
     if (!term.empty()) {
         term_map[term] = 0;
     }
+    if (term_map.size() > 0) {
+        float weight = 1.0 / term_map.size();
+        for (auto& pair : term_map) {
+            pair.second = weight;
+        }
+    }
     return 0;
 }
-
 
 void Tokenizer::split_str_gbk(const std::string& word, std::vector<std::string>& split_word, char delim) {
     if (word.empty()) {

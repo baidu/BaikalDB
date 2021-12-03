@@ -156,6 +156,23 @@ std::string TableKey::decode_start_key_string(IndexInfo& index) const {
     }
     return start_key_string;
 }
+    
+std::string TableKey::decode_start_key_string(const std::vector<pb::PrimitiveType>& types, int32_t dimension) const {
+    std::string start_key_string;
+    int pos = 0;
+    for (auto& field : types) {
+        start_key_string += decode_start_key_string(field, pos);
+        start_key_string += ",";
+        dimension--;
+        if (dimension <= 0) {
+            break;
+        }
+    }
+    if (start_key_string.size() > 0) {
+        start_key_string.pop_back();
+    }
+    return start_key_string;
+}
 
 //TODO: secondary key
 int TableKey::decode_field(Message* message,

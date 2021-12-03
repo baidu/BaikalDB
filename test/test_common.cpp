@@ -15,6 +15,8 @@
 #include <gtest/gtest.h>
 #include <climits>
 #include <iostream>
+#include <istream>
+#include <streambuf>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -27,6 +29,13 @@
 #else
 #include <json2pb/pb_to_json.h>
 #endif
+#ifdef BAIDU_INTERNAL
+#include <baidu/rpc/channel.h>
+#include <baidu/rpc/selective_channel.h>
+#else
+#include <brpc/channel.h>
+#include <brpc/selective_channel.h>
+#endif
 #include <proto/meta.interface.pb.h>
 #include "rapidjson.h"
 #include "re2/re2.h"
@@ -35,14 +44,89 @@
 #include "common.h"
 #include "password.h"
 #include "schema_factory.h"
+#include "transaction.h"
 
 int main(int argc, char* argv[])
 {
+    google::ParseCommandLineFlags(&argc, &argv, true);
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
 
 namespace baikaldb {
+TEST(test_channel, channel) {
+    int64_t aa = 3600 * 1000 * 1000;
+    int64_t bb = 3600 * 1000 * 1000L;
+    std::cout << aa << ":" << bb << std::endl;
+    char buf[100] = "20210907\n";
+    std::streambuf sbuf;
+    sbuf.setg(buf, buf, buf + 8);
+    std::istream f(&sbuf);
+    std::string line;
+    std::getline(f, line);
+    std::cout << "size:" << line.size() << " " << f.eof() << "\n";
+    line.clear();
+    std::getline(f, line);
+    std::cout << "size:" << line.size() << " " << f.eof() << "\n";
+    TimeCost cost;
+    for (int i = 0; i < 100000; i++) {
+        brpc::Channel channel;
+        brpc::ChannelOptions option;
+        option.max_retry = 1;
+        option.connect_timeout_ms = 1000;
+        option.timeout_ms = 1000000;
+        std::string addr = "10.77.22.157:8225";
+        auto ret = channel.Init(addr.c_str(), &option);
+        brpc::Controller cntl;
+        if (ret != 0) {
+            DB_WARNING("error");
+        }
+    }
+    DB_WARNING("normal:%ld,%ld,%s", cost.get_time(),butil::gettimeofday_us(),
+        timestamp_to_str(butil::gettimeofday_us()/1000/1000).c_str());
+    cost.reset();
+    for (int i = 0; i < 100000; i++) {
+        brpc::SelectiveChannel channel;
+        brpc::ChannelOptions option;
+        option.max_retry = 1;
+        option.connect_timeout_ms = 1000;
+        option.timeout_ms = 1000000;
+        option.backup_request_ms = 100000;
+        auto ret = channel.Init("rr", &option);
+        brpc::Controller cntl;
+        if (ret != 0) {
+            DB_WARNING("error");
+        }
+        std::string addr = "10.77.22.157:8225";
+        brpc::Channel* sub_channel1 = new brpc::Channel;
+        sub_channel1->Init(addr.c_str(), &option);
+        channel.AddChannel(sub_channel1, NULL);
+    }
+    DB_WARNING("selective1:%ld", cost.get_time());
+    cost.reset();
+    for (int i = 0; i < 100000; i++) {
+        brpc::SelectiveChannel channel;
+        brpc::ChannelOptions option;
+        option.max_retry = 1;
+        option.connect_timeout_ms = 1000;
+        option.timeout_ms = 1000000;
+        option.backup_request_ms = 100000;
+        auto ret = channel.Init("rr", &option);
+        brpc::Controller cntl;
+        if (ret != 0) {
+            DB_WARNING("error");
+        }
+        std::string addr = "10.77.22.157:8225";
+        brpc::Channel* sub_channel1 = new brpc::Channel;
+        sub_channel1->Init(addr.c_str(), &option);
+        channel.AddChannel(sub_channel1, NULL);
+        brpc::Channel* sub_channel2 = new brpc::Channel;
+        addr = "10.77.22.37:8225";
+        sub_channel2->Init(addr.c_str(), &option);
+        channel.AddChannel(sub_channel2, NULL);
+    }
+    DB_WARNING("selective2:%ld", cost.get_time());
+}
 TEST(test_exmaple, case_all) {
     int a = 10;
     int& b = a;
@@ -269,10 +353,29 @@ TEST(BvarMap, bvarmap) {
     bvar::Adder<BvarMap> bm;
     std::map<int32_t, int> field_range_type;
     //bm << BvarMap(std::make_pair("abc", 1));
-    bm << BvarMap("abc", 1, 101, 10, 1, 5, 3, field_range_type, 1);
-    bm << BvarMap("abc", 4, 102, 20, 2, 6, 2, field_range_type, 1);
-    bm << BvarMap("bcd", 5, 103, 30, 3, 7, 1, field_range_type, 1);
+    bm << BvarMap("abc", 1, 101, 101, 10, 1, 5, 3, 1, field_range_type, 1);
+    bm << BvarMap("abc", 4, 102, 102, 20, 2, 6, 2, 1, field_range_type, 1);
+    bm << BvarMap("bcd", 5, 103, 103, 30, 3, 7, 1, 1, field_range_type, 1);
     std::cout << bm.get_value();
+}
+
+TEST(LatencyOnly, LatencyOnly) {
+    LatencyOnly cost;
+    bvar::LatencyRecorder cost2;/*
+    for (int i = 0; i < 10; i++) {
+        for (int j = 0; j <= i; j++) {
+            cost << j * 10;
+            cost2 << j * 10;
+        }
+        std::cout << "i:" << i << std::endl;
+        std::cout << "qps:" << cost.qps() << " vs " << cost2.qps() << std::endl;
+        std::cout << "latency:" << cost.latency() << " vs " << cost2.latency() << std::endl;
+        std::cout << "qps10:" << cost.qps(10) << " vs " << cost2.qps(10) << std::endl;
+        std::cout << "latency10:" << cost.latency(10) << " vs " << cost2.latency(10) << std::endl;
+        std::cout << "qps5:" << cost.qps(5)<< " vs " << cost2.qps(5) << std::endl;
+        std::cout << "latency5:" << cost.latency(5) << " vs " << cost2.latency(5) << std::endl;
+        bthread_usleep(1000000);
+    }*/
 }
 
 TEST(test_gbk_regex, match) {
@@ -337,6 +440,88 @@ TEST(gflags_test, case_all) {
     update_param("gflags_test_double", "600");
     update_param("gflags_test_int32", "600");
     update_param("gflags_test_bool", "false");
+}
+
+TEST(bns_to_meta_bns_test, case_all) {
+     static std::map<std::string, std::string> mapping = {
+        {"0.opera-adp-baikalStore-000-ct.FENGCHAO.dbl",            "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
+        {"31.opera-adp-baikalStore-000-nj.FENGCHAO.njjs",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
+        {"28.opera-atomkv-baikalStore-000-bj.FENGCHAO.bjhw",       "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},
+        {"2.opera-bigtree-baikalStore-000-bj.FENGCHAO.bjyz",       "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},
+        {"5.opera-coffline-baikalStore-000-mix.FENGCHAO.dbl",      "group.opera-coffline-baikalMeta-000-bj.FENGCHAO.all"},
+        {"83.opera-p1-baikalStore-000-bj.HOLMES.bjhw",             "group.opera-online-baikalMeta-000-bj.HOLMES.all"},
+        {"45.opera-xinghe2-baikalStore-000-bj.DMP.bjhw",           "group.opera-online-baikalMeta-000-bj.DMP.all"},
+        {"0.opera-adp-baikaldb-000-bj.FENGCHAO.bjyz",              "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
+        {"0.opera-atomkv-baikaldb-000-bj.FENGCHAO.bjyz",           "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},
+        {"group.opera-atomkv-baikaldb-000-bj.FENGCHAO.all",        "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},
+        {"group.opera-detect-baikaldb-000-gz.FENGCHAO.all",        "group.opera-detect-baikalMeta-000-bj.FENGCHAO.all"},
+        {"group.opera-e0-baikaldb-000-ct.FENGCHAO.all",            "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all"},
+        {"1.opera-aladdin-baikaldb-000-bj.FENGCHAO.dbl",           "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
+        {"group.opera-aladdin-baikaldb-000-nj.FENGCHAO.all",       "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
+        {"7.opera-aladdin-baikalStore-000-mix.FENGCHAO.gzhxy",     "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
+        {"0.opera-hmkv-baikalStore-000-yq.FENGCHAO.yq012",         "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
+        {"85.opera-hm-baikalStore-000-yq.FENGCHAO.yq013",          "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
+        {"group.opera-hm-baikalStore-000-yq.FENGCHAO.all.serv",    "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
+        {"1.opera-adp-baikalBinlog-000-bj.FENGCHAO.bjhw",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
+        {"group.opera-adp-baikalBinlog-000-bj.FENGCHAO.all",       "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
+    };
+
+    for (const auto& it : mapping) {
+        std::string meta_bns = store_or_db_bns_to_meta_bns(it.first);
+        DB_NOTICE("bns to meta_bns: %s => %s", it.first.c_str(), meta_bns.c_str());
+        ASSERT_EQ(meta_bns, it.second);
+    }
+
+}
+
+DEFINE_int32(bvar_test_total_time_s, 0, "");
+DEFINE_int32(bvar_test_loop_time_ms, 100, "");
+DEFINE_int32(bvar_test_interaval_time_s, 60, "");
+TEST(bvar_window_test, bvar) {
+    bvar::Adder<int> count;
+    bvar::Window<bvar::Adder<int>> window_count(&count, FLAGS_bvar_test_interaval_time_s);
+    TimeCost time;
+    int i = 0;
+    while (true) {
+        if (time.get_time() > FLAGS_bvar_test_total_time_s * 1000 * 1000) {
+            break;
+        }
+
+        i++;
+        count << 1;
+        DB_WARNING("window_count: %d, i : %d, time: %ld", window_count.get_value(), i, time.get_time());
+        bthread_usleep(FLAGS_bvar_test_loop_time_ms * 1000);
+    }
+
+}
+DEFINE_int64(ttl_time_us, 60, "");
+TEST(ttl_test, ttl) {
+    int64_t now_time = butil::gettimeofday_us();
+    uint64_t ttl_storage = ttl_encode(now_time);
+    char* data = reinterpret_cast<char*>(&ttl_storage);
+    DB_WARNING("now_time: %ld, ttl_storage: %lu, 0x%8x%8x%8x%8x%8x%8x%8x%8x,", now_time, ttl_storage, 
+        data[0] & 0xFF, data[1]& 0xFF, data[2]& 0xFF, data[3]& 0xFF, data[4]& 0xFF, data[5]& 0xFF, data[6]& 0xFF, data[7]& 0xFF);
+
+    now_time = FLAGS_ttl_time_us;
+    ttl_storage = ttl_encode(now_time);
+    data = reinterpret_cast<char*>(&ttl_storage);
+
+    rocksdb::Slice key_slice;
+    key_slice.data_ = reinterpret_cast<const char*>(&ttl_storage);
+    key_slice.size_ = sizeof(uint64_t);
+    TupleRecord tuple_record(key_slice);
+    tuple_record.verification_fields(0x7FFFFFFF);
+
+    
+    DB_WARNING("now_time: %ld, ttl_storage: %lu 0x%8x%8x%8x%8x%8x%8x%8x%8x", now_time, ttl_storage,
+        data[0] & 0xFF, data[1]& 0xFF, data[2]& 0xFF, data[3]& 0xFF, data[4]& 0xFF, data[5]& 0xFF, data[6]& 0xFF, data[7]& 0xFF);
+    data = reinterpret_cast<char*>(&now_time);
+    DB_WARNING("now_time: %ld, 0x%8x%8x%8x%8x%8x%8x%8x%8x", now_time, 
+        data[0] & 0xFF, data[1]& 0xFF, data[2]& 0xFF, data[3]& 0xFF, data[4]& 0xFF, data[5]& 0xFF, data[6]& 0xFF, data[7]& 0xFF);
+    uint64_t encode = KeyEncoder::to_endian_u64(0xFFFFFFFF00000000);
+    data = reinterpret_cast<char*>(&encode);
+    DB_WARNING("encode: %lu, 0x%8x%8x%8x%8x%8x%8x%8x%8x", encode, 
+        data[0] & 0xFF, data[1]& 0xFF, data[2]& 0xFF, data[3]& 0xFF, data[4]& 0xFF, data[5]& 0xFF, data[6]& 0xFF, data[7]& 0xFF);
 }
 
 

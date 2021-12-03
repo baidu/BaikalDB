@@ -46,10 +46,12 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         return -1;
     }
 
-    int64_t ttl_duration = _row_ttl_duration > 0 ? _row_ttl_duration : _table_info->ttl_duration;
+    int64_t ttl_duration = _row_ttl_duration > 0 ? _row_ttl_duration : _table_info->ttl_info.ttl_duration_s;
     if (ttl_duration > 0) {
-        _ttl_timestamp_us = butil::gettimeofday_us() + ttl_duration * 1000 * 1000;
+        _ttl_timestamp_us = butil::gettimeofday_us() + ttl_duration * 1000 * 1000LL;
     }
+    DB_DEBUG("table_id: %ld, region_id: %ld, _row_ttl_duration: %ld, table ttl duration: %ld", 
+        _table_id, _region_id, _row_ttl_duration, _table_info->ttl_info.ttl_duration_s);
     bool ttl = ttl_duration > 0;
 
     if (_global_index_id != 0) {
@@ -261,6 +263,11 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 }
             } else {
                 DB_WARNING_STATE(state, "insert row rocksdb error, index:%ld, ret:%d", _table_id, ret);
+                if (ret == -5) {
+                    state->error_code = ER_LOCK_WAIT_TIMEOUT;
+                    state->error_msg << "Lock '" << 
+                        old_record->get_index_value(*_pri_info) << "' for key 'PRIMARY' Timeout";
+                }
                 return -1;
             }
         }
@@ -274,9 +281,14 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         //DB_DEBUG("dml_insert_record prime+index string[%s] state[%s] index_id[%ld] index_name[%s] region_%ld", 
         //    record->to_string().c_str(), pb::IndexState_Name(index_state).c_str(), info.id, info.name.c_str(), _region_id);
 
-        if (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
-            index_state != pb::IS_WRITE_LOCAL) {
-            DB_DEBUG("index_selector skip index [%ld] state [%s] ", 
+        if (!_ddl_need_write && (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
+            index_state != pb::IS_WRITE_LOCAL)) {
+            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
+                info.id, pb::IndexState_Name(index_state).c_str());
+            continue;
+        } else if (_ddl_need_write && info_ptr->id != _ddl_index_id && (index_state == pb::IS_WRITE_ONLY &&
+            index_state == pb::IS_WRITE_LOCAL)) {
+            DB_DEBUG("DDL_LOG index_selector skip stale index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -329,6 +341,11 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             if (_need_ignore) {
                 return 0;
             }
+            if (ret == -5) {
+                state->error_code = ER_LOCK_WAIT_TIMEOUT;
+                state->error_msg << "Lock '" << 
+                     old_record->get_index_value(info) << "' for key '" << info.short_name << "' Timeout";
+            }
             DB_WARNING_STATE(state, "insert rocksdb failed, index:%ld, ret:%d", info.id, ret);
             return -1;
         }
@@ -342,9 +359,14 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             continue;
         }
         auto index_state = info.state;
-        if (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
-            index_state != pb::IS_WRITE_LOCAL) {
+        if (!_ddl_need_write && (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
+            index_state != pb::IS_WRITE_LOCAL)) {
             DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
+                info.id, pb::IndexState_Name(index_state).c_str());
+            continue;
+        } else if (_ddl_need_write && info_ptr->id != _ddl_index_id && (index_state == pb::IS_WRITE_ONLY &&
+            index_state == pb::IS_WRITE_LOCAL)) {
+            DB_DEBUG("DDL_LOG index_selector skip stale index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         }

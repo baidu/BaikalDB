@@ -38,6 +38,7 @@ enum OpType {
     // fake op
     OP_UNION                                = 51;
     OP_LOAD                                 = 52;
+    OP_UPDATE_PRIMARY_TIMESTAMP             = 53; // 大事务更新primary reigon时间戳，防止超时回滚
     
     // for binlog
     OP_READ_BINLOG                          = 60; //read     binlog
@@ -94,8 +95,8 @@ enum OpType {
     OP_CLOSE_MIGRATE                        = 158; //迁移跟其他开关不同的是，默认情况下是开启的
     OP_OPEN_MIGRATE                         = 159;
     OP_UPDATE_SPLIT_LINES                   = 160; //修改表的region_split_lines, 调整分裂阈值
-    OP_SET_FULL                             = 161; //迁移跟其他开关不同的是，默认情况下是开启的
-    OP_SET_NO_FULL                          = 162;
+    OP_SET_INSTANCE_STATUS                  = 161; //修改各种实例状态
+    //OP_SET_NO_FULL                          = 162;
     OP_MODIFY_RESOURCE_TAG                  = 163;
     OP_MERGE_REGION                         = 164; //Region请求merge,serch dst region
     OP_UPDATE_MERGE_SWITCH                  = 165; //merge switch
@@ -115,9 +116,13 @@ enum OpType {
     OP_SET_INDEX_HINT_STATUS                = 179; //设置索引提示状态
     OP_UPDATE_TTL_DURATION                  = 180; //修改ttl_duration，只有ttl表才能改
     OP_UPDATE_INSTANCE_PARAM                = 181;
-    OP_UPDATE_GLOBAL_REGION_DDL_WORK        = 182;
+    OP_UPDATE_INDEX_REGION_DDL_WORK         = 182;
     OP_SUSPEND_DDL_WORK                     = 183; 
     OP_RESTART_DDL_WORK                     = 184; 
     OP_REMOVE_GLOBAL_INDEX_DATA             = 185;
     OP_UPDATE_MAIN_LOGICAL_ROOM             = 186;
+    OP_ADD_LEARNER                          = 187;
+    OP_DROP_LEARNER                         = 188;
+    OP_OPEN_NETWORK_SEGMENT_BALANCE         = 189; // 打开一个resource tag的按网段进行balance
+    OP_CLOSE_NETWORK_SEGMENT_BALANCE        = 190; // 关闭一个resource tag的按网段进行balance
 };

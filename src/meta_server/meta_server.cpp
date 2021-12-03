@@ -36,22 +36,8 @@ DEFINE_int32(meta_port, 8010, "Meta port");
 DEFINE_int32(meta_replica_number, 3, "Meta replica num");
 DEFINE_int32(concurrency_num, 40, "concurrency num, default: 40");
 DEFINE_int64(region_apply_raft_interval_ms, 1000LL,
-            "region apply raft interval, defalut(1s)");
+            "region apply raft interval, default(1s)");
 DECLARE_int64(flush_memtable_interval_us);
-#ifdef BAIDU_INTERNAL
-// for migrate
-DEFINE_string(ps_meta_bns, "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all", "");
-DEFINE_string(e0_meta_bns, "group.opera-e0-baikalMeta-000-yz.FENGCHAO.all", "");
-DEFINE_string(holmes_meta_bns, "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all", "");
-DEFINE_string(holmes_product_meta_bns, "group.opera-online-baikalMeta-000-bj.HOLMES.all", "");
-DEFINE_string(dmp_meta_bns, "group.opera-online-baikalMeta-000-bj.DMP.all", "");
-DEFINE_string(coffline_meta_bns, "group.opera-coffline-baikalMeta-000-bj.FENGCHAO.all", "");
-DEFINE_string(detect_meta_bns, "group.opera-detect-baikalMeta-000-bj.FENGCHAO.all", "");
-DEFINE_string(pinpai_meta_bns, "group.opera-pinpai-baikalMeta-000-cm.FENGCHAO.all", "");
-DEFINE_string(aladdin_meta_bns, "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all", "");
-DEFINE_string(atomkv_meta_bns, "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all", "");
-DEFINE_string(qa_meta_bns, "group.opera-qa-qabaikalMeta-000-ct.FENGCHAO.all", "");
-#endif
 
 const std::string MetaServer::CLUSTER_IDENTIFY(1, 0x01);
 const std::string MetaServer::LOGICAL_CLUSTER_IDENTIFY(1, 0x01);
@@ -71,7 +57,7 @@ const std::string MetaServer::REGION_SCHEMA_IDENTIFY(1, 0x05);
 
 const std::string MetaServer::DDLWORK_IDENTIFY(1, 0x06);
 const std::string MetaServer::STATISTICS_IDENTIFY(1, 0x07);
-const std::string MetaServer::GLOBAL_DDLWORK_REGION_IDENTIFY(1, 0x08);
+const std::string MetaServer::INDEX_DDLWORK_REGION_IDENTIFY(1, 0x08);
 const std::string MetaServer::MAX_IDENTIFY(1, 0xFF);
 
 MetaServer::~MetaServer() {}
@@ -130,30 +116,6 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     DBManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     DDLManager::get_instance()->launch_work();
     DBManager::get_instance()->init();
-#ifdef BAIDU_INTERNAL
-    _meta_interact_map["e0"] = new MetaServerInteract;
-    _meta_interact_map["e0"]->init_internal(FLAGS_e0_meta_bns);
-    _meta_interact_map["holmes"] = new MetaServerInteract;
-    _meta_interact_map["holmes"]->init_internal(FLAGS_holmes_meta_bns);
-    _meta_interact_map["holmes_product"] = new MetaServerInteract;
-    _meta_interact_map["holmes_product"]->init_internal(FLAGS_holmes_product_meta_bns);
-    _meta_interact_map["ps"] = new MetaServerInteract;
-    _meta_interact_map["ps"]->init_internal(FLAGS_ps_meta_bns);
-    _meta_interact_map["dmp"] = new MetaServerInteract;
-    _meta_interact_map["dmp"]->init_internal(FLAGS_dmp_meta_bns);
-    _meta_interact_map["coffline"] = new MetaServerInteract;
-    _meta_interact_map["coffline"]->init_internal(FLAGS_coffline_meta_bns);
-    _meta_interact_map["detect"] = new MetaServerInteract;
-    _meta_interact_map["detect"]->init_internal(FLAGS_detect_meta_bns);
-    _meta_interact_map["pinpai"] = new MetaServerInteract;
-    _meta_interact_map["pinpai"]->init_internal(FLAGS_pinpai_meta_bns);
-    _meta_interact_map["aladdin"] = new MetaServerInteract;
-    _meta_interact_map["aladdin"]->init_internal(FLAGS_aladdin_meta_bns);
-    _meta_interact_map["atomkv"] = new MetaServerInteract;
-    _meta_interact_map["atomkv"]->init_internal(FLAGS_atomkv_meta_bns);
-    _meta_interact_map["qa"] = new MetaServerInteract;
-    _meta_interact_map["qa"]->init_internal(FLAGS_qa_meta_bns);
-#endif
     _flush_bth.run([this]() {flush_memtable_thread();});
     _apply_region_bth.run([this]() {apply_region_thread();});
     _init_success = true;
@@ -256,10 +218,12 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_LINK_BINLOG
             || request->op_type() == pb::OP_UNLINK_BINLOG
             || request->op_type() == pb::OP_SET_INDEX_HINT_STATUS
-            || request->op_type() == pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK
+            || request->op_type() == pb::OP_UPDATE_INDEX_REGION_DDL_WORK
             || request->op_type() == pb::OP_SUSPEND_DDL_WORK
-            || request->op_type() == pb::OP_RESTART_DDL_WORK
-            || request->op_type() == pb::OP_UPDATE_MAIN_LOGICAL_ROOM) {
+            || request->op_type() == pb::OP_UPDATE_MAIN_LOGICAL_ROOM
+            || request->op_type() == pb::OP_ADD_LEARNER
+            || request->op_type() == pb::OP_DROP_LEARNER
+            || request->op_type() == pb::OP_RESTART_DDL_WORK) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,
@@ -280,16 +244,13 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
         ClusterManager::get_instance()->set_instance_migrate(request, response, log_id);
         return;
     }
-    if (request->op_type() == pb::OP_SET_FULL) {
-        ClusterManager::get_instance()->set_instance_full(request, response, log_id);
-        return;
-    }
-    if (request->op_type() == pb::OP_SET_NO_FULL) {
-        ClusterManager::get_instance()->set_instance_no_full(request, response, log_id);
+    if (request->op_type() == pb::OP_SET_INSTANCE_STATUS) {
+        ClusterManager::get_instance()->set_instance_status(request, response, log_id);
         return;
     }
     if (request->op_type() == pb::OP_OPEN_LOAD_BALANCE) {
         response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
         response->set_op_type(request->op_type());
         if (request->resource_tags_size() == 0) {
             _meta_state_machine->set_global_load_balance(true);
@@ -304,6 +265,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
     }
     if (request->op_type() == pb::OP_CLOSE_LOAD_BALANCE) {
         response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
         response->set_op_type(request->op_type());
         if (request->resource_tags_size() == 0) {
             _meta_state_machine->set_global_load_balance(false);
@@ -318,6 +280,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
     }
     if (request->op_type() == pb::OP_OPEN_MIGRATE) {
         response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
         response->set_op_type(request->op_type());
         if (request->resource_tags_size() == 0) {
             _meta_state_machine->set_global_migrate(true);
@@ -332,6 +295,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
     }
     if (request->op_type() == pb::OP_CLOSE_MIGRATE) {
         response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
         response->set_op_type(request->op_type());
         if (request->resource_tags_size() == 0) {
             _meta_state_machine->set_global_migrate(false);
@@ -344,11 +308,41 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
         } 
         return;
     }
+    if (request->op_type() == pb::OP_OPEN_NETWORK_SEGMENT_BALANCE) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
+        response->set_op_type(request->op_type());
+        if (request->resource_tags_size() == 0) {
+            _meta_state_machine->set_global_network_segment_balance(true);
+            DB_WARNING("open global network segment balance");
+            return;
+        }
+        for (auto& resource_tag : request->resource_tags()) {
+            _meta_state_machine->set_network_segment_balance(resource_tag, true);
+            DB_WARNING("open network segment balance for resource_tag: %s", resource_tag.c_str());
+        }
+        return;
+    }
+    if (request->op_type() == pb::OP_CLOSE_NETWORK_SEGMENT_BALANCE) {
+        response->set_errcode(pb::SUCCESS);
+        response->set_errmsg("success");
+        response->set_op_type(request->op_type());
+        if (request->resource_tags_size() == 0) {
+            _meta_state_machine->set_global_network_segment_balance(false);
+            DB_WARNING("close global network segment balance");
+            return;
+        }
+        for (auto& resource_tag : request->resource_tags()) {
+            _meta_state_machine->set_network_segment_balance(resource_tag, false);
+            DB_WARNING("close network segment balance for resource_tag: %s", resource_tag.c_str());
+        }
+        return;
+    }
     if (request->op_type() == pb::OP_OPEN_UNSAFE_DECISION) {
         _meta_state_machine->set_unsafe_decision(true);
         response->set_errcode(pb::SUCCESS);
         response->set_op_type(request->op_type());
-        DB_WARNING("open unsafe decison");
+        DB_WARNING("open unsafe decision");
         return;
     }
     if (request->op_type() == pb::OP_CLOSE_UNSAFE_DECISION) {
@@ -485,13 +479,25 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         QueryRegionManager::get_instance()->get_region_peer_status(request, response);
         break;                           
     }
-    case pb::QUERY_GLOBAL_DDL_WORK: {
-        DDLManager::get_instance()->get_global_ddlwork_info(request, response);
+    case pb::QUERY_INDEX_DDL_WORK: {
+        DDLManager::get_instance()->get_index_ddlwork_info(request, response);
         break;
     }
     case pb::QUERY_INSTANCE_PARAM: {
         QueryClusterManager::get_instance()->get_instance_param(request, response);
         break;                           
+    }
+    case pb::QUERY_NETWORK_SEGMENT: {
+        QueryClusterManager::get_instance()->get_network_segment(request, response);
+        break;
+    }
+    case pb::QUERY_RESOURCE_TAG_SWITCH: {
+        ClusterManager::get_instance()->get_switch(request, response);
+        break;
+    }
+    case pb::QUERY_SHOW_VIRINDX_INFO_SQL: {
+        QueryTableManager::get_instance()->get_virtual_index_influence_info(request, response);
+        break;   
     }
     default: {
         DB_WARNING("invalid op_type, request:%s logid:%lu", 
@@ -611,39 +617,6 @@ void MetaServer::tso_service(google::protobuf::RpcController* controller,
     }
 }
 
-static std::string bns_to_plat(const std::string& bns) {
-    static std::map<std::string, std::string> mapping = {
-        {"e0", "e0"},
-        {"e1", "e0"},
-        {"holmes", "holmes"},
-        {"hmkv", "holmes"},
-        {"hm", "holmes"},
-        {"coffline", "coffline"},
-        {"detect", "detect"},
-        {"taskonline", "detect"},
-        {"probe", "detect"},
-        {"pinpai", "pinpai"},
-        {"ao", "pinpai"},
-        {"aladdin", "aladdin"},
-        {"atomkv", "atomkv"},
-        {"qa", "qa"},
-    };
-    std::vector<std::string> vec;
-    boost::split(vec, bns, boost::is_any_of(".-"));
-    // DMP产品线采用独立的meta
-    if (vec.size() > 6 && vec[6] == "DMP") {
-        return "dmp";
-    } else if (vec.size() > 6 && vec[6] == "HOLMES") {
-        return "holmes_product";
-    } else if (vec.size() > 2) {
-        if (mapping.count(vec[2]) == 1) {
-            return mapping[vec[2]];
-        }
-    }
-    return "ps";
-}
-
-
 void MetaServer::migrate(google::protobuf::RpcController* controller,
                                  const pb::MigrateRequest* /*request*/,
                                  pb::MigrateResponse* response,
@@ -669,7 +642,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
     static std::mutex bns_mutex;
     for (auto& instance : request.targets_list().instances()) {
         std::string bns = instance.name();
-        std::string plat = bns_to_plat(bns);
+        std::string meta_bns = store_or_db_bns_to_meta_bns(bns);
         std::string event = instance.event();
         auto res_instance = response->mutable_data()->mutable_targets_list()->add_instances();
         res_instance->set_name(bns);
@@ -688,14 +661,19 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
             }
             ip_port = bns_instances[0];
         }
+        
+        if (meta_bns.empty()) {
+            res_instance->set_status("PROCESSING");
+            return;
+        }
+
         if (event == "EXPECTED_MIGRATE") {
-            DB_WARNING("bns: %s, plat: %s allowed", bns.c_str(), plat.c_str());
+            DB_WARNING("bns: %s, meta_bns: %s is migrating", bns.c_str(), meta_bns.c_str());
             pb::MetaManagerRequest internal_req;
             pb::MetaManagerResponse internal_res;
             internal_req.set_op_type(pb::OP_SET_INSTANCE_MIGRATE);
             internal_req.mutable_instance()->set_address(ip_port);
-            ret = meta_proxy(plat)->send_request(
-                    "meta_manager", internal_req, internal_res);
+            ret = meta_proxy(meta_bns)->send_request("meta_manager", internal_req, internal_res);
             if (ret != 0) {
                 DB_WARNING("internal request fail, %s, %s", 
                         internal_req.ShortDebugString().c_str(), 
@@ -704,13 +682,16 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
                 return;
             }
             res_instance->set_status(internal_res.errmsg());
+            if (internal_res.errmsg() == "ALLOWED") {
+                DB_WARNING("bns: %s, meta_bns: %s ALLOWED", bns.c_str(), meta_bns.c_str());
+            }
             BAIDU_SCOPED_LOCK(bns_mutex);
             bns_pre_ip_port[bns] = ip_port;
         } else if (event == "MIGRATED") {
             if (instance.pre_host() == instance.post_host()) {
                 res_instance->set_status("SUCCESS");
-                DB_WARNING("instance not migrate, request: %s", instance.ShortDebugString().c_str());
-                DB_FATAL("bns: %s, plat: %s not migrate", bns.c_str(), plat.c_str());
+                DB_WARNING("instance not migrate, request: %s, meta_bns: %s", 
+                    instance.ShortDebugString().c_str(), meta_bns.c_str());
                 //return;
             }
             {
@@ -723,8 +704,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
             pb::MetaManagerResponse internal_res;
             internal_req.set_op_type(pb::OP_DROP_INSTANCE);
             internal_req.mutable_instance()->set_address(ip_port);
-            ret = meta_proxy(plat)->send_request(
-                    "meta_manager", internal_req, internal_res);
+            ret = meta_proxy(meta_bns)->send_request("meta_manager", internal_req, internal_res);
             if (ret != 0) {
                 DB_WARNING("internal request fail, %s, %s", 
                         internal_req.ShortDebugString().c_str(), 

@@ -175,7 +175,7 @@ struct NetworkSocket {
     int64_t         conn_id = -1;            // The client connection ID in Mysql Client-Server Protocol
 
     // Transaction related members
-    int64_t         primary_region_id = -1;  // used for txn like Percolator
+    std::atomic<int64_t>  primary_region_id{-1};  // used for txn like Percolator
     bool            autocommit = true;       // The autocommit flag set by SET AUTOCOMMIT=0/1
     uint64_t        txn_id = 0;              // ID of the current transaction, 0 means out-transaction query
     int             seq_id = 0;              // The query sequence id within a transaction, starting from 1
@@ -199,8 +199,10 @@ struct NetworkSocket {
     //ddl
     int64_t txn_start_time = 0;
     int64_t txn_timeout = 0;
+    int64_t txn_pri_region_last_exec_time = 0;
     std::unordered_set<int64_t> txn_table_id_set;
     bthread::Mutex txn_tid_set_lock;
+    bool is_index_ddl = false;
 
     static std::atomic<uint64_t> txn_id_counter;
 };

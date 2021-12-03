@@ -300,6 +300,14 @@ public:
         schema_info->schema->exe() = nullptr;
         return exe_ptr;
     }
+    std::string get_query_words() {
+        auto schema_info = bthread_local_schema();
+        if (schema_info == nullptr) {
+            return "";
+        }
+
+        return schema_info->schema->get_query_words();
+    }
 private:
 struct BthreadLocal {
     Schema* schema = nullptr;
@@ -401,7 +409,7 @@ private:
     KeyRange            _key_range;
     int64_t             _level_1_scan_count = 0;
     Cache<std::string, ReverseListSptr> _cache;
-    Cache<uint64_t, std::shared_ptr<std::map<std::string, ReverseNode>>> _seg_cache;
+    Cache<std::string, std::shared_ptr<std::map<std::string, ReverseNode>>> _seg_cache;
     pb::SegmentType _segment_type;
     bool _is_over_cache;
     bool _is_seg_cache;
@@ -483,13 +491,20 @@ public:
         if (ret < 0) {
             return -1;
         }
-        if (_weight_field_id > 0) {
-            auto field = record->get_field_by_tag(_weight_field_id);
-            record->set_float(field, _cur_node->weight());
-            // if (ret < 0) {
-            //     return -1;
-            // }
+        try {
+            if (_weight_field_id > 0) {
+                auto field = record->get_field_by_tag(_weight_field_id);
+                record->set_float(field, _cur_node->weight());
+            }
+            if (_query_words_field_id > 0) {
+                DB_DEBUG("set querywords %s", _query_words.c_str());
+                MessageHelper::set_string(record->get_field_by_tag(_query_words_field_id),
+                        record->get_raw_message(), _query_words);
+            }
+        } catch (std::exception& exp) {
+            DB_FATAL("pack weight or query words expection %s", exp.what());
         }
+        
         return 0;
     }
 private:
@@ -501,6 +516,8 @@ private:
     std::vector<ReverseIndex<Schema>*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;
     int32_t _weight_field_id = 0;
+    int32_t _query_words_field_id = 0;
+    std::string _query_words;
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     bool _is_fast = false;
     myrocksdb::Transaction* _txn = nullptr;

@@ -29,11 +29,12 @@ int InformationSchema::init() {
     init_statistics();
     init_schemata();
     init_tables();
+    init_virtual_index_influence_info();
     return 0;
 }
 
 int64_t InformationSchema::construct_table(const std::string& table_name, FieldVec& fields) {
-    auto& table = _tables[table_name];
+    auto& table = _tables[table_name];//_tables[table_name]取出的是Schema_info
     table.set_table_id(--_max_table_id);
     table.set_table_name(table_name);
     table.set_database("information_schema");
@@ -50,7 +51,6 @@ int64_t InformationSchema::construct_table(const std::string& table_name, FieldV
     SchemaFactory::get_instance()->update_table(table);
     return table.table_id();
 }
-// BaikalDB专用表
 void InformationSchema::init_partition_split_info() {
     // 定义字段信息
     FieldVec fields {
@@ -109,35 +109,33 @@ void InformationSchema::init_partition_split_info() {
             std::string last_partition_key;
             std::vector<std::string> last_keys;
             std::vector<int64_t> last_region_ids;
+            last_keys.reserve(3);
+            last_region_ids.reserve(3);
             int64_t last_id = 0;
             std::string partition_key;
             auto type1 = index_ptr->fields[0].type;
             auto type2 = index_ptr->fields[1].type;
             records.reserve(10000);
+            std::vector<std::vector<int64_t>> region_ids;
+            region_ids.reserve(10000);
+            pb::QueryRequest req;
+            pb::QueryResponse res;
+            req.set_op_type(pb::QUERY_REGION);
             for (auto& pair : region_infos) {
                 TableKey start_key(pair.second.start_key());
                 int pos = 0;
                 partition_key = start_key.decode_start_key_string(type1, pos);
                 if (partition_key != last_partition_key) {
                     if (last_keys.size() > 1) {
-                        std::vector<std::string> rows;
                         for (auto id : last_region_ids) {
-                            pb::QueryRequest req;
-                            req.set_op_type(pb::QUERY_REGION);
                             req.add_region_ids(id);
-                            pb::QueryResponse res;
-                            MetaServerInteract::get_instance()->send_request("query", req, res);
-                            if (res.region_infos_size() == 1) {
-                                rows.emplace_back(std::to_string(res.region_infos(0).num_table_lines()));
-                            } else {
-                                rows.emplace_back("0");
-                            }
                         }
+                        region_ids.emplace_back(last_region_ids);
                         auto record = factory->new_record(table_id);
                         record->set_string(record->get_field_by_name("partition_key"), last_partition_key);
                         record->set_string(record->get_field_by_name("table_name"), table_name);
                         record->set_string(record->get_field_by_name("split_info"), boost::join(last_keys, ","));
-                        record->set_string(record->get_field_by_name("split_rows"), boost::join(rows, ","));
+                        //record->set_string(record->get_field_by_name("split_rows"), boost::join(rows, ","));
                         records.emplace_back(record);
                     }
                     last_partition_key = partition_key;
@@ -150,25 +148,31 @@ void InformationSchema::init_partition_split_info() {
                 last_id = pair.second.region_id();
             }
             if (last_keys.size() > 1) {
-                std::vector<std::string> rows;
                 for (auto id : last_region_ids) {
-                    pb::QueryRequest req;
                     req.set_op_type(pb::QUERY_REGION);
-                    req.add_region_ids(id);
-                    pb::QueryResponse res;
-                    MetaServerInteract::get_instance()->send_request("query", req, res);
-                    if (res.region_infos_size() == 1) {
-                        rows.emplace_back(std::to_string(res.region_infos(0).num_table_lines()));
-                    } else {
-                        rows.emplace_back("0");
+                }
+                region_ids.emplace_back(last_region_ids);
+                auto record = factory->new_record(table_id);
+                record->set_string(record->get_field_by_name("partition_key"), last_partition_key);
+                record->set_string(record->get_field_by_name("table_name"), table_name);
+                record->set_string(record->get_field_by_name("split_info"), boost::join(last_keys, ","));
+                //record->set_string(record->get_field_by_name("split_rows"), boost::join(rows, ","));
+                records.emplace_back(record);
+            }
+            MetaServerInteract::get_instance()->send_request("query", req, res);
+            std::unordered_map<int64_t, std::string> region_lines;
+            for (auto& info : res.region_infos()) {
+                region_lines[info.region_id()] = std::to_string(info.num_table_lines());
+            }
+            for (uint32_t i = 0; i < records.size(); i++) {
+                std::vector<std::string> rows;
+                rows.reserve(3);
+                if (i < region_ids.size()) {
+                    for (auto& id : region_ids[i]) {
+                        rows.emplace_back(region_lines[id]);
                     }
                 }
-                auto record = factory->new_record(table_id);
-                record->set_string(record->get_field_by_tag(1), last_partition_key);
-                record->set_string(record->get_field_by_tag(2), table_name);
-                record->set_string(record->get_field_by_tag(3), boost::join(last_keys, ","));
-                record->set_string(record->get_field_by_name("split_rows"), boost::join(rows, ","));
-                records.emplace_back(record);
+                records[i]->set_string(records[i]->get_field_by_name("split_rows"), boost::join(rows, ","));
             }
             return records;
         };
@@ -182,7 +186,7 @@ void InformationSchema::init_region_status() {
         {"table_id", pb::INT64},
         {"main_table_id", pb::INT64},
         {"table_name", pb::STRING},
-        {"start_key", pb::STRING},
+        {"start_key", pb::  STRING},
         {"end_key", pb::STRING},
         {"create_time", pb::STRING},
         {"peers", pb::STRING},
@@ -592,6 +596,54 @@ void InformationSchema::init_tables() {
                 record->set_string(record->get_field_by_name("CREATE_OPTIONS"), "");
                 record->set_string(record->get_field_by_name("TABLE_COMMENT"), "");
                 record->set_int64(record->get_field_by_name("TABLE_ID"), table_info->id);
+                records.emplace_back(record);
+            }
+            return records;
+    };
+}
+void InformationSchema::init_virtual_index_influence_info() {
+    //定义字段信息
+    FieldVec fields {
+        {"database_name",pb::STRING},
+        {"table_name",pb::STRING},
+        {"virtual_index_name",pb::STRING},
+        {"sign",pb::STRING},
+        {"sample_sql",pb::STRING},
+    };
+    int64_t table_id = construct_table("VIRTUAL_INDEX_AFFECT_SQL", fields);
+    //定义操作
+    _calls[table_id] = [table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) -> 
+        std::vector <SmartRecord> {
+            std::vector <SmartRecord> records;
+            //更新表中数据前，要交互一次，从TableMem取影响面数据
+            pb::QueryRequest request;
+            pb::QueryResponse response;
+            //1、设定查询请求的操作类型
+            request.set_op_type(pb::QUERY_SHOW_VIRINDX_INFO_SQL);
+            //2、发送请求
+            MetaServerInteract::get_instance()->send_request("query", request, response);
+            //3.取出response中的影响面信息
+            auto& virtual_index_info_sqls = response.virtual_index_influence_info();//virtual_index_info   and   affected_sqls
+            if(state -> client_conn() ==  nullptr){
+                return records;
+            }
+            std::string namespace_ = state->client_conn()->user_info->namespace_;
+            std::string table_name;
+            auto* factory = SchemaFactory::get_instance();
+            auto tb_vec = factory->get_table_list(namespace_, state->client_conn()->user_info.get());
+            records.reserve(tb_vec.size());
+            for (auto& it1 : virtual_index_info_sqls) {
+                std::string key = it1.virtual_index_info();
+                std::string infuenced_sql = it1.affected_sqls();
+                std::string sign = it1.affected_sign();
+                std::vector<std::string> items1;
+                boost::split(items1, key, boost::is_any_of(","));
+                auto record = factory->new_record(table_id);
+                record->set_string(record->get_field_by_name("database_name"), items1[0]);
+                record->set_string(record->get_field_by_name("table_name"), items1[1]);
+                record->set_string(record->get_field_by_name("virtual_index_name"),items1[2]);
+                record->set_string(record->get_field_by_name("sign"), sign);
+                record->set_string(record->get_field_by_name("sample_sql"), infuenced_sql);
                 records.emplace_back(record);
             }
             return records;

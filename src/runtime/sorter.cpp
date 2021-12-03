@@ -40,7 +40,7 @@ int Sorter::get_next(RowBatch* batch, bool* eos) {
         _min_heap[0]->next();
         //堆顶batch遍历完后，pop出去
         if (_min_heap[0]->is_traverse_over()) {
-            iter_swap(_min_heap.begin(), _min_heap.end() - 1);
+            std::iter_swap(_min_heap.begin(), _min_heap.end() - 1);
             _min_heap.pop_back();
             if (!_min_heap.empty()) {
                 shiftdown(0);

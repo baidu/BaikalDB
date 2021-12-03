@@ -31,6 +31,7 @@ enum ExprNodeType {
     SUB_QUERY_EXPR = 25;
     BITMAP_LITERAL = 26;
     TDIGEST_LITERAL = 27;
+    REGEXP_PREDICATE = 28;
 };
 
 message Function {

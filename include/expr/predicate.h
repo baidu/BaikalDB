@@ -122,9 +122,25 @@ public:
     virtual ExprValue get_value(MemRow* row);
 
 private:
+    void reset_regex(MemRow* row);
     std::unique_ptr<re2::RE2> _regex_ptr;
     std::string _regex_pattern;
     char _escape_char = '\\';
+    bool _const_regex = true;
+    re2::RE2::Options _option;
+};
+
+class RegexpPredicate : public ScalarFnCall {
+public:
+    virtual int open();
+    virtual ExprValue get_value(MemRow* row);
+
+private:
+    void reset_regex(MemRow* row);
+    std::unique_ptr<re2::RE2> _regex_ptr;
+    std::string _regex_pattern;
+    bool _const_regex = true;
+    re2::RE2::Options _option;
 };
 
 class NotPredicate : public ScalarFnCall {

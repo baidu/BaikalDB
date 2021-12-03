@@ -25,6 +25,7 @@
 #include <raft/raft.h>
 #include <raft/util.h>
 #include <raft/storage.h>
+#include <raft/snapshot_throttle.h>
 #else
 #include <butil/iobuf.h>
 #include <butil/containers/bounded_queue.h>
@@ -32,6 +33,7 @@
 #include <braft/raft.h>
 #include <braft/util.h>
 #include <braft/storage.h>
+#include <braft/snapshot_throttle.h>
 #endif
 #include "common.h"
 #include "schema_factory.h"
@@ -52,9 +54,33 @@
 #include "region_control.h"
 #include "meta_writer.h"
 #include "rpc_sender.h"
-#include "ddl_common.h"
 #include "exec_node.h"
+#include "concurrency.h"
 #include "backup.h"
+
+#ifdef BAIDU_INTERNAL
+#else
+//开源编译，等raft learner开源后删除
+#include <braft/raft.h>
+namespace braft {
+class Learner {
+public:
+Learner(const GroupId& group_id, const PeerId& peer_id) {
+}
+int init(const NodeOptions& options) {
+    return 0;
+}
+void shutdown(Closure* done) {
+}
+void join() {
+}
+void snapshot(Closure* done) {
+}
+void get_status(NodeStatus* status) {
+}
+};
+}
+#endif
 
 using google::protobuf::Message;
 using google::protobuf::RepeatedPtrField;
@@ -63,6 +89,7 @@ namespace baikaldb {
 DECLARE_int64(disable_write_wait_timeout_us);
 DECLARE_int32(prepare_slow_down_wait);
 
+static std::atomic<int64_t> ttl_remove_rows = { 0 }; // ttl删除行数计数
 static const int32_t RECV_QUEUE_SIZE = 128;
 struct StatisticsInfo {
     int64_t time_cost_sum;
@@ -143,18 +170,33 @@ public:
             delete pair.second;
         }
     }
-
+    void wait_async_apply_log_queue_empty() {
+        BthreadCond cond;
+        cond.increase();
+        _async_apply_log_queue.run([&cond]() {
+            cond.decrease_signal();
+        });
+        cond.wait();
+    }
     void shutdown() {
+        if (get_version() == 0) {
+            wait_async_apply_log_queue_empty();
+            _async_apply_param.stop_adjust_stall();
+        }
+        if (_need_decrease) {
+            _need_decrease = false;
+            Concurrency::get_instance()->recieve_add_peer_concurrency.decrease_broadcast();
+        }
         bool expected_status = false;
         if (_shutdown.compare_exchange_strong(expected_status, true)) {
-            _node.shutdown(NULL);
+            is_learner() ? _learner->shutdown(NULL) : _node.shutdown(NULL);
             _init_success = false;
             DB_WARNING("raft node was shutdown, region_id: %ld", _region_id);
         }
     }
 
     void join() {
-        _node.join();
+        is_learner() ? _learner->join() : _node.join();
         DB_WARNING("raft node join completely, region_id: %ld", _region_id);
         _real_writing_cond.wait();
         _disable_write_cond.wait();
@@ -162,9 +204,9 @@ public:
         DB_WARNING("_multi_thread_cond wait success, region_id: %ld", _region_id);
         _txn_pool.close();
     }
-    void get_node_status(braft::NodeStatus* status) { 
-        _node.get_status(status);
-    } 
+    void get_node_status(braft::NodeStatus* status) {
+        is_learner() ? _learner->get_status(status) : _node.get_status(status);
+    }
 
     Region(RocksWrapper* rocksdb, 
             SchemaFactory*  factory,
@@ -172,7 +214,8 @@ public:
             const braft::GroupId& groupId,
             const braft::PeerId& peerId,
             const pb::RegionInfo& region_info, 
-            int64_t region_id) :
+            int64_t region_id,
+            bool is_learner = false) :
                 _rocksdb(rocksdb),
                 _factory(factory),
                 _address(address),
@@ -184,14 +227,21 @@ public:
                 _num_table_lines(0),
                 _num_delete_lines(0),
                 _region_control(this, region_id),
-                _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)){
+                _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)), _is_learner(is_learner),
+                _not_leader_alarm(region_id, peerId) {
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
         _region_control.store_status(_region_info.status());
+        _version = _region_info.version();
         _is_global_index = _region_info.has_main_table_id() &&
                    _region_info.main_table_id() != 0 &&
-                   region_info.table_id() != _region_info.main_table_id();
+                   _region_info.table_id() != _region_info.main_table_id();
+        _global_index_id = _region_info.table_id();
+        _table_id = _is_global_index ? _region_info.main_table_id() : _region_info.table_id();
         if (_region_info.has_is_binlog_region()) {
             _is_binlog_region = _region_info.is_binlog_region();
+        }
+        if (_is_learner) {
+            _learner.reset(new braft::Learner(groupId, peerId));
         }
     }
 
@@ -209,6 +259,11 @@ public:
             google::protobuf::Closure* done) {
         _region_control.raft_control(controller, request, response, done);
     };
+
+    void async_apply_log_entry(google::protobuf::RpcController* controller,
+          const pb::BatchStoreReq* request,
+          pb::BatchStoreRes* response,
+          google::protobuf::Closure* done);
 
     void query(google::protobuf::RpcController* controller,
             const pb::StoreReq* request,
@@ -240,7 +295,8 @@ public:
             const RepeatedPtrField<pb::TupleDescriptor>& tuples, 
             pb::StoreRes& response,
             int64_t applied_index,
-            int64_t term);
+            int64_t term,
+            braft::Closure* done);
 
     int select(const pb::StoreReq& request, pb::StoreRes& response);
     int select(const pb::StoreReq& request, 
@@ -248,11 +304,11 @@ public:
             const RepeatedPtrField<pb::TupleDescriptor>& tuples,
             pb::StoreRes& response);
     int select_normal(RuntimeState& state, ExecNode* root, pb::StoreRes& response);
-    int select_sample(RuntimeState& state, ExecNode* root, const pb::AnalyzeInfo& analyze_info, pb::StoreRes& response); 
+    int select_sample(RuntimeState& state, ExecNode* root, const pb::AnalyzeInfo& analyze_info, pb::StoreRes& response);
+    void do_apply(int64_t term, int64_t index, const pb::StoreReq& request, braft::Closure* done);
     virtual void on_apply(braft::Iterator& iter);
    
     virtual void on_shutdown();
-    virtual void on_leader_start();
     virtual void on_leader_start(int64_t term);
     virtual void on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done);
     
@@ -271,8 +327,7 @@ public:
     void on_snapshot_load_for_restart(braft::SnapshotReader* reader,
             std::map<int64_t, std::string>& prepared_log_entrys);
 
-    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance, 
-        std::set<int64_t>& ddl_wait_doing_table_ids); 
+    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance); 
 
     void construct_peers_status(pb::LeaderHeartBeat* leader_heart);
   
@@ -333,6 +388,8 @@ public:
                                            braft::Closure* done, 
                                            int64_t applied_index, 
                                            int64_t term);
+    void exec_update_primary_timestamp(const pb::StoreReq& request,
+            braft::Closure* done, int64_t applied_index, int64_t term);
     
     void adjustkey_and_add_version_query(google::protobuf::RpcController* controller,
             const pb::StoreReq* request, 
@@ -344,37 +401,46 @@ public:
     //第一步通过raft状态机,创建迭代器，取出当前的index,自此之后的log不能再删除
     void start_process_split(const pb::RegionSplitResponse& split_response,
             bool tail_split,
-            const std::string& split_key);
+            const std::string& split_key,
+            int64_t key_term);
     void get_split_key_for_tail_split();
 
-    void split_region_do_first_snapshot();
-    
+    void adjust_num_table_lines();
     //split第二步，发送迭代器数据
     void write_local_rocksdb_for_split();
 
     int replay_txn_for_recovery(
             const std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn);
 
-    int replay_txn_for_recovery(
+    int replay_applied_txn_for_recovery(
             int64_t region_id,
             const std::string& instance,
             std::string start_key,
-            const std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn);
+            const std::unordered_map<uint64_t, pb::TransactionInfo>& applied_txn);
 
     void send_log_entry_to_new_region_for_split();
+    int split_region_add_peer(std::string& new_region_leader);
+    void split_remove_new_region_peers() {
+        start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
+        for (auto& peer : _split_param.add_peer_instances) {
+            start_thread_to_remove_region(_split_param.new_region_id, peer);
+        }
+    }
     //split 第三步， 通知被分裂出来的region分裂完成， 增加old_region的version, update end_key
     void send_complete_to_new_region_for_split(); 
     //分裂第四步完成
     void complete_split();
+    void transfer_leader_after_split();
     
     //从split开始之后所有的entry数据作为分裂的增量部分
     // 1说明还有数据，0说明到头了
     int get_log_entry_for_split(const int64_t start_index, 
             const int64_t expected_term,
-            std::vector<pb::StoreReq>& requests, 
+            std::vector<pb::BatchStoreReq>& requests,
+            std::vector<butil::IOBuf>& req_datas,      // cntl attachment的数据
             int64_t& split_end_index);
     
-    int get_split_key(std::string& split_key);
+    int get_split_key(std::string& split_key, int64_t& split_key_term);
     
     int64_t get_region_id() const {
         return _region_id;
@@ -383,22 +449,10 @@ public:
     void update_average_cost(int64_t request_time_cost);
 
     void reset_split_status() {
-        _split_param.split_start_index = INT_FAST64_MAX;
-        _split_param.split_end_index = 0;
-        _split_param.split_term = 0;
-        _split_param.new_region_id = 0;
-        _split_param.split_slow_down = false;
-        _split_param.split_slow_down_cost = 0;
-        _split_param.err_code = 0;
-        _split_param.split_key = "";
-        _split_param.instance = "";
-        _split_param.reduce_num_lines = 0;
         if (_split_param.snapshot != nullptr) {
             _rocksdb->get_db()->ReleaseSnapshot(_split_param.snapshot);
         }
-        _split_param.tail_split = false;
-        _split_param.snapshot = nullptr;
-        _split_param.prepared_txn.clear();
+        _split_param.reset_status();
     }
 
     void real_writing_decrease() {
@@ -423,6 +477,7 @@ public:
         return _split_param.split_start_index;
     }
     void set_used_size(int64_t used_size) {
+        std::lock_guard<std::mutex> lock(_region_lock);
         _region_info.set_used_size(used_size);
     }
     std::string get_start_key() {
@@ -473,38 +528,51 @@ public:
         return _data_cf;
     }
     butil::EndPoint get_leader() {
+        if (is_learner()) {
+            butil::EndPoint leader;
+            butil::str2endpoint(region_info().leader().c_str(), &leader);
+            return leader;
+        }
         return _node.leader_id().addr;    
     }
     
     int64_t get_used_size() {
+        std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.used_size();
     }
     int64_t get_table_id() {
-        if (_is_global_index) {
-            return _region_info.main_table_id();
-        }
-        return _region_info.table_id();
+        return _table_id;
     }
     int64_t get_global_index_id() {
-        return _region_info.table_id();
+        return _global_index_id;
     }
     bool is_leader() {
         return (_is_leader.load());
     }
-    void leader_start() {
+    void leader_start(int64_t term) {
         _is_leader.store(true);
-        DB_WARNING("leader real start, region_id: %ld", _region_id);
+        _not_leader_alarm.reset();
+        _expected_term = term;
+        DB_WARNING("leader real start, region_id: %ld term: %ld", _region_id, term);
     }
     int64_t get_version() {
-        return _region_info.version();
+        return _version;
+    }
+    int64_t get_dml_latency() {
+        return _dml_time_cost.latency();
     }
     pb::RegionInfo& region_info() {
         return _region_info;
+    }
+    std::shared_ptr<RegionResource> get_resource() {
+        BAIDU_SCOPED_LOCK(_ptr_mutex);
+        return _resource;
     }
     bool check_region_legal_complete();
 
     bool compare_and_set_illegal() {
         std::unique_lock<std::mutex> lock(_legal_mutex);
+        std::lock_guard<std::mutex> lock_region(_region_lock);
         if (_region_info.version() <= 0) {
             _legal_region = false;
             return true;
@@ -515,6 +583,7 @@ public:
     bool compare_and_set_legal_for_split() {
         std::unique_lock<std::mutex> lock(_legal_mutex);
         if (_legal_region) {
+            std::lock_guard<std::mutex> lock_region(_region_lock);
             _region_info.set_version(1);
             DB_WARNING("compare and set split verison to 1, region_id: %ld", _region_id);
             return true;
@@ -534,15 +603,20 @@ public:
     }
 
     bool is_tail() {
-        return  (!_region_info.has_end_key() || _region_info.end_key().empty());
+        std::lock_guard<std::mutex> lock(_region_lock);
+        return  (_region_info.end_key().empty());
     }
     
     bool is_head() {
-        return (!_region_info.has_start_key() || _region_info.start_key().empty());
+        std::lock_guard<std::mutex> lock(_region_lock);
+        return (_region_info.start_key().empty());
     }
     
     bool empty() {
-        return (_region_info.start_key() == _region_info.end_key() && !is_tail() && !is_head());
+        std::lock_guard<std::mutex> lock(_region_lock);
+        return (_region_info.start_key() == _region_info.end_key() 
+                && !_region_info.end_key().empty() 
+                && !_region_info.start_key().empty());
     }
     
     int64_t get_timecost() {
@@ -617,7 +691,7 @@ public:
             SmartTransaction& txn, 
             int64_t applied_index, 
             int64_t term, 
-            uint64_t log_id = 0);
+            uint64_t log_id);
 
     void clear_transactions() {
         if (_shutdown || !_init_success || get_version() <= 0) {
@@ -627,11 +701,33 @@ public:
         _txn_pool.clear_transactions(this);
         _multi_thread_cond.decrease_signal();
     }
+    void update_ttl_info() {
+        if (_shutdown || !_init_success || get_version() <= 0) {
+            return;
+        }
+
+        TTLInfo ttl_info = _factory->get_ttl_duration(get_table_id());
+        if (ttl_info.ttl_duration_s > 0 && ttl_info.online_ttl_expire_time_us > 0) {
+            // online TTL 
+            if (ttl_info.online_ttl_expire_time_us != _online_ttl_base_expire_time_us) {
+                _online_ttl_base_expire_time_us = ttl_info.online_ttl_expire_time_us;
+                _use_ttl = true;
+                _txn_pool.update_ttl_info(_use_ttl, _online_ttl_base_expire_time_us);
+                DB_WARNING("table_id: %ld, region_id: %ld, ttl_duration_s: %ld, online_ttl_expire_time_us: %ld, %s", 
+                    get_table_id(), _region_id, ttl_info.ttl_duration_s, 
+                    ttl_info.online_ttl_expire_time_us, timestamp_to_str(ttl_info.online_ttl_expire_time_us/1000000).c_str());
+            }
+        }
+    }
     void clear_orphan_transactions(braft::Closure* done, int64_t applied_index, int64_t term);
     void apply_clear_transactions_log();
 
     TransactionPool& get_txn_pool() {
         return _txn_pool;
+    }
+
+    void rollback_txn_before(int64_t timeout) {
+        return _txn_pool.rollback_txn_before(timeout);
     }
 
     void start_thread_to_remove_region(int64_t drop_region_id, std::string instance_address) {
@@ -692,33 +788,9 @@ public:
         return _commit_ts_map[txn_id];
     }
 
-
-    int ddlwork_process(const pb::DdlWorkInfo& store_ddl_work);
-    int ddlwork_common_init_process(const pb::DdlWorkInfo& store_ddl_work);
-    void ddlwork_finish_check_process(std::set<int64_t>& ddlwork_table_ids);
-
-    void start_add_index();
-    void write_local_rocksdb_for_ddl();
-    int ddlwork_add_index_process();
-
-    void start_drop_index();
-    void delete_local_rocksdb_for_ddl();
-    int ddlwork_del_index_process();
-
-    bool is_wait_ddl();
-    int add_reverse_index();
-    int ddl_schema_state(pb::IndexState& state);
-
-    void ddlwork_rollback(pb::ErrCode errcode, bool& is_success) {
-        BAIDU_SCOPED_LOCK(_region_ddl_lock);
-        if (_region_ddl_info.ddlwork_infos_size() > 0) {
-            _region_ddl_info.mutable_ddlwork_infos(0)->set_errcode(errcode);
-            _region_ddl_info.mutable_ddlwork_infos(0)->set_rollback(true);
-        } else {
-            DB_FATAL("DDL_LOG region_%ld ddlwork_infos_size is zero, rollback failed.", _region_id);
-        }
-        is_success = false;
-    }
+    void remove_local_index_data();
+    void delete_local_rocksdb_for_ddl(int64_t table_id, int64_t index_id);
+    int add_reverse_index(int64_t table_id, int64_t index_id);
 
     void process_download_sst(brpc::Controller* controller, 
         std::vector<std::string>& req_vec, SstBackupType type);
@@ -747,7 +819,10 @@ public:
     void set_snapshot_meta_size(size_t size) {
         _snapshot_meta_size = size;
     }
-    uint64_t get_approx_size() const {
+    bool is_addpeer() const {
+        return _region_info.can_add_peer();
+    }
+    uint64_t get_approx_size() {
         //分裂后一段时间每超过10分钟，或者超过10%的数据量diff则需要重新获取
         if (_approx_info.time_cost.get_time() > 10 * 60 * 1000 * 1000LL && 
             _approx_info.last_version_time_cost.get_time() < 2 * 60 * 60 * 1000 * 1000LL) {
@@ -755,6 +830,7 @@ public:
         } else {
             int64_t diff_lines = abs(_num_table_lines.load() - _approx_info.table_lines);
             if (diff_lines * 10 > _num_table_lines.load()) {
+                // adjust_num_table_lines();
                 return UINT64_MAX;
             }
         }
@@ -778,6 +854,27 @@ public:
         return _region_status;
     }
 
+    int64_t snapshot_index() const {
+        return _snapshot_index;
+    }
+
+    bool is_learner() const {
+        return _is_learner;
+    }
+
+    bool is_disable_write() {
+        return _disable_write_cond.count() > 0;
+    }
+
+    bool is_dml_op_type(const pb::OpType& op_type) {
+        if (op_type == pb::OP_INSERT 
+             || op_type == pb::OP_DELETE
+             || op_type == pb::OP_UPDATE
+             || op_type == pb::OP_SELECT_FOR_UPDATE) {
+            return true;
+        }
+        return false;
+    }
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -791,6 +888,7 @@ private:
         std::string split_key;
         //std::string old_end_key;
         std::string instance;
+        std::vector<std::string> add_peer_instances;
         TimeCost total_cost;
         TimeCost no_write_time_cost;
         int64_t new_region_cost;
@@ -800,6 +898,7 @@ private:
         TimeCost op_start_split_for_tail;
         int64_t op_start_split_for_tail_cost;
         TimeCost op_snapshot;
+        TimeCost add_peer_cost;
         int64_t op_snapshot_cost;
         int64_t write_sst_cost;
         int64_t send_first_log_entry_cost;
@@ -811,7 +910,24 @@ private:
         const rocksdb::Snapshot* snapshot = nullptr;
 
         bool tail_split = false;
-        std::unordered_map<uint64_t, pb::TransactionInfo> prepared_txn;
+        std::unordered_map<uint64_t, pb::TransactionInfo> applied_txn;
+
+        void reset_status() {
+            split_start_index = INT_FAST64_MAX;
+            split_end_index = 0;
+            split_term = 0;
+            new_region_id = 0;
+            split_slow_down = false;
+            split_slow_down_cost = 0;
+            err_code = 0;
+            split_key = "";
+            instance = "";
+            reduce_num_lines = 0;
+            tail_split = false;
+            snapshot = nullptr;
+            applied_txn.clear();
+            add_peer_instances.clear();
+        };
     };
 
     struct BinlogParam {
@@ -820,6 +936,7 @@ private:
         int64_t max_ts_in_map  = -1; // ts_binlog_map中最大ts，如果收到比max ts还大的binlog，则直接写rocksdb不更新map，map靠之后定时线程更新
         int64_t check_point_ts = -1; // 检查点，检查点之前的binlog都已经commit，重启之后从检查点开始扫描
         int64_t oldest_ts      = -1; // rocksdb中最小ts，如果region 某个peer迁移，binlog数据不迁移则oldest_ts改为当前ts
+        std::map<int64_t, bool> timeout_start_ts_done; // 标记超时反查的start_ts, 仅用来避免重复commit导致的报警，不用于严格一致性场景
     };
 
         //binlog function
@@ -838,7 +955,7 @@ private:
     
     int binlog_reset_on_snapshot_load();
     void binlog_update_map_when_scan(const std::map<std::string, ExprValue>& field_value_map);
-    int binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map);
+    int binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map, const std::string& remote_side);
     int binlog_update_check_point();
     int get_primary_region_info(int64_t primary_region_id, pb::RegionInfo& region_info);
     
@@ -853,14 +970,16 @@ private:
     void apply_kv_split(const pb::StoreReq& request, braft::Closure* done, 
                                 int64_t index, int64_t term);
     bool validate_version(const pb::StoreReq* request, pb::StoreRes* response);
-
+    void print_log_entry(const int64_t start_index, const int64_t end_index);
     void set_region(const pb::RegionInfo& region_info) {
         std::lock_guard<std::mutex> lock(_region_lock);
         _region_info.CopyFrom(region_info);
+        _version = _region_info.version();
     }
     void set_region_with_update_range(const pb::RegionInfo& region_info) {
         std::lock_guard<std::mutex> lock(_region_lock);
         _region_info.CopyFrom(region_info);
+        _version = _region_info.version();
         // region_info更新range，替换resource
         std::shared_ptr<RegionResource> new_resource(new RegionResource);
         *new_resource = *_resource;
@@ -872,32 +991,56 @@ private:
         //compaction时候删掉多余的数据
         if (_is_binlog_region) {
             //binlog region把start key和end key设置为空，防止filter把数据删掉
-            SplitCompactionFilter::get_instance()->set_end_key(
-                    _region_id, "");
+            SplitCompactionFilter::get_instance()->set_filter_region_info(
+                    _region_id, "", false, 0);
         } else {
-            SplitCompactionFilter::get_instance()->set_end_key(
-                    _region_id,
-                    region_info.end_key());
+            SplitCompactionFilter::get_instance()->set_filter_region_info(
+                    _region_id, region_info.end_key(), 
+                    _use_ttl, _online_ttl_base_expire_time_us);
         }
         DB_WARNING("region_id: %ld, start_key: %s, end_key: %s", _region_id, 
             rocksdb::Slice(region_info.start_key()).ToString(true).c_str(), 
             rocksdb::Slice(region_info.end_key()).ToString(true).c_str());
     }
 
-    void set_region_ddl(const pb::StoreRegionDdlInfo& region_ddl_info) {
-        std::lock_guard<std::mutex> lock(_region_ddl_lock);
-        _region_ddl_info.CopyFrom(region_ddl_info);
-    }
-
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
     bool has_sst_data(int64_t* seek_table_lines);
     bool ingest_has_sst_data();
-    void wait_rocksdb_normal() {
+    bool wait_rocksdb_normal(int64_t timeout = -1) {
+        TimeCost cost;
+        TimeCost total_cost;
         while (_rocksdb->is_any_stall()) {
+            if (timeout > 0 && total_cost.get_time() > timeout) {
+                return false;
+            }
+            if (cost.get_time() > 60 * 1000 * 1000) {
+                DB_WARNING("region_id: %ld wait for rocksdb stall", _region_id);
+                cost.reset();
+            }
             reset_timecost();
-            bthread_usleep(100 * 1000 * 1000);
+            bthread_usleep(1 * 1000 * 1000);
+        }
+        return true;
+    }
+
+    int check_learner_snapshot();
+
+    int check_follower_snapshot(const std::string& peer);
+
+    bool learner_ready_for_read() const {
+        return _learner_ready_for_read;
+    }
+
+    void update_binlog_read_max_ts(int64_t ts) {
+        int64_t max_ts = _binlog_read_max_ts.load();
+        while (max_ts < ts) {
+            if (_binlog_read_max_ts.compare_exchange_strong(max_ts, ts)) {
+                break;
+            } 
+            max_ts = _binlog_read_max_ts.load();
         }
     }
+
 private:
     //Singleton
     RocksWrapper*       _rocksdb;
@@ -914,7 +1057,10 @@ private:
     size_t _snapshot_data_size = 0;
     size_t _snapshot_meta_size = 0;
     pb::RegionInfo      _new_region_info;
-    int64_t             _region_id;
+    int64_t             _region_id = 0;
+    int64_t             _version = 0;
+    int64_t             _table_id = 0; // region.main_table_id
+    int64_t             _global_index_id = 0; //region.table_id
     
     //merge后该region为空，记录目标region，供baikaldb使用，只会merge一次，不必使用vector
     pb::RegionInfo      _merge_region_info;
@@ -926,24 +1072,29 @@ private:
     BthreadCond _disable_write_cond;
     BthreadCond _real_writing_cond;
     SplitParam _split_param;
-    DllParam _ddl_param;
 
     std::mutex _legal_mutex;
     bool       _legal_region = true;
 
     TimeCost                        _time_cost; //上次收到请求的时间，每次收到请求都重置一次
-    bvar::LatencyRecorder _dml_time_cost;
+    LatencyOnly                     _dml_time_cost;
     bool                                _restart = false;
     //计算存储分离开关，在store定时任务中更新，避免每次dml都访问schema factory
     bool                                _storage_compute_separate = false;
-    bool                                _use_ttl = false; //init时更新，表的ttl后续不会改变
+    bool                                _use_ttl = false; // online TTL会更新，只会false 变为true
+    int64_t                             _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
     bool                                _reverse_remove_range = false; //split的数据，把拉链过滤一遍  
     //raft node
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;
+    // 一般情况下，_braft_apply_index和_applied_index是一致的
+    // 只有在加速分裂进行异步发送logEntry的时候，_braft_apply_index > _applied_index
+    // 两者diff值即为executionQueue里面排队的请求数
+    int64_t                             _braft_apply_index = 0;
     int64_t                             _applied_index = 0;  //current log index
     // 表示数据版本，conf_change,no_op等不影响数据时版本不变
-    int64_t                             _data_index = 0;  
+    int64_t                             _data_index = 0;
+    int64_t                             _expected_term = -1; 
     // bthread cycle: set _applied_index_lastcycle = _applied_index when _num_table_lines == 0
     int64_t                             _applied_index_lastcycle = 0;  
     TimeCost                            _lastcycle_time_cost; //定时线程上次循环的时间，更新_applied_index_lastcycle时更新
@@ -953,6 +1104,7 @@ private:
     bool                                _report_peer_info = false;
     std::atomic<bool>                   _shutdown;
     bool                                _init_success = false;
+    bool                                _need_decrease = false; // addpeer时候从init到on_snapshot_load整体限制
     bool                                _can_heartbeat = false;
 
     BthreadCond                         _multi_thread_cond;
@@ -976,14 +1128,13 @@ private:
     MetaWriter*                             _meta_writer = nullptr;
     bthread::Mutex                         _commit_meta_mutex;
     scoped_refptr<braft::FileSystemAdaptor>  _snapshot_adaptor = nullptr;
-    std::mutex          _region_ddl_lock;    
-    pb::StoreRegionDdlInfo     _region_ddl_info;
     bool                                     _is_global_index = false; //是否是全局索引的region
     std::mutex       _reverse_index_map_lock;
     std::mutex       _backup_lock;
     Backup          _backup;
     //binlog
     bool _is_binlog_region = false; //是否为binlog region
+    std::atomic<int64_t> _binlog_read_max_ts = { 0 }; // 读取binlog的最大ts
     // txn_id:commit_ts
     std::map<uint64_t, int64_t> _commit_ts_map;
     bthread::Mutex  _commit_ts_map_lock;
@@ -992,6 +1143,69 @@ private:
     std::string     _rocksdb_start;
     std::string     _rocksdb_end;
     pb::PeerStatus  _region_status = pb::STATUS_NORMAL;
+
+    //learner
+    std::unique_ptr<braft::Learner> _learner;
+    bool            _is_learner = false;
+    bool            _learner_ready_for_read = false;
+    TimeCost        _learner_time;
+
+    //NOT_LEADER分类报警
+    struct NotLeaderAlarm {
+        enum AlarmType {
+            ALARM_INIT              = 0,
+            LEADER_INVALID          = 1,
+            LEADER_RAFT_FALL_BEHIND = 2,
+            LEADER_NOT_REAL_START   = 3
+        };
+
+        NotLeaderAlarm (int64_t region_id, const braft::PeerId& node_id) : 
+            type(ALARM_INIT), region_id(region_id), node_id(node_id) { }
+
+        void reset() {
+            leader_start = false;
+            alarm_begin_time.reset();
+            last_print_time.reset();
+            total_count = 0;
+            interval_count = 0;
+            type = ALARM_INIT;
+        }
+
+        void set_leader_start() { leader_start = true; }
+
+        void not_leader_alarm(const braft::PeerId& leader_id);
+
+        AlarmType type;
+        std::atomic<bool> leader_start = { false };
+        std::atomic<int> total_count = { 0 };
+        std::atomic<int> interval_count = { 0 };
+        TimeCost alarm_begin_time;
+        TimeCost last_print_time;  // 每隔一段时间打印报警日志
+        const int64_t region_id;
+        const braft::PeerId node_id;
+    };
+
+    NotLeaderAlarm _not_leader_alarm;
+    struct AsyncApplyParam {
+        std::atomic<bool>  has_adjust_stall = { false };
+        // 异步apply如果失败了，置标记，下次async_apply_log rpc会返回error
+        // 以及在add_version会检查这个标记
+        bool apply_log_failed = false;
+        void start_adjust_stall() {
+            if (!has_adjust_stall) {
+                RocksWrapper::get_instance()->begin_split_adjust_option();
+                has_adjust_stall = true;
+            }
+        }
+        void stop_adjust_stall() {
+            if (has_adjust_stall) {
+                RocksWrapper::get_instance()->stop_split_adjust_option();
+                has_adjust_stall = false;
+            }
+        }
+    };
+    AsyncApplyParam _async_apply_param;
+    ExecutionQueue _async_apply_log_queue;
 };
 
 } // end of namespace

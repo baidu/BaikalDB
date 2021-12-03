@@ -33,6 +33,53 @@ inline const google::protobuf::FieldDescriptor* get_field(
     }
 }
 
+// 验证pb与fields是否匹配，for online TTL
+int TupleRecord::verification_fields(int32_t max_field_id) {
+    uint64_t field_key  = 0;
+    uint64_t field_num  = 0;
+    int32_t  wired_type = 0;
+    
+    while (_offset < _size) {
+        field_key = get_varint<uint64_t>();
+        field_num = field_key >> 3;
+        wired_type = field_key & 0x07;
+        
+        if (_offset >= _size) {
+            DB_WARNING("error: %lu, %lu", _offset, _size);
+            return -1;
+        }
+
+        DB_DEBUG("field_num: %lu, wired_type: %d, max_field_id: %d _offset:%ld", 
+            field_num, wired_type, max_field_id, _offset);
+
+        if (field_num > max_field_id || field_num == 0) {
+            DB_WARNING("error: field_num: %lu, wired_type: %d, max_field_id: %d", 
+                field_num, wired_type, max_field_id);
+            return -1;
+        }
+
+        switch (wired_type) {
+            case 0:
+                skip_varint();
+                break;
+            case 1:
+                skip_fixed<double>();
+                break;
+            case 2:
+                skip_string();
+                break;
+            case 5:
+                skip_fixed<float>();
+                break;
+            default:
+                DB_WARNING("invalid wired_type: %d, offset: %lu,%lu", wired_type, _offset, _size);
+                return -1;
+        }
+    }
+
+    return 0;
+}
+
 int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields, 
         const std::vector<int32_t>* field_slot,
         SmartRecord* record, int32_t tuple_id, 

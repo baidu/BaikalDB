@@ -110,10 +110,9 @@ int ReverseIndex<Schema>::handle_reverse(
     std::shared_ptr<std::map<std::string, ReverseNode>> seg_res =
         std::make_shared<std::map<std::string, ReverseNode>>();
     if (_is_seg_cache) {
-        uint64_t key = make_sign(word);
-        if (_seg_cache.find(key, &cache_seg_res) != 0) {
+        if (_seg_cache.find(word, &cache_seg_res) != 0) {
             Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res);
-            _seg_cache.add(key, seg_res);
+            _seg_cache.add(word, seg_res);
         } else {
             *seg_res = *cache_seg_res;
             // 填充pk，flag信息
@@ -324,7 +323,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) 
     for (iter->Seek(key); !is_prefix_end(iter, prefix); iter->Next()) {
         ++scan_rows;
         // 内部txn，不提交出作用域自动析构
-        SmartTransaction txn(new Transaction(0, nullptr, false));
+        SmartTransaction txn(new Transaction(0, nullptr));
         rocksdb::TransactionOptions txn_opt;
         txn_opt.lock_timeout = 100;
         txn->begin(txn_opt);
@@ -425,7 +424,7 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
         return 1;
     }
     // 内部txn，不提交出作用域自动析构
-    SmartTransaction txn(new Transaction(0, nullptr, false));
+    SmartTransaction txn(new Transaction(0, nullptr));
     rocksdb::TransactionOptions txn_opt;
     txn_opt.lock_timeout = 100;
     txn->begin(txn_opt);
@@ -482,8 +481,8 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
     if (second_level_size >= _second_level_length) {
         //DB_WARNING("merge 2 level to 3");
         // 2/3层合并单独开txn处理
-        SmartTransaction txn_level2(new Transaction(0, nullptr, false));
-        txn_level2->begin();
+        SmartTransaction txn_level2(new Transaction(0, nullptr));
+        txn_level2->begin(txn_opt);
         ReverseListSptr third_level_list(new ReverseList());
         status = _get_level_reverse_list(txn_level2->get_txn(), 3, merge_term, third_level_list);
         if (status != 0) {
@@ -696,12 +695,15 @@ int MutilReverseIndex<Schema>::search(
     _index_info = index_info;
     _table_info = table_info;
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
+    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
     bool_executor_type type = NODE_COPY;
     _son_exe_vec.resize(son_size);
     bool type_init = false; 
     for (uint32_t i = 0; i < son_size; ++i) {
         reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i], modes[i],
             std::vector<ExprNode*>(), is_fast);
+        _query_words += reverse_indexes[i]->get_query_words();
+        _query_words += ";";
         _son_exe_vec[i] = reverse_indexes[i]->get_executor();
         if (!type_init && _son_exe_vec[i]) {
             type = ((BooleanExecutor<Schema>*)_son_exe_vec[i])->get_type();
@@ -726,6 +728,9 @@ int MutilReverseIndex<Schema>::search(
             }
         }
     }
+    if (_query_words.size() > 0 && _query_words.back() == ';') {
+        _query_words.pop_back();
+    }
     return 0;
 }
 
@@ -742,9 +747,13 @@ int MutilReverseIndex<Schema>::search(
     _txn = txn;
     _is_fast = is_fast;
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
+    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
     _reverse_index_map = reverse_index_map;    
     _reverse_indexes.reserve(5);
     init_operator_executor(fulltext_index_info, _exe);
+    if (_query_words.size() > 0 && _query_words.back() == ';') {
+        _query_words.pop_back();
+    }
     return 0;
 }
 
@@ -815,6 +824,9 @@ int MutilReverseIndex<Schema>::init_term_executor(
     reverse_iter->create_executor(_txn, _index_info, _table_info, word, 
         fulltext_index_info.possible_index().ranges(0).match_mode(),
         std::vector<ExprNode*>(), _is_fast);
+
+    _query_words += reverse_iter->get_query_words();
+    _query_words += ";";
     exe = static_cast<BooleanExecutor<Schema>*>(reverse_iter->get_executor());
     reverse_iter->print_reverse_statistic_log();
     return 0;

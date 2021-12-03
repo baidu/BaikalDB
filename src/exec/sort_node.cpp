@@ -104,7 +104,9 @@ int SortNode::expr_optimize(QueryContext* ctx) {
                 DB_WARNING("slot_idx:%d < slot_size:%d", slot_idx, tuple_desc->slots_size());
             }
         }
-        if (tuple_desc != nullptr && expr->node_type() == pb::SLOT_REF) {
+        // union中数据都放到tuple:0里了，函数也额外放到tuple:0占了新slot
+        // 目前union中的order by不支持函数
+        if (_tuple_id == 0 && tuple_desc != nullptr && expr->node_type() == pb::SLOT_REF) {
             for (int i = 0; i < tuple_desc->slots_size(); i++) {
                 auto& slot = tuple_desc->slots(i);
                 if (slot.slot_id() == expr->slot_id()) {
@@ -149,7 +151,7 @@ int SortNode::open(RuntimeState* state) {
         }
     }
     if (state->sort_use_index()) {
-        DB_WARNING_STATE(state, "sort use index, limit:%ld", _limit);
+        //DB_WARNING_STATE(state, "sort use index, limit:%ld", _limit);
         return 0;
     }
     _mem_row_desc = state->mem_row_desc();

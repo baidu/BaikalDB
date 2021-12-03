@@ -45,13 +45,16 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
     }
     _children.erase(_children.begin());
     //没有全局二级索引的情况下，dmlmanagerNode下的dmlNode直接cache,不执行
-    if (dml_manager_node->children_size() <= 1 && !state->single_txn_need_separate_execute()) {
+    if (dml_manager_node->children_size() <= 1 
+        && !state->single_txn_need_separate_execute()
+        && !state->open_binlog()) {
         client_conn->seq_id++;
         //dml请求放入cache, 同时更新client_conn上的region_info信息
         state->client_conn()->region_infos = dml_manager_node->region_infos();
         push_cmd_to_cache(state, _op_type, dml_manager_node->children(0));
         _children.erase(_children.begin());
         dml_manager_node->clear_children();
+        state->set_single_txn_ceched();
         delete dml_manager_node;
     } else {
         has_global_index = true;

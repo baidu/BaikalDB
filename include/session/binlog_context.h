@@ -85,6 +85,10 @@ public:
         _partition_record = partition_record;
     }
 
+    bool has_data_changed() {
+        return _partition_record != nullptr;
+    }
+
     void set_table_info(SmartTable table_info) {
         _table_info = table_info;
     }

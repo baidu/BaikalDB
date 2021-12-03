@@ -21,7 +21,6 @@
 #include "schema_manager.h"
 #include "meta_server.h"
 #include "table_key.h"
-#include "ddl_common.h"
 #include "ddl_manager.h"
 #ifdef BAIDU_INTERNAL
 #include <raft/repeated_timer_task.h>
@@ -31,7 +30,8 @@
 
 namespace baikaldb {
 DECLARE_int64(table_tombstone_gc_time_s);
-DECLARE_int64(min_ddl_index_state_change_interval_us);
+DECLARE_int64(store_heart_beat_interval_us);
+
 enum MergeStatus {
     MERGE_IDLE   = 0, //空闲
     MERGE_SRC    = 1,  //用于merge源
@@ -65,6 +65,7 @@ struct TableMem {
     //普通表使用
     bool is_linked = false;
     bool is_binlog = false;
+    std::vector<std::string> learner_resource_tag;
     int64_t binlog_id = 0;
     std::vector<pb::Expr> range_infos;
     bool exist_global_index(int64_t global_index_id) {
@@ -94,67 +95,14 @@ struct TableMem {
         //}
     }
 };
-struct DdlPeerMem {
-    DdlPeerMem() = default;
-    DdlPeerMem(const DdlPeerMem& peer_mem) = default;
-    DdlPeerMem(pb::IndexState state, std::string peer_str) : workstate(state), peer(peer_str) {}
-    pb::IndexState   workstate;
-    std::string     peer;
-};
 
-struct DdlRegionMem {
-    DdlRegionMem() = default;
-    DdlRegionMem(int64_t id, pb::IndexState state, std::string peer_str) : region_id(id), workstate(state) {
-        peer_infos.emplace(peer_str, DdlPeerMem{state, peer_str});
-    }
-    template<class List>
-    DdlRegionMem(int64_t id, pb::IndexState state, List&& peers) : region_id(id), workstate(state) {
-        for (const auto& peer_str : peers) {
-            peer_infos.emplace(peer_str, DdlPeerMem{state, peer_str});
-        }
-    }
-    DdlRegionMem(const DdlRegionMem& region_mem) = default;
-    int64_t region_id;
-    pb::IndexState workstate;
-    std::unordered_map<std::string, DdlPeerMem> peer_infos;
+struct TablePkPrefixSchedulingInfo {
+    std::unordered_map<int64_t, std::vector<pb::PrimitiveType>> table_pk_types;
+    std::unordered_map<int64_t, int32_t> table_pk_prefix_dimension;
+    int64_t table_pk_prefix_timestamp;
 };
+using DoubleBufferedTablePkPrefixInfo = butil::DoublyBufferedData<TablePkPrefixSchedulingInfo>;
 
-struct DdlWorkMem {
-    uint64_t table_id;
-    pb::DdlWorkInfo work_info; //持久化、与store交互更新
-    ThreadSafeMap<int64_t, DdlRegionMem, 257> region_ddl_infos;
-    std::string resource_tag;
-    std::atomic<bool> is_rollback {false};
-    std::atomic<bool> is_leader_region_info_collected {false};
-    std::atomic<bool> is_doing {false};
-    ThreadSafeMap<int64_t, int64_t> need_scan_regions;
-    std::mutex mutex;
-    int64_t update_interval_us {FLAGS_min_ddl_index_state_change_interval_us};
-    int64_t last_update_timestamp_us {0};
-    void set_rollback(bool rollback) {
-        std::lock_guard<std::mutex> lock(mutex);
-        work_info.set_rollback(rollback);
-    }
-    void set_state(pb::IndexState state) {
-        std::lock_guard<std::mutex> lock(mutex);
-        work_info.set_job_state(state);
-    }
-    void set_deleted(bool is_delete) {
-        std::lock_guard<std::mutex> lock(mutex);
-        work_info.set_deleted(true);
-    }
-    bool should_update() {
-        int64_t current_time = butil::gettimeofday_us();
-        std::lock_guard<std::mutex> lock(mutex);
-        if (current_time - last_update_timestamp_us > update_interval_us) {
-            last_update_timestamp_us = current_time;
-            return true;
-        }
-        return false;
-    }
-};
-
-using DdlWorkMemPtr = std::shared_ptr<DdlWorkMem>;
 
 class TableTimer : public braft::RepeatedTimerTask {
 public:
@@ -168,12 +116,13 @@ protected:
     virtual void on_destroy() {}
 };
 
+using VirtualIndexInfo = std::unordered_map<std::string, std::set<std::pair<std::string,std::string>>>;
+
 class TableManager {
 public:
     ~TableManager() {
         bthread_mutex_destroy(&_table_mutex);
-        bthread_mutex_destroy(&_table_ddlinfo_mutex);
-        bthread_mutex_destroy(&_all_table_ddlinfo_mutex);
+        bthread_mutex_destroy(&_load_virtual_to_memory_mutex);
         _table_timer.stop();
         _table_timer.destroy();
     }
@@ -182,6 +131,7 @@ public:
         return &instance;
     }
     friend class QueryTableManager;
+    friend class SchemaManager;
     void update_table_internal(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done,
     std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb)> update_callback);
     void create_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -201,9 +151,7 @@ public:
 
     void add_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void add_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
-    int add_local_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done, 
-        const int64_t table_id, pb::IndexInfo& index_info);
-    int add_global_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done,  
+    int do_add_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done,  
         const int64_t table_id, pb::IndexInfo& index_info);
     void drop_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -212,11 +160,11 @@ public:
     void link_binlog(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void unlink_binlog(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void set_index_hint_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void add_learner(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void drop_learner(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
 
     void update_index_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void delete_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done);
-    void delete_local_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done);
-    void delete_global_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done);
 
     void process_schema_heartbeat_for_store(
                 std::unordered_map<int64_t, int64_t>& store_table_id_version,
@@ -282,11 +230,6 @@ public:
     void get_update_regions_apply_raft();
     void check_update_region(const pb::LeaderHeartBeat& leader_region,
                              const SmartRegionInfo& master_region_info);
-    
-
-    void process_ddl_heartbeat_for_store(const pb::StoreHeartBeatRequest* request,
-                                             pb::StoreHeartBeatResponse* response,
-                                             uint64_t log_id);
 
     void on_leader_start();
     void on_leader_stop();
@@ -525,12 +468,16 @@ public:
     void get_table_info(const std::set<int64_t> table_ids, 
             std::unordered_map<int64_t, int64_t>& table_replica_nums,
             std::unordered_map<int64_t, std::string>& table_resource_tags,
-            std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>>& table_replica_dists_maps) {
+            std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>>& table_replica_dists_maps,
+            std::unordered_map<int64_t, std::vector<std::string>>& table_learner_resource_tags) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         for (auto& table_id : table_ids) {
             if (_table_info_map.find(table_id) != _table_info_map.end()) {
                 table_replica_nums[table_id] = _table_info_map[table_id].schema_pb.replica_num();
                 table_resource_tags[table_id] = _table_info_map[table_id].schema_pb.resource_tag();
+                for (auto& learner_resource : _table_info_map[table_id].schema_pb.learner_resource_tags()) {
+                    table_learner_resource_tags[table_id].emplace_back(learner_resource);
+                }
                 //没有指定机房分布的表，也在map中有key
                 table_replica_dists_maps[table_id];
                 for (auto& replica_dist : _table_info_map[table_id].schema_pb.dists()) {
@@ -571,6 +518,91 @@ public:
         }
         return false;
     }
+    bool update_pk_prefix_balance_timestamp(int64_t table_id, int32_t pk_prefix_dimension) {
+        auto call_func = [table_id, pk_prefix_dimension](TablePkPrefixSchedulingInfo& infos) -> int {
+            if (pk_prefix_dimension == 0) {
+                infos.table_pk_prefix_dimension.erase(table_id);
+            } else if (infos.table_pk_prefix_dimension[table_id] != pk_prefix_dimension) {
+                // 重置时间
+                infos.table_pk_prefix_timestamp = butil::gettimeofday_us();
+                infos.table_pk_prefix_dimension[table_id] = pk_prefix_dimension;
+            }
+            return 1;
+        };
+        _table_pk_prefix_infos.Modify(call_func);
+        return true;
+    }
+    bool get_pk_prefix_key(int64_t table_id, int32_t pk_prefix_dimension, const std::string& start_key, std::string& key) {
+        {
+            DoubleBufferedTablePkPrefixInfo::ScopedPtr info;
+            if (_table_pk_prefix_infos.Read(&info) != 0) {
+                DB_WARNING("read double_buffer_table error.");
+                return false;
+            }
+            auto iter = info->table_pk_types.find(table_id);
+            if (iter != info->table_pk_types.end() && !iter->second.empty()) {
+                // 之前解析过表主键，则直接从双buffer获取表主键解析key即可
+                TableKey tableKey(start_key, true);
+                key = std::to_string(table_id) + "_" +
+                      tableKey.decode_start_key_string(iter->second, pk_prefix_dimension);
+                return true;
+            }
+        }
+        // 第一次解析key，需要解析表的主键，并加入双buffer
+        std::vector<pb::PrimitiveType> pk_types;
+        pk_types.reserve(1);
+        {
+            BAIDU_SCOPED_LOCK(_table_mutex);
+            if (_table_info_map.find(table_id) == _table_info_map.end()) {
+                return false;
+            }
+            auto& schema_info = _table_info_map[table_id].schema_pb;
+            std::unordered_map<int64_t, pb::PrimitiveType> filed_types;
+            for(auto& field : schema_info.fields()) {
+                filed_types[field.field_id()] = field.mysql_type();
+            }
+            for(auto& idx : schema_info.indexs()) {
+                if (idx.index_type() != pb::I_PRIMARY) {
+                    continue;
+                }
+                for (auto& id : idx.field_ids()) {
+                    if (filed_types.find(id) == filed_types.end()) {
+                        DB_WARNING("find PrimitiveType failed, table_id: %ld, field_id: %d", table_id, id);
+                        return false;
+                    }
+                    pk_types.emplace_back(filed_types[id]);
+                }
+            }
+        }
+        if (pk_types.empty()) {
+            return false;
+        }
+        TableKey tableKey(start_key, true);
+        key = std::to_string(table_id) + "_" + tableKey.decode_start_key_string(pk_types, pk_prefix_dimension);
+        auto call_func = [table_id, pk_types](TablePkPrefixSchedulingInfo& infos) -> int {
+            infos.table_pk_types[table_id] = pk_types;
+            return 1;
+        };
+        _table_pk_prefix_infos.Modify(call_func);
+        return true;
+    }
+    void get_pk_prefix_dimensions(std::unordered_map<int64_t, int32_t>& pk_prefix_dimension) {
+        DoubleBufferedTablePkPrefixInfo::ScopedPtr info;
+        if (_table_pk_prefix_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        pk_prefix_dimension = info->table_pk_prefix_dimension;
+    }
+    bool can_do_pk_prefix_balance() {
+        DoubleBufferedTablePkPrefixInfo::ScopedPtr info;
+        if (_table_pk_prefix_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        return (butil::gettimeofday_us() - info->table_pk_prefix_timestamp) >=
+                2LL * FLAGS_balance_periodicity * FLAGS_store_heart_beat_interval_us;
+    }
     int64_t get_region_count(int64_t table_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
@@ -603,6 +635,7 @@ public:
         replica_num = _table_info_map[table_id].schema_pb.replica_num();
         return 0;
     }
+
     void get_region_ids(const std::string& full_table_name, std::vector<int64_t>& query_region_ids) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_id_map.find(full_table_name) == _table_id_map.end()) {
@@ -655,17 +688,19 @@ public:
         _table_info_map.clear();
         _incremental_schemainfo.clear();
         _incremental_statistics_info.clear();
+        _virtual_index_sql_map.clear();
+        _just_add_virtual_index_info.clear();
+        auto call_func = [](TablePkPrefixSchedulingInfo& infos) -> int {
+            infos.table_pk_prefix_dimension.clear();
+            infos.table_pk_prefix_timestamp = 0;
+            return 1;
+        };
+        _table_pk_prefix_infos.Modify(call_func);
     }
 
     int load_ddl_snapshot(const std::string& value);
 
     bool check_table_has_ddlwork(int64_t table_id) {
-        {
-            BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-            if (_table_ddlinfo_map.find(table_id) != _table_ddlinfo_map.end()) {
-                return true;
-            }
-        }
         return DDLManager::get_instance()->check_table_has_ddlwork(table_id);
     }
 
@@ -688,39 +723,6 @@ public:
             return  table_iter->second.schema_pb.link_field().field_id() == field_id;
         }
         return false;
-    }
-
-
-    int get_ddlwork_info(int64_t table_id, pb::QueryResponse* query_response) {
-        auto ddlwork_ptr = get_ddlwork_ptr(table_id);
-        if (ddlwork_ptr != nullptr) {
-            {
-                BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-                query_response->add_ddlwork_infos()->CopyFrom(ddlwork_ptr->work_info);
-            }
-            auto ddl_info_ptr = query_response->add_query_ddl_infos();
-            ddl_info_ptr->set_table_id(table_id);
-
-            ddlwork_ptr->region_ddl_infos.traverse([ddl_info_ptr](const DdlRegionMem& region_info){
-                auto region_info_ptr = ddl_info_ptr->add_ddl_region_infos();
-                region_info_ptr->set_region_id(region_info.region_id);
-                region_info_ptr->set_state(region_info.workstate);
-
-                for (const auto& peer_ddl_info : region_info.peer_infos) {
-                    auto peer_info_ptr = region_info_ptr->add_ddl_peer_infos();
-                    peer_info_ptr->set_peer(peer_ddl_info.second.peer);
-                    peer_info_ptr->set_state(peer_ddl_info.second.workstate);
-                }
-            });
-        }
-        {
-            BAIDU_SCOPED_LOCK(_all_table_ddlinfo_mutex);
-            auto range = _all_table_ddlinfo_map.equal_range(table_id);
-            for (auto i = range.first; i != range.second; ++i) {
-                query_response->add_ddlwork_infos()->CopyFrom(i->second.work_info);
-            }
-        }
-        return 0;
     }
 
     int get_index_state(int64_t table_id, int64_t index_id, pb::IndexState& index_state) {
@@ -746,7 +748,7 @@ public:
 
     void drop_index_request(const pb::DdlWorkInfo& ddl_work);
 
-    void get_delay_delete_index(std::vector<pb::SchemaInfo>& index_to_delete) {
+    void get_delay_delete_index(std::vector<pb::SchemaInfo>& index_to_delete, std::vector<pb::SchemaInfo>& index_to_clear) {
         auto current_time = butil::gettimeofday_us();
         BAIDU_SCOPED_LOCK(_table_mutex);
         for (auto& table_info : _table_info_map) {
@@ -755,18 +757,30 @@ public:
             }
             auto& schema_pb = table_info.second.schema_pb; 
             for (auto& index : schema_pb.indexs()) {
-                if (index.hint_status() == pb::IHS_DISABLE  && 
-                    index.drop_timestamp() != 0             && 
+                if (index.hint_status() == pb::IHS_DISABLE &&
+                    index.state() != pb::IS_DELETE_LOCAL &&
+                    index.drop_timestamp() != 0 &&
                     index.drop_timestamp() < current_time) {
-                    DB_NOTICE("disbale %s", schema_pb.ShortDebugString().c_str());
                     pb::SchemaInfo delete_schema = schema_pb;
                     delete_schema.clear_indexs();
                     auto index_ptr = delete_schema.add_indexs();
                     index_ptr->CopyFrom(index);
                     index_to_delete.emplace_back(delete_schema);
+                    DB_NOTICE("delete index start %s", delete_schema.ShortDebugString().c_str());
+                    break;
+                } else if (index.hint_status() == pb::IHS_DISABLE &&
+                    index.state() == pb::IS_DELETE_LOCAL &&
+                    index.drop_timestamp() != 0 &&
+                    index.drop_timestamp() < current_time) {
+                    pb::SchemaInfo delete_schema = schema_pb;
+                    delete_schema.clear_indexs();
+                    auto index_ptr = delete_schema.add_indexs();
+                    index_ptr->CopyFrom(index);
+                    index_to_clear.emplace_back(delete_schema);
+                    DB_NOTICE("clear local index start %s", delete_schema.ShortDebugString().c_str());
                     break;
                 }
-            } 
+            }
         }
     }
     int check_table_exist(const pb::SchemaInfo& schema_info,
@@ -775,11 +789,11 @@ public:
         int64_t database_id = 0;
         return check_table_exist(schema_info, namespace_id, database_id, table_id);
     }
+    
 private:
     TableManager(): _max_table_id(0) {
         bthread_mutex_init(&_table_mutex, NULL);
-        bthread_mutex_init(&_table_ddlinfo_mutex, NULL);
-        bthread_mutex_init(&_all_table_ddlinfo_mutex, NULL);
+        bthread_mutex_init(&_load_virtual_to_memory_mutex, NULL);
         _table_timer.init(FLAGS_table_tombstone_gc_time_s * 1000);
     }
     int write_schema_for_not_level(TableMem& table_mem,
@@ -862,178 +876,41 @@ private:
         return max_table_id_key;
     }
 
-    int update_ddlwork_for_rocksdb(int64_t table_id, 
-                                    const pb::DdlWorkInfo& _info, 
-                                    braft::Closure* done);
-
-    void common_update_ddlwork_info_heartbeat_for_store(const pb::StoreHeartBeatRequest* request);
-
-    void process_ddl_add_index_process(
-        DdlWorkMem& meta_work);
-
-    void process_ddl_common_init(
-        pb::StoreHeartBeatResponse* response,
-        const pb::DdlWorkInfo& work_info);
-
-    void process_ddl_del_index_process(
-        DdlWorkMem& meta_work);
-
-    void update_ddlwork_info(const pb::DdlWorkInfo& ddl_work, 
-        pb::OpType update_op);
-
-    int init_ddlwork(const pb::MetaManagerRequest& request, DdlWorkMem& ddl_work_mem);
-    int init_ddlwork_drop_index(const pb::MetaManagerRequest& request, DdlWorkMem& ddl_work_mem);
-    int init_ddlwork_add_index(const pb::MetaManagerRequest& request, DdlWorkMem& ddl_work_mem);
-
-    bool process_ddl_update_job_index(DdlWorkMem& meta_work_info, pb::IndexState expected_state,
-        pb::IndexState state);
-    void rollback_ddlwork(DdlWorkMem& ddlwork_mem);
-
     bool is_global_index(const pb::IndexInfo& index_info) {
         return index_info.is_global() == true && 
             (index_info.index_type() == pb::I_UNIQ || index_info.index_type() == pb::I_KEY);
     }
-    void delete_ddl_region_info(DdlWorkMem& ddlwork, std::vector<int64_t>& region_ids);
-    int init_region_ddlwork(DdlWorkMem& ddl_work_mem);
 
-    void check_delete_ddl_region_info(DdlWorkMem& ddlwork);
+    int init_global_index_region(TableMem& table_mem, braft::Closure* done, pb::IndexInfo& index_info);
 
     void put_incremental_schemainfo(const int64_t apply_index, std::vector<pb::SchemaInfo>& schema_infos);
     void put_incremental_statistics_info(const int64_t apply_index, std::vector<pb::Statistics>& st_infos);
-    DdlWorkMemPtr get_ddlwork_ptr(int64_t table_id) {
-        DdlWorkMemPtr ddl_work_ptr {nullptr};
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        auto table_ddlinfo_iter = _table_ddlinfo_map.find(table_id);
-        if (table_ddlinfo_iter == _table_ddlinfo_map.end()) {
-            DB_DEBUG("table_ddlinfo_map doesn't have table_id[%ld]", table_id);
-            return nullptr;
-        }
-        return table_ddlinfo_iter->second;
-    }
 
-    void add_ddlwork_region(int64_t table_id, int64_t region_id, const std::string& peer) {
-        DdlRegionMem ddl_region_mem;
-        ddl_region_mem.region_id = region_id;
-        ddl_region_mem.workstate = pb::IS_UNKNOWN;
-        ddl_region_mem.peer_infos.emplace(peer, DdlPeerMem{pb::IS_UNKNOWN, peer});
-        DdlWorkMemPtr ddl_work_ptr = get_ddlwork_ptr(table_id);
-        if (ddl_work_ptr != nullptr) {
-            ddl_work_ptr->region_ddl_infos.set(region_id, ddl_region_mem);
-        }
-    }
-
-    void init_ddlwork_region_info(
-        DdlRegionMem& region_ddl_info,
-        const pb::RegionInfo& region_info,
-        pb::IndexState work_state
-    ) {
-        region_ddl_info.region_id = region_info.region_id();
-        region_ddl_info.workstate = work_state;
-        for (const auto& peer : region_info.peers()) {
-            DdlPeerMem ddl_peer_mem;
-            ddl_peer_mem.workstate = work_state;
-            ddl_peer_mem.peer = peer;
-            region_ddl_info.peer_infos.emplace(peer, ddl_peer_mem);
-            DB_NOTICE("add_ddl_region region[%ld] peer[%s] state[%s]", region_ddl_info.region_id, peer.c_str(),
-                        pb::IndexState_Name(work_state).c_str());
-        }
-    }
-
-    void update_ddlwork_peer_state(DdlWorkMemPtr& ddl_work_ptr, int64_t table_id, int64_t region_id, const std::string& peer,
-        pb::IndexState store_job_state, bool& debug_flag) {
-        
-        auto update_func = [&peer, store_job_state, table_id, region_id, &debug_flag](DdlRegionMem& region_info) {
-            if (store_job_state == region_info.workstate) {
-                return;
-            }
-            auto peer_iter = region_info.peer_infos.find(peer);
-            if (peer_iter != region_info.peer_infos.end()) {
-                auto& peer_state = peer_iter->second.workstate;
-                if (store_job_state != peer_state) {
-                    peer_state = store_job_state;
-                    auto all_peer_done = std::all_of(region_info.peer_infos.begin(),
-                        region_info.peer_infos.end(), 
-                        [store_job_state](typename std::unordered_map<std::string, DdlPeerMem>::const_reference r){
-                            return r.second.workstate == store_job_state;
-                    });
-
-                    if (all_peer_done && region_info.workstate != store_job_state) {
-                        DB_NOTICE("table_id_%ld region_%ld all peer state[%s]", table_id, region_id, 
-                            pb::IndexState_Name(store_job_state).c_str());
-                        region_info.workstate = store_job_state;
-                    }
-                    if (debug_flag && !all_peer_done) {
-                        debug_flag = false;
-                        for (const auto& peer_ddl_info : region_info.peer_infos) {
-                            DB_NOTICE("table_id_%ld wait for region[%ld] peer[%s] state[%s]", table_id, region_info.region_id,
-                                peer_ddl_info.second.peer.c_str(), 
-                                pb::IndexState_Name(peer_ddl_info.second.workstate).c_str());
-                        }
-                    }
-                }
-            } else {
-                DB_NOTICE("DDL_LOG region[%ld] peer[%s] has been delete.", region_id, peer.c_str());
-                //region_info.peer_infos.emplace(peer, DdlPeerMem{pb::IS_UNKNOWN, peer});
-            }
-        };
-        ddl_work_ptr->region_ddl_infos.update(region_id, update_func);
-    }
-
-    //不要使用这种轮询方案，重构TODO
-    void delete_ddlwork_with_leader_region_info(const pb::StoreHeartBeatRequest& store_req, 
-        int start_index, int end_index);
-
-    //不要使用这种轮询方案，重构TODO
-    void init_ddlwork_with_leader_region_info(const pb::StoreHeartBeatRequest& store_req, 
-        int start_index, int end_index);
-
-    int get_pb_ddlwork_info(int64_t table_id, pb::DdlWorkInfo& pb_ddlwork_info) {
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        auto table_iter = _table_ddlinfo_map.find(table_id);
-        if (table_iter != _table_ddlinfo_map.end()) {
-            pb_ddlwork_info = table_iter->second->work_info;
-            return 0;
-        }
-        return -1;
-    }
-
-    void get_ddlwork_table_ids(std::unordered_set<int64_t>& table_ids) {
-        BAIDU_SCOPED_LOCK(_table_ddlinfo_mutex);
-        for (const auto& ddlwork : _table_ddlinfo_map) {
-            table_ids.insert(ddlwork.first);
-        }
-    }
-
-    void init_store_ddl_work(const pb::StoreHeartBeatRequest* request,
-        pb::StoreHeartBeatResponse* response);
-
-    void update_ddl_work(const pb::StoreHeartBeatRequest& request);
-
-    void ddlwork_process_leader_region(const pb::StoreHeartBeatRequest& store_req);
-
-    void collect_ddlwork_info(DdlWorkMem& meta_work);
     bool partition_check_region_when_update(int64_t table_id, 
         std::string min_start_key, 
         std::string max_end_key, std::map<std::string, RegionDesc>& partition_region_map);
+    //虚拟索引影响面信息更新至TableManager管理的内存中
+    void load_virtual_indextosqls_to_memory(const pb::BaikalHeartBeatRequest* request);
+    void drop_virtual_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    VirtualIndexInfo get_virtual_index_id_set();
 private:
     bthread_mutex_t                                     _table_mutex;
-    bthread_mutex_t                                     _table_ddlinfo_mutex;
-    bthread_mutex_t                                     _all_table_ddlinfo_mutex;
+    bthread_mutex_t                                     _load_virtual_to_memory_mutex;
     int64_t                                             _max_table_id;
+    VirtualIndexInfo _virtual_index_sql_map;//虚拟索引和sql的影响相互对应情况
     //table_name 与op映射关系， name: namespace\001\database\001\table_name
     std::unordered_map<std::string, int64_t>            _table_id_map;
     std::unordered_map<int64_t, TableMem>               _table_info_map;
     // table_id => TableMem 
     std::map<int64_t, TableMem>               _table_tombstone_map;
-
-    std::unordered_map<int64_t, DdlWorkMemPtr> _table_ddlinfo_map;
-    std::atomic<int64_t> _last_ddl_update_timestamp {0};
-    std::multimap<int64_t, DdlWorkMem> _all_table_ddlinfo_map;
     std::set<int64_t>                  _need_apply_raft_table_ids;
-
+    //用一个set<std::string>保存刚被删除的虚拟索引记录
+    std::set<int64_t>                          _just_add_virtual_index_info;
     IncrementalUpdate<std::vector<pb::SchemaInfo>> _incremental_schemainfo;
     IncrementalUpdate<std::vector<pb::Statistics>> _incremental_statistics_info;
     TableTimer _table_timer;
+
+    DoubleBufferedTablePkPrefixInfo             _table_pk_prefix_infos;
 }; //class
 
 }//namespace

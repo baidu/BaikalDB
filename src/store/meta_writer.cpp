@@ -14,6 +14,7 @@
 
 #include "meta_writer.h"
 #include <cstdint>
+#include <rocksdb/sst_file_reader.h>
 #include "table_key.h"
 #include "region_control.h"
 
@@ -42,6 +43,10 @@ const std::string MetaWriter::BINLOG_CHECK_POINT_IDENTIFY(1, 0x0A);
 
 const std::string MetaWriter::BINLOG_OLDEST_IDENTIFY(1, 0x0B);
 
+const std::string MetaWriter::LEARNER_IDENTIFY(1, 0x0C);
+
+const std::string MetaWriter::LOCAL_STORAGE_IDENTIFY(1, 0x0D);
+
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
     std::vector<std::string> values;
@@ -65,6 +70,9 @@ int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     keys.push_back(binlog_oldest_ts_key(region_id));
     values.push_back(encode_binlog_ts(0));
 
+    //keys.push_back(learner_key(region_id));
+    //values.push_back(region_info.is_learner() ? encode_learner_flag(1) : encode_learner_flag(0));
+    
     auto status = _rocksdb->write(MetaWriter::write_options, _meta_cf, keys, values);
     if (!status.ok()) {
         DB_FATAL("write init_meta_info fail, err_msg: %s, region_id: %ld",
@@ -203,6 +211,14 @@ int MetaWriter::write_meta_after_commit(int64_t region_id, int64_t num_table_lin
     batch.Delete(_meta_cf, transcation_log_index_key(region_id, txn_id));
     return write_batch(&batch, region_id);
 }
+
+int MetaWriter::clear_error_pre_commit(int64_t region_id, uint64_t txn_id) {
+    rocksdb::WriteBatch batch;
+    batch.Delete(_meta_cf, pre_commit_key(region_id, txn_id));
+    batch.Delete(_meta_cf, transcation_log_index_key(region_id, txn_id));
+    return write_batch(&batch, region_id);
+}
+
 int MetaWriter::write_meta_begin_index(int64_t region_id, int64_t log_index, int64_t data_index, uint64_t txn_id) {
     if (log_index == 0) {
         return 0;
@@ -221,6 +237,7 @@ int MetaWriter::write_meta_index_and_num_table_lines(int64_t region_id, int64_t 
     txn->put_meta_info(num_table_lines_key(region_id), encode_num_table_lines(num_table_lines));
     return 0;
 }
+/*
 int MetaWriter::ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id) {
     rocksdb::IngestExternalFileOptions ifo;
     auto res = _rocksdb->ingest_external_file(_meta_cf, {meta_sst_file}, ifo);
@@ -228,6 +245,30 @@ int MetaWriter::ingest_meta_sst(const std::string& meta_sst_file, int64_t region
          DB_WARNING("Error while adding file %s, Error %s, region_id: %ld",
                  meta_sst_file.c_str(), res.ToString().c_str(), region_id);
          return -1;
+    }
+    return 0;
+}*/
+// meta数据量很少，直接写入memtable减少ingest 导致的flush
+int MetaWriter::ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id) {
+    RocksWrapper* db = RocksWrapper::get_instance();
+    rocksdb::Options options = db->get_options(db->get_meta_info_handle());
+    rocksdb::SstFileReader reader(options);
+    auto res = reader.Open(meta_sst_file);
+    if (!res.ok()) {
+         DB_WARNING("SstFileReader open fail %s, Error %s, region_id: %ld",
+                 meta_sst_file.c_str(), res.ToString().c_str(), region_id);
+         return -1;
+    }
+    rocksdb::ReadOptions read_opt;
+    std::unique_ptr<rocksdb::Iterator> iter(reader.NewIterator(read_opt));
+    for (iter->Seek(""); iter->Valid(); iter->Next()) {
+        auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                iter->key(), iter->value());
+        if (!status.ok()) {
+            DB_FATAL("put meta fail, err_msg: %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+            return -1;
+        }
     }
     return 0;
 }
@@ -273,6 +314,7 @@ int MetaWriter::clear_all_meta_info(int64_t drop_region_id) {
     batch.Delete(_meta_cf, applied_index_key(drop_region_id));
     batch.Delete(_meta_cf, num_table_lines_key(drop_region_id));
     batch.Delete(_meta_cf, doing_snapshot_key(drop_region_id));
+    batch.Delete(_meta_cf, learner_key(drop_region_id));
     auto status = _rocksdb->write(options, &batch);
     if (!status.ok()) {
         DB_FATAL("drop region fail, error: code=%d, msg=%s, region_id: %ld", 
@@ -454,6 +496,11 @@ int MetaWriter::parse_doing_snapshot(std::set<int64_t>& region_ids) {
 void MetaWriter::read_applied_index(int64_t region_id, int64_t* applied_index, int64_t* data_index) {
     std::string value;
     rocksdb::ReadOptions options;
+    read_applied_index(region_id, options, applied_index, data_index);
+}
+
+void MetaWriter::read_applied_index(int64_t region_id, const rocksdb::ReadOptions& options, int64_t* applied_index, int64_t* data_index) {
+    std::string value;
     auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(applied_index_key(region_id)), &value);
     if (!status.ok()) {
         DB_WARNING("Error while read applied index, Error %s, region_id: %ld",
@@ -483,6 +530,20 @@ int64_t MetaWriter::read_num_table_lines(int64_t region_id) {
     }
     return TableKey(rocksdb::Slice(value)).extract_i64(0);
 }
+
+int MetaWriter::read_learner_key(int64_t region_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(learner_key(region_id)), &value);
+    if (!status.ok()) {
+        DB_WARNING("Error while read learner key, Error %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1;
+    }
+    DB_DEBUG("region_id %ld read learner %s", region_id, str_to_hex(value).c_str());
+    return TableKey(rocksdb::Slice(value)).extract_i64(0);
+}
+
 int MetaWriter::read_region_info(int64_t region_id, pb::RegionInfo& region_info) {
     std::string value;
     rocksdb::ReadOptions options;
@@ -641,6 +702,16 @@ std::string MetaWriter::encode_applied_index(int64_t applied_index, int64_t data
     index_value.append_i64(data_index);
     return index_value.data();
 }
+
+std::string MetaWriter::encode_removed_ddl_key(int64_t region_id, int64_t index_id)  const {
+    MutTableKey ddl_key;
+    ddl_key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    ddl_key.append_i64(region_id);
+    ddl_key.append_char(MetaWriter::LOCAL_STORAGE_IDENTIFY.c_str(), 1);
+    ddl_key.append_i64(index_id);
+    return ddl_key.data();
+}
+
 std::string MetaWriter::encode_num_table_lines(int64_t line) const {
     MutTableKey line_value;
     line_value.append_i64(line);
@@ -696,6 +767,12 @@ std::string MetaWriter::encode_binlog_ts(int64_t ts) const {
     return ts_value.data();
 }
 
+std::string MetaWriter::encode_learner_flag(int64_t learner_flag) const {
+    MutTableKey value;
+    value.append_i64(learner_flag);
+    return value.data();
+}
+
 std::string MetaWriter::binlog_check_point_key(int64_t region_id) const {
     MutTableKey key;
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
@@ -718,6 +795,20 @@ int MetaWriter::write_binlog_check_point(int64_t region_id, int64_t ts) {
     return 0;
 }
 
+int MetaWriter::write_learner_key(int64_t region_id, bool is_learner) {
+    DB_DEBUG("write learner key region %ld, is_learner %d write %s", 
+        region_id, is_learner, str_to_hex(encode_learner_flag(is_learner)).c_str());
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(learner_key(region_id)),
+                rocksdb::Slice(encode_learner_flag(is_learner)));
+    if (!status.ok()) {
+        DB_FATAL("write binlog check point fail, err_msg: %s, region_id: %ld, learner: %d",
+                    status.ToString().c_str(), region_id, is_learner);
+        return -1;
+    }
+    return 0;
+}
+
 int64_t MetaWriter::read_binlog_check_point(int64_t region_id) {
     std::string value;
     rocksdb::ReadOptions options;
@@ -735,6 +826,14 @@ std::string MetaWriter::binlog_oldest_ts_key(int64_t region_id) const {
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
     key.append_i64(region_id);
     key.append_char(MetaWriter::BINLOG_OLDEST_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+
+std::string MetaWriter::learner_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::LEARNER_IDENTIFY.c_str(), 1);
     return key.data();
 }
 

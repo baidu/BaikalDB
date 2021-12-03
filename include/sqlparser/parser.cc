@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "parser.h"
-#include "common.h"
 #ifdef BAIDU_INTERNAL
 #include "uconv.h"
 #endif

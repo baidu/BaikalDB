@@ -42,10 +42,11 @@ struct QueryStat {
     int64_t     table_get_row_time;
     int64_t     total_time;
     uint64_t    version;
-    int32_t     send_buf_size;
+    size_t      send_buf_size;
     int32_t     partition_key;
     
     int32_t     sql_length;
+    int32_t     region_count;
     bool        hit_cache;
     timeval     start_stamp;
     timeval     send_stamp;
@@ -62,13 +63,13 @@ struct QueryStat {
     MysqlErrCode error_code;
     std::ostringstream error_msg;
 
-    int         num_affected_rows = 0;
-    int         num_returned_rows = 0;
-    int         num_scan_rows     = 0;
-    int         num_filter_rows   = 0;
-    uint64_t    log_id;
-    uint64_t    old_txn_id;
-    int         old_seq_id;
+    int64_t     num_affected_rows = 0;
+    int64_t     num_returned_rows = 0;
+    int64_t     num_scan_rows     = 0;
+    int64_t     num_filter_rows   = 0;
+    uint64_t    log_id = 0;
+    uint64_t    old_txn_id = 0;
+    int         old_seq_id = 0;
 
     QueryStat() {
         reset();
@@ -113,6 +114,7 @@ struct QueryStat {
         log_id              = butil::fast_rand();
         old_txn_id          = 0;
         old_seq_id          = 0;
+        region_count        = 0;
     }
 };
 

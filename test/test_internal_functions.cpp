@@ -163,4 +163,77 @@ TEST(round, round) {
     }
 }
 
+TEST(substring_index, substring_index) {
+    {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "www.begtut.com";
+        ExprValue v2(pb::STRING);
+        v2.str_val = "ut";
+        ExprValue v3(pb::INT64);
+        v3._u.int64_val = -1;
+        input.push_back(v1);
+        input.push_back(v2);
+        input.push_back(v3);
+        ExprValue ret = substring_index(input);
+        EXPECT_STREQ(ret.str_val.c_str(), ".com");
+    }
+    {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "www.begtut.com";
+        ExprValue v2(pb::STRING);
+        v2.str_val = "ut";
+        ExprValue v3(pb::INT64);
+        v3._u.int64_val = -2;
+        input.push_back(v1);
+        input.push_back(v2);
+        input.push_back(v3);
+        ExprValue ret = substring_index(input);
+        EXPECT_STREQ(ret.str_val.c_str(), "www.begtut.com");
+    }
+    {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "www.begtut.com";
+        ExprValue v2(pb::STRING);
+        v2.str_val = "ut";
+        ExprValue v3(pb::INT64);
+        v3._u.int64_val = 1;
+        input.push_back(v1);
+        input.push_back(v2);
+        input.push_back(v3);
+        ExprValue ret = substring_index(input);
+        EXPECT_STREQ(ret.str_val.c_str(), "www.begt");
+    }
+    {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "www.begtut.com";
+        ExprValue v2(pb::STRING);
+        v2.str_val = "ww";
+        ExprValue v3(pb::INT64);
+        v3._u.int64_val = -1;
+        input.push_back(v1);
+        input.push_back(v2);
+        input.push_back(v3);
+        ExprValue ret = substring_index(input);
+        EXPECT_STREQ(ret.str_val.c_str(), "w.begtut.com");
+    }
+    {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "www.begtut.com";
+        ExprValue v2(pb::STRING);
+        v2.str_val = "ww";
+        ExprValue v3(pb::INT64);
+        v3._u.int64_val = 1;
+        input.push_back(v1);
+        input.push_back(v2);
+        input.push_back(v3);
+        ExprValue ret = substring_index(input);
+        EXPECT_STREQ(ret.str_val.c_str(), "");
+    }
+}
+
 }  // namespace baikal

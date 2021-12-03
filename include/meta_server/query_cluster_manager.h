@@ -32,6 +32,7 @@ public:
     void get_flatten_instance(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_diff_region_ids(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_region_ids(const pb::QueryRequest* request, pb::QueryResponse* response);
+    void get_network_segment(const pb::QueryRequest* request, pb::QueryResponse* response);
     void process_console_heartbeat(const pb::ConsoleHeartBeatRequest* request,
             pb::ConsoleHeartBeatResponse* response);
 private:

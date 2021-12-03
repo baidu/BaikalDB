@@ -24,6 +24,35 @@
 #include "common.h"
 #include "meta_server_interact.hpp"
 #include "baikal_heartbeat.h"
+#ifdef BAIDU_INTERNAL
+#include "baikal_client.h"
+#else
+namespace baikal {
+namespace client {
+class ResultSet {
+public:
+    uint64_t get_affected_rows() {
+        return 0;
+    }
+};
+class Service {
+public:
+    int query(int i, const std::string& sql, ResultSet* res) {
+        return -1;
+    }
+};
+class Manager {
+public:
+    int init(const std::string& path, const std::string& conf) {
+        return -1;
+    }
+    Service* get_service(const std::string& name) {
+        return nullptr;
+    }
+};
+}
+}
+#endif
 
 namespace baikaldb {
 class NetworkServer {
@@ -81,7 +110,10 @@ private:
         std::string type, std::ostringstream& os);
     void print_agg_sql();
     void store_health_check();
-    
+    int insert_agg_sql(const std::string &sql);
+    int insert_agg_sql_by_sign(const std::string& values);
+    int insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map);
+
 private:
     // Server info.
     uint32_t        _counter = 0;       // Using counter++ to generate socket id.
@@ -100,5 +132,8 @@ private:
     uint64_t        _instance_id = 0;
     std::string     _physical_room;
     bvar::Adder<int64_t> _heart_beat_count;
+    // for print_agg_sql
+    baikal::client::Manager _manager;
+    baikal::client::Service* _baikaldb;
 };
 } // namespace baikal

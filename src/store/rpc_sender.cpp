@@ -35,7 +35,8 @@ int RpcSender::send_no_op_request(const std::string& instance,
     return ret;
 }
 
-int64_t RpcSender::get_peer_applied_index(const std::string& peer, int64_t region_id) {
+void RpcSender::get_peer_applied_index(const std::string& peer, int64_t region_id,
+                                       int64_t& applied_index, int64_t& dml_latency) {
     pb::GetAppliedIndex request;
     request.set_region_id(region_id);
     pb::StoreRes response;
@@ -43,13 +44,16 @@ int64_t RpcSender::get_peer_applied_index(const std::string& peer, int64_t regio
     StoreInteract store_interact(peer);
     auto ret = store_interact.send_request("get_applied_index", request, response);
     if (ret == 0) {
-        return response.applied_index();
+        applied_index = response.region_raft_stat().applied_index();
+        dml_latency = response.region_raft_stat().dml_latency();
+        if (dml_latency == 0) {
+            dml_latency = 50000;
+        }
     }
-    return 0;
 }
 
 void RpcSender::get_peer_snapshot_size(const std::string& peer, int64_t region_id,
-        uint64_t* data_size, uint64_t* meta_size) {
+        uint64_t* data_size, uint64_t* meta_size, int64_t* snapshot_index) {
     pb::GetAppliedIndex request;
     request.set_region_id(region_id);
     pb::StoreRes response;
@@ -59,6 +63,7 @@ void RpcSender::get_peer_snapshot_size(const std::string& peer, int64_t region_i
     if (ret == 0) {
         *data_size = response.region_raft_stat().snapshot_data_size();
         *meta_size = response.region_raft_stat().snapshot_meta_size();
+        *snapshot_index = response.region_raft_stat().snapshot_index();
     }
 }
 
@@ -91,6 +96,16 @@ int RpcSender::send_query_method(const pb::StoreReq& request,
     TimeCost time_cost;
     StoreInteract store_interact(instance);
     return store_interact.send_request_for_leader(log_id, "query", request, response);
+}
+
+int RpcSender::send_async_apply_log(const pb::BatchStoreReq& request,
+                                    pb::BatchStoreRes& response,
+                                    const std::string& instance,
+                                    butil::IOBuf* attachment_data) {
+    uint64_t log_id = butil::fast_rand();
+    TimeCost time_cost;
+    StoreInteract store_interact(instance);
+    return store_interact.send_request_for_leader(log_id, "async_apply_log_entry", request, response, attachment_data);
 }
 
 void RpcSender::send_remove_region_method(int64_t drop_region_id, const std::string& instance) {

@@ -46,7 +46,7 @@ public:
     static const std::string REGION_SCHEMA_IDENTIFY;
     static const std::string DDLWORK_IDENTIFY;
     static const std::string STATISTICS_IDENTIFY;
-    static const std::string GLOBAL_DDLWORK_REGION_IDENTIFY;
+    static const std::string INDEX_DDLWORK_REGION_IDENTIFY;
     static const std::string MAX_IDENTIFY;
 
     virtual ~MetaServer();
@@ -113,18 +113,23 @@ public:
     void close();
 
 private:
-    MetaServerInteract* meta_proxy(const std::string& plat) {
-        if (_meta_interact_map.count(plat) == 1) {
-            return _meta_interact_map[plat];
+    MetaServerInteract* meta_proxy(const std::string& meta_bns) {
+        std::lock_guard<bthread::Mutex> guard(_meta_interact_mutex);
+        if (_meta_interact_map.count(meta_bns) == 1) {
+            return _meta_interact_map[meta_bns];
+        } else {
+            _meta_interact_map[meta_bns] = new MetaServerInteract;
+            _meta_interact_map[meta_bns]->init_internal(meta_bns);
+            return _meta_interact_map[meta_bns];
         }
-        return MetaServerInteract::get_instance();
     }
+
     MetaServer() {}
-    
+    bthread::Mutex _meta_interact_mutex;
+    std::map<std::string, MetaServerInteract*> _meta_interact_map;
     MetaStateMachine* _meta_state_machine = NULL;
     AutoIncrStateMachine* _auto_incr_state_machine = NULL;
     TSOStateMachine*      _tso_state_machine = NULL;
-    std::map<std::string, MetaServerInteract*> _meta_interact_map;
     Bthread _flush_bth;
     //region区间修改等信息应用raft
     Bthread _apply_region_bth;

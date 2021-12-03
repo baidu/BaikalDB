@@ -77,8 +77,8 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
         }
     }
     
-    // 如果更新主键，那么影响了全部索引
-    if (!_affect_primary) {
+    // 如果更新主键或者ttl，那么影响了全部索引
+    if (!(_affect_primary || _table_info->ttl_info.ttl_duration_s > 0)) {
         _global_affected_index_ids.swap(global_affected_indices);
         _local_affected_index_ids.swap(local_affected_indices);
     }

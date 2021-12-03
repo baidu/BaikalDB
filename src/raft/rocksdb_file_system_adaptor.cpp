@@ -35,6 +35,7 @@ bool inline is_snapshot_meta_file(const std::string& path) {
     }
     return false;
 }
+
 bool PosixDirReader::is_valid() const {
     return _dir_reader.IsValid();
 }
@@ -114,8 +115,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     std::string txn_info_prefix = MetaWriter::get_instance()->transcation_pb_key_prefix(_region_id);
     std::string pre_commit_prefix = MetaWriter::get_instance()->pre_commit_key_prefix(_region_id);
     std::string region_info_key = MetaWriter::get_instance()->region_info_key(_region_id);
-    std::string applied_index_key = MetaWriter::get_instance()->applied_index_key(_region_id);
-    int64_t applied_index = 0;
+    
     while (count < size) {
         if (!iter_context->iter->Valid()
                 || !iter_context->iter->key().starts_with(iter_context->prefix)) {
@@ -138,11 +138,6 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
             DB_WARNING("region_id: %ld meta_sst region_info:%s", _region_id,
                     region_info.ShortDebugString().c_str());
         }
-        if (iter_context->is_meta_sst && iter_context->iter->key().compare(applied_index_key) == 0) {
-            applied_index = TableKey(iter_context->iter->value()).extract_i64(0);
-            DB_WARNING("region_id: %ld meta_sst applied_index:%ld", _region_id,
-                    applied_index);
-        }
         //txn_info请求不发送，理论上leader上没有该类请求
         if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(txn_info_prefix)) {
             iter_context->iter->Next();
@@ -160,7 +155,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
             int64_t log_index = MetaWriter::get_instance()->decode_log_index_value(iter_context->iter->value());
             uint64_t txn_id = MetaWriter::get_instance()->decode_log_index_key(iter_context->iter->key());
             std::map<int64_t, std::string> txn_infos;
-            auto ret  = LogEntryReader::get_instance()->read_log_entry(_region_id, log_index, applied_index, txn_id, txn_infos);
+            auto ret  = LogEntryReader::get_instance()->read_log_entry(_region_id, log_index, iter_context->applied_index, txn_id, txn_infos);
             if (ret < 0) {
                 iter_context->done = true;
                 DB_FATAL("read txn info fail, may be has removed, region_id: %ld", _region_id);
@@ -540,6 +535,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_writer_adaptor(const std::str
     } else {
         options = db->get_options(db->get_meta_info_handle());
     }
+    options.bottommost_compression = rocksdb::kLZ4Compression;
     
     SstWriterAdaptor* writer = new SstWriterAdaptor(_region_id, path, options);
     int ret = writer->open();
@@ -631,6 +627,9 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
                     _region_id, sc->data_index, peer_next_index, path.c_str(), time_cost.get_time());
         }
     }
+    int64_t applied_index = 0;
+    int64_t data_index = 0;
+    int64_t snapshot_index = 0;
     if (is_snapshot_meta_file(path)) {
         is_meta_reader = true;
         iter_context = sc->meta_context;
@@ -647,6 +646,10 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
             iter_context->iter->Seek(prefix);
             sc->meta_context = iter_context;
+            snapshot_index = parse_snapshot_index_from_path(path, true);
+            iter_context->snapshot_index = snapshot_index;
+            MetaWriter::get_instance()->read_applied_index(_region_id, read_options, &applied_index, &data_index);
+            iter_context->applied_index = std::max(iter_context->snapshot_index, applied_index);
         }
     }
     if (iter_context->reading) {
@@ -659,8 +662,8 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
     iter_context->reading = true;
     auto reader = new RocksdbReaderAdaptor(_region_id, path, this, sc, is_meta_reader);
     reader->open();
-    DB_WARNING("region_id: %ld open reader: path: %s, time_cost: %ld", 
-                _region_id, path.c_str(), time_cost.get_time());
+    DB_WARNING("region_id: %ld open reader: path: %s snapshot_index: %ld applied_index: %ld data_index: %ld , time_cost: %ld", 
+                _region_id, path.c_str(), snapshot_index, applied_index, data_index, time_cost.get_time());
     return reader;
 }
 

@@ -20,8 +20,8 @@
 namespace baikaldb {
 
 struct DMLClosure : public braft::Closure {
-    DMLClosure() : clear_applying_txn_cond(nullptr) {};
-    DMLClosure(BthreadCond* cond) : clear_applying_txn_cond(cond) {};
+    DMLClosure() : cond(nullptr) {};
+    DMLClosure(BthreadCond* cond) : cond(cond) {};
     virtual void Run();
 
     brpc::Controller* cntl = nullptr;
@@ -32,8 +32,8 @@ struct DMLClosure : public braft::Closure {
     SmartTransaction transaction = nullptr;
     TimeCost cost;
     std::string remote_side;
-    BthreadCond* clear_applying_txn_cond;
-    bool is_clear_applying_txn = false;
+    BthreadCond* cond;
+    bool is_sync = false;
     int64_t txn_num_increase_rows = 0;
     int64_t applied_index = 0;
 };
@@ -51,6 +51,7 @@ struct BinlogClosure : public braft::Closure {
         delete this;
     }
 
+    std::string remote_side;
     BthreadCond* cond;
     TimeCost cost;
     pb::StoreRes* response = nullptr;
@@ -66,6 +67,7 @@ struct AddPeerClosure : public braft::Closure {
     google::protobuf::Closure* done = nullptr;
     pb::StoreRes* response = nullptr;
     BthreadCond& cond;
+    bool is_split = false;
 };
 struct MergeClosure : public braft::Closure {
     virtual void Run();
@@ -79,7 +81,8 @@ struct SplitClosure : public braft::Closure {
     virtual void Run();
     std::function<void()> next_step;
     Region* region;
-    std::string new_instance;
+    std::string new_instance;  // 第一个init region的instance
+    std::vector<std::string> add_peer_instance; // 后面add peer补齐副本数的instance
     int64_t split_region_id;
     std::string step_message;
     pb::OpType op_type;

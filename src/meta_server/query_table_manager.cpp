@@ -16,6 +16,7 @@
 #include "query_region_manager.h"
 #include <boost/algorithm/string.hpp>
 #include "region_manager.h"
+#include "ddl_manager.h"
 #include <unordered_set>
 
 namespace baikaldb {
@@ -382,7 +383,23 @@ void QueryTableManager::decode_key(int64_t table_id, const TableKey& start_key, 
 }
 
 void QueryTableManager::get_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response) {
-    TableManager::get_instance()->get_ddlwork_info(request->table_id(), response);
+    DDLManager::get_instance()->get_ddlwork_info(request->table_id(), response);
+}
+
+void QueryTableManager::get_virtual_index_influence_info(const pb::QueryRequest* request, pb::QueryResponse* response){
+    //将meta的tableMem中影响面信息存入response同时返还给db
+    TableManager* manager = TableManager::get_instance();
+    auto virtual_index_sql_map = manager->get_virtual_index_id_set();
+    for (auto& it1 : virtual_index_sql_map) {
+        for (auto& it2 : it1.second) {
+            pb::VirtualInfoAndSqls virtual_index_info_sqls;
+            virtual_index_info_sqls.set_virtual_index_info(it1.first);
+            virtual_index_info_sqls.set_affected_sign(it2.first);
+            virtual_index_info_sqls.set_affected_sqls(it2.second);
+            pb::VirtualInfoAndSqls* virtual_index_influence_info = response->add_virtual_index_influence_info();
+            *virtual_index_influence_info = virtual_index_info_sqls;
+        }
+    }
 }
 }//namespace 
 

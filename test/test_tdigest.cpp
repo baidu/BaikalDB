@@ -80,7 +80,7 @@ TEST(test_tdigest_internal_functions, case_all) {
     }
     ExprValue td1 = tdigest_build(vals1);
     ASSERT_EQ(td1.type, pb::TDIGEST);
-    ASSERT_EQ(td1.str_val.size(), mem_size);
+    ASSERT_EQ(td1.str_val.size(), tdigest::td_actual_size((tdigest::td_histogram_t*)td1.str_val.data()));
 
     std::vector<ExprValue> vals2;
     vals2.emplace_back(td1);
@@ -91,7 +91,7 @@ TEST(test_tdigest_internal_functions, case_all) {
     }
     ExprValue td2 = tdigest_add(vals2);
     ASSERT_EQ(td2.type, pb::TDIGEST);
-    ASSERT_EQ(td2.str_val.size(), mem_size);
+    ASSERT_EQ(td2.str_val.size(), tdigest::td_actual_size((tdigest::td_histogram_t*)td2.str_val.data()));
 
     std::vector<ExprValue> vals3;
     vals3.emplace_back(td2);

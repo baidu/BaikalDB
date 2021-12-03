@@ -57,7 +57,7 @@ int DeletePlanner::plan() {
         DB_WARNING("unsupport multi table delete");
         return -1;
     }
-    if (0 != parse_db_tables((parser::TableName*)_delete_stmt->from_table)) {
+    if (0 != parse_db_tables(_delete_stmt->from_table, &_join_root)) {
         return -1;
     }
     // delete from xxx; => truncate table xxx;

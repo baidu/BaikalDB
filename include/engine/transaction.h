@@ -17,7 +17,6 @@
 #include <memory>
 #include <stack>
 #include "common.h"
-#include "ddl_common.h"
 #include "schema_factory.h"
 #include "table_key.h"
 #include "table_iterator.h"
@@ -27,38 +26,38 @@
 #include "proto/store.interface.pb.h" 
 #include "trace_state.h"
 #include "my_rocksdb.h"
+#include "tuple_record.h"
 
 namespace baikaldb {
 DECLARE_bool(disable_wal);
 
 typedef std::map<int, pb::CachePlan> CachePlanMap;
 
-struct DllTransactionState {
-    DllParam* ddl_ptr {nullptr};
-    pb::IndexState index_state;
-    bool is_ok {false};
-};
-
-using SmartDllTransactionState = std::shared_ptr<DllTransactionState>;
-
 inline uint64_t ttl_encode(int64_t ttl_timestamp_us) {
     return KeyEncoder::to_endian_u64(
             KeyEncoder::encode_i64(ttl_timestamp_us));
 }
 
-inline int64_t ttl_decode(rocksdb::Slice value) {
+inline int64_t decode_first_8bytes2int64(const rocksdb::Slice& value) {
     return KeyEncoder::decode_i64(
             KeyEncoder::to_endian_u64(
                 *reinterpret_cast<const uint64_t*>(value.data())));
 }
 
+// timestamp是否有效，我们认为从开发日期2021年到未来2121年的时间戳有效 
+inline bool valid_timestamp_us(int64_t timestamp_us) {
+    return timestamp_us > 1608336000000000LL && timestamp_us < 4761936000000000LL;
+}
+
+// value 出参，会remove prefix
+extern int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int64_t base_expire_time_us);
+
 class TransactionPool;
 class Transaction {
 public:
-    Transaction(uint64_t txn_id, TransactionPool* pool, bool use_ttl) : 
+    Transaction(uint64_t txn_id, TransactionPool* pool) : 
             _txn_id(txn_id),
-            _pool(pool),
-            _use_ttl(use_ttl) {
+            _pool(pool) {
         _write_opt.disableWAL = FLAGS_disable_wal;
         bthread_mutex_init(&_txn_mutex, nullptr);
         bthread_mutex_init(&_cache_map_mutex, nullptr);
@@ -71,42 +70,21 @@ public:
         if (_db != nullptr && _snapshot != nullptr) {
             _db->relase_snapshot(_snapshot);
         }
-        if (_ddl_state != nullptr && _ddl_state->is_ok) {
-            DB_DEBUG("txn_id: %lu Transaction atomic index[%s] --", 
-                   _txn_id, pb::IndexState_Name(_ddl_state->index_state).c_str());
-            switch (_ddl_state->index_state) {
-                case pb::IS_NONE:
-                    _ddl_state->ddl_ptr->none_count--;
-                    break;
-                case pb::IS_DELETE_ONLY:
-                    _ddl_state->ddl_ptr->delete_only_count--;
-                    break;
-                case pb::IS_WRITE_ONLY:
-                    _ddl_state->ddl_ptr->write_only_count--;
-                    break;
-                case pb::IS_PUBLIC:
-                    _ddl_state->ddl_ptr->public_count--;
-                    break;
-                case pb::IS_DELETE_LOCAL:
-                    _ddl_state->ddl_ptr->delete_local_count--;
-                    break;
-                case pb::IS_WRITE_LOCAL:
-                    _ddl_state->ddl_ptr->write_local_count--;
-                    break;
-                default:
-                    DB_WARNING("unknown state");
-            }
-        }
         delete _txn;
         _txn = nullptr;
-        _ddl_state = nullptr;
         bthread_mutex_destroy(&_txn_mutex);
         bthread_mutex_destroy(&_cache_map_mutex);
     }
 
+    struct TxnOptions {
+        bool dml_1pc = false; 
+        bool in_fsm = false; // 是否在状态机内执行
+        int64_t lock_timeout = -1;
+    };
+
     // Begin a new transaction
-    int begin();
-    int begin(rocksdb::TransactionOptions txn_opt);
+    int begin(const Transaction::TxnOptions& txn_opt);
+    int begin(const rocksdb::TransactionOptions& txn_opt);
     // Wrap the close recovered (prepared) rocksdb Transaction after db restart
     const rocksdb::Snapshot* get_snapshot() {
         return _snapshot;
@@ -149,23 +127,35 @@ public:
     int get_update_primary(
             int64_t     region, 
             IndexInfo&  pk_index, 
-            SmartRecord key, 
+            const SmartRecord& key, 
             std::map<int32_t, FieldInfo*>& fields,
             GetMode     mode,
-            bool        check_region);
+            bool        check_region,
+            int64_t&    ttl_ts);
+    int get_update_primary(
+            int64_t     region, 
+            IndexInfo&  pk_index, 
+            const SmartRecord& key, 
+            std::map<int32_t, FieldInfo*>& fields,
+            GetMode     mode,
+            bool        check_region) {
+                int64_t  ttl_ts = 0;
+                return get_update_primary(region, pk_index, key, fields, mode, check_region, ttl_ts);
+            }
 
     int get_update_primary(int64_t region, 
             IndexInfo&      pk_index, 
             const TableKey& key,
             GetMode         mode, 
-            SmartRecord     val,
+            const SmartRecord& val,
             std::map<int32_t, FieldInfo*>& fields,
-            bool            check_region);
+            bool            check_region,
+            int64_t&        ttl_ts);
 
     int get_update_primary_columns(
             const TableKey& primary_key,
             GetMode         mode,
-            SmartRecord     val,
+            const SmartRecord&   val,
             std::map<int32_t, FieldInfo*>& fields);
 
     // TODO: update return status
@@ -195,20 +185,7 @@ public:
     int remove(int64_t region, IndexInfo& index, const TableKey&   key);
     int remove_columns(const TableKey& primary_key);
 
-    void print_txninfo_holding_lock(const std::string& key) {
-        return;
-        //内部有pthread锁
-        auto lock_info = _db->get_db()->GetLockStatusData();
-        for (auto& it : lock_info) {
-            if (it.second.key.size() == key.size() && it.second.key == key) {
-                for (auto txn_id : it.second.ids) {
-                    DB_WARNING("holding lock, txn_id: %lu, cf_id: %u, key_hex: %s", 
-                        txn_id, it.first, str_to_hex(key).c_str());
-                }
-                break;
-            }
-        }
-    }
+    void print_txninfo_holding_lock(const std::string& key);
 
     myrocksdb::Transaction* get_txn() {
         return _txn;
@@ -227,6 +204,10 @@ public:
     }
 
     void set_seq_id(int seq_id) {
+        if (seq_id < _seq_id) {
+            DB_WARNING("txn:%lu seq_id fallback seq_id:%d _seq_id:%d", _txn_id, seq_id, _seq_id);
+            return;
+        }
         _seq_id = seq_id;
     }
 
@@ -244,14 +225,6 @@ public:
 
     void set_applying(bool applying) {
         _is_applying = applying;
-    }
-
-    bool need_check_rollback() const {
-        return _need_check_rollback;
-    }
-
-    void set_need_check_rollback(bool need_check) {
-        _need_check_rollback = need_check;
     }
 
     bool is_rolledback() const {
@@ -300,7 +273,7 @@ public:
 
     bool has_write() {
         BAIDU_SCOPED_LOCK(_cache_map_mutex);
-        // cache缓存OP_BEGIN/OP_INSERT/OP_UPDATE/OP_DELETE
+        // cache缓存OP_BEGIN/OP_INSERT/OP_UPDATE/OP_DELETE/OP_SELECT_FOR_UPDATE
         return _cache_plan_map.size() > 1;
     }
 
@@ -384,9 +357,12 @@ public:
     int64_t read_ttl_timestamp_us() const {
         return _read_ttl_timestamp_us;
     }
-    bool use_ttl() const {
-        return _use_ttl;
+    int64_t online_ttl_base_expire_time_us() const {
+        return _online_ttl_base_expire_time_us;
     }
+
+    void set_use_ttl(bool use_ttl) { _use_ttl = use_ttl; }
+    bool use_ttl() const { return _use_ttl; }
 
     static int get_full_primary_key(
             rocksdb::Slice  index_bytes, 
@@ -418,52 +394,6 @@ public:
         return &_store_req;
     }
 
-    void set_ddl_state(DllParam* ddl_param) {
-        if (ddl_param != nullptr && ddl_param->is_doing && _ddl_state == nullptr) {
-            //当is_doing时，该ddl在工作中。
-            _ddl_state = std::make_shared<DllTransactionState>();
-            _ddl_state->ddl_ptr = ddl_param;
-            _ddl_state->is_ok = false; 
-            update_ddl_state();
-        }
-    }
-
-    void update_ddl_state() {
-        if (_ddl_state != nullptr && _region_info != nullptr) {
-            auto table_id = _region_info->table_id();
-            pb::IndexState state = pb::IS_PUBLIC;
-            int ret = SchemaFactory::get_instance()->get_table_state(table_id, state);
-            _ddl_state->is_ok = !ret;
-            if (_ddl_state->is_ok) {
-                _ddl_state->index_state = state;
-                DB_DEBUG("region_%ld, txn_id: %lu Transaction atomic index[%s] ++", 
-                       _region_info->region_id(), _txn_id, pb::IndexState_Name(state).c_str());
-                switch (state) {
-                    case pb::IS_NONE:
-                        _ddl_state->ddl_ptr->none_count++;
-                        break;
-                    case pb::IS_DELETE_ONLY:
-                        _ddl_state->ddl_ptr->delete_only_count++;
-                        break;
-                    case pb::IS_WRITE_ONLY:
-                        _ddl_state->ddl_ptr->write_only_count++;
-                        break;
-                    case pb::IS_DELETE_LOCAL:
-                        _ddl_state->ddl_ptr->delete_local_count++;
-                        break;
-                    case pb::IS_WRITE_LOCAL:
-                        _ddl_state->ddl_ptr->write_local_count++;
-                        break;
-                    case pb::IS_PUBLIC:
-                        _ddl_state->ddl_ptr->public_count++;
-                        break;
-                    default:
-                        DB_WARNING("unknown state");
-                }
-            }
-        }
-    }
-
     void set_primary_region_id(int64_t region_id) {
         _primary_region_id = region_id;
     }
@@ -478,6 +408,13 @@ public:
 
     int64_t txn_timeout() const {
         return _txn_timeout;
+    }
+
+    void add_exec_time_cost(int64_t timecost) {
+        _txn_time_cost += timecost;
+    }
+    int64_t get_exec_time_cost() {
+        return _txn_time_cost;
     }
 
     bool is_primary_region() {
@@ -520,10 +457,11 @@ private:
             IndexInfo&      pk_index, 
             const TableKey& key, 
             GetMode         mode, 
-            SmartRecord     val, 
+            const SmartRecord&  val, 
             std::map<int32_t, FieldInfo*>& fields,
             bool            parse_key,
-            bool            check_region);
+            bool            check_region,
+            int64_t&        ttl_ts);
     
     void add_kvop_put(std::string& key, std::string& value, int64_t ttl_timestamp_us) {
         //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,
@@ -550,7 +488,6 @@ private:
     bool                            _is_prepared = false;
     bool                            _is_finished = false;
     bool                            _is_rolledback = false;
-    bool                            _need_check_rollback = false;
     std::atomic<bool>               _in_process {false};
     bool                            _write_begin_index = true;
     int64_t                         _prepare_time_us = 0;
@@ -579,11 +516,13 @@ private:
     std::set<int32_t>               _pri_field_ids; // for cstore
 
     bthread_mutex_t                 _txn_mutex;
-    SmartDllTransactionState        _ddl_state = nullptr;
     bool                            _use_ttl = false;
     int64_t                         _read_ttl_timestamp_us = 0; //ttl读取时间
     int64_t                         _write_ttl_timestamp_us = 0; //ttl写入时间
+    int64_t                         _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
     int64_t                         _txn_timeout = 0;
+    // 执行累加时间, 主要是auto_commit dml_latency在prepare的时候记录到dml_cost_time
+    int64_t                         _txn_time_cost = 0;
 };
 
 typedef std::shared_ptr<Transaction> SmartTransaction;

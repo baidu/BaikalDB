@@ -1,11 +1,11 @@
-#include "global_ddl_planner.h"
+#include "ddl_work_planner.h"
 #include "lock_secondary_node.h"
 #include <unordered_set>
 #include "exec_node.h"
 #include "plan_router.h"
 #include "separate.h"
 #include "rocksdb_scan_node.h"
-#include "global_ddl_manager_node.h"
+#include "index_ddl_manager_node.h"
 
 namespace baikaldb {
 
@@ -24,7 +24,8 @@ std::unique_ptr<Type> create_generic_manager_node(pb::PlanNodeType node_type) {
     return std::move(manager_node);
 }
 
-int create_single_txn(std::unique_ptr<GlobalDDLManagerNode> dml_root, std::unique_ptr<SingleTxnManagerNode>& txn_manager_node) {
+int create_single_txn(std::unique_ptr<IndexDDLManagerNode> dml_root,
+        std::unique_ptr<SingleTxnManagerNode>& txn_manager_node) {
     // create baikaldb commit node
     pb::PlanNode pb_plan_node;
     pb_plan_node.set_node_type(pb::SIGNEL_TXN_MANAGER_NODE);
@@ -77,7 +78,7 @@ int create_single_txn(std::unique_ptr<GlobalDDLManagerNode> dml_root, std::uniqu
     return 0;
 }
 
-int GlobalDDLPlanner::plan() {
+int DDLWorkPlanner::plan() {
     //初始化
     int ret = 0;
     auto table_ptr = _factory->get_table_info_ptr(_table_id);
@@ -89,7 +90,7 @@ int GlobalDDLPlanner::plan() {
         return -1;
     }
 
-    if (!_factory->is_region_info_exist(index_ptr->id)) {
+    if (_is_global_index && !_factory->is_region_info_exist(index_ptr->id)) {
         DB_FATAL("create global index error.");
         return -1;
     }
@@ -120,8 +121,8 @@ int GlobalDDLPlanner::plan() {
     return 0;
 }
 
-int GlobalDDLPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& txn_node, std::unique_ptr<ScanNode> scan_node) {
-    auto manager_node = create_generic_manager_node<GlobalDDLManagerNode>(pb::GLOBAL_DDL_MANAGER_NODE);
+int DDLWorkPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& txn_node, std::unique_ptr<ScanNode> scan_node) {
+    auto manager_node = create_generic_manager_node<IndexDDLManagerNode>(pb::INDEX_DDL_MANAGER_NODE);
     manager_node->set_table_id(_table_id);
     manager_node->set_index_id(_index_id);
     manager_node->set_task_id(_task_id);
@@ -131,12 +132,13 @@ int GlobalDDLPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>&
     DB_DEBUG("region_info size : %zu", region_infos.size());
     manager_node->set_region_infos(region_infos);
     manager_node->add_child(scan_node.release());
-    auto secondary_node_ptr = new (std::nothrow) LockSecondaryNode;
-    if (secondary_node_ptr == nullptr) {
-        DB_WARNING("create manager_node failed");
-        return -1;
-    }
-    {
+    if (_is_global_index) {
+        auto secondary_node_ptr = new (std::nothrow) LockSecondaryNode;
+        if (secondary_node_ptr == nullptr) {
+            DB_WARNING("create manager_node failed");
+            return -1;
+        }
+        manager_node->set_is_global_index(true);
         pb::PlanNode plan_node;
         plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
         plan_node.set_num_children(0);
@@ -148,9 +150,8 @@ int GlobalDDLPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>&
                 _table_id);
         plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_lock_secondary_type(pb::LST_GLOBAL_DDL);
         secondary_node_ptr->init(plan_node);
+        manager_node->add_child(secondary_node_ptr);
     }
-    
-    manager_node->add_child(secondary_node_ptr);
     if (create_single_txn(std::move(manager_node), txn_node) != 0) {
         DB_WARNING("create signele txn error.");            
         return -1;
@@ -158,7 +159,7 @@ int GlobalDDLPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>&
     return 0;
 }
 
-std::unique_ptr<ScanNode> GlobalDDLPlanner::create_scan_node() {
+std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     //plan 已经add_nodes。
     int ret = 0;
     std::unique_ptr<ScanNode> scan_node(ScanNode::create_scan_node(_ctx->plan.nodes(0))); 
@@ -189,6 +190,10 @@ std::unique_ptr<ScanNode> GlobalDDLPlanner::create_scan_node() {
         range_index->set_right_field_cnt(_field_num);
         range_index->set_right_open(true);
     }
+    if (!_is_global_index) {
+        pb_scan_node->set_is_ddl_work(true);
+        pb_scan_node->set_ddl_index_id(_index_id);
+    }
     google::protobuf::RepeatedPtrField<pb::RegionInfo> old_region_infos;
     auto old_region_info = old_region_infos.Add();
     old_region_info->set_table_id(_table_id);
@@ -209,10 +214,13 @@ std::unique_ptr<ScanNode> GlobalDDLPlanner::create_scan_node() {
     return std::move(scan_node);
 }
 
-int GlobalDDLPlanner::execute() {
+int DDLWorkPlanner::execute() {
     bool first_flag = true;
     RuntimeState& state = *_ctx->get_runtime_state();
     auto client_conn = state.client_conn();
+    if (!_is_global_index) {
+        state.set_single_txn_need_separate_execute(true);
+    }
     int retry_times = 0;
     const int MAX_RETRY_TIMES = 20;
     while (true) {

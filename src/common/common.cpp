@@ -26,26 +26,42 @@
 #include <json2pb/json_to_pb.h>
 #endif
 
+#ifdef BAIDU_INTERNAL
+#include <base/endpoint.h>
+#include <baidu/rpc/channel.h>
+#include <baidu/rpc/server.h>
+#include <baidu/rpc/controller.h>
+#include <base/file_util.h>
+#else
+#include <butil/endpoint.h>
+#include <brpc/channel.h>
+#include <brpc/server.h>
+#include <brpc/controller.h>
+#include <butil/file_util.h>
+#endif
+
 #include "rocksdb/slice.h"
 #include <boost/algorithm/string.hpp>
 #include <google/protobuf/descriptor.pb.h>
 #include "rocksdb/slice.h"
 #include "expr_value.h"
+#include "re2/re2.h"
+
+#include <boost/algorithm/string.hpp>
 
 using google::protobuf::FieldDescriptorProto;
 
 namespace baikaldb {
 DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
 DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
-DEFINE_int32(service_lock_concurrency, 40, "service_lock_concurrency, Deprecated");
 DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
-DEFINE_int32(ddl_work_concurrency, 10, "ddlwork concurrency, default:10");
 DEFINE_int32(baikal_heartbeat_concurrency, 10, "baikal heartbeat concurrency, default:10");
 DEFINE_int64(incremental_info_gc_time, 600 * 1000 * 1000, "time interval to clear incremental info");
 DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
 DEFINE_bool(servitysinglelog, true, "diff servity message in seperate logfile");
+DEFINE_bool(open_service_write_concurrency, true, "open service_write_concurrency, default: true");
 DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 DEFINE_bool(schema_ignore_case, false, "whether ignore case when match db/table name");
 DEFINE_bool(disambiguate_select_name, false, "whether use the first when select name is ambiguous, default false");
@@ -496,7 +512,89 @@ int get_instance_from_bns(int* ret,
         for (int i = 0; i < output.instance_size(); ++i) {
             if (output.instance(i).status() == 0 || !need_alive) {
                 instances.push_back(output.instance(i).host_ip() + ":" 
-                        + boost::lexical_cast<std::string>(output.instance(i).port()));
+                        + std::to_string(output.instance(i).port()));
+            }   
+        }
+        return 0;
+    }   
+    DB_WARNING("get instance from service fail, bns_name:%s, ret:%d",
+            bns_name.c_str(), *ret);
+    return -1; 
+#else
+    return -1;
+#endif
+}
+
+bool same_with_container_id_and_address(const std::string& container_id, const std::string& address) {
+#ifdef BAIDU_INTERNAL
+    if (container_id.empty()) {
+        return true;
+    }
+    int bns_ret = 0;
+    std::vector<std::string> instances;
+    int ret = get_instance_from_bns(&bns_ret, container_id, instances, false);
+    if (ret != 0) {
+        return true;
+    }
+    if (instances.size() != 1) {
+        return true;
+    }
+    if (instances[0] == address) {
+        return true;
+    } else {
+        DB_WARNING("diff with container_id:%s and address:%s", container_id.c_str(), address.c_str());
+        return false;
+    }
+#else
+    return true;
+#endif
+}
+
+#ifdef BAIDU_INTERNAL
+inline int get_dummy_port(std::string& dummy_port, const std::string& multi_port) {
+    bool has_dummy_port = false;
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, multi_port, boost::is_any_of(","));
+    for (const std::string& info : split_vec) {
+        auto find_pos = info.find("dummy");
+        if (find_pos == info.npos) {
+            continue;
+        }
+
+        std::vector<std::string> vec;
+        boost::split(vec, info, boost::is_any_of("="));
+        if (vec.size() == 2 && vec[1] != "") {
+            dummy_port = vec[1];
+        }
+    }
+
+    if (!has_dummy_port) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+#endif
+int get_multi_port_from_bns(int* ret,
+                          const std::string& bns_name,
+                          std::vector<std::string>& instances,
+                          bool need_alive) {
+#ifdef BAIDU_INTERNAL
+    instances.clear();
+    BnsInput input;
+    BnsOutput output;
+    input.set_service_name(bns_name);
+    input.set_type(0);
+    *ret = webfoot::get_instance_by_service(input, &output);
+    // bns service not exist
+    if (*ret == webfoot::WEBFOOT_RET_SUCCESS ||
+            *ret == webfoot::WEBFOOT_SERVICE_BEYOND_THRSHOLD) {
+        for (int i = 0; i < output.instance_size(); ++i) {
+            if (output.instance(i).status() == 0 || !need_alive) {
+                std::string dummy_port = "";
+                if (get_dummy_port(dummy_port, output.instance(i).multi_port()) != 0) {
+                    instances.push_back(output.instance(i).host_ip() + ":" + dummy_port);
+                }
             }   
         }   
         return 0;
@@ -550,6 +648,25 @@ std::vector<std::string> string_split(const std::string &s, char delim) {
         // elems.push_back(std::move(item));
     }
     return elems;
+}
+
+int64_t parse_snapshot_index_from_path(const std::string& snapshot_path, bool use_dirname) {
+    butil::FilePath path(snapshot_path);
+    std::string tmp_path;
+    if (use_dirname) {
+        tmp_path = path.DirName().BaseName().value();
+    } else {
+        tmp_path = path.BaseName().value();
+    }
+    std::vector<std::string> split_vec;
+    std::vector<std::string> snapshot_index_vec;
+    boost::split(split_vec, tmp_path, boost::is_any_of("/"));
+    boost::split(snapshot_index_vec, split_vec.back(), boost::is_any_of("_"));
+    int64_t snapshot_index = 0;
+    if (snapshot_index_vec.size() == 2) {
+        snapshot_index = atoll(snapshot_index_vec[1].c_str());
+    }
+    return snapshot_index;
 }
 
 bool ends_with(const std::string &str, const std::string &ending) {
@@ -609,4 +726,117 @@ std::string url_encode(const std::string& str) {
     }  
     return strTemp; 
 }
+
+int brpc_with_http(const std::string& host, const std::string& url, std::string& response) {
+    brpc::Channel channel;
+    brpc::ChannelOptions options;
+    options.protocol = brpc::PROTOCOL_HTTP;
+    if (channel.Init(host.c_str() /*any url*/, &options) != 0) {
+        DB_WARNING("Fail to initialize channel, host: %s, url: %s", host.c_str(), url.c_str());
+        return -1;
+    }
+
+    brpc::Controller cntl;
+    cntl.http_request().uri() = url;  // 设置为待访问的URL
+    channel.CallMethod(NULL, &cntl, NULL, NULL, NULL/*done*/);
+
+    response = cntl.response_attachment().to_string();
+    DB_WARNING("host: %s, url: %s, response: %s", host.c_str(), url.c_str(), response.c_str());
+    return 0;
+}
+
+std::string store_or_db_bns_to_meta_bns(const std::string& bns) {
+    auto serv_pos = bns.find(".serv");
+    std::string bns_group = bns;
+    if (serv_pos != bns.npos) {
+        bns_group = bns.substr(0, serv_pos);
+    }
+    auto pos1 = bns_group.find_first_of(".");
+    auto pos2 = bns_group.find_last_of(".");
+    if (pos1 == bns_group.npos || pos2 == bns_group.npos || pos2 <= pos1) {
+        return "";
+    }
+    bns_group = "group" + bns_group.substr(pos1, pos2 - pos1 + 1) + "all";
+    bool is_store_bns = false;
+    if (bns_group.find("baikalStore") != bns_group.npos || bns_group.find("baikalBinlog") != bns_group.npos) {
+        is_store_bns = true;
+    }
+
+    std::vector<std::string> instances;
+    int retry_times = 0;
+    while (true) {
+        instances.clear();
+        int ret2 = 0;
+        int ret = 0;
+        if (is_store_bns) {
+            ret = get_instance_from_bns(&ret2, bns_group, instances);
+        } else {
+            ret = get_multi_port_from_bns(&ret2, bns_group, instances);
+        }
+        if (ret != 0 || instances.empty()) {
+            if (++retry_times > 3) {
+                return "";
+            } else {
+                continue;
+            }
+        } else {
+            break;
+        }
+    }
+
+    std::string meta_bns = "";
+    for (const std::string& instance : instances) {
+        std::string response;
+        int ret = brpc_with_http(instance, instance + "/flags/meta_server_bns", response);
+        if (ret != 0) {
+            continue;
+        }
+        auto pos = response.find("(default");
+        if (pos != response.npos) {
+            response = response.substr(0, pos + 1);
+        }
+        re2::RE2::Options option;
+        option.set_utf8(false);
+        option.set_case_sensitive(false);
+        option.set_perl_classes(true);
+
+        re2::RE2 reg(".*(group.*baikalMeta.*all).*", option);
+        meta_bns.clear();
+        if (!RE2::Extract(response, reg, "\\1", &meta_bns)) {
+            DB_WARNING("extract commit error. response: %s", response.c_str());
+            continue;
+        }
+
+        if (meta_bns.empty()) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    DB_WARNING("bns_group: %s; store_bns to meta bns : %s => %s", bns_group.c_str(), bns.c_str(), meta_bns.c_str());
+
+    return meta_bns;
+}
+void parse_sample_sql(const std::string& sample_sql, std::string& database, std::string& table, std::string& sql) {
+    // Remove comments.
+    re2::RE2::Options option;
+    option.set_utf8(false);
+    option.set_case_sensitive(false);
+    option.set_perl_classes(true);
+
+    re2::RE2 reg("family_table_tag_optype_plat=\\[(.*)\t(.*)\t.*\t.*\t.*sql=\\[(.*)\\]", option);
+
+    if (!RE2::Extract(sample_sql, reg, "\\1", &database)) {
+        DB_WARNING("extract commit error.");
+    }
+    if (!RE2::Extract(sample_sql, reg, "\\2", &table)) {
+        DB_WARNING("extract commit error.");
+    }
+    if (!RE2::Extract(sample_sql, reg, "\\3", &sql)) {
+        DB_WARNING("extract commit error.");
+    }
+    DB_WARNING("sample_sql: %s, database: %s, table: %s, sql: %s", sample_sql.c_str(), database.c_str(), table.c_str(), sql.c_str());
+}
+
 }  // baikaldb

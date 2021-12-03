@@ -32,23 +32,40 @@ namespace baikaldb {
 DECLARE_int32(store_request_timeout);
 DECLARE_int32(store_connect_timeout); 
 
+
+struct StoreReqOptions {
+    int32_t request_timeout;
+    int32_t connect_timeout;
+    int32_t retry_times;
+
+    StoreReqOptions() : request_timeout(FLAGS_store_request_timeout),
+            connect_timeout(FLAGS_store_connect_timeout),
+            retry_times(3) {}
+    StoreReqOptions(const StoreReqOptions& other) : request_timeout(other.request_timeout),
+            connect_timeout(other.connect_timeout),
+            retry_times(other.retry_times) {}
+};
+
 class StoreInteract {
 public:
-    static const int RETRY_TIMES = 3;
     StoreInteract(const std::string& store_address):
                     _store_address(store_address),
-                    _connect_timeout(FLAGS_store_connect_timeout),
-                    _request_timeout(FLAGS_store_request_timeout) {}
+                    _req_options(StoreReqOptions()) {}
+    StoreInteract(const std::string& store_address, const StoreReqOptions& req_options):
+                    _store_address(store_address),
+                    _req_options(req_options) {}
     template<typename Request, typename Response>
     int send_request(uint64_t log_id, 
                         const std::string& service_name,
                         const Request& request,
-                        Response& response) {
+                        Response& response,
+                        butil::IOBuf* attachment_data = nullptr) {
         //初始化channel，但是该channel是meta_server的 bns pool，大部分时间用不到
         brpc::ChannelOptions channel_opt;
-        channel_opt.timeout_ms = _request_timeout;
-        channel_opt.connect_timeout_ms = _connect_timeout;
-        if (_store_channel.Init(_store_address.c_str(), &channel_opt) != 0) {
+        channel_opt.timeout_ms = _req_options.request_timeout;
+        channel_opt.connect_timeout_ms = _req_options.connect_timeout;
+        brpc::Channel store_channel;
+        if (store_channel.Init(_store_address.c_str(), &channel_opt) != 0) {
             DB_FATAL("store channle init fail. store_address:%s", _store_address.c_str());
             response.set_errcode(pb::CONNECT_FAIL);
             return -1;
@@ -62,7 +79,10 @@ public:
         }
         brpc::Controller cntl;
         cntl.set_log_id(log_id);
-        _store_channel.CallMethod(method, &cntl, &request, &response, NULL);
+        if (attachment_data != nullptr) {
+            cntl.request_attachment().append(*attachment_data);
+        }
+        store_channel.CallMethod(method, &cntl, &request, &response, NULL);
         if (cntl.Failed()) {
             DB_WARNING("connect with store fail. send request fail, error:%s, log_id:%lu",
                         cntl.ErrorText().c_str(), cntl.log_id());
@@ -90,10 +110,11 @@ public:
     int send_request_for_leader(uint64_t log_id,
                                 const std::string& service_name,
                                 const Request& request,
-                                Response& response) {
+                                Response& response,
+                                butil::IOBuf* attachment_data = nullptr) {
         int retry_time = 0;
         do {
-            auto ret = send_request(log_id, service_name, request, response);
+            auto ret = send_request(log_id, service_name, request, response, attachment_data);
             if (ret == 0) {
                 return 0;
             }
@@ -109,7 +130,7 @@ public:
             }  
             _store_address = response.leader();
             ++retry_time;
-        } while (retry_time < RETRY_TIMES);
+        } while (retry_time < _req_options.retry_times);
         return -1;
     }
     template<typename Request, typename Response>
@@ -120,10 +141,8 @@ public:
         return send_request_for_leader(log_id, service_name, request, response);
     }
 private:
-    std::string _store_address;
-    int32_t _connect_timeout;
-    int32_t _request_timeout;
-    brpc::Channel _store_channel;
+    std::string      _store_address;
+    StoreReqOptions  _req_options;
 };
 }//namespace
 

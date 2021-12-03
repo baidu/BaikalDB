@@ -656,15 +656,64 @@ ExprValue locate(const std::vector<ExprValue>& input) {
 
     int begin_pos = 0;
     if (input.size() == 3) {
-        begin_pos = input[2].get_numberic<int>();
+        begin_pos = input[2].get_numberic<int>() - 1;
     }
     
     ExprValue tmp(pb::INT32);
-    auto pos = input[1].str_val.find(input[0].str_val, begin_pos);
+    auto pos = input[1].get_string().find(input[0].get_string(), begin_pos);
     if (pos != std::string::npos) {
-        tmp._u.int32_val = pos;
+        tmp._u.int32_val = pos + 1;
     } else {
         tmp._u.int32_val = 0;
+    }
+
+    return tmp;
+}
+
+ExprValue substring_index(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+
+    for (auto s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+
+    int pos = input[2].get_numberic<int>();
+    ExprValue tmp(pb::STRING);
+    if (pos == 0) {
+        return tmp;
+    }
+    std::vector<size_t> pos_vec;
+    pos_vec.reserve(3);
+    size_t last_pos = 0;
+    const std::string& str = input[0].get_string();
+    const std::string& sub = input[1].get_string();
+    while (true) {
+        size_t find_pos = str.find(sub, last_pos);
+        if (find_pos != std::string::npos) {
+            pos_vec.emplace_back(find_pos);
+            last_pos = find_pos + sub.size();
+        } else {
+            break;
+        }
+    }
+    if (pos > 0) {
+        if (pos <= pos_vec.size()) {
+            tmp.str_val = str.substr(0, pos_vec[pos - 1]);
+        } else {
+            tmp.str_val = str;
+        }
+    } else {
+        pos = -pos;
+        if (pos <= pos_vec.size()) {
+            pos = pos_vec.size() - pos;
+            tmp.str_val = str.substr(pos_vec[pos] + sub.size());
+        } else {
+            tmp.str_val = str;
+        }
     }
 
     return tmp;
@@ -1576,8 +1625,10 @@ ExprValue tdigest_build(const std::vector<ExprValue>& input) {
     for (uint32_t i = 0; i < input.size(); i++) {
         tdigest::td_add(t, input[i].get_numberic<double>(), 1);
     }
+    tdigest::td_serialize(result.str_val);
     return result;
 }
+
 ExprValue tdigest_add(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();
@@ -1588,12 +1639,59 @@ ExprValue tdigest_add(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     ExprValue result = input[0];
+    tdigest::td_normallize(result.str_val);
     tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)result.str_val.data();
     for (uint32_t i = 1; i < input.size(); i++) {
         tdigest::td_add(t, input[i].get_numberic<double>(), 1);
     }
+    tdigest::td_serialize(result.str_val);
     return result;
 }
+
+ExprValue tdigest_merge(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    if (input[0].is_null()) {
+        (ExprValue&)input[0] = ExprValue::Tdigest();
+    } else if (!input[0].is_tdigest()) {
+        return ExprValue::Null();
+    }
+    ExprValue result = input[0];
+    tdigest::td_normallize(result.str_val);
+    tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)result.str_val.data();
+    for (uint32_t i = 1; i < input.size(); i++) {
+        if (input[i].is_tdigest() && tdigest::is_td_object(input[i].str_val)) {
+            tdigest::td_histogram_t* f = (tdigest::td_histogram_t*)input[i].str_val.data();
+            tdigest::td_merge(t, f);
+        }
+    }
+    tdigest::td_serialize(result.str_val);
+    return result;
+}
+
+ExprValue tdigest_total_sum(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || !input[0].is_tdigest()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    ExprValue result(pb::DOUBLE);
+    tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)tmp.str_val.data();
+    result._u.double_val = tdigest::td_total_sum(t);
+    return result;
+}
+
+ExprValue tdigest_total_count(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || !input[0].is_tdigest()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    ExprValue result(pb::DOUBLE);
+    tdigest::td_histogram_t* t = (tdigest::td_histogram_t*)tmp.str_val.data();
+    result._u.double_val = tdigest::td_total_count(t);
+    return result;
+}
+
 ExprValue tdigest_percentile(const std::vector<ExprValue>& input) {
     if (input.size() != 2 || !input[0].is_tdigest()) {
         return ExprValue::Null();

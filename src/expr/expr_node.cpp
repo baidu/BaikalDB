@@ -319,6 +319,10 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
             *expr_node = new LikePredicate;
             (*expr_node)->init(node);
             return 0;
+        case pb::REGEXP_PREDICATE:
+            *expr_node = new RegexpPredicate;
+            (*expr_node)->init(node);
+            return 0;
         case pb::FUNCTION_CALL:
             *expr_node = new ScalarFnCall;
             (*expr_node)->init(node);

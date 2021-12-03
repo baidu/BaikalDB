@@ -147,6 +147,7 @@ protected:
     bool                    _use_ttl = false;
     bool                    _is_cstore = false;
     int64_t                 _read_ttl_timestamp_us = 0;
+    int64_t                 _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
     int64_t                 _region;
     pb::RegionInfo*         _region_info;
     IndexInfo*              _index_info;

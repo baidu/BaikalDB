@@ -38,6 +38,8 @@ public:
     static const std::string ROLLBACKED_TXN_IDENTIFY;
     static const std::string BINLOG_CHECK_POINT_IDENTIFY;
     static const std::string BINLOG_OLDEST_IDENTIFY;
+    static const std::string LEARNER_IDENTIFY;
+    static const std::string LOCAL_STORAGE_IDENTIFY;
 
     virtual ~MetaWriter() {}
    
@@ -55,6 +57,7 @@ public:
     int update_num_table_lines(int64_t region_id, int64_t num_table_lines);
     int update_apply_index(int64_t region_id, int64_t applied_index, int64_t data_index);
     int write_pre_commit(int64_t region_id, uint64_t txn_id, int64_t num_table_lines, int64_t applied_index);
+    int clear_error_pre_commit(int64_t region_id, uint64_t txn_id);
     int write_doing_snapshot(int64_t region_id);
     int write_batch(rocksdb::WriteBatch* updates, int64_t region_id);
     int write_meta_after_commit(int64_t region_id, int64_t num_table_lines,
@@ -77,11 +80,14 @@ public:
     int parse_txn_log_indexs(int64_t region_id, std::unordered_map<uint64_t, int64_t>& log_indexs);
     int parse_doing_snapshot(std::set<int64_t>& region_ids);
     void read_applied_index(int64_t region_id, int64_t* applied_index, int64_t* data_index);
+    void read_applied_index(int64_t region_id, const rocksdb::ReadOptions& options, int64_t* applied_index, int64_t* data_index);
     int64_t read_num_table_lines(int64_t region_id);
     int read_region_info(int64_t region_id, pb::RegionInfo& region_info);
+    int read_learner_key(int64_t region_id);
+    int write_learner_key(int64_t region_id, bool is_learner);
     int read_pre_commit_key(int64_t region_id, uint64_t txn_id, int64_t& num_table_lines, int64_t& applied_index);
     int read_doing_snapshot(int64_t region_id);
-    int read_transcation_rollbacked_tag(int64_t region_id, uint64_t txn_id) ;
+    int read_transcation_rollbacked_tag(int64_t region_id, uint64_t txn_id);
     int write_binlog_check_point(int64_t region_id, int64_t ts);
     int64_t read_binlog_check_point(int64_t region_id);
     std::string binlog_oldest_ts_key(int64_t region_id) const;
@@ -99,11 +105,14 @@ public:
     std::string pre_commit_key_prefix(int64_t region_id) const;
     std::string pre_commit_key(int64_t region_id, uint64_t txn_id) const;
     std::string doing_snapshot_key(int64_t region_id) const;
+    std::string learner_key(int64_t region_id) const;
     std::string encode_applied_index(int64_t applied_index, int64_t data_index) const;
     std::string encode_num_table_lines(int64_t line) const;
     std::string encode_region_info(const pb::RegionInfo& region_info) const;
+    std::string encode_learner_flag(int64_t ts) const;
     std::string encode_transcation_pb_value(const pb::StoreReq& txn) const;
     std::string encode_transcation_log_index_value(int64_t log_index) const;
+    std::string encode_removed_ddl_key(int64_t region_id, int64_t index_id) const;
     std::string rollbacked_transcation_key(int64_t region_id, uint64_t txn_id) const;
     int64_t decode_log_index_value(const rocksdb::Slice& value);
     uint64_t decode_log_index_key(const rocksdb::Slice& key);

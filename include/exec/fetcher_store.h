@@ -58,6 +58,9 @@ public:
         row_cnt = 0;
         analyze_fail_cnt = 0;
         used_bytes = 0;
+        primary_timestamp_updated = false;
+        no_copy_cache_plan_set.clear();
+        dynamic_timeout_ms = -1;
     }
 
     // send (cached) cmds with seq_id >= start_seq_id
@@ -99,7 +102,73 @@ public:
             pb::OpType op_type) {
         return run(state, region_infos, store_request, start_seq_id, start_seq_id, op_type);
     }
-    void choose_opt_instance(pb::RegionInfo& info, std::string& addr);
+    template<typename Repeated>
+    void choose_opt_instance(int64_t region_id, Repeated&& peers, std::string& addr, std::string* backup) {
+        SchemaFactory* schema_factory = SchemaFactory::get_instance();
+        std::string baikaldb_logical_room = schema_factory->get_logical_room();
+        if (baikaldb_logical_room.empty()) {
+            return;
+        }
+        std::vector<std::string> candicate_peers;
+        std::vector<std::string> normal_peers;
+        bool addr_in_candicate = false;
+        bool addr_in_normal = false;
+        for (auto& peer: peers) {
+            auto status = schema_factory->get_instance_status(peer);
+            if (status.status != pb::NORMAL) {
+                continue;
+            } else if (!status.logical_room.empty() && status.logical_room == baikaldb_logical_room) {
+                if (addr == peer) {
+                    addr_in_candicate = true;
+                } else {
+                    candicate_peers.emplace_back(peer);
+                }
+            } else {
+                if (addr == peer) {
+                    addr_in_normal = true;
+                } else {
+                    normal_peers.emplace_back(peer);
+                }
+            }
+        }
+        if (addr_in_candicate) {
+            if (backup != nullptr) {
+                if (candicate_peers.size() > 0) {
+                    *backup = candicate_peers[0];
+                } else if (normal_peers.size() > 0) {
+                    *backup = normal_peers[0];
+                }
+            }
+            return;
+        }
+        if (candicate_peers.size() > 0) {
+            addr = candicate_peers[0];
+            if (backup != nullptr) {
+                if (candicate_peers.size() > 1) {
+                    *backup = candicate_peers[1];
+                } else if (normal_peers.size() > 0) {
+                    *backup = normal_peers[0];
+                }
+            }
+            return;
+        }
+        if (addr_in_normal) { 
+            if (backup != nullptr) {
+                if (normal_peers.size() > 0) {
+                    *backup = normal_peers[0];
+                }
+            }
+            return;
+        } 
+        if (normal_peers.size() > 0) {
+            addr = normal_peers[0];
+            if (normal_peers.size() > 1) {
+                addr = normal_peers[1];
+            }
+        } else {
+            DB_DEBUG("all peer faulty, %ld", region_id);
+        }
+    }
     void choose_other_if_faulty(pb::RegionInfo& info, std::string& addr);
     void other_normal_peer_to_leader(pb::RegionInfo& info, std::string& addr);
     bool need_process_binlog(RuntimeState* state, pb::OpType op_type) {
@@ -124,10 +193,16 @@ public:
                            const uint64_t log_id);
     int64_t get_commit_ts();
     int memory_limit_exceeded(RuntimeState* state, MemRow* row);
+    void memory_limit_release(RuntimeState* state) {
+        state->memory_limit_release(used_bytes);
+        used_bytes = 0;
+    }
 public:
     std::map<int64_t, std::vector<SmartRecord>>  index_records; //key: index_id
     std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
     std::map<int64_t, std::shared_ptr<RowBatch>> split_region_batch;
+    bthread::Mutex  ttl_timestamp_mutex;
+    std::map<int64_t, std::vector<int64_t>> region_id_ttl_timestamp_batch;
 
     std::multimap<std::string, int64_t> start_key_sort;
     std::multimap<std::string, int64_t> split_start_key_sort;
@@ -145,6 +220,10 @@ public:
     bool  binlog_prepare_success = false;
     bool  need_get_binlog_region = true;
     std::atomic<int64_t> used_bytes = {0};
+    std::atomic<bool> primary_timestamp_updated{false};
+    std::set<int64_t> no_copy_cache_plan_set;
+    int64_t dynamic_timeout_ms = -1;
+    TimeCost binlog_prewrite_time;
 };
 }
 
