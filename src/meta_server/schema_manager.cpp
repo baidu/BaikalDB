@@ -57,6 +57,13 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
             log_id = cntl->log_id();
         }
     }
+    ON_SCOPE_EXIT(([cntl, log_id, response]() {
+        if (response != nullptr && response->errcode() != pb::SUCCESS) {
+            const auto& remote_side_tmp = butil::endpoint2str(cntl->remote_side());
+            const char* remote_side = remote_side_tmp.c_str();
+            DB_WARNING("response error, remote_side:%s, log_id:%lu", remote_side, log_id);
+        }
+    }));
     switch (request->op_type()) {
     case pb::OP_CREATE_NAMESPACE:
     case pb::OP_MODIFY_NAMESPACE:
@@ -109,6 +116,8 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_MODIFY_RESOURCE_TAG: 
     case pb::OP_ADD_INDEX:
     case pb::OP_DROP_INDEX: 
+    case pb::OP_ADD_LEARNER:
+    case pb::OP_DROP_LEARNER:
     case pb::OP_LINK_BINLOG:
     case pb::OP_UNLINK_BINLOG:
     case pb::OP_SET_INDEX_HINT_STATUS:
@@ -171,7 +180,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 timestamp); 
         }
         if (request->op_type() == pb::OP_UPDATE_TTL_DURATION 
-                && request->table_info().ttl_duration() == 0) {
+                && !request->table_info().has_ttl_duration()) {
             // 只能修改有ttl的表
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "ttl_duration must > 0", request->op_type(), log_id);
@@ -229,7 +238,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
-    case pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK:
+    case pb::OP_UPDATE_INDEX_REGION_DDL_WORK:
     case pb::OP_SUSPEND_DDL_WORK:
     case pb::OP_RESTART_DDL_WORK: {
         _meta_state_machine->process(controller, request, response, done_guard.release());
@@ -302,8 +311,10 @@ void SchemaManager::process_leader_heartbeat_for_store(const pb::StoreHeartBeatR
         response->set_leader(butil::endpoint2str(_meta_state_machine->get_leader()).c_str());
         return;
     }
+
+    int64_t timestamp = butil::gettimeofday_us();
     TimeCost step_time_cost;
-    RegionManager::get_instance()->update_leader_status(request);
+    RegionManager::get_instance()->update_leader_status(request, timestamp);
     int64_t update_status_time = step_time_cost.get_time();
     step_time_cost.reset();
 
@@ -315,7 +326,7 @@ void SchemaManager::process_leader_heartbeat_for_store(const pb::StoreHeartBeatR
     RegionManager::get_instance()->leader_load_balance(_meta_state_machine->whether_can_decide(), 
             _meta_state_machine->get_load_balance(resource_tag), request, response);
     int64_t leader_balance_time = step_time_cost.get_time();
-    DB_NOTICE("store: %s process leader heartbeat, update_status_time: %ld, leader_region_time: %ld,"
+    DB_NOTICE("store: %s process leader heartbeat, update_status_time: %ld, leader_region_time: %ld"
                 " leader_balance_time: %ld, log_id: %lu",
                 request->instance_info().address().c_str(),
                 update_status_time, leader_region_time, leader_balance_time, log_id); 
@@ -382,6 +393,8 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
     DB_NOTICE("process schema info for baikal heartbeat, prepare_time: %ld, update_incremental_time:%ld,"
                 " update_table_time: %ld, update_region_time: %ld, log_id: %lu",
                 prepare_time, update_incremental_time, update_table_time, update_region_time, log_id);
+    //判断是否需要更新内存中虚拟索引影响面信息
+    TableManager::get_instance()->load_virtual_indextosqls_to_memory(request);
 }
 
 int SchemaManager::check_and_get_for_privilege(pb::UserPrivilege& user_privilege) {
@@ -462,8 +475,8 @@ int SchemaManager::load_snapshot() {
     std::string statistics_prefix = MetaServer::SCHEMA_IDENTIFY;
     statistics_prefix += MetaServer::STATISTICS_IDENTIFY;
 
-    std::string global_ddl_region_prefix = MetaServer::SCHEMA_IDENTIFY;
-    global_ddl_region_prefix += MetaServer::GLOBAL_DDLWORK_REGION_IDENTIFY;
+    std::string index_ddl_region_prefix = MetaServer::SCHEMA_IDENTIFY;
+    index_ddl_region_prefix += MetaServer::INDEX_DDLWORK_REGION_IDENTIFY;
  
     for (; iter->Valid(); iter->Next()) {
         int ret = 0;
@@ -477,11 +490,11 @@ int SchemaManager::load_snapshot() {
             ret = NamespaceManager::get_instance()->load_namespace_snapshot(iter->value().ToString());
         } else if (iter->key().starts_with(max_id_prefix)) {
             ret = load_max_id_snapshot(max_id_prefix, iter->key().ToString(), iter->value().ToString());
-        } else if (iter->key().starts_with(ddl_prefix)) {
-            ret = TableManager::get_instance()->load_ddl_snapshot(iter->value().ToString());
         } else if (iter->key().starts_with(statistics_prefix)) {
             ret = TableManager::get_instance()->load_statistics_snapshot(iter->value().ToString());
-        } else if (iter->key().starts_with(global_ddl_region_prefix)) {
+        }else if (iter->key().starts_with(ddl_prefix)) {
+            ret = TableManager::get_instance()->load_ddl_snapshot(iter->value().ToString());
+        } else if (iter->key().starts_with(index_ddl_region_prefix)) {
             ret = DDLManager::get_instance()->load_region_ddl_snapshot(iter->value().ToString());
         } else {
             DB_FATAL("unsupport schema info when load snapshot, key:%s", iter->key().data());
@@ -606,7 +619,7 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
                     main_logical_room,    
                     instance);
         if (ret < 0) {
-            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+            ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                         "select instance fail", request->op_type(), log_id);
             return -1;
         }
@@ -733,38 +746,54 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
             return -1;
         }
     }
-    std::string source_instance = request->region_split().new_instance();
-    if (!request->region_split().has_tail_split()
-            || !request->region_split().tail_split()) {
-        response->mutable_split_response()->set_new_instance(source_instance);
-        return 0;
+    auto parent_region = RegionManager::get_instance()->get_region_info(region_id);
+    std::set<std::string> parent_region_stores;
+    if (parent_region != nullptr) {
+        for(auto& peer : parent_region->peers()) {
+            parent_region_stores.insert(peer);
+        }
     }
-    //从cluster中选择一台实例, 只有尾分裂需要，其他分裂只做本地分裂
-    std::string instance;
-    auto ret = 0;
-    std::string main_logical_room;
-    TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
-    if (_meta_state_machine->whether_can_decide()) {
-        ret = ClusterManager::get_instance()->select_instance_min(resource_tag, 
-                                                  std::set<std::string>{source_instance},
-                                                  //std::set<std::string>{},
-                                                  table_id,
-                                                  main_logical_room,
-                                                  instance);
-    } else {
-        DB_WARNING("meta state machine can not make decision");
-        ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag, 
-                                                    std::set<std::string>{source_instance},
-                                                    //std::set<std::string>{},
-                                                    main_logical_room,
-                                                    instance);
-    }
+    bool is_tail_split = request->region_split().has_tail_split() && request->region_split().tail_split();
+    int64_t instance_num = 0;
+    int ret = TableManager::get_instance()->get_replica_num(table_id, instance_num);
     if (ret < 0) {
-        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
-                    "select instance fail", request->op_type(), log_id);
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                                "table id not exist", request->op_type(), log_id);
         return -1;
     }
-    response->mutable_split_response()->set_new_instance(instance);
+    //从cluster中选择store, 尾分裂选择replica个store, 中间分裂选择replica-1个store
+    std::set<std::string> exclude_stores;
+    std::string source_instance = request->region_split().new_instance();
+    if (!is_tail_split) {
+        response->mutable_split_response()->set_new_instance(source_instance);
+        --instance_num;
+        exclude_stores.insert(source_instance);
+    }
+    for (auto i = 0; i < instance_num; ++i) {
+        std::string instance;
+        std::string main_logical_room;
+        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
+        for(size_t rolling_retry = 0; rolling_retry <= parent_region_stores.size(); ++rolling_retry) {
+            ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag,
+                                                                          exclude_stores,
+                                                                          main_logical_room,
+                                                                          instance);
+            if (ret < 0) {
+                ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                                   "select instance fail", request->op_type(), log_id);
+                return -1;
+            }
+            if (parent_region_stores.count(instance) == 0) {
+                break;
+            }
+        }
+        if (is_tail_split && i == 0) {
+            response->mutable_split_response()->set_new_instance(instance);
+        } else {
+            response->mutable_split_response()->add_add_peer_instance(instance);
+        }
+        exclude_stores.insert(instance);
+    }
     return 0;
 }
 int SchemaManager::load_max_id_snapshot(const std::string& max_id_prefix, 

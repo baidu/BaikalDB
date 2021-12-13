@@ -28,13 +28,13 @@ int UpdatePlanner::plan() {
         return -1;
     }
     if (_update->table_refs->node_type == parser::NT_TABLE) {
-        if (0 != parse_db_tables((parser::TableName*)_update->table_refs)) {
+        if (0 != parse_db_tables(_update->table_refs, &_join_root)) {
             DB_WARNING("parse db table fail");
             return -1;
         }
     } 
     if (_update->table_refs->node_type == parser::NT_TABLE_SOURCE) {
-        if (0 != parse_db_tables((parser::TableSource*)_update->table_refs)) {
+        if (0 != parse_db_tables(_update->table_refs, &_join_root)) {
             DB_WARNING("parse db table fail");
             return -1;
         }

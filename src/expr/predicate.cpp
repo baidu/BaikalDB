@@ -180,6 +180,17 @@ ExprValue InPredicate::get_value(MemRow* row) {
     return _has_null ? ExprValue::Null() : ExprValue::False();
 }
 
+void LikePredicate::reset_regex(MemRow* row) {
+    std::string like_pattern = children(1)->get_value(row).get_string();
+    if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
+        covent_exact_pattern(like_pattern);
+        _regex_ptr.reset(new re2::RE2(_regex_pattern, _option));
+    } else {
+        covent_pattern(like_pattern);
+        _regex_ptr.reset(new re2::RE2(_regex_pattern, _option));
+    }
+}
+
 int LikePredicate::open() {
     int ret = 0;
     ret = ExprNode::open();
@@ -191,21 +202,17 @@ int LikePredicate::open() {
         DB_WARNING("LikePredicate _children.size:%lu", _children.size());
         return -1;
     }
-    if (!children(1)->is_constant()) {
-        DB_WARNING("param 2 must be constant");
-        return -1;
-    }
-    std::string like_pattern = children(1)->get_value(nullptr).get_string();
-    re2::RE2::Options option;
-    option.set_utf8(false);
-    option.set_dot_nl(true);
+    std::unordered_set<int32_t> slot_ids;
+    children(1)->get_all_slot_ids(slot_ids);
+    _option.set_utf8(false);
+    _option.set_dot_nl(true);
     if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
-        covent_exact_pattern(like_pattern);
-        option.set_case_sensitive(false);
-        _regex_ptr.reset(new re2::RE2(_regex_pattern, option));
+        _option.set_case_sensitive(false);
+    }
+    if (slot_ids.size() == 0) {
+        reset_regex(nullptr);
     } else {
-        covent_pattern(like_pattern);
-        _regex_ptr.reset(new re2::RE2(_regex_pattern, option));
+        _const_regex = false;
     }
     return 0;
 }
@@ -289,11 +296,66 @@ void LikePredicate::hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_
 }
 
 ExprValue LikePredicate::get_value(MemRow* row) {
+    if (!_const_regex) {
+        reset_regex(row);
+    }
     ExprValue value = children(0)->get_value(row);
     value.cast_to(pb::STRING);
     ExprValue ret(pb::BOOL);
     try {
         ret._u.bool_val = RE2::FullMatch(value.str_val, *_regex_ptr);
+        if (_regex_ptr->error_code() != 0) {
+            DB_FATAL("regex error[%d]", _regex_ptr->error_code());
+        }
+    } catch (std::exception& e) {
+        DB_FATAL("regex error:%s, _regex_pattern:%ss", 
+                e.what(), _regex_pattern.c_str());
+        ret._u.bool_val = false;
+    } catch (...) {
+        DB_FATAL("regex unknown error: _regex_pattern:%ss", 
+                 _regex_pattern.c_str());
+        ret._u.bool_val = false;
+    }
+    return ret;
+}
+
+void RegexpPredicate::reset_regex(MemRow* row) {
+    _regex_pattern = children(1)->get_value(row).get_string();
+    _regex_ptr.reset(new re2::RE2(_regex_pattern, _option));
+}
+
+int RegexpPredicate::open() {
+    int ret = 0;
+    ret = ExprNode::open();
+    if (ret < 0) {
+        DB_WARNING("ExprNode::open fail:%d", ret);
+        return ret;
+    }
+    if (children_size() < 2) {
+        DB_WARNING("RegexpPredicate _children.size:%lu", _children.size());
+        return -1;
+    }
+    std::unordered_set<int32_t> slot_ids;
+    children(1)->get_all_slot_ids(slot_ids);
+    _option.set_utf8(false);
+    _option.set_dot_nl(true);
+    if (slot_ids.size() == 0) {
+        reset_regex(nullptr);
+    } else {
+        _const_regex = false;
+    }
+    return 0;
+}
+
+ExprValue RegexpPredicate::get_value(MemRow* row) {
+    if (!_const_regex) {
+        reset_regex(row);
+    }
+    ExprValue value = children(0)->get_value(row);
+    value.cast_to(pb::STRING);
+    ExprValue ret(pb::BOOL);
+    try {
+        ret._u.bool_val = RE2::PartialMatch(value.str_val, *_regex_ptr);
         if (_regex_ptr->error_code() != 0) {
             DB_FATAL("regex error[%d]", _regex_ptr->error_code());
         }

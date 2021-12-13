@@ -55,14 +55,9 @@ int BinlogContext::get_binlog_regions(uint64_t log_id) {
         return -1;      
     }
     int ret = 0;
-    if (_table_info->partition_num == 1) {
+    if (_table_info->link_field.empty()) {
         ret = _factory->get_binlog_regions(_table_info->id, _binlog_region);
     } else {
-        if (_table_info->link_field.empty()) {
-            DB_WARNING("table %ld not link to binlog table log_id:%lu", _table_info->id, log_id);
-            return -1;      
-        }   
-
         FieldInfo& link_filed = _table_info->link_field[0];
         auto field_desc = _partition_record->get_field_by_idx(link_filed.pb_idx);
         ExprValue value = _partition_record->get_value(field_desc);

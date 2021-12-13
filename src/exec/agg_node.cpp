@@ -145,9 +145,17 @@ int AggNode::open(RuntimeState* state) {
             }
             scan_time += cost.get_time();
             cost.reset();
-            process_row_batch(state, batch);
+            int64_t used_size = 0;
+            int64_t release_size = 0;
+            process_row_batch(state, batch, used_size, release_size);
             agg_time += cost.get_time();
             row_cnt += batch.size();
+            memory_limit_release(state, release_size);
+            if (memory_limit_exceeded(state, used_size) != 0) {
+                _iter = _hash_map.begin();
+                DB_WARNING_STATE(state, "memory limit exceeded");
+                return -1;
+            }
             // 对于用order by分组的特殊优化
             //if (_agg_tuple_id == -1 && _limit != -1 && (int64_t)_hash_map.size() >= _limit) {
             //    break;
@@ -156,8 +164,8 @@ int AggNode::open(RuntimeState* state) {
     }
     LOCAL_TRACE_DESC << "agg time cost:" << agg_time << 
         " scan time cost:" << scan_time << " rows:" << row_cnt;
-    DB_WARNING_STATE(state, "region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
-        state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
+    //DB_WARNING_STATE(state, "region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
+        //state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
 
     // 兼容mysql: select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
@@ -165,7 +173,8 @@ int AggNode::open(RuntimeState* state) {
         uint8_t null_flag = 0;
         MutTableKey key;
         key.append_u8(null_flag);
-        AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get());
+        int64_t used_size = 0;
+        AggFnCall::initialize_all(_agg_fn_calls, key.data(), used_size, row.get());
         _hash_map.insert(key.data(), row.release());
     }
     _iter = _hash_map.begin();
@@ -186,7 +195,7 @@ void AggNode::encode_agg_key(MemRow* row, MutTableKey& key) {
     key.replace_u8(null_flag, 0);
 }
 
-void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch) {
+void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& used_size, int64_t& release_size) {
     for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
         std::unique_ptr<MemRow>& row = batch.get_row();
         MutTableKey key;
@@ -206,11 +215,11 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch) {
                     continue;
                 }
             }
-            AggFnCall::initialize_all(_agg_fn_calls, key.data(), *agg_row);
+            AggFnCall::initialize_all(_agg_fn_calls, key.data(), used_size, *agg_row);
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);
         } else {
-            memory_limit_release(state, cur_row);
+            release_size += cur_row->used_size();
         }
         if (_is_merger) {
             AggFnCall::merge_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
@@ -220,11 +229,20 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch) {
     }
 }
 
-void AggNode::memory_limit_release(RuntimeState* state, MemRow* row) {
+void AggNode::memory_limit_release(RuntimeState* state, int64_t size) {
     if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
-        state->memory_limit_release(row->used_size());
-        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->used_size());
+        state->memory_limit_release(size);
+        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), size);
     }
+}
+
+int AggNode::memory_limit_exceeded(RuntimeState* state, int64_t size) {
+    if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
+        if (0 != state->memory_limit_exceeded(size)) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {

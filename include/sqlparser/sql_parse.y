@@ -100,7 +100,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     CONVERT
     CREATE
     CROSS
-    CURRENT_TIMESTAMP
     CURRENT_USER
     DATABASE
     DATABASES
@@ -423,6 +422,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     HLL
     BITMAP
     TDIGEST
+    LEARNER
 
     /* The following tokens belong to builtin functions. */
     ADDDATE
@@ -491,6 +491,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ShowTableAliasOpt
     LinesTerminated
     Starting
+    ResourceTag
 
 %type <expr> 
     RowExprList
@@ -653,6 +654,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     InOrNot
     AnyOrAll
     LikeOrNot
+    RegexpOrNot
     BetweenOrNot
     SelectStmtCalcFoundRows
     SelectStmtSQLCache
@@ -669,6 +671,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IgnoreLines
     DuplicateOpt
     LocalOpt
+    ForceOrNot
 
 %type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
@@ -987,7 +990,7 @@ ColumnNameList:
     | ColumnNameList ',' ColumnName {
         $1->children.push_back($3, parser->arena);
         $$ = $1;
-    }
+     }
     ;
 
 ColumnName:
@@ -1197,6 +1200,15 @@ IndexHintListOpt:
     }
     ;
 
+ForceOrNot:
+    {
+        $$ = false;
+    } 
+    | FORCE {
+        $$ = true;
+    }
+    ;
+
 IndexHintList:
     IndexHint {
         Node* list = new_node(Node);
@@ -1403,22 +1415,22 @@ LimitClause:
     }
     | LIMIT SimpleExpr ',' SimpleExpr {
         if ($2->expr_type != parser::ET_LITETAL) {
-            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
             return -1;
         }
         LiteralExpr* offset = (LiteralExpr*)$2;
         if (offset->literal_type != parser::LT_INT && offset->literal_type != parser::LT_PLACE_HOLDER) {
-            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
             return -1;
         }
 
         if ($4->expr_type != parser::ET_LITETAL) {
-            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
             return -1;
         }
         LiteralExpr* count = (LiteralExpr*)$4;
         if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
-            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
             return -1;
         }
         LimitClause* limit = new_node(LimitClause);
@@ -2192,6 +2204,15 @@ FunctionCallKeyword:
         fun->children.push_back($5, parser->arena);
         $$ = fun; 
     }
+    | REPLACE '(' Expr ',' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "replace";
+        fun->func_type = FT_COMMON;
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        fun->children.push_back($7, parser->arena);
+        $$ = fun; 
+    }
     | IF '(' Expr ',' Expr ',' Expr ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "if";
@@ -2843,6 +2864,11 @@ PredicateOp:
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_EXACT_LIKE, $1, $3, $4, parser->arena);
         $$ = fun;
     }
+    | SimpleExpr RegexpOrNot SimpleExpr %prec LIKE {
+        FuncExpr* fun = FuncExpr::new_binary_op_node(FT_REGEXP, $1, $3, parser->arena);
+        fun->is_not = $2;
+        $$ = fun;
+    }
     | SimpleExpr BetweenOrNot SimpleExpr AND SimpleExpr {
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_BETWEEN, $1, $3, $5, parser->arena);
         fun->is_not = $2;
@@ -2890,6 +2916,20 @@ LikeEscapeOpt:
     }
     |   "ESCAPE" STRING_LIT {
         $$ = $2;
+    }
+    ;
+RegexpOrNot:
+    REGEXP {
+        $$ = false;
+    }
+    | RLIKE {
+        $$ = false;
+    }
+    | NOT REGEXP {
+        $$ = true;
+    }
+    | NOT RLIKE {
+        $$ = true;
     }
     ;
 BetweenOrNot:
@@ -3926,9 +3966,12 @@ TableOption:
     ;
 
 PartitionRange:
-    PARTITION VALUES LESS THEN '(' Expr ')'
+    PARTITION AllIdent VALUES LESS THAN '(' Expr ')'
     {
-        $$ = $6;
+        PartitionRange* p = new_node(PartitionRange);
+        p->name = $2;
+        p->less_expr = $7;
+        $$ = p;
     }
     ;
 
@@ -3939,16 +3982,10 @@ PartitionRangeList:
         list->children.push_back($1, parser->arena);
         $$ = list;
     }
-    | PartitionRangeList PartitionRange
-    {
-        Node* list = $1;
-        list->children.push_back((ExprNode*)$2, parser->arena);
-        $$ = list;
-    }
     | PartitionRangeList ','  PartitionRange
     {
         Node* list = $1;
-        list->children.push_back((ExprNode*)$3, parser->arena);
+        list->children.push_back($3, parser->arena);
         $$ = list;
     }
     ;
@@ -3960,8 +3997,16 @@ PartitionOpt:
         option->type = PARTITION_RANGE;
         option->expr = $3;
         for (int i = 0; i < $6->children.size(); i++) {
-            option->range.push_back((ExprNode*)$6->children[i], parser->arena);
+            option->range.push_back(static_cast<PartitionRange*>($6->children[i]), parser->arena);
         }
+        $$ = option;
+    }
+    | HASH '(' Expr ')' PARTITIONS INTEGER_LIT 
+    {
+        PartitionOption* option = new_node(PartitionOption);
+        option->type = PARTITION_HASH;
+        option->expr = $3;
+        option->partition_num = ((LiteralExpr*)$6)->_u.int64_val;
         $$ = option;
     }
     ;
@@ -4025,6 +4070,11 @@ DBName:
     }
     ;
 
+ResourceTag:
+    AllIdent {
+        $$ = $1;
+    }
+    ;
 DatabaseOption:
     DefaultKwdOpt CharsetKw EqOpt StringName
     {
@@ -4530,11 +4580,12 @@ AlterSpec:
         spec->new_constraints.push_back((Constraint*)$4, parser->arena);
         $$ = spec;
     }
-    | DROP INDEX IndexName
+    | DROP INDEX IndexName ForceOrNot
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_DROP_INDEX;
         spec->index_name = $3;
+        spec->force = $4;
         $$ = spec;
     }
     | DROP VIRTUAL INDEX IndexName
@@ -4550,6 +4601,20 @@ AlterSpec:
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_RESTORE_INDEX;
         spec->index_name = $3;
+        $$ = spec;
+    }
+    | ADD LEARNER ResourceTag
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_LEARNER;
+        spec->resource_tag = $3;
+        $$ = spec;
+    }
+    | DROP LEARNER ResourceTag
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_LEARNER;
+        spec->resource_tag = $3;
         $$ = spec;
     }
     ;

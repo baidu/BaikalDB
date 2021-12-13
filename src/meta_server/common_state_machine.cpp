@@ -82,7 +82,7 @@ int CommonStateMachine::init(const std::vector<braft::PeerId>& peers) {
     options.snapshot_interval_s = FLAGS_snapshot_interval_s; 
     options.log_uri = FLAGS_log_uri + std::to_string(_dummy_region_id);
     //options.stable_uri = FLAGS_stable_uri + "/meta_server";
-#if BAIDU_INTERNAL
+#ifdef BAIDU_INTERNAL
     options.stable_uri = FLAGS_stable_uri + _file_path;                      
 #else
     options.raft_meta_uri = FLAGS_stable_uri + _file_path;                      
@@ -276,7 +276,7 @@ int CommonStateMachine::send_set_peer_request(bool remove_peer, const std::strin
     pb::RaftControlResponse response;
     int ret = meta_server_interact.send_request("raft_control", request, response);
     if (ret != 0) {
-        DB_FATAL("set peer when meta server migrate fail, request:%s, response:%s",
+        DB_WARNING("set peer when meta server migrate fail, request:%s, response:%s",
                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
     }
     return ret;

@@ -313,24 +313,30 @@ public:
     void run(const std::function<void()>& call) {
         std::function<void()>* _call = new std::function<void()>;
         *_call = call;
-        bthread_start_background(&_tid, _attr, 
+        int ret = bthread_start_background(&_tid, _attr, 
                 [](void*p) -> void* { 
                     auto call = static_cast<std::function<void()>*>(p);
                     (*call)();
                     delete call;
                     return NULL;
                 }, _call);
+        if (ret != 0) {
+            DB_FATAL("bthread_start_background fail");
+        }
     }
     void run_urgent(const std::function<void()>& call) {
         std::function<void()>* _call = new std::function<void()>;
         *_call = call;
-        bthread_start_urgent(&_tid, _attr, 
+        int ret = bthread_start_urgent(&_tid, _attr, 
                 [](void*p) -> void* { 
                     auto call = static_cast<std::function<void()>*>(p);
                     (*call)();
                     delete call;
                     return NULL;
                 }, _call);
+        if (ret != 0) {
+            DB_FATAL("bthread_start_urgent fail");
+        }
     }
     void join() {
         bthread_join(_tid, NULL);
@@ -461,6 +467,22 @@ public:
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         _map[idx][key] = value;
     }
+    // 已存在则不插入，返回false；不存在则init
+    // init函数需要返回0，否则整个insert返回false
+    bool insert_init_if_not_exist(const KEY& key, const std::function<int(VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            if (call(_map[idx][key]) == 0) {
+                return true;
+            } else {
+                _map[idx].erase(key);
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
     const VALUE get(const KEY& key) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
@@ -531,15 +553,18 @@ public:
             _map[i].clear();
         } 
     }
-
+    // 已存在返回true，不存在init则返回false
     template<typename... Args>
-    bool init_if_not_exist_else_update(const KEY& key, 
+    bool init_if_not_exist_else_update(const KEY& key, bool always_update, 
         const std::function<void(VALUE& value)>& call, Args&&... args) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         auto iter = _map[idx].find(key);
         if (iter == _map[idx].end()) {
             _map[idx].insert(std::make_pair(key, VALUE(std::forward<Args>(args)...)));
+            if (always_update) {
+                call(_map[idx][key]);
+            }
             return false;
         } else {
             //字段存在，才执行回调
@@ -614,6 +639,7 @@ private:
         }
         DoubleBuffer* db = (DoubleBuffer*)meta;
         std::vector<std::function<void(T&)>> vec;
+        vec.reserve(3);
         for (; iter; ++iter) {
             (*iter)(*db->read_background());
             vec.emplace_back(*iter);
@@ -727,10 +753,12 @@ private:
 struct BvarMap {
     struct SumCount {
         SumCount() {}
-        SumCount(int64_t table_id, int64_t sum, int64_t count, int64_t err_count,
-                int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, const std::map<int32_t, int>& field_range_type_) 
-            : table_id(table_id), sum(sum), count(count), err_count(err_count),
-            affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows) {
+        SumCount(int64_t table_id, int64_t sum, int64_t err_sum, int64_t count, int64_t err_count,
+                int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, int64_t region_count,
+                const std::map<int32_t, int>& field_range_type_) 
+            : table_id(table_id), sum(sum), err_sum(err_sum), count(count), err_count(err_count),
+            affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows),
+            region_count(region_count) {
                 field_range_type = field_range_type_;
             }
         SumCount& operator+=(const SumCount& other) {
@@ -744,37 +772,45 @@ struct BvarMap {
             }
 
             sum += other.sum;
+            err_sum += other.err_sum;
             count += other.count;
             err_count += other.err_count;
             affected_rows += other.affected_rows;
             scan_rows += other.scan_rows;
             filter_rows += other.filter_rows;
+            region_count += other.region_count;
             return *this;
         }
         SumCount& operator-=(const SumCount& other) {
             sum -= other.sum;
+            err_sum -= other.err_sum;
             count -= other.count;
             err_count -= other.err_count;
             affected_rows -= other.affected_rows;
             scan_rows -= other.scan_rows;
             filter_rows -= other.filter_rows;
+            region_count -= other.region_count;
             return *this;
         }
         int64_t table_id = 0;
         int64_t sum = 0;
+        int64_t err_sum = 0;
         int64_t count = 0;
         int64_t err_count = 0;
         int64_t affected_rows = 0;
         int64_t scan_rows = 0;
         int64_t filter_rows = 0;
+        int64_t region_count = 0;
         // 用于索引推荐
         std::map<int32_t, int> field_range_type;
     };
 public:
     BvarMap() {}
-    BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, 
+    BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t err_cost,
+        int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, int64_t region_count,
         const std::map<int32_t, int>& field_range_type_, int64_t err_count) {
-        internal_map[key][index_id] = SumCount(table_id, cost, 1, err_count, affected_rows, scan_rows, filter_rows, field_range_type_);
+        internal_map[key][index_id] = SumCount(table_id, cost, err_cost, 1, err_count, affected_rows,
+            scan_rows, filter_rows, region_count, field_range_type_);
     }
     BvarMap& operator+=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
@@ -846,6 +882,43 @@ inline std::ostream& operator<<(std::ostream& os, const VirtualIndexMap& vim) {
     return os;
 }
 
+typedef bvar::Window<bvar::IntRecorder, bvar::SERIES_IN_SECOND> RecorderWindow;
+class LatencyOnly {
+public:
+explicit LatencyOnly() : LatencyOnly(-1) 
+{}
+explicit LatencyOnly(time_t window_size) : 
+     _latency_window(&_latency, window_size)
+{}
+
+int64_t qps(time_t window_size) const {
+    bvar::detail::Sample<bvar::Stat> s;
+    _latency_window.get_span(window_size, &s);
+    // Use floating point to avoid overflow.
+    if (s.time_us <= 0) {
+        return 0;
+    }
+    return static_cast<int64_t>(round(s.data.num * 1000000.0 / s.time_us));
+}
+int64_t qps() const { 
+    return qps(1); 
+}
+int64_t latency(time_t window_size) const { 
+    return _latency_window.get_value(window_size).get_average_int(); 
+}
+int64_t latency() const { 
+    return _latency_window.get_value().get_average_int(); 
+}
+LatencyOnly& operator<<(int64_t latency) {
+    _latency << latency;
+    return *this;
+}
+
+private:
+    bvar::IntRecorder _latency;
+    RecorderWindow _latency_window;
+};
+
 struct RocksdbVars {
     static RocksdbVars* get_instance() {
         static RocksdbVars _instance;
@@ -895,6 +968,59 @@ private:
                    }
 };
 
+template <typename T, typename Compare = std::less<T>>
+class Heap {
+public:
+    Heap() {
+    }
+    Heap(size_t size) {
+        _heap.resize(size);
+    }
+    T top() const {
+        if (!_heap.empty()) {
+            return _heap[0];
+        }
+        return T();
+    }
+    void replace_top(const T&v) {
+        if (!_heap.empty()) {
+            _heap[0] = v;
+            shiftdown(0);
+        }
+    }
+    void clear() {
+        _heap.clear();
+    }
+    void resize(size_t size) {
+        _heap.resize(size);
+    }
+    size_t size() const {
+        return _heap.size();
+    }
+private:
+    void shiftdown(size_t index) {
+        size_t left_index = index * 2 + 1;
+        size_t right_index = left_index + 1;
+        if (left_index >= _heap.size()) {
+            return;
+        }
+        size_t min_index = index;
+        if (left_index < _heap.size() &&
+                Compare()(_heap[left_index], _heap[min_index])) {
+            min_index = left_index;
+        }
+        if (right_index < _heap.size() && 
+                Compare()(_heap[right_index], _heap[min_index])) {
+            min_index = right_index;  
+        }
+        if (min_index != index) {
+            std::iter_swap(_heap.begin() + min_index, _heap.begin() + index);
+            shiftdown(min_index);
+        }
+    }
+    std::vector<T> _heap;
+};
+
 inline void update_param(const std::string& name, const std::string& value) {
     std::string target;
     if (!google::GetCommandLineOption(name.c_str(), &target)) {
@@ -938,15 +1064,23 @@ extern int get_instance_from_bns(int* ret,
                           const std::string& bns_name, 
                           std::vector<std::string>& instances,
                           bool need_alive = true); 
+extern int get_multi_port_from_bns(int* ret,
+                          const std::string& bns_name, 
+                          std::vector<std::string>& instances,
+                          bool need_alive = true); 
+extern bool same_with_container_id_and_address(const std::string& container_id, const std::string& address); 
+extern std::string store_or_db_bns_to_meta_bns(const std::string& bns);
 extern bool is_digits(const std::string& str);
 extern std::string url_decode(const std::string& str);
 extern std::string url_encode(const std::string& str);
 extern std::vector<std::string> string_split(const std::string &s, char delim);
+extern int64_t parse_snapshot_index_from_path(const std::string& snapshot_path, bool use_dirname);
 extern bool ends_with(const std::string &str, const std::string &ending);
 extern std::string string_trim(std::string& str);
 extern const std::string& rand_peer(pb::RegionInfo& info);
 extern void other_peer_to_leader(pb::RegionInfo& info);
-
+extern int brpc_with_http(const std::string& host, const std::string& url, std::string& response);
+extern void parse_sample_sql(const std::string& sample_sql, std::string& database, std::string& table, std::string& sql);
 DECLARE_bool(disambiguate_select_name);
 DECLARE_bool(schema_ignore_case);
 inline std::string try_to_lower(const std::string& str) {

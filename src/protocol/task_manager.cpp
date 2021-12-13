@@ -1,7 +1,7 @@
 #include "task_manager.h"
 #include "physical_planner.h"
 #include "network_socket.h"
-#include "global_ddl_planner.h"
+#include "ddl_work_planner.h"
 #include "network_server.h"
 
 namespace baikaldb {
@@ -86,10 +86,11 @@ void TaskManager::process_ddl_work(pb::RegionDdlWork work) {
     int ret = 0;
     SmartSocket client(new NetworkSocket);
     client->query_ctx->client_conn = client.get();
+    client->is_index_ddl = true;
     client->server_instance_id = NetworkServer::get_instance()->get_instance_id();
     //ms
     client->txn_timeout = 40000;
-    std::unique_ptr<GlobalDDLPlanner> planner_ptr(new  GlobalDDLPlanner(client->query_ctx.get()));
+    std::unique_ptr<DDLWorkPlanner> planner_ptr(new  DDLWorkPlanner(client->query_ctx.get()));
     ret = planner_ptr->set_ddlwork(work);
     if (ret != 0) {
         DB_FATAL("ddl work[%s] set ddlwork fail.", work.ShortDebugString().c_str());
@@ -100,7 +101,7 @@ void TaskManager::process_ddl_work(pb::RegionDdlWork work) {
     ret = planner_ptr->plan();
     if (ret !=0) {
         DB_FATAL("ddl work[%s] fail plan error.", work.ShortDebugString().c_str());
-        //plan失败，建全局二级索引初始化region失败。回滚，不重试
+        //plan失败，建二级索引初始化region失败。回滚，不重试
         work.set_status(pb::DdlWorkError);
         TaskFactory<pb::RegionDdlWork>::get_instance()->finish_task(work);
         return;

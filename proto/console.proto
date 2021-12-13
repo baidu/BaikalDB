@@ -64,6 +64,7 @@ message QueryParam {
     optional string      platform           = 23;
     optional string      meta_server_bns    = 24;
     optional string      baikaldb_bns       = 25;
+    optional string      export_time        = 26;
 };
 
 message OverViewInfo {

@@ -245,7 +245,7 @@ void datetime_to_time_struct(uint64_t datetime, DateTime& time_struct, uint8_t t
             localtime_r(&timestamp, &tm);
         }
         time_struct.year = tm.tm_year + 1900;
-        time_struct.month = tm.tm_mon++;
+        time_struct.month = tm.tm_mon + 1;
         time_struct.day = tm.tm_mday;
         time_struct.hour = tm.tm_hour;
         time_struct.minute = tm.tm_min;

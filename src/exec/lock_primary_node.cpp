@@ -29,6 +29,7 @@ int LockPrimaryNode::init(const pb::PlanNode& node) {
     _lock_type = lock_primary_node.lock_type();
     _global_index_id = lock_primary_node.table_id();
     _update_affect_primary = lock_primary_node.affect_primary();
+    _row_ttl_duration = lock_primary_node.row_ttl_duration_s();
     if (lock_primary_node.affect_index_ids_size() > 0) {
         for (auto i = 0; i < lock_primary_node.affect_index_ids_size(); i++) {
             _affected_index_ids.push_back(lock_primary_node.affect_index_ids(i));
@@ -39,9 +40,6 @@ int LockPrimaryNode::init(const pb::PlanNode& node) {
 
 void LockPrimaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
-    if (region_id == 0) {
-        return;
-    }
     auto lock_primary_node = pb_node->mutable_derive_node()->mutable_lock_primary_node();
     lock_primary_node->set_table_id(_table_id);
     lock_primary_node->set_lock_type(_lock_type);
@@ -60,6 +58,7 @@ void LockPrimaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
         }
     }
     lock_primary_node->set_affect_primary(_update_affect_primary);
+    lock_primary_node->set_row_ttl_duration_s(_row_ttl_duration);
     for (auto id : _affected_index_ids) {
         lock_primary_node->add_affect_index_ids(id);
     }
@@ -82,20 +81,16 @@ int LockPrimaryNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
-    // 如果是insert，则_affected_index_ids为空
-    // 只有update才会赋值
-    // TODO 后续baikaldb吃掉这个逻辑，所以上一次线后需要删除这个判断，否则update不影响索引也会全部使用索引
-    if (!_affected_index_ids.empty()) {
-        _affected_indexes.clear();
-        for (auto index_id : _affected_index_ids) {
-            auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-            if (index_info == nullptr) {
-                DB_WARNING("get index info failed index_id: %ld", index_id);
-                return -1;
-            }
-            if (!index_info->is_global) {
-                _affected_indexes.push_back(index_info);
-            }
+    _affected_indexes.clear();
+    for (auto index_id : _affected_index_ids) {
+        auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        // 新加索引还未同步到store
+        if (index_info == nullptr) {
+            DB_WARNING("get index info failed index_id: %ld", index_id);
+            continue;
+        }
+        if (!index_info->is_global) {
+            _affected_indexes.push_back(index_info);
         }
     }
     _indexes_ptr = &_affected_indexes;
@@ -124,7 +119,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
         return -1;
     }
-
+    txn->set_write_ttl_timestamp_us(_ttl_timestamp_us);
     SmartRecord record_template = _factory->new_record(_table_id);
     std::vector<SmartRecord> put_records;
     std::vector<SmartRecord> delete_records;
@@ -245,7 +240,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
     auto txn = state->txn();
     SmartRecord primary_record = record->clone(true);
     auto ret = txn->get_update_primary(_region_id, *_pri_info, primary_record, _field_ids, GET_LOCK, true);
-    if (ret == -1) {
+    if (ret == -1 || ret == -5) {
         DB_WARNING("get lock fail txn_id: %lu", txn->txn_id());
         return -1;
     }
@@ -264,7 +259,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
         if (ret == -3 || ret == -2 || ret == -4) {
             continue;
         }
-        if (ret == -1) {
+        if (ret == -1 || ret == -5) {
             DB_WARNING("get lock fail txn_id: %lu", txn->txn_id());
             return -1;
         }

@@ -73,28 +73,48 @@ void SchemaFactory::update_instance_canceled(const std::string& addr) {
     _double_buffer_idc.Modify(call_func, addr);
 }
 
-void SchemaFactory::update_instance(const std::string& addr, pb::Status s) {
-    std::function<int(IdcMapping&, const std::string&, pb::Status)> call_func = 
-        std::bind(&SchemaFactory::update_instance_internal, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+void SchemaFactory::update_instance(const std::string& addr, pb::Status s, bool user_check) {
+    auto call_func = [this, addr, s, user_check](IdcMapping& map) -> int {
+        return update_instance_internal(map, addr , s, user_check);
+    };
     _double_buffer_idc.Modify(
-        call_func,
-        addr,
-        s
+        call_func
     );
 }
 
-int SchemaFactory::update_instance_internal(IdcMapping& idc_mapping, const std::string& addr, pb::Status s) {
+int SchemaFactory::update_instance_internal(IdcMapping& idc_mapping, const std::string& addr,
+        pb::Status s, bool user_check) {
     if (idc_mapping.instance_info_mapping.count(addr) == 0) {
         return 0;
     }
     pb::Status old_s = idc_mapping.instance_info_mapping[addr].status;
-    if (s == pb::NORMAL && old_s == pb::DEAD) {
+    if (old_s == s) {
+        return 0;
+    }
+    if (s == pb::NORMAL) {
         if (++idc_mapping.instance_info_mapping[addr].normal_count >= InstanceDBStatus::CHECK_COUNT) {
             idc_mapping.instance_info_mapping[addr].status = s;
-            DB_WARNING("addr:%s DEAD to NORMAL", addr.c_str());
+            idc_mapping.instance_info_mapping[addr].normal_count = 0;
+            idc_mapping.instance_info_mapping[addr].faulty_count = 0;
+            DB_WARNING("addr:%s %s to %s", addr.c_str(), 
+                    pb::Status_Name(old_s).c_str(), pb::Status_Name(s).c_str());
+        }
+    } else if (user_check) {
+        // 如果两次user_check间隔太久，则从头计数
+        if (idc_mapping.instance_info_mapping[addr].last_update_time.get_time() > 1000000) {
+            idc_mapping.instance_info_mapping[addr].faulty_count = 0;
+        }
+        idc_mapping.instance_info_mapping[addr].last_update_time.reset();
+        if (++idc_mapping.instance_info_mapping[addr].faulty_count >= InstanceDBStatus::CHECK_COUNT) {
+            idc_mapping.instance_info_mapping[addr].status = s;
+            idc_mapping.instance_info_mapping[addr].normal_count = 0;
+            idc_mapping.instance_info_mapping[addr].faulty_count = 0;
+            DB_WARNING("addr:%s %s to %s", addr.c_str(), 
+                    pb::Status_Name(old_s).c_str(), pb::Status_Name(s).c_str());
         }
     } else {
         idc_mapping.instance_info_mapping[addr].normal_count = 0;
+        idc_mapping.instance_info_mapping[addr].faulty_count = 0;
         idc_mapping.instance_info_mapping[addr].status = s;
         if (s == pb::DEAD) {
             idc_mapping.instance_info_mapping[addr].need_cancel = true;
@@ -194,7 +214,7 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
     auto _factory = tbl_info.factory;
     Bthread bth;
     bth.run([table_id, _pool, _factory]() {
-            bthread_usleep(3600 * 1000 * 1000L);
+            bthread_usleep(3600 * 1000 * 1000LL);
             delete _factory;
             delete _pool; 
             });
@@ -277,6 +297,8 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.dists.clear();
         tbl_info.reverse_fields.clear();
         tbl_info.arrow_reverse_fields.clear();
+        tbl_info.has_global_not_none = false;
+        tbl_info.has_index_write_only_or_write_local = false;
     }
     TableInfo& tbl_info = *tbl_info_ptr;
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
@@ -332,23 +354,6 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             return -1;
         }
     }
-    if (table.has_binlog_info()) {
-        auto& binlog_info = table.binlog_info();
-        if (binlog_info.has_binlog_table_id()) {
-            DB_DEBUG("link binlog %ld", binlog_info.binlog_table_id());
-            tbl_info.is_linked = true;
-            tbl_info.binlog_id = binlog_info.binlog_table_id();
-        } else {
-            DB_DEBUG("unlink binlog");
-            tbl_info.is_linked = false;
-            tbl_info.binlog_id = 0;
-        }
-        tbl_info.binlog_target_ids.clear();
-        for (auto target_id : table.binlog_info().target_table_ids()) {
-            DB_DEBUG("insert target id %ld", target_id);
-            tbl_info.binlog_target_ids.insert(target_id);
-        }
-    }
     tbl_info.link_field.clear();
     tbl_info.version = table.version();
     tbl_info.name = _db_name + "." + _tbl_name;
@@ -365,9 +370,43 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     if (table.has_replica_num()) {
         tbl_info.replica_num = table.replica_num(); 
     }
+    if (table.has_binlog_info()) {
+        auto& binlog_info = table.binlog_info();
+        if (binlog_info.has_binlog_table_id()) {
+            DB_WARNING("table %s,link binlog %ld", tbl_info.name.c_str(), binlog_info.binlog_table_id());
+            tbl_info.is_linked = true;
+            tbl_info.binlog_id = binlog_info.binlog_table_id();
+        } else {
+            DB_DEBUG("unlink binlog");
+            tbl_info.is_linked = false;
+            tbl_info.binlog_id = 0;
+        }
+        tbl_info.binlog_target_ids.clear();
+        for (auto target_id : table.binlog_info().target_table_ids()) {
+            DB_DEBUG("insert target id %ld", target_id);
+            tbl_info.binlog_target_ids.insert(target_id);
+        }
+    }
+    
+    if (table.has_region_num()) {
+        tbl_info.region_num = table.region_num();
+    }
+
     if (table.has_ttl_duration()) {
-        tbl_info.ttl_duration = table.ttl_duration();
-        DB_DEBUG("table:%s ttl_duration:%ld", tbl_info.name.c_str(), tbl_info.ttl_duration);
+        tbl_info.ttl_info.ttl_duration_s = table.ttl_duration();
+        if (table.has_online_ttl_expire_time_us()) {
+            tbl_info.ttl_info.online_ttl_expire_time_us = table.online_ttl_expire_time_us();
+        }
+
+        DB_WARNING("table:%s ttl_duration:%ld, online_ttl_expire_time_us:%ld, %s", 
+            tbl_info.name.c_str(), tbl_info.ttl_info.ttl_duration_s, 
+            tbl_info.ttl_info.online_ttl_expire_time_us,
+            timestamp_to_str(tbl_info.ttl_info.online_ttl_expire_time_us / 1000000).c_str());
+    }
+
+    tbl_info.learner_resource_tags.clear();
+    for (auto& learner_resource : table.learner_resource_tags()) {
+        tbl_info.learner_resource_tags.emplace_back(learner_resource);
     }
     for (auto& dist : table.dists()) {
         DistInfo dist_info;
@@ -410,6 +449,9 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             DB_FATAL("add field failed: %d", field.has_field_id());
             return -1;
         }
+        if (field.mysql_type() == pb::TDIGEST) {
+            DB_WARNING("%s is TDIGEST", tbl_info.name.c_str());
+        }
         field_proto->set_name(field.field_name());
         //FieldDescriptorProto::Type proto_type;
         int proto_type = primitive_to_proto_type(field.mysql_type());
@@ -425,6 +467,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
 
         FieldInfo field_info;
         field_info.id = field.field_id();
+        tbl_info.max_field_id = std::max(tbl_info.max_field_id, field_info.id);
         field_info.pb_idx = pb_idx++;
         field_info.table_id = table_id;
         field_info.name = tbl_info.name + "." + field.field_name();
@@ -445,6 +488,9 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         if (field.has_default_value()) {
             field_info.default_expr_value.type = pb::STRING;
             field_info.default_expr_value.str_val = field_info.default_value;
+            if (field_info.default_value == "(current_timestamp())" && field.has_default_literal()) {
+                field_info.default_expr_value.str_val = field.default_literal();
+            }
             field_info.default_expr_value.cast_to(field_info.type);
         }
         if (field_info.type == pb::STRING || field_info.type == pb::HLL
@@ -492,7 +538,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         Bthread bth;
         bth.run([table_id, del_pool, del_factory]() {
                 // 延迟删除
-                bthread_usleep(3600 * 1000 * 1000L);
+                bthread_usleep(3600 * 1000 * 1000LL); 
                 delete del_factory;
                 delete del_pool; 
                 });
@@ -533,7 +579,18 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         update_index(tbl_info, cur, pk_index, background);
         if (cur.index_type() == pb::I_PRIMARY
                 || cur.is_global() == true) {
+            if (cur.is_global() && cur.state() != pb::IS_NONE) {
+                tbl_info.has_global_not_none = true;
+            }
+            
             global_index_id_mapping[index_id] = table_id;
+        }
+        
+        if (!cur.is_global() && (cur.state() == pb::IS_WRITE_ONLY || cur.state() == pb::IS_WRITE_LOCAL)) {
+            tbl_info.has_index_write_only_or_write_local = true;
+        }
+        if (cur.state() != pb::IS_PUBLIC) {
+            DB_WARNING("table:%s index:%s not public", _db_table.c_str(), cur.index_name().c_str());
         }
         tbl_info.indices.push_back(index_id);
     }
@@ -591,6 +648,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     idx_info.short_name = lower_index_name;
     idx_info.type = index.index_type();
     idx_info.state = index.state();
+    idx_info.max_field_id = table_info.max_field_id;
     if (idx_info.state == pb::IS_WRITE_ONLY) {
         auto time = butil::gettimeofday_us();
         DB_DEBUG("update write_only timestamp %ld", time);
@@ -637,8 +695,9 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
             idx_info.length += info->size;
         }
         if (idx_info.type == pb::I_FULLTEXT) {
-            DB_NOTICE("table %ld index %ld insert reverse field %d", 
-                table_info.id, idx_info.id, info->id);
+            DB_NOTICE("table %ld:%s index %ld insert reverse field %d, type:%s", 
+                    table_info.id, table_info.name.c_str(), idx_info.id, info->id,
+                    StorageType_Name(idx_info.storage_type).c_str());
             if (idx_info.storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
                 table_info.reverse_fields[info->id] = idx_info.id;
             } else {
@@ -903,7 +962,7 @@ size_t SchemaFactory::update_regions_table(
     //DB_NOTICE("double_buffer_write update_regions_table table_id[%ld]", table_id);
     for (auto& start_key_region : key_region_map) {
         auto partition = start_key_region.first;
-        DB_NOTICE("update region partition %d", partition);
+        DB_DEBUG("update region partition %d", partition);
         auto& start_key_region_map = start_key_region.second;
         std::vector<const pb::RegionInfo*> last_regions;
         std::map<std::string, int64_t> clear_regions;
@@ -1036,15 +1095,22 @@ void SchemaFactory::update_leader(const pb::RegionInfo& region) {
 void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     const std::string& username = user.username();
     const std::string& password = user.password();
-    // 每次都新建一个UserInfo，所以内部无需加锁
-    std::shared_ptr<UserInfo> user_info(new (std::nothrow)UserInfo);
-    BAIDU_SCOPED_LOCK(_update_user_mutex);
-    if (_user_info_mapping.count(username) == 1 && !user.need_auth_addr()) {
-        // need not update when version GE
-        if (_user_info_mapping[username]->version >= user.version()) {
-            return;
+    {
+        DoubleBufferedUser::ScopedPtr ptr;
+        if (_user_info_mapping.Read(&ptr) != 0) {
+            DB_WARNING("read _user_info_mapping error.");
+            return ; 
+        }
+        auto iter = ptr->find(username);
+        if (iter != ptr->end() && !user.need_auth_addr()) {
+            // need not update when version GE
+            if (iter->second->version >= user.version()) {
+                return;
+            }
         }
     }
+    // 每次都新建一个UserInfo，所以内部无需加锁
+    std::shared_ptr<UserInfo> user_info(new (std::nothrow)UserInfo);
     user_info->username = username;
     user_info->password = password;
     scramble(user_info->scramble_password,
@@ -1091,7 +1157,12 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
             }
         }
     }
-    _user_info_mapping[username] = user_info;
+    auto call_func = [](std::unordered_map<std::string, std::shared_ptr<UserInfo>>& mapping, 
+            const std::shared_ptr<UserInfo>& user_info) {
+        mapping[user_info->username] = user_info;
+        return 1;
+    };
+    _user_info_mapping.Modify(call_func, user_info);
 }
 
 void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
@@ -1139,155 +1210,6 @@ int SchemaFactory::update_statistics_internal(SchemaMapping& background, const s
         } else {
             table_statistics_mapping[iter->first] = iter->second;
         }
-    }
-
-    return 1;
-}
-
-void SchemaFactory::update_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info) {
-    
-    std::function<int(SchemaMapping& schema_mapping, const std::string& table_full_name, const pb::IndexInfo& index_info)> func =
-        std::bind(&SchemaFactory::update_virtual_index_internal, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
-    _double_buffer_table.Modify(func, table_full_name, index_info);
-}
-
-int SchemaFactory::update_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info) {
-    auto& table_info_mapping = background.table_info_mapping;
-    auto& index_info_mapping = background.index_info_mapping;
-    auto& table_name_id_mapping = background.table_name_id_mapping;
-
-    if (table_name_id_mapping.count(try_to_lower(table_full_name)) == 0) {
-        DB_WARNING("can not find table_name: %s", table_full_name.c_str());
-        return 0;
-    }
-
-    int64_t table_id = table_name_id_mapping[try_to_lower(table_full_name)];
-
-    if (table_info_mapping.count(table_id) == 0) {
-        DB_WARNING("can not find table_id: %ld", table_id);
-        return 0;
-    }
-
-    TableInfo& tbl_info = *table_info_mapping[table_id];
-
-    if (index_info_mapping.count(table_id) == 0) {
-        DB_WARNING("can not find pk table_id: %ld", table_id);
-        return 0;
-    }
-
-    SmartIndex pk_ptr = index_info_mapping[table_id];
-
-    // 1、构造主键信息，update_index函数里面只用到了pk_index中的field_ids，所以只构造该字段
-    pb::IndexInfo pk_index; 
-    for (auto& field : pk_ptr->fields) {
-        DB_WARNING("pk field name: %s, field id: %d", field.name.c_str(), field.id);
-        pk_index.add_field_ids(field.id);
-    }
-
-    if (index_info.index_type() != pb::I_KEY && index_info.index_type() != pb::I_UNIQ) {
-        return 0;
-    }
-
-    pb::IndexInfo virtual_index = index_info;
-
-    // 2、构造虚拟索引pb结构
-    // 2.1、获取虚拟索引index_id，去最大table_id或index_id 加 10000，确保虚拟index_id不影响正常流程
-    int64_t max_table_id = 0;
-    for (auto iter : table_info_mapping) {
-        max_table_id = max_table_id > iter.first ? max_table_id : iter.first;
-    }
-    int64_t max_index_id = 0;
-    for (auto& iter : index_info_mapping) {
-        max_index_id = max_index_id > iter.first ? max_index_id : iter.first;
-    }
-
-    int64_t virtual_index_id = (max_table_id > max_index_id ? max_table_id : max_index_id) + 10000;
-    virtual_index.set_index_id(virtual_index_id);
-
-    // 2.2、暂时不支持GLOBAL INDEX
-    virtual_index.set_is_global(false);
-
-    // 2.3、state 为 IS_PUBLIC，这样才可以当真实索引去选择
-    virtual_index.set_state(pb::IS_PUBLIC);
-
-    // 2.4、构造field_ids
-    for (auto& short_name : virtual_index.field_names()) {
-        int field_id = tbl_info.get_field_id_by_short_name(short_name);
-        if (field_id <= 0) {
-            DB_WARNING("get field id faild, field name: %s, table_id: %ld", short_name.c_str(), table_id);
-            return 0;
-        }
-        virtual_index.add_field_ids(field_id);
-    }
-    // 2.5、设置为虚拟索引
-    virtual_index.set_hint_status(pb::IHS_VIRTUAL);
-
-    // 3、兼容心跳更新索引流程
-    update_index(tbl_info, virtual_index, &pk_index, background);
-
-    DB_WARNING("virtual_index: %s", virtual_index.ShortDebugString().c_str());
-
-    tbl_info.indices.push_back(virtual_index.index_id());
-
-    SmartIndex index_ptr =  index_info_mapping[virtual_index_id];
-
-    return 1;
-}
-
-void SchemaFactory::drop_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info) {
-    // 清理统计信息
-    _virtual_index_info.reset();
-    std::function<int(SchemaMapping& schema_mapping, const std::string& table_full_name, const pb::IndexInfo& index_info)> func =
-        std::bind(&SchemaFactory::drop_virtual_index_internal, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
-    _double_buffer_table.Modify(func, table_full_name, index_info);
-}
-
-int SchemaFactory::drop_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info) {
-    auto& table_info_mapping = background.table_info_mapping;
-    auto& index_info_mapping = background.index_info_mapping;
-    auto& table_name_id_mapping = background.table_name_id_mapping;
-    auto& index_name_id_mapping = background.index_name_id_mapping;
-
-    if (table_name_id_mapping.count(try_to_lower(table_full_name)) == 0) {
-        DB_WARNING("can not find table_name: %s", table_full_name.c_str());
-        return 0;
-    }
-
-    int64_t table_id = table_name_id_mapping[try_to_lower(table_full_name)];
-
-    if (table_info_mapping.count(table_id) == 0) {
-        DB_WARNING("can not find table_id: %ld", table_id);
-        return 0;
-    }
-
-    TableInfo& tbl_info = *table_info_mapping[table_id];
-
-    std::string index_full_name = table_full_name + "." + index_info.index_name();
-
-    if (index_name_id_mapping.count(index_full_name) == 0) {
-        DB_WARNING("cant find index_name :%s", index_full_name.c_str());
-        return 0;
-    }
-
-    int64_t index_id = index_name_id_mapping[index_full_name];
-
-    auto index_iter = index_info_mapping.find(index_id);
-    if (index_iter != index_info_mapping.end()) {
-        if (index_iter->second->index_hint_status != pb::IHS_VIRTUAL) {
-            // 非虚拟索引
-            DB_WARNING("index_name: %s, index_id:%ld is not virtual index", index_full_name.c_str(), index_id);
-            return 0;
-        }
-        index_info_mapping.erase(index_iter);
-        index_name_id_mapping.erase(index_full_name);
-        for (auto it = tbl_info.indices.begin(); it != tbl_info.indices.end(); it++) {
-            if (*it == index_id) {
-                tbl_info.indices.erase(it); //用erase比较安全
-                break;
-            }
-        }
-        DB_WARNING("delete virtual index info: index_id: %ld index_name: %s.", 
-            index_id, index_full_name.c_str());
     }
 
     return 1;
@@ -1542,11 +1464,40 @@ std::string SchemaFactory::get_index_name(int64_t index_id) {
 }
 
 std::shared_ptr<UserInfo> SchemaFactory::get_user_info(const std::string& user) {
-    BAIDU_SCOPED_LOCK(_update_user_mutex);
-    if (_user_info_mapping.count(user) == 0) {
+    DoubleBufferedUser::ScopedPtr ptr;
+    if (_user_info_mapping.Read(&ptr) != 0) {
+        DB_WARNING("read _user_info_mapping error.");
+        return nullptr; 
+    }
+    auto iter = ptr->find(user);
+    if (iter == ptr->end()) {
         return nullptr;
     }
-    return _user_info_mapping[user];
+    return iter->second;
+}
+
+std::shared_ptr<SqlStatistics> SchemaFactory::get_sql_stat(int64_t sign) {
+    DoubleBufferedSql::ScopedPtr ptr;
+    if (_double_buffer_sql_stat.Read(&ptr) != 0) {
+        DB_WARNING("read _double_buffer_sql_staterror.");
+        return nullptr; 
+    }
+    auto iter = ptr->find(sign);
+    if (iter == ptr->end()) {
+        return nullptr;
+    }
+    return iter->second;
+}
+
+std::shared_ptr<SqlStatistics> SchemaFactory::create_sql_stat(int64_t sign) {
+    std::shared_ptr<SqlStatistics> info(new (std::nothrow)SqlStatistics);
+    auto call_func = [sign](SqlStatMap& mapping, 
+            const std::shared_ptr<SqlStatistics>& info) {
+        mapping[sign] = info;
+        return 1;
+    };
+    _double_buffer_sql_stat.Modify(call_func, info);
+    return info;
 }
 
 std::vector<std::string> SchemaFactory::get_db_list(const std::set<int64_t>& db) {
@@ -1582,6 +1533,7 @@ std::vector<std::string> SchemaFactory::get_table_list(
             }
         }
     }
+    std::sort(vec.begin(), vec.end());
     return vec;
 }
 
@@ -1750,9 +1702,29 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
         if (!has_field) {
             continue;
         }
+        if (conf_name == "pk_prefix_balance") {
+            auto value = reflection->GetInt32(pb_conf, field);
+            database_table.emplace_back(table.second->namespace_ + "." + table.second->name + "." + std::to_string(value));
+        } else if (reflection->GetBool(pb_conf, field)) {
+            database_table.emplace_back(table.second->namespace_ + "." + table.second->name);
+        }
+    }
 
-        if (reflection->GetBool(pb_conf, field)) {
-            database_table.push_back(table.second->namespace_ + "." + table.second->name);
+    return;
+}
+
+void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table,
+        const std::function<bool(const SmartTable&)>& select_table) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return;
+    }
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+
+    for (auto& table : table_info_mapping) {
+        if (select_table(table.second)) {
+            database_table.emplace_back(table.second->namespace_ + "." + table.second->name);
         }
     }
 
@@ -1864,17 +1836,17 @@ int SchemaFactory::get_schema_conf_str(const int64_t table_id, const std::string
     return 0;
 }
 
-int64_t SchemaFactory::get_ttl_duration(int64_t table_id) {
+TTLInfo SchemaFactory::get_ttl_duration(int64_t table_id) {
     DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {
         DB_WARNING("read double_buffer_table error.");
-        return 0;
+        return TTLInfo();
     }
     auto& table_info_mapping = table_ptr->table_info_mapping;
     if (table_info_mapping.count(table_id) == 0) {
-        return 0;
+        return TTLInfo();
     }
-    return table_info_mapping.at(table_id)->ttl_duration;
+    return table_info_mapping.at(table_id)->ttl_info;
 }
 
 int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {

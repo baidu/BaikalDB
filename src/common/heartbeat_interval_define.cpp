@@ -22,5 +22,6 @@ DEFINE_int32(region_faulty_interval_times, 3, "region faulty interval times of h
 DEFINE_int32(store_faulty_interval_times, 3, "store faulty interval times of heart beat");
 DEFINE_int32(store_dead_interval_times, 60, "store dead interval times of heart beat");
 DEFINE_int32(healthy_check_interval_times, 1, "meta state machine healthy check interval times of heart beat");
+DEFINE_int64(transfer_leader_catchup_time_threshold, 1 * 1000 * 1000LL, "transfer leader catchup time threshold");
 }
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

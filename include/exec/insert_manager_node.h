@@ -131,6 +131,13 @@ public:
     }
     void process_binlog(RuntimeState* state, bool save_data);
 
+    void set_row_ttl_duration(int64_t row_ttl_duration) { 
+        _row_ttl_duration = row_ttl_duration; 
+    }
+    int64_t row_ttl_duration() const { 
+        return _row_ttl_duration; 
+    }
+
 private:
     void update_record(SmartRecord record);
     int64_t     _table_id = -1;
@@ -172,6 +179,7 @@ private:
     std::vector<ExprNode*>  _select_projections;
     ExecNode*               _sub_query_node = nullptr;
     bool   _need_plan_router = false;
+    int64_t _row_ttl_duration = 0;
 };
 
 }

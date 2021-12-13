@@ -49,6 +49,7 @@ message TransactionInfo {
     optional bool    open_binlog  = 14;
     optional bool    from_store        = 15;
     optional int64  txn_timeout    = 16;
+    optional bool need_update_primary_timestamp = 17;
 };
 
 message KvOp {
@@ -65,7 +66,7 @@ message AnalyzeInfo {
     required int64     table_rows  = 4;     
 };
 
-//prewrite binlog需要填写binlog_ts、txn_id、primary_region_id、partion_key
+//prewrite binlog需要填写binlog_ts、txn_id、primary_region_id
 //commit/rollback binlog 只填binlog_ts、txn_id、start_ts
 //read binlog只填binlog_ts、read_binlog_cnt
 message BinlogDesc {
@@ -73,9 +74,24 @@ message BinlogDesc {
     optional int64     txn_id            = 2;
     optional int64     start_ts          = 3;
     optional int64     primary_region_id = 4;
-    optional int64     partion_key       = 5;
     optional int64     read_binlog_cnt   = 6;
 };
+
+message BatchStoreReq {
+    required int64      region_id        = 1;
+    repeated int64      request_lens     = 2;  // 保存每个storeReq的长度，数据放在了request_attachment里
+    optional int64      start_pos        = 3;
+}
+
+message BatchStoreRes {
+    required ErrCode   errcode              = 1;
+    optional bytes     errmsg               = 2;
+    optional string    leader               = 3;
+    optional int64     success_cnt          = 4;
+    optional int64     applied_index        = 5;
+    optional int64     braft_applied_index  = 6;
+    optional int64     dml_latency          = 7;
+}
 
 message StoreReq {
     required OpType op_type         = 1;  //对表的操作类型
@@ -122,14 +138,16 @@ message IndexRecords {
 };
 
 message RegionRaftStat {
-    optional int64 applied_index    = 1;
-    optional uint64 snapshot_data_size = 2;
-    optional uint64 snapshot_meta_size = 3;
+    optional int64  applied_index       = 1;
+    optional uint64 snapshot_data_size  = 2;
+    optional uint64 snapshot_meta_size  = 3;
+    optional int64  snapshot_index      = 4;
+    optional int64  dml_latency         = 5;
 };
 
 message StoreRes {
     required ErrCode errcode        = 1;
-    optional bytes errmsg          = 2;
+    optional bytes errmsg           = 2;
     optional string leader          = 3;
     //目前返回所有tuple
     repeated int32 tuple_ids        = 4;
@@ -152,12 +170,14 @@ message StoreRes {
     optional PeerStatus region_status = 21;
     optional int64 last_insert_id = 22;
     optional RegionRaftStat region_raft_stat = 23;
+    repeated int64 ttl_timestamp = 24;
 };
 message InitRegion {
     required RegionInfo region_info     = 1;
     optional SchemaInfo schema_info     = 2;
-    optional bool       split_start     = 3;
+    optional bool       is_split        = 3;
     optional int32      snapshot_times  = 4; //初始化时需要做snapshot的次数
+    optional bool       is_learner      = 5;
 };
 
 message GetAppliedIndex {
@@ -175,6 +195,8 @@ message RegionIds {
     optional bool compact_raft_log  = 2; // if true, compact raft log
     optional int64  table_id        = 3; // use for restore region
     optional int32  compact_type    = 4; //  1:data_cf 2:meta_cf 3:raft_log_cf
+    optional bool   clear_all_txns  = 5;
+    optional int64  txn_timeout     = 6;
 };
 
 message BackUpReq {};
@@ -214,6 +236,10 @@ service StoreService {
     rpc region_raft_control(RaftControlRequest) returns (RaftControlResponse); 
     
     rpc health_check(HealthCheck) returns (StoreRes);
+
+    //快速应用raft日志,分裂使用
+    rpc async_apply_log_entry(BatchStoreReq) returns (BatchStoreRes);
+
     //增删改查功能，需要走raft状态机的都通过此接口
     rpc query(StoreReq) returns (StoreRes);
 

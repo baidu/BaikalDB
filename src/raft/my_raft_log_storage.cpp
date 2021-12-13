@@ -19,6 +19,7 @@
 #include "concurrency.h"
 #include "proto/store.interface.pb.h"
 namespace baikaldb {
+DECLARE_int32(rocksdb_cost_sample);
 
 static int parse_my_raft_log_uri(const std::string& uri, std::string& id, bool& is_binlog){
     size_t pos = uri.find("id=");
@@ -365,7 +366,6 @@ int MyRaftLogStorage::append_entry(const braft::LogEntry* entry) {
 
 int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entries
         , braft::IOMetric* metric) {
-    TimeCost time_cost;
     if (entries.empty()) {
         return 0;
     }
@@ -377,6 +377,18 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
                 entries.front()->id.term, _region_id);
         return -1;
     }
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
+    TimeCost time_cost;
+    ON_SCOPE_EXIT(([&time_cost, &total_time, &count]() {
+        total_time += time_cost.get_time();
+        if (++count >= FLAGS_rocksdb_cost_sample) {
+            RocksdbVars::get_instance()->rocksdb_put_time << total_time / count;
+            RocksdbVars::get_instance()->rocksdb_put_count << count;
+            total_time = 0;
+            count = 0;
+        }
+    }));
 
     //construct data
     SlicePartsVec kv_raftlog_vec; //存储raftlog

@@ -410,7 +410,7 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
 bool Separate::need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id) {
     if (ctx->get_runtime_state()->single_sql_autocommit() && 
         (ctx->enable_2pc 
-            || _factory->has_global_index(main_table_id)
+            || _factory->need_begin_txn(main_table_id)
             || ctx->open_binlog)) {
         return true;
     }
@@ -447,8 +447,13 @@ int Separate::separate_load(QueryContext* ctx) {
         manager_node->set_table_id(main_table_id);
         manager_node->set_selected_field_ids(insert_node->prepared_field_ids());
     } else {
-        separate_global_insert(manager_node.get(), insert_node);
+        int ret = separate_global_insert(manager_node.get(), insert_node);
+        if (ret < 0) {
+            DB_WARNING("separte global insert failed table_id:%ld", main_table_id);
+            return -1;
+        }
     }
+    ctx->get_runtime_state()->set_single_txn_need_separate_execute(true);
     parent->clear_children();
     parent->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
@@ -473,6 +478,9 @@ int Separate::separate_insert(QueryContext* ctx) {
     }
     manager_node->init(pb_manager_node);
     manager_node->set_records(ctx->insert_records);
+    if (ctx->row_ttl_duration > 0) {
+        manager_node->set_row_ttl_duration(ctx->row_ttl_duration);
+    }
     int64_t main_table_id = insert_node->table_id();
     if (!need_separate_plan(ctx, main_table_id)) {
         manager_node->set_op_type(pb::OP_INSERT);
@@ -481,7 +489,11 @@ int Separate::separate_insert(QueryContext* ctx) {
         manager_node->set_table_id(main_table_id);
         manager_node->set_selected_field_ids(insert_node->prepared_field_ids());
     } else {
-        separate_global_insert(manager_node.get(), insert_node);
+        int ret = separate_global_insert(manager_node.get(), insert_node);
+        if (ret < 0) {
+            DB_WARNING("separte global insert failed table_id:%ld", main_table_id);
+            return -1;
+        }
     }
 
     if (ctx->sub_query_plans.size() > 0) {
@@ -582,6 +594,13 @@ int Separate::create_lock_node(
         const std::vector<int64_t>& global_affected_indexs,
         const std::vector<int64_t>& local_affected_indexs,
         ExecNode* manager_node) {
+    InsertManagerNode* tmp_node = static_cast<InsertManagerNode*>(manager_node);
+    int64_t row_ttl_duration = 0;
+    if (tmp_node != nullptr && tmp_node->row_ttl_duration() > 0) {
+        row_ttl_duration = tmp_node->row_ttl_duration();
+        DB_DEBUG("global insert row_ttl_duration: %ld", row_ttl_duration);
+    }
+    
     //构造LockAndPutPrimaryNode
     if (mode == Separate::BOTH || mode == Separate::PRIMARY) {
         std::unique_ptr<LockPrimaryNode> primary_node(new (std::nothrow) LockPrimaryNode);
@@ -592,8 +611,10 @@ int Separate::create_lock_node(
         pb::PlanNode plan_node;
         plan_node.set_node_type(pb::LOCK_PRIMARY_NODE);
         plan_node.set_limit(-1);
-        plan_node.mutable_derive_node()->mutable_lock_primary_node()->set_lock_type(lock_type);
-        plan_node.mutable_derive_node()->mutable_lock_primary_node()->set_table_id(table_id);
+        auto lock_primary_node = plan_node.mutable_derive_node()->mutable_lock_primary_node();
+        lock_primary_node->set_lock_type(lock_type);
+        lock_primary_node->set_table_id(table_id);
+        lock_primary_node->set_row_ttl_duration_s(row_ttl_duration);
         primary_node->init(plan_node);
         primary_node->set_affected_index_ids(local_affected_indexs); 
         manager_node->add_child(primary_node.release());
@@ -609,11 +630,11 @@ int Separate::create_lock_node(
         pb::PlanNode plan_node;
         plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
         plan_node.set_limit(-1);
-        plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_lock_type(
-                lock_type);
-        plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_global_index_id(index_id);
-        plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_table_id(
-                table_id);
+        auto lock_secondary_node = plan_node.mutable_derive_node()->mutable_lock_secondary_node();
+        lock_secondary_node->set_lock_type(lock_type);
+        lock_secondary_node->set_global_index_id(index_id);
+        lock_secondary_node->set_table_id(table_id);
+        lock_secondary_node->set_row_ttl_duration_s(row_ttl_duration);
         secondary_node->init(plan_node);
         manager_node->add_child(secondary_node.release());
     }
@@ -649,7 +670,11 @@ int Separate::separate_update(QueryContext* ctx) {
         manager_node->set_region_infos(region_infos);
         manager_node->add_child(packet_node->children(0));
     } else {
-        separate_global_update(manager_node.get(), update_node, scan_nodes[0]);
+        ret = separate_global_update(manager_node.get(), update_node, scan_nodes[0]);
+        if (ret < 0) {
+            DB_WARNING("separte global update failed table_id:%ld", main_table_id);
+            return -1;
+        }
     }
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
@@ -680,7 +705,11 @@ int Separate::separate_delete(QueryContext* ctx) {
         manager_node->set_region_infos(region_infos);
         manager_node->add_child(packet_node->children(0));       
     } else {
-        separate_global_delete(manager_node.get(), delete_node, scan_nodes[0]);
+        int ret = separate_global_delete(manager_node.get(), delete_node, scan_nodes[0]);
+        if (ret < 0) {
+            DB_WARNING("separte global delete failed table_id:%ld", main_table_id);
+            return -1;
+        }
     }
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());

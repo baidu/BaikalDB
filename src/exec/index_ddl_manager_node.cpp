@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "global_ddl_manager_node.h"
+#include "index_ddl_manager_node.h"
 #include "exec_node.h"
 #include "schema_factory.h"
 #include "runtime_state.h"
@@ -22,15 +22,13 @@
 
 namespace baikaldb {
 
-GlobalDDLManagerNode::GlobalDDLManagerNode() {
+IndexDDLManagerNode::IndexDDLManagerNode() {
 }
-GlobalDDLManagerNode::~GlobalDDLManagerNode() {
+IndexDDLManagerNode::~IndexDDLManagerNode() {
 }
 
-int GlobalDDLManagerNode::open(RuntimeState* state) {
+int IndexDDLManagerNode::open(RuntimeState* state) {
     int ret = 0;
-    // query_cxt 中释放 dmj节点
-    ON_SCOPE_EXIT([this](){_children.clear();});
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
         DB_WARNING("task_%s connection is nullptr: %lu", _task_id.c_str(), state->txn_id);
@@ -55,6 +53,7 @@ int GlobalDDLManagerNode::open(RuntimeState* state) {
     if (ret < 0) {
         DB_WARNING("task_%s select manager fetcher manager node open fail, txn_id: %lu, log_id:%lu", 
                 _task_id.c_str(), state->txn_id, state->log_id());
+        state->ddl_error_code = state->error_code;
         return ret;
     }
     client_conn->region_infos = _region_infos;
@@ -73,9 +72,16 @@ int GlobalDDLManagerNode::open(RuntimeState* state) {
     int32_t ddl_scan_size = 0;
     std::string max_pk_str;
     std::string max_record;
-    auto multi_region_size = _fetcher_store.start_key_sort.size();
+    bool global_ddl_with_ttl = _fetcher_store.region_id_ttl_timestamp_batch.size() > 0 ? true : false;
+    std::map<std::string, int64_t> record_ttl_map;
     for (auto& pair : _fetcher_store.start_key_sort) {
         auto& batch = _fetcher_store.region_batch[pair.second];
+        auto& ttl_batch = _fetcher_store.region_id_ttl_timestamp_batch[pair.second];
+        if (global_ddl_with_ttl && batch->size() != ttl_batch.size()) {
+            DB_FATAL("region_id: %ld, batch size diff with ttl size %ld vs %ld", pair.second, batch->size(), ttl_batch.size());
+            global_ddl_with_ttl = false;
+        }
+        int ttl_idx = 0;
         if (batch != NULL && batch->size() != 0) {
             for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
                 ddl_scan_size++;
@@ -102,6 +108,11 @@ int GlobalDDLManagerNode::open(RuntimeState* state) {
                 }
                 insert_records.emplace_back(record);
                 DB_DEBUG("record %s", record->debug_string().c_str());
+                if (global_ddl_with_ttl) {
+                    std::string record_str;
+                    record->encode(record_str);
+                    record_ttl_map[record_str] = ttl_batch[ttl_idx++];
+                }
                 // 已排序，只 encode batch最后的record 或者 最后一个record。
                 if (batch->index() + 1 == batch->size() || ddl_scan_size == limit) {
                     MutTableKey max_pk_key;
@@ -121,6 +132,7 @@ int GlobalDDLManagerNode::open(RuntimeState* state) {
                         }
                     }
                 }
+
             }
         }
         if (insert_records.size() >= limit) {
@@ -133,7 +145,7 @@ int GlobalDDLManagerNode::open(RuntimeState* state) {
     state->ddl_max_router_key = max_pk_str;
     std::string first_record;
     std::string last_record;
-    if (ddl_scan_size > 0) {
+    if (state->ddl_scan_size > 0) {
         first_record = insert_records[0]->to_string();
         last_record = insert_records.back()->to_string();
         if (state->first_record_ptr == nullptr) {
@@ -144,13 +156,14 @@ int GlobalDDLManagerNode::open(RuntimeState* state) {
     DB_NOTICE("task_%s ddl scan size %d, first_record %s last_record %s max_pk_key %s log_id %lu", 
         _task_id.c_str(), ddl_scan_size, first_record.c_str(), last_record.c_str(), str_to_hex(max_pk_str).c_str(), state->log_id());
 
-    if (ddl_scan_size > 0) {
-        auto lock_second_node_ptr = static_cast<LockSecondaryNode*>(_children[1]);
-        //lock_second_node_ptr->get_region_infos(state, lock_second_node_ptr, insert_records, delete_records, region_infos);
+    if (_is_global_index && ddl_scan_size > 0) {
         std::map<int64_t, pb::RegionInfo> empty_region_infos;
         set_region_infos(empty_region_infos);
         set_op_type(pb::OP_INSERT);
-        ret = send_request(state, lock_second_node_ptr, insert_records, delete_records);
+        DMLNode* exec_node = static_cast<DMLNode*>(_children[1]);
+        LockSecondaryNode* second_node = static_cast<LockSecondaryNode*>(exec_node);
+        second_node->set_ttl_timestamp(record_ttl_map);
+        ret = send_request_light(state, exec_node, _fetcher_store, client_conn->seq_id, insert_records, delete_records);
         if (ret == -1) {
             state->ddl_error_code = state->error_code;
             DB_FATAL("task_%s send request error [%d] log_id %lu.", _task_id.c_str(), state->error_code, state->log_id());

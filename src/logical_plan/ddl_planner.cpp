@@ -69,10 +69,6 @@ int DDLPlanner::plan() {
             return -1;
         } 
         error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
-        if (ret == -2) {
-            // 虚拟索引操作, 不再向meta发请求
-            return 0;
-        }
     } else {
         DB_WARNING("unsupported DDL command: %d", _ctx->stmt_type);
         return -1;
@@ -114,6 +110,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             field->set_can_null(false);
         } else if (col_option->type == parser::COLUMN_OPT_NULL) {
             field->set_can_null(true);
+            _column_can_null[column->name->name.value] = true;
         } else if (col_option->type == parser::COLUMN_OPT_AUTO_INC) {
             field->set_auto_increment(true);
         } else if (col_option->type == parser::COLUMN_OPT_PRIMARY_KEY) {
@@ -129,6 +126,39 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             index->add_field_names(col_name);
         } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL) {
             field->set_default_value(col_option->expr->to_string());
+            if (field->default_value() == "(current_timestamp())") {
+                field->set_default_literal(ExprValue::Now().get_string());
+            }
+            parser::LiteralExpr* lit = static_cast<parser::LiteralExpr*>(col_option->expr);
+            // default null不需要存
+            if (lit != nullptr && lit->literal_type != parser::LT_NULL) {
+                std::string str = lit->to_string();
+                // 简单校验下类型
+                if (is_int(data_type) || is_double(data_type)) {
+                    bool is_int_format = std::all_of(str.begin(), str.end(), 
+                            [](char i) {
+                                return (i >= '0' && i <= '9') || i == '-' || i == '.';
+                            });
+                    if (!is_int_format) {
+                        DB_WARNING("Invalid default value for '%s'", column->name->name.value);
+                        _ctx->stat_info.error_code = ER_INVALID_DEFAULT;
+                        _ctx->stat_info.error_msg << "Invalid default value for '" << column->name->name.value << "'";
+                        return -1;
+                    }
+                } else if (field->default_value() != "(current_timestamp())" && is_datetime_specic(data_type)) {
+                    bool is_datetime_format = std::all_of(str.begin(), str.end(),
+                            [](char i) {
+                                return (i >= '0' && i <= '9') || i == '-' || i == '.' || i == ' ' || i == ':';
+                            });
+                    if (!is_datetime_format) {
+                        DB_WARNING("Invalid default value for '%s'", column->name->name.value);
+                        _ctx->stat_info.error_code = ER_INVALID_DEFAULT;
+                        _ctx->stat_info.error_msg << "Invalid default value for '" << column->name->name.value << "'";
+                        return -1;
+                    }
+                }
+                field->set_default_value(lit->to_string());
+            }
         } else if (col_option->type == parser::COLUMN_OPT_COMMENT) {
             field->set_comment(col_option->expr->to_string());
         } else if (col_option->type == parser::COLUMN_OPT_ON_UPDATE) {
@@ -187,7 +217,6 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         pb::IndexInfo* index = table.add_indexs();
         if (constraint->global == true) {
             index->set_is_global(true);
-            can_support_ttl = false;
         }
         if (constraint->type == parser::CONSTRAINT_PRIMARY) {
             index->set_index_type(pb::I_PRIMARY);
@@ -247,6 +276,12 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         }
         for (int col_idx = 0; col_idx < constraint->columns.size(); ++col_idx) {
             parser::ColumnName* col_name = constraint->columns[col_idx];
+            if (_column_can_null[col_name->name.value]) {
+                DB_WARNING("index column : %s should NOT NULL", col_name->name.value);
+                _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+                _ctx->stat_info.error_msg << "index column : " << col_name->name.value << " should NOT NULL";
+                return -1;
+            }
             index->add_field_names(col_name->name.value);
         }
     }
@@ -262,7 +297,6 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 can_support_ttl = false;
             } else if (boost::algorithm::iequals(str_val, "rocksdb_cstore")) {
                 table.set_engine(pb::ROCKSDB_CSTORE);
-//                can_support_ttl = false;
             } else if (boost::algorithm::iequals(str_val, "binlog")) {
                 table.set_engine(pb::BINLOG);
                 can_support_ttl = false;
@@ -340,11 +374,12 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 json_iter = root.FindMember("ttl_duration");
                 if (json_iter != root.MemberEnd()) {
                     if (!can_support_ttl) {
-                        DB_FATAL("global index/fulltext/engine!=rocksdb can not create ttl table");
+                        DB_FATAL("fulltext/engine!=rocksdb  can not create ttl table");
                         return -1;
                     }
                     int64_t ttl_duration = json_iter->value.GetInt64();
                     table.set_ttl_duration(ttl_duration);
+                    table.set_online_ttl_expire_time_us(0);
                     DB_WARNING("ttl_duration: %ld", ttl_duration);
                 }
                 json_iter = root.FindMember("storage_compute_separate");
@@ -363,33 +398,22 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     int32_t region_num = json_iter->value.GetInt64();
                     table.set_region_num(region_num);
                 }
-                // hash 分区通过commit进行配置。
-                json_iter = root.FindMember("partition_type");
-                if (json_iter != root.MemberEnd() && root["partition_type"].IsString()) {
-                    auto partition_ptr = table.mutable_partition_info();
-                    auto partition_type = json_iter->value.GetString();
-                    if (strcmp(partition_type, "hash") == 0) {
-                        partition_ptr->set_type(pb::PT_HASH);
-                        json_iter = root.FindMember("partition");
-                        if (json_iter != root.MemberEnd() && root["partition"].IsNumber()) {
-                            int64_t partition_num = json_iter->value.GetInt64();
-                            table.set_partition_num(partition_num);
-                        } else {
-                            DB_WARNING("unknown partition number.");
+
+                json_iter = root.FindMember("learner_resource_tag");
+                if (json_iter != root.MemberEnd()) {
+                    if (root["learner_resource_tag"].IsString()) {
+                        if (table.resource_tag() == json_iter->value.GetString()) {
+                            DB_FATAL("learner must use different resource tag.");
                             return -1;
                         }
-                        json_iter = root.FindMember("column");
-                        if (json_iter != root.MemberEnd() && root["column"].IsString()) {
-                            partition_ptr->set_type(pb::PT_HASH);
-                            auto field_ptr = partition_ptr->mutable_field_info();
-                            field_ptr->set_field_name(json_iter->value.GetString());
-                        } else {
-                            DB_WARNING("hash partition no column.");
-                            return -1;
+                        table.add_learner_resource_tags(json_iter->value.GetString());
+                    } else if (root["learner_resource_tag"].IsArray()) {
+                        for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                            const rapidjson::Value& learner_value = json_iter->value[i];
+                            if (learner_value.IsString()) {
+                                table.add_learner_resource_tags(learner_value.GetString());
+                            }
                         }
-                    } else {
-                        DB_WARNING("unsupport partition type.");
-                        return -1;
                     }
                 }
             } catch (...) {
@@ -400,31 +424,39 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             // range 分区这里进行配置。
             parser::PartitionOption* p_option = static_cast<parser::PartitionOption*>(option);
             auto partition_ptr = table.mutable_partition_info();
-            partition_ptr->set_type(pb::PT_RANGE);
 
-            if (!p_option->expr || p_option->expr->expr_type != parser::ET_COLUMN) {
-                DB_WARNING("no range partition field only support column expr.");
+            if (p_option->expr == nullptr || p_option->expr->expr_type != parser::ET_COLUMN) {
+                DB_WARNING("partition field only support column expr.");
                 return -1;
             }
-            
-            // 只能把field字段传给Meta，等schema建立好之后，创建表达式树。
-            auto field_ptr = partition_ptr->mutable_field_info();
-            field_ptr->set_field_name(static_cast<parser::ColumnName*>(p_option->expr)->name.value);
-            
-            for (int32_t index = 0; index < p_option->range.size(); ++index) {
-                auto range_ptr = partition_ptr->add_range_partition_values();
-                if (0 != create_expr_tree(p_option->range[index], *range_ptr, CreateExprOptions())) {
-                    DB_WARNING("error pasing common expression");
-                    return -1;
+
+            if (p_option->type == parser::PARTITION_RANGE) {
+                partition_ptr->set_type(pb::PT_RANGE);
+                // 只能把field字段传给Meta，等schema建立好之后，创建表达式树。
+                auto field_ptr = partition_ptr->mutable_field_info();
+                field_ptr->set_field_name(static_cast<parser::ColumnName*>(p_option->expr)->name.value);
+
+                for (int32_t index = 0; index < p_option->range.size(); ++index) {
+                    auto range_ptr = partition_ptr->add_range_partition_values();
+                    if (0 != create_expr_tree(p_option->range[index]->less_expr, *range_ptr, CreateExprOptions())) {
+                        DB_WARNING("error pasing common expression");
+                        return -1;
+                    }
+                    // 不支持多表达式，只支持字面量
+                    if (range_ptr->nodes_size() != 1) {
+                        DB_WARNING("only support literal");
+                        return -1;
+                    }
+                    partition_ptr->add_partition_names(p_option->range[index]->name.c_str());
                 }
-                // 不支持多表达式，只支持字面量
-                if (range_ptr->nodes_size() != 1) {
-                    DB_WARNING("only support literal");
-                    return -1;
-                }
+                // 默认range最后为最大值MAXVALUE
+                table.set_partition_num(p_option->range.size() + 1);
+            } else if (p_option->type == parser::PARTITION_HASH) {
+                partition_ptr->set_type(pb::PT_HASH);
+                auto field_ptr = partition_ptr->mutable_field_info();
+                field_ptr->set_field_name(static_cast<parser::ColumnName*>(p_option->expr)->name.value);
+                table.set_partition_num(p_option->partition_num);
             }
-            // 默认range最后为最大值MAXVALUE
-            table.set_partition_num(p_option->range.size() + 1);
         } else {
 
         }
@@ -634,41 +666,60 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     } else if (spec->spec_type == parser::ALTER_SPEC_ADD_INDEX) {
         alter_request.set_op_type(pb::OP_ADD_INDEX);
         int constraint_len = spec->new_constraints.size();
+        std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
+        int64_t tableid = -1;
+        if (0 != _factory->get_table_id(table_full_name, tableid)) {
+            _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+            _ctx->stat_info.error_msg << "table: " << table->database() << "." << table->table_name() << " not exist";
+            return -1;
+        }
+        auto tbl_ptr = _factory->get_table_info_ptr(tableid);
+        if (tbl_ptr == nullptr) {
+            DB_WARNING("no table found with id: %ld", tableid);
+            _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+            _ctx->stat_info.error_msg << "table: " << table->database() << "." << table->table_name() << " not exist";
+            return -1;
+        }
+        for (auto& field : tbl_ptr->fields) {
+            if (field.can_null) {
+                _column_can_null[field.short_name] = true;
+            }
+        }
         for (int idx = 0; idx < constraint_len; ++idx) {
             parser::Constraint* constraint = spec->new_constraints[idx];
             if (constraint == nullptr) {
                 DB_WARNING("constraint is nullptr");
                 return -1;
             }
-            if (0 != add_constraint_def(*table, constraint)) {
+            if (0 != add_constraint_def(*table, constraint,spec)) {
                 DB_WARNING("add constraint to table failed.");
                 return -1;
             }
         }
-        // 添加虚拟索引
-        if (spec->is_virtual_index) {
-            std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
-            SchemaFactory::get_instance()->update_virtual_index(table_full_name, table->indexs(0));
-            return -2;
-        }
         DB_DEBUG("DDL_LOG schema_info[%s]", table->ShortDebugString().c_str());
-
     } else if (spec->spec_type == parser::ALTER_SPEC_DROP_INDEX) {
+        DB_NOTICE("prepare to delete index");
         //drop index 转换成屏蔽
-        alter_request.set_op_type(pb::OP_SET_INDEX_HINT_STATUS);
         if (spec->index_name.empty()) {
             DB_WARNING("index_name is null.");
             return -1;
         }
-
         pb::IndexInfo* index = table->add_indexs();
         index->set_index_name(spec->index_name.value);
-        index->set_hint_status(pb::IHS_DISABLE);
         // 删除虚拟索引
         if (spec->is_virtual_index) {
-            std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
-            SchemaFactory::get_instance()->drop_virtual_index(table_full_name, table->indexs(0));
-            return -2;
+            if (alter_request.mutable_table_info() != nullptr) {
+                alter_request.mutable_table_info()->mutable_indexs(0)->set_hint_status(pb::IHS_VIRTUAL);
+                alter_request.set_op_type(pb::OP_DROP_INDEX);
+                return -2;
+            }
+        } else if (spec->force) {
+            index->set_hint_status(pb::IHS_DISABLE);
+            alter_request.set_op_type(pb::OP_DROP_INDEX);
+        } else {
+            //非虚拟索引走正常流程
+            alter_request.set_op_type(pb::OP_SET_INDEX_HINT_STATUS);
+            index->set_hint_status(pb::IHS_DISABLE);//设置为不可见
         }
         DB_NOTICE("drop index schema_info[%s]", table->ShortDebugString().c_str());
     } else if (spec->spec_type == parser::ALTER_SPEC_RESTORE_INDEX) {
@@ -678,11 +729,18 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             DB_WARNING("index_name is null.");
             return -1;
         }
-
         pb::IndexInfo* index = table->add_indexs();
         index->set_index_name(spec->index_name.value);
         index->set_hint_status(pb::IHS_NORMAL);
         DB_NOTICE("restore index schema_info[%s]", table->ShortDebugString().c_str());
+    }  else if (spec->spec_type == parser::ALTER_SPEC_ADD_LEARNER) {
+        alter_request.set_op_type(pb::OP_ADD_LEARNER);
+        alter_request.add_resource_tags(spec->resource_tag.value);
+        DB_NOTICE("add learner schema_info[%s]", table->ShortDebugString().c_str());
+    } else if (spec->spec_type == parser::ALTER_SPEC_DROP_LEARNER) { 
+        alter_request.set_op_type(pb::OP_DROP_LEARNER);
+        alter_request.add_resource_tags(spec->resource_tag.value);
+        DB_NOTICE("drop learner schema_info[%s]", table->ShortDebugString().c_str());
     } else {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
         _ctx->stat_info.error_msg << "alter_specification type (" 
@@ -768,7 +826,7 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     return pb::INVALID_TYPE;
 }
 
-int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint) {
+int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec) {
     pb::IndexInfo* index = table.add_indexs();
     pb::IndexType index_type;
     switch (constraint->type) {
@@ -798,8 +856,21 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
     index->set_index_type(index_type);
     index->set_hint_status(pb::IHS_DISABLE);
     index->set_index_name(constraint->name.value);
+//虚拟索引标志位
+    if (spec->is_virtual_index) {
+        if (table.mutable_indexs(0) != nullptr) {
+            table.mutable_indexs(0)->set_hint_status(pb::IHS_VIRTUAL);
+        }
+    }
 
     for (int32_t column_index = 0; column_index < constraint->columns.size(); ++column_index) {
+        std::string column_name = constraint->columns[column_index]->name.value;
+        if (_column_can_null[column_name]) {
+            DB_WARNING("index column : %s should NOT NULL", column_name.c_str());
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "index column : " << column_name << " should NOT NULL";
+            return -1;
+        }
         index->add_field_names(constraint->columns[column_index]->name.value);
     }
     if (constraint->index_option != nullptr) {

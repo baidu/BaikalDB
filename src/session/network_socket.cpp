@@ -143,13 +143,7 @@ bool NetworkSocket::need_send_binlog() {
     if (!open_binlog) {
         return false;
     }
-    for (auto& pair : cache_plans) {
-        pb::OpType type = pair.second.op_type;
-        if (type == pb::OP_INSERT || type == pb::OP_DELETE || type == pb::OP_UPDATE) {
-            return true;
-        }
-    }
-    return false;    
+    return binlog_ctx->has_data_changed();  
 }
 
 SmartBinlogContext NetworkSocket::get_binlog_ctx() {
@@ -170,12 +164,13 @@ void NetworkSocket::reset_query_ctx(QueryContext* ctx) {
 }
 
 void NetworkSocket::on_begin() {
-    this->txn_id = get_txn_id();
+    txn_id = get_txn_id();
     seq_id = 0;
-    this->primary_region_id = -1;
+    primary_region_id = -1;
     auto time = butil::gettimeofday_us();
     DB_DEBUG("set txn start time %ld", time);
-    this->txn_start_time = time;
+    txn_start_time = time;
+    txn_pri_region_last_exec_time = time;
 }
 
 void NetworkSocket::on_commit_rollback() {
@@ -184,6 +179,7 @@ void NetworkSocket::on_commit_rollback() {
     txn_id = 0;
     seq_id = 0;
     txn_start_time = 0;
+    txn_pri_region_last_exec_time = 0;
     open_binlog = false;
     need_rollback_seq.clear();
     //multi_state_txn = !autocommit;

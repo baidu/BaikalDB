@@ -67,7 +67,8 @@ int UnionPlanner::gen_select_stmts_plan() {
     _union_tuple_id = _plan_table_ctx->tuple_cnt;
     for (int stmt_idx = 0; stmt_idx < _union_stmt->select_stmts.size(); stmt_idx++) {
         parser::SelectStmt* select = _union_stmt->select_stmts[stmt_idx];
-        int ret = gen_subquery_plan(select, _plan_table_ctx, ExprParams());
+        ExprParams expr_params;
+        int ret = gen_subquery_plan(select, _plan_table_ctx, expr_params);
         if (ret < 0) {
             return -1;
         }

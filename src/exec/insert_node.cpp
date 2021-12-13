@@ -33,8 +33,10 @@ int InsertNode::init(const pb::PlanNode& node) {
     _row_ttl_duration = insert_node.row_ttl_duration();
     DB_DEBUG("_row_ttl_duration:%ld", _row_ttl_duration);
     _need_ignore = insert_node.need_ignore();
+    _ddl_need_write = insert_node.ddl_need_write();
+    _ddl_index_id = insert_node.ddl_index_id();
     for (auto& slot : insert_node.update_slots()) {
-        _update_slots.push_back(slot);
+        _update_slots.emplace_back(slot);
     }
     for (auto& expr : insert_node.update_exprs()) {
         ExprNode* up_expr = nullptr;
@@ -42,10 +44,10 @@ int InsertNode::init(const pb::PlanNode& node) {
         if (ret < 0) {
             return ret;
         }
-        _update_exprs.push_back(up_expr);
+        _update_exprs.emplace_back(up_expr);
     }
     for (auto id : insert_node.field_ids()) {
-        _selected_field_ids.push_back(id);
+        _selected_field_ids.emplace_back(id);
     }
 
     for (auto& expr : insert_node.insert_values()) {
@@ -54,11 +56,19 @@ int InsertNode::init(const pb::PlanNode& node) {
         if (ret < 0) {
             return ret;
         }
-        _insert_values.push_back(value_expr);
+        _insert_values.emplace_back(value_expr);
+    }
+    // insert_values 只在db上使用
+    // pb清掉没关系，不会发给store
+    if (!_insert_values.empty()) {
+        pb::DerivePlanNode* derive = _pb_node.mutable_derive_node();
+        pb::InsertNode* insert = derive->mutable_insert_node();
+        insert->clear_insert_values();
     }
     _on_dup_key_update = _update_slots.size() > 0;
     return 0;
 }
+
 int InsertNode::open(RuntimeState* state) {
     int num_affected_rows = 0;
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([this, &num_affected_rows](TraceLocalNode& local_node) {
@@ -145,6 +155,22 @@ void InsertNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     for (auto& record : records) {
         std::string* str = insert_node->add_records();
         record->encode(*str);
+    }
+    auto table_info = _factory->get_table_info_ptr(_table_id);
+    if (table_info == nullptr) {
+        DB_WARNING("no table found with table_id: %ld", _table_id);
+        return;
+    }
+    for (const auto index_id : table_info->indices) {
+        auto info_ptr = _factory->get_index_info_ptr(index_id);
+        if (info_ptr == nullptr) {
+            DB_WARNING("no index info found with index_id: %ld", index_id);
+            continue;
+        }
+        if (!info_ptr->is_global && (info_ptr->state == pb::IS_WRITE_ONLY || info_ptr->state == pb::IS_WRITE_LOCAL)) {
+            insert_node->set_ddl_need_write(true);
+            insert_node->set_ddl_index_id(index_id);
+        }
     }
 }
 

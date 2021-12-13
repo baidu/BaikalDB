@@ -52,7 +52,7 @@ public:
                         butil::endpoint2str(cntl->remote_side()).c_str(), log_id);
             _response->set_errcode(pb::SUCCESS);
         } else {
-            DB_FATAL("raft control failed, type:%d, region_id:%lu,"
+            DB_WARNING("raft control failed, type:%d, region_id:%lu,"
                         " status:%d:%s, remote_side: %s, log_id:%lu",
                         _request->op_type(), _request->region_id(),
                         status().error_code(), status().error_cstr(),

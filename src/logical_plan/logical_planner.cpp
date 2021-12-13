@@ -55,7 +55,7 @@ int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item,
         pb::ExprNodeType type,
         const CreateExprOptions& options) {
     if (func_item->has_subquery()) {
-        return handle_exists_subquery(func_item, expr, options);
+        return handle_scalar_subquery(func_item, expr, options);
     }
     pb::ExprNode* node = expr.add_nodes();
     node->set_col_type(pb::BOOL);
@@ -126,6 +126,13 @@ int LogicalPlanner::handle_in_subquery(const parser::FuncExpr* func_item,
         row_expr_size = arg1->children.size();
     }
     parser::ExprNode* arg2 = (parser::ExprNode*)func_item->children[1];
+    if (arg1->is_subquery() || !arg2->is_subquery()) {
+        if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+            _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+            _ctx->stat_info.error_msg << "only support subquery at right side, e.g: expr in (subquery)";
+        }
+        return -1;
+    }
     pb::Expr tmp_expr;
     int ret = create_common_subquery_expr((parser::SubqueryExpr*)arg2, tmp_expr, options, _is_correlate_subquery_expr);
     if (ret < 0) {
@@ -296,6 +303,8 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     }
     if (parser.result.size() != 1) {
         DB_WARNING("multi-stmt is not supported, sql: %s", ctx->sql.c_str());
+        ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        ctx->stat_info.error_msg << "multi-stmt is not supported";
         return -1;
     }
     if (parser.result[0] == nullptr) {
@@ -439,6 +448,7 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlan
     subquery_ctx->stmt_type = subquery->node_type;
     subquery_ctx->cur_db = _ctx->cur_db;
     subquery_ctx->is_explain = _ctx->is_explain;
+    subquery_ctx->stat_info.log_id = _ctx->stat_info.log_id;
     subquery_ctx->user_info = _ctx->user_info;
     subquery_ctx->row_ttl_duration = _ctx->row_ttl_duration;
     subquery_ctx->is_complex = _ctx->is_complex;
@@ -461,8 +471,10 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlan
     _ctx->stat_info.family = subquery_ctx->stat_info.family;
     _ctx->stat_info.table = subquery_ctx->stat_info.table;
     _ctx->cur_db = subquery_ctx->cur_db;
-    if (_select_names.size() == 0) {
-        _select_names = planner->select_names();
+    if (!expr_params.is_expr_subquery) {
+        if (_select_names.size() == 0) {
+            _select_names = planner->select_names();
+        }
     }
     subquery_ctx->expr_params.row_filed_number = planner->select_names().size();
     subquery_ctx->is_full_export = false;
@@ -1330,11 +1342,18 @@ int LogicalPlanner::handle_scalar_subquery(const parser::FuncExpr* func_item,
     if (arg1->expr_type == parser::ET_ROW_EXPR) {
         row_expr_size = arg1->children.size();
     }
+    parser::ExprNode* arg2 = (parser::ExprNode*)func_item->children[1];
+    if (func_item->children.size() != 2 || arg1->is_subquery() || !arg2->is_subquery()) {
+        if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+            _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+            _ctx->stat_info.error_msg << "only support binary_op subquery at right side, e.g: expr op (subquery)";
+        }
+        return -1;
+    }
     if (0 != create_expr_tree(arg1, expr, options)) {
         DB_WARNING("create child 1 expr failed");
         return -1;
     }
-    parser::ExprNode* arg2 = (parser::ExprNode*)func_item->children[1];
     pb::Expr tmp_expr;
     int ret = create_common_subquery_expr((parser::SubqueryExpr*)arg2, tmp_expr, options, _is_correlate_subquery_expr);
     if (ret < 0) {
@@ -1909,6 +1928,8 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, c
             case parser::FT_LIKE:
             case parser::FT_EXACT_LIKE:
                 return create_n_ary_predicate(func, expr, pb::LIKE_PREDICATE, options);
+            case parser::FT_REGEXP:
+                return create_n_ary_predicate(func, expr, pb::REGEXP_PREDICATE, options);
             case parser::FT_BETWEEN:
                 return create_between_expr(func, expr, options);
             case parser::FT_AGG:
@@ -2569,12 +2590,13 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
         DB_DEBUG("enable_2pc %d global index %d, binlog %d", 
             _ctx->enable_2pc, _factory->has_global_index(table_id), _factory->has_open_binlog(table_id));
         if (_ctx->enable_2pc
-            || _factory->has_global_index(table_id)
+            || _factory->need_begin_txn(table_id)
             || _factory->has_open_binlog(table_id)) {
             client->on_begin();
             DB_DEBUG("get txn %ld", client->txn_id);
             client->seq_id = 0;
-            if (_factory->has_open_binlog(table_id)) {
+            //is_gloabl_ddl 打开时，该连接处理全局二级索引增量数据，不需要处理binlog。
+            if (_factory->has_open_binlog(table_id) && !client->is_index_ddl) {
                 client->open_binlog = true;
                 _ctx->open_binlog = true;
             }
@@ -2585,7 +2607,7 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
-        if (_factory->has_open_binlog(table_id)) {
+        if (_factory->has_open_binlog(table_id) && !client->is_index_ddl) {
                 client->open_binlog = true;
                 _ctx->open_binlog = true;
         }

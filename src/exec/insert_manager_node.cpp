@@ -119,6 +119,7 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
     std::unordered_map<int32_t, FieldInfo*> table_field_map;
     std::unordered_set<int32_t> insert_prepared_field_ids;
     std::vector<FieldInfo*>  default_fields;
+    default_fields.reserve(3);
 
     for (auto& field : _table_info->fields) {
         table_field_map.insert({field.id, &field});
@@ -282,11 +283,18 @@ int InsertManagerNode::open(RuntimeState* state) {
 int InsertManagerNode::basic_insert(RuntimeState* state) {
     int ret = 0;
     _affected_rows = _insert_scan_records.size();
-    // 主键和全局唯一二级索引串行执行
-    size_t serial_num = _uniq_index_number;
     auto iter = _children.begin();
-    size_t cur = 0;
-    while (iter != _children.end() && cur < serial_num) {
+    // 保证主键单独执行
+    DMLNode* dml_node = static_cast<DMLNode*>(*iter);
+    ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
+    if (ret < 0) {
+        DB_WARNING("exec node failed, log_id:%lu ret:%d ", state->log_id(), ret);
+        return -1;
+    }
+    iter = _children.erase(iter);
+    size_t cur = 1;
+    // 全局唯一二级索引串行执行, 最后一个唯一索引和非唯一索引并发
+    while (iter != _children.end() && cur < _uniq_index_number) {
         DMLNode* dml_node = static_cast<DMLNode*>(*iter);
         ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
         if (ret < 0) {
@@ -426,10 +434,9 @@ int InsertManagerNode::insert_replace(RuntimeState* state) {
         }
     } else {
         auto iter = _children.begin() + start_child;
-        size_t serial_num = _uniq_index_number;
         size_t cur = 0;
-        // 写主表和全局唯一二级索引串行,最后一个唯一索引和非唯一索引并发
-        while (iter != _children.end() && cur < serial_num) {
+        // 写主表和全局唯一二级索引串行，最后一个唯一索引和其他并发
+        while (iter != _children.end() && cur < _uniq_index_number) {
             DMLNode* dml_node = static_cast<DMLNode*>(*iter);
             ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
             if (ret < 0) {
@@ -544,10 +551,9 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
         }
     } else {
         auto iter = _children.begin() + start_child;
-        size_t serial_num = _uniq_index_number;
         size_t cur = 0;
-        // 写主表和全局唯一二级索引串行,最后一个唯一索引和非唯一索引并发
-        while (iter != _children.end() && cur < serial_num) {
+        // 写主表和全局唯一二级索引串行，最后一个唯一索引和非唯一索引并发
+        while (iter != _children.end() && cur < _uniq_index_number) {
             DMLNode* dml_node = static_cast<DMLNode*>(*iter);
             ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
             if (ret < 0) {
@@ -624,13 +630,13 @@ int InsertManagerNode::expr_optimize(QueryContext* ctx) {
 void InsertManagerNode::reset(RuntimeState* state) {
     auto client_conn = state->client_conn();
     // add dml node back
-    std::vector<ExecNode*> old_chilren = this->children();
+    std::vector<ExecNode*> old_children = this->children();
     this->clear_children();
     if (_is_replace || _on_dup_key_update) {
         size_t idx = 0;
         for (auto& iter : client_conn->cache_plans) {
-            if (old_chilren.size() == 1 && (idx == _uniq_index_number + 1)) {
-                this->add_child(old_chilren[0]);
+            if (old_children.size() == 1 && (idx == _uniq_index_number + 1)) {
+                this->add_child(old_children[0]);
             }
             idx++;
             this->add_child(iter.second.root);
@@ -639,7 +645,7 @@ void InsertManagerNode::reset(RuntimeState* state) {
         for (auto& iter : client_conn->cache_plans) {
             this->add_child(iter.second.root);
         }
-        for (auto& child : old_chilren) {
+        for (auto& child : old_children) {
             this->add_child(child);
         }
     }

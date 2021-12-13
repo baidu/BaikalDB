@@ -76,7 +76,7 @@ struct TableRegionInfo {
     void update_leader(int64_t region_id, const std::string& leader) {
         if (region_info_mapping.count(region_id) == 1) {
             region_info_mapping[region_id].region_info.set_leader(leader);
-            DB_NOTICE("double_buffer_write region_id[%ld] set_leader[%s]", 
+            DB_DEBUG("double_buffer_write region_id[%ld] set_leader[%s]", 
                 region_id, leader.c_str());
         }
     }
@@ -114,7 +114,7 @@ inline size_t double_buffer_table_region_update_leader(
     std::unordered_map<int64_t, TableRegionPtr>& table_region_map, 
     int64_t table_id, int64_t region_id, std::string& leader) {
     
-    DB_NOTICE("double_buffer_write table_id[%ld], region_id[%ld], update_leader [%s]",
+    DB_DEBUG("double_buffer_write table_id[%ld], region_id[%ld], update_leader [%s]",
         table_id, region_id, leader.c_str());
     std::unordered_map<int64_t, TableRegionPtr>::iterator it = table_region_map.find(table_id);
     if (it == table_region_map.end()) {
@@ -219,13 +219,19 @@ public:
             DB_WARNING("partition_num [%ld] or range_expr size is zero", _partition_num);
             return -1;
         }
+        if (_partition_info.partition_names_size() != _range_expr.size()) {
+            _partition_info.clear_partition_names();
+            for (uint32_t i = 0; i < _range_expr.size(); i++) {
+                _partition_info.add_partition_names("p" + std::to_string(i));
+            }
+        }
         return 0;
     };
     int64_t calc_partition(SmartRecord record);
     int64_t calc_partition(const ExprValue& field_value) {
         size_t range_index = 0;
         for (; range_index < _range_expr.size(); ++range_index) {
-            if (field_value.compare(_range_expr[range_index]) <= 0) {
+            if (field_value.compare(_range_expr[range_index]) < 0) {
                 return range_index;
             }
         }
@@ -236,10 +242,18 @@ public:
         std::lock_guard<std::mutex> lock(_mutex);
         std::vector<std::string> exprs;
         exprs.reserve(5);
-        for (const auto& expr : _range_expr) {
-            exprs.push_back(expr.get_string());
+        std::string ret;
+        for (uint32_t i = 0; i < _range_expr.size(); i++) {
+            ret += "\nPARTITION ";
+            ret += _partition_info.partition_names(i);
+            ret += " VALUES LESS THAN (";
+            ret += _range_expr[i].get_string();
+            ret += "),";
         }
-        return "\"range\":\"" + boost::algorithm::join(exprs, ",") + "\"";
+        if (!ret.empty()) {
+            ret.pop_back();
+        }
+        return ret;
     }
 private:
     std::vector<ExprValue> _range_expr;
@@ -247,6 +261,12 @@ private:
     int64_t _table_id;
     int64_t _partition_num;
     std::mutex _mutex;
+};
+
+struct TTLInfo {
+    TTLInfo() { }
+    int64_t ttl_duration_s           = 0; // >0表示配置有ttl，单位s
+    int64_t online_ttl_expire_time_us = 0; // online ttl 过期时间
 };
 
 struct TableInfo {
@@ -271,8 +291,9 @@ struct TableInfo {
     int64_t                 replica_num = 3;
     //table字段不变的话不需要重新构建动态pb
     std::string             fields_sign;
-    //>0表示配置有ttl，单位s
-    int64_t                 ttl_duration = 0;
+    TTLInfo                 ttl_info;
+    int32_t                 max_field_id = 0;
+    int32_t                 region_num = 0;
 
     const Descriptor*       tbl_desc = nullptr;
     DescriptorProto*        tbl_proto = nullptr;
@@ -285,6 +306,8 @@ struct TableInfo {
     bool                    have_backup = false;
     bool                    need_read_backup = false;
     bool                    need_write_backup = false;
+    bool                    has_global_not_none = false;
+    bool                    has_index_write_only_or_write_local = false;
     // 该表是否已和 binlog 表关联
     bool is_linked = false;
     pb::PartitionInfo partition_info;
@@ -297,6 +320,7 @@ struct TableInfo {
     std::vector<FieldInfo> link_field;
     std::unordered_map<int64_t, int64_t>    reverse_fields;
     std::unordered_map<int64_t, int64_t>    arrow_reverse_fields;
+    std::vector<std::string> learner_resource_tags;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {
@@ -316,6 +340,7 @@ struct TableInfo {
         }
         return -1;
     }
+
 };
 
 struct IndexInfo {
@@ -350,7 +375,8 @@ struct IndexInfo {
     bool                    is_global = false;
     pb::StorageType storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
     pb::IndexHintStatus     index_hint_status = pb::IHS_NORMAL;
-    int64_t write_only_time = -1;
+    int64_t                 write_only_time = -1;
+    int32_t                 max_field_id = 0;
 };
 
 struct DatabaseInfo {
@@ -392,7 +418,10 @@ struct InstanceDBStatus {
     std::string logical_room;
     // 正常探测CHECK_COUNT次后才置NORMAL
     int64_t normal_count = 0;
-    static const int64_t CHECK_COUNT = 5;
+    // 业务请求探测CHECK_COUNT次后才置FAULTY
+    int64_t faulty_count = 0;
+    TimeCost last_update_time;
+    static const int64_t CHECK_COUNT = 10;
 };
 struct IdcMapping {
     // store => logical_room
@@ -402,6 +431,75 @@ struct IdcMapping {
 };
 
 using DoubleBufferedIdc = butil::DoublyBufferedData<IdcMapping>;
+using DoubleBufferedUser = butil::DoublyBufferedData<std::unordered_map<std::string, std::shared_ptr<UserInfo>>>;
+
+struct SqlStatistics {
+    static const int64_t TOTAL_COUNT = 1000000;
+    double qps = 0.0;
+    int64_t avg_scan_rows = 0;
+    int64_t scan_rows_9999 = 0;
+    int64_t avg_scan_rows_per_region = 0;
+    int64_t latency_us = 0;
+    int64_t latency_us_9999 = 0;
+    int64_t times_avg_and_9999 = 20; // latency_us_9999 / latency_us，应对平响上升后的突发响应
+    int64_t counter = 0;
+    bool first = true;
+    Heap<int64_t> latency_heap{100};
+    Heap<int64_t> scan_rows_heap{100};
+    std::mutex mutex;
+    int64_t dynamic_timeout_ms() const {
+        if (latency_us > 1000000) {
+            return -1;
+        }
+        //有sql扫描量很大的并且不稳定的
+        if (scan_rows_9999 > 10000 && avg_scan_rows > 0 && scan_rows_9999 / avg_scan_rows > 100) {
+            return -1;
+        }
+        if (latency_us_9999 > 0 || latency_us > 0) {
+            return std::max(latency_us_9999 / 1000, latency_us * times_avg_and_9999 / 1000);
+        }
+        return -1;
+    }
+    void update(int64_t cost, int64_t scan_rows) {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (++counter > TOTAL_COUNT) {
+            latency_us_9999 = latency_heap.top();
+            scan_rows_9999 = scan_rows_heap.top();
+            if (latency_us > 0) {
+                times_avg_and_9999 = latency_us_9999 / latency_us + 1;
+            }
+            counter = 0;
+            latency_heap.clear();
+            latency_heap.resize(100);
+            scan_rows_heap.clear();
+            scan_rows_heap.resize(100);
+            first = false;
+            return;
+        }
+        if (first) {
+            //第一轮计算，快速计算出非精确的值
+            if (counter < 1000) {
+                latency_us_9999 = std::max(latency_us_9999, cost);
+                scan_rows_9999 = std::max(scan_rows_9999, scan_rows);
+            } else {
+                latency_us_9999 = latency_heap.top();
+                scan_rows_9999 = scan_rows_heap.top();
+            }
+            if (latency_us > 0) {
+                times_avg_and_9999 = latency_us_9999 / latency_us + 1;
+            }
+        }
+        if (cost > latency_heap.top()) {
+            latency_heap.replace_top(cost);
+        }
+        if (scan_rows > scan_rows_heap.top()) {
+            scan_rows_heap.replace_top(scan_rows);
+        }
+    }
+};
+
+using SqlStatMap = std::unordered_map<uint64_t, std::shared_ptr<SqlStatistics>>;
+using DoubleBufferedSql = butil::DoublyBufferedData<SqlStatMap>;
 
 class SchemaFactory {
 typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec; 
@@ -410,7 +508,6 @@ typedef ::google::protobuf::RepeatedPtrField<pb::DataBaseInfo> DataBaseVec;
 typedef ::google::protobuf::RepeatedPtrField<pb::Statistics> StatisticsVec;
 public:
     virtual ~SchemaFactory() {
-        bthread_mutex_destroy(&_update_user_mutex);
         bthread_mutex_destroy(&_update_show_db_mutex);
     }
 
@@ -443,8 +540,8 @@ public:
     void update_tables_double_buffer_sync(const SchemaVec& tables);
 
     void update_instance_canceled(const std::string& addr);
-    void update_instance(const std::string& addr, pb::Status s);
-    int update_instance_internal(IdcMapping& idc_mapping, const std::string& addr, pb::Status s);
+    void update_instance(const std::string& addr, pb::Status s, bool user_check);
+    int update_instance_internal(IdcMapping& idc_mapping, const std::string& addr, pb::Status s, bool user_check);
     void update_idc(const pb::IdcInfo& idc_info);
     int update_idc_internal(IdcMapping& background, const pb::IdcInfo& idc_info);
 
@@ -483,11 +580,7 @@ public:
     void update_show_db(const DataBaseVec& db_infos);
     void update_statistics(const StatisticsVec& statistics);
     int update_statistics_internal(SchemaMapping& background, const std::map<int64_t, SmartStatistics>& mapping);
-    void update_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info);
 
-    int update_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info);
-    void drop_virtual_index(const std::string& table_full_name, const pb::IndexInfo& index_info);
-    int drop_virtual_index_internal(SchemaMapping& background, const std::string& table_full_name, const pb::IndexInfo& index_info);
     int64_t get_statis_version(int64_t table_id);
     int64_t get_total_rows(int64_t table_id);
     // 从直方图中计算取值区间占比，如果计算小于某值的比率，则lower填null；如果计算大于某值的比率，则upper填null
@@ -534,7 +627,8 @@ public:
 
     // functions for permission access
     std::shared_ptr<UserInfo> get_user_info(const std::string& user);
-
+    std::shared_ptr<SqlStatistics> get_sql_stat(int64_t sign);
+    std::shared_ptr<SqlStatistics> create_sql_stat(int64_t sign);
     std::vector<std::string> get_db_list(const std::set<int64_t>& db);
     std::vector<std::string> get_table_list(
             std::string namespace_, std::string db_name, UserInfo* user);
@@ -561,12 +655,14 @@ public:
     bool is_switch_open(const int64_t table_id, const std::string& switch_name);
     void get_cost_switch_open(std::vector<std::string>& database_table);
     void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
+    void get_table_by_filter(std::vector<std::string>& database_table, 
+            const std::function<bool(const SmartTable&)>& select_table);
     void table_with_statistics_info(std::vector<std::string>& database_table);
     void get_schema_conf_op_info(const int64_t table_id, int64_t& op_version, std::string& op_desc);
     template <class T>
     int get_schema_conf_value(const int64_t table_id, const std::string& switch_name, T& value);
     int get_schema_conf_str(const int64_t table_id, const std::string& switch_name, std::string& value);
-    int64_t get_ttl_duration(int64_t table_id);
+    TTLInfo get_ttl_duration(int64_t table_id);
     
     int get_all_region_by_table_id(int64_t table_id, 
             std::map<std::string, pb::RegionInfo>* region_infos,
@@ -662,30 +758,28 @@ public:
             DB_WARNING("read double_buffer_table error.");
             return false;
         }
-        auto& table_info_mapping = table_ptr->table_info_mapping;
+        const auto& table_info_mapping = table_ptr->table_info_mapping;
         if (table_info_mapping.find(main_table_id) == table_info_mapping.end()) {
             DB_WARNING("main_table_id: %ld not exist", main_table_id);
             return false;
         }
-        auto table_info = table_info_mapping.at(main_table_id);
-        std::vector<int64_t> indices = table_info->indices;
-        auto& global_index_id_mapping = table_ptr->global_index_id_mapping;
-        auto index_info_map = table_ptr->index_info_mapping;
-        for (auto& index_id : indices) {
-            if (global_index_id_mapping.find(index_id) != global_index_id_mapping.end()
-                    && global_index_id_mapping.at(index_id) != index_id) {
-                
-                auto index_ptr = index_info_map.find(index_id);
-                if (index_ptr == index_info_map.end()) {
-                    continue;
-                }
-                if (index_ptr->second->state == pb::IS_NONE) {
-                    continue;
-                }
-                return true;
-            }
+        const auto& table_info = table_info_mapping.at(main_table_id);
+        return table_info->has_global_not_none;
+    }
+
+    bool need_begin_txn(const int64_t& main_table_id) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
         }
-        return false;
+        const auto& table_info_mapping = table_ptr->table_info_mapping;
+        if (table_info_mapping.find(main_table_id) == table_info_mapping.end()) {
+            DB_WARNING("main_table_id: %ld not exist", main_table_id);
+            return false;
+        }
+        const auto& table_info = table_info_mapping.at(main_table_id);
+        return table_info->has_global_not_none || table_info->has_index_write_only_or_write_local;
     }
 
     int get_table_state(int64_t table_id, pb::IndexState& state) {
@@ -785,8 +879,12 @@ public:
         }
         if (table_info->partition_ptr != nullptr) {
             partition_index = table_info->partition_ptr->calc_partition(value);
+            if (partition_index < 0) {
+                DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
+                return -1;
+            }
         } else {
-            DB_WARNING("get partition number error.");
+            DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
             return -1;
         }
         return 0;
@@ -813,7 +911,7 @@ public:
 
     int get_binlog_regions(int64_t binlog_id, int64_t partition_index, std::map<int64_t, pb::RegionInfo>& region_infos);
 
-    int has_open_binlog(int64_t table_id) {
+    bool has_open_binlog(int64_t table_id) {
         DoubleBufferedTable::ScopedPtr table_ptr;
         if (_double_buffer_table.Read(&table_ptr) != 0) {
             DB_WARNING("read double_buffer_table error.");
@@ -822,7 +920,7 @@ public:
         auto& table_info_mapping = table_ptr->table_info_mapping;
         if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
             DB_WARNING("table_id: %ld not exist", table_id);
-            return -1;
+            return false;
         }
         auto table_info = table_info_mapping.at(table_id);
         if (table_info->is_linked) {
@@ -861,7 +959,6 @@ public:
 private:
     SchemaFactory() {
         _is_inited = false;
-        bthread_mutex_init(&_update_user_mutex, NULL);
         bthread_mutex_init(&_update_show_db_mutex, NULL);
         butil::EndPoint addr;
         addr.ip = butil::my_ip();
@@ -884,14 +981,13 @@ private:
 
     void delete_table_region_map(const pb::SchemaInfo& table);
     bool                    _is_inited;
-    bthread_mutex_t         _update_user_mutex;
     bthread_mutex_t         _update_show_db_mutex;
 
     // use for show databases
     std::map<int64_t, DatabaseInfo> _show_db_info;
 
     // username => UserPrivilege
-    std::unordered_map<std::string, std::shared_ptr<UserInfo>> _user_info_mapping;
+    DoubleBufferedUser _user_info_mapping;
     
     DoubleBufferedTable _double_buffer_table;
     // index_id => IndexInfo*
@@ -904,6 +1000,7 @@ private:
     bthread::ExecutionQueueId<RegionVec> _region_queue_id = {0};
 
     DoubleBufferStringSet _double_buffer_big_sql;
+    DoubleBufferedSql _double_buffer_sql_stat;
 
     std::string _physical_room;
     std::string _logical_room;

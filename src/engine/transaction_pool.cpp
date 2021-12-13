@@ -24,7 +24,6 @@
 #include "region.h"
 
 namespace baikaldb {
-//DECLARE_int32(rocks_transaction_expiration_ms);
 DECLARE_int64(retry_interval_us);
 DEFINE_int32(transaction_clear_delay_ms, 600 * 1000,
         "delay duration to clear prepared and expired transactions");
@@ -32,62 +31,106 @@ DEFINE_int32(long_live_txn_interval_ms, 900 * 1000,
         "delay duration to clear prepared and expired transactions");
 DEFINE_int64(clean_finished_txn_interval_us, 600 * 1000 * 1000LL,
         "clean_finished_txn_interval_us");
+DEFINE_int64(1pc_out_fsm_interval_us, 20 * 1000 * 1000LL,
+        "clean_finished_txn_interval_us");
 // 分裂slow down max time：5s
 DEFINE_int32(transaction_query_primary_region_interval_ms, 15 * 1000,
         "interval duration send request to primary region");
 
-int TransactionPool::init(int64_t region_id, bool use_ttl) {
+int TransactionPool::init(int64_t region_id, bool use_ttl, int64_t online_ttl_base_expire_time_us) {
     _region_id = region_id;
     _use_ttl = use_ttl;
+    _online_ttl_base_expire_time_us = online_ttl_base_expire_time_us;
     _meta_writer = MetaWriter::get_instance();
     return 0;
+}
+
+bool TransactionPool::exec_1pc_out_fsm() {
+    if (_txn_count > 0) {
+        return true;
+    }
+    if (butil::gettimeofday_us() - _latest_active_txn_ts < FLAGS_1pc_out_fsm_interval_us) {
+        return true;
+    }
+    return false;
 }
 
 // -1 means insert error (already exists)
 int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id, int64_t txn_timeout) {
     //int64_t region_id = _region->get_region_id();
-    std::string txn_name = std::to_string(_region_id) + "_" + std::to_string(txn_id);
-    if (_txn_map.exist(txn_id)) {
-        DB_FATAL("txn already exists, txn_id: %lu", txn_id);
-        return -1;
-    }
-    txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, this, _use_ttl));
-    if (txn == nullptr) {
-        DB_FATAL("new txn failed, txn_id: %lu", txn_id);
-        return -1;
-    }
-    auto ret = txn->begin();
-    if (ret != 0) {
-        DB_FATAL("begin txn failed, txn_id: %lu", txn_id);
-        txn.reset();
-        return -1;
-    }
-    auto res = txn->get_txn()->SetName(txn_name);
-    if (!res.ok()) {
-        DB_WARNING("unknown error: %d, %s txn_id: %lu", res.code(), res.ToString().c_str(), txn_id);
-    }
-    if (primary_region_id > 0) {
-        txn->set_primary_region_id(primary_region_id);
-    }
+    auto call = [this, 
+         txn_id,
+         primary_region_id,
+         txn_timeout](SmartTransaction& txn) {
+        txn = SmartTransaction(new (std::nothrow)Transaction(txn_id, this));
+        if (txn == nullptr) {
+            DB_FATAL("new txn failed, region_id:%ld txn_id: %lu", _region_id, txn_id);
+            return -1;
+        }
+        auto ret = txn->begin(Transaction::TxnOptions());
+        if (ret != 0) {
+            DB_FATAL("begin txn failed, region_id:%ld txn_id: %lu", _region_id, txn_id);
+            txn.reset();
+            return -1;
+        }
+        std::string txn_name = std::to_string(_region_id) + "_" + std::to_string(txn_id);
+        auto res = txn->get_txn()->SetName(txn_name);
+        if (!res.ok()) {
+            DB_FATAL("unknown error: %d, %s region_id:%ld txn_id: %lu", res.code(), res.ToString().c_str(),
+                _region_id, txn_id);
+            return -1;
+        }
+        if (primary_region_id > 0) {
+            txn->set_primary_region_id(primary_region_id);
+        }
 
-    if (txn_timeout > 0) {
-        txn->set_txn_timeout(txn_timeout);
+        if (txn_timeout > 0) {
+            txn->set_txn_timeout(txn_timeout);
+        }
+        txn->set_in_process(true);
+        _txn_count++;
+        return 0;
+    };
+    if (!_txn_map.insert_init_if_not_exist(txn_id, call)) {
+        DB_FATAL("txn already exists, region_id:%ld txn_id: %lu", _region_id, txn_id);
+        return -1;
     }
-    _txn_map.set(txn_id, txn);
-    _txn_count++;
+    txn = _txn_map.get(txn_id);
+    _latest_active_txn_ts = butil::gettimeofday_us();
     return 0;
 }
 
 void TransactionPool::remove_txn(uint64_t txn_id, bool mark_finished) {
-    if (!_txn_map.exist(txn_id)) {
+    auto txn = _txn_map.get(txn_id);
+    if (txn == nullptr) {
         return;
     }
     if (mark_finished) {
-        (*_finished_txn_map.read())[txn_id] = _txn_map[txn_id]->dml_num_affected_rows;
+        (*_finished_txn_map.read())[txn_id] = txn->dml_num_affected_rows;
     }
     //DB_WARNING("txn_removed: %p, %lu", txn, txn->GetName().c_str());
-    _txn_map.erase(txn_id);
-    _txn_count--;
+    auto size = _txn_map.erase(txn_id);
+    if (size > 0) {
+        _txn_count--;
+    }
+    _latest_active_txn_ts = butil::gettimeofday_us();
+}
+
+void TransactionPool::rollback_txn_before(const int64_t txn_timeout) {
+    std::vector<uint64_t>  txns_need_clear;
+    txns_need_clear.reserve(50);
+    int64_t cur_time = butil::gettimeofday_us();
+    auto call = [this, &txns_need_clear, cur_time, txn_timeout](SmartTransaction& txn) {
+        if (cur_time - txn->begin_time > txn_timeout * 1000) {
+            DB_WARNING("txn %ld_%ld  txn_timeout: %ld force rollback", _region_id, txn->txn_id(), txn_timeout);
+            txns_need_clear.emplace_back(txn->txn_id());
+        }
+        return 0;
+    };
+    _txn_map.traverse(call);
+    for (auto id : txns_need_clear) {
+        remove_txn(id, false);
+    }
 }
 
 void TransactionPool::txn_query_primary_region(SmartTransaction txn, Region* region,
@@ -117,21 +160,16 @@ void TransactionPool::txn_query_primary_region(SmartTransaction txn, Region* reg
         switch (response.errcode()) {
             case pb::SUCCESS: {
                 auto txn_info = response.txn_infos(0);
-                bool need_remove = true;
                 if (txn_info.txn_state() == pb::TXN_ROLLBACKED) {
-                    need_remove = txn_commit_through_raft(txn, region->region_info(), pb::OP_ROLLBACK);
+                    txn_commit_through_raft(txn, region->region_info(), pb::OP_ROLLBACK);
                 } else if (txn_info.txn_state() == pb::TXN_COMMITTED) {
-                    need_remove = txn_commit_through_raft(txn, region->region_info(), pb::OP_COMMIT);
+                    txn_commit_through_raft(txn, region->region_info(), pb::OP_COMMIT);
                 } else {
-                    // primary没有查到rollback_tag，认为是commit，但是secondary不是PREPARE状态
-                    DB_FATAL("primary committed, secondary need catchup log, region_id:%ld,"
+                    // primary没有查到rollback_tag，secondary不是PREPARE状态直接rollback
+                    DB_WARNING("primary not commit, region_id:%ld,"
                         "primary_region_id: %ld txn_id: %lu",
                         region->region_info().region_id(), region_info.region_id(), txn->txn_id());
-                    success = true;
-                    return;
-                }
-                if (need_remove) {
-                    remove_txn(txn->txn_id(), true);
+                    txn_commit_through_raft(txn, region->region_info(), pb::OP_ROLLBACK);
                 }
                 success = true;
                 DB_WARNING("send txn query success primary_region_id: %ld request:%s response: %s",
@@ -237,12 +275,11 @@ void TransactionPool::read_only_txn_process(int64_t region_id,
         default:
             break;
     }
-    DB_NOTICE("dml type: %s region_id: %ld, txn_id: %lu optimize_1pc:%d", pb::OpType_Name(op_type).c_str(),
+    DB_DEBUG("dml type: %s region_id: %ld, txn_id: %lu optimize_1pc:%d", pb::OpType_Name(op_type).c_str(),
             _region_id, txn_id, optimize_1pc);
 }
 
-// 返回true时从txn_pool删除txn
-bool TransactionPool::txn_commit_through_raft(SmartTransaction txn,
+void TransactionPool::txn_commit_through_raft(SmartTransaction txn,
             pb::RegionInfo& region_info,
             pb::OpType op_type) {
     pb::StoreReq request;
@@ -268,18 +305,16 @@ bool TransactionPool::txn_commit_through_raft(SmartTransaction txn,
         txn_node->set_txn_cmd(pb::TXN_ROLLBACK_STORE);
     }
     int retry_times = 1;
-    bool need_remove = false;
     bool success = false;
     do {
         RpcSender::send_query_method(request, response, region_info.leader(), region_id);
         switch (response.errcode()) {
-            case pb::SUCCESS:
+            case pb::SUCCESS: 
             case pb::TXN_IS_ROLLBACK: {
                 DB_WARNING("txn process success , request:%s response: %s",
                     request.ShortDebugString().c_str(),
                     response.ShortDebugString().c_str());
                 success = true;
-                need_remove = true;
                 break;
             }
             case pb::IN_PROCESS: {
@@ -299,13 +334,6 @@ bool TransactionPool::txn_commit_through_raft(SmartTransaction txn,
                     request.ShortDebugString().c_str(),
                     response.ShortDebugString().c_str());
                 bthread_usleep(retry_times * FLAGS_retry_interval_us);
-                break;
-            }
-            case pb::TXN_FOLLOW_UP: {
-                pb_txn->set_start_seq_id(1);
-                DB_WARNING("send txn commit TXN_FOLLOW_UP , request:%s response: %s",
-                    request.ShortDebugString().c_str(),
-                    response.ShortDebugString().c_str());
                 break;
             }
             case pb::VERSION_OLD: {
@@ -353,7 +381,6 @@ bool TransactionPool::txn_commit_through_raft(SmartTransaction txn,
             retry_times++;
         }
    } while (!success && retry_times < 5);
-   return need_remove;
 }
 
 int TransactionPool::get_region_info_from_meta(int64_t region_id, pb::RegionInfo& region_info) {
@@ -372,6 +399,76 @@ int TransactionPool::get_region_info_from_meta(int64_t region_id, pb::RegionInfo
     }
     region_info = query_response.region_infos(0);
     return 0;
+}
+
+void TransactionPool::update_primary_timestamp(const pb::TransactionInfo& txn_info) {
+    auto update_fun = [this, txn_info] {
+            pb::RegionInfo region_info;
+            int ret = this->get_region_info_from_meta(txn_info.primary_region_id(), region_info);
+            if (ret < 0) {
+                if (ret == -2) {
+                    DB_WARNING("region_id:%ld REGION_NOT_EXIST txn_id:%lu seq_id: %d when update timestamp",
+                        txn_info.primary_region_id(), txn_info.txn_id(), txn_info.seq_id());
+                    return;
+                }
+                DB_WARNING("send query request to meta server fail primary_region_id: %ld "
+                        "txn_id: %lu seq_id: %d",
+                    txn_info.primary_region_id(), txn_info.txn_id(), txn_info.seq_id());
+                return;
+            }
+            pb::StoreReq request;
+            pb::StoreRes response;
+            request.set_op_type(pb::OP_UPDATE_PRIMARY_TIMESTAMP);
+            request.set_region_id(region_info.region_id());
+            request.set_region_version(region_info.version());
+            pb::TransactionInfo* pb_txn = request.add_txn_infos();
+            pb_txn->set_txn_id(txn_info.txn_id());
+            pb_txn->set_seq_id(txn_info.seq_id());
+            int retry_times = 0;
+            bool success = false;
+            do {
+                RpcSender::send_query_method(request, response, region_info.leader(), txn_info.primary_region_id());
+                switch (response.errcode()) {
+                    case pb::SUCCESS: 
+                    case pb::TXN_IS_ROLLBACK: {
+                        DB_WARNING("txn process success , request:%s response: %s",
+                            request.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str());
+                        success = true;
+                        break;
+                    }
+                    case pb::NOT_LEADER: {
+                        if (response.leader() != "0.0.0.0:0") {
+                            region_info.set_leader(response.leader());
+                        } else {
+                            other_peer_to_leader(region_info);
+                        }
+                        DB_WARNING("send update primary timestamp NOT_LEADER , request:%s response: %s",
+                            request.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str());
+                        bthread_usleep(retry_times * FLAGS_retry_interval_us);
+                        break;
+                    }
+                    case pb::VERSION_OLD: {
+                        DB_WARNING("send update primary timestamp VERSION_OLD , request:%s response: %s",
+                            request.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str());
+                        break;
+                    }
+                    default: {
+                        DB_WARNING("send update primary timestamp failed , request:%s response: %s",
+                            request.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str());
+                        bthread_usleep(retry_times * FLAGS_retry_interval_us);
+                        break;
+                    }
+                }
+                retry_times++;
+            } while (!success && retry_times < 3);
+
+        };
+    Bthread bth;
+    bth.run(update_fun);
 }
 
 // 清理僵尸事务：包括长时间（clear_delay_ms）未更新的事务
@@ -395,7 +492,6 @@ void TransactionPool::clear_transactions(Region* region) {
          &readonly_txns_need_clear](SmartTransaction& txn) {
         auto cur_time = butil::gettimeofday_us();
         // 事务存在时间过长报警
-
         if (cur_time - txn->begin_time > FLAGS_long_live_txn_interval_ms * 1000LL) {
             DB_FATAL("TransactionWarning: txn %s is alive for %d ms, %ld, %ld, %lds",
                  txn->get_txn()->GetName().c_str(), FLAGS_long_live_txn_interval_ms,
@@ -409,14 +505,12 @@ void TransactionPool::clear_transactions(Region* region) {
             }
             return;
         }
-        if (txn->need_check_rollback() || (txn->primary_region_id() == -1
-            && (cur_time - txn->last_active_time > FLAGS_transaction_clear_delay_ms * 1000LL))) {
+        if (txn->primary_region_id() == -1
+            && (cur_time - txn->last_active_time > FLAGS_transaction_clear_delay_ms * 1000LL)) {
             DB_WARNING("read only txn %s seq_id: %d need rollback time:%lds", txn->get_txn()->GetName().c_str(),
                 txn->seq_id(), (cur_time - txn->last_active_time) / 1000000);
             if (!txn->has_write()) {
                 readonly_txns_need_clear.emplace_back(txn);
-            } else if (txn->need_check_rollback() && txn->has_write()) {
-                txn->set_need_check_rollback(false);
             }
             return;
         }
@@ -446,10 +540,7 @@ void TransactionPool::clear_transactions(Region* region) {
     }
     // 只对primary region进行超时rollback
     for (auto txn : primary_txns_need_clear) {
-        bool need_remove = txn_commit_through_raft(txn, region->region_info(), pb::OP_ROLLBACK);
-        if (need_remove) {
-            remove_txn(txn->txn_id(), true);
-        }
+        txn_commit_through_raft(txn, region->region_info(), pb::OP_ROLLBACK);
     }
     for (auto txn : txns_need_query_primary) {
         if (txn->primary_region_id() == -1) {
@@ -478,32 +569,49 @@ void TransactionPool::clear_transactions(Region* region) {
 }
 
 void TransactionPool::clear_orphan_transactions() {
-    std::vector<uint64_t> need_erase;
-    need_erase.reserve(50);
-    auto call = [this, &need_erase](SmartTransaction& txn) {
-        if (txn->is_finished()) {
-            return;
+    int retry = 0;
+    while (true) {
+        std::vector<uint64_t> need_erase;
+        need_erase.reserve(50);
+        bool has_process = false;
+        auto call = [this, &need_erase, &has_process, retry](SmartTransaction& txn) {
+            if (txn->is_finished()) {
+                DB_WARNING("TransactionNote: txn %ld_%lu is finish seq_id:%d",
+                        _region_id, txn->txn_id(), txn->seq_id());
+                return;
+            }
+            if (txn->is_applying()) {
+                DB_WARNING("TransactionNote: txn %ld_%lu need rollback due to leader transfer seq_id:%d",
+                        _region_id, txn->txn_id(), txn->seq_id());
+                txn->rollback_current_request();
+                if (!txn->has_write() && !txn->in_process()) {
+                    DB_WARNING("read only txn primary region_id:%ld txn_id: %lu need rollback", 
+                        _region_id, txn->txn_id());
+                    txn->rollback();
+                    need_erase.emplace_back(txn->txn_id());
+                }
+            }
+            if (txn->in_process()) {
+                DB_WARNING("txn is processing region_id:%ld txn_id: %lu need delay rollback, retry:%d", 
+                        _region_id, txn->txn_id(), retry);
+                has_process = true;
+            }
+            // 只读事务处理
+            if (!txn->has_write() && !txn->in_process()) {
+                DB_WARNING("read only txn region_id:%ld txn_id: %lu need rollback", _region_id, txn->txn_id());
+                txn->rollback();
+                need_erase.emplace_back(txn->txn_id());
+            }
+        };
+        _txn_map.traverse(call);
+        for (auto id : need_erase) {
+            remove_txn(id, false);
         }
-        if (txn->is_applying()) {
-            DB_WARNING("TransactionNote: txn %s need rollback due to leader transfer seq_id:%d",
-                txn->get_txn()->GetName().c_str(), txn->seq_id());
-            txn->rollback_current_request();
+        if (!has_process) {
+            break;
         }
-        if (txn->in_process()) {
-            DB_WARNING("read only txn region_id:%ld txn_id: %lu need delay rollback", _region_id, txn->txn_id());
-            txn->set_need_check_rollback(true);
-        }
-        // 只读事务处理
-        if (!txn->has_write() && !txn->in_process()) {
-            DB_WARNING("read only txn region_id:%ld txn_id: %lu need rollback", _region_id, txn->txn_id());
-            txn->rollback();
-            need_erase.emplace_back(txn->txn_id());
-            _txn_count--;
-        }
-    };
-    _txn_map.traverse(call);
-    for (auto id : need_erase) {
-        _txn_map.erase(id);
+        bthread_usleep(1000 * 1000);
+        ++retry;
     }
 }
 
@@ -518,11 +626,10 @@ void TransactionPool::on_leader_stop_rollback() {
                 txn->get_txn()->GetName().c_str());
             txn->rollback();
             need_erase.emplace_back(txn->txn_id());
-            _txn_count--;
         }
     });
     for (auto id : need_erase) {
-        _txn_map.erase(id);
+        remove_txn(id, false);
     }
 }
 

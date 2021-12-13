@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "baikal_heartbeat.h"
+#include "schema_factory.h"
 #include "task_fetcher.h"
 namespace baikaldb {
 
@@ -59,20 +60,7 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
                 if (index_id == info_pair.second->id) {
                     req_info->set_version(info_pair.second->version);
                 }
-                /*
-                std::map<int64_t, pb::RegionInfo> region_infos;
-                //
-                // TODO：读多个double buffer，可能死锁？
-                //
-                factory->get_region_by_key(index, NULL, region_infos);
-                for (auto& pair : region_infos) {
-                    auto region = req_info->add_regions();
-                    auto& region_info = pair.second;
-                    region->set_region_id(region_info.region_id());
-                    region->set_version(region_info.version());
-                    region->set_conf_version(region_info.conf_version());
-                }*/
-            }
+            }  
         }
     };
     request.set_last_updated_index(factory->last_updated_index());
@@ -81,7 +69,22 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
         &pb::BaikalHeartBeatRequest::add_region_ddl_works);
     TaskFactory<pb::DdlWorkInfo>::get_instance()->construct_heartbeat(request, 
         &pb::BaikalHeartBeatRequest::add_ddl_works);
-    request.set_can_do_ddlwork(true);
+    request.set_can_do_ddlwork(is_backup ? false : true);
+    //定时将request当中消息体更新 等待process_baikal_heartbeat处理更新至TableManager中的virtual_Index_sql_map
+    auto sample = factory->get_virtual_index_info();
+    auto index_id_name_map = sample.index_id_name_map;
+    auto index_id_sample_sqls_map = sample.index_id_sample_sqls_map;
+    //遍历map 更新至request 
+    for (auto& it1 : index_id_name_map) {
+        for (auto& it2 : index_id_sample_sqls_map[it1.first]) {
+            pb::VirtualIndexInfluence virtual_index_influence;
+            virtual_index_influence.set_virtual_index_id(it1.first);
+            virtual_index_influence.set_virtual_index_name(it1.second);
+            virtual_index_influence.set_influenced_sql(it2);
+            pb::VirtualIndexInfluence* info_affect = request.add_info_affect();
+            *info_affect = virtual_index_influence ;
+        }
+    }
 }
 
 void BaikalHeartBeat::process_heart_beat_response(const pb::BaikalHeartBeatResponse& response, bool is_backup) {

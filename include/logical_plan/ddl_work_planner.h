@@ -22,9 +22,9 @@
 
 namespace baikaldb {
 
-class GlobalDDLPlanner : public LogicalPlanner {
+class DDLWorkPlanner : public LogicalPlanner {
 public:
-    GlobalDDLPlanner(QueryContext* ctx) : LogicalPlanner(ctx), _ctx(ctx) {}
+    DDLWorkPlanner(QueryContext* ctx) : LogicalPlanner(ctx), _ctx(ctx) {}
     int plan(); 
     int execute();
 
@@ -50,6 +50,7 @@ public:
             return -1;
         }
         _is_uniq = index_ptr->type == pb::I_UNIQ;
+        _is_global_index = index_ptr->is_global;
         _field_num = pri_index_ptr->fields.size();
 
         _router_start_key = _work.start_key();
@@ -72,6 +73,7 @@ private:
     int64_t _limit = 100;
     int64_t _last_num = 100;
     bool _is_uniq = false;
+    bool _is_global_index = false;
     int64_t _partition_id = 0;
     std::string _task_id;
     int32_t _field_num = 0;

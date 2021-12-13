@@ -17,6 +17,7 @@
 #include "tuple_record.h"
 
 namespace baikaldb {
+DEFINE_bool(cstore_scan_fill_cache, true, "cstore_scan_fill_cache");
 
 TableIterator* Iterator::scan_primary(
         SmartTransaction        txn,
@@ -77,6 +78,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     if (txn != nullptr) {
         _use_ttl = txn->use_ttl();
         _read_ttl_timestamp_us = txn->read_ttl_timestamp_us();
+        _online_ttl_base_expire_time_us = txn->online_ttl_base_expire_time_us();
         _txn = txn->get_txn();
     }
     bool like_prefix = range.like_prefix;
@@ -265,10 +267,16 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
         read_options.prefix_same_as_start = true;
         read_options.total_order_seek = false;
         read_options.iterate_upper_bound = &_upper_bound_slice;
+        if (_is_cstore) {
+            read_options.fill_cache = FLAGS_cstore_scan_fill_cache;
+        }
     } else {
         read_options.prefix_same_as_start = false;
         read_options.total_order_seek = true;
         read_options.iterate_lower_bound = &_lower_bound_slice;
+        if (_is_cstore) {
+            read_options.fill_cache = FLAGS_cstore_scan_fill_cache;
+        }
     }
 
 
@@ -320,9 +328,11 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
     if (_forward) {
         read_options.prefix_same_as_start = true;
         read_options.total_order_seek = false;
+        read_options.fill_cache = FLAGS_cstore_scan_fill_cache;
     } else {
         read_options.prefix_same_as_start = false;
         read_options.total_order_seek = true;
+        read_options.fill_cache = FLAGS_cstore_scan_fill_cache;
     }
     std::set<int32_t>    pri_field_ids;
     for (auto& field_info : _pri_info->fields) {
@@ -440,7 +450,7 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
         value_slice = _iter->value();
     }
     if (_use_ttl) {
-        int64_t row_ttl_timestamp_us = ttl_decode(value_slice);
+        int64_t row_ttl_timestamp_us = ttl_decode(value_slice, _index_info, _online_ttl_base_expire_time_us);
         if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
             //expired
             if (_forward) {
@@ -451,7 +461,6 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             _valid = _valid && _iter->Valid();
             return -4;
         }
-        value_slice.remove_prefix(sizeof(uint64_t));
     }
     //create a record and parse key and value
     if (VAL_ONLY == _mode || KEY_VAL == _mode) {
@@ -585,8 +594,7 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             iter_value = _iter->value();
         }
         if (_use_ttl) {
-            int64_t row_ttl_timestamp_us = ttl_decode(iter_value);
-            iter_value.remove_prefix(sizeof(uint64_t));
+            int64_t row_ttl_timestamp_us = ttl_decode(iter_value, _index_info, _online_ttl_base_expire_time_us);
             if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
                 //expired
                 if (_forward) {

@@ -194,9 +194,12 @@ void QueryRegionManager::get_region_info(const pb::QueryRequest* request,
                                             pb::QueryResponse* response) {
     RegionManager* manager = RegionManager::get_instance();
     if (request->region_ids_size() == 0) {
+        int64_t table_id = request->table_id();
         std::vector<SmartRegionInfo> region_infos;
-        manager->traverse_region_map([&region_infos](SmartRegionInfo& region_info) {
-            region_infos.push_back(region_info);
+        manager->traverse_region_map([&region_infos, &table_id](SmartRegionInfo& region_info) {
+            if (table_id == 0 || table_id == region_info->table_id()) {
+                region_infos.push_back(region_info);
+            }
         });
         for (auto& region_info : region_infos) {
             auto region_pb = response->add_region_infos();
@@ -293,9 +296,9 @@ void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request,
     auto func = [&table_id_name_map, response](const int64_t& region_id, RegionPeerState& region_state) {
         int64_t table_id = 0;
         std::vector<pb::PeerStateInfo> region_peer_status_vec;
-        for (auto& pair : region_state.legal_peers_state) {
-            if (pair.second.has_table_id()) {
-                table_id = pair.second.table_id();
+        for (auto& peer_status : region_state.legal_peers_state) {
+            if (peer_status.has_table_id()) {
+                table_id = peer_status.table_id();
                 if (table_id_name_map.count(table_id) == 0) {
                     return;
                 }
@@ -303,40 +306,39 @@ void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request,
                 return;
             }
 
-            if (pair.second.peer_status() == pb::STATUS_NORMAL 
-                && (butil::gettimeofday_us() - pair.second.timestamp() >
+            if (peer_status.peer_status() == pb::STATUS_NORMAL
+                && (butil::gettimeofday_us() - peer_status.timestamp() >
                 FLAGS_store_heart_beat_interval_us * FLAGS_region_faulty_interval_times)) {
-                pair.second.set_peer_status(pb::STATUS_NOT_HEARTBEAT);
+                peer_status.set_peer_status(pb::STATUS_NOT_HEARTBEAT);
             }
         }
         bool healthy = false;
         bool has_bad_peer = false;
-        for (auto& pair : region_state.legal_peers_state) {
-            if (pair.second.peer_status() == pb::STATUS_NORMAL) {
+        for (auto& peer_status : region_state.legal_peers_state) {
+            if (peer_status.peer_status() == pb::STATUS_NORMAL) {
                 healthy = true;
             } else {
                 has_bad_peer = true;
             }
         }
         if (!healthy || has_bad_peer || !region_state.ilegal_peers_state.empty()) {
-            for (auto& pair : region_state.legal_peers_state) {
-                pair.second.set_region_id(region_id);
-                pair.second.set_peer_id(pair.first);
-                region_peer_status_vec.push_back(pair.second);
+            for (auto& peer_status : region_state.legal_peers_state) {
+                peer_status.set_region_id(region_id);
+                peer_status.set_peer_id(peer_status.peer_id());
+                region_peer_status_vec.emplace_back(peer_status);
             }  
         }
-        for (auto& pair : region_state.ilegal_peers_state) {
-            if (pair.second.has_table_id()) {
-                table_id = pair.second.table_id();
+        for (auto& peer_status : region_state.ilegal_peers_state) {
+            if (peer_status.has_table_id()) {
+                table_id = peer_status.table_id();
                 if (table_id_name_map.count(table_id) == 0) {
                     return;
                 }
             } else {
                 return;
             }
-            pair.second.set_peer_id(pair.first);
-            pair.second.set_region_id(region_id);
-            region_peer_status_vec.push_back(pair.second);
+            peer_status.set_region_id(region_id);
+            region_peer_status_vec.emplace_back(peer_status);
         }
         if (!region_peer_status_vec.empty()) {
             pb::RegionStateInfo* region_info = response->add_region_status_infos();

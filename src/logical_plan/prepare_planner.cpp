@@ -145,6 +145,8 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     }
     if (parser.result.size() != 1) {
         DB_WARNING("multi-stmt is not supported, sql: %s", stmt_sql.c_str());
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "multi-stmt is not supported";
         return -1;
     }
     if (parser.result[0] == nullptr) {

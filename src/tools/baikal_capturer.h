@@ -36,7 +36,7 @@
 #include "store_interact.hpp"
 #include "table_record.h"
 #include "expr_value.h"
-#if BAIDU_INTERNAL
+#ifdef BAIDU_INTERNAL
 #include <json/json.h>
 #endif
 #include "baikal_heartbeat.h"
@@ -75,7 +75,7 @@ public:
         static Capturer capturer;
         return &capturer;
     }
-#if BAIDU_INTERNAL
+#ifdef BAIDU_INTERNAL
     int init(Json::Value& value);
 #endif
     int init();

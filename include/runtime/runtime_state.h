@@ -52,7 +52,7 @@ struct TxnLimitMap {
                 too_many = true;
             }
         };
-        _txn_limit_mapping.init_if_not_exist_else_update(txn_id, update_func, row_count);
+        _txn_limit_mapping.init_if_not_exist_else_update(txn_id, false, update_func, row_count);
         return too_many;
     }
 
@@ -71,7 +71,6 @@ class NetworkSocket;
 // 不同region资源隔离，不需要每次从SchemaFactory加锁获取
 struct RegionResource {
     pb::RegionInfo region_info;
-    DllParam* ddl_param_ptr;
 };
 
 class RuntimeStatePool;
@@ -161,23 +160,21 @@ public:
         _txn = txn;
     }
 
-    SmartTransaction create_txn_if_null() {
+    SmartTransaction create_txn_if_null(const Transaction::TxnOptions& txn_opts) {
         if (_txn != nullptr) {
             return _txn;
         }
-        _txn = SmartTransaction(new Transaction(0, _txn_pool, use_ttl));
+        _txn = SmartTransaction(new Transaction(0, _txn_pool));
         _txn->set_region_info(&(_resource->region_info));
-        _txn->set_ddl_state(_resource->ddl_param_ptr);
         _txn->_is_separate = is_separate;
-        _txn->begin();
+        _txn->begin(txn_opts);
         return _txn;
     }
     SmartTransaction create_batch_txn() {
-        auto txn = SmartTransaction(new Transaction(0, _txn_pool, use_ttl));
+        auto txn = SmartTransaction(new Transaction(0, _txn_pool));
         txn->set_region_info(&(_resource->region_info));
-        txn->set_ddl_state(_resource->ddl_param_ptr);
         txn->_is_separate = is_separate;
-        txn->begin();
+        txn->begin(Transaction::TxnOptions());
         return txn;
     }
     void set_num_increase_rows(int64_t num) {
@@ -274,7 +271,7 @@ public:
         return _txn_pool;
     }
 
-    void set_resource(std::shared_ptr<RegionResource> resource) {
+    void set_resource(const std::shared_ptr<RegionResource>& resource) {
         _resource = resource;
     }
     void set_pool(RuntimeStatePool* pool) {
@@ -321,12 +318,20 @@ public:
         _open_binlog = flag;
     }
 
+    bool single_txn_ceched() {
+        return _single_txn_ceched;
+    }
+
+    void set_single_txn_ceched() {
+        _single_txn_ceched = true;
+    }
+
     void set_single_txn_need_separate_execute(bool flag) {
         _single_txn_need_separate_execute = flag;
     }
 
     bool single_txn_need_separate_execute() {
-        return _single_txn_need_separate_execute || _open_binlog;
+        return _single_txn_need_separate_execute;
     }
 
     bool is_expr_subquery() {
@@ -366,7 +371,6 @@ public:
     std::ostringstream error_msg;
     bool              is_full_export = false;
     bool              is_separate = false; //是否为计算存储分离模式
-    bool              use_ttl = false;
     BthreadCond       txn_cond;
     std::function<void(RuntimeState* state, SmartTransaction txn)> raft_func;
     bool              need_txn_limit = false;
@@ -377,12 +381,14 @@ public:
     int64_t         last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
 
     // global index ddl 使用
-    int32_t             ddl_scan_size = 0;
+    int32_t            ddl_scan_size = 0;
+    int32_t            region_count = 0;
     std::string        ddl_max_pk_key;
     std::string        ddl_max_router_key;
     MysqlErrCode       ddl_error_code = ER_ERROR_FIRST;
     std::unique_ptr<std::string> first_record_ptr {nullptr};
     std::unique_ptr<std::string> last_record_ptr {nullptr};
+    std::vector<int64_t> ttl_timestamp_vec;
 
     uint64_t          sign = 0;
 private:
@@ -391,6 +397,7 @@ private:
     bool _eos          = false;
     bool _open_binlog  = false;
     bool _single_txn_need_separate_execute  = false;
+    bool _single_txn_ceched = false;
     bool _is_expr_subquery = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
     MemRowDescriptor _mem_row_desc;

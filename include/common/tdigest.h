@@ -52,9 +52,14 @@ double td_total_sum(td_histogram_t *h);
 // td_decay multiplies all countes by factor.
 void td_decay(td_histogram_t *h, double factor);
 size_t td_required_buf_size(double compression);
+size_t td_actual_size(td_histogram_t *h);
 void td_set_target_quantile(td_histogram_t *t, double target_quantile);
 double td_get_target_quantile(td_histogram_t *t);
-bool is_td_object(const std::string& hll);
+bool is_td_object(const std::string& td);
+//td序列化，执行merge后只保存需要的nodes(merged_nodes + unmerged_nodes)
+void td_serialize(std::string& td);
+//td转为内存buf
+void td_normallize(std::string& td);
 
 } // namespace tdigest
 } // namespace baikaldb

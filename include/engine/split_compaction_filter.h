@@ -24,10 +24,17 @@
 namespace baikaldb {
 DECLARE_int32(rocks_binlog_ttl_days);
 class SplitCompactionFilter : public rocksdb::CompactionFilter {
-typedef butil::FlatMap<int64_t, std::string*> KeyMap;
+struct FilterRegionInfo {
+    FilterRegionInfo(bool use_ttl, const std::string& end_key, int64_t online_ttl_base_expire_time_us) :
+        use_ttl(use_ttl), end_key(end_key), online_ttl_base_expire_time_us(online_ttl_base_expire_time_us) {}
+    bool use_ttl = false;
+    int64_t online_ttl_base_expire_time_us = 0;
+    std::string end_key;
+};
+typedef butil::FlatMap<int64_t, FilterRegionInfo*> KeyMap;
 typedef DoubleBuffer<KeyMap> DoubleBufKey;
-typedef std::unordered_set<int64_t> BinlogSet;
-typedef butil::DoublyBufferedData<BinlogSet> DoubleBufBinlog;
+typedef butil::FlatSet<int64_t> BinlogSet;
+typedef DoubleBuffer<BinlogSet> DoubleBufBinlog;
 public:
     static SplitCompactionFilter* get_instance() {
         static SplitCompactionFilter _instance;
@@ -42,26 +49,31 @@ public:
     // A return value of false indicates that the kv should be preserved 
     // a return value of true indicates that this key-value should be removed from the
     // output of the compaction. 
-    bool Filter(int /*level*/,
+    bool Filter(int level,
                 const rocksdb::Slice& key,
                 const rocksdb::Slice& value,
                 std::string* /*new_value*/,
                 bool* /*value_changed*/) const override {
+        //只对最后2层做filter
+        if (level < 5) {
+            return false;
+        }
         static int prefix_len = sizeof(int64_t) * 2;
         if ((int)key.size() < prefix_len) {
             return false;
         }
         TableKey table_key(key);
         int64_t region_id = table_key.extract_i64(0);
-        std::string* end_key = get_end_key(region_id);
-        if (end_key == nullptr || end_key->empty()) {
+        FilterRegionInfo* filter_info  = get_filter_region_info(region_id);
+        if (filter_info == nullptr || filter_info->end_key.empty()) {
             return false;
         }
+        const std::string& end_key = filter_info->end_key;
         if (is_binlog_region(region_id)) {
             static int64_t ttl_ms = FLAGS_rocks_binlog_ttl_days * 24 * 60 * 60 * 1000;
             rocksdb::Slice pure_key(key);
             pure_key.remove_prefix(2 * sizeof(int64_t));
-            int64_t commit_tso = ttl_decode(pure_key);
+            int64_t commit_tso = decode_first_8bytes2int64(pure_key);
             int64_t expire_ts_ms = (commit_tso >> tso::logical_bits) + ttl_ms;
             int64_t current_ts_ms = tso::clock_realtime_ms();
 //            DB_WARNING("binglog compaction filter, region_id: %ld, ttl_tso: %ld, commit_tso: %ld, expire_tso: %ld, current_tso: %ld",
@@ -84,7 +96,7 @@ public:
         //int ret1 = 0;
         int ret2 = 0;
         if (index_info->type == pb::I_PRIMARY || index_info->is_global) {
-            ret2 = end_key->compare(0, std::string::npos, 
+            ret2 = end_key.compare(0, std::string::npos, 
                     key.data() + prefix_len, key.size() - prefix_len);
            // DB_WARNING("split compaction filter, region_id: %ld, index_id: %ld, end_key: %s, key: %s, ret: %d",
            //     region_id, index_id, rocksdb::Slice(end_key).ToString(true).c_str(), 
@@ -97,26 +109,31 @@ public:
             }
             rocksdb::Slice key_slice(key);
             key_slice.remove_prefix(sizeof(int64_t) * 2);
-            return !Transaction::fits_region_range(key_slice, value, 
-                nullptr, end_key, *pk_info, *index_info);
+            rocksdb::Slice value_slice(value);
+            if (filter_info->use_ttl) {
+                ttl_decode(value_slice, index_info, filter_info->online_ttl_base_expire_time_us);
+            }
+            return !Transaction::fits_region_range(key_slice, value_slice, 
+                nullptr, &end_key, *pk_info, *index_info);
         }
         return false;
     }
 
-    void set_end_key(int64_t region_id, const std::string& end_key) {
-        std::string* old_key = get_end_key(region_id);
+    void set_filter_region_info(int64_t region_id, const std::string& end_key, 
+                                bool use_ttl, int64_t online_ttl_base_expire_time_us) {
+        FilterRegionInfo* old = get_filter_region_info(region_id);
         // 已存在不更新
-        if (old_key != nullptr && *old_key == end_key) {
+        if (old != nullptr && old->end_key == end_key) {
             return;
         }
-        auto call = [region_id, end_key](KeyMap& key_map) {
-            std::string* new_key = new std::string(end_key);
-            key_map[region_id] = new_key;
+        auto call = [region_id, end_key, use_ttl, online_ttl_base_expire_time_us](KeyMap& key_map) {
+            FilterRegionInfo* new_info = new FilterRegionInfo(use_ttl, end_key, online_ttl_base_expire_time_us);
+            key_map[region_id] = new_info;
         };
         _range_key_map.modify(call);
     }
 
-    std::string* get_end_key(int64_t region_id) const {
+    FilterRegionInfo* get_filter_region_info(int64_t region_id) const {
         auto iter = _range_key_map.read()->seek(region_id);
         if (iter != nullptr) {
             return *iter;
@@ -125,20 +142,16 @@ public:
     }
 
     void set_binlog_region(int64_t region_id) {
-        auto call = [this, region_id](BinlogSet& region_id_set) -> int {
+        auto call = [this, region_id](BinlogSet& region_id_set) {
             region_id_set.insert(region_id);
-            return 1;
         };
-        _binlog_region_id_set.Modify(call);
+        _binlog_region_id_set.modify(call);
     }
 
     bool is_binlog_region(int64_t region_id) const {
-        DoubleBufBinlog::ScopedPtr ptr;
-        if (_binlog_region_id_set.Read(&ptr) == 0) {
-            auto iter = ptr->find(region_id);
-            if (iter != ptr->end()) {
-                return true;
-            }
+        auto iter = _binlog_region_id_set.read()->seek(region_id);
+        if (iter != nullptr) {
+            return true;
         }
         return false;
     }
@@ -148,6 +161,8 @@ private:
         _factory = SchemaFactory::get_instance();
         _range_key_map.read_background()->init(12301);
         _range_key_map.read()->init(12301);
+        _binlog_region_id_set.read_background()->init(12301);
+        _binlog_region_id_set.read()->init(12301);
     }
 
     // region_id => end_key

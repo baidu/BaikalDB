@@ -22,7 +22,7 @@ enum ErrCode {
     REGION_ALREADY_EXIST = 15;
     REGION_NOT_EXIST = 16;
     HAVE_NOT_INIT = 17;
-    TXN_FOLLOW_UP = 18;
+    // TXN_FOLLOW_UP = 18;
     CANNOT_ADD_PEER = 19;
     PEER_NOT_EQUAL  = 20;
     CONNECT_FAIL    = 21;
@@ -88,6 +88,7 @@ message SchemaConf {
     optional string op_desc                 = 5;
     optional float filter_ratio             = 6;
     optional BackupTable backup_table       = 7;
+    optional int32 pk_prefix_balance        = 8;
 };
 
 enum Engine {

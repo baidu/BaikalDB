@@ -31,6 +31,14 @@ struct ExprNode : public Node {
     ExprNode() {
         node_type = NT_EXPR;
     }
+    bool is_subquery() {
+        if (expr_type == ET_SUB_QUERY_EXPR
+            || expr_type == ET_CMP_SUB_QUERY_EXPR
+            || expr_type == ET_EXISTS_SUB_QUERY_EXPR) {
+            return true;
+        }
+        return false;
+    }
     virtual void to_stream(std::ostream& os) const override {}
 };
 
@@ -71,6 +79,7 @@ enum FuncType {
     FT_IN,
     FT_LIKE,
     FT_EXACT_LIKE,
+    FT_REGEXP,
     FT_MATCH_AGAINST,
     FT_BETWEEN,
     /* use in on dup key update */

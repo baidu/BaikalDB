@@ -125,6 +125,7 @@ int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos)
     }));
     if (_return_empty) {
         DB_WARNING_STATE(state, "return_empty");
+        state->set_eos();
         *eos = true;
         return 0;
     }
@@ -213,6 +214,10 @@ int SelectManagerNode::construct_primary_possible_index(
             for (auto& pri_field : pri_info->fields) {
                 int32_t field_id = pri_field.id;
                 int32_t slot_id = state->get_slot_id(tuple_id, field_id);
+                if (slot_id == -1) {
+                    DB_WARNING("field_id:%d tuple_id:%d, slot_id:%d", field_id, tuple_id, slot_id);
+                    return -1;
+                }
                 record->set_value(record->get_field_by_tag(field_id), mem_row->get_value(tuple_id, slot_id));
             }
             auto range = pos_index->add_ranges();

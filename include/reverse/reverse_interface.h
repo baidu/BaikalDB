@@ -134,8 +134,14 @@ public:
         return _index_ptr->get_reverse_list_two(_txn, term, list_new, list_old, _is_fast);
     }
 
+    const std::string& get_query_words () const {
+        return _query_words;
+    }
+
 private:
     int _weight_field_id = 0;
+    std::string _query_words;
+    int32_t _query_words_field_id = 0;
     std::map<std::string, Parser*> _temp_map;
     using SchemaBase<Node, List>::_table_info;
     using SchemaBase<Node, List>::_exe;

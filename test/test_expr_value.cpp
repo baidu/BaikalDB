@@ -24,6 +24,7 @@
 #include "proto/expr.pb.h"
 #include "parser.h"
 #include "proto/meta.interface.pb.h"
+#include "joiner.h"
 
 int main(int argc, char* argv[])
 {
@@ -32,7 +33,6 @@ int main(int argc, char* argv[])
 }
 
 namespace baikaldb {
-
 TEST(test_proto, case_all) {
     /*
     std::ofstream fp;
@@ -534,6 +534,39 @@ TEST(type_merge, type_merge) {
         std::vector<pb::PrimitiveType> types {pb::STRING, pb::NULL_TYPE, pb::INT8};
         FunctionManager::instance()->complete_common_fn(f, types);
         EXPECT_EQ(pb::INT8, f.return_type());
+    }
+    {
+        std::unordered_set<ExprValueVec, ExprValueVec::HashFunction> ABCSet; 
+        ExprValue v1(pb::UINT32);
+        v1._u.uint32_val = 1;
+        ExprValue v2(pb::UINT32);
+        v2._u.uint32_val = 2;
+        ExprValue v3(pb::UINT32);
+        v3._u.uint32_val = 1;
+
+        ExprValueVec vec1;
+        vec1.vec.emplace_back(v1);
+
+        ABCSet.emplace(vec1);
+
+
+        ExprValueVec vec2;
+        vec2.vec.emplace_back(v2);
+
+        ABCSet.emplace(vec2);
+
+
+        ExprValueVec vec3;
+        vec3.vec.emplace_back(v3);
+
+        ABCSet.emplace(vec3);
+        EXPECT_EQ(ABCSet.size(), 2);
+        for (auto& it : ABCSet) {
+            for (auto& v : it.vec) {
+                DB_WARNING("value: %u", v._u.uint32_val);
+            }
+        }
+
     }
 }
 

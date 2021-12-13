@@ -85,6 +85,8 @@ public:
     }
     int decode_fields(const std::map<int32_t, FieldInfo*>& fields, const std::vector<int32_t>* field_slot,
             SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
+
+    int verification_fields(int32_t max_field_id);
 private:
     const char*   _data;
     size_t  _size;

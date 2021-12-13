@@ -75,10 +75,8 @@ int RuntimeState::init(const pb::StoreReq& req,
     _log_id = req.log_id();
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
-    use_ttl = _txn_pool->use_ttl();
     if (_txn != nullptr) {
         _txn->set_region_info(&(_resource->region_info));
-        _txn->set_ddl_state(_resource->ddl_param_ptr);
     }
     return 0;
 }
@@ -148,7 +146,7 @@ int RuntimeState::memory_limit_exceeded(int64_t bytes) {
     _mem_tracker->consume(bytes);
     _used_bytes += bytes;
     if (_mem_tracker->check_bytes_limit()) {
-        DB_WARNING("log_id:%lu mempry limit Exceeded limit:%ld consumed:%ld used:%ld.", _log_id,
+        DB_WARNING("log_id:%lu memory limit Exceeded limit:%ld consumed:%ld used:%ld.", _log_id,
             _mem_tracker->bytes_limit(), _mem_tracker->bytes_consumed(), _used_bytes);
         error_code = ER_TOO_BIG_SELECT;
         error_msg.str("select reach memory limit");

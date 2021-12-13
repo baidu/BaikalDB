@@ -152,7 +152,9 @@ enum AlterSpecType : unsigned char {
     ALTER_SPEC_RENAME_COLUMN,
     ALTER_SPEC_RENAME_TABLE,
     ALTER_SPEC_TABLE_OPTION,
-    ALTER_SPEC_RESTORE_INDEX
+    ALTER_SPEC_RESTORE_INDEX,
+    ALTER_SPEC_ADD_LEARNER,
+    ALTER_SPEC_DROP_LEARNER
 };
 
 enum PartitionType : unsigned char {
@@ -242,10 +244,16 @@ struct TableOption : public Node {
     }
 };
 
+struct PartitionRange : public Node {
+    String name;
+    ExprNode* less_expr;
+};
+
 struct PartitionOption : public TableOption {
     PartitionType type;
     ExprNode* expr = nullptr;
-    Vector<ExprNode*> range;
+    int64_t partition_num = 1;
+    Vector<PartitionRange*> range;
 };
 
 struct Constraint : public Node {
@@ -336,8 +344,10 @@ struct AlterTableSpec : public Node {
     Vector<ColumnDef*>      new_columns;
     //add constraint
     Vector<Constraint*>     new_constraints;
-    String           index_name;
-    bool             is_virtual_index = false;
+    String                  index_name;
+    String                  resource_tag;
+    bool                    force = false;
+    bool                    is_virtual_index = false;
 
     AlterTableSpec() {
         node_type = NT_ALTER_SEPC;

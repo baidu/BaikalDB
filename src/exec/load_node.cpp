@@ -101,6 +101,10 @@ int LoadNode::open(RuntimeState* state) {
     std::vector<std::string> row_lines;
     row_lines.reserve(FLAGS_row_batch_size);
     while (!_read_eof) {
+        if (state->is_cancelled()) {
+            DB_WARNING("load is cancelled, log_id: %lu", state->log_id());
+            return 0;
+        }
         int64_t size = file.Read(_file_cur_pos, data_buffer.get(), BUFFER_SIZE);
         if (size < 0) {
             DB_WARNING("file: %s read failed", _data_path.c_str());
@@ -111,6 +115,10 @@ int LoadNode::open(RuntimeState* state) {
         MemBuf sbuf(data_buffer.get(), data_buffer.get() + size);
         std::istream f(&sbuf);
         while (!f.eof()) {
+            if (state->is_cancelled()) {
+                DB_WARNING("load is cancelled, log_id: %lu", state->log_id());
+                return 0;
+            }
             std::string line;
             std::getline(f, line);
             if (f.eof()) {

@@ -30,6 +30,7 @@ int Joiner::init(const pb::PlanNode& node) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
+    _outer_join_values.init(12301);
     _hash_map.init(12301);
     return 0;
 }
@@ -209,7 +210,7 @@ int Joiner::fetcher_full_table_data(RuntimeState* state, ExecNode* child_node,
 }
 
 int Joiner::construct_in_condition(std::vector<ExprNode*>& slot_refs, 
-                             std::vector<std::vector<ExprValue>>& in_values, 
+                             const ExprValueSet& in_values, 
                              std::vector<ExprNode*>& in_exprs) {
     //手工构造pb格式的表达式，再转为内存结构的表达式
     if (slot_refs.size() == 0) {
@@ -240,7 +241,7 @@ int Joiner::construct_in_condition(std::vector<ExprNode*>& slot_refs,
             return ret;
         }
         for (auto& in_value : in_values) {
-            ExprNode* literal_node = new Literal(in_value[0]);
+            ExprNode* literal_node = new Literal(in_value.vec[0]);
             conjunct->add_child(literal_node); 
         }
         conjunct->type_inferer();
@@ -272,7 +273,7 @@ int Joiner::construct_in_condition(std::vector<ExprNode*>& slot_refs,
         for (auto& in_value : in_values) {
             //增加一个row_expr
             RowExpr* row_expr = new RowExpr;
-            for (auto val : in_value) {
+            for (auto val : in_value.vec) {
                 ExprNode* literal_node = new Literal(val);
                 row_expr->add_child(literal_node);
             }
@@ -288,14 +289,14 @@ int Joiner::construct_in_condition(std::vector<ExprNode*>& slot_refs,
 void Joiner::construct_equal_values(const std::vector<MemRow*>& tuple_data,
                                 const std::vector<ExprNode*>& slot_refs) {
     for (auto& mem_row : tuple_data) {
-        std::vector<ExprValue> join_values;
-        join_values.reserve(slot_refs.size());
+        ExprValueVec join_values;
+        join_values.vec.reserve(slot_refs.size());
         for (auto& slot_ref_expr : slot_refs) {
             ExprValue value = mem_row->get_value(static_cast<SlotRef*>(slot_ref_expr)->tuple_id(), 
                                              static_cast<SlotRef*>(slot_ref_expr)->slot_id());
-            join_values.emplace_back(value);
+            join_values.vec.emplace_back(value);
         }
-        _outer_join_values.emplace_back(join_values);
+        _outer_join_values.insert(join_values);
     }
 }
 

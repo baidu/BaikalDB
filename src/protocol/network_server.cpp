@@ -43,8 +43,12 @@ DEFINE_int32(backup_pv_threshold, 50, "backup_pv_threshold");
 DEFINE_double(backup_error_percent, 0.5, "use backup table if backup_error_percent > 0.5");
 DEFINE_int64(health_check_interval_us, 10 * 1000 * 1000, "health_check_interval_us");
 DEFINE_bool(need_health_check, true, "need_health_check");
+DEFINE_int64(health_check_timeout_ms, 2000, "health_check_timeout_ms");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
+DEFINE_bool(insert_agg_sql, false, "whether insert agg_sql");
+DEFINE_int32(batch_insert_agg_sql_size, 50, "batch size for insert");
+DEFINE_int32(batch_insert_sign_sql_interval_us, 10 * 60 * 1000 * 1000, "batch_insert_sign_sql_interval_us default 10min");
 DECLARE_int32(baikal_heartbeat_interval_us);
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
@@ -265,8 +269,99 @@ void NetworkServer::index_recommend(const std::string& sample_sql, int64_t table
     index_info = recommend_index.str();
 }
 
+int NetworkServer::insert_agg_sql(const std::string& values) {
+    baikal::client::ResultSet result_set;
+    TimeCost cost;
+    // 构造sql
+    std::string sql = "REPLACE INTO BaikalStat.baikaldb_trace_info(`time`,`date`,`hour`,`min`,"
+                      "`sum`,`count`,`avg`,`affected_rows`,`scan_rows`,`filter_rows`,`sign`, "
+                      "`hostname`,`index_name`,`family`,`tbl`,`resource_tag`,`op_type`,`plat`, "
+                      "`op_version`,`op_desc`,`err_count`, `region_count`) VALUES ";
+    sql += values;
+    int ret = 0;
+    int retry = 0;
+    do {
+        ret = _baikaldb->query(0, sql, &result_set);
+        if (ret == 0) {
+            break;
+        }
+        bthread_usleep(1000000);
+    }while (++retry < 20);
+
+    if (ret != 0) {
+        DB_FATAL("sql_len:%lu query fail : %s", sql.size(), sql.c_str());
+        sql += ";\n";
+        return -1;
+    }
+    DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
+              result_set.get_affected_rows(), cost.get_time(), sql.size(), sql.c_str());
+    return 0;
+}
+
+int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map) {
+    static TimeCost cost;
+
+    // 新签名可能最长20分钟无法写入
+    if (cost.get_time() < (FLAGS_batch_insert_sign_sql_interval_us + butil::fast_rand() % FLAGS_batch_insert_sign_sql_interval_us)) {
+        return 0;
+    } 
+
+    std::string values;
+    int values_size = 0;
+    for (const auto& it : sign_sql_map) {
+        values_size++;
+        values += it.second + ",";
+        if (values_size >= FLAGS_batch_insert_agg_sql_size) {
+            values.pop_back();
+            insert_agg_sql_by_sign(values);
+            values_size = 0;
+            values.clear();
+        } 
+    }
+
+    if (values_size > 0) {
+        values.pop_back();
+        insert_agg_sql_by_sign(values);
+    }
+
+    cost.reset();
+    sign_sql_map.clear();
+    return 0;
+}
+
+int NetworkServer::insert_agg_sql_by_sign(const std::string& values) {
+    baikal::client::ResultSet result_set;
+    TimeCost cost;
+    // 构造sql
+    std::string sql = "REPLACE INTO BaikalStat.sign_family_table_sql(`sign`,`family`,`tbl`,`resource_tag`,"
+                      "`op_type`,`sql`) VALUES ";
+    sql += values;
+    int ret = 0;
+    int retry = 0;
+    do {
+        ret = _baikaldb->query(0, sql, &result_set);
+        if (ret == 0) {
+            break;
+        }
+        bthread_usleep(1000000);
+    }while (++retry < 20);
+
+    if (ret != 0) {
+        DB_FATAL("sql_len:%lu query fail : %s", sql.size(), sql.c_str());
+        sql += ";\n";
+        return -1;
+    }
+    DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
+              result_set.get_affected_rows(), cost.get_time(), sql.size(), sql.c_str());
+    return 0;
+}
+
 void NetworkServer::print_agg_sql() {
+    static std::map<uint64_t, std::string> sign_sql_map;
+    TimeCost cost;
     while (!_shutdown) {
+        int64_t last_cost = cost.get_time();
+        cost.reset();
         BvarMap sample = StateMachine::get_instance()->sql_agg_cost.reset();
         SchemaFactory* factory = SchemaFactory::get_instance();
         time_t timep;
@@ -289,36 +384,157 @@ void NetworkServer::print_agg_sql() {
         };
 
         std::map<int64_t, CountErr> table_count_err;
-        
+        int values_size = 0;
+        std::string sql_values;
+        if (FLAGS_insert_agg_sql) {
+            sql_values.reserve(4096);
+        }
+
         for (auto& pair : sample.internal_map) {
-            if (!pair.first.empty()) {
-                for (auto& pair2 : pair.second) {
-                    std::string hostname = FLAGS_hostname;
-                    if (hostname == "HOSTNAME") {
-                        hostname = butil::my_hostname();
-                        if (hostname == "") {
-                            DB_WARNING("get hostname failed");
-                        }
+            if (pair.first.empty()) {
+                continue;
+            }
+            for (auto& pair2 : pair.second) {
+                std::string hostname = FLAGS_hostname;
+                if (hostname == "HOSTNAME") {
+                    hostname = butil::my_hostname();
+                    if (hostname == "") {
+                        DB_WARNING("get hostname failed");
                     }
-                    uint64_t out[2];
-                    int64_t version;
-                    std::string op_description;
-                    factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
-                    std::string recommend_index = "-";
-                    std::string field_desc = "-";
-                    index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
-                    butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
-                    SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_err="
-                            "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] sql_agg: %s "
-                            "op_version_desc=[%ld\t%s\t%s\t%s]", 
-                        1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
-                        pair2.second.sum, pair2.second.count,
-                        pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
-                        pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows, pair2.second.err_count,
-                        out[0], hostname.c_str(), factory->get_index_name(pair2.first).c_str(), pair.first.c_str(),  
-                        version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str());
-                    table_count_err[pair2.second.table_id] += CountErr(pair2.second.count, pair2.second.err_count);
                 }
+                uint64_t out[2];
+                int64_t version;
+                std::string op_description;
+                factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
+                std::string recommend_index = "-";
+                std::string field_desc = "-";
+                index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
+                butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
+                std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(out[0]);
+                int64_t dynamic_timeout_ms = -1;
+                if (sql_info == nullptr) {
+                    sql_info = factory->create_sql_stat(out[0]);
+                }
+                if (sql_info != nullptr) {
+                    int64_t last_cost_s = last_cost / 1000 / 1000;
+                    if (last_cost_s > 0) {
+                        sql_info->qps = pair2.second.count * 1.0 / last_cost_s;
+                    }
+                    if (pair2.second.count > 0) {
+                        sql_info->avg_scan_rows = pair2.second.scan_rows / pair2.second.count;
+                    }
+                    //只统计正常请求的平响
+                    if (pair2.second.count - pair2.second.err_count > 0) {
+                        sql_info->latency_us = (pair2.second.sum - pair2.second.err_sum) 
+                            / (pair2.second.count - pair2.second.err_count);
+                    }
+                    dynamic_timeout_ms = sql_info->dynamic_timeout_ms();
+                    SQL_TRACE("sign:%lu qps:%f avg_scan_rows:%ld scan_rows_9999:%ld "
+                            "latency_us:%ld latency_us_9999:%ld times:%ld dynamic_timeout_ms:%ld",
+                            out[0], sql_info->qps, sql_info->avg_scan_rows, sql_info->scan_rows_9999, sql_info->latency_us,
+                            sql_info->latency_us_9999, sql_info->times_avg_and_9999, dynamic_timeout_ms);
+                }
+                SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_rgcnt_err="
+                        "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] dynamic_timeout_ms:%ld sql_agg: %s "
+                        "op_version_desc=[%ld\t%s\t%s\t%s]",
+                    1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
+                    pair2.second.sum, pair2.second.count,
+                    pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
+                    pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
+                    pair2.second.region_count, pair2.second.err_count,
+                    out[0], hostname.c_str(), factory->get_index_name(pair2.first).c_str(), dynamic_timeout_ms, 
+                    pair.first.c_str(), version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str());
+                table_count_err[pair2.second.table_id] += CountErr(pair2.second.count, pair2.second.err_count);
+
+                if (FLAGS_insert_agg_sql) {
+                    if (values_size >= FLAGS_batch_insert_agg_sql_size) {
+                        sql_values.pop_back();
+                        if (insert_agg_sql(sql_values) < 0) {
+                            DB_WARNING("insert agg_sql: %s failed", sql_values.c_str());
+                        }
+                        if (insert_agg_sql_by_sign(sign_sql_map) < 0) {
+                            DB_WARNING("insert agg_sql_by_sign: %s failed", sql_values.c_str());
+                        }
+                        sql_values.clear();
+                        values_size = 0;
+                    }
+
+                    // pair.first 格式
+                    // family_table_tag_optype_plat=[" << stat_info->family << "\t"
+                    //             << stat_info->table << "\t" << resource_tag << "\t" << op_type << "\t"
+                    //             << FLAGS_log_plat_name << "] sql=[" << ctx->stmt << "]"
+
+                    // 解析 sql_agg，即key
+                    std::string sql_agg = pair.first.substr(pair.first.find_first_of('[') + 1);
+                    int pos = 0;
+                    std::string family = sql_agg.substr(0, sql_agg.find_first_of('\t'));
+                    pos += family.size() + 1;
+                    std::string tbl = sql_agg.substr(pos, sql_agg.find_first_of('\t', pos) - pos);
+                    pos += tbl.size() + 1;
+                    std::string resource_tag = sql_agg.substr(pos, sql_agg.find_first_of('\t', pos) - pos);
+                    pos += resource_tag.size() + 1;
+                    std::string op_type = sql_agg.substr(pos, sql_agg.find_first_of('\t', pos) - pos);
+                    pos += op_type.size() + 1;
+                    std::string plat = sql_agg.substr(pos, sql_agg.find_first_of(']', pos) - pos);
+                    pos = sql_agg.find_first_of('[') + 1;
+                    std::string sql_text = sql_agg.substr(pos, sql_agg.find_first_of(']', pos) - pos);
+                    sql_text = boost::replace_all_copy(sql_text, "'", "\\'");
+                    // 避免REPLACE INTO的执行发生递归
+                    if (family == "BaikalStat" && tbl == "baikaldb_trace_info" &&
+                        sql_text.find("REPLACE") != std::string::npos) {
+                        continue;
+                    }
+
+                    // time
+                    char time_str[40];
+                    snprintf(time_str, 40, "%04d-%02d-%02d %02d:%02d:%02d:%03d",
+                             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, 0);
+                    sql_values += "('" + std::string(time_str) + "',";                 // time: 06-02 14:33:10:063
+                    snprintf(time_str, 40, "%02d-%02d-%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+                    sql_values += "'" + std::string(time_str) + "',";                  // date: 2021-06-02
+                    snprintf(time_str, 40, "%02d", tm.tm_hour);
+                    sql_values += "'" + std::string(time_str) + "',";
+                    snprintf(time_str, 40, "%02d", tm.tm_min);
+                    sql_values += "'" + std::string(time_str) + "',";
+                    sql_values += "'" + std::to_string(pair2.second.sum) + "',";
+                    sql_values += "'" + std::to_string(pair2.second.count) + "',";
+                    sql_values += "'" +
+                                  std::to_string(pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count) +
+                                  "',";
+                    sql_values += "'" + std::to_string(pair2.second.affected_rows) + "',";
+                    sql_values += "'" + std::to_string(pair2.second.scan_rows) + "',";
+                    sql_values += "'" + std::to_string(pair2.second.filter_rows) + "',";
+                    sql_values += "'" + std::to_string(out[0]) + "',";
+                    sql_values += "'" + hostname + "',";
+                    sql_values += "'" + factory->get_index_name(pair2.first) + "',";
+                    sql_values += "'" + family + "',";
+                    sql_values += "'" + tbl + "',";
+                    sql_values += "'" + resource_tag + "',";
+                    sql_values += "'" + op_type + "',";
+                    sql_values += "'" + plat + "',";
+                    sql_values += "'" + std::to_string(version) + "',";
+                    sql_values += "'" + op_description + "',";
+                    sql_values += "'" + std::to_string(pair2.second.err_count) + "',";
+                    sql_values += "'" + std::to_string(pair2.second.region_count) + "'),";
+
+                    std::string sign_sql_value = "('" + std::to_string(out[0]) + "',";
+                    sign_sql_value += "'" + family + "',";
+                    sign_sql_value += "'" + tbl + "',";
+                    sign_sql_value += "'" + resource_tag + "',";
+                    sign_sql_value += "'" + op_type + "',";
+                    sign_sql_value += "'" + sql_text + "')";
+                    sign_sql_map[out[0]] = sign_sql_value;
+                    ++values_size;
+                }
+            }
+        }
+        if (FLAGS_insert_agg_sql && values_size > 0) {
+            sql_values.pop_back();
+            if (insert_agg_sql(sql_values) < 0) {
+                DB_WARNING("insert agg_sql: %s failed", sql_values.c_str());
+            }
+            if (insert_agg_sql_by_sign(sign_sql_map) < 0) {
+                DB_WARNING("insert agg_sql_by_sign: %s failed", sql_values.c_str());
             }
         }
         for (auto& pair : table_count_err) {
@@ -360,7 +576,7 @@ static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
         if (old_status == pb::NORMAL) {
             new_status = pb::FAULTY;
         }
-        SchemaFactory::get_instance()->update_instance(addr, new_status);
+        SchemaFactory::get_instance()->update_instance(addr, new_status, false);
     }
 }
 
@@ -385,7 +601,10 @@ void NetworkServer::store_health_check() {
             brpc::ChannelOptions option;
             option.max_retry = 1;
             option.connect_timeout_ms = 1000;
-            option.timeout_ms = 2000;
+            option.timeout_ms = FLAGS_health_check_timeout_ms;
+            if (old_status != pb::NORMAL) {
+                option.timeout_ms = FLAGS_health_check_timeout_ms / 2;
+            }
             int ret = channel.Init(addr.c_str(), &option);
             if (ret != 0) {
                 DB_WARNING("init failed, addr:%s, ret:%d", addr.c_str(), ret);
@@ -629,6 +848,20 @@ bool NetworkServer::init() {
         }        
     }
     DB_WARNING("get instance_id: %lu", _instance_id);
+    // for print_agg_sql
+    if (FLAGS_insert_agg_sql) {
+        int rc = 0;
+        rc = _manager.init("conf", "baikal_client.conf");
+        if (rc != 0) {
+            DB_FATAL("baikal client init fail:%d", rc);
+            return false;
+        }
+        _baikaldb = _manager.get_service("baikaldb");
+        if (_baikaldb == NULL) {
+            DB_FATAL("baikaldb is null");
+            return false;
+        }
+    }
     _is_init = true;
     return true;
 }

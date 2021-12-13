@@ -18,15 +18,15 @@
 
 namespace baikaldb {
 
-DEFINE_int64(memory_gc_interval_s, 10, "mempry GC interval , defalut: 10s");
-DEFINE_int64(memory_stats_interval_s, 60, "mempry GC interval , defalut: 60s");
-DEFINE_int64(memory_free_rate, 20, "mempry free rate , defalut: 20");
-DEFINE_int64(min_memory_use_size, 8589934592, "minimum memory use size , defalut: 8G");
-DEFINE_int64(min_memory_free_size_to_release, 2147483648, "minimum memory free size to release, defalut: 2G");
-DEFINE_int64(mem_tracker_gc_interval_s, 60, "do memory limit when row number more than #, defalut: 60");
+DEFINE_int64(memory_gc_interval_s, 10, "mempry GC interval , default: 10s");
+DEFINE_int64(memory_stats_interval_s, 60, "mempry GC interval , default: 60s");
+DEFINE_int64(memory_free_rate, 20, "mempry free rate , default: 20");
+DEFINE_int64(min_memory_use_size, 8589934592, "minimum memory use size , default: 8G");
+DEFINE_int64(min_memory_free_size_to_release, 2147483648, "minimum memory free size to release, default: 2G");
+DEFINE_int64(mem_tracker_gc_interval_s, 60, "do memory limit when row number more than #, default: 60");
 
 void MemoryGCHandler::memory_gc_thread() {
-    char stats_buffer[16000] = {0};
+    char stats_buffer[1000] = {0};
     TimeCost stats_cost;
     while (!_shutdown) {
         size_t used_size = 0;
@@ -56,10 +56,9 @@ void MemoryGCHandler::memory_gc_thread() {
         size_t alloc_size = used_size + free_size;
 
         if ((int64_t)alloc_size > FLAGS_min_memory_use_size) {
-            size_t max_free_size = alloc_size * FLAGS_memory_free_rate / 100;
-            if (free_size > max_free_size && (free_size - max_free_size > FLAGS_min_memory_free_size_to_release)) {
-                MallocExtension::instance()->ReleaseToSystem(free_size - max_free_size);
-                DB_WARNING("tcmalloc release memory size: %ld cast: %ld", free_size - max_free_size, cost.get_time());
+            if (free_size > FLAGS_min_memory_free_size_to_release) {
+                MallocExtension::instance()->ReleaseFreeMemory();
+                DB_WARNING("tcmalloc release memory size: %ld cast: %ld", free_size, cost.get_time());
             }
         }
         bthread_usleep_fast_shutdown(FLAGS_memory_gc_interval_s * 1000 * 1000LL, _shutdown);

@@ -16,9 +16,9 @@
 #include "qos.h"
 
 namespace baikaldb {
+DEFINE_int32(rocksdb_cost_sample, 100, "rocksdb_cost_sample");
 
 namespace myrocksdb {
-DEFINE_int32(rocksdb_cost_sample, 100, "rocksdb_cost_sample");
 
 void Iterator::Seek(const rocksdb::Slice& target) {
     QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();

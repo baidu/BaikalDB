@@ -37,13 +37,15 @@ typedef std::shared_ptr<Region> SmartRegion;
 
 struct IteratorContext {
     bool reading = false;
+    bool is_meta_sst = false;
+    bool done = false;
     std::unique_ptr<rocksdb::Iterator> iter;
     std::string prefix;
     std::string upper_bound;
     rocksdb::Slice upper_bound_slice;
-    bool is_meta_sst = false;
     int64_t offset = 0;
-    bool done = false;
+    int64_t snapshot_index = 0;
+    int64_t applied_index = 0;
 };
 
 struct SnapshotContext {

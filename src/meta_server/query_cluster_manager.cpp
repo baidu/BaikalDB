@@ -254,6 +254,41 @@ void QueryClusterManager::get_region_ids(const pb::QueryRequest* request,
         response->add_peer_ids(peer_id);
     } 
 }
+
+void QueryClusterManager::get_network_segment(const pb::QueryRequest* request,
+                              pb::QueryResponse* response) {
+
+    if (!request->has_resource_tag()) {
+        response->set_errcode(pb::INPUT_PARAM_ERROR);
+        response->set_errmsg("input has no resource_tag");
+        return;
+    }
+    ClusterManager* manager = ClusterManager::get_instance();
+    auto get_network_segment_per_resource_tag = [this, manager, response](std::string resource_tag) {
+        if (manager->_resource_tag_instances_by_network.find(resource_tag) ==
+            manager->_resource_tag_instances_by_network.end()) {
+            return;
+        }
+        for (auto& network_segment_to_instances : manager->_resource_tag_instances_by_network[resource_tag]) {
+            for (auto& instance : network_segment_to_instances.second) {
+                auto info = response->add_instance_infos();
+                info->set_resource_tag(resource_tag);
+                info->set_address(instance);
+                info->set_network_segment(network_segment_to_instances.first + "/" +
+                                          std::to_string(network_segment_to_instances.first.size()));
+            }
+        } 
+    };
+    BAIDU_SCOPED_LOCK(manager->_instance_mutex);
+    if (!request->has_resource_tag() || request->resource_tag().empty()) {
+        for(auto& resource_tag_pair : manager->_resource_tag_instances_by_network) {
+            get_network_segment_per_resource_tag(resource_tag_pair.first); 
+        }
+    } else {
+        get_network_segment_per_resource_tag(request->resource_tag());
+    }
+}
+
 void QueryClusterManager::mem_instance_to_pb(const Instance& instance_mem, pb::InstanceInfo* instance_pb) {
     instance_pb->set_address(instance_mem.address);
     instance_pb->set_capacity(instance_mem.capacity);
@@ -267,11 +302,16 @@ void QueryClusterManager::get_region_ids_per_instance(
                     const std::string& instance,
                     std::set<int64_t>& region_ids) {
     ClusterManager* manager = ClusterManager::get_instance();
-    BAIDU_SCOPED_LOCK(manager->_instance_mutex);
-    if (manager->_instance_regions_map.find(instance) == manager->_instance_regions_map.end()) {
+    DoubleBufferedSchedulingInfo ::ScopedPtr info_iter;
+    if (manager->_scheduling_info.Read(&info_iter) != 0) {
+        DB_WARNING("read double_buffer_table error.");
         return;
     }
-    for (auto& table_regions : manager->_instance_regions_map[instance]) {
+    auto instance_region_map_iter = info_iter->find(instance);
+    if (instance_region_map_iter == info_iter->end()) {
+        return;
+    }
+    for (auto& table_regions : instance_region_map_iter->second.regions_map) {
         for (auto& region_id : table_regions.second) {
             region_ids.insert(region_id);
         }
@@ -282,12 +322,16 @@ void QueryClusterManager::get_region_count_per_instance(
             const std::string& instance,
             int64_t& count) {
     ClusterManager* manager = ClusterManager::get_instance();
-    BAIDU_SCOPED_LOCK(manager->_instance_mutex);
-    if (manager->_instance_regions_map.find(instance) == manager->_instance_regions_map.end()) {
-        count = 0;
+    DoubleBufferedSchedulingInfo::ScopedPtr info_iter;
+    if (manager->_scheduling_info.Read(&info_iter) != 0) {
+        DB_WARNING("read double_buffer_table error.");
         return;
     }
-    for (auto& table_regions : manager->_instance_regions_map[instance]) {
+    auto instance_region_map_iter = info_iter->find(instance);
+    if (instance_region_map_iter == info_iter->end()) {
+        return;
+    }
+    for (auto& table_regions : instance_region_map_iter->second.regions_map) {
         count += table_regions.second.size(); 
     }
 }

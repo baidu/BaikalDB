@@ -18,10 +18,10 @@
 
 namespace baikaldb {
 
-class GlobalDDLManagerNode : public DmlManagerNode {
+class IndexDDLManagerNode : public DmlManagerNode {
 public:
-    GlobalDDLManagerNode();
-    virtual ~GlobalDDLManagerNode();
+    IndexDDLManagerNode();
+    virtual ~IndexDDLManagerNode();
 
     virtual int open(RuntimeState* state);
     void set_table_id(int64_t table_id) {
@@ -31,19 +31,19 @@ public:
         _index_id = index_id;
     }
 
-    void set_region_infos(std::map<int64_t, pb::RegionInfo> region_infos) {
-        _region_infos.swap(region_infos);
-    }
-
     void set_task_id(const std::string& task_id) {
         _task_id = task_id;
+    }
+
+    void set_is_global_index(bool flags) {
+        _is_global_index = flags;
     }
 
 private:
     FetcherStore    _fetcher_store;
     int64_t _table_id {0};
     int64_t _index_id {0};
-    std::map<int64_t, pb::RegionInfo> _region_infos;
     std::string _task_id;
+    bool _is_global_index = false;
 };
 } // namespace  baikaldbame

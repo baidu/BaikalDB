@@ -41,6 +41,7 @@ public:
             // un-expected case since infinite retry of commit after prepare
             DB_WARNING("TransactionError: rollback failed. txn_id: %lu log_id:%lu",
                     state->txn_id, state->log_id());
+            client_conn->on_commit_rollback();
             return -1;
         }
         uint64_t old_txn_id = client_conn->txn_id;

@@ -90,19 +90,16 @@ void MetaStateMachine::store_heartbeat(google::protobuf::RpcController* controll
     SchemaManager::get_instance()->process_leader_heartbeat_for_store(request, response, log_id);
     int64_t leader_time = step_time_cost.get_time();
     step_time_cost.reset();
-
-    TableManager::get_instance()->process_ddl_heartbeat_for_store(request, response, log_id);
-    int64_t ddlwork_time = step_time_cost.get_time();
     _store_heart_beat << time_cost.get_time();
     DB_DEBUG("store_heart_beat req[%s]", request->DebugString().c_str());
     DB_DEBUG("store_heart_beat resp[%s]", response->DebugString().c_str());
 
     DB_NOTICE("store:%s heart beat, time_cost: %ld, "
                 "instance_time: %ld, peer_balance_time: %ld, schema_time: %ld,"
-                " peer_time: %ld, leader_time: %ld, ddlwork_time: %ld, log_id: %lu", 
+                " peer_time: %ld, leader_time: %ld, log_id: %lu", 
                 request->instance_info().address().c_str(),
                 time_cost.get_time(),
-                instance_time, peer_balance_time, schema_time, peer_time, leader_time, ddlwork_time, log_id);
+                instance_time, peer_balance_time, schema_time, peer_time, leader_time, log_id);
 }
 
 void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* controller,
@@ -131,7 +128,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     });
     int ret = Concurrency::get_instance()->baikal_heartbeat_concurrency.increase_timed_wait(10 * 1000 * 1000LL);
     if (ret != 0) {
-        DB_FATAL("baikaldb:%s time_cost: %ld, log_id: %ld",
+        DB_FATAL("baikaldb:%s time_cost: %ld, log_id: %lu",
                 butil::endpoint2str(cntl->remote_side()).c_str(),
                 time_cost.get_time(),
                 log_id);
@@ -154,14 +151,14 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     int64_t schema_time = step_time_cost.get_time();
     step_time_cost.reset();
     DBManager::get_instance()->process_baikal_heartbeat(request, response, cntl);
-    int64_t global_ddl_time = step_time_cost.get_time();
+    int64_t ddl_time = step_time_cost.get_time();
     step_time_cost.reset();
     _baikal_heart_beat << time_cost.get_time();
     DB_NOTICE("baikaldb:%s heart beat, wait_time:%ld, time_cost: %ld, cluster_time: %ld, "
-                "privilege_time: %ld, schema_time: %ld, global_ddl_time: %ld, log_id: %lu", 
+                "privilege_time: %ld, schema_time: %ld, ddl_time: %ld, log_id: %lu", 
                 butil::endpoint2str(cntl->remote_side()).c_str(),
                 wait_time, time_cost.get_time(),
-                cluster_time, privilege_time, schema_time, global_ddl_time,
+                cluster_time, privilege_time, schema_time, ddl_time,
                 log_id);
 }
 
@@ -447,8 +444,15 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->set_index_hint_status(request, iter.index(), done);
             break;
         }
-
-        case pb::OP_UPDATE_GLOBAL_REGION_DDL_WORK: 
+        case pb::OP_ADD_LEARNER: {
+            TableManager::get_instance()->add_learner(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_DROP_LEARNER: {
+            TableManager::get_instance()->drop_learner(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_UPDATE_INDEX_REGION_DDL_WORK: 
         case pb::OP_SUSPEND_DDL_WORK:
         case pb::OP_RESTART_DDL_WORK: {
             DDLManager::get_instance()->raft_update_info(request, iter.index(), done);
@@ -468,14 +472,6 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             braft::run_closure_in_bthread(done_guard.release());
         }
     }
-}
-
-int64_t MetaStateMachine::snapshot_index(std::string& snapshot_path) {
-    butil::FilePath path(snapshot_path);
-    int64_t index = 0;
-    int ret = sscanf(path.BaseName().value().c_str(), "snapshot_%020ld", &index);
-    CHECK_EQ(ret, 1);
-    return index;
 }
 
 void MetaStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
@@ -579,7 +575,7 @@ int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
         DB_WARNING("snapshot load file:%s", file.c_str());
         if (file == "/meta_info.sst") {
             std::string snapshot_path = reader->get_path();
-            _applied_index = snapshot_index(snapshot_path);
+            _applied_index = parse_snapshot_index_from_path(snapshot_path, false);
             DB_WARNING("_applied_index:%ld path:%s", _applied_index, snapshot_path.c_str());
             snapshot_path.append("/meta_info.sst");
         
@@ -674,6 +670,7 @@ void MetaStateMachine::on_leader_stop() {
         DB_WARNING("healthy check bthread join");
     }
     RegionManager::get_instance()->clear_region_peer_state_map();
+    RegionManager::get_instance()->clear_region_learner_peer_state_map();
     DB_WARNING("leader stop");
     CommonStateMachine::on_leader_stop();
     DBManager::get_instance()->clear_all_tasks();
@@ -681,6 +678,8 @@ void MetaStateMachine::on_leader_stop() {
     TableManager::get_instance()->on_leader_stop();
 }
 
+// 只有store需要peer load balance才会上报所有的peer信息
+// 同时meta才会更新内存中的_instance_regions_map, _instance_regions_count_map
 bool MetaStateMachine::whether_can_decide() {
     return _node.is_leader() &&
             ((butil::gettimeofday_us()- _leader_start_timestmap) >

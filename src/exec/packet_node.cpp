@@ -324,7 +324,6 @@ int PacketNode::open(RuntimeState* state) {
         }
     }
     _send_buf = state->send_buf();
-    _wrapper = MysqlWrapper::get_instance();
     int ret = 0;
     if (!_return_empty || op_type() == pb::OP_SELECT) {
         ret = ExecNode::open(state);
@@ -332,6 +331,16 @@ int PacketNode::open(RuntimeState* state) {
             DB_WARNING("ExecNode::open fail:%d", ret);
             return ret;
         }
+    }
+    for (auto expr : _projections) {
+        ret = expr->open();
+        if (ret < 0) {
+            DB_WARNING("Expr::open fail:%d", ret);
+            return ret;
+        }
+    }
+    if (state->is_expr_subquery()) {
+        return fatch_expr_subquery_results(state);
     }
     if (_is_explain && state->explain_type == EXPLAIN_NULL) {
         handle_explain(state);
@@ -349,13 +358,6 @@ int PacketNode::open(RuntimeState* state) {
         pack_ok(state->num_affected_rows(), _client);
         return 0;
     }
-    for (auto expr : _projections) {
-        ret = expr->open();
-        if (ret < 0) {
-            DB_WARNING("Expr::open fail:%d", ret);
-            return ret;
-        }
-    }
 
     if (_trace != nullptr) {
         return open_trace(state);
@@ -367,9 +369,6 @@ int PacketNode::open(RuntimeState* state) {
         return open_histogram(state);
     } else if (state->explain_type == SHOW_CMSKETCH) {
         return open_cmsketch(state);
-    }
-    if (state->is_expr_subquery()) {
-        return fatch_expr_subquery_results(state);
     }
 
     pack_head();

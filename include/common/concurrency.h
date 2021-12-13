@@ -19,7 +19,6 @@ namespace baikaldb {
 DECLARE_int32(snapshot_load_num);
 DECLARE_int32(raft_write_concurrency);
 DECLARE_int32(service_write_concurrency);
-DECLARE_int32(ddl_work_concurrency);
 DECLARE_int32(baikal_heartbeat_concurrency);
 
 struct Concurrency {
@@ -29,19 +28,17 @@ struct Concurrency {
     }
     //全局做snapshot_load的并发控制
     BthreadCond snapshot_load_concurrency;
-    BthreadCond init_region_concurrency;
+    BthreadCond recieve_add_peer_concurrency;
     BthreadCond add_peer_concurrency;
     BthreadCond raft_write_concurrency;
     BthreadCond service_write_concurrency;
-    BthreadCond ddl_work_concurrency;
     BthreadCond baikal_heartbeat_concurrency;
 private:
     Concurrency(): snapshot_load_concurrency(-FLAGS_snapshot_load_num), 
-                   init_region_concurrency(-FLAGS_snapshot_load_num), 
+                   recieve_add_peer_concurrency(-FLAGS_snapshot_load_num), 
                    add_peer_concurrency(-FLAGS_snapshot_load_num), 
                    raft_write_concurrency(-FLAGS_raft_write_concurrency), 
                    service_write_concurrency(-FLAGS_service_write_concurrency),
-                   ddl_work_concurrency(-FLAGS_ddl_work_concurrency),
                    baikal_heartbeat_concurrency(-FLAGS_baikal_heartbeat_concurrency) {
                    }
 };

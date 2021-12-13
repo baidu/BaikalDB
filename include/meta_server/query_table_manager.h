@@ -15,7 +15,6 @@
 #pragma once
 
 #include "table_manager.h"
-
 namespace baikaldb {
 class QueryTableManager {
 public:
@@ -37,7 +36,7 @@ public:
             pb::ConsoleHeartBeatResponse* response, uint64_t log_id);
 
     void get_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response);    
-
+    void get_virtual_index_influence_info(const pb::QueryRequest* request, pb::QueryResponse* response);
 private:
     QueryTableManager() {}
     void check_table_and_update(

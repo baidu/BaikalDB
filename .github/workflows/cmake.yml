@@ -11,7 +11,7 @@ jobs:
     - name: Cache cmake modules
       uses: actions/cache@v2
       with:
-        key: cmake-buildenv2
+        key: cmake-buildenv3
         path: |
            buildenv
     - name: Install Dependencies

@@ -54,8 +54,9 @@ static std::unordered_map<int, std::string> FUNC_STR_MAP = {
     {FT_IN, "IN"},
     {FT_LIKE, "LIKE"},
     {FT_EXACT_LIKE, "EXACT_LIKE"},
+    {FT_REGEXP, "REGEXP"},
     {FT_BETWEEN, "BETWEEN"},
-    {FT_VALUES, "values"}
+    {FT_VALUES, "VALUES"}
 };
 
 static std::unordered_map<int, const char*> FUNC_FN_NAME_MAP = {
@@ -95,6 +96,7 @@ static std::unordered_map<int, const char*> FUNC_FN_NAME_MAP = {
     {FT_IN, "in"},
     {FT_LIKE, "like"},
     {FT_EXACT_LIKE, "exact_like"},
+    {FT_REGEXP, "regexp"},
     {FT_MATCH_AGAINST, "match_against"},
     {FT_BETWEEN, "between"}
 };
@@ -224,6 +226,9 @@ void FuncExpr::to_stream(std::ostream& os) const {
             break;
         case FT_EXACT_LIKE:
             os << children[0] << not_str[is_not] << " EXACT_LIKE " << children[1]; 
+            break;
+        case FT_REGEXP:
+            os << children[0] << not_str[is_not] << " REGEXP " << children[1]; 
             break;
         case FT_MATCH_AGAINST:
             os << "MATCH" << children[0] << " AGAINST " << "(" << children[1] << " " << children[2] << ")"; 

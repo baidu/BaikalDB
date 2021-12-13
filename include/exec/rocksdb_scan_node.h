@@ -96,8 +96,8 @@ private:
     int get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos);
     int lock_primary(RuntimeState* state, MemRow* row);
+    int index_ddl_work(RuntimeState* state, MemRow* row);
     int choose_index(RuntimeState* state);
-    int select_index_for_store();
 
     int multi_get_next(pb::StorageType st, SmartRecord record) {
         if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
@@ -115,7 +115,6 @@ private:
         }
         return false;
     }
-    int choose_arrow_pb_reverse_index(const pb::ScanNode& node);
 
     int memory_limit_exceeded(RuntimeState* state, RowBatch* batch);
 
@@ -130,6 +129,8 @@ private:
     int64_t _index_id = -1;
     int64_t _region_id;
     bool _use_get = false;
+    bool _is_ddl_work = false;
+    int64_t _ddl_index_id = -1;
 
     //record all used indices here (LIKE & MATCH may use multiple indices)
     std::vector<int64_t> _index_ids;
@@ -158,6 +159,7 @@ private:
     SmartTable       _table_info;
     SmartIndex       _pri_info;
     SmartIndex       _index_info;
+    SmartIndex       _ddl_index_info;
     pb::RegionInfo*  _region_info;
     std::vector<IndexInfo> _reverse_infos;
     std::vector<std::string> _query_words;

@@ -64,7 +64,7 @@ int TSOStateMachine::init(const std::vector<braft::PeerId>& peers) {
     options.snapshot_interval_s = FLAGS_tso_snapshot_interval_s;
     options.log_uri = FLAGS_log_uri + std::to_string(_dummy_region_id);
     //options.stable_uri = FLAGS_stable_uri + "/meta_server";
-#if BAIDU_INTERNAL
+#ifdef BAIDU_INTERNAL
     options.stable_uri = FLAGS_stable_uri + _file_path;                      
 #else
     options.raft_meta_uri = FLAGS_stable_uri + _file_path;                      

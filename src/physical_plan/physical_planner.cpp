@@ -149,8 +149,10 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     ctx->root->close(&state);
     if (ret < 0) {
         DB_WARNING("plan open fail: %d, %s", state.error_code, state.error_msg.str().c_str());
-         ctx->stat_info.error_code = state.error_code;
-         ctx->stat_info.error_msg.str(state.error_msg.str());
+        ctx->stat_info.error_code = state.error_code;
+        ctx->stat_info.error_msg.str(state.error_msg.str());
+        ctx->stat_info.region_count = state.region_count;
+        ctx->stat_info.num_scan_rows = state.num_scan_rows();
         return ret;
     }
     ctx->stat_info.num_returned_rows = state.num_returned_rows();
@@ -158,6 +160,7 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     ctx->stat_info.num_scan_rows = state.num_scan_rows();
     ctx->stat_info.num_filter_rows = state.num_filter_rows();
     ctx->stat_info.error_code = state.error_code;
+    ctx->stat_info.region_count = state.region_count;
     
     return 0;
 }
@@ -205,6 +208,7 @@ int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, b
         ctx->stat_info.num_filter_rows = state.num_filter_rows();
         ctx->stat_info.error_code = state.error_code;
         ctx->stat_info.error_msg.str(state.error_msg.str());
+        ctx->stat_info.region_count = state.region_count;
     }
     return 0;            
 }

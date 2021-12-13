@@ -19,7 +19,6 @@
 #include "transaction.h"
 
 namespace baikaldb {
-DECLARE_int32(transaction_clear_delay_ms);
 //class Region;
 class Region;
 class MetaWriter;
@@ -36,7 +35,7 @@ public:
 
     TransactionPool() : _num_prepared_txn(0), _txn_count(0) {}
 
-    int init(int64_t region_id, bool use_ttl);
+    int init(int64_t region_id, bool use_ttl, int64_t online_ttl_base_expire_time_us);
 
     // -1 means insert error (already exists)
     int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id, int64_t txn_timeout = 0);
@@ -77,18 +76,33 @@ public:
         return _use_ttl;
     }
 
+    int64_t online_ttl_base_expire_time_us() const {
+        return _online_ttl_base_expire_time_us;
+    }
+
+    void update_ttl_info(bool use_ttl, int64_t online_ttl_base_expire_time_us) {
+        _use_ttl = use_ttl;
+        _online_ttl_base_expire_time_us = online_ttl_base_expire_time_us;
+    }
+
+    bool exec_1pc_out_fsm();
+
     void clear_transactions(Region* region);
 
     void on_leader_stop_rollback();
 
     void clear_orphan_transactions();
 
+    void rollback_txn_before(int64_t txn_timeout);
+
+    void update_primary_timestamp(const pb::TransactionInfo& txn_info);
+
     void get_prepared_txn_info(std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn, bool for_num_rows);
 
     void update_txn_num_rows_after_split(const std::vector<pb::TransactionInfo>& txn_infos);
 
     void txn_query_primary_region(SmartTransaction txn, Region* region, pb::RegionInfo& region_info);
-    bool txn_commit_through_raft(SmartTransaction txn, pb::RegionInfo& region_info, pb::OpType op_type);
+    void txn_commit_through_raft(SmartTransaction txn, pb::RegionInfo& region_info, pb::OpType op_type);
     void get_txn_state(const pb::StoreReq* request, pb::StoreRes* response);
     void read_only_txn_process(int64_t region_id, SmartTransaction txn, pb::OpType op_type, bool optimize_1pc);
     int get_region_info_from_meta(int64_t region_id, pb::RegionInfo& region_info);
@@ -96,7 +110,9 @@ public:
     void clear();
 private:
     int64_t _region_id = 0;
+    int64_t _latest_active_txn_ts = 0;
     bool _use_ttl = false;
+    int64_t _online_ttl_base_expire_time_us = 0;
 
     // txn_id => txn handler mapping
     ThreadSafeMap<uint64_t, SmartTransaction>  _txn_map;

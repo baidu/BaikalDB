@@ -36,6 +36,7 @@ int InsertPlanner::plan() {
     insert->set_is_replace(_insert_stmt->is_replace);
     if (_ctx->row_ttl_duration > 0) {
         insert->set_row_ttl_duration(_ctx->row_ttl_duration);
+        DB_DEBUG("row_ttl_duration: %ld", _ctx->row_ttl_duration);
     }
     
     // parse db.table in insert SQL

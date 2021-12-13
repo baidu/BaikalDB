@@ -67,7 +67,6 @@ public:
 
     virtual void on_leader_stop();
 
-    int64_t snapshot_index(std::string& snapshot_path);
     int64_t applied_index() { return _applied_index; }
 
     //经过3个周期后才可以做决策
@@ -105,6 +104,22 @@ public:
         }
         return _global_migrate;
     }
+    void set_global_network_segment_balance(bool open) {
+        BAIDU_SCOPED_LOCK(_param_mutex);
+        _global_network_balance = open;
+        _resource_network_balance.clear();
+    }
+    void set_network_segment_balance(const std::string& resource_tag, bool open) {
+        BAIDU_SCOPED_LOCK(_param_mutex);
+        _resource_network_balance[resource_tag] = open;
+    }
+    bool get_network_segment_balance(const std::string& resource_tag) {
+        BAIDU_SCOPED_LOCK(_param_mutex);
+        if (_resource_network_balance.find(resource_tag) != _resource_network_balance.end()) {
+            return _resource_network_balance[resource_tag];
+        }
+        return _global_network_balance;
+    }
     void set_unsafe_decision(bool open) {
         _unsafe_decision = open;
     }
@@ -126,6 +141,9 @@ private:
 
     bool _global_migrate = true;
     std::map<std::string, bool> _resource_migrate;
+
+    bool _global_network_balance = true;
+    std::map<std::string, bool> _resource_network_balance;
 
     bool _unsafe_decision = false;
     int64_t _applied_index = 0;

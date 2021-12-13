@@ -19,6 +19,7 @@
 #include "common.h"
 #include "meta_server.h"
 #include "cluster_manager.h"
+#include "proto/meta.interface.pb.h"
 
 namespace baikaldb {
 struct MemRegionDdlWork {
@@ -98,6 +99,7 @@ public:
         int64_t number = 0;
         task_ptr->work = work;
         MemDdlWork mem_ddlwork;
+        mem_ddlwork.update_timestamp = butil::gettimeofday_us();
         BAIDU_SCOPED_LOCK(_address_instance_mutex);
         for (const auto& instance_pair : _address_instance_map) {
             DB_NOTICE("insert txn task %s", instance_pair.first.c_str());
@@ -223,10 +225,10 @@ public:
     void set_meta_state_machine(MetaStateMachine* meta_state_machine) {
         _meta_state_machine = meta_state_machine;
     }
-    int init_global_ddlwork(int64_t table_id, int64_t index_id, 
+    int init_index_ddlwork(int64_t table_id, pb::IndexInfo& index_info, 
         std::unordered_map<int64_t, std::set<int64_t>>& partition_regions);
 
-    int init_del_global_ddlwork(int64_t table_id, int64_t index_id);
+    int init_del_index_ddlwork(int64_t table_id, const pb::IndexInfo& index_info);
     // 定时线程处理所有ddl work。
     int work();
 
@@ -234,7 +236,7 @@ public:
     int launch_work();
 
     //处理单个ddl work
-    int add_index_global_ddlwork(pb::DdlWorkInfo& val);
+    int add_index_ddlwork(pb::DdlWorkInfo& val);
 
     void join() {
         _work_thread.join();
@@ -244,7 +246,7 @@ public:
         _shutdown = true;
     }
 
-    int drop_index_global_ddlwork(pb::DdlWorkInfo& val);
+    int drop_index_ddlwork(pb::DdlWorkInfo& val);
     int load_table_ddl_snapshot(const pb::DdlWorkInfo& val);
     int load_region_ddl_snapshot(const std::string& info);
 
@@ -259,9 +261,9 @@ public:
             _wait_txns[table_id].done = true;
         }
     }
-    int delete_global_ddlwork_region_info(int64_t table_id);
-    int delete_global_ddlwork_info(int64_t table_id);
-    int update_global_ddlwork_region_info(const pb::RegionDdlWork& work);
+    int delete_index_ddlwork_region_info(int64_t table_id);
+    int delete_index_ddlwork_info(int64_t table_id);
+    int update_index_ddlwork_region_info(const pb::RegionDdlWork& work);
 
     int raft_update_info(const pb::MetaManagerRequest& request,
                             const int64_t apply_index,
@@ -270,12 +272,14 @@ public:
     int apply_raft(const pb::MetaManagerRequest& request);
 
     void delete_ddlwork(const pb::MetaManagerRequest& request, braft::Closure* done); 
-    void get_global_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response);    
+    void get_index_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response);    
 
     void clear_txn_info() {
         BAIDU_SCOPED_LOCK(_txn_mutex);
         _wait_txns.clear();
     }
+
+    void get_ddlwork_info(int64_t table_id, pb::QueryResponse* query_response);
 
     void on_leader_start();
 

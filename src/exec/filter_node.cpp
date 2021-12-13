@@ -45,7 +45,7 @@ int FilterNode::init(const pb::PlanNode& node) {
             //如何释放资源
             return ret;
         }
-        _conjuncts.push_back(conjunct);
+        _conjuncts.emplace_back(conjunct);
     }
     return 0;
 }
@@ -388,12 +388,12 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
                 int64_t sign = (slot_ref->tuple_id() << 16) + slot_ref->slot_id();
                 pred_map[sign].slot_ref = slot_ref;
                 if (expr->node_type() == pb::IN_PREDICATE) {
-                    pred_map[sign].in_preds.push_back(expr);
+                    pred_map[sign].in_preds.emplace_back(expr);
                 } else if (expr->node_type() == pb::FUNCTION_CALL) {
                     int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
                     switch (fn_op) {
                         case parser::FT_EQ:
-                            pred_map[sign].eq_preds.push_back(expr);
+                            pred_map[sign].eq_preds.emplace_back(expr);
                             break;
                         case parser::FT_GE:
                         case parser::FT_GT:
@@ -425,20 +425,20 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         }
         // TODO 整块剪枝逻辑挪到index selector
         if (expr->node_type() == pb::IN_PREDICATE) {
-            pred_map[sign].in_preds.push_back(expr);
+            pred_map[sign].in_preds.emplace_back(expr);
         } else if (expr->node_type() == pb::FUNCTION_CALL) {
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
             switch (fn_op) {
                 case parser::FT_EQ:
-                    pred_map[sign].eq_preds.push_back(expr);
+                    pred_map[sign].eq_preds.emplace_back(expr);
                     break;
                 case parser::FT_GE:
                 case parser::FT_GT:
-                    pred_map[sign].gt_ge_preds.push_back(expr);
+                    pred_map[sign].gt_ge_preds.emplace_back(expr);
                     break;
                 case parser::FT_LE:
                 case parser::FT_LT:
-                    pred_map[sign].lt_le_preds.push_back(expr);
+                    pred_map[sign].lt_le_preds.emplace_back(expr);
                     break;
                 default:
                     break;
@@ -498,7 +498,7 @@ int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
         return 0;
     }
     for (auto& expr : _conjuncts) {
-        input_exprs.push_back(expr);     
+        input_exprs.emplace_back(expr);     
     }
     if (_children.size() != 1) {
         DB_WARNING("filter node pushdown fail");
@@ -507,7 +507,7 @@ int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     _children[0]->predicate_pushdown(input_exprs);
     _conjuncts.clear();
     for (auto& expr: input_exprs) {
-        _conjuncts.push_back(expr);
+        _conjuncts.emplace_back(expr);
     }
     input_exprs.clear();
     return 0;
@@ -516,14 +516,14 @@ int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
 int FilterNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     
+    if (_return_empty) {
+        return 0;
+    }
     int ret = 0;
     ret = ExecNode::open(state);
     if (ret < 0) {
         DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
-    }
-    if (_return_empty) {
-        return 0;
     }
 
     std::vector<int64_t>& scan_indices = state->scan_indices();
@@ -538,7 +538,7 @@ int FilterNode::open(RuntimeState* state) {
             DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
-        _pruned_conjuncts.push_back(conjunct);
+        _pruned_conjuncts.emplace_back(conjunct);
     }
     return 0;
 }
@@ -570,6 +570,7 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     }));
     if (_return_empty) {
         DB_WARNING_STATE(state, "return_empty");
+        state->set_eos();
         *eos = true;
         return 0;
     }

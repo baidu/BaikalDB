@@ -23,10 +23,42 @@
 #include "slot_ref.h"
 
 namespace baikaldb {
+struct ExprValueVec {
+    std::vector<ExprValue> vec;
 
+    bool operator==(const ExprValueVec& other) const {
+        if (this->vec.size() != other.vec.size()) {
+            return false;
+        }
+
+        for (int i = 0; i < other.vec.size(); i++) {
+            int64_t c = other.vec[i].compare(this->vec[i]);
+            if (c != 0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    struct HashFunction {
+        size_t operator()(const ExprValueVec& ev_vec) const {
+            size_t offset = 0;
+            size_t hash = 0;
+            for (const auto& ev : ev_vec.vec) {
+                hash ^= (ev.hash() << offset);
+                offset++;
+            }
+
+            return hash;
+        }
+    };
+};
+using ExprValueSet = butil::FlatSet<ExprValueVec, ExprValueVec::HashFunction>;
 class Joiner : public ExecNode {
 public:
-    Joiner() : _child_eos(false) {
+    Joiner() : _child_eos(false) { 
+
     }
     virtual  ~Joiner() {
         for (auto& condition : _conditions) {
@@ -88,7 +120,7 @@ public:
     bool expr_is_equal_condition(ExprNode* expr);
     bool is_slot_ref_equal_condition(ExprNode* left, ExprNode* right);
     int construct_in_condition(std::vector<ExprNode*>& slot_refs,
-                                  std::vector<std::vector<ExprValue>>& in_values,
+                                  const ExprValueSet& in_values,
                                   std::vector<ExprNode*>& in_exprs);
     int fetcher_full_table_data(RuntimeState* state, ExecNode* child_node,
                             std::vector<MemRow*>& tuple_data);
@@ -122,7 +154,7 @@ protected:
     std::vector<ExprNode*> _inner_equal_slot;
 
     //从左边取到的等值条件的value
-    std::vector<std::vector<ExprValue>> _outer_join_values;
+    ExprValueSet _outer_join_values;
     
     std::vector<MemRow*> _outer_tuple_data;
     std::vector<MemRow*> _inner_tuple_data;

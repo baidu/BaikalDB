@@ -51,6 +51,16 @@ public:
         static Tokenizer _instance;
         return &_instance;
     }
+    enum class SeperateType : int8_t {
+        ST_MAJOR,
+        ST_MINOR
+    };
+
+    struct SeperateIndex {
+        SeperateIndex(size_t i, SeperateType t) : index(i), type(t) {}
+        size_t index;
+        SeperateType type;
+    };
     int init();
 
 #ifdef BAIDU_INTERNAL
@@ -59,10 +69,13 @@ public:
                 const std::string& word, 
                 OUT& s_output, IN& s_input);
     int wordrank(std::string word, std::map<std::string, float>& term_map);
-    int wordweight(std::string word, std::map<std::string, float>& term_map, bool is_filter = false);
+    int wordweight(std::string word, std::map<std::string, float>& term_map, 
+            bool is_filter = false, bool is_same_weight = false);
     int wordrank_q2b_icase(std::string word, std::map<std::string, float>& term_map);
+    int wordrank_q2b_icase_unlimit(std::string word, std::map<std::string, float>& term_map);
     int wordseg_basic(std::string word, std::map<std::string, float>& term_map);
 #endif
+    std::vector<SeperateIndex> q2b_tolower_gbk_with_index(std::string& word);
     int q2b_tolower_gbk(std::string& word);
     int es_standard_gbk(std::string word, std::map<std::string, float>& term_map);
     int simple_seg_gbk(std::string word, uint32_t word_count, std::map<std::string, float>& term_map);

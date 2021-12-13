@@ -264,7 +264,7 @@ bool AggFnCall::is_initialize(const std::string& key, MemRow* dst) {
 }
 
 // 聚合函数逻辑
-int AggFnCall::initialize(const std::string& key, MemRow* dst) {
+int AggFnCall::initialize(const std::string& key, int64_t& used_size, MemRow* dst) {
     ExprValue dst_val = dst->get_value(_tuple_id, _intermediate_slot_id);
     switch (_agg_type) {
         case COUNT_STAR:
@@ -303,7 +303,6 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                 auto& intermediate_val = _intermediate_val_map[key];
                 intermediate_val.val = hll::hll_row_init();
                 if (dst_val.is_null()) {
-                    
                     dst->set_value(_tuple_id, _intermediate_slot_id, hll::hll_row_init());
                 } else {
                     dst_val.cast_to(pb::HLL);
@@ -311,6 +310,7 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                     dst->set_value(_tuple_id, _intermediate_slot_id, intermediate_val.val);
                 }
                 intermediate_val.is_assign = true;
+                used_size += intermediate_val.val.size();
             }
             return 0;
         }
@@ -335,6 +335,7 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                     // and第一次需要特殊处理
                     intermediate_val.is_assign = true;
                 }
+                used_size += intermediate_val.val.size();
             }
             return 0;
         }
@@ -348,9 +349,11 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                 } else {
                     dst_val.cast_to(pb::TDIGEST);
                     intermediate_val.val = dst_val;
+                    tdigest::td_normallize(intermediate_val.val.str_val);
                     dst->set_value(_tuple_id, _intermediate_slot_id, dst_val);
                 }
                 intermediate_val.is_assign = true;
+                used_size += intermediate_val.val.size();
             }
             return 0;
         }

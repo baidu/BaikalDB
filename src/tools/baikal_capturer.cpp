@@ -372,7 +372,7 @@ int BinLogTransfer::transfer_mutation(const pb::TableMutation& mutation, RecordC
     }
     return 0;
 }
-#if BAIDU_INTERNAL
+#ifdef BAIDU_INTERNAL
 int Capturer::init(Json::Value& config) {
     if (!config.isMember("db_shard") || !config["db_shard"].isNumeric()) {
         DB_FATAL("config db_shard info error.");

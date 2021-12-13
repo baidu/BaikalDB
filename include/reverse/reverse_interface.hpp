@@ -244,6 +244,9 @@ int NewSchema<Node, List>::segment(
         case pb::S_WORDRANK_Q2B_ICASE: 
             ret = Tokenizer::get_instance()->wordrank_q2b_icase(word, term_map);
             break;
+        case pb::S_WORDRANK_Q2B_ICASE_UNLIMIT: 
+            ret = Tokenizer::get_instance()->wordrank_q2b_icase_unlimit(word, term_map);
+            break;
         case pb::S_WORDSEG_BASIC: 
             ret = Tokenizer::get_instance()->wordseg_basic(word, term_map);
             break;
@@ -252,6 +255,9 @@ int NewSchema<Node, List>::segment(
             break;
         case pb::S_WORDWEIGHT_NO_FILTER: 
             ret = Tokenizer::get_instance()->wordweight(word, term_map, false);
+            break;
+        case pb::S_WORDWEIGHT_NO_FILTER_SAME_WEIGHT: 
+            ret = Tokenizer::get_instance()->wordweight(word, term_map, false, true);
             break;
 #endif
         default:
@@ -276,6 +282,7 @@ template<typename Node, typename List>
 int NewSchema<Node, List>::create_executor(const std::string& search_data, 
     pb::MatchMode mode, pb::SegmentType segment_type) {
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
+    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
     //segment
     TimeCost timer;
     std::vector<std::string> or_search;
@@ -337,6 +344,9 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
             case pb::S_WORDRANK_Q2B_ICASE: 
                 ret = Tokenizer::get_instance()->wordrank_q2b_icase(or_item, term_map);
                 break;
+            case pb::S_WORDRANK_Q2B_ICASE_UNLIMIT: 
+                ret = Tokenizer::get_instance()->wordrank_q2b_icase_unlimit(or_item, term_map);
+                break;
             case pb::S_WORDSEG_BASIC: 
                 ret = Tokenizer::get_instance()->wordseg_basic(or_item, term_map);
                 break;
@@ -370,19 +380,26 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
         }
         if (term_map.size() == 1) {
             and_node->_type = TERM;
-            and_node->_term = term_map.begin()->first;
+            and_node->_term = term_map.begin()->first;               
+            _query_words = term_map.begin()->first;
         } else {
             for (auto& pair : term_map) {
                 auto sub_node = new ExecutorNode<ThisType>();
                 sub_node->_type = TERM;
                 sub_node->_term = pair.first;
                 and_node->_sub_nodes.push_back(sub_node);
+                _query_words += pair.first;
+                _query_words += ";";
             }
         }
         if (parent != nullptr) {
             parent->_sub_nodes.push_back(and_node);
         }
     }
+    if (_query_words.size() > 0 && _query_words.back() == ';') {
+        _query_words.pop_back();
+    }
+    DB_DEBUG("query_words : %s", _query_words.c_str());
     _statistic.segment_time += timer.get_time();
     timer.reset();
     _exe = logical_query.create_executor();
@@ -400,11 +417,19 @@ int NewSchema<Node, List>::next(SmartRecord record) {
     if (ret < 0) {
         return -1;
     }
-    if (_weight_field_id > 0) {
-        MessageHelper::set_float(record->get_field_by_tag(_weight_field_id),
-                record->get_raw_message(), reverse_node.weight());
+    try {
+        if (_weight_field_id > 0) {
+            MessageHelper::set_float(record->get_field_by_tag(_weight_field_id),
+                    record->get_raw_message(), reverse_node.weight());
+        }
+        if (_query_words_field_id > 0) {
+            DB_DEBUG("set querywords %s", _query_words.c_str());
+            MessageHelper::set_string(record->get_field_by_tag(_query_words_field_id),
+                    record->get_raw_message(), _query_words);
+        }
+    } catch (std::exception& exp) {
+        DB_FATAL("pack weight or query words expection %s", exp.what());
     }
-
     return 0;
 }
 } // end of namespace

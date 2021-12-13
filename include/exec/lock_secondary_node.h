@@ -26,12 +26,16 @@ public:
     virtual int open(RuntimeState* state);
     virtual void reset(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
+    void set_ttl_timestamp(const std::map<std::string, int64_t>& ttl_timestamp) {
+        _record_ttl_map = ttl_timestamp;
+    }
 private:
     int insert_global_index(RuntimeState* state, SmartRecord record);
     int delete_global_index(RuntimeState* state, SmartRecord record);
     int put_global_index(RuntimeState* state, SmartRecord record);
 
     pb::LockSecondaryType _lock_secondary_type = pb::LST_COMMON;
+    std::map<std::string, int64_t> _record_ttl_map; // ttl表增加全局二级索引时使用
 };
 }
 

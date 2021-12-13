@@ -35,6 +35,7 @@ enum Status {
     DEAD   = 3;
     MIGRATE= 4; // 迁移状态，该状态不能被改变，后续只能删除该实例
     FULL   = 5;
+    SLOW   = 6; // 同集群比其他实例慢很多
 };
 enum RegionStatus {
     IDLE = 1;
@@ -84,6 +85,7 @@ message PartitionInfo {
     optional int32 partition_field = 3;
     optional Expr range_partition_field = 4;
     repeated Expr range_partition_values = 5;
+    repeated string partition_names = 6;
 };
 
 message SchemaInfo {
@@ -112,7 +114,7 @@ message SchemaInfo {
     optional SchemaType schema_type         = 23;
     optional Engine engine                  = 24;
     repeated string init_store              = 25;
-    //repeated SplitKey split_keys            = 26;
+    //repeated SplitKey split_keys          = 26;
     optional bool deleted                   = 27;
     optional int64  byte_size_per_record    = 28;
     optional uint64 auto_increment_increment= 29; //自增主键初始值
@@ -121,15 +123,17 @@ message SchemaInfo {
     repeated ReplicaDist dists              = 32;
     optional string main_logical_room       = 33;
     optional int64  region_split_lines      = 34; //region分裂行数阈值
-    //optional bool   need_merge              = 35; //merge switch
+    //optional bool   need_merge            = 35; //merge switch
     repeated SplitKey split_keys            = 36;
     optional SchemaConf schema_conf         = 37; //一些可以随意修改的配置放在这里
     optional int64 ttl_duration             = 38; //0表示无ttl，>0表示有ttl，建表时指定
-    optional BinlogInfo    binlog_info = 39;
-    optional PartitionInfo partition_info = 40;
-    optional bool is_binlog = 41;
-    optional FieldInfo link_field = 42;
-    optional int32 region_num = 43;
+    optional BinlogInfo    binlog_info      = 39;
+    optional PartitionInfo partition_info   = 40;
+    optional bool is_binlog                 = 41;
+    optional FieldInfo link_field           = 42;
+    optional int32 region_num               = 43;
+    repeated string learner_resource_tags   = 44;
+    optional int64 online_ttl_expire_time_us = 45; 
 };
 
 message PartitionRegion {
@@ -150,6 +154,7 @@ message FieldInfo {
     optional bytes on_update_value    = 10;
     optional bytes encrypt            = 11; //指定加密字段
     optional uint32 flag              = 12;
+    optional bytes default_literal    = 13;
 };
 
 enum IndexType {
@@ -171,6 +176,8 @@ enum SegmentType {
     S_WORDRANK_Q2B_ICASE = 7;// 转小写，全角转半角后wordrank切词
     S_WORDWEIGHT         = 8;
     S_WORDWEIGHT_NO_FILTER  = 9;
+    S_WORDRANK_Q2B_ICASE_UNLIMIT = 10;// 转小写，全角转半角后wordrank切词，取消长度限制。
+    S_WORDWEIGHT_NO_FILTER_SAME_WEIGHT  = 11; // wordweight，不过滤，每个term weight相同
 };  
 
 // 普通索引，默认的格式是format1
@@ -224,10 +231,12 @@ message RegionInfo {
     optional int64 main_table_id           = 20; //如果是全局二级索引的region保存主表的table_id
     optional bool is_binlog_region         = 21; //是否为binlog region
     optional int64 partition_num           = 22;
+    repeated string learners               = 23;
+    optional bool is_learner               = 24;
 };
 
 message StoreRegionDdlInfo {
-    required int64 region_id                        = 1;
+    required int64 region_id               = 1;
     repeated DdlWorkInfo ddlwork_infos     = 2;
 };
 
@@ -290,6 +299,14 @@ message InstanceInfo {
     optional Status status          = 6;
     optional string logical_room    = 7;
     optional string version         = 8;
+    optional int64 dml_latency      = 9;
+    optional int64 dml_qps          = 10;
+    optional int64 raft_total_latency = 11;
+    optional int64 raft_total_qps   = 12;
+    optional int64 select_latency   = 13;
+    optional int64 select_qps       = 14;
+    optional string network_segment = 15;
+    optional string container_id    = 16;
 };
 
 message MovePhysicalRequest {
@@ -338,6 +355,7 @@ message RegionSplitResponse {
     required int64 old_region_id = 1;
     required int64 new_region_id = 2;
     required string new_instance = 3;
+    repeated string add_peer_instance = 4;
 };
 
 /*
@@ -371,7 +389,7 @@ message RestoreRegionRequest {
     optional int64 upper_region_id = 3;
 };
 
-message GlobalDdlRequest {
+message IndexDdlRequest {
     optional int64 table_id = 1;
     optional int64 region_id = 2;
     repeated string add_keys = 3;
@@ -381,6 +399,7 @@ message GlobalDdlRequest {
 message ParamDesc {
     optional string key     = 1;
     optional string value   = 2; // 为通用，使用string，如果使用其他类型需要自己转成string
+    optional bool is_meta_param = 3; //true则meta使用，store不需要更新本地配置
 };
 
 message InstanceParam {
@@ -394,6 +413,13 @@ enum RecoverOpt {
     DO_REMOVE_PEER         = 2; // 3个peer存活2个，remove_peer
     DO_SET_PEER            = 3; // 3个peer存活1个，set_peer
     DO_INIT_REGION         = 4; // 3个peer都不在集群，init_peer
+};
+
+
+message VirtualIndexInfluence{
+    optional int64   virtual_index_id                = 1;
+    optional string  virtual_index_name              = 2;
+    optional string  influenced_sql                  = 3;
 };
 
 message MetaManagerRequest {
@@ -412,7 +438,7 @@ message MetaManagerRequest {
     optional RegionSplitRequest  region_split           = 13; //region分裂请求
     optional AutoIncrementRequest auto_increment        = 14; //自增主键id生成和更新 
     optional RestoreRegionRequest restore_region        = 15; //恢复误删的region
-    repeated string               resource_tags         = 16; //针对resouce_tag做某些操作
+    repeated string               resource_tags         = 16; //针对resource_tag做某些操作
     optional RegionMergeRequest  region_merge           = 17; //region merge请求
     optional bool                 need_merge            = 18; 
     repeated RegionInfo          region_infos           = 19; //add and update
@@ -422,7 +448,8 @@ message MetaManagerRequest {
     optional SchemaInfo          binlog_info            = 23;  //关联binlog表及普通表
     repeated InstanceParam       instance_params        = 24;
     optional RecoverOpt          recover_opt            = 25;
-    optional GlobalDdlRequest global_ddl_request        = 26;
+    optional IndexDdlRequest     index_ddl_request      = 26;
+    optional int64               learner_replica_num    = 27;
 };
 
 message MetaManagerResponse {
@@ -465,6 +492,7 @@ message PeerStateInfo {
     optional int64       table_id    = 3;
     optional int64       timestamp   = 4;
     optional int64       region_id   = 5;
+    optional bool        is_learner  = 6;
 }
 
 message RegionStateInfo {
@@ -481,6 +509,12 @@ message LeaderHeartBeat {
     repeated PeerStateInfo  peers_status = 3;
 };
 
+message LearnerHeartBeat {
+    required RegionInfo     region       = 1;
+    optional RegionStatus   status       = 2;
+    optional PeerStatus     state = 3;
+};
+
 message PeerHeartBeat {
     required int64 region_id            = 1;
     //为了在创建表失败的情况下，该region能够删除
@@ -491,12 +525,14 @@ message PeerHeartBeat {
     //如果是全局二级索引的region保存主表的table_id
     optional int64 main_table_id = 6;
     optional bool  exist_leader  = 7;
+    optional bool  is_learner     = 8;
 };
 
 message AddPeer {
     required int64 region_id    = 1;
     repeated string old_peers   = 2;
     repeated string new_peers   = 3;
+    optional bool is_split = 4;
 };
 
 message TransLeaderRequest {
@@ -514,6 +550,7 @@ message StoreHeartBeatRequest {
     optional bool need_leader_balance           = 5;
     optional bool need_peer_balance             = 6;
     repeated DdlWorkInfoHeartBeat ddlwork_infos = 7;
+    repeated LearnerHeartBeat learner_regions   = 8;
 };
 
 message StoreHeartBeatResponse {
@@ -556,6 +593,7 @@ message BaikalHeartBeatRequest {
     repeated DdlWorkInfo  ddl_works                = 5;
     optional bool can_do_ddlwork                   = 6;
     optional string physical_room                  = 7;
+    repeated VirtualIndexInfluence info_affect     = 8;//影响面信息 
 };
 
 message BaikalOtherHeartBeat {
@@ -592,8 +630,8 @@ message BaikalHeartBeatResponse {
     repeated DataBaseInfo db_info                 = 8; //全部同步
     optional int64        last_updated_index      = 9;
     repeated Statistics   statistics              = 10;
-    repeated RegionDdlWork region_ddl_works              = 11;
-    repeated DdlWorkInfo  ddl_works           = 12;
+    repeated RegionDdlWork region_ddl_works       = 11;
+    repeated DdlWorkInfo  ddl_works               = 12;
 };
 
 enum QueryOpType {
@@ -617,7 +655,10 @@ enum QueryOpType {
     QUERY_DDLWORK                                 = 303;
     QUERY_REGION_PEER_STATUS                      = 304;
     QUERY_INSTANCE_PARAM                          = 305;
-    QUERY_GLOBAL_DDL_WORK                         = 306;
+    QUERY_INDEX_DDL_WORK                          = 306;
+    QUERY_NETWORK_SEGMENT                         = 307;
+    QUERY_RESOURCE_TAG_SWITCH                     = 308;
+    QUERY_SHOW_VIRINDX_INFO_SQL                   = 309;//展示虚拟索引的影响   
 };
 
 message PhysicalInstance {
@@ -645,6 +686,17 @@ message QueryRequest {
     optional int64  table_id                      = 16;
 };
 
+message ResourceTagInfo {
+    required string     resource_tag                = 1;
+    optional bool       peer_load_balance           = 2;
+    optional bool       migrate                     = 3;
+    optional bool       network_segment_balance     = 4;
+}
+message VirtualInfoAndSqls{
+    optional string   virtual_index_info =1;
+    optional string   affected_sign      =2;
+    optional string   affected_sqls      =3;
+}
 message QueryResponse {
     required ErrCode            errcode             = 1;
     optional string             errmsg              = 2;
@@ -664,11 +716,13 @@ message QueryResponse {
     repeated QuerySchema        flatten_schema_infos= 16;
     repeated int64              peer_ids            = 17;
     repeated int64              region_ids          = 18;
-    repeated DdlWorkInfo ddlwork_infos              = 19;
-    repeated QueryDdlInfo query_ddl_infos           = 20;
+    repeated DdlWorkInfo        ddlwork_infos       = 19;
+    repeated QueryDdlInfo       query_ddl_infos     = 20;
     repeated RegionStateInfo    region_status_infos = 21;
     repeated InstanceParam      instance_params     = 22;
     repeated RegionDdlWork      region_ddl_infos    = 23;
+    repeated ResourceTagInfo    resource_tag_infos  = 24;
+    repeated VirtualInfoAndSqls virtual_index_influence_info = 25;
 };
 
 message DdlPeerInfo {
@@ -834,7 +888,8 @@ message DdlWorkInfo {
     optional DdlWorkStatus status                   = 10;
     optional bool suspend                           = 11;
     optional int64 update_timestamp                 = 12;
-    optional bool global                         = 13;
+    optional bool global                            = 13;
+    optional bool drop_index                        = 14;
 };
 
 enum DdlWorkStatus {
@@ -858,6 +913,7 @@ message RegionDdlWork {
     optional uint32 retry_time                      = 9;
     optional int64 update_timestamp                 = 10;
     optional int64 partition                        = 11;
+    optional bool  is_global                        = 12;
 };
  
 message TableHeartBeat {

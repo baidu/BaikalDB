@@ -189,7 +189,14 @@ void Region::binlog_timeout_check(int64_t rollback_ts) {
             if (iter->second.time.get_time() > FLAGS_binlog_warn_timeout_minute * 60 * 1000 * 1000LL) {
                 DB_FATAL("region_id: %ld not commited for a long time", _region_id);
             }
-            if (is_leader()) {
+
+            // 避免过长
+            if (_binlog_param.timeout_start_ts_done.size() > 1000) {
+                _binlog_param.timeout_start_ts_done.erase(_binlog_param.timeout_start_ts_done.begin());
+            }
+
+            _binlog_param.timeout_start_ts_done[iter->first] = false;
+            if (is_leader() && iter->second.binlog_type == PREWRITE_BINLOG) {
                 start_ts = iter->first;
                 txn_id = iter->second.txn_id;
                 primary_region_id = iter->second.primary_region_id;
@@ -269,13 +276,6 @@ void Region::binlog_fill_exprvalue(const pb::BinlogDesc& binlog_desc, pb::OpType
         primary_region_id._u.int64_val = binlog_desc.primary_region_id();
         field_value_map["primary_region_id"] = primary_region_id;
     }
-
-    if (binlog_desc.has_partion_key()) {
-        ExprValue partion_key;
-        partion_key.type = pb::INT64;
-        partion_key._u.int64_val = binlog_desc.partion_key();
-        field_value_map["partion_key"] = partion_key;
-    }   
 
     {
         ExprValue binlog_region_id;
@@ -531,7 +531,7 @@ void Region::binlog_update_map_when_scan(const std::map<std::string, ExprValue>&
 }
 
 //on_apply中只有相关start_ts/commit_ts/rollback_ts和map区间有重合时才可以更新map
-int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map) {
+int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>& field_value_map, const std::string& remote_side) {
     int ret = 0;
     BinlogDesc binlog_desc;
     int64_t ts = binlog_get_int64_val("ts", field_value_map);
@@ -581,11 +581,30 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
         binlog_desc.txn_id = txn_id;
         binlog_desc.primary_region_id = binlog_get_int64_val("primary_region_id", field_value_map);
         _binlog_param.ts_binlog_map[ts] = binlog_desc;
-        DB_WARNING("region_id: %ld, ts: %ld, %s, txn_id: %ld, PREWRITE BINLOG", _region_id, ts, ts_to_datetime(ts).c_str(), txn_id);
+        DB_WARNING("region_id: %ld, ts: %ld, %s, txn_id: %ld, PREWRITE BINLOG, remote_side: %s", 
+            _region_id, ts, ts_to_datetime(ts).c_str(), txn_id, remote_side.c_str());
     } else if (type == COMMIT_BINLOG || type == ROLLBACK_BINLOG) {
         if (start_ts < _binlog_param.min_ts_in_map) {
-            DB_FATAL("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s < min ts: %ld", 
-                _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime(ts).c_str(), start_ts, ts_to_datetime(start_ts).c_str(), _binlog_param.min_ts_in_map);
+            auto timeout_start_ts_iter = _binlog_param.timeout_start_ts_done.find(start_ts);
+            if (timeout_start_ts_iter != _binlog_param.timeout_start_ts_done.end()) {
+                bool has_committed = timeout_start_ts_iter->second;
+                if (!has_committed) {
+                    // start_ts 设置为已经commit
+                    _binlog_param.timeout_start_ts_done[start_ts] = true;
+                } else {
+                    // 重复commit
+                    DB_WARNING("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s < min ts: %ld, remote_side: %s", 
+                        _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime(ts).c_str(), start_ts, 
+                        ts_to_datetime(start_ts).c_str(), _binlog_param.min_ts_in_map, remote_side.c_str());
+                    return 0;
+                }
+            }
+
+            if (type == COMMIT_BINLOG && ts < _binlog_read_max_ts.load()) {
+                DB_FATAL("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s < min ts: %ld, read_max_ts: %ld, %s, remote_side: %s", 
+                    _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime(ts).c_str(), start_ts, ts_to_datetime(start_ts).c_str(), 
+                    _binlog_param.min_ts_in_map, _binlog_read_max_ts.load(), ts_to_datetime(_binlog_read_max_ts.load()).c_str(), remote_side.c_str());
+            }
             return 0;
         }
 
@@ -595,9 +614,21 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
                 _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime(ts).c_str(), start_ts, ts_to_datetime(start_ts).c_str());
             return 0;
         } else {
+            bool repeated_commit = false;
             _binlog_param.ts_binlog_map.erase(start_ts);
-            DB_WARNING("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s start_ts: %ld, %s erase", 
-                _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime(ts).c_str(), start_ts, ts_to_datetime(start_ts).c_str());
+            auto timeout_start_ts_iter = _binlog_param.timeout_start_ts_done.find(start_ts);
+            if (timeout_start_ts_iter != _binlog_param.timeout_start_ts_done.end()) {
+                bool has_committed = timeout_start_ts_iter->second;
+                if (!has_committed) {
+                    // start_ts 设置为已经commit
+                    repeated_commit = true;
+                    _binlog_param.timeout_start_ts_done[start_ts] = true;
+                } 
+            }
+
+            DB_WARNING("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s start_ts: %ld, %s remote_side: %s repeated_commit: %d, erase", 
+                _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime(ts).c_str(), start_ts, 
+                ts_to_datetime(start_ts).c_str(), remote_side.c_str(), repeated_commit);
         }
     }
 
@@ -633,8 +664,8 @@ int Region::binlog_update_check_point() {
                 break;
             }
 
-            auto delete_iter = iter++;
-            _binlog_param.ts_binlog_map.erase(delete_iter);
+            // erase FAKE_BINLOG
+            iter = _binlog_param.ts_binlog_map.erase(iter);
         }
     }
 
@@ -709,14 +740,24 @@ int Region::write_binlog_record(SmartRecord record) {
 //ts(primary key),   no null 
 //txn_id,            default 0
 //binlog_type,       no null
-//partion_key,       default 0
+//partition_key,       default 0
 //start_ts,          default -1
 //primary_region_id, default -1
 int Region::write_binlog_value(const std::map<std::string, ExprValue>& field_value_map) {
     SmartTable  table_ptr = _factory->get_table_info_ptr(get_table_id());
     SmartRecord record    = _factory->new_record(get_table_id());
+    if (table_ptr == nullptr || record == nullptr) {
+        DB_WARNING("table_id: %ld nullptr", get_table_id());
+        return -1;
+    }
 
     for (auto& field : table_ptr->fields) {
+        if (field.short_name == "partition_key") {
+            ExprValue value(pb::INT64);
+            value._u.int64_val = _region_info.partition_id();
+            record->set_value(record->get_field_by_tag(field.id), value);
+            continue;
+        }
         auto iter = field_value_map.find(field.short_name);
         if (iter == field_value_map.end()) {
             //default
@@ -752,6 +793,7 @@ void Region::apply_binlog(const pb::StoreReq& request, braft::Closure* done) {
     std::unique_lock<bthread::Mutex> lck(_binlog_param_mutex);
     
     pb::OpType op_type = request.op_type();
+    TimeCost cost;
 
     std::map<std::string, ExprValue> field_value_map;
 
@@ -785,7 +827,7 @@ void Region::apply_binlog(const pb::StoreReq& request, braft::Closure* done) {
             DB_FATAL("write binlog failed, region_id: %ld", _region_id);
         }
 
-        binlog_update_map_when_apply(field_value_map);
+        binlog_update_map_when_apply(field_value_map, done ? ((BinlogClosure*)done)->remote_side : "");
         binlog_update_check_point();
     } else {
         DB_FATAL("region_id: %ld field value invailde", _region_id);
@@ -795,6 +837,7 @@ void Region::apply_binlog(const pb::StoreReq& request, braft::Closure* done) {
         ((BinlogClosure*)done)->response->set_errcode(pb::SUCCESS); 
         ((BinlogClosure*)done)->response->set_errmsg("apply binlog success");
     }
+    Store::get_instance()->dml_time_cost << cost.get_time();
 
 }
 
@@ -990,6 +1033,7 @@ void Region::read_binlog(const pb::StoreReq* request,
     }
 
     if (return_nr > 0) {
+        update_binlog_read_max_ts(last_commit_ts);
         DB_WARNING("region_id: %ld, get bin log first_commit_ts: %ld, %s, last_commit_ts: %ld, %s begin_ts: %ld, %s, return_count: %ld, "
             "binlog_size:%ld, timecost:%ld", 
             _region_id, first_commit_ts,ts_to_datetime(first_commit_ts).c_str(), last_commit_ts, ts_to_datetime(last_commit_ts).c_str(), 
@@ -997,7 +1041,7 @@ void Region::read_binlog(const pb::StoreReq* request,
     }
 
     response->set_errcode(pb::SUCCESS); 
-    response->set_errmsg("read binlog success");
+    response->set_errmsg("read binlog success");    
 
 }
 
@@ -1086,6 +1130,7 @@ void Region::query_binlog(google::protobuf::RpcController* controller,
             }
 
             BinlogClosure* c = new BinlogClosure;
+            c->remote_side = butil::endpoint2str(cntl->remote_side()).c_str();
             c->cost.reset();
             c->response = response;
             c->done = done_guard.release();

@@ -228,7 +228,6 @@ void ExecNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     _pb_node.set_limit(_limit);
     _pb_node.set_num_children(_children.size());
     pb_node->CopyFrom(_pb_node);
-    return;
 }
 
 void ExecNode::create_pb_plan(int64_t region_id, pb::Plan* plan, ExecNode* root) {

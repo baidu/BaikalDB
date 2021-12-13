@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "closure.h"
+#include "store.h"
 
 namespace baikaldb {
 DECLARE_int64(print_time_us);
@@ -22,30 +23,36 @@ void DMLClosure::Run() {
     if (cntl != nullptr && cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
+    if (region != nullptr) {
+        region_id = region->get_region_id();
+    }
     if (!status().ok()) {
         butil::EndPoint leader;
         if (region != nullptr) {
-            region_id = region->get_region_id();
             leader = region->get_leader();
         }
         response->set_errcode(pb::NOT_LEADER);
         response->set_leader(butil::endpoint2str(leader).c_str());
         response->set_errmsg("leader transfer");
-        if (status().error_code() != EPERM) {
-            // 发生错误，回滚当前dml
-            if (transaction != nullptr && region != nullptr) {
-                if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
-                        int seq_id = transaction->seq_id();
-                        transaction->rollback_current_request();
-                        DB_WARNING("txn rollback region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
-                        region_id, log_id, transaction->txn_id(), seq_id, pb::OpType_Name(op_type).c_str());
+        if (transaction != nullptr && region != nullptr) {
+            if (transaction->txn_id() != 0) {
+                if (status().error_code() != EPERM) {
+                    // 发生错误，回滚当前dml
+                    if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
+                            int seq_id = transaction->seq_id();
+                            transaction->rollback_current_request();
+                            DB_WARNING("txn rollback region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
+                            region_id, log_id, transaction->txn_id(), seq_id, pb::OpType_Name(op_type).c_str());
+                    }
+                } else {
+                    DB_WARNING("leader changed region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
+                            region_id, log_id, transaction->txn_id(), transaction->seq_id(), pb::OpType_Name(op_type).c_str());
                 }
-            }
-        } else {
-            // 发生leader切换
-            if (transaction != nullptr && region != nullptr) {
-                DB_WARNING("leader changed region_id: %ld log_id:%lu txn_id: %lu:%d, op_type: %s",
-                        region_id, log_id, transaction->txn_id(), transaction->seq_id(), pb::OpType_Name(op_type).c_str());
+            } else {
+                // 1pc状态机外执行失败rollback
+                transaction->rollback();
+                DB_WARNING("txn rollback 1pc region_id: %ld log_id:%lu op_type: %s",
+                            region_id, log_id, pb::OpType_Name(op_type).c_str());
             }
         }
         DB_WARNING("region_id: %ld  status:%s ,leader:%s, log_id:%lu, remote_side: %s",
@@ -63,15 +70,14 @@ void DMLClosure::Run() {
         txn_id = transaction->txn_id();
         transaction->set_in_process(false);
     }
-    if (is_clear_applying_txn) {
-        clear_applying_txn_cond->decrease_signal();
+    if (is_sync) {
+        cond->decrease_signal();
     }
     if (done) {
         done->Run();
     }
-    static bvar::LatencyRecorder raft_total_cost("raft_total_cost");
     int64_t raft_cost = cost.get_time();
-    raft_total_cost << raft_cost;
+    Store::get_instance()->raft_total_cost << raft_cost;
     if (raft_cost > FLAGS_print_time_us) {
         DB_NOTICE("dml log_id:%lu, txn_id:%lu, type:%s, raft_total_cost:%ld, region_id: %ld, "
                 "applied_index:%ld, num_prepared:%d remote_side:%s",
@@ -108,7 +114,9 @@ void AddPeerClosure::Run() {
                     region->get_region_id(),
                     cost.get_time());
     }
-    region->reset_region_status();
+    if (!is_split) {
+        region->reset_region_status();
+    }
     DB_WARNING("region status was reset, region_id: %ld", region->get_region_id());
     if (done) {
         done->Run();
@@ -174,13 +182,16 @@ void SplitClosure::Run() {
                     cost.get_time());
     }
     // OP_VALIDATE_AND_ADD_VERSION 这步失败了也不能自动删除new region
-    // 防止出现flase negative，raft返回失败，实际成功
+    // 防止出现false negative，raft返回失败，实际成功
     // 如果真实失败，需要手工drop new region
     // todo 增加自动删除步骤，删除与分裂解耦
     if (split_fail && op_type != pb::OP_VALIDATE_AND_ADD_VERSION) {
         DB_WARNING("split fail, start remove region, old_region_id: %ld, split_region_id: %ld, new_instance:%s",
                     region->get_region_id(), split_region_id, new_instance.c_str());
         RpcSender::send_remove_region_method(split_region_id, new_instance);
+        for (auto& instance : add_peer_instance) {
+            RpcSender::send_remove_region_method(split_region_id, instance);
+        }
     }
     delete this;
 }

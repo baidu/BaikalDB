@@ -25,6 +25,7 @@ namespace baikaldb {
 class PacketNode : public ExecNode {
 public:
     PacketNode() {
+        _wrapper = MysqlWrapper::get_instance();
     }
     virtual ~PacketNode() {
         for (auto expr : _projections) {

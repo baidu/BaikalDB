@@ -29,6 +29,12 @@ int64_t ScanNode::select_index() {
     std::multimap<uint32_t, int64_t> prefix_ratio_id_mapping;
     std::unordered_set<int32_t> primary_fields;
     primary_fields = _paths[_table_id]->hit_index_field_ids;
+    if (!_multi_reverse_index.empty()) {
+        // join情况下被驱动表可能会多次执行选择索引函数，每次执行前先清空，避免_multi_reverse_index push多次造成可使用multi倒排假象
+        _multi_reverse_index.clear();
+        _fulltext_use_arrow = false;
+    }
+    
     for (auto& pair : _paths) {
         int64_t index_id = pair.first;
         auto& path = pair.second;
@@ -108,6 +114,9 @@ int64_t ScanNode::select_index() {
     for (auto iter = prefix_ratio_id_mapping.crbegin(); iter != prefix_ratio_id_mapping.crend(); ++iter) {
         return iter->second;
     }
+    if (_multi_reverse_index.size() > 0) {
+        return _multi_reverse_index[0];
+    }
     return _table_id;
 }
 
@@ -120,6 +129,7 @@ int ScanNode::init(const pb::PlanNode& node) {
     }
     _tuple_id = node.derive_node().scan_node().tuple_id();
     _table_id = node.derive_node().scan_node().table_id();
+    _router_index_id = _table_id;
     _lock = node.derive_node().scan_node().lock();
     if (node.derive_node().scan_node().has_engine()) {
         _engine = node.derive_node().scan_node().engine();
@@ -177,13 +187,13 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         if (!explain_info["possible_keys"].empty()) {
             explain_info["possible_keys"].pop_back();
         }
-        
-        auto& pos_index = _pb_node.derive_node().scan_node().indexes(0);
-        int64_t index_id = pos_index.index_id();
+        std::string tmp;
+        int64_t index_id = select_index_in_baikaldb(tmp);
         auto index_info = factory->get_index_info(index_id);
         auto pri_info = factory->get_index_info(_table_id);
         explain_info["key"] = index_info.short_name;
         explain_info["type"] = "range";
+        auto& pos_index = _paths[index_id]->pos_index;
         if (pos_index.ranges_size() == 1) {
             int field_cnt = pos_index.ranges(0).left_field_cnt();
             if (field_cnt == (int)index_info.fields.size() && 
@@ -295,7 +305,7 @@ bool ScanNode::full_coverage(const std::unordered_set<int32_t>& smaller, const s
     return true;
 }
 
-// 两个索引比较选择最优的，干掉另一个
+// 两个索引比较择最优的，干掉另一个
 // return  0 没有干掉任何一个
 // return -1 outer被干掉
 // return -2 inner被干掉
@@ -422,14 +432,16 @@ int64_t ScanNode::pre_process_select_index() {
 
     _cover_index_cnt = cover_index_cnt;
     _possible_index_cnt = possible_cnt;
+
+    //1. 使用虚拟索引情况下正常走预处理逻辑(虚拟索引不会被干掉，也不会干掉任何正常索引)
+    //2. 存在虚拟索引时不使用预处理初选的索引。case：只有主键和虚拟索引的情况下possible_cnt = 1，会直接选择
+    if (_use_virtual_index) {
+        return 0;
+    }
+
     // 仅有一个possible index直接选择这个索引
     if (possible_cnt == 1) {
         return possible_index;
-    }
-
-    // 没有possible index 选择 primary index
-    if (possible_cnt == 0) {
-        return _table_id;
     }
 
     return 0;
@@ -442,7 +454,6 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
     _router_index = &_paths[_table_id]->pos_index;
     // 预处理，使用倒排索引的sql不进行预处理，如果select_idx大于0则已经选出索引
     int64_t select_idx = pre_process_select_index();
-
     if (select_idx == 0) {
         if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
             && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext) {
@@ -452,19 +463,18 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
             select_idx = select_index();
         }
     } 
-
     if (_paths[select_idx]->is_virtual) {
         // 虚拟索引需要重新选择
-        _router_index_id = -1;
+        _router_index_id = _table_id; 
         _router_index = nullptr;
         _multi_reverse_index.clear();
         _paths[select_idx]->is_possible = false; // 确保下次不再选择该虚拟索引
         std::string& name = _paths[select_idx]->index_info_ptr->short_name;
         SchemaFactory::get_instance()->update_virtual_index_info(select_idx, name, sample_sql);
+        DB_WARNING("hit virtual index, table_id: %ld, virtual_index_id: %ld, virtual_index_name: %s, sample_sql: %s", 
+            _table_id, select_idx, name.c_str(), sample_sql.c_str());
         return select_index_in_baikaldb(sample_sql);
     }
-
-    //DB_WARNING("idx:%ld table:%ld", select_idx, _table_id);
     std::unordered_set<ExprNode*> other_condition;
     if (_multi_reverse_index.size() > 0) {
         //有倒排索引，创建倒排索引树
@@ -504,8 +514,6 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
         }
         other_condition = _paths[select_idx]->other_condition;
     }
-    DB_DEBUG("select_idx:%ld _is_covering_index:%d index:%ld table:%ld", 
-            select_idx, _is_covering_index, select_idx, _table_id);
     // modify filter conjuncts
     if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
         get_parent()->node_type() == pb::WHERE_FILTER_NODE) {

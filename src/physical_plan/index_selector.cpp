@@ -536,6 +536,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         return -1;
     }
     SmartRecord record_template = _factory->new_record(table_id);
+    std::unordered_set<int64_t> fulltext_fields;
     for (auto index_id : index_ids) {
         if (ignore_indexs.count(index_id) == 1 && index_id != table_id) {
             continue;
@@ -557,6 +558,19 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
+        if (index_info.type == pb::I_FULLTEXT && index_info.index_hint_status != pb::IHS_VIRTUAL) {
+            if (index_info.fields.size() == 1) {
+                if (fulltext_fields.count((index_info.fields[0].id << 5) + index_info.storage_type) == 1) {
+                    DB_WARNING("skip fulltext index %ld", index_id);
+                    continue;
+                } else {
+                    fulltext_fields.insert((index_info.fields[0].id << 5) + index_info.storage_type);
+                }
+            } else {
+                DB_FATAL("index %ld fulltext fields number error.", index_id);
+                continue;
+            }
+        }
         SmartPath access_path = std::make_shared<AccessPath>();
         // 只有primary会走到这里
         if (ignore_indexs.count(index_id) == 1) {
@@ -572,7 +586,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         access_path->index_id = index_id;
         if (index_info.index_hint_status == pb::IHS_VIRTUAL) {
             access_path->is_virtual = true;
-        }
+        } 
         Property sort_property;
         if (sort_node != nullptr) {
             sort_property = sort_node->sort_property();

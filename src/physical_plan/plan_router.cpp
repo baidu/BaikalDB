@@ -36,14 +36,17 @@ int PlanRouter::analyze(QueryContext* ctx) {
     }
     //DB_NOTICE("need_seperate:%d", plan->need_seperate());
     std::vector<ExecNode*> scan_nodes;
+    std::vector<ExecNode*> dual_scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
+    plan->get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
     TruncateNode* truncate_node = static_cast<TruncateNode*>(plan->get_node(pb::TRUNCATE_NODE));
     KillNode* kill_node = static_cast<KillNode*>(plan->get_node(pb::KILL_NODE));
     TransactionNode* txn_node = static_cast<TransactionNode*>(plan->get_node(pb::TRANSACTION_NODE));
 
-    if (scan_nodes.size() != 0) {
-        bool has_join = scan_nodes.size() > 1;
+    size_t scan_size = scan_nodes.size() + dual_scan_nodes.size();
+    if (scan_size > 0) {
+        bool has_join = scan_size > 1;
         for (auto scan_node : scan_nodes) {
             auto ret = scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node), ctx, has_join);
             if (ret != 0) {

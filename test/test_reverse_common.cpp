@@ -231,6 +231,17 @@ TEST(test_simple_seg_gbk, case_all) {
         }
     }
     {
+        std::string word = "我A 是c";
+        std::vector<std::string> split_vec;
+        std::map<std::string, float> term_map;
+        Tokenizer::get_instance()->simple_seg_gbk(word, 2, term_map);
+        std::cout << word << "size:" << term_map.size() << std::endl;
+        ASSERT_EQ(4, term_map.size());
+        for (auto& i : term_map) {
+            std::cout << i.first << std::endl;
+        }
+    }
+    {
         std::string word = "我是谁!";
         std::vector<std::string> split_vec;
         std::map<std::string, float> term_map;
@@ -431,8 +442,8 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
             std::cout << "insert " << i << '\n';
         }
         auto smart_transaction = std::make_shared<TransactionPool>();
-        SmartTransaction txn(new Transaction(0, smart_transaction.get(), false)); 
-        txn->begin();
+        SmartTransaction txn(new Transaction(0, smart_transaction.get())); 
+        txn->begin(Transaction::TxnOptions());
         std::string pk = std::to_string(i++);
         arrow_index->insert_reverse(txn->get_txn(), nullptr, line, pk, nullptr);
         auto res = txn->commit();
@@ -480,8 +491,8 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
             IndexInfo ii;
             std::vector<ExprNode*> _con;
             auto smart_transaction = std::make_shared<TransactionPool>();
-            SmartTransaction txn(new Transaction(0, smart_transaction.get(), false)); 
-            txn->begin();
+            SmartTransaction txn(new Transaction(0, smart_transaction.get())); 
+            txn->begin(Transaction::TxnOptions());
             TimeCost tc;
             arrow_index->search(txn->get_txn(), ii, ti, search_line, pb::M_NONE, _con, true);
             std::cout << "valid reverse time[" << tc.get_time() << "]\n";

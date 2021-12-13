@@ -21,17 +21,104 @@
 namespace baikaldb {
 DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raft log");
 DECLARE_int32(rocks_transaction_lock_timeout_ms);
-// DEFINE_int32(rocks_transaction_expiration_ms, 600 * 1000, 
-//         "rocksdb transaction_expiration timeout(us)");
+DEFINE_int64(exec_1pc_out_fsm_timeout_ms, 5 * 1000, "exec 1pc out of fsm, timeout");
+DEFINE_int64(exec_1pc_in_fsm_timeout_ms, 100, "exec 1pc in fsm, timeout");
 
-int Transaction::begin() {
-    rocksdb::TransactionOptions txn_opt;
-    txn_opt.lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms +
-        butil::fast_rand_less_than(FLAGS_rocks_transaction_lock_timeout_ms);
-    return begin(txn_opt);
+// value 出参，会remove prefix
+int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int64_t base_expire_time_us) {
+    if (base_expire_time_us == 0) {
+        // 非online TTL
+        int64_t time = decode_first_8bytes2int64(value);
+        value.remove_prefix(sizeof(uint64_t));
+        return  time;
+    }
+
+    if (value.size() < sizeof(uint64_t)) {
+        DB_DEBUG("value size < 8, index id: %ld, name: %s, ttl time: %ld", 
+            index_info->id, pb::IndexType_Name(index_info->type).c_str(), base_expire_time_us);
+        return base_expire_time_us;
+    }
+
+    // 时间戳无效则认为没有时间前缀
+    int64_t time = decode_first_8bytes2int64(value);
+    if (!valid_timestamp_us(time)) {
+        DB_DEBUG("invalid timestamp, index id: %ld, name: %s, ttl time: %ld, data size: %lu, invalid time: %ld", 
+            index_info->id, pb::IndexType_Name(index_info->type).c_str(), base_expire_time_us, value.size(), time);
+        return base_expire_time_us;
+    } 
+
+    //时间戳有效，需要验证编码是否匹配
+    if (index_info->type == pb::I_KEY) {        
+        if (value.size() == sizeof(uint64_t)) {
+            value.remove_prefix(sizeof(uint64_t));
+            DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld", 
+                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time);
+        } else {
+            // 报警
+            DB_WARNING("ttl_decode fail, value size != 8, index id: %ld, name: %s, ttl time: %ld", 
+                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time);
+        }
+        return time;
+    } else if (index_info->type == pb::I_PRIMARY) {
+        value.remove_prefix(sizeof(uint64_t));
+        TupleRecord tuple_record(value);
+        if(tuple_record.verification_fields(index_info->max_field_id) == 0) {
+            DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
+                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
+        } else {
+            // 报警
+            DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
+                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
+        }
+        return time;
+    } else if (index_info->type == pb::I_UNIQ) {
+        value.remove_prefix(sizeof(uint64_t));
+        int pos = 0;
+        bool succ = true;
+        TableKey key(value);
+        for (auto& field_info : index_info->pk_fields) {
+            if (0 != key.skip_field(field_info, pos)) {
+                DB_WARNING("decode index field error: field_id: %d, type: %d", 
+                    field_info.id, field_info.type);
+                succ = false; 
+                break;
+            }
+            if (pos > key.size()) {
+                succ = false;
+                break;
+            }
+        }
+
+        // 不能严格验证 TODO
+        if (succ && pos == value.size()) {
+            DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld, pos: %d, value size: %lu", 
+                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, pos, value.size());
+        } else {
+            DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, pos: %d, value size: %lu", 
+                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, pos, value.size());
+        }
+
+        return time;
+    } else {
+        // 报警
+        DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
+            index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
+        return time;
+    }
 }
 
-int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
+int Transaction::begin(const Transaction::TxnOptions& txn_opt) {
+    rocksdb::TransactionOptions rocks_txn_opt;
+    if (txn_opt.dml_1pc && txn_opt.in_fsm) {
+        // lock_timeout=0走try lock，rocksdb内部在用lock时会增加错误率
+        rocks_txn_opt.lock_timeout = FLAGS_exec_1pc_in_fsm_timeout_ms;
+    } else {
+        rocks_txn_opt.lock_timeout = txn_opt.lock_timeout;
+    }
+    return begin(rocks_txn_opt);
+}
+
+int Transaction::begin(const rocksdb::TransactionOptions& txn_opt) {
     if (nullptr == (_db = RocksWrapper::get_instance())) {
         DB_WARNING("get rocksdb instance failed");
         return -1;
@@ -44,9 +131,11 @@ int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
         DB_WARNING("get rocksdb data column family failed");
         return -1;
     }
-    txn_opt.lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms +
-        butil::fast_rand_less_than(FLAGS_rocks_transaction_lock_timeout_ms);
     _txn_opt = txn_opt;
+    if (_txn_opt.lock_timeout == -1) {
+        _txn_opt.lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms +
+            butil::fast_rand_less_than(FLAGS_rocks_transaction_lock_timeout_ms);
+    }
     auto txn = _db->begin_transaction(_write_opt, _txn_opt);
     if (txn == nullptr) {
         DB_WARNING("start_trananction failed");
@@ -54,7 +143,11 @@ int Transaction::begin(rocksdb::TransactionOptions txn_opt) {
     }
 
     _txn = new myrocksdb::Transaction(txn);
-
+    if (_pool != nullptr) {
+        _use_ttl = _pool->use_ttl();
+        _online_ttl_base_expire_time_us = _pool->online_ttl_base_expire_time_us();
+        DB_DEBUG();
+    }
     last_active_time = butil::gettimeofday_us();
     begin_time = last_active_time;
     if (_use_ttl) {
@@ -295,7 +388,13 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         add_kvop_put(key.data(), value, _write_ttl_timestamp_us);
     } else {
         auto res = put_kv_without_lock(key.data(), value, _write_ttl_timestamp_us);
-        if (!res.ok()) {
+        if (res.IsTimedOut()) {
+            print_txninfo_holding_lock(key.data());        
+            int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+            DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                    region_id, _txn_id, res.ToString().c_str(), record->debug_string().c_str());
+            return -1;
+        } else if (!res.ok()) {
             DB_FATAL("put primary fail, error: %s", res.ToString().c_str());
             return -1;
         }
@@ -356,7 +455,13 @@ int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord rec
         }
         res = put_kv_without_lock(key.data(), pk.data(), _write_ttl_timestamp_us);
     }
-    if (!res.ok()) {
+    if (res.IsTimedOut()) {
+        print_txninfo_holding_lock(key.data());        
+        int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+        DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                region_id, _txn_id, res.ToString().c_str(), record->debug_string().c_str());
+        return -1;
+    } else if (!res.ok()) {
         DB_FATAL("put secondary fail, error: %s", res.ToString().c_str());
         return -1;
     }
@@ -446,10 +551,11 @@ int Transaction::remove_meta_info(const std::string& key) {
 int Transaction::get_update_primary(
         int64_t             region, 
         IndexInfo&          pk_index,
-        SmartRecord         key, 
+        const SmartRecord&         key, 
         std::map<int32_t, FieldInfo*>& fields,
         GetMode             mode,
-        bool                check_region) {
+        bool                check_region,
+        int64_t&             ttl_ts) {
     MutTableKey         _key;
     //full key, no prefix allowed
     if (0 != _key.append_index(pk_index, key.get(), -1, false)) {
@@ -457,7 +563,7 @@ int Transaction::get_update_primary(
         return -1;
     }
     return get_update_primary(region, pk_index, TableKey(_key), 
-            mode, key, fields, false, check_region);
+            mode, key, fields, false, check_region, ttl_ts);
 }
 
 //TODO: update return status
@@ -466,11 +572,12 @@ int Transaction::get_update_primary(
         IndexInfo&      pk_index,
         const TableKey& key,
         GetMode         mode,
-        SmartRecord     val,
+        const SmartRecord&   val,
         std::map<int32_t, FieldInfo*>& fields,
-        bool            check_region) {
+        bool            check_region,
+        int64_t&             ttl_ts) {
     return get_update_primary(region, pk_index, key, 
-            mode, val, fields, true, check_region);
+            mode, val, fields, true, check_region, ttl_ts);
 }
 
 //TODO: update return status
@@ -481,10 +588,11 @@ int Transaction::get_update_primary(
         IndexInfo&      pk_index,
         const TableKey& key,
         GetMode         mode,
-        SmartRecord     val,
+        const SmartRecord& val,
         std::map<int32_t, FieldInfo*>& fields,
         bool            parse_key,
-        bool            check_region) {
+        bool            check_region,
+        int64_t&             ttl_ts) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     if (_region_info == nullptr) {
         DB_WARNING("no region_info");
@@ -536,14 +644,14 @@ int Transaction::get_update_primary(
         if (mode == GET_ONLY || mode == GET_LOCK) {
             rocksdb::Slice value_slice(pin_slice);
             if (_use_ttl && _read_ttl_timestamp_us > 0) {
-                int64_t row_ttl_timestamp_us = ttl_decode(value_slice);
+                int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &pk_index, _online_ttl_base_expire_time_us);
                 if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
                     DB_DEBUG("expired _read_ttl_timestamp_us:%ld row_ttl_timestamp_us:%ld",
                             _read_ttl_timestamp_us, row_ttl_timestamp_us);
                     //expired
                     return -4;
                 }
-                value_slice.remove_prefix(sizeof(uint64_t));
+                ttl_ts = row_ttl_timestamp_us;
             }
             //TimeCost cost;
             if (!is_cstore()) {
@@ -578,8 +686,10 @@ int Transaction::get_update_primary(
         return -1;
     } else if (res.IsTimedOut()) {
         print_txninfo_holding_lock(_key.data());        
-        DB_WARNING("lock failed, timedout: %s", res.ToString().c_str());
-        return -1;
+        int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+        DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                region_id, _txn_id, res.ToString().c_str(), key.decode_start_key_string(pk_index).c_str());
+        return -5;
     } else {
         DB_WARNING("unknown error: %d, %s", res.code(), res.ToString().c_str());
         return -1;
@@ -675,9 +785,11 @@ int Transaction::get_update_secondary(
         DB_WARNING("lock failed, busy: %s", res.ToString().c_str());
         return -1;
     } else if (res.IsTimedOut()) {
-        print_txninfo_holding_lock(_key.data());
-        DB_WARNING("lock failed, timedout: %s", res.ToString().c_str());
-        return -1;
+        print_txninfo_holding_lock(_key.data());        
+        int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+        DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                region_id, _txn_id, res.ToString().c_str(), key->debug_string().c_str());
+        return -5;
     } else {
         DB_WARNING("unknown error: %d, %s", res.code(), res.ToString().c_str());
         return -1;
@@ -685,12 +797,11 @@ int Transaction::get_update_secondary(
 
     rocksdb::Slice value(pin_slice);
     if (_use_ttl && _read_ttl_timestamp_us > 0) {
-        int64_t row_ttl_timestamp_us = ttl_decode(value);
+        int64_t row_ttl_timestamp_us = ttl_decode(value, &index, _online_ttl_base_expire_time_us);
         if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
             //expired
             return -4;
         }
-        value.remove_prefix(sizeof(uint64_t));
     }
     pk.data().assign(value.data(), value.size());
     if (/*_need_check_region &&*/check_region && (mode == GET_ONLY || mode == GET_LOCK)) {
@@ -730,7 +841,13 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
     } else {
         auto res = _txn->Delete(_data_cf, _key.data());
         DB_DEBUG("delete key=%s", str_to_hex(_key.data()).c_str());
-        if (!res.ok()) {
+        if (res.IsTimedOut()) {
+            print_txninfo_holding_lock(_key.data());        
+            int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+            DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                    region_id, _txn_id, res.ToString().c_str(), key->debug_string().c_str());
+            return -1;
+        } else if (!res.ok()) {
             DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
             return -1;
         }
@@ -761,7 +878,13 @@ int Transaction::remove(int64_t region, IndexInfo& index, const TableKey& key) {
         add_kvop_delete(_key.data());
     } else {
         auto res = _txn->Delete(_data_cf, _key.data());
-        if (!res.ok()) {
+        if (res.IsTimedOut()) {
+            print_txninfo_holding_lock(_key.data());        
+            int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+            DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                    region_id, _txn_id, res.ToString().c_str(), key.decode_start_key_string(index).c_str());
+            return -1;
+        } else if (!res.ok()) {
             DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
             return -1;
         }
@@ -785,12 +908,6 @@ rocksdb::Status Transaction::prepare() {
     last_active_time = butil::gettimeofday_us();
     auto res = _txn->Prepare();
     if (res.ok()) {
-        /*
-        if (_pool && !_is_prepared) {
-            _pool->increase_prepared();
-            //DB_WARNING("increase_prepared: %d", _pool->num_prepared());
-        }
-        */
         _is_prepared = true;
         _prepare_time_us = butil::gettimeofday_us();
     }
@@ -814,11 +931,6 @@ rocksdb::Status Transaction::commit() {
     }
     auto res = _txn->Commit();
     if (res.ok()) {
-        /*
-        if (_pool && _is_prepared && !_is_finished) {
-            _pool->decrease_prepared();
-        }
-        */
         _is_finished = true;
     }
     return res;
@@ -833,11 +945,6 @@ rocksdb::Status Transaction::rollback() {
     }
     auto res = _txn->Rollback();
     if (res.ok()) {
-        /*
-        if (_pool && _is_prepared && !_is_finished) {
-            _pool->decrease_prepared();
-        }
-        */
         _is_finished = true;
         _is_rolledback = true;
     }
@@ -978,7 +1085,7 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
 int Transaction::get_update_primary_columns(
         const TableKey& primary_key,
         GetMode         mode,
-        SmartRecord     val,
+        const SmartRecord&     val,
         std::map<int32_t, FieldInfo*>& fields) {
     if (_table_info.get() == nullptr) {
        DB_WARNING("no table_info");
@@ -1024,6 +1131,7 @@ int Transaction::get_update_primary_columns(
             DB_WARNING("get failed, busy: %s", res.ToString().c_str());
             return -1;
         } else if (res.IsTimedOut()) {
+            print_txninfo_holding_lock(key.data());        
             DB_WARNING("timedout: %s", res.ToString().c_str());
             return -1;
         } else {
@@ -1052,7 +1160,11 @@ int Transaction::remove_columns(const TableKey& primary_key) {
         key.replace_i32(field_id, sizeof(int64_t) + sizeof(int32_t));
         auto res = _txn->Delete(_data_cf, key.data());
         DB_DEBUG("del key=%s, res=%s", str_to_hex(key.data()).c_str(), res.ToString().c_str());
-        if (!res.ok()) {
+        if (res.IsTimedOut()) {
+            print_txninfo_holding_lock(key.data());        
+            DB_WARNING("timedout: %s", res.ToString().c_str());
+            return -1;
+        } else if (!res.ok()) {
            DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
            return -1;
         }
@@ -1060,4 +1172,21 @@ int Transaction::remove_columns(const TableKey& primary_key) {
     return 0;
 }
 
+static TimeCost print_lock_last_time;
+void Transaction::print_txninfo_holding_lock(const std::string& key) {
+    //内部有pthread锁
+    if (print_lock_last_time.get_time() > 10 * 1000 * 1000) {
+        auto lock_info = _db->get_db()->GetLockStatusData();
+        for (auto& it : lock_info) {
+            if (it.second.key.size() == key.size() && it.second.key == key) {
+                for (auto txn_id : it.second.ids) {
+                    DB_WARNING("holding lock, txn_id: %lu, cf_id: %u, key_hex: %s", 
+                            txn_id, it.first, str_to_hex(key).c_str());
+                }
+                break;
+            }
+        }
+        print_lock_last_time.reset();
+    }
+}
 } //nanespace baikaldb

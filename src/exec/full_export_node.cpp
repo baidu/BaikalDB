@@ -36,6 +36,9 @@ int FullExportNode::open(RuntimeState* state) {
         DB_WARNING("connection is nullptr: %lu", state->txn_id);
         return -1;
     }
+    if (_return_empty) {
+        return 0;
+    }
     client_conn->seq_id++;
     state->seq_id = client_conn->seq_id;
     for (auto& pair : _region_infos) {
@@ -76,7 +79,11 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         *eos = true;
         return 0;
     }
-
+    if (_return_empty) {
+        state->set_eos();
+        *eos = true;
+        return 0;
+    }
     if (reached_limit()) {
         state->set_eos();
         *eos = true;
@@ -105,6 +112,7 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     ConcurrencyBthread region_bth(FLAGS_region_per_batch, &BTHREAD_ATTR_SMALL);
     int region_per_batch = 0;
     _fetcher_store.scan_rows = 0;
+    _fetcher_store.memory_limit_release(state);
     for (auto id_iter = _send_region_ids.begin(); id_iter != _send_region_ids.end();) {
         if (region_per_batch >= FLAGS_region_per_batch) {
             break;
@@ -118,7 +126,7 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             id_iter = _send_region_ids.erase(id_iter);
             continue;
         }
-        DB_WARNING("send region_id:%ld", region_id);
+        DB_WARNING("send region_id:%ld log_id:%lu", region_id, log_id);
         region_per_batch++;
         auto region_thread = [this, state, region_id, info, log_id]() {
             auto ret = _fetcher_store.send_request(state, _children[0], *info, region_id, region_id, 

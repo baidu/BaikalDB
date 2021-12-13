@@ -29,6 +29,8 @@
 //#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
+DECLARE_int32(rocks_max_background_compactions);
+DECLARE_int32(addpeer_rate_limit_level);
 
 enum KVMode {
     KEY_ONLY,
@@ -174,13 +176,25 @@ public:
     }
     bool is_any_stall() {
         uint64_t value = 0;
-        _txn_db->GetAggregatedIntProperty("rocksdb.actual-delayed-write-rate", &value);
-        if (value > 0) {
-            return true;
+        if (FLAGS_addpeer_rate_limit_level >= 2) {
+            _txn_db->GetIntProperty(get_data_handle(), "rocksdb.num-running-compactions", &value);
+            if (value >= (uint64_t)FLAGS_rocks_max_background_compactions) {
+                return true;
+            }
+            _txn_db->GetAggregatedIntProperty("rocksdb.estimate-pending-compaction-bytes", &value);
+            if (value > _data_cf_option.soft_pending_compaction_bytes_limit / 2) {
+                return true;
+            }
         }
-        _txn_db->GetAggregatedIntProperty("rocksdb.is-write-stopped", &value);
-        if (value > 0) {
-            return true;
+        if (FLAGS_addpeer_rate_limit_level >= 1) {
+            _txn_db->GetAggregatedIntProperty("rocksdb.actual-delayed-write-rate", &value);
+            if (value > 0) {
+                return true;
+            }
+            _txn_db->GetAggregatedIntProperty("rocksdb.is-write-stopped", &value);
+            if (value > 0) {
+                return true;
+            }
         }
         return false;
     }
@@ -192,6 +206,8 @@ public:
     uint64_t flush_file_number() {
         return _flush_file_number;
     }
+    void begin_split_adjust_option();
+    void stop_split_adjust_option();
 private:
 
     RocksWrapper();
@@ -213,5 +229,7 @@ private:
     bvar::Adder<int64_t>     _raft_cf_remove_range_count;
     bvar::Adder<int64_t>     _data_cf_remove_range_count;
     bvar::Adder<int64_t>     _mata_cf_remove_range_count;
+
+    std::atomic<int32_t> _split_num;
 };
 }
