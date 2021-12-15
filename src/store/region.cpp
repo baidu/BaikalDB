@@ -1237,7 +1237,33 @@ void Region::async_apply_log_entry(google::protobuf::RpcController* controller,
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
-    std::vector<pb::StoreRes> store_reqs(request->request_lens_size());
+    if (!is_leader()) {
+        // 非leader才返回
+        response->set_leader(butil::endpoint2str(get_leader()).c_str());
+        response->set_errcode(pb::NOT_LEADER);
+        response->set_errmsg("not leader");
+        response->set_success_cnt(request->start_pos());
+        DB_WARNING("not leader alarm_type: %d, leader:%s, region_id: %ld, log_id:%lu, remote_side:%s",
+                   _not_leader_alarm.type, butil::endpoint2str(get_leader()).c_str(),
+                   _region_id, log_id, remote_side);
+        return;
+    }
+    if (_async_apply_param.apply_log_failed) {
+        // 之前丢进异步队列里面的dml执行失败了，分裂直接失败
+        response->set_errcode(pb::EXEC_FAIL);
+        response->set_errmsg("exec fail in executionQueue");
+        DB_WARNING("exec fail in executionQueue, region_id: %ld, log_id:%lu, remote_side:%s",
+                   _region_id, log_id, remote_side);
+        return;
+    }
+    if (get_version() != 0) {
+        response->set_errcode(pb::VERSION_OLD);
+        response->set_errmsg("not allowed");
+        DB_WARNING("not allowed fast_apply_log_entry, region_id: %ld, version:%ld, log_id:%lu, remote_side:%s",
+                    _region_id, get_version(), log_id, remote_side);
+        return;
+    }                                   
+    std::vector<pb::StoreRes> store_responses(request->request_lens_size());
     BthreadCond on_apply_cond;
     // Parse request
     butil::IOBuf data_buf;
@@ -1250,18 +1276,17 @@ void Region::async_apply_log_entry(google::protobuf::RpcController* controller,
         }
         if (_async_apply_param.apply_log_failed) {
             // 之前丢进异步队列里面的dml执行失败了，分裂直接失败
-            response->set_errcode(pb::EXEC_FAIL);
-            response->set_errmsg("exec fail in executionQueue");
+            store_responses[apply_idx].set_errcode(pb::EXEC_FAIL);
+            store_responses[apply_idx].set_errmsg("exec fail in executionQueue");
             DB_WARNING("exec fail in executionQueue, region_id: %ld, log_id:%lu, remote_side:%s",
                        _region_id, log_id, remote_side);
-            return;
+            break;
         }
 
         if (!is_leader()) {
             // 非leader才返回
-            response->set_leader(butil::endpoint2str(get_leader()).c_str());
-            response->set_errcode(pb::NOT_LEADER);
-            response->set_errmsg("not leader");
+            store_responses[apply_idx].set_errcode(pb::NOT_LEADER);
+            store_responses[apply_idx].set_errmsg("not leader");
             DB_WARNING("not leader alarm_type: %d, leader:%s, region_id: %ld, log_id:%lu, remote_side:%s",
                        _not_leader_alarm.type, butil::endpoint2str(get_leader()).c_str(),
                        _region_id, log_id, remote_side);
@@ -1269,11 +1294,11 @@ void Region::async_apply_log_entry(google::protobuf::RpcController* controller,
         }
         // 只有分裂的时候采用这个rpc, 此时新region version一定是0, 分裂直接失败
         if (get_version() != 0) {
-            response->set_errcode(pb::VERSION_OLD);
-            response->set_errmsg("not allowed");
+            store_responses[apply_idx].set_errcode(pb::VERSION_OLD);
+            store_responses[apply_idx].set_errmsg("not allowed");
             DB_WARNING("not allowed fast_apply_log_entry, region_id: %ld, version:%ld, log_id:%lu, remote_side:%s",
                        _region_id, get_version(), log_id, remote_side);
-            return;
+            break;
         }
         // 异步执行走follower逻辑，DMLClosure不传transaction
         // 减少序列化/反序列化开销，DMLClosure不传op_type
@@ -1281,7 +1306,7 @@ void Region::async_apply_log_entry(google::protobuf::RpcController* controller,
         on_apply_cond.increase();
         c->cost.reset();
         c->cntl = cntl;
-        c->response = &store_reqs[apply_idx];
+        c->response = &store_responses[apply_idx];
         c->done = nullptr;
         c->region = this;
         c->remote_side = remote_side;
@@ -1294,18 +1319,20 @@ void Region::async_apply_log_entry(google::protobuf::RpcController* controller,
         _node.apply(task);
     }
     on_apply_cond.wait();
+
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
+
     // 判断是否有not leader
-    int64_t success_applied_cnt = 0;
-    for(success_applied_cnt = 0; success_applied_cnt < apply_idx; ++success_applied_cnt) {
-        if (store_reqs[success_applied_cnt].errcode() == pb::SUCCESS) {
-            continue;
+    int64_t success_applied_cnt = request->start_pos();
+    for (; success_applied_cnt < request->request_lens_size(); ++success_applied_cnt) {
+        if (store_responses[success_applied_cnt].errcode() != pb::SUCCESS) {
+            response->set_errcode(store_responses[success_applied_cnt].errcode());
+            response->set_errmsg(store_responses[success_applied_cnt].errmsg());
+            break;
         }
-        response->set_errcode(store_reqs[success_applied_cnt].errcode());
-        response->set_errmsg(store_reqs[success_applied_cnt].errmsg());
-        break;
     }
+    response->set_leader(butil::endpoint2str(get_leader()).c_str());
     response->set_success_cnt(success_applied_cnt);
     response->set_applied_index(_applied_index);
     response->set_braft_applied_index(_braft_apply_index);
@@ -2798,6 +2825,7 @@ void Region::on_apply(braft::Iterator& iter) {
                     && store_req.op_type() != pb::OP_COMMIT
                     && store_req.op_type() != pb::OP_NONE
                     && store_req.op_type() != pb::OP_KV_BATCH
+                    && store_req.op_type() != pb::OP_KV_BATCH_SPLIT
                     && store_req.op_type() != pb::OP_SELECT_FOR_UPDATE
                     && store_req.op_type() != pb::OP_UPDATE_PRIMARY_TIMESTAMP) {
                     DB_WARNING("unexpected store_req:%s, region_id: %ld",
