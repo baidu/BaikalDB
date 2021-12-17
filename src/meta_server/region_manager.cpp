@@ -2338,11 +2338,11 @@ void RegionManager::check_whether_illegal_peer(const pb::StoreHeartBeatRequest* 
             } else {
                 if (peer_info.has_exist_leader() && !peer_info.exist_leader()) {
                     bool find_in_legal = false;
-                    for(auto& peer_state : peer_state.legal_peers_state) {
-                        if (peer_state.peer_id() == instance) {
-                            peer_state.set_timestamp(timestamp);
-                            peer_state.set_table_id(peer_info.table_id());
-                            peer_state.set_peer_status(pb::STATUS_NO_LEADER);
+                    for(auto& ps : peer_state.legal_peers_state) {
+                        if (ps.peer_id() == instance) {
+                            ps.set_timestamp(timestamp);
+                            ps.set_table_id(peer_info.table_id());
+                            ps.set_peer_status(pb::STATUS_NO_LEADER);
                             find_in_legal = true;
                             break;
                         }
@@ -2385,11 +2385,11 @@ void RegionManager::check_whether_illegal_peer(const pb::StoreHeartBeatRequest* 
             bool legal_peer = check_legal_peer(master_region_info);
             if (!legal_peer) {
                 bool find_in_illegal = false;
-                for (auto& peer_state : peer_state.ilegal_peers_state) {
-                    if (peer_state.peer_id() == instance) {
-                        peer_state.set_timestamp(timestamp);
-                        peer_state.set_table_id(peer_info.table_id());
-                        peer_state.set_peer_status(pb::STATUS_ILLEGAL_PEER);
+                for (auto& ps : peer_state.ilegal_peers_state) {
+                    if (ps.peer_id() == instance) {
+                        ps.set_timestamp(timestamp);
+                        ps.set_table_id(peer_info.table_id());
+                        ps.set_peer_status(pb::STATUS_ILLEGAL_PEER);
                         find_in_illegal = true;
                         break;
                     }
@@ -2404,11 +2404,11 @@ void RegionManager::check_whether_illegal_peer(const pb::StoreHeartBeatRequest* 
                 }
             } else {
                 bool find_in_legal = false;
-                for (auto& peer_state : peer_state.legal_peers_state) {
-                    if (peer_state.peer_id() == instance) {
-                        peer_state.set_timestamp(timestamp);
-                        peer_state.set_table_id(peer_info.table_id());
-                        peer_state.set_peer_status(pb::STATUS_NO_LEADER);
+                for (auto& ps : peer_state.legal_peers_state) {
+                    if (ps.peer_id() == instance) {
+                        ps.set_timestamp(timestamp);
+                        ps.set_table_id(peer_info.table_id());
+                        ps.set_peer_status(pb::STATUS_NO_LEADER);
                         find_in_legal = true;
                         break;
                     }

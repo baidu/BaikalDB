@@ -1442,9 +1442,7 @@ bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<s
     };
 
     if (type_func_map[split_vec[2]] != nullptr) {
-        factory->get_table_by_filter(database_table, [](const SmartTable& table) {
-            return table != nullptr && table->binlog_id > 0;
-        });
+        factory->get_table_by_filter(database_table, type_func_map[split_vec[2]]);
     } else {
         DB_WARNING("not support type:%s", split_vec[2].c_str());
         return false;
@@ -1991,7 +1989,7 @@ bool ShowHelper::_show_store_txn(const SmartSocket& client, const std::vector<st
     // Make fields.
     std::vector<ResultField> fields;
     std::vector<std::string> names = {"txn_id", "seq_id", "primary_region_id", "state"};
-    std::unordered_map<pb::TxnState, std::string> state = {
+    std::unordered_map<pb::TxnState, std::string, std::hash<int>> state = {
             {pb::TXN_ROLLBACKED, "TXN_ROLLBACKED"},
             {pb::TXN_COMMITTED, "TXN_COMMITTED"},
             {pb::TXN_PREPARED, "TXN_PREPARED"},
@@ -2044,7 +2042,7 @@ bool ShowHelper::_show_store_txn(const SmartSocket& client, const std::vector<st
 }
 
 bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std::string>& split_vec) {
-    std::unordered_map<pb::DdlWorkStatus, std::string> state = {
+    std::unordered_map<pb::DdlWorkStatus, std::string, std::hash<int>> state = {
             {pb::DdlWorkIdle,    "DdlWorkIdle"},
             {pb::DdlWorkDoing,   "DdlWorkDoing"},
             {pb::DdlWorkDone,    "DdlWorkDone"},
@@ -2053,7 +2051,7 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
             {pb::DdlWorkError,   "DdlWorkError"}
 
     };
-    std::unordered_map<pb::IndexState, std::string> index_state = {
+    std::unordered_map<pb::IndexState, std::string, std::hash<int>> index_state = {
             {pb::IS_PUBLIC, "IS_PUBLIC"},
             {pb::IS_WRITE_LOCAL, "IS_WRITE_LOCAL"},
             {pb::IS_WRITE_ONLY, "IS_WRITE_ONLY"},
@@ -2353,7 +2351,7 @@ bool ShowHelper::_show_global_ddl_work(const SmartSocket& client, const std::vec
     std::vector<ResultField> fields;
     std::vector<std::string> names = {"region_id", "start_key", "end_key", "status", "op_type", "index_id",
                                       "address", "retry_time", "update_timestamp", "partition"};
-    std::unordered_map<pb::DdlWorkStatus, std::string> state = {
+    std::unordered_map<pb::DdlWorkStatus, std::string, std::hash<int>> state = {
             {pb::DdlWorkIdle, "DdlWorkIdle"},
             {pb::DdlWorkDoing, "DdlWorkDoing"},
             {pb::DdlWorkDone, "DdlWorkDone"},
