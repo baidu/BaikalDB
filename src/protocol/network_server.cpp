@@ -43,7 +43,7 @@ DEFINE_int32(backup_pv_threshold, 50, "backup_pv_threshold");
 DEFINE_double(backup_error_percent, 0.5, "use backup table if backup_error_percent > 0.5");
 DEFINE_int64(health_check_interval_us, 10 * 1000 * 1000, "health_check_interval_us");
 DEFINE_bool(need_health_check, true, "need_health_check");
-DEFINE_int64(health_check_timeout_ms, 2000, "health_check_timeout_ms");
+DEFINE_int64(health_check_store_timeout_ms, 2000, "health_check_store_timeout_ms");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
 DEFINE_bool(insert_agg_sql, false, "whether insert agg_sql");
@@ -601,9 +601,9 @@ void NetworkServer::store_health_check() {
             brpc::ChannelOptions option;
             option.max_retry = 1;
             option.connect_timeout_ms = 1000;
-            option.timeout_ms = FLAGS_health_check_timeout_ms;
+            option.timeout_ms = FLAGS_health_check_store_timeout_ms;
             if (old_status != pb::NORMAL) {
-                option.timeout_ms = FLAGS_health_check_timeout_ms / 2;
+                option.timeout_ms = FLAGS_health_check_store_timeout_ms / 2;
             }
             int ret = channel.Init(addr.c_str(), &option);
             if (ret != 0) {
