@@ -1256,6 +1256,7 @@ int LogicalPlanner::create_values_expr(const parser::FuncExpr* func_item, pb::Ex
         DB_WARNING("create_term_slot_ref_node failed");
         return -1;
     }
+
     return 0;
 }
 
@@ -1414,6 +1415,33 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
                 node->mutable_derive_node()->set_string_val(_ctx->client_conn->current_db);
             }
 
+            return 0;
+        }
+        if (item->fn_name.to_lower() == "default" && item->children.size() == 1) {
+            auto col_expr = (parser::ColumnName*)(item->children[0]);
+            std::string alias_name = get_field_alias_name(col_expr);
+            if (alias_name.empty()) {
+                DB_WARNING("get_field_alias_name failed: %s", col_expr->to_string().c_str());
+                return -1;
+            }
+            std::string full_name = alias_name;
+            full_name += ".";
+            full_name += col_expr->name.to_lower();
+            FieldInfo* field_info = nullptr;
+            if (nullptr == (field_info = get_field_info_ptr(full_name))) {
+                DB_WARNING("invalid field name: %s full_name: %s", col_expr->to_string().c_str(), full_name.c_str());
+                return -1;
+            }
+            if (field_info->default_expr_value.is_null()) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_NO_DEFAULT_FOR_FIELD;
+                    _ctx->stat_info.error_msg << "Field '" << col_expr->name.to_lower() << "' doesn't have a default value";
+                }
+                return -1;
+            }
+            pb::ExprNode* node = expr.add_nodes();
+            Literal literal = Literal(field_info->default_expr_value);
+            literal.transfer_pb(node);
             return 0;
         }
         if (FunctionManager::instance()->get_object(item->fn_name.to_lower()) == nullptr) {

@@ -1832,11 +1832,6 @@ FunctionCall:
         fun->children = $3->children;
         $$ = fun;
     }
-    | DATABASE '(' ')' {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "database";
-        $$ = fun;
-    }
     ;
 
 BuildInFun:
@@ -2094,109 +2089,109 @@ FunctionCallNonKeyword:
         $$ = fun;
     }
     | CONVERT '(' Expr ',' DATE ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_date";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS DATE ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_date";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' DATETIME ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_datetime";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS DATETIME ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_datetime";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' TIME ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_time";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS TIME ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_time";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' CHAR ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS CHAR ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' SIGNED INTEGER')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_signed";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' SIGNED ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_signed";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS SIGNED INTEGER')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_signed";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS SIGNED ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_signed";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' UNSIGNED INTEGER')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_unsigned";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' UNSIGNED')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_unsigned";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS UNSIGNED INTEGER')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_unsigned";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS UNSIGNED ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_unsigned";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CONVERT '(' Expr ',' BINARY ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | CAST '(' Expr AS BINARY ')' {
-	FuncExpr* fun = new_node(FuncExpr);
+	    FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
@@ -2346,6 +2341,17 @@ FunctionCallKeyword:
         fun->children.push_back($5, parser->arena);
         fun->children.push_back($7, parser->arena);
         $$ = fun; 
+    }
+    | DATABASE '(' ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "database";
+        $$ = fun;
+    }
+    | DEFAULT '(' ColumnName ')' {
+	    FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "default";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
     }
     ;
 SumExpr:
