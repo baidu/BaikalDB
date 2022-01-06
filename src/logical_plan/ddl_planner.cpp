@@ -623,65 +623,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                         code, table_option->str_value.value);
                     return 0;
                 }
-                auto json_iter = root.FindMember("resource_tag");
-                if (json_iter != root.MemberEnd()) {
-                    alter_request.set_op_type(pb::OP_MODIFY_RESOURCE_TAG);
-                    std::string resource_tag = json_iter->value.GetString();
-                    table->set_resource_tag(resource_tag);
-                    DB_WARNING("resource_tag: %s", resource_tag.c_str());
-                }
-                // TODO json_iter = root.FindMember("namespace");
-                // TODO json_iter = root.FindMember("replica_num");
-                json_iter = root.FindMember("dists");
-                std::set<std::string> logical_room_set;
-                if (json_iter != root.MemberEnd()) {
-                    alter_request.set_op_type(pb::OP_UPDATE_DISTS);
-                    if (json_iter->value.IsArray()) {
-                        for (size_t i = 0; i < json_iter->value.Size(); i++) {
-                            const rapidjson::Value& dist_value = json_iter->value[i];
-                            auto* dist = table->add_dists();
-                            std::string logical_room = dist_value["logical_room"].GetString();
-                            dist->set_logical_room(logical_room);
-                            dist->set_count(dist_value["count"].GetInt());
-                            logical_room_set.emplace(logical_room);
-                        }
-                    }
-                }
-                json_iter = root.FindMember("main_logical_room");
-                if (json_iter != root.MemberEnd()) {
-                    alter_request.set_op_type(pb::OP_UPDATE_MAIN_LOGICAL_ROOM);
-                    std::string main_logical_room = json_iter->value.GetString();
-                    table->set_main_logical_room(main_logical_room);
-                    DB_WARNING("main_logical_room: %s", main_logical_room.c_str());
-                }
-                json_iter = root.FindMember("region_split_lines");
-                if (json_iter != root.MemberEnd()) {
-                    alter_request.set_op_type(pb::OP_UPDATE_SPLIT_LINES);
-                    int64_t region_split_lines = json_iter->value.GetInt64();
-                    table->set_region_split_lines(region_split_lines);
-                    DB_WARNING("region_split_lines: %ld", region_split_lines);
-                }
-                json_iter = root.FindMember("ttl_duration");
-                if (json_iter != root.MemberEnd()) {
-                    int64_t ttl_duration = json_iter->value.GetInt64();
-                    table->set_ttl_duration(ttl_duration);
-                    DB_WARNING("ttl_duration: %ld", ttl_duration);
-                }
-                json_iter = root.FindMember("storage_compute_separate");
-                if (json_iter != root.MemberEnd()) {
-                    alter_request.set_op_type(pb::OP_UPDATE_SCHEMA_CONF);
-                    int64_t separate = json_iter->value.GetInt64();
-                    auto* schema_conf = table->mutable_schema_conf();
-                    if (separate == 0) {
-                        schema_conf->set_storage_compute_separate(false);
-                    } else {
-                        schema_conf->set_storage_compute_separate(true);
-                    }
-                    DB_WARNING("storage_compute_separate: %ld", separate);
-                }
-                // TODO json_iter = root.FindMember("region_num");
-                // TODO json_iter = root.FindMember("partition_type");
-                json_iter = root.FindMember("comment");
+                auto json_iter = root.FindMember("comment");
                 if (json_iter != root.MemberEnd()) {
                     alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
                     std::string comment = json_iter->value.GetString();

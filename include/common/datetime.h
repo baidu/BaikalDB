@@ -59,5 +59,7 @@ inline std::string date_to_str(uint32_t date) {
 
 extern bool tz_to_second(const char *time_zone, int32_t& result);
 
+//此函数处理mysql和strftime不一致的格式，进行格式转换后，继续使用strftime函数.
+extern size_t date_format_internal(char* s, size_t maxsize, const char* format, const struct tm* tp);
 } // namespace baikaldb
 

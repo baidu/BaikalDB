@@ -841,7 +841,7 @@ ExprValue date_format(const std::vector<ExprValue>& input) {
     struct tm t_result;
     localtime_r(&t, &t_result);
     char s[DATE_FORMAT_LENGTH];
-    strftime(s, sizeof(s), input[1].str_val.c_str(), &t_result);
+    date_format_internal(s, sizeof(s), input[1].str_val.c_str(), &t_result);
     ExprValue format_result(pb::STRING);
     format_result.str_val = s;
     return format_result;
@@ -864,11 +864,7 @@ ExprValue time_format(const std::vector<ExprValue>& input) {
     t_result.tm_min = (second >> 6) & 0x3F;
     t_result.tm_sec = second & 0x3F;
     char s[DATE_FORMAT_LENGTH];
-    std::string format = input[1].str_val;
-    boost::replace_all(format, "\%i", "\%M");
-    boost::replace_all(format, "\%s", "\%S");
-    boost::replace_all(format, "\%h", "\%I");
-    strftime(s, sizeof(s), format.c_str(), &t_result);
+    date_format_internal(s, sizeof(s), input[1].str_val.c_str(), &t_result);
     ExprValue format_result(pb::STRING);
     format_result.str_val = s;
     return format_result;
