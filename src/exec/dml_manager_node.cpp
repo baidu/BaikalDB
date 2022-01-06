@@ -53,6 +53,10 @@ int DmlManagerNode::get_region_infos(RuntimeState* state,
         DB_WARNING("invalid index info: %ld", global_index_id);
         return -1;
     }
+    if (index_info_ptr->index_hint_status == pb::IHS_VIRTUAL) {
+        DB_WARNING("index info: %ld is virtual, skip", global_index_id);
+        return 0;
+    }
     int ret = _factory->get_region_by_key(*index_info_ptr,
                 insert_scan_records,
                 delete_scan_records,

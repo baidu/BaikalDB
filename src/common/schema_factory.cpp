@@ -589,7 +589,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         update_index(tbl_info, cur, pk_index, background);
         if (cur.index_type() == pb::I_PRIMARY
                 || cur.is_global() == true) {
-            if (cur.is_global() && cur.state() != pb::IS_NONE) {
+            if (cur.is_global() && cur.state() != pb::IS_NONE && cur.hint_status() != pb::IHS_VIRTUAL) {
                 tbl_info.has_global_not_none = true;
             }
             

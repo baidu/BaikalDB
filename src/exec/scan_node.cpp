@@ -95,6 +95,10 @@ int64_t ScanNode::select_index() {
         if (path->hint == AccessPath::IGNORE_INDEX) {
             prefix_ratio_index_score = 0;
         }
+        // force index情况下非FORCE_INDEX优先级最低, 其实只有primary会走到这里
+        if (_use_force_index && path->hint != AccessPath::FORCE_INDEX) {
+            prefix_ratio_index_score = 0;
+        }
         prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, index_id));
 
         // 优先选倒排，没有就取第一个
@@ -262,7 +266,11 @@ int64_t ScanNode::select_index_by_cost() {
         } else if (!path->is_possible) {
             continue;
         }
-        
+        // _use_force_index时, 只有primary可能为非FORCE_INDEX，直接跳过
+        if (_use_force_index && path->hint != AccessPath::FORCE_INDEX) {
+            continue;
+        }
+
         int64_t index_id = pair.first;
         path->calc_cost(nullptr, _filed_selectiy);
         if (path->cost < min_cost) {
@@ -310,6 +318,13 @@ bool ScanNode::full_coverage(const std::unordered_set<int32_t>& smaller, const s
 // return -1 outer被干掉
 // return -2 inner被干掉
 int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
+    if (_use_force_index) {
+        // 只有primary可能不是FORCE_INDEX, 应该防止primary干掉force index
+        // @ref: https://dev.mysql.com/doc/refman/5.6/en/index-hints.html
+        if (outer_path->hint != inner_path->hint) {
+            return 0;
+        }
+    }
     if (outer_path->hit_index_field_ids.size() == inner_path->hit_index_field_ids.size()) {
         if (!full_coverage(outer_path->hit_index_field_ids, inner_path->hit_index_field_ids)) {
             return 0;
@@ -416,7 +431,9 @@ int64_t ScanNode::pre_process_select_index() {
             if (outer_loop_iter->second->index_field_ids.size() 
                 == outer_loop_iter->second->hit_index_field_ids.size()) {
                 // 主键或唯一键全命中，直接选择
-                return outer_loop_iter->second->index_id;
+                if (!_use_force_index || outer_loop_iter->second->hint == AccessPath::FORCE_INDEX) {
+                    return outer_loop_iter->second->index_id;
+                }
             }
         }
 

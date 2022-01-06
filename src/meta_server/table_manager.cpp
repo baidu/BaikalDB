@@ -2776,7 +2776,7 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
                 info.index_type() == pb::I_FULLTEXT);
         });
     if (index_to_del != std::end(schema_info.indexs())) {
-        if (index_req.hint_status() == pb::IHS_VIRTUAL) {
+        if (index_req.hint_status() == pb::IHS_VIRTUAL || index_to_del->hint_status() == pb::IHS_VIRTUAL) {
             auto& index_name = index_req.index_name();
             auto& database_name = schema_info.database();
             auto& table_name = schema_info.table_name();

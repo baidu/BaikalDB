@@ -149,6 +149,9 @@ public:
         if (access_path->is_virtual) {
             _use_virtual_index =  true;
         }
+        if (access_path->hint == AccessPath::FORCE_INDEX) {
+            _use_force_index =  true;
+        }
         _paths[access_path->index_id] = access_path;
     }
 
@@ -184,6 +187,7 @@ protected:
     bool _is_covering_index = true;
     bool _use_fulltext = false;
     bool _use_virtual_index = false;
+    bool _use_force_index = false;
     int32_t _possible_index_cnt = 0;
     int32_t _cover_index_cnt = 0;
     std::map<int32_t, double> _filed_selectiy; //缓存，避免重复的filed_id多次调用代价接口

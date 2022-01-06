@@ -205,7 +205,7 @@ ErrorType FetcherStore::send_request(
                 continue;
             }
             if (!need_copy_cache_plan && plan_item.op_type != pb::OP_BEGIN
-                && !state->single_txn_ceched()) {
+                && !state->single_txn_cached()) {
                 DB_DEBUG("not copy cache region_id: %ld, log_id:%lu txn_id:%lu", region_id, log_id, state->txn_id);
                 continue;
             }
@@ -227,7 +227,7 @@ ErrorType FetcherStore::send_request(
             pb_cache_plan->set_op_type(plan_item.op_type);
             pb_cache_plan->set_seq_id(plan_item.sql_id);
             ExecNode::create_pb_plan(old_region_id, pb_cache_plan->mutable_plan(), plan_item.root);
-            if (plan_item.op_type != pb::OP_BEGIN && !state->single_txn_ceched()) {
+            if (plan_item.op_type != pb::OP_BEGIN && !state->single_txn_cached()) {
                 DB_WARNING("TranstationNote: copy cache region_id: %ld, old_region_id:%ld log_id:%lu txn_id:%lu "
                 "start_seq_id:%d current_seq_id:%d cache_plan:%s", 
                     region_id, old_region_id, log_id, state->txn_id, start_seq_id, current_seq_id,

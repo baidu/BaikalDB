@@ -567,6 +567,10 @@ int Separate::create_lock_node(
         if (index_info == nullptr) {
             return -1;
         }
+        if (index_info->index_hint_status == pb::IHS_VIRTUAL) {
+            DB_NOTICE("index info is virtual, skip.");
+            continue;
+        }
         if (index_info->is_global) {
             if (index_info->state == pb::IS_NONE) {
                 DB_NOTICE("index info is NONE, skip.");

@@ -317,12 +317,12 @@ public:
         _open_binlog = flag;
     }
 
-    bool single_txn_ceched() {
-        return _single_txn_ceched;
+    bool single_txn_cached() {
+        return _single_txn_cached;
     }
 
-    void set_single_txn_ceched() {
-        _single_txn_ceched = true;
+    void set_single_txn_cached() {
+        _single_txn_cached = true;
     }
 
     void set_single_txn_need_separate_execute(bool flag) {
@@ -404,7 +404,7 @@ private:
     bool _eos          = false;
     bool _open_binlog  = false;
     bool _single_txn_need_separate_execute  = false;
-    bool _single_txn_ceched = false;
+    bool _single_txn_cached = false;
     bool _is_expr_subquery = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
     MemRowDescriptor _mem_row_desc;
