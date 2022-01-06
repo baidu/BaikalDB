@@ -2353,9 +2353,17 @@ FunctionCallKeyword:
         $$ = fun;
     }
     | DEFAULT '(' ColumnName ')' {
-	    FuncExpr* fun = new_node(FuncExpr);
+        FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "default";
         fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | REPLACE '(' Expr ',' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "replace";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        fun->children.push_back($7, parser->arena);
         $$ = fun;
     }
     ;
