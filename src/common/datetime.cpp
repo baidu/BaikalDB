@@ -419,4 +419,169 @@ int32_t seconds_to_time(int32_t seconds) {
     }
     return time;
 }
+
+bool tz_to_second(const char* time_zone, int32_t& result) {
+    if (strcmp(time_zone, "SYSTEM") == 0) {
+        result = 0;
+        time_t time_utc;
+        struct tm tm_local;
+        time(&time_utc);
+ 
+        localtime_r(&time_utc, &tm_local);
+ 
+        time_t time_local;
+        struct tm tm_gmt;
+ 
+        time_local = mktime(&tm_local);
+ 
+        gmtime_r(&time_utc, &tm_gmt);
+        int hour = tm_local.tm_hour - tm_gmt.tm_hour;
+        if (hour < -12) {
+            hour += 24; 
+        } else if (hour > 12) {
+            hour -= 24;
+        }
+        result = hour * 3600;
+        return true;
+    }
+    int minu = 1;
+    if (strlen(time_zone) != 6) {
+        return false;
+    }
+    char minu_char = time_zone[0];
+    if (minu_char == '-' ){
+        minu = -1;
+    } else if (minu_char != '+') {
+        return false;
+    }
+    if (time_zone[3] != ':') {
+        return false;
+    }
+    if (!isdigit(time_zone[1]) || !isdigit(time_zone[2]) || !isdigit(time_zone[4]) || !isdigit(time_zone[5])) {
+        return false;
+    }
+    int hour = 10 * (time_zone[1] - '0') + time_zone[2] - '0';
+    int min = 10 * (time_zone[4] - '0') + time_zone[5] - '0';
+    if (hour > 12 || min > 59) {
+        return false;
+    }
+    result =  (hour * 3600 + min * 60 ) * minu;
+    return true;
+}
+// 此函数处理mysql和strftime不一致的格式，进行格式转换后，继续使用strftime函数.
+// @ref: https://dev.mysql.com/doc/refman/8.0/en/date-and-time-functions.html#function_date-format
+// @ref: https://www.cplusplus.com/reference/ctime/strftime
+size_t date_format_internal(char* s, size_t maxsize, const char* format, const struct tm* tp) {
+    if (tp == nullptr || format == nullptr) {
+        return 0;
+    }
+    size_t i = 0;
+    std::string f = "";
+    char tmp[20] = {0};
+    int hour12 = tp->tm_hour % 12;
+    if (hour12 == 0) {
+        hour12 = 12;
+    }
+    while (format[i] != '\0') {
+        if (format[i] != '%' ) {
+            f += format[i++];
+            continue;
+        }
+        i++;
+        if (format[i] == '\0') {
+            break;
+        }
+        switch (format[i]) {
+            case 'c':
+                f += std::to_string(tp->tm_mon + 1);
+                break;
+            case 'D':
+                f += std::to_string(tp->tm_mday);
+                if (tp->tm_mday == 1 || tp->tm_mday == 21 || tp->tm_mday == 31) {
+                    f += "st";
+                }
+                else if (tp->tm_mday == 2 || tp->tm_mday == 22) {
+                    f += "nd";
+                }
+                else if (tp->tm_mday == 3 || tp->tm_mday == 23) {
+                    f += "rd";
+                } else {
+                    f += "th";
+                }
+                break;
+            case 'e':
+                //mysql为月的天，strftime中<10时会带个空格
+                f += std::to_string(tp->tm_mday);
+                break;
+            case 'f':
+                //微妙数
+                f += "000000";
+                break;
+            case 'h':
+            case 'I':
+                if (hour12 < 10) {
+                    f += "0";
+                }
+                f += std::to_string(hour12);
+                break;
+            case 'i':
+                f += "%M";
+                break;
+            case 'l':
+                f += std::to_string(hour12);
+                break;
+            case 'M':
+                f += "%B";
+                break;
+            case 'p':
+                if (tp->tm_hour % 24 >= 12){
+                    f += "PM";
+                } else {
+                    f += "AM";
+                }
+                break;
+            case 'r':
+                //02:12:00 AM，
+                memset(tmp, 0, sizeof(tmp));
+                sprintf(tmp, "%02d:%02d:%02d ", hour12, tp->tm_min, tp->tm_sec);
+                f += tmp;
+                if (tp->tm_hour % 24 >= 12) {
+                    f += "PM";
+                } else {
+                    f += "AM";
+                }
+                break;
+            case 'v':
+                f += "%V";
+                break;
+            case 'W':
+                f += "%A";
+                break;
+            case 'X':
+            case 'x':
+                f += "%Y";
+                break;
+            case 's':
+                f += "%S";
+                break;
+            case 'k':
+                f += std::to_string(tp->tm_hour);
+                break;
+            case 'u':
+                f += "%W";
+                break;
+            case 'Y':
+            case 'y':
+            case 'j':
+            case 'm':
+            case 'H':
+            default:
+                f += "%";
+                f += format[i];
+        }
+        i++;
+    }
+    return strftime(s, maxsize, f.c_str(), tp);
+}
+
 }  // baikaldb

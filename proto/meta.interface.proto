@@ -134,6 +134,8 @@ message SchemaInfo {
     optional int32 region_num               = 43;
     repeated string learner_resource_tags   = 44;
     optional int64 online_ttl_expire_time_us = 45; 
+    optional string comment                 = 46;
+    optional bool  if_exist                 = 47;
 };
 
 message PartitionRegion {

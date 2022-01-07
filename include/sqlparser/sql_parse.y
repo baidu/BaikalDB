@@ -433,6 +433,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     COUNT
     CURDATE
     CURTIME
+    CURRENT_TIMESTAMP
     DATE_ADD
     DATE_SUB
     EXTRACT
@@ -441,7 +442,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     MID
     MIN
     NOW
-    CURRENT_TIMESTAMP
     UTC_TIMESTAMP
     POSITION
     SESSION_USER
@@ -478,6 +478,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     OptCollate
     DBName
     FunctionNameCurtime
+    FunctionNameCurTimestamp
     FunctionaNameCurdate
     FunctionaNameDateRelate
     FunctionNameDateArithMultiForms
@@ -2035,20 +2036,31 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | CURRENT_TIMESTAMP '(' ')' {
+    | FunctionNameCurTimestamp {
         FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = $1;
+        fun->fn_name = "current_timestamp"; 
         $$ = fun; 
     }
-    | CURRENT_TIMESTAMP '(' INTEGER_LIT ')' {
+    | FunctionNameCurTimestamp '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = $1;
+        fun->fn_name = "current_timestamp"; 
+        $$ = fun; 
+    }
+    | FunctionNameCurTimestamp '(' INTEGER_LIT ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "current_timestamp"; 
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | UTC_TIMESTAMP '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
+        $$ = fun;
+    }
+    | TIMESTAMP '(' ExprList ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children = $3->children;
         $$ = fun;
     }
     | FunctionNameDateArithMultiForms '(' Expr ',' Expr ')' {
@@ -2074,6 +2086,114 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         fun->children.push_back($6, parser->arena);
         fun->children.push_back($7, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' DATE ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_date";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS DATE ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_date";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' DATETIME ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_datetime";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS DATETIME ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_datetime";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' TIME ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_time";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS TIME ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_time";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' CHAR ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_string";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS CHAR ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_string";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' SIGNED INTEGER')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_signed";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' SIGNED ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_signed";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS SIGNED INTEGER')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_signed";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS SIGNED ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_signed";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' UNSIGNED INTEGER')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_unsigned";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' UNSIGNED')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_unsigned";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS UNSIGNED INTEGER')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_unsigned";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS UNSIGNED ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_unsigned";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' BINARY ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_string";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS BINARY ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_string";
+        fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | USER '(' ')' {
@@ -2221,6 +2341,17 @@ FunctionCallKeyword:
         fun->children.push_back($5, parser->arena);
         fun->children.push_back($7, parser->arena);
         $$ = fun; 
+    }
+    | DATABASE '(' ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "database";
+        $$ = fun;
+    }
+    | DEFAULT '(' ColumnName ')' {
+	    FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "default";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
     }
     ;
 SumExpr:
@@ -3106,7 +3237,7 @@ ColumnOption:
         option->expr = $2;
         $$ = option;
     }
-    | ON UPDATE CURRENT_TIMESTAMP
+    | ON UPDATE FunctionCallCurTimestamp
     {
         FuncExpr* current_timestamp = new_node(FuncExpr);
         current_timestamp->func_type = FT_COMMON;
@@ -3124,7 +3255,7 @@ ColumnOption:
         $$ = option;
     }
     ;
-
+    
 SignedLiteral:
     Literal {}
     | '+' NumLiteral {
@@ -3143,7 +3274,7 @@ SignedLiteral:
     ;
 
 DefaultValue:
-    CURRENT_TIMESTAMP
+    FunctionCallCurTimestamp
     {
         FuncExpr* current_timestamp = new_node(FuncExpr);
         current_timestamp->func_type = FT_COMMON;
@@ -3154,6 +3285,15 @@ DefaultValue:
     {
         $$ = $1;
     }
+
+FunctionCallCurTimestamp:
+    NOW '(' ')'
+    | FunctionNameCurTimestamp
+    | FunctionNameCurTimestamp '(' ')'
+    ;
+FunctionNameCurTimestamp:
+    CURRENT_TIMESTAMP | LOCALTIME | LOCALTIMESTAMP
+    ;
 
 PrimaryOpt:
     {}
@@ -4216,6 +4356,12 @@ VarAssignItem:
         assign->value = LiteralExpr::make_int("1", parser->arena);
         $$ = assign;
     }
+    | VarName EQ_OP DEFAULT
+    {
+        VarAssign* assign = new_node(VarAssign);
+        assign->key = $1;
+        $$ = assign;
+    }
     | VarName ASSIGN_OP Expr
     {
         VarAssign* assign = new_node(VarAssign);
@@ -4514,6 +4660,14 @@ AsOrToOpt:
     | TO
     {}
 
+ColumnPosOpt:
+    {}
+    | FIRST ColumnName
+    {}
+    | AFTER ColumnName
+    {}
+    ;
+
 AlterSpec:
     TableOptionList
     {
@@ -4524,7 +4678,7 @@ AlterSpec:
         }
         $$ = spec;
     }
-    | ADD ColumnKwdOpt ColumnDef
+    | ADD ColumnKwdOpt ColumnDef ColumnPosOpt
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_ADD_COLUMN;

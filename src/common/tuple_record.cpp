@@ -266,6 +266,9 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
         auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
         //add default value
         MessageHelper::set_value(field, message, iter->second->default_expr_value);
+        if (record == nullptr) {
+            (*mem_row)->update_used_size(iter->second->default_expr_value.size());
+        }
         iter++;
     }
     return 0;

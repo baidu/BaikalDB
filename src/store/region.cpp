@@ -478,6 +478,9 @@ int Region::execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& respon
             }
             return -1;
         }
+        if (res.has_last_insert_id()) {
+            response.set_last_insert_id(res.last_insert_id());
+        }
         
         // if this is the BEGIN cmd, we need to refresh the txn handler
         if (op_type == pb::OP_BEGIN && (nullptr == (txn = _txn_pool.get_txn(txn_id)))) {
@@ -1755,6 +1758,9 @@ void Region::dml_2pc(const pb::StoreReq& request,
         txn->dml_num_affected_rows = affected_rows;
     }
     response.set_affected_rows(affected_rows);
+    if (state.last_insert_id != INT64_MIN) {
+        response.set_last_insert_id(state.last_insert_id);
+    }
     root->close(&state);
     ExecNode::destroy_tree(root);
     response.set_errcode(pb::SUCCESS);
@@ -2431,8 +2437,11 @@ int Region::select_sample(RuntimeState& state, ExecNode* root, const pb::Analyze
                 if (count > 0) {
                     int32_t random = butil::fast_rand() % count; 
                     if (random < sample_cnt) {
+                        state.memory_limit_release(sample_batch.get_row(random)->used_size());
                         sample_batch.replace_row(std::move(batch.get_row()), random);
-                    }
+                    } else {
+			state.memory_limit_release(batch.get_row()->used_size());
+		    }
                 }
             }
         }
@@ -3214,6 +3223,9 @@ void Region::apply_txn_request(const pb::StoreReq& request, braft::Closure* done
         }
         if (res.has_affected_rows()) {
             ((DMLClosure*)done)->response->set_affected_rows(res.affected_rows());
+        }
+        if (res.has_last_insert_id()) {
+            ((DMLClosure*)done)->response->set_last_insert_id(res.last_insert_id());
         }
     }
 }

@@ -477,6 +477,61 @@ ExprValue rtrim(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue lpad(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::STRING);
+    std::string str = input[0].get_string();
+    int64_t len = input[1].get_numberic<int64_t>();
+    if (len <= 0 || len > UINT16_MAX) {
+        return ExprValue::Null();
+    }
+    if (len <= str.length()) {
+        tmp.str_val.append(str.begin(), str.begin() + len);
+        return tmp;
+    }
+    std::string padstr = input[2].get_string();
+    if (padstr.length() == 0) {
+        return ExprValue::Null();
+    }
+    size_t padlen = len - str.length();
+    while (padlen > padstr.length()) {
+        tmp.str_val.append(padstr);
+        padlen -= padstr.length();
+    }
+    tmp.str_val.append(padstr.begin(), padstr.begin() + padlen);
+    tmp.str_val.append(str);
+    return tmp;
+}
+ExprValue rpad(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::STRING);
+    std::string str = input[0].get_string();
+    int64_t len = input[1].get_numberic<int64_t>();
+    if (len <= 0 || len > UINT16_MAX) {
+        return ExprValue::Null();
+    }
+    if (len <= str.length()) {
+        tmp.str_val.append(str.begin(), str.begin() + len);
+        return tmp;
+    }
+    std::string padstr = input[2].get_string();
+    if (padstr.length() == 0) {
+        return ExprValue::Null();
+    }
+    tmp.str_val.append(str);
+    size_t padlen = len - str.length();
+    while (padlen > padstr.length()) {
+        tmp.str_val.append(padstr);
+        padlen -= padstr.length();
+    }
+    tmp.str_val.append(padstr.begin(), padstr.begin() + padlen);
+    return tmp;
+}
+
 ExprValue concat_ws(const std::vector<ExprValue>& input) {
     if (input.size() < 2) {
         return ExprValue::Null();
@@ -759,6 +814,19 @@ ExprValue current_timestamp(const std::vector<ExprValue>& input) {
 ExprValue utc_timestamp(const std::vector<ExprValue>& input) {
     return ExprValue::UTC_TIMESTAMP();
 }
+
+ExprValue timestamp(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input.size() > 2) {
+        return ExprValue::Null();
+    }
+    ExprValue arg1 = input[0];
+    ExprValue ret = arg1.cast_to(pb::DATETIME).cast_to(pb::TIMESTAMP);
+    if (input.size() == 2) {
+        ret._u.uint32_val += time_to_sec(std::vector<ExprValue>(input.begin() + 1, input.end()))._u.int32_val;
+    }
+    return ret;
+}
+
 ExprValue date_format(const std::vector<ExprValue>& input) {
     if (input.size() != 2) {
         return ExprValue::Null();
@@ -773,11 +841,60 @@ ExprValue date_format(const std::vector<ExprValue>& input) {
     struct tm t_result;
     localtime_r(&t, &t_result);
     char s[DATE_FORMAT_LENGTH];
-    strftime(s, sizeof(s), input[1].str_val.c_str(), &t_result);
+    date_format_internal(s, sizeof(s), input[1].str_val.c_str(), &t_result);
     ExprValue format_result(pb::STRING);
     format_result.str_val = s;
     return format_result;
 }
+
+ExprValue time_format(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    ExprValue tmp = input[0];
+    struct tm t_result;
+    uint32_t second = tmp.cast_to(pb::TIME)._u.int32_val;
+    
+    t_result.tm_hour = (second >> 12) & 0x3FF;
+    t_result.tm_min = (second >> 6) & 0x3F;
+    t_result.tm_sec = second & 0x3F;
+    char s[DATE_FORMAT_LENGTH];
+    date_format_internal(s, sizeof(s), input[1].str_val.c_str(), &t_result);
+    ExprValue format_result(pb::STRING);
+    format_result.str_val = s;
+    return format_result;
+}
+
+ExprValue convert_tz(const std::vector<ExprValue>& input) {
+    if (input.size() != 3){
+        return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    ExprValue time = input[0];
+    ExprValue from_tz = input[1];
+    ExprValue to_tz = input[2];
+    int from_tz_second, to_tz_second;
+    if (!tz_to_second(from_tz.str_val.c_str(), from_tz_second)) {
+        return ExprValue::Null();
+    }
+    if (!tz_to_second(to_tz.str_val.c_str(), to_tz_second)) {
+        return ExprValue::Null();
+    }
+    int second_diff = to_tz_second - from_tz_second;
+    ExprValue ret = time.cast_to(pb::TIMESTAMP);
+    ret._u.uint32_val += second_diff;
+    return ret.cast_to(pb::DATETIME);
+}
+
 ExprValue timediff(const std::vector<ExprValue>& input) {
     if (input.size() < 2) {
         return ExprValue::Null();
@@ -1249,6 +1366,19 @@ ExprValue ifnull(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     return input[0].is_null() ? input[1] : input[0];
+}
+
+ExprValue isnull(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::BOOL);
+    if (input[0].is_null()) {
+        tmp._u.bool_val = true;
+    } else {
+        tmp._u.bool_val = false;
+    }
+   return tmp;
 }
 
 ExprValue nullif(const std::vector<ExprValue>& input) {
@@ -1728,6 +1858,54 @@ ExprValue last_insert_id(const std::vector<ExprValue>& input) {
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::INT64);
+}
+
+ExprValue cast_to_date(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DATE);
+}
+
+ExprValue cast_to_datetime(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DATETIME);
+}
+
+ExprValue cast_to_time(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::TIME);
+}
+
+ExprValue cast_to_string(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::STRING);
+}
+
+ExprValue cast_to_signed(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::INT64);
+}
+
+ExprValue cast_to_unsigned(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+	return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::UINT64);
 }
 }
 

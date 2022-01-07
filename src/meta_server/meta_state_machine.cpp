@@ -396,6 +396,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->update_schema_conf(request, iter.index(), done);
             break;
         }
+        case pb::OP_UPDATE_TABLE_COMMENT: {
+            TableManager::get_instance()->update_table_comment(request, iter.index(), done);
+            break;
+        }
         case pb::OP_DROP_REGION: {
             RegionManager::get_instance()->drop_region(request, iter.index(), done);
             break;

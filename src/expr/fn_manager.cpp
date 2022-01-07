@@ -149,6 +149,8 @@ void FunctionManager::register_operators() {
     register_object_ret("reverse", reverse, pb::STRING);
     register_object_ret("locate", locate, pb::INT32);
     register_object_ret("substring_index", substring_index, pb::STRING);
+    register_object_ret("lpad", lpad, pb::STRING);
+    register_object_ret("rpad", rpad, pb::STRING);
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);
@@ -157,13 +159,16 @@ void FunctionManager::register_operators() {
     register_object_ret("sysdate", now, pb::DATETIME);
     register_object_ret("utc_timestamp", utc_timestamp, pb::DATETIME);
     register_object_ret("date_format", date_format, pb::STRING);
+    register_object_ret("time_format", time_format, pb::STRING);
     register_object_ret("timediff", timediff, pb::TIME);
     register_object_ret("timestampdiff", timestampdiff, pb::INT64);
+    register_object_ret("convert_tz", convert_tz, pb::STRING);
     register_object_ret("curdate", curdate, pb::DATE);
     register_object_ret("current_date", current_date, pb::DATE);
     register_object_ret("curtime", curtime, pb::TIME);
     register_object_ret("current_time", current_time, pb::TIME);
     register_object_ret("current_timestamp", current_timestamp, pb::TIMESTAMP);
+    register_object_ret("timestamp", timestamp, pb::TIMESTAMP);
     register_object_ret("day", day, pb::UINT32);
     register_object_ret("dayname", dayname, pb::STRING);
     register_object_ret("dayofweek", dayofweek, pb::UINT32);
@@ -191,6 +196,7 @@ void FunctionManager::register_operators() {
     register_object_ret("if", if_, pb::STRING);
     register_object_ret("ifnull", ifnull, pb::STRING);
     register_object_ret("nullif", nullif, pb::STRING);
+    register_object_ret("isnull", isnull, pb::BOOL);
     // MurmurHash sign
     register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
     register_object_ret("md5", md5, pb::STRING);
@@ -234,6 +240,12 @@ void FunctionManager::register_operators() {
 
     register_object_ret("version", version, pb::STRING);
     register_object_ret("last_insert_id", last_insert_id, pb::INT64);
+    register_object_ret("cast_to_date", cast_to_date, pb::DATE);
+    register_object_ret("cast_to_time", cast_to_time, pb::TIME);
+    register_object_ret("cast_to_datetime", cast_to_datetime, pb::DATETIME);
+    register_object_ret("cast_to_string", cast_to_string, pb::STRING);
+    register_object_ret("cast_to_signed", cast_to_signed, pb::INT64);
+    register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::INT64);
 }
 
 int FunctionManager::init() {

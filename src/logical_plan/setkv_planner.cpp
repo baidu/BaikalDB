@@ -29,8 +29,10 @@ int SetKVPlanner::plan() {
         parser::VarAssign* var_assign = var_list[idx];
         std::string key(var_assign->key.value);
         if (var_assign->value == nullptr) {
+            // SET variable = DEFAULT 时, value为空
             DB_WARNING("var_assign->value is null: %s", var_assign->key.value);
-            return -1;
+            _ctx->succ_after_logical_plan = true;
+            return 0;
         }
         // https://dev.mysql.com/doc/refman/5.7/en/set-variable.html
         std::transform(key.begin(), key.end(), key.begin(), ::tolower);

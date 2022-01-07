@@ -22,6 +22,36 @@
 
 namespace baikaldb {
 
+// https://dev.mysql.com/doc/internals/en/capability-flags.html
+enum MysqlCapability {
+    CLIENT_LONG_PASSWORD                    = 1 << 0,  /* new more secure passwords */
+    CLIENT_FOUND_ROWS                       = 1 << 1,  /* Found instead of affected rows */
+    CLIENT_LONG_FLAG                        = 1 << 2,  /* Get all column flags */
+    CLIENT_CONNECT_WITH_DB                  = 1 << 3,  /* One can specify db on connect */
+    CLIENT_NO_SCHEMA                        = 1 << 4,  /* Don't allow database.table.column */
+    CLIENT_COMPRESS                         = 1 << 5,  /* Can use compression protocol */
+    CLIENT_ODBC                             = 1 << 6,  /* Odbc client */
+    CLIENT_LOCAL_FILES                      = 1 << 7,  /* Can use LOAD DATA LOCAL */
+    CLIENT_IGNORE_SPACE                     = 1 << 8,  /* Ignore spaces before '(' */
+    CLIENT_PROTOCOL_41                      = 1 << 9,  /* New 4.1 protocol */
+    CLIENT_INTERACTIVE                      = 1 << 10, /* This is an interactive client */
+    CLIENT_SSL                              = 1 << 11, /* Switch to SSL after handshake */
+    CLIENT_IGNORE_SIGPIPE                   = 1 << 12, /* IGNORE sigpipes */
+    CLIENT_TRANSACTIONS                     = 1 << 13, /* Client knows about transactions */
+    CLIENT_RESERVED                         = 1 << 14, /* Old flag for 4.1 protocol  */
+    CLIENT_SECURE_CONNECTION                = 1 << 15, /* New 4.1 authentication */
+    CLIENT_MULTI_STATEMENTS                 = 1 << 16, /* Enable/disable multi-stmt support */
+    CLIENT_MULTI_RESULTS                    = 1 << 17, /* Enable/disable multi-results */
+    CLIENT_PS_MULTI_RESULTS                 = 1 << 18, /* Multi-results in PS-protocol */
+    CLIENT_PLUGIN_AUTH                      = 1 << 19, /* Client supports plugin authentication */
+    CLIENT_CONNECT_ATTRS                    = 1 << 20, /* Client supports connection attributes */
+    CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA   = 1 << 21, /* Enable authentication response packet to be larger than 255 bytes. */
+    CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS     = 1 << 22, /* Don't close the connection for a connection with expired password. */
+    CLIENT_SESSION_TRACK                    = 1 << 30,
+    CLIENT_DEPRECATE_EOF                    = 1 << 31,
+};
+
+
 class NetworkSocket;
 const uint32_t PACKET_LEN_MAX                    = 0x00ffffff;
 const uint32_t PACKET_HEADER_LEN                 = 4;

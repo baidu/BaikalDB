@@ -317,10 +317,13 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             try {
                 root.Parse<0>(option->str_value.value);
                 if (root.HasParseError()) {
+                    // 兼容mysql语法
+                    table.set_comment(option->str_value.value);
                     rapidjson::ParseErrorCode code = root.GetParseError();
                     DB_WARNING("parse create table json comments error [code:%d][%s]", 
                         code, option->str_value.value);
-                    return -1;
+                    continue;
+//                    return -1;
                 }
                 auto json_iter = root.FindMember("resource_tag");
                 if (json_iter != root.MemberEnd()) {
@@ -416,9 +419,17 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         }
                     }
                 }
+                json_iter = root.FindMember("comment");
+                if (json_iter != root.MemberEnd()) {
+                    std::string comment = json_iter->value.GetString();
+                    table.set_comment(comment);
+                    DB_WARNING("comment: %s", comment.c_str());
+                }
             } catch (...) {
+                // 兼容mysql语法
+                table.set_comment(option->str_value.value);
                 DB_WARNING("parse create table json comments error [%s]", option->str_value.value);
-                return -1;
+//                return -1;
             }
         } else if (option->type == parser::TABLE_OPT_PARTITION) {
             // range 分区这里进行配置。
@@ -497,6 +508,7 @@ int DDLPlanner::parse_drop_table(pb::SchemaInfo& table) {
     }
     table.set_table_name(table_name->table.value);
     table.set_namespace_name(_ctx->user_info->namespace_);
+    table.set_if_exist(stmt->if_exist);
     DB_WARNING("drop table: %s.%s.%s", 
         table.namespace_name().c_str(), table.database().c_str(), table.table_name().c_str());
     return 0;
@@ -589,7 +601,6 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         return -1;
     }
     if (spec->spec_type == parser::ALTER_SPEC_TABLE_OPTION) {
-        alter_request.set_op_type(pb::OP_UPDATE_BYTE_SIZE);
         if (spec->table_options.size() > 1) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
             _ctx->stat_info.error_msg << "Alter with multiple table_options is not supported in this version";
@@ -597,7 +608,34 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         }
         parser::TableOption* table_option = spec->table_options[0];
         if (table_option->type == parser::TABLE_OPT_AVG_ROW_LENGTH) {
+            alter_request.set_op_type(pb::OP_UPDATE_BYTE_SIZE);
             table->set_byte_size_per_record(table_option->uint_value);
+        } else if (table_option->type == parser::TABLE_OPT_COMMENT) {
+            rapidjson::Document root;
+            try {
+                root.Parse<0>(table_option->str_value.value);
+                if (root.HasParseError()) {
+                    // 兼容mysql语法
+                    alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
+                    table->set_comment(table_option->str_value.value);
+                    rapidjson::ParseErrorCode code = root.GetParseError();
+                    DB_WARNING("parse create table json comments error [code:%d][%s]",
+                        code, table_option->str_value.value);
+                    return 0;
+                }
+                auto json_iter = root.FindMember("comment");
+                if (json_iter != root.MemberEnd()) {
+                    alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
+                    std::string comment = json_iter->value.GetString();
+                    table->set_comment(comment);
+                    DB_WARNING("comment: %s", comment.c_str());
+                }
+            } catch (...) {
+                // 兼容mysql语法
+                alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
+                table->set_comment(table_option->str_value.value);
+                DB_WARNING("parse alter table json comments error [%s]", table_option->str_value.value);
+            }
         } else {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
             _ctx->stat_info.error_msg << "Alter table option type unsupported: " << table_option->type;

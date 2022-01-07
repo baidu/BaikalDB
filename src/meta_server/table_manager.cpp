@@ -312,6 +312,10 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
     int64_t drop_table_id = 0;
     auto ret = check_table_exist(request.table_info(), namespace_id, database_id, drop_table_id);
     if (ret < 0) {
+        if (request.table_info().if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "table not exist");
+            return;
+        }
         DB_WARNING("input table not exit, request: %s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
         return;
@@ -848,6 +852,16 @@ void TableManager::update_ttl_duration(const pb::MetaManagerRequest& request,
             }
 
             mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+        });
+}
+
+void TableManager::update_table_comment(const pb::MetaManagerRequest& request,
+                                const int64_t apply_index,
+                                braft::Closure* done) {
+    update_table_internal(request, apply_index, done,
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+            mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+            mem_schema_pb.set_comment(request.table_info().comment());
         });
 }
 
@@ -3343,7 +3357,8 @@ void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, 
                 for (const auto& index_info : request.table_info().indexs()) {
                     auto index_iter = mem_schema_pb.mutable_indexs()->begin();
                     for (; index_iter != mem_schema_pb.mutable_indexs()->end(); index_iter++) {
-                        if (index_iter->index_name() == index_info.index_name() &&
+                        // 索引匹配不区分大小写
+                        if (boost::algorithm::iequals(index_iter->index_name(), index_info.index_name()) &&
                             index_iter->index_type() != pb::I_PRIMARY) {
                             if (index_iter->hint_status() == pb::IHS_VIRTUAL) {
                                 continue;

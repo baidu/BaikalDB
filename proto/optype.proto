@@ -125,4 +125,5 @@ enum OpType {
     OP_DROP_LEARNER                         = 188;
     OP_OPEN_NETWORK_SEGMENT_BALANCE         = 189; // 打开一个resource tag的按网段进行balance
     OP_CLOSE_NETWORK_SEGMENT_BALANCE        = 190; // 关闭一个resource tag的按网段进行balance
+    OP_UPDATE_TABLE_COMMENT                 = 191; //修改表的comment
 };

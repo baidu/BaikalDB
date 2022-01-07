@@ -56,7 +56,7 @@ CHECK { return CHECK; }
 COLLATE { return COLLATE; }
 COLUMN { return COLUMN; }
 CONSTRAINT { return CONSTRAINT; }
-CONVERT { return CONVERT; }
+CONVERT { un_reserved_keyword(yylval, yyscanner, parser); return CONVERT;}
 CREATE { return CREATE; }
 CROSS { return CROSS; }
 CURRENT_DATE { un_reserved_keyword(yylval, yyscanner, parser); return CURRENT_DATE; }
@@ -504,6 +504,9 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
     yylval->string.strdup(yytext, parser->arena);
     return IDENT;
 }
+
+"--"[ \t].* {/* single line comment; do nothing */}
+"#".* {/* single line comment; do nothing */}
 
 [ \t\r\n] { }
 [\0] { return 0; }

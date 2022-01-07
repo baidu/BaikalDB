@@ -557,6 +557,9 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
     oss << " DEFAULT CHARSET=" << charset_map[info.charset];
     oss <<" AVG_ROW_LENGTH=" << info.byte_size_per_record;
     oss << " COMMENT='{\"resource_tag\":\"" << info.resource_tag << "\"";
+    if (!info.comment.empty()) {
+        oss << ", \"comment\":\"" << info.comment << "\"";
+    }
     oss << ", \"replica_num\":" << info.replica_num;
     oss << ", \"region_split_lines\":" << info.region_split_lines;
     if (info.ttl_info.ttl_duration_s > 0) {
@@ -1004,6 +1007,10 @@ bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector
         //client->state = STATE_ERROR;
         return false;
     }
+    bool is_like_pattern = false;
+    std::string like_pattern;
+    re2::RE2::Options option;
+    std::unique_ptr<re2::RE2> regex_ptr;
 
     // Make fields.
     std::vector<ResultField> fields;
@@ -1079,6 +1086,23 @@ bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector
     } else if (split_vec.size() == 7) {
         db = remove_quote(split_vec[6].c_str(), '`');
         table = remove_quote(split_vec[4].c_str(), '`');
+    } else if (split_vec.size() == 9) {
+          is_like_pattern = true;
+          std::string like_str;
+          db = remove_quote(split_vec[6].c_str(), '`');
+          table = remove_quote(split_vec[4].c_str(), '`');
+          like_str = remove_quote(split_vec[8].c_str(), '"');
+          like_str = remove_quote(like_str.c_str(), '\'');
+          for (auto ch : like_str) {
+              if (ch == '%') {
+                  like_pattern.append(".*");
+              } else {
+                  like_pattern.append(1, ch);
+              }
+          }
+          option.set_utf8(false);
+          option.set_case_sensitive(false);
+          regex_ptr.reset(new re2::RE2(like_pattern, option));
     } else {
         client->state = STATE_ERROR;
         return false;
@@ -1114,6 +1138,12 @@ bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector
         std::vector<std::string> split_vec;
         boost::split(split_vec, field.name,
                      boost::is_any_of(" \t\n\r."), boost::token_compress_on);
+        if (is_like_pattern) {
+            if (!RE2::FullMatch(split_vec[split_vec.size() - 1], *regex_ptr)) {
+                DB_NOTICE("not match");
+                continue;
+            }
+        }
         row.emplace_back(split_vec[split_vec.size() - 1]);
         row.emplace_back("NULL");
         row.emplace_back(PrimitiveType_Name(field.type));
