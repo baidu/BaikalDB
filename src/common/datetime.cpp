@@ -487,7 +487,7 @@ size_t date_format_internal(char* s, size_t maxsize, const char* format, const s
             f += format[i++];
             continue;
         }
-        i ++;
+        i++;
         if (format[i] == '\0') {
             break;
         }
@@ -579,7 +579,7 @@ size_t date_format_internal(char* s, size_t maxsize, const char* format, const s
                 f += "%";
                 f += format[i];
         }
-        i ++;
+        i++;
     }
     return strftime(s, maxsize, f.c_str(), tp);
 }

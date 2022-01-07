@@ -505,7 +505,7 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
     return IDENT;
 }
 
-"--".* {/* single line comment; do nothing */}
+"--"[ \t].* {/* single line comment; do nothing */}
 "#".* {/* single line comment; do nothing */}
 
 [ \t\r\n] { }
