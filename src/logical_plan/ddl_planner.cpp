@@ -421,9 +421,11 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 }
                 json_iter = root.FindMember("comment");
                 if (json_iter != root.MemberEnd()) {
-                    std::string comment = json_iter->value.GetString();
-                    table.set_comment(comment);
-                    DB_WARNING("comment: %s", comment.c_str());
+                    if (json_iter->value.IsString()) {
+                        std::string comment = json_iter->value.GetString();
+                        table.set_comment(comment);
+                        DB_WARNING("comment: %s", comment.c_str());
+                    }
                 }
             } catch (...) {
                 // 兼容mysql语法
@@ -626,9 +628,11 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 auto json_iter = root.FindMember("comment");
                 if (json_iter != root.MemberEnd()) {
                     alter_request.set_op_type(pb::OP_UPDATE_TABLE_COMMENT);
-                    std::string comment = json_iter->value.GetString();
-                    table->set_comment(comment);
-                    DB_WARNING("comment: %s", comment.c_str());
+                    if (json_iter->value.IsString()) {
+                        std::string comment = json_iter->value.GetString();
+                        table->set_comment(comment);
+                        DB_WARNING("comment: %s", comment.c_str());
+                    }
                 }
             } catch (...) {
                 // 兼容mysql语法

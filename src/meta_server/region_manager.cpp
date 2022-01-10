@@ -2258,6 +2258,21 @@ void RegionManager::check_peer_count(int64_t region_id,
         if (remove_peer.empty()) {
             return;
         }
+        if (remove_peer == leader_region_info.leader() && leader_region_info.peers().size() > 1) {
+            // 如果删除的是leader，本轮心跳先让store transfer leader，下轮心跳再remove follower
+            std::string new_leader = remove_peer;
+            while (new_leader == remove_peer) {
+                int64_t rand = butil::fast_rand() % leader_region_info.peers().size();
+                new_leader = leader_region_info.peers(rand);
+            }
+            pb::TransLeaderRequest* transfer_request = response->add_trans_leader();
+            transfer_request->set_region_id(region_id);
+            transfer_request->set_old_leader(remove_peer);
+            transfer_request->set_new_leader(new_leader);
+            DB_WARNING("trans leader before remove peer, peer_count: %ld, instance: %s, table_id: %ld, new_leader:%s",
+                       max_peer_count, remove_peer.c_str(), table_id, new_leader.c_str());
+            return;
+        }
         DB_WARNING("remove peer, peer_count: %ld, instance: %s, table_id: %ld, region_info:%s",
                    max_peer_count, remove_peer.c_str(), table_id, leader_region_info.ShortDebugString().c_str());
         for (auto& peer : leader_region_info.peers()) {

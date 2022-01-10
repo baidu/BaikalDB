@@ -298,7 +298,8 @@ int InsertManagerNode::basic_insert(RuntimeState* state) {
         DMLNode* dml_node = static_cast<DMLNode*>(*iter);
         ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
         if (ret < 0) {
-            DB_WARNING("exec node failed, log_id:%lu ret:%d ", state->log_id(), ret);
+            DB_WARNING("exec node failed, log_id:%lu _uniq_index_number:%zu cur:%zu ret:%d ",
+                state->log_id(), _uniq_index_number, cur, ret);
             return -1;
         }
         iter = _children.erase(iter);
@@ -440,7 +441,8 @@ int InsertManagerNode::insert_replace(RuntimeState* state) {
             DMLNode* dml_node = static_cast<DMLNode*>(*iter);
             ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
             if (ret < 0) {
-                DB_WARNING("exec node failed, log_id:%lu ret:%d ", state->log_id(), ret);
+                DB_WARNING("exec node failed, log_id:%lu _uniq_index_number:%zu cur:%zu ret:%d ",
+                state->log_id(), _uniq_index_number, cur, ret);
                 return -1;
             }
             iter = _children.erase(iter);
@@ -557,7 +559,8 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
             DMLNode* dml_node = static_cast<DMLNode*>(*iter);
             ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
             if (ret < 0) {
-                DB_WARNING("exec node failed, log_id:%lu ret:%d", state->log_id(), ret);
+                DB_WARNING("exec node failed, log_id:%lu _uniq_index_number:%zu cur:%zu ret:%d ",
+                state->log_id(), _uniq_index_number, cur, ret);
                 return -1;
             }
             iter = _children.erase(iter);

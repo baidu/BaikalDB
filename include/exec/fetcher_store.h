@@ -95,13 +95,7 @@ public:
             int start_seq_id,
             int current_seq_id,
             pb::OpType op_type);
-    int run(RuntimeState* state,
-            std::map<int64_t, pb::RegionInfo>& region_infos,
-            ExecNode* store_request,
-            int start_seq_id,
-            pb::OpType op_type) {
-        return run(state, region_infos, store_request, start_seq_id, start_seq_id, op_type);
-    }
+
     template<typename Repeated>
     void choose_opt_instance(int64_t region_id, Repeated&& peers, std::string& addr, std::string* backup) {
         SchemaFactory* schema_factory = SchemaFactory::get_instance();

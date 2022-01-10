@@ -493,8 +493,8 @@ void TransactionPool::clear_transactions(Region* region) {
         auto cur_time = butil::gettimeofday_us();
         // 事务存在时间过长报警
         if (cur_time - txn->begin_time > FLAGS_long_live_txn_interval_ms * 1000LL) {
-            DB_FATAL("TransactionWarning: txn %s is alive for %d ms, %ld, %ld, %lds",
-                 txn->get_txn()->GetName().c_str(), FLAGS_long_live_txn_interval_ms,
+            DB_FATAL("TransactionWarning: txn %s seq_id: %d is alive for %d ms, %ld, %ld, %lds",
+                 txn->get_txn()->GetName().c_str(), txn->seq_id(), FLAGS_long_live_txn_interval_ms,
                  cur_time,
                  txn->begin_time,
                  (cur_time - txn->begin_time) / 1000000);
@@ -519,8 +519,8 @@ void TransactionPool::clear_transactions(Region* region) {
         if (txn->is_primary_region() &&
            (cur_time - txn->last_active_time > txn_timeout * 1000LL)) {
             primary_txns_need_clear.emplace_back(txn);
-            DB_FATAL("TransactionFatal: primary txn %s is idle for %ld ms, %ld, %ld, %lds",
-                 txn->get_txn()->GetName().c_str(), txn_timeout,
+            DB_FATAL("TransactionFatal: primary txn %s seq_id: %d is idle for %ld ms, %ld, %ld, %lds",
+                 txn->get_txn()->GetName().c_str(), txn->seq_id(), txn_timeout,
                  cur_time,
                  txn->last_active_time,
                  (cur_time - txn->last_active_time) / 1000000);

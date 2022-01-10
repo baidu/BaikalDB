@@ -74,10 +74,11 @@ enum Charset {
 };
 
 enum BackupTable {
-    BT_NONE = 0;
-    BT_AUTO = 1;
-    BT_READ = 2;
-    BT_WRITE = 3;
+    BT_NONE    = 0;
+    BT_AUTO    = 1;
+    BT_READ    = 2;
+    BT_WRITE   = 3;
+    BT_LEARNER = 4;
 };
 
 message SchemaConf {

@@ -79,6 +79,97 @@ TEST(test_parser, case_option) {
     {
         parser::SqlParser parser;
         //select distict
+        std::string sql_opt1 = "select field_a, field_b ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+        exit(0);
+    }
+    //select
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select field_a, '1.1', 1+1, count(*), (select 1 +1), (('1.1')), ((1.1+1)), count(*) as A";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+        ASSERT_STREQ(select_stmt->fields[0]->org_name.c_str(), "");
+        ASSERT_STREQ(select_stmt->fields[1]->org_name.c_str(), "");
+        ASSERT_STREQ(select_stmt->fields[2]->org_name.c_str(), "1+1");
+        ASSERT_STREQ(select_stmt->fields[3]->org_name.c_str(), "count(*)");
+        ASSERT_STREQ(select_stmt->fields[4]->org_name.c_str(), "(select 1 +1)");
+        ASSERT_STREQ(select_stmt->fields[5]->org_name.c_str(), "");
+        ASSERT_STREQ(select_stmt->fields[6]->org_name.c_str(), "((1.1+1))");
+        ASSERT_STREQ(select_stmt->fields[7]->org_name.c_str(), "");
+        exit(0);
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select 1 ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select 0b1101011 ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
+        std::string sql_opt1 = "select 0xFA00 ";
+        parser.parse(sql_opt1);
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
+        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
+        ASSERT_FALSE(select_stmt->select_opt->distinct);
+        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
+        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
+        ASSERT_FALSE(select_stmt->select_opt->straight_join);
+        ASSERT_EQ(0, select_stmt->select_opt->priority);
+        std::cout << select_stmt->to_string() << std::endl; 
+    }
+    {
+        parser::SqlParser parser;
+        //select distict
         std::string sql_opt1 = "select 1 in ()";
         parser.parse(sql_opt1);
         ASSERT_EQ(1, parser.error);
@@ -347,70 +438,6 @@ TEST(test_parser, case_option) {
         ASSERT_TRUE(select_stmt->select_opt->calc_found_rows);
         ASSERT_TRUE(select_stmt->select_opt->straight_join);
         ASSERT_EQ(3, select_stmt->select_opt->priority);
-        std::cout << select_stmt->to_string() << std::endl; 
-    }
-    {
-        parser::SqlParser parser;
-        //select distict
-        std::string sql_opt1 = "select field_a ";
-        parser.parse(sql_opt1);
-        ASSERT_EQ(0, parser.error);
-        ASSERT_EQ(1, parser.result.size());
-        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
-        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
-        ASSERT_FALSE(select_stmt->select_opt->distinct);
-        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
-        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
-        ASSERT_FALSE(select_stmt->select_opt->straight_join);
-        ASSERT_EQ(0, select_stmt->select_opt->priority);
-        std::cout << select_stmt->to_string() << std::endl; 
-    }
-    {
-        parser::SqlParser parser;
-        //select distict
-        std::string sql_opt1 = "select 1 ";
-        parser.parse(sql_opt1);
-        ASSERT_EQ(0, parser.error);
-        ASSERT_EQ(1, parser.result.size());
-        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
-        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
-        ASSERT_FALSE(select_stmt->select_opt->distinct);
-        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
-        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
-        ASSERT_FALSE(select_stmt->select_opt->straight_join);
-        ASSERT_EQ(0, select_stmt->select_opt->priority);
-        std::cout << select_stmt->to_string() << std::endl; 
-    }
-    {
-        parser::SqlParser parser;
-        //select distict
-        std::string sql_opt1 = "select 0b1101011 ";
-        parser.parse(sql_opt1);
-        ASSERT_EQ(0, parser.error);
-        ASSERT_EQ(1, parser.result.size());
-        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
-        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
-        ASSERT_FALSE(select_stmt->select_opt->distinct);
-        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
-        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
-        ASSERT_FALSE(select_stmt->select_opt->straight_join);
-        ASSERT_EQ(0, select_stmt->select_opt->priority);
-        std::cout << select_stmt->to_string() << std::endl; 
-    }
-    {
-        parser::SqlParser parser;
-        //select distict
-        std::string sql_opt1 = "select 0xFA00 ";
-        parser.parse(sql_opt1);
-        ASSERT_EQ(0, parser.error);
-        ASSERT_EQ(1, parser.result.size());
-        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::SelectStmt));
-        parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
-        ASSERT_FALSE(select_stmt->select_opt->distinct);
-        ASSERT_FALSE(select_stmt->select_opt->sql_cache);
-        ASSERT_FALSE(select_stmt->select_opt->calc_found_rows);
-        ASSERT_FALSE(select_stmt->select_opt->straight_join);
-        ASSERT_EQ(0, select_stmt->select_opt->priority);
         std::cout << select_stmt->to_string() << std::endl; 
     }
     {

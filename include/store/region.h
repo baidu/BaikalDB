@@ -89,7 +89,6 @@ namespace baikaldb {
 DECLARE_int64(disable_write_wait_timeout_us);
 DECLARE_int32(prepare_slow_down_wait);
 
-static std::atomic<int64_t> ttl_remove_rows = { 0 }; // ttl删除行数计数
 static const int32_t RECV_QUEUE_SIZE = 128;
 struct StatisticsInfo {
     int64_t time_cost_sum;
@@ -247,7 +246,7 @@ public:
 
     int init(bool new_region, int32_t snapshot_times);
     void wait_table_info() {
-        while (!SchemaFactory::get_instance()->exist_tableid(get_table_id())) {
+        while (!_factory->exist_tableid(get_table_id())) {
             DB_WARNING("region_id: %ld wait for table_info: %ld", _region_id, get_table_id());
             bthread_usleep(1000 * 1000);
         }
@@ -351,10 +350,31 @@ public:
     void do_snapshot() {
         _region_control.sync_do_snapshot();
     }
+
+    void transfer_leader_set_is_leader() {
+        if (is_learner()) {
+            return;
+        }
+        _is_leader.store(_node.is_leader());
+        DB_WARNING("region_id: %ld, is_leader:%d", _region_id, _is_leader.load());
+    }
+
+    int transfer_leader_to(const braft::PeerId& peer) {
+        if (is_learner()) {
+            return -1;
+        }
+        int ret = _node.transfer_leadership_to(peer);
+        if (ret == 0) {
+            transfer_leader_set_is_leader();
+        }
+        return ret;
+    }
+
     int transfer_leader(const pb::TransLeaderRequest& trans_leader_request, 
             SmartRegion region, ExecutionQueue& queue) {
         return _region_control.transfer_leader(trans_leader_request, region, queue);
     }
+
     void reset_region_status () {
         _region_control.reset_region_status();
     }
@@ -408,9 +428,6 @@ public:
     void adjust_num_table_lines();
     //split第二步，发送迭代器数据
     void write_local_rocksdb_for_split();
-
-    int replay_txn_for_recovery(
-            const std::unordered_map<uint64_t, pb::TransactionInfo>& prepared_txn);
 
     int replay_applied_txn_for_recovery(
             int64_t region_id,
@@ -682,9 +699,10 @@ public:
             pb::StoreRes* response,
             google::protobuf::Closure* done);
     
-    void exec_dml_out_txn_query(const pb::StoreReq* request, 
-                                        pb::StoreRes* response, 
-                                        google::protobuf::Closure* done);
+    void exec_kv_out_txn(const pb::StoreReq* request, 
+            pb::StoreRes* response,
+            const char* remote_side,
+            google::protobuf::Closure* done);
     
     int execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& response, 
             uint64_t txn_id, 
@@ -967,8 +985,6 @@ private:
 
     void apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done, 
                                   int64_t index, int64_t term);
-    void apply_kv_split(const pb::StoreReq& request, braft::Closure* done, 
-                                int64_t index, int64_t term);
     bool validate_version(const pb::StoreReq* request, pb::StoreRes* response);
     void print_log_entry(const int64_t start_index, const int64_t end_index);
     void set_region(const pb::RegionInfo& region_info) {
@@ -1024,6 +1040,24 @@ private:
     }
 
     int check_learner_snapshot();
+
+    bool check_key_fits_region_range(SmartIndex pk_info, SmartTransaction txn,
+        const pb::RegionInfo& region_info, const pb::KvOp& kv_op);
+
+    bool check_key_exist(SmartTransaction txn, const pb::KvOp& kv_op) {
+        if (kv_op.is_primary_key()) {
+            MutTableKey key(kv_op.key());
+            key.replace_i64(_region_id, 0);
+            std::string value;
+            int rc = txn->get_for_update(key.data(), &value);
+            if (rc == 0) {
+                return true;
+            } else if (rc == -1) {
+                return false;
+            }
+        }
+        return false;
+    }
 
     int check_follower_snapshot(const std::string& peer);
 

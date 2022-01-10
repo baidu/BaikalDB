@@ -846,6 +846,18 @@ ExprValue date_format(const std::vector<ExprValue>& input) {
     format_result.str_val = s;
     return format_result;
 }
+ExprValue str_to_date(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    for (auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DATETIME);
+}
 
 ExprValue time_format(const std::vector<ExprValue>& input) {
     if (input.size() != 2) {
@@ -859,7 +871,7 @@ ExprValue time_format(const std::vector<ExprValue>& input) {
     ExprValue tmp = input[0];
     struct tm t_result;
     uint32_t second = tmp.cast_to(pb::TIME)._u.int32_val;
-    
+
     t_result.tm_hour = (second >> 12) & 0x3FF;
     t_result.tm_min = (second >> 6) & 0x3F;
     t_result.tm_sec = second & 0x3F;
@@ -882,7 +894,8 @@ ExprValue convert_tz(const std::vector<ExprValue>& input) {
     ExprValue time = input[0];
     ExprValue from_tz = input[1];
     ExprValue to_tz = input[2];
-    int from_tz_second, to_tz_second;
+    int from_tz_second = 0;
+    int to_tz_second = 0;
     if (!tz_to_second(from_tz.str_val.c_str(), from_tz_second)) {
         return ExprValue::Null();
     }
@@ -1862,7 +1875,7 @@ ExprValue last_insert_id(const std::vector<ExprValue>& input) {
 
 ExprValue cast_to_date(const std::vector<ExprValue>& input) {
     if (input.size() != 1) {
-	return ExprValue::Null();
+        return ExprValue::Null();
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::DATE);
@@ -1870,7 +1883,7 @@ ExprValue cast_to_date(const std::vector<ExprValue>& input) {
 
 ExprValue cast_to_datetime(const std::vector<ExprValue>& input) {
     if (input.size() != 1) {
-	return ExprValue::Null();
+        return ExprValue::Null();
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::DATETIME);
@@ -1878,7 +1891,7 @@ ExprValue cast_to_datetime(const std::vector<ExprValue>& input) {
 
 ExprValue cast_to_time(const std::vector<ExprValue>& input) {
     if (input.size() != 1) {
-	return ExprValue::Null();
+        return ExprValue::Null();
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::TIME);
@@ -1886,7 +1899,7 @@ ExprValue cast_to_time(const std::vector<ExprValue>& input) {
 
 ExprValue cast_to_string(const std::vector<ExprValue>& input) {
     if (input.size() != 1) {
-	return ExprValue::Null();
+        return ExprValue::Null();
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::STRING);
@@ -1894,7 +1907,7 @@ ExprValue cast_to_string(const std::vector<ExprValue>& input) {
 
 ExprValue cast_to_signed(const std::vector<ExprValue>& input) {
     if (input.size() != 1) {
-	return ExprValue::Null();
+        return ExprValue::Null();
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::INT64);
@@ -1902,7 +1915,7 @@ ExprValue cast_to_signed(const std::vector<ExprValue>& input) {
 
 ExprValue cast_to_unsigned(const std::vector<ExprValue>& input) {
     if (input.size() != 1) {
-	return ExprValue::Null();
+        return ExprValue::Null();
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::UINT64);

@@ -387,11 +387,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 return ret;
             }
             //DB_NOTICE("word:%s", str_to_hex(word).c_str());
-            pb::StoreReq* req = nullptr;
-            if (_txn->_is_separate) {
-                req = _txn->get_raftreq();
-            }
-            ret = reverse_index_map[info.id]->insert_reverse(_txn->get_txn(), req, 
+            ret = reverse_index_map[info.id]->insert_reverse(_txn->get_txn(), 
                                                             word, pk_str, record);
             if (ret < 0) {
                 return ret;
@@ -483,11 +479,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
                 DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", info.id);
                 return ret;
             }
-            pb::StoreReq* req = nullptr;
-            if (_txn->_is_separate) {
-                req = _txn->get_raftreq();
-            }
-            ret = reverse_index_map[info.id]->delete_reverse(_txn->get_txn(), req, 
+            ret = reverse_index_map[info.id]->delete_reverse(_txn->get_txn(), 
                                                            word, pk_str, record);
             if (ret < 0) {
                 return ret;

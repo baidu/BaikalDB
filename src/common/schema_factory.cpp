@@ -330,6 +330,13 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         } else if (bk == pb::BT_WRITE) {
             tbl_info.have_backup = true;
             tbl_info.need_write_backup = true;
+        } else if (bk == pb::BT_LEARNER) {
+            tbl_info.need_learner_backup = true;
+        } else {
+            tbl_info.have_backup = false;
+            tbl_info.need_read_backup = false;
+            tbl_info.need_write_backup = false;
+            tbl_info.need_learner_backup = false;
         }
     }
 
@@ -587,6 +594,9 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             }
             
             global_index_id_mapping[index_id] = table_id;
+        }
+        if (cur.index_type() == pb::I_FULLTEXT) {
+            tbl_info.has_fulltext = true;
         }
         
         if (!cur.is_global() && (cur.state() == pb::IS_WRITE_ONLY || cur.state() == pb::IS_WRITE_LOCAL)) {
@@ -2053,6 +2063,7 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
                         (!right_open && boost::starts_with(region_iter->first, end.data()))) {
                     int64_t region_id = region_iter->second;
                     frontground->get_region_info(region_id, region_infos[region_id]);
+
                     if (range_size > 1 && region_primary != nullptr) {
                         if (region_primary->count(region_id) == 0) {
                             (*region_primary)[region_id].CopyFrom(template_primary);

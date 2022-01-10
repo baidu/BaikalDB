@@ -133,7 +133,7 @@ public:
     friend class QueryTableManager;
     friend class SchemaManager;
     void update_table_internal(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done,
-    std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb)> update_callback);
+    std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done)> update_callback);
     void create_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_table_tombstone(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);

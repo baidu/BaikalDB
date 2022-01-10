@@ -460,18 +460,34 @@ TEST(bns_to_meta_bns_test, case_all) {
         {"group.opera-aladdin-baikaldb-000-nj.FENGCHAO.all",       "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"7.opera-aladdin-baikalStore-000-mix.FENGCHAO.gzhxy",     "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"0.opera-hmkv-baikalStore-000-yq.FENGCHAO.yq012",         "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
-        {"85.opera-hm-baikalStore-000-yq.FENGCHAO.yq013",          "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
-        {"group.opera-hm-baikalStore-000-yq.FENGCHAO.all.serv",    "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
+        {"55.opera-hm-baikalStore-000-bd.FENGCHAO.bddwd",          "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
+        {"group.opera-hm-baikalStore-000-bd.FENGCHAO.all.serv",    "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"1.opera-adp-baikalBinlog-000-bj.FENGCHAO.bjhw",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
         {"group.opera-adp-baikalBinlog-000-bj.FENGCHAO.all",       "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
+        {"0.opera-sandbox-baikalStore-000-bd.FENGCHAO.bddwd",      "group.opera-pap-baikalMeta-000-bj.FENGCHAO.all"},
     };
-
     for (const auto& it : mapping) {
-        std::string meta_bns = store_or_db_bns_to_meta_bns(it.first);
+        std::string meta_bns = store_or_db_bns_to_meta_bns(it.first);//实例和小的服务群组的对应关系
         DB_NOTICE("bns to meta_bns: %s => %s", it.first.c_str(), meta_bns.c_str());
         ASSERT_EQ(meta_bns, it.second);
     }
+}
 
+//集群消息收集 brpc接口测试 
+TEST(brpc_http_get_info_test_db, case_all) {
+    static const std::string host_noah = "http://api.mt.noah.baidu.com:8557";
+    static std::string query_item = "&items=matrix.cpu_used_percent,matrix.cpu_quota,matrix.cpu_used,matrix.disk_home_quota_mb,matrix.disk_home_used_mb&ttype=instance";
+    static std::set<std::string> test_instance_names = {
+         "45.opera-xinghe2-baikalStore-000-bj.DMP.bjhw",
+         "1.opera-aladdin-baikaldb-000-bj.FENGCHAO.dbl",
+         "85.opera-hm-baikalStore-000-yq.FENGCHAO.yq013"
+    };
+    for (auto& it : test_instance_names) {
+        std::string url_instance_source_used = host_noah + "/monquery/getlastestitemdata?namespaces=" + it + query_item;
+        std::string response = "";
+        int res = brpc_with_http(host_noah, url_instance_source_used, response);
+        DB_NOTICE("http get instance db res: %s", response.c_str());
+    }
 }
 
 DEFINE_int32(bvar_test_total_time_s, 0, "");
@@ -492,7 +508,6 @@ TEST(bvar_window_test, bvar) {
         DB_WARNING("window_count: %d, i : %d, time: %ld", window_count.get_value(), i, time.get_time());
         bthread_usleep(FLAGS_bvar_test_loop_time_ms * 1000);
     }
-
 }
 DEFINE_int64(ttl_time_us, 60, "");
 TEST(ttl_test, ttl) {

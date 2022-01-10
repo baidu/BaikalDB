@@ -606,6 +606,12 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             _ctx->stat_info.error_msg << "table: " << database << "." << table << " not exist";
             return -1;
         }
+
+        // learner降级
+        if (tbl_ptr->need_learner_backup) {
+            _ctx->need_learner_backup = true;
+        }
+
         // 通用降级路由
         // 复杂sql(join和子查询)不降级
         if (MetaServerInteract::get_backup_instance()->is_inited() && tbl_ptr->have_backup && !_ctx->is_complex &&
@@ -2663,6 +2669,7 @@ void LogicalPlanner::plan_begin_txn() {
     pb::PlanNode* plan_node = _ctx->add_plan_node();
     plan_node->set_node_type(pb::BEGIN_MANAGER_NODE);
     plan_node->set_limit(-1);
+    plan_node->set_num_children(0);
     pb::DerivePlanNode* derived_node = plan_node->mutable_derive_node();
     pb::TransactionNode* txn_node = derived_node->mutable_transaction_node();
     
@@ -2677,6 +2684,7 @@ void LogicalPlanner::plan_commit_txn() {
     create_packet_node(pb::OP_COMMIT);
     pb::PlanNode* plan_node = _ctx->add_plan_node();
     plan_node->set_limit(-1);
+    plan_node->set_num_children(0);
     plan_node->set_node_type(pb::COMMIT_MANAGER_NODE);
     pb::DerivePlanNode* derived_node = plan_node->mutable_derive_node();
     pb::TransactionNode* txn_node = derived_node->mutable_transaction_node();
@@ -2690,6 +2698,7 @@ void LogicalPlanner::plan_commit_and_begin_txn() {
     pb::PlanNode* plan_node = _ctx->add_plan_node();
     plan_node->set_node_type(pb::COMMIT_MANAGER_NODE);
     plan_node->set_limit(-1);
+    plan_node->set_num_children(0);
     pb::DerivePlanNode* derived_node = plan_node->mutable_derive_node();
     pb::TransactionNode* txn_node = derived_node->mutable_transaction_node();
     
@@ -2702,6 +2711,7 @@ void LogicalPlanner::plan_rollback_txn() {
     pb::PlanNode* plan_node = _ctx->add_plan_node();
     plan_node->set_node_type(pb::ROLLBACK_MANAGER_NODE);
     plan_node->set_limit(-1);
+    plan_node->set_num_children(0);
     pb::DerivePlanNode* derived_node = plan_node->mutable_derive_node();
     pb::TransactionNode* txn_node = derived_node->mutable_transaction_node();
     
@@ -2715,6 +2725,7 @@ void LogicalPlanner::plan_rollback_and_begin_txn() {
     pb::PlanNode* plan_node = _ctx->add_plan_node();
     plan_node->set_node_type(pb::ROLLBACK_MANAGER_NODE);
     plan_node->set_limit(-1);
+    plan_node->set_num_children(0);
     pb::DerivePlanNode* derived_node = plan_node->mutable_derive_node();
     pb::TransactionNode* txn_node = derived_node->mutable_transaction_node();
     

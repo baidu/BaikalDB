@@ -27,6 +27,7 @@ DEFINE_int64(mem_tracker_gc_interval_s, 60, "do memory limit when row number mor
 
 void MemoryGCHandler::memory_gc_thread() {
     char stats_buffer[1000] = {0};
+    const size_t BYTES_TO_GC = 8 * 1024 * 1024;
     TimeCost stats_cost;
     while (!_shutdown) {
         size_t used_size = 0;
@@ -57,8 +58,13 @@ void MemoryGCHandler::memory_gc_thread() {
 
         if ((int64_t)alloc_size > FLAGS_min_memory_use_size) {
             if (free_size > FLAGS_min_memory_free_size_to_release) {
-                MallocExtension::instance()->ReleaseFreeMemory();
-                DB_WARNING("tcmalloc release memory size: %ld cast: %ld", free_size, cost.get_time());
+                size_t total_bytes_to_gc = free_size - FLAGS_min_memory_free_size_to_release;
+                size_t bytes = total_bytes_to_gc;
+                while (bytes > BYTES_TO_GC) {
+                    MallocExtension::instance()->ReleaseToSystem(BYTES_TO_GC);
+                    bytes -= BYTES_TO_GC;
+                }
+                DB_WARNING("tcmalloc release memory about size: %ld cast: %ld", total_bytes_to_gc, cost.get_time());
             }
         }
         bthread_usleep_fast_shutdown(FLAGS_memory_gc_interval_s * 1000 * 1000LL, _shutdown);

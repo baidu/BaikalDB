@@ -307,8 +307,10 @@ struct TableInfo {
     bool                    have_backup = false;
     bool                    need_read_backup = false;
     bool                    need_write_backup = false;
+    bool                    need_learner_backup = false;
     bool                    has_global_not_none = false;
     bool                    has_index_write_only_or_write_local = false;
+    bool                    has_fulltext = false;
     // 该表是否已和 binlog 表关联
     bool is_linked = false;
     pb::PartitionInfo partition_info;
@@ -766,6 +768,21 @@ public:
         }
         const auto& table_info = table_info_mapping.at(main_table_id);
         return table_info->has_global_not_none;
+    }
+
+    bool has_fulltext_index(const int64_t& main_table_id) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        const auto& table_info_mapping = table_ptr->table_info_mapping;
+        if (table_info_mapping.find(main_table_id) == table_info_mapping.end()) {
+            DB_WARNING("main_table_id: %ld not exist", main_table_id);
+            return false;
+        }
+        const auto& table_info = table_info_mapping.at(main_table_id);
+        return table_info->has_fulltext;
     }
 
     bool need_begin_txn(const int64_t& main_table_id) {

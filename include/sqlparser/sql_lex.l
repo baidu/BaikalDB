@@ -18,10 +18,8 @@ using parser::LiteralExpr;
 using parser::SqlParser;
  //redefine the lex
 #define YY_DECL int sql_lex(YYSTYPE *yylval, YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser)
-#define YY_USER_ACTION yylloc->first_line = yylloc->last_line = yylineno;\
-  yylloc->first_column = yycolumn;\
-  yylloc->last_column = yylloc->first_column + yyleng - 1;\
-  yycolumn += yyleng;
+#define YY_USER_ACTION yylloc->start = yytext;\
+  yylloc->end = yytext + yyleng;
 void un_reserved_keyword(YYSTYPE *yylval, yyscan_t yyscanner, SqlParser* parser);
 %}
 

@@ -37,14 +37,12 @@ public:
     //新加正排 创建倒排索引
     virtual int insert_reverse(
                        myrocksdb::Transaction* txn,
-                       pb::StoreReq* req,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
     //删除正排 删除倒排索引
     virtual int delete_reverse(
                        myrocksdb::Transaction* txn,
-                       pb::StoreReq* req,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
@@ -207,14 +205,12 @@ public:
     //0:success    -1:fail
     virtual int insert_reverse(
                         myrocksdb::Transaction* txn,
-                        pb::StoreReq* req,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
     //0:success    -1:fail
     virtual int delete_reverse(
                         myrocksdb::Transaction* txn,
-                        pb::StoreReq* req,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
@@ -345,7 +341,6 @@ private:
     //0:success    -1:fail
     int handle_reverse(
                         myrocksdb::Transaction* txn,
-                        pb::StoreReq* req,
                         pb::ReverseNodeType flag,
                         const std::string& word, 
                         const std::string& pk,
@@ -372,8 +367,7 @@ private:
                     const std::string& term);
     //对一条倒排链增加一个倒排节点
     int _insert_one_reverse_node( 
-                    myrocksdb::Transaction* txn, 
-                    pb::StoreReq* req,
+                    myrocksdb::Transaction* txn,
                     const std::string& term, 
                     const ReverseNode* node);
 

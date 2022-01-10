@@ -76,7 +76,6 @@ int main(int argc, char **argv) {
     static bvar::Status<std::string> baikaldb_version("baikaldb_version", "");
     baikaldb_version.set_value(BAIKALDB_REVISION);
 #endif
-
     google::SetCommandLineOption("flagfile", "conf/gflags.conf");
     google::ParseCommandLineFlags(&argc, &argv, true);
     srand((unsigned)time(NULL));

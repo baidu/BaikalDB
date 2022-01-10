@@ -142,7 +142,7 @@ int64_t TableManager::get_row_count(int64_t table_id) {
 }
 
 void TableManager::update_table_internal(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done,
-        std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb)> update_callback) {
+        std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done)> update_callback) {
     int64_t table_id;
     if (check_table_exist(request.table_info(), table_id) != 0) {
         DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
@@ -150,7 +150,12 @@ void TableManager::update_table_internal(const pb::MetaManagerRequest& request, 
         return;
     }
     pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
-    update_callback(request, mem_schema_pb);
+
+    update_callback(request, mem_schema_pb, done);
+    if (done != nullptr && ((MetaServerClosure*)done)->response
+        && ((MetaServerClosure*)done)->response->errcode() == pb::INPUT_PARAM_ERROR) {
+        return;
+    }
     auto ret = update_schema_for_rocksdb(table_id, mem_schema_pb, done);
     if (ret < 0) {
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
@@ -656,7 +661,7 @@ void TableManager::update_byte_size(const pb::MetaManagerRequest& request,
                                     const int64_t apply_index, 
                                     braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             mem_schema_pb.set_byte_size_per_record(request.table_info().byte_size_per_record());
             mem_schema_pb.set_version(mem_schema_pb.version() + 1);
         });
@@ -666,7 +671,7 @@ void TableManager::update_split_lines(const pb::MetaManagerRequest& request,
                                       const int64_t apply_index,
                                       braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
                 mem_schema_pb.set_region_split_lines(request.table_info().region_split_lines());
                 mem_schema_pb.set_version(mem_schema_pb.version() + 1);
         });
@@ -676,7 +681,7 @@ void TableManager::set_main_logical_room(const pb::MetaManagerRequest& request,
                                       const int64_t apply_index,
                                       braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
                 mem_schema_pb.set_main_logical_room(request.table_info().main_logical_room());
                 mem_schema_pb.set_version(mem_schema_pb.version() + 1);
         });
@@ -686,10 +691,20 @@ void TableManager::update_schema_conf(const pb::MetaManagerRequest& request,
                                        const int64_t apply_index,
                                        braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-    [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+    [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
         const pb::SchemaConf& schema_conf = request.table_info().schema_conf();
+        DB_WARNING("request:%s", request.ShortDebugString().c_str());
         pb::SchemaConf* p_conf = mem_schema_pb.mutable_schema_conf();
-
+        if (schema_conf.storage_compute_separate()) {
+            for (auto& index : mem_schema_pb.indexs()) {
+                DB_WARNING("index:%s", index.ShortDebugString().c_str());
+                if (index.index_type() == pb::I_FULLTEXT) {
+                    DB_WARNING("table has fulltext index, request:%s", request.ShortDebugString().c_str());
+                    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "fulltext not support kv mode");
+                    return;
+                }
+            }
+        }
         update_schema_conf_common(request.table_info().table_name(), schema_conf, p_conf);
         //代价开关操作，需要增加op_version
         if (schema_conf.has_select_index_by_cost()) {
@@ -791,7 +806,7 @@ void TableManager::update_dists(const pb::MetaManagerRequest& request,
                                 const int64_t apply_index, 
                                 braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             mem_schema_pb.set_version(mem_schema_pb.version() + 1);
             mem_schema_pb.clear_dists();
             mem_schema_pb.clear_main_logical_room();
@@ -820,7 +835,7 @@ void TableManager::update_ttl_duration(const pb::MetaManagerRequest& request,
                                 const int64_t apply_index, 
                                 braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             if (mem_schema_pb.ttl_duration() > 0 && request.table_info().ttl_duration() > 0) {
                 // 只修改ttl
                 mem_schema_pb.set_ttl_duration(request.table_info().ttl_duration());
@@ -859,7 +874,7 @@ void TableManager::update_table_comment(const pb::MetaManagerRequest& request,
                                 const int64_t apply_index,
                                 braft::Closure* done) {
     update_table_internal(request, apply_index, done,
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             mem_schema_pb.set_version(mem_schema_pb.version() + 1);
             mem_schema_pb.set_comment(request.table_info().comment());
         });
@@ -2770,7 +2785,9 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
                 //meta内存中虚拟索引影响面记录删除
                 BAIDU_SCOPED_LOCK(_load_virtual_to_memory_mutex);
                 //将删除的info存入TableManager管理的内存
-                _just_add_virtual_index_info.erase(index_req.index_id());
+                DB_NOTICE("DDL_LOG drop_virtual_index_id [%ld], index_name [%s], database_name [%s], table_name[%s]", index_to_del->index_id(), 
+                          index_name.c_str(), database_name.c_str(), table_name.c_str());
+                _just_add_virtual_index_info.erase(index_to_del->index_id());
                 _virtual_index_sql_map.erase(delete_virtual_indx_info);
             }
             drop_virtual_index(request, apply_index, done);
@@ -2904,6 +2921,13 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
     pb::IndexInfo* add_index = mem_schema_pb.add_indexs();
     add_index->CopyFrom(index_info);
     mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+    if (index_info.index_type() == pb::I_FULLTEXT) {
+        // fulltext close kv mode
+        auto schema_conf = mem_schema_pb.mutable_schema_conf();
+        if (schema_conf->has_storage_compute_separate()) {
+            schema_conf->set_storage_compute_separate(false);
+        }
+    }
     _table_info_map[table_id].index_id_map[add_index->index_name()] = add_index->index_id();
     set_table_pb(mem_schema_pb);
     std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
@@ -3114,7 +3138,7 @@ void TableManager::update_index_status(const pb::MetaManagerRequest& request,
                                        const int64_t apply_index,
                                        braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             auto&& request_index_info = request.ddlwork_info();
             auto index_iter = mem_schema_pb.mutable_indexs()->begin();
             for (; index_iter != mem_schema_pb.mutable_indexs()->end(); index_iter++) {
@@ -3352,7 +3376,7 @@ void TableManager::on_leader_stop() {
 
 void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
     update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             if (request.has_table_info()) {
                 for (const auto& index_info : request.table_info().indexs()) {
                     auto index_iter = mem_schema_pb.mutable_indexs()->begin();
@@ -3380,7 +3404,7 @@ void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, 
 }
 void TableManager::drop_virtual_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
        update_table_internal(request, apply_index, done, 
-        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb) {
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             if (request.has_table_info()) {
                 const auto& index_info = request.table_info().indexs(0);
                 if (mem_schema_pb.mutable_indexs() != nullptr) {

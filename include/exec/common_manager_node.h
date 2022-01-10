@@ -33,7 +33,7 @@ public:
            return -1; 
         }
         ExecNode* common_node = _children[0];
-        ret = _fetcher_store.run(state, _region_infos, common_node, client_conn->seq_id, _op_type);
+        ret = _fetcher_store.run(state, _region_infos, common_node, client_conn->seq_id, client_conn->seq_id, _op_type);
         if (ret < 0) {
             DB_WARNING("exec common node fail");
         }

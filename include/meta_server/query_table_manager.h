@@ -37,6 +37,11 @@ public:
 
     void get_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response);    
     void get_virtual_index_influence_info(const pb::QueryRequest* request, pb::QueryResponse* response);
+    void clean_cache() {
+        BAIDU_SCOPED_LOCK(_mutex);
+        _table_info_cache_time.clear();
+        _table_infos_cache.clear();
+    }
 private:
     QueryTableManager() {}
     void check_table_and_update(
@@ -44,7 +49,11 @@ private:
                   std::unordered_map<int64_t, int64_t>& report_table_map,
                   pb::ConsoleHeartBeatResponse* response, uint64_t log_id);  
     void construct_query_table(const TableMem& table, pb::QueryTable* query_table);
-
+    // 由于show table status太重了，进行cache
+    bthread::Mutex _mutex;
+    std::unordered_map<std::string, int64_t> _table_info_cache_time;
+    // db -> table -> table info
+    std::unordered_map<std::string, std::map<std::string, pb::QueryTable>> _table_infos_cache;
 }; //class
 
 }//namespace

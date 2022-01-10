@@ -34,6 +34,7 @@ using parser::TableName;
 using parser::PriorityEnum;
 using parser::CreateTableStmt;
 
+
 using namespace parser;
 #include "sql_lex.flex.h"
 #include "sql_parse.yacc.hh"
@@ -1401,12 +1402,12 @@ LimitClause:
     }
     | LIMIT SimpleExpr {
         if ($2->expr_type != parser::ET_LITETAL) {
-            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
             return -1;
         }
         LiteralExpr* count = (LiteralExpr*)$2;
         if (count->literal_type != parser::LT_INT && count->literal_type != parser::LT_PLACE_HOLDER) {
-            sql_error(&@2, yyscanner, parser, "limti expr only support INT_LIT or PLACE_HOLDER");
+            sql_error(&@2, yyscanner, parser, "limit expr only support INT_LIT or PLACE_HOLDER");
             return -1;
         }
         LimitClause* limit = new_node(LimitClause);
@@ -1694,6 +1695,10 @@ SelectField:
         SelectField* select_field = new_node(SelectField);
         select_field->expr = $1;
         select_field->as_name = $2;
+        if (select_field->expr->expr_type != ET_COLUMN 
+            && select_field->expr->expr_type != ET_LITETAL) {
+            select_field->org_name.strdup(@1.start, @1.end - @1.start, parser->arena);
+        }
         $$ = select_field;
     }
     | '{' AllIdent Expr '}' FieldAsNameOpt {
@@ -5165,9 +5170,7 @@ ExplainableStmt:
 int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser *parser, const char *s) {    
     parser->error = parser::SYNTAX_ERROR;
     std::ostringstream os;
-    os << s << ", in [" << yylloc->last_line;
-    os << ":" << yylloc->first_column;
-    os << "-" << yylloc->last_column;
+    os << s << ", near " << std::string(yylloc->start, yylloc->end - yylloc->start);
     os << "] key:" << sql_get_text(yyscanner);
     parser->syntax_err_str = os.str();
     return 1;

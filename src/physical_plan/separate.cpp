@@ -125,7 +125,7 @@ int Separate::separate_union(QueryContext* ctx) {
             DB_WARNING("init runtime_state failed");
             return -1;
         }
-        union_node->mutable_select_runtime_states()->push_back(state.get());
+        union_node->mutable_select_runtime_states()->emplace_back(state.get());
     }
     return 0;
 }
@@ -559,6 +559,8 @@ int Separate::create_lock_node(
         return -1;
     }
     std::vector<int64_t> global_affected_indexs;
+    std::vector<int64_t> global_unique_indexs;
+    std::vector<int64_t> global_non_unique_indexs;
     std::vector<int64_t> local_affected_indexs;
     for (auto index_id : table_info->indices) {
         auto index_info = _factory->get_index_info_ptr(index_id);
@@ -571,20 +573,22 @@ int Separate::create_lock_node(
                 continue;
             }
             if (index_info->type == pb::I_UNIQ) {
-                global_affected_indexs.push_back(index_id);
+                global_unique_indexs.emplace_back(index_id);
             } else if (lock_type != pb::LOCK_GET) {
                 //LOGK_GET只需要关注全局唯一索引
-                global_affected_indexs.push_back(index_id);
+                global_non_unique_indexs.emplace_back(index_id);
             }
         } else {
             if (index_info->type == pb::I_UNIQ) {
-                local_affected_indexs.push_back(index_id);
+                local_affected_indexs.emplace_back(index_id);
             } else if (lock_type != pb::LOCK_GET) {
                 //LOGK_GET只需要关注全局唯一索引
-                local_affected_indexs.push_back(index_id);
+                local_affected_indexs.emplace_back(index_id);
             }
         }
     }
+    global_affected_indexs.insert(global_affected_indexs.end(), global_unique_indexs.begin(), global_unique_indexs.end());
+    global_affected_indexs.insert(global_affected_indexs.end(), global_non_unique_indexs.begin(), global_non_unique_indexs.end());
     return create_lock_node(table_id, lock_type, mode, global_affected_indexs, local_affected_indexs, manager_node);
 }
 int Separate::create_lock_node(
@@ -611,6 +615,7 @@ int Separate::create_lock_node(
         pb::PlanNode plan_node;
         plan_node.set_node_type(pb::LOCK_PRIMARY_NODE);
         plan_node.set_limit(-1);
+        plan_node.set_num_children(0);
         auto lock_primary_node = plan_node.mutable_derive_node()->mutable_lock_primary_node();
         lock_primary_node->set_lock_type(lock_type);
         lock_primary_node->set_table_id(table_id);
@@ -630,6 +635,7 @@ int Separate::create_lock_node(
         pb::PlanNode plan_node;
         plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
         plan_node.set_limit(-1);
+        plan_node.set_num_children(0);
         auto lock_secondary_node = plan_node.mutable_derive_node()->mutable_lock_secondary_node();
         lock_secondary_node->set_lock_type(lock_type);
         lock_secondary_node->set_global_index_id(index_id);
@@ -836,6 +842,7 @@ int Separate::separate_single_txn(T* node, pb::OpType op_type) {
     pb::PlanNode pb_plan_node;
     pb_plan_node.set_node_type(pb::SIGNEL_TXN_MANAGER_NODE);
     pb_plan_node.set_limit(-1);
+    pb_plan_node.set_num_children(5);
     SingleTxnManagerNode* txn_manager_node = new (std::nothrow) SingleTxnManagerNode;
     if (txn_manager_node == nullptr) {
         DB_WARNING("create store_txn_node failed");
@@ -1003,6 +1010,7 @@ TransactionNode* Separate::create_txn_node(pb::TxnCmdType cmd_type) {
     // pb_plan_node.set_txn_id(txn_id);
     pb_plan_node.set_node_type(pb::TRANSACTION_NODE);
     pb_plan_node.set_limit(-1);
+    pb_plan_node.set_num_children(0);
     auto txn_node = pb_plan_node.mutable_derive_node()->mutable_transaction_node();
     txn_node->set_txn_cmd(cmd_type);
 

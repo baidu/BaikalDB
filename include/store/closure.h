@@ -24,7 +24,6 @@ struct DMLClosure : public braft::Closure {
     DMLClosure(BthreadCond* cond) : cond(cond) {};
     virtual void Run();
 
-    brpc::Controller* cntl = nullptr;
     pb::OpType op_type;
     pb::StoreRes* response = nullptr;
     google::protobuf::Closure* done = nullptr;
@@ -34,8 +33,10 @@ struct DMLClosure : public braft::Closure {
     std::string remote_side;
     BthreadCond* cond;
     bool is_sync = false;
+    bool is_separate = false;
     int64_t txn_num_increase_rows = 0;
     int64_t applied_index = 0;
+    uint64_t log_id = 0;
 };
 
 struct BinlogClosure : public braft::Closure {
@@ -119,19 +120,5 @@ struct SnapshotClosure : public braft::Closure {
     int ret = 0;
     //int retry = 0;
 };
-
-struct Dml1pcClosure : public braft::Closure {
-    Dml1pcClosure(BthreadCond& _txn_cond) : txn_cond(_txn_cond) {};
-
-    virtual void Run();
-
-    RuntimeState* state = nullptr;
-    SmartTransaction txn = nullptr;
-    BthreadCond& txn_cond;
-    google::protobuf::Closure* done = nullptr;
-    TimeCost cost;
-};
-
-
 
 } // end of namespace

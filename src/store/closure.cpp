@@ -19,10 +19,7 @@ namespace baikaldb {
 DECLARE_int64(print_time_us);
 void DMLClosure::Run() {
     int64_t region_id = 0;
-    uint64_t log_id = 0;
-    if (cntl != nullptr && cntl->has_log_id()) {
-        log_id = cntl->log_id();
-    }
+
     if (region != nullptr) {
         region_id = region->get_region_id();
     }
@@ -68,7 +65,10 @@ void DMLClosure::Run() {
     uint64_t txn_id = 0;
     if (transaction != nullptr) {
         txn_id = transaction->txn_id();
-        transaction->set_in_process(false);
+        if (txn_id != 0) {
+            transaction->set_in_process(false);
+            transaction->clear_raftreq();
+        }
     }
     if (is_sync) {
         cond->decrease_signal();
@@ -80,13 +80,14 @@ void DMLClosure::Run() {
     Store::get_instance()->raft_total_cost << raft_cost;
     if (raft_cost > FLAGS_print_time_us) {
         DB_NOTICE("dml log_id:%lu, txn_id:%lu, type:%s, raft_total_cost:%ld, region_id: %ld, "
-                "applied_index:%ld, num_prepared:%d remote_side:%s",
+                "applied_index:%ld, is_separate:%d num_prepared:%d remote_side:%s",
                     log_id, 
                     txn_id,
                     pb::OpType_Name(op_type).c_str(), 
                     raft_cost,
                     region_id, 
                     applied_index,
+                    is_separate,
                     (region != nullptr)?region->num_prepared():0, 
                     remote_side.c_str());
     }
@@ -210,21 +211,4 @@ void ConvertToSyncClosure::Run() {
     delete this;
 }
 
-void Dml1pcClosure::Run() {
-    if (!status().ok()) {
-        DB_FATAL("dml 1pc exec fail, status:%s, time_cost:%ld", 
-                 status().error_cstr(), 
-                 cost.get_time());
-        if (txn != nullptr) {
-            txn->rollback();
-            state->err_code = pb::NOT_LEADER;
-            state->raft_error_msg = status().error_cstr();
-        }
-    } 
-    if (done) {
-        done->Run();
-    }
-    txn_cond.decrease_signal();
-    delete this;
-}
 } // end of namespace

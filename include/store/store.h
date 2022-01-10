@@ -285,8 +285,8 @@ public:
         DB_WARNING("binlog timeout check bth join");
         _binlog_fake_bth.join();
         DB_WARNING("fake binlog bth join");
-
-
+        _multi_thread_cond.wait();
+        DB_WARNING("_multi_thread_cond wait finish");
         _rocksdb->close();
         DB_WARNING("rockdb close, quit success");
     }
@@ -372,6 +372,7 @@ private:
     bool _has_prepared_tran = true;
     bool _has_binlog_region = false;
     BthreadCond _get_tso_cond {-1};
+    BthreadCond _multi_thread_cond;
     bthread_mutex_t _param_mutex;
     std::map<std::string, std::string> _param_map;
 public:

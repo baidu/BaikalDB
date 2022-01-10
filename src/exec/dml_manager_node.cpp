@@ -28,9 +28,10 @@ int DmlManagerNode::open(RuntimeState* state) {
         return 0;
     }
     ExecNode* dml_node = _children[0];
-    ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, _op_type); 
+    ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, client_conn->seq_id, _op_type); 
     if (ret < 0) {
-        DB_WARNING("fetcher store fail, txn_id: %lu seq_id: %d", state->txn_id, client_conn->seq_id);
+        DB_WARNING("fetcher store fail, txn_id: %lu seq_id: %d need_rollback_seq[%d]",
+            state->txn_id, client_conn->seq_id, client_conn->seq_id);
         client_conn->need_rollback_seq.insert(client_conn->seq_id);
         return -1;
     }
@@ -87,7 +88,7 @@ int DmlManagerNode::send_request(RuntimeState* state,
     //每条dml语句都需要单独占一个seq_id
     client_conn->seq_id++;
     //对每个索引表进行lock_delete操作
-    ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, _op_type);
+    ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, client_conn->seq_id, _op_type);
     if (ret < 0) {
         std::string seq_id_str = "[";
         for (auto seq_id : _seq_ids) {
@@ -95,6 +96,7 @@ int DmlManagerNode::send_request(RuntimeState* state,
             seq_id_str += std::to_string(seq_id) + ",";
         }
         client_conn->need_rollback_seq.insert(client_conn->seq_id);
+        seq_id_str += std::to_string(client_conn->seq_id);
         seq_id_str += "]";
         DB_WARNING("fetcher store fail, txn_id: %lu log_id:%lu seq_id: %d need_rollback_seq:%s", state->txn_id, 
              state->log_id(), client_conn->seq_id, seq_id_str.c_str());
@@ -120,7 +122,7 @@ int DmlManagerNode::send_request_light(RuntimeState* state,
         return ret;
     }
     //对每个索引表进行lock_delete操作
-    ret = fetcher_store.run(state, region_infos, dml_node, seq_id, _op_type);
+    ret = fetcher_store.run(state, region_infos, dml_node, seq_id, seq_id, _op_type);
     if (ret < 0) {
         DB_WARNING("fetcher store fail, txn_id: %lu seq_id: %d", state->txn_id, seq_id);
         return -1;
@@ -149,7 +151,7 @@ int DmlManagerNode::send_request_concurrency(RuntimeState* state, size_t start_c
             ret = send_request_light(state, exec_node, fetcher_store, start_seq_id, 
                               _insert_scan_records, _del_scan_records);
             if (ret < 0) {
-                DB_WARNING("exec node failed, index_id:%ld log_id:%lu ret:%d ",
+                DB_WARNING("exec node failed, log_id:%lu index_id:%ld ret:%d ",
                     state->log_id(), exec_node->global_index_id(), ret);
                 error = ret;
             }

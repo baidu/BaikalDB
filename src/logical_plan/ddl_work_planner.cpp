@@ -21,7 +21,7 @@ std::unique_ptr<Type> create_generic_manager_node(pb::PlanNodeType node_type) {
         return nullptr;
     }
     manager_node->init(pb_manager_node);
-    return std::move(manager_node);
+    return manager_node;
 }
 
 int create_single_txn(std::unique_ptr<IndexDDLManagerNode> dml_root,
@@ -211,7 +211,7 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
         DB_FATAL("router plan error.");
         return nullptr;
     }
-    return std::move(scan_node);
+    return scan_node;
 }
 
 int DDLWorkPlanner::execute() {
