@@ -53,6 +53,10 @@ inline bool valid_timestamp_us(int64_t timestamp_us) {
 extern int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int64_t base_expire_time_us);
 
 class TransactionPool;
+// 不同region资源隔离，不需要每次从SchemaFactory加锁获取
+struct RegionResource {
+    pb::RegionInfo region_info;
+};
 class Transaction {
 public:
     Transaction(uint64_t txn_id, TransactionPool* pool) : 
@@ -268,6 +272,9 @@ public:
         if (_cache_plan_map.count(seq_id) > 0) {
             return;
         }
+        if (plan_item.op_type() != pb::OP_BEGIN) {
+            _has_dml_executed = true;
+        }
         _cache_plan_map.insert(std::make_pair(seq_id, plan_item));
     }
 
@@ -275,6 +282,10 @@ public:
         BAIDU_SCOPED_LOCK(_cache_map_mutex);
         // cache缓存OP_BEGIN/OP_INSERT/OP_UPDATE/OP_DELETE/OP_SELECT_FOR_UPDATE
         return _cache_plan_map.size() > 1;
+    }
+
+    bool has_dml_executed() const {
+        return _has_dml_executed;
     }
 
     bool write_begin_index() {
@@ -315,12 +326,14 @@ public:
         return 0;
     }
 
-    void set_region_info(pb::RegionInfo* region_info) {
-        _region_info = region_info;
-        if (_region_info == nullptr) {
+    void set_resource(const std::shared_ptr<RegionResource>& resource) {
+        BAIDU_SCOPED_LOCK(_txn_mutex);
+        if (resource == nullptr) {
             DB_WARNING("no region_info");
             return;
         }
+        _resource = resource;
+        _region_info = &resource->region_info;
         // _is_global_index
         if (_region_info->has_main_table_id() && _region_info->main_table_id() != 0 &&
                     _region_info->table_id() != _region_info->main_table_id()) {
@@ -406,6 +419,18 @@ public:
         _txn_timeout = timeout;
     }
 
+    void set_separate(bool is_separate) {
+        _is_separate = is_separate;
+    }
+
+    bool is_separate() const {
+       return _is_separate;
+    }
+
+    void clear_raftreq() {
+        _store_req.Clear();
+    }
+
     int64_t txn_timeout() const {
         return _txn_timeout;
     }
@@ -418,6 +443,7 @@ public:
     }
 
     bool is_primary_region() {
+        BAIDU_SCOPED_LOCK(_txn_mutex);
         if (_region_info != nullptr) {
             return (_region_info->region_id() == _primary_region_id);
         }
@@ -443,7 +469,6 @@ public:
     void rollback_current_request();
 
 public:
-    bool        _is_separate = false; //是否存储计算分离
     int64_t     num_increase_rows = 0;
     int64_t     last_active_time = 0;
     int64_t     begin_time = 0;
@@ -463,21 +488,23 @@ private:
             bool            check_region,
             int64_t&        ttl_ts);
     
-    void add_kvop_put(std::string& key, std::string& value, int64_t ttl_timestamp_us) {
+    void add_kvop_put(std::string& key, std::string& value, int64_t ttl_timestamp_us, bool is_primary_key) {
         //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,
         //           str_to_hex(key).c_str(), str_to_hex(value).c_str());
         pb::KvOp* kv_op = _store_req.add_kv_ops();
         kv_op->set_op_type(pb::OP_PUT_KV);
         kv_op->set_key(key);
         kv_op->set_value(value);
+        kv_op->set_is_primary_key(is_primary_key);
         kv_op->set_ttl_timestamp_us(ttl_timestamp_us);
     }
     
-    void add_kvop_delete(std::string& key) {
+    void add_kvop_delete(std::string& key, bool is_primary_key) {
         //DB_WARNING("txn:%p, add kvop delete key:%s", this, str_to_hex(key).c_str());
         pb::KvOp* kv_op = _store_req.add_kv_ops();
         kv_op->set_op_type(pb::OP_DELETE_KV);
         kv_op->set_key(key);
+        kv_op->set_is_primary_key(is_primary_key);
     }
     
     // seq_id should be updated after each query execution regardless of success or failure 
@@ -490,6 +517,7 @@ private:
     bool                            _is_rolledback = false;
     std::atomic<bool>               _in_process {false};
     bool                            _write_begin_index = true;
+    bool                            _has_dml_executed = false;
     int64_t                         _prepare_time_us = 0;
     std::stack<int>                 _save_point_seq;
     std::stack<int64_t>             _save_point_increase_rows;
@@ -509,6 +537,7 @@ private:
     rocksdb::ColumnFamilyHandle*    _meta_cf = nullptr;
     const rocksdb::Snapshot*        _snapshot = nullptr;
     pb::RegionInfo*                 _region_info = nullptr;
+    std::shared_ptr<RegionResource> _resource;
     RocksWrapper*                   _db = nullptr;
     TransactionPool*                _pool = nullptr;
     SmartTable                      _table_info; // for cstore
@@ -517,6 +546,7 @@ private:
 
     bthread_mutex_t                 _txn_mutex;
     bool                            _use_ttl = false;
+    bool                            _is_separate = false;
     int64_t                         _read_ttl_timestamp_us = 0; //ttl读取时间
     int64_t                         _write_ttl_timestamp_us = 0; //ttl写入时间
     int64_t                         _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用

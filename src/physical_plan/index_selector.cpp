@@ -220,9 +220,13 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                 field_range_map[field_id].eq_in_values = values[idx];
                 field_range_map[field_id].conditions.clear();
                 field_range_map[field_id].conditions.insert(expr);
-                field_range_map[field_id].type = IN;
                 field_range_map[field_id].is_row_expr = true;
                 field_range_map[field_id].left_row_field_ids = field_ids;
+                if (values[idx].size() == 1) {
+                    field_range_map[field_id].type = EQ;
+                } else {
+                    field_range_map[field_id].type = IN;
+                }
             }
             return;
         }

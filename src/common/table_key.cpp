@@ -144,7 +144,7 @@ std::string TableKey::decode_start_key_string(pb::PrimitiveType field_type, int&
     return start_key_string;
 }
 
-std::string TableKey::decode_start_key_string(IndexInfo& index) const {
+std::string TableKey::decode_start_key_string(const IndexInfo& index) const {
     std::string start_key_string;
     int pos = 0;
     for (auto& field : index.fields) {

@@ -18,6 +18,7 @@
 #include "query_context.h"
 #include "re2/re2.h"
 
+DEFINE_int64(show_table_status_cache_time, 3600 * 1000 * 1000LL, "show table status cache time : 3600s");
 namespace baikaldb {
 void ShowHelper::init() {
     _calls[SQL_SHOW_ABNORMAL_REGIONS] = std::bind(&ShowHelper::_show_abnormal_regions,
@@ -118,7 +119,7 @@ bool ShowHelper::execute(const SmartSocket& client) {
     return iter->second(client, split_vec);
 }
 
-bool ShowHelper::_show_abnormal_regions(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+bool ShowHelper::_show_abnormal_regions(const SmartSocket& client, const std::vector<std::string>& split_vec_arg) {
     if (client == nullptr || client->query_ctx == nullptr) {
         DB_FATAL("param invalid");
         //client->state = STATE_ERROR;
@@ -126,14 +127,15 @@ bool ShowHelper::_show_abnormal_regions(const SmartSocket& client, const std::ve
     }
 
     std::string resource_tag;
-    bool unhealthy = false;;
-    if (split_vec.size() == 5) {
-        if (split_vec[4] == "unhealthy") {
-            unhealthy = true;
-        }
-    } else if (split_vec.size() == 4) {
+    auto split_vec = split_vec_arg;
+    bool unhealthy = false;
+    if (split_vec.back() == "unhealthy") {
+        unhealthy = true;
+        split_vec.pop_back();
+    }
+    if (split_vec.size() == 4) {
         resource_tag = split_vec[3];
-    } else if (split_vec.size() != 3) {
+    } else if (split_vec.size() < 3) {
         client->state = STATE_ERROR;
         return false;
     }
@@ -1311,6 +1313,7 @@ bool ShowHelper::_show_table_status(const SmartSocket& client, const std::vector
 
     std::string namespace_ = client->user_info->namespace_;
     std::string db = client->current_db;
+    std::string key = namespace_ + "." + db;
     if (db == "") {
         DB_WARNING("no database selected");
         _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
@@ -1321,50 +1324,73 @@ bool ShowHelper::_show_table_status(const SmartSocket& client, const std::vector
         namespace_ = "INTERNAL";
     }
 
-    // Make rows.
     std::vector< std::vector<std::string> > rows;
+    std::vector< std::vector<std::string> > assign_rows;
     rows.reserve(10);
-    std::vector<std::string> tables;
+    assign_rows.reserve(1);
+    std::string assign_table;
     if (split_vec.size() == 5) {
         std::string table = remove_quote(split_vec[4].c_str(), '\'');
-        tables.emplace_back(table);
-    } else if (split_vec.size() == 3) {
-        tables =  factory->get_table_list(namespace_, db, client->user_info.get());
-    } else {
-        client->state = STATE_ERROR;
-        return false;
-    }
-    for (auto table : tables) {
+        // 指定了table，查询是否存在
         std::string full_name = namespace_ + "." + db + "." + table;
         int64_t table_id = -1;
         if (factory->get_table_id(full_name, table_id) != 0) {
             client->state = STATE_ERROR;
             return false;
         }
-        TableInfo info = factory->get_table_info(table_id);
-        pb::QueryRequest req;
-        req.set_op_type(pb::QUERY_TABLE_FLATTEN);
-        req.set_namespace_name(client->user_info->namespace_);
-        req.set_database(db);
-        req.set_table_name(table);
-        pb::QueryResponse res;
-        MetaServerInteract::get_instance()->send_request("query", req, res);
+        assign_table = table;
+    } else if (split_vec.size() != 3) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    // 查看cache是否有效
+    {
+        BAIDU_SCOPED_LOCK(_mutex);
+        if (_table_info_cache_time.find(key) != _table_info_cache_time.end()
+            && butil::gettimeofday_us() - _table_info_cache_time[key] < FLAGS_show_table_status_cache_time) {
+            if (assign_table != "") {
+                // 指定了table，遍历找到table信息
+                for (auto& row : _table_info_cache[key]) {
+                    if (row.size() > 0 && row[0] == assign_table) {
+                        assign_rows.emplace_back(row);
+                        break;
+                    }
+                }
+            }
+            if (_make_common_resultset_packet(client,
+                                              fields,
+                                              assign_table == "" ? _table_info_cache[key] : assign_rows) != 0) {
+                DB_FATAL_CLIENT(client, "Failed to make result packet.");
+                _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+                client->state = STATE_ERROR;
+                return false;
+            }
+            client->state = STATE_READ_QUERY_RESULT;
+            return true;
+        }
+    }
+
+    pb::QueryRequest req;
+    req.set_op_type(pb::QUERY_TABLE_FLATTEN);
+    req.set_namespace_name(client->user_info->namespace_);
+    req.set_database(db);
+    pb::QueryResponse res;
+    // 这个请求meta会对table_mutex加锁并copy所有table元数据，比较重
+    MetaServerInteract::get_instance()->send_request("query", req, res);
+    for (auto& table_info : res.flatten_tables()) {
         std::string create_time = "2018-08-09 15:01:40";
-        int64_t avg_row_length = 0;
-        int64_t row_count = 0;
-        if (res.flatten_tables_size() == 1) {
-            create_time = res.flatten_tables(0).create_time();
-            row_count = res.flatten_tables(0).row_count();
-            avg_row_length = res.flatten_tables(0).byte_size_per_record();
+        if (!table_info.create_time().empty()) {
+            create_time = table_info.create_time();
         }
         // Make rows.
         std::vector<std::string> row;
-        row.emplace_back(table);
+        row.emplace_back(table_info.table_name());
         row.emplace_back("Innodb");
-        row.emplace_back(std::to_string(info.version));
+        row.emplace_back(std::to_string(table_info.version()));
         row.emplace_back("Compact");
-        row.emplace_back(std::to_string(row_count));
-        row.emplace_back(std::to_string(avg_row_length));
+        row.emplace_back(std::to_string(table_info.row_count()));
+        row.emplace_back(std::to_string(table_info.byte_size_per_record()));
         row.emplace_back("0");
         row.emplace_back("0");
         row.emplace_back("0");
@@ -1378,10 +1404,20 @@ bool ShowHelper::_show_table_status(const SmartSocket& client, const std::vector
         row.emplace_back("");
         row.emplace_back("");
         rows.emplace_back(row);
+        if (assign_table != "" && table_info.table_name() == assign_table) {
+            assign_rows.emplace_back(row);
+        }
     }
-
+    {
+        // 更新缓存
+        BAIDU_SCOPED_LOCK(_mutex);
+        _table_info_cache_time[key] = butil::gettimeofday_us();
+        _table_info_cache[key] = rows;
+    }
     // Make mysql packet.
-    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+    if (_make_common_resultset_packet(client,
+                                      fields,
+                                      assign_table == "" ? rows : assign_rows) != 0) {
         DB_FATAL_CLIENT(client, "Failed to make result packet.");
         _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
         client->state = STATE_ERROR;
@@ -2150,12 +2186,42 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
     MetaServerInteract::get_instance()->send_request("query", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
     if (show_region) {
+        int work_done_count = 0;
+        int work_idle_count = 0;
+        int work_doing_count = 0;
+        int work_fail_count = 0;
+        int work_error_count = 0;
         for(auto info : response.region_ddl_infos()) {
             std::vector<std::string> row;
             row.reserve(6);
             row.emplace_back(std::to_string(info.index_id()));
             row.emplace_back(std::to_string(info.region_id()));
             row.emplace_back(state[info.status()]);
+            switch (info.status()) {
+                case pb::DdlWorkIdle: {
+                    ++work_idle_count;
+                    break;
+                }
+                case pb::DdlWorkDoing: {
+                    ++work_doing_count;
+                    break;
+                }
+                case pb::DdlWorkDone: {
+                    ++work_done_count;
+                    break;
+                }
+                case pb::DdlWorkFail: {
+                    ++work_fail_count;
+                    break;
+                }
+                case pb::DdlWorkDupUniq:
+                case pb::DdlWorkError: {
+                    ++work_error_count;
+                    break;
+                }
+                default:
+                    break;
+            }
             if (info.start_key().size() > 0) {
                 TableKey start_key(info.start_key());
                 row.emplace_back(start_key.decode_start_key_string(pri_info));
@@ -2170,6 +2236,14 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
             }
             rows.emplace_back(row);
         }
+        std::vector<std::string> row;
+        row.reserve(6);
+        row.emplace_back("Idle : " + std::to_string(work_idle_count));
+        row.emplace_back("Doing : " + std::to_string(work_doing_count));
+        row.emplace_back("Done : " + std::to_string(work_done_count));
+        row.emplace_back("Fail : " + std::to_string(work_fail_count));
+        row.emplace_back("Error : " + std::to_string(work_error_count));
+        rows.emplace_back(row);
     } else {
         for (auto ddl : response.ddlwork_infos()) {
             std::vector<std::string> row;
@@ -2632,7 +2706,7 @@ bool ShowHelper::_handle_client_query_template(const SmartSocket& client,
 
 int ShowHelper::_make_common_resultset_packet(const SmartSocket& sock,
         std::vector<ResultField>& fields,
-        std::vector< std::vector<std::string> >& rows) {
+        const std::vector<std::vector<std::string>>& rows) {
     if (!sock || !sock->send_buf) {
         DB_FATAL("sock == NULL.");
         return RET_ERROR;

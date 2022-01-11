@@ -500,6 +500,8 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         if (field->expr->expr_type == parser::ET_COLUMN) {
             parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
             select_name = column->name.c_str();
+        } else if (!field->org_name.empty()) {
+            select_name = field->org_name.c_str();
         } else {
             select_name = field->expr->to_string();
         }

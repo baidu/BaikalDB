@@ -729,11 +729,11 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     }
     if (ptr_region->peers_size() < 2) {
         ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
-                            "region not stable, cannot split", 
-                            request->op_type(), 
-                            log_id);
-        DB_WARNING("region cannot split, region not stable, request: %s, region_id: %ld", 
-                    request->ShortDebugString().c_str(), region_id);
+                                "region not stable, cannot split",
+                                request->op_type(),
+                                log_id);
+        DB_WARNING("region cannot split, region not stable, request: %s, region_id: %ld",
+                   request->ShortDebugString().c_str(), region_id);
         return -1;
     }
     int64_t table_id = 0;
@@ -765,9 +765,25 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     int ret = TableManager::get_instance()->get_replica_num(table_id, instance_num);
     if (ret < 0) {
         ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
-                                "table id not exist", request->op_type(), log_id);
+                                "replica num not exist", request->op_type(), log_id);
         return -1;
     }
+    // 5副本，分裂的时候选3个peer，剩下两个peer在分裂完之后补齐
+    if (instance_num > 3) {
+        instance_num = 3;
+    }
+    std::unordered_map<std::string, int64_t> replica_dists_map;
+    TableManager::get_instance()->get_replica_dists(table_id, replica_dists_map);
+    if (replica_dists_map.size() == 0) {
+        std::string main_logical_room;
+        ret = TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
+        if (ret < 0) {
+            ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                                    "main logical room not exist", request->op_type(), log_id);
+        }
+        replica_dists_map[main_logical_room] = instance_num;
+    }
+
     //从cluster中选择store, 尾分裂选择replica个store, 中间分裂选择replica-1个store
     std::set<std::string> exclude_stores;
     std::string source_instance = request->region_split().new_instance();
@@ -775,31 +791,44 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
         response->mutable_split_response()->set_new_instance(source_instance);
         --instance_num;
         exclude_stores.insert(source_instance);
+        std::string source_logical_room = ClusterManager::get_instance()->get_logical_room(source_instance);
+        if (replica_dists_map.find(source_logical_room) != replica_dists_map.end()) {
+            replica_dists_map[source_logical_room]--;
+        }
     }
-    for (auto i = 0; i < instance_num; ++i) {
-        std::string instance;
-        std::string main_logical_room;
-        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
-        for(size_t rolling_retry = 0; rolling_retry <= parent_region_stores.size(); ++rolling_retry) {
-            ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag,
-                                                                          exclude_stores,
-                                                                          main_logical_room,
-                                                                          instance);
-            if (ret < 0) {
-                ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
-                                   "select instance fail", request->op_type(), log_id);
-                return -1;
+
+    int selected_instance = 0;
+    for (auto& replica_dist_pair : replica_dists_map) {
+        std::string logical_room = replica_dist_pair.first;
+        for (auto i = 0; i < replica_dist_pair.second; ++i) {
+            std::string instance;
+            // 尽量和父region的三个peer不在一个store上，同时也得保证只有三个store也能分裂
+            // 选store，如果选到了父region peer所在的store，最多重试3次
+            for (auto select_retry_time = 0; select_retry_time < 3; ++select_retry_time) {
+                ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag,
+                                                                              exclude_stores,
+                                                                              logical_room,
+                                                                              instance);
+                if (ret < 0) {
+                    ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                                       "select instance fail", request->op_type(), log_id);
+                    return -1;
+                }
+                if (parent_region_stores.count(instance) == 0) {
+                    break;
+                }
             }
-            if (parent_region_stores.count(instance) == 0) {
-                break;
+            if (is_tail_split && selected_instance == 0) {
+                response->mutable_split_response()->set_new_instance(instance);
+            } else {
+                response->mutable_split_response()->add_add_peer_instance(instance);
+            }
+            exclude_stores.insert(instance);
+            ++selected_instance;
+            if (selected_instance == instance_num) {
+                return 0;
             }
         }
-        if (is_tail_split && i == 0) {
-            response->mutable_split_response()->set_new_instance(instance);
-        } else {
-            response->mutable_split_response()->add_add_peer_instance(instance);
-        }
-        exclude_stores.insert(instance);
     }
     return 0;
 }

@@ -131,9 +131,15 @@ private:
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 
             std::vector<ResultField>& fields,
-            std::vector< std::vector<std::string> >& rows);
+            const std::vector<std::vector<std::string>>& rows);
     void _parse_sample_sql(std::string sample_sql, std::string& database, std::string& table, std::string& sql);
     MysqlWrapper*   _wrapper = nullptr;
+
+    // 由于show table status太重了，进行cache
+    bthread::Mutex _mutex;
+    std::unordered_map<std::string, int64_t> _table_info_cache_time;
+    // db -> rows
+    std::unordered_map<std::string, std::vector<std::vector<std::string>>> _table_info_cache;
 };
 }
 

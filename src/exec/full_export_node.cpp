@@ -127,7 +127,8 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             continue;
         }
         DB_WARNING("send region_id:%ld log_id:%lu", region_id, log_id);
-        region_per_batch++;
+        ++region_per_batch;
+        ++state->region_count;
         auto region_thread = [this, state, region_id, info, log_id]() {
             auto ret = _fetcher_store.send_request(state, _children[0], *info, region_id, region_id, 
                 log_id, 0, state->seq_id, state->seq_id, _op_type);

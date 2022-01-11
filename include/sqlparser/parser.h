@@ -20,6 +20,23 @@
 #include "ddl.h"
 #include "misc.h"
 
+struct yy_buffer_state;
+
+struct YYLTYPE {
+    const char* start;
+    const char* end;
+};
+#define YYLTYPE_IS_DECLARED 1  // userdefined YYLTYPE
+
+#define YYLLOC_DEFAULT(Current, Rhs, N)                                   \
+  do {                                                                    \
+    if (N) {                                                              \
+      (Current).start = YYRHSLOC(Rhs, 1).start;                       \
+      (Current).end = YYRHSLOC(Rhs, N).end;                           \
+    } else {                                                              \
+      (Current).start = (Current).end = YYRHSLOC(Rhs, 0).end;             \
+    }                                                                     \
+  } while (0)
 namespace parser {
 enum ParseError {
     SUCC = 0,

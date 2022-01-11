@@ -68,11 +68,6 @@ private:
 class QueryContext;
 class NetworkSocket;
 
-// 不同region资源隔离，不需要每次从SchemaFactory加锁获取
-struct RegionResource {
-    pb::RegionInfo region_info;
-};
-
 class RuntimeStatePool;
 class RuntimeState {
 
@@ -165,15 +160,15 @@ public:
             return _txn;
         }
         _txn = SmartTransaction(new Transaction(0, _txn_pool));
-        _txn->set_region_info(&(_resource->region_info));
-        _txn->_is_separate = is_separate;
+        _txn->set_resource(_resource);
+        _txn->set_separate(is_separate);
         _txn->begin(txn_opts);
         return _txn;
     }
     SmartTransaction create_batch_txn() {
         auto txn = SmartTransaction(new Transaction(0, _txn_pool));
-        txn->set_region_info(&(_resource->region_info));
-        txn->_is_separate = is_separate;
+        txn->set_resource(_resource);
+        txn->set_separate(is_separate);
         txn->begin(Transaction::TxnOptions());
         return txn;
     }
@@ -278,8 +273,8 @@ public:
         _pool = pool;
     }
     // runtime release at last
-    RegionResource* resource() {
-        return _resource.get();
+    std::shared_ptr<RegionResource>& resource() {
+        return _resource;
     }
 
     void set_single_sql_autocommit(bool single_sql_autocommit) {
@@ -304,6 +299,10 @@ public:
 
     bool use_backup() {
         return _use_backup;
+    }
+
+    bool need_learner_backup() const {
+        return _need_learner_backup;
     }
 
     void set_eos() {
@@ -338,6 +337,14 @@ public:
         return _is_expr_subquery;
     }
 
+    std::string& remote_side() {
+        return _remote_side;
+    }
+
+    void set_remote_side(const std::string& remote_side) {
+        _remote_side = remote_side;
+    }
+
     void set_is_expr_subquery(bool flag) {
         _is_expr_subquery = flag;
     }
@@ -370,15 +377,15 @@ public:
     MysqlErrCode      error_code = ER_ERROR_FIRST;
     std::ostringstream error_msg;
     bool              is_full_export = false;
-    bool              is_separate = false; //是否为计算存储分离模式
+    bool              is_separate = false;
     BthreadCond       txn_cond;
     std::function<void(RuntimeState* state, SmartTransaction txn)> raft_func;
     bool              need_txn_limit = false;
     pb::ErrCode       err_code = pb::SUCCESS;
-    std::string       raft_error_msg;
     ExplainType       explain_type = EXPLAIN_NULL;
     std::shared_ptr<CMsketch> cmsketch = nullptr;
-    int64_t         last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
+    int64_t          last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
+    pb::StoreRes*    response = nullptr;
 
     // global index ddl 使用
     int32_t            ddl_scan_size = 0;
@@ -421,6 +428,7 @@ private:
     // 如果用了排序列做索引，就不需要排序了
     bool              _sort_use_index = false;
     bool              _use_backup = false;
+    bool              _need_learner_backup = false;
                                               // there is only 1 region.
     NetworkSocket*    _client_conn = nullptr; // used for baikaldb
     TransactionPool*  _txn_pool = nullptr;    // used for store
@@ -439,6 +447,7 @@ private:
     int64_t _used_bytes = 0;
     bthread_mutex_t  _mem_lock;
     SmartMemTracker  _mem_tracker = nullptr;
+    std::string      _remote_side;
 };
 typedef std::shared_ptr<RuntimeState> SmartState;
 }

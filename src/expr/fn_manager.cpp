@@ -159,6 +159,11 @@ void FunctionManager::register_operators() {
     register_object_ret("sysdate", now, pb::DATETIME);
     register_object_ret("utc_timestamp", utc_timestamp, pb::DATETIME);
     register_object_ret("date_format", date_format, pb::STRING);
+    /*
+        str_to_date实现较为复杂，需要满足任意格式的string转换为标准形式的DATETIME，现在为了方便确保str_to_date可以使用，
+        默认string是标准形式的date，故其实现内容和date_format函数一致
+    */ 
+    register_object_ret("str_to_date", str_to_date, pb::DATETIME);
     register_object_ret("time_format", time_format, pb::STRING);
     register_object_ret("timediff", timediff, pb::TIME);
     register_object_ret("timestampdiff", timestampdiff, pb::INT64);

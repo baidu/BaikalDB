@@ -680,6 +680,7 @@ void MetaStateMachine::on_leader_stop() {
     DBManager::get_instance()->clear_all_tasks();
     DDLManager::get_instance()->clear_txn_info();
     TableManager::get_instance()->on_leader_stop();
+    QueryTableManager::get_instance()->clean_cache();
 }
 
 // 只有store需要peer load balance才会上报所有的peer信息

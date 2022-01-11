@@ -47,7 +47,7 @@ int RuntimeState::init(const pb::StoreReq& req,
         // binlog region 不检查
         _need_check_region = false;
     }
-    int64_t limit = req.plan().nodes(0).limit();
+    int64_t limit = plan.nodes(0).limit();
     //DB_WARNING("limit:%ld", limit);
     if (limit > 0) {
         _row_batch_capacity = limit / 2 + 1;
@@ -76,7 +76,8 @@ int RuntimeState::init(const pb::StoreReq& req,
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
     if (_txn != nullptr) {
-        _txn->set_region_info(&(_resource->region_info));
+        _txn->set_resource(_resource);
+        _txn->set_separate(store_compute_separate);
     }
     return 0;
 }
@@ -95,6 +96,7 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     _log_id = ctx->stat_info.log_id;
     sign    = ctx->stat_info.sign;
     _use_backup = ctx->use_backup;
+    _need_learner_backup = ctx->need_learner_backup;
     // prepare 复用runtime
     if (_is_inited) {
         return 0;

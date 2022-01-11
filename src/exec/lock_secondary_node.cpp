@@ -154,68 +154,76 @@ int LockSecondaryNode::open(RuntimeState* state) {
             //    _global_index_id, _region_id, record->debug_string().c_str());
         }
     }
-    //对全局二级索引加锁返回
-    if (_lock_type == pb::LOCK_GET) {
-        if (can_write) {
-            int ttl_idx = 0;
-            for (auto& record : put_records) {
-                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-                txn->set_write_ttl_timestamp_us(put_record_ttl[ttl_idx++]);
-                auto ret = txn->get_update_secondary(_region_id, *_pri_info, *_global_index_info, record, GET_LOCK, true);
-                if (ret == -3 || ret == -2 || ret == -4) {
-                    continue;
+    switch (_lock_type) {
+        //对全局二级索引加锁返回
+        case pb::LOCK_GET: {
+            txn->set_separate(false); // 只加锁不走kv模式
+            if (can_write) {
+                int ttl_idx = 0;
+                for (auto& record : put_records) {
+                    //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                    txn->set_write_ttl_timestamp_us(put_record_ttl[ttl_idx++]);
+                    auto ret = txn->get_update_secondary(_region_id, *_pri_info, *_global_index_info, record, GET_LOCK, true);
+                    if (ret == -3 || ret == -2 || ret == -4) {
+                        continue;
+                    }
+                    if (ret == -1 || ret == -5) {
+                        DB_WARNING("get lock fail");
+                        return -1;
+                    }
+                    _return_records[_global_index_info->id].push_back(record);
+                    //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
                 }
-                if (ret == -1 || ret == -5) {
-                    DB_WARNING("get lock fail");
-                    return -1;
-                }
-                _return_records[_global_index_info->id].push_back(record);
-                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
             }
+            break;
         }
-    }
-    //对全局二级索引进行加锁写入 or  删除
-    if (_lock_type == pb::LOCK_DML || _lock_type == pb::LOCK_GLOBAL_DDL) {
-        if (can_delete) {
-            for (auto& record : delete_records) {
-                ret = delete_global_index(state, record);
-                if (ret < 0) {
-                    DB_WARNING_STATE(state, "insert_row fail");
-                    return -1;
+        //对全局二级索引进行加锁写入 or  删除
+        case pb::LOCK_DML:
+        case pb::LOCK_GLOBAL_DDL: {
+            if (can_delete) {
+                for (auto& record : delete_records) {
+                    ret = delete_global_index(state, record);
+                    if (ret < 0) {
+                        DB_WARNING_STATE(state, "delete_global_index fail");
+                        return -1;
+                    }
+                    num_affected_rows += ret;
                 }
-                num_affected_rows += ret;
             }
-        }
-        
-        if (can_write) {
-            int ttl_idx = 0;
-            for (auto& record : put_records) {
-                //加锁写入
-                txn->set_write_ttl_timestamp_us(put_record_ttl[ttl_idx++]);
-                ret = insert_global_index(state, record);
-                if (ret < 0) {
-                    DB_WARNING_STATE(state, "insert_row fail");
-                    return -1;
+            if (can_write) {
+                int ttl_idx = 0;
+                for (auto& record : put_records) {
+                    //加锁写入
+                    txn->set_write_ttl_timestamp_us(put_record_ttl[ttl_idx++]);
+                    ret = insert_global_index(state, record);
+                    if (ret < 0) {
+                        DB_WARNING_STATE(state, "insert_global_index fail");
+                        return -1;
+                    }
+                    num_affected_rows += ret;
                 }
-                num_affected_rows += ret;
             }
+            break;
         }
-        
-    }
-    if (_lock_type == pb::LOCK_NO || _lock_type == pb::LOCK_NO_GLOBAL_DDL) {
-        if (can_write) {
-            int ttl_idx = 0;
-            for (auto& record : put_records) {
-                txn->set_write_ttl_timestamp_us(put_record_ttl[ttl_idx++]);
-                ret = put_global_index(state, record);
-                if (ret < 0) {
-                    DB_WARNING_STATE(state, "put_row fail");
-                    return -1;
+        case pb::LOCK_NO:
+        case pb::LOCK_NO_GLOBAL_DDL: {
+            if (can_write) {
+                int ttl_idx = 0;
+                for (auto& record : put_records) {
+                    txn->set_write_ttl_timestamp_us(put_record_ttl[ttl_idx++]);
+                    ret = put_global_index(state, record);
+                    if (ret < 0) {
+                        DB_WARNING_STATE(state, "put_row fail");
+                        return -1;
+                    }
+                    num_affected_rows += ret;
                 }
-                num_affected_rows += ret;
             }
+            break;
         }
-        
+        default:
+            DB_WARNING("error _lock_type:%s", LockCmdType_Name(_lock_type).c_str());
+            break;
     }
     state->set_num_increase_rows(_num_increase_rows);
     if (state->need_txn_limit) {

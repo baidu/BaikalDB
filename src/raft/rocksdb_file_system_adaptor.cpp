@@ -536,6 +536,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_writer_adaptor(const std::str
         options = db->get_options(db->get_meta_info_handle());
     }
     options.bottommost_compression = rocksdb::kLZ4Compression;
+    options.bottommost_compression_opts = rocksdb::CompressionOptions();
     
     SstWriterAdaptor* writer = new SstWriterAdaptor(_region_id, path, options);
     int ret = writer->open();
@@ -706,9 +707,20 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
     BAIDU_SCOPED_LOCK(_snapshot_mutex);
     auto iter = _snapshots.find(path);
     if (iter != _snapshots.end()) {
-        DB_WARNING("region_id: %ld snapshot path: %s is busy", _region_id, path.c_str());
-        _snapshots[path].second++;
-        return false;
+        // raft InstallSnapshot接口超时-1
+        // 长时间没处理说明对方机器卡住了
+        // TODO 后续如果遇到长时间不read也可以关闭
+        if (iter->second.cost.get_time() > 3600 * 1000 * 1000LL
+            && iter->second.count == 1
+            && (iter->second.ptr->data_context == nullptr
+            || iter->second.ptr->data_context->offset == 0)) {
+            _snapshots.erase(iter);
+            DB_WARNING("region_id: %ld snapshot path: %s is hang over 1 hour, erase", _region_id, path.c_str());
+        } else {
+            DB_WARNING("region_id: %ld snapshot path: %s is busy", _region_id, path.c_str());
+            _snapshots[path].count++;
+            return false;
+        }
     }
 
     _mutil_snapshot_cond.increase();
@@ -716,12 +728,13 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
     auto region = Store::get_instance()->get_region(_region_id);
     region->lock_commit_meta_mutex();
     DB_WARNING("region_id: %ld lock_commit_meta_mutex before open snapshot", _region_id);
-    _snapshots[path].first.reset(new SnapshotContext());
+    _snapshots[path].ptr.reset(new SnapshotContext());
     region = Store::get_instance()->get_region(_region_id);
     int64_t data_index = region->get_data_index();
-    _snapshots[path].first->data_index = data_index;
+    _snapshots[path].ptr->data_index = data_index;
     region->unlock_commit_meta_mutex();
-    _snapshots[path].second++;
+    _snapshots[path].count++;
+    _snapshots[path].cost.reset();
     DB_WARNING("region_id: %ld, data_index:%ld, open snapshot path: %s", 
             _region_id, data_index, path.c_str());
     return true;
@@ -732,8 +745,8 @@ void RocksdbFileSystemAdaptor::close_snapshot(const std::string& path) {
     BAIDU_SCOPED_LOCK(_snapshot_mutex);
     auto iter = _snapshots.find(path);
     if (iter != _snapshots.end()) {
-        _snapshots[path].second--;
-        if (_snapshots[path].second == 0) {
+        _snapshots[path].count--;
+        if (_snapshots[path].count == 0) {
             _snapshots.erase(iter);
             _mutil_snapshot_cond.decrease_broadcast();
             DB_WARNING("region_id: %ld close snapshot path: %s relase", _region_id, path.c_str());
@@ -745,7 +758,7 @@ SnapshotContextPtr RocksdbFileSystemAdaptor::get_snapshot(const std::string& pat
     BAIDU_SCOPED_LOCK(_snapshot_mutex);
     auto iter = _snapshots.find(path);
     if (iter != _snapshots.end()) {
-        return iter->second.first;
+        return iter->second.ptr;
     }
     return nullptr;
 }
@@ -767,12 +780,12 @@ void RocksdbFileSystemAdaptor::close(const std::string& path) {
         return;
     }
     auto& snapshot_ctx = iter->second;
-    if (is_snapshot_data_file(path)) {
+    if (is_snapshot_data_file(path) && snapshot_ctx.ptr->data_context != nullptr) {
         DB_WARNING("read snapshot data file close, path: %s", path.c_str());
-        snapshot_ctx.first->data_context->reading = false;
-    } else {
+        snapshot_ctx.ptr->data_context->reading = false;
+    } else if (snapshot_ctx.ptr->meta_context != nullptr) {
         DB_WARNING("read snapshot meta data file close, path: %s", path.c_str());
-        snapshot_ctx.first->meta_context->reading = false;
+        snapshot_ctx.ptr->meta_context->reading = false;
     }
 }
 

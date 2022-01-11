@@ -143,7 +143,7 @@ bool NetworkSocket::need_send_binlog() {
     if (!open_binlog) {
         return false;
     }
-    return binlog_ctx->has_data_changed();  
+    return binlog_ctx != nullptr ? binlog_ctx->has_data_changed() : false;  
 }
 
 SmartBinlogContext NetworkSocket::get_binlog_ctx() {

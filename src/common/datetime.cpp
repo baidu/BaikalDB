@@ -421,6 +421,9 @@ int32_t seconds_to_time(int32_t seconds) {
 }
 
 bool tz_to_second(const char* time_zone, int32_t& result) {
+    if (time_zone == nullptr) {
+        return false;
+    }
     if (strcmp(time_zone, "SYSTEM") == 0) {
         result = 0;
         time_t time_utc;
@@ -543,7 +546,7 @@ size_t date_format_internal(char* s, size_t maxsize, const char* format, const s
             case 'r':
                 //02:12:00 AM，
                 memset(tmp, 0, sizeof(tmp));
-                sprintf(tmp, "%02d:%02d:%02d ", hour12, tp->tm_min, tp->tm_sec);
+                snprintf(tmp, sizeof(tmp), "%02d:%02d:%02d ", hour12, tp->tm_min, tp->tm_sec);
                 f += tmp;
                 if (tp->tm_hour % 24 >= 12) {
                     f += "PM";

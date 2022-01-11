@@ -49,7 +49,7 @@ int SelectManagerNode::open(RuntimeState* state) {
     int64_t main_table_id = scan_node->table_id();
     //如果命中的不是全局二级索引，或者全局二级索引是covering_index, 则直接在主表或者索引表上做scan即可
     if (router_index_id == main_table_id || scan_node->covering_index()) {
-        ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, pb::OP_SELECT);
+        ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
     } else {
         ret = open_global_index(state, scan_node, router_index_id, main_table_id);
     } 
@@ -166,7 +166,7 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
         && _children[0]->node_type() != pb::WHERE_FILTER_NODE) {
         store_exec = _children[0]->children(0);
     }*/
-    auto ret = _fetcher_store.run(state, _region_infos, store_exec, client_conn->seq_id, pb::OP_SELECT);
+    auto ret = _fetcher_store.run(state, _region_infos, store_exec, client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());
@@ -177,7 +177,7 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
         DB_WARNING("construct primary possible index failed");
         return ret;
     }
-    ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, pb::OP_SELECT);
+    ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());

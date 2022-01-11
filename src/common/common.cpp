@@ -740,7 +740,7 @@ int brpc_with_http(const std::string& host, const std::string& url, std::string&
     brpc::Controller cntl;
     cntl.http_request().uri() = url;  // 设置为待访问的URL
     channel.CallMethod(NULL, &cntl, NULL, NULL, NULL/*done*/);
-
+    DB_DEBUG("http status code : %d",cntl.http_response().status_code());
     response = cntl.response_attachment().to_string();
     DB_WARNING("host: %s, url: %s, response: %s", host.c_str(), url.c_str(), response.c_str());
     return 0;
@@ -752,12 +752,14 @@ std::string store_or_db_bns_to_meta_bns(const std::string& bns) {
     if (serv_pos != bns.npos) {
         bns_group = bns.substr(0, serv_pos);
     }
+    std::string bns_group2 = bns_group;
     auto pos1 = bns_group.find_first_of(".");
     auto pos2 = bns_group.find_last_of(".");
     if (pos1 == bns_group.npos || pos2 == bns_group.npos || pos2 <= pos1) {
         return "";
     }
     bns_group = "group" + bns_group.substr(pos1, pos2 - pos1 + 1) + "all";
+    bns_group2 = bns_group2.substr(pos1 + 1);
     bool is_store_bns = false;
     if (bns_group.find("baikalStore") != bns_group.npos || bns_group.find("baikalBinlog") != bns_group.npos) {
         is_store_bns = true;
@@ -775,9 +777,12 @@ std::string store_or_db_bns_to_meta_bns(const std::string& bns) {
             ret = get_multi_port_from_bns(&ret2, bns_group, instances);
         }
         if (ret != 0 || instances.empty()) {
-            if (++retry_times > 3) {
+            if (++retry_times > 5) {
                 return "";
             } else {
+                if (retry_times > 3) {
+                    bns_group = bns_group2;
+                }
                 continue;
             }
         } else {

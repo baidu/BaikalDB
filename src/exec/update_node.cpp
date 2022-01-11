@@ -17,6 +17,9 @@
 #include "update_node.h"
 
 namespace baikaldb {
+
+DEFINE_int64(txn_kv_max_dml_row_size, 4096, "max dml rows to use kv mode, default(4096)");
+
 int UpdateNode::init(const pb::PlanNode& node) { 
     int ret = 0;
     ret = ExecNode::init(node);
@@ -126,6 +129,12 @@ int UpdateNode::open(RuntimeState* state) {
                 state->raft_func(state, _txn);
             } else {
                 _txn->commit();                
+            }
+        }
+        if (state->txn_id != 0 && num_affected_rows > FLAGS_txn_kv_max_dml_row_size) {
+            if (state->is_separate) {
+                _txn->set_separate(false);
+                _txn->clear_raftreq();
             }
         }
     } while (!eos);

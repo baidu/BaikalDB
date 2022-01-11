@@ -32,7 +32,7 @@ int LockPrimaryNode::init(const pb::PlanNode& node) {
     _row_ttl_duration = lock_primary_node.row_ttl_duration_s();
     if (lock_primary_node.affect_index_ids_size() > 0) {
         for (auto i = 0; i < lock_primary_node.affect_index_ids_size(); i++) {
-            _affected_index_ids.push_back(lock_primary_node.affect_index_ids(i));
+            _affected_index_ids.emplace_back(lock_primary_node.affect_index_ids(i));
         }
     }
     return 0;
@@ -90,7 +90,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
             continue;
         }
         if (!index_info->is_global) {
-            _affected_indexes.push_back(index_info);
+            _affected_indexes.emplace_back(index_info);
         }
     }
     _indexes_ptr = &_affected_indexes;
@@ -133,7 +133,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
             return -1;
         }
         if (fit_region) {
-            put_records.push_back(record);
+            put_records.emplace_back(record);
         }
     }
     for (auto& str_record : _pb_node.derive_node().lock_primary_node().delete_records()) {
@@ -146,81 +146,93 @@ int LockPrimaryNode::open(RuntimeState* state) {
             return -1;
         }
         if (fit_region) {
-            delete_records.push_back(record);
+            delete_records.emplace_back(record);
         }
     }
     int num_affected_rows = 0;
-    //对主表加锁，同时对局部二级索引表加锁
-    if (_lock_type == pb::LOCK_GET) {
-        for (auto& record : put_records) {
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            auto ret = lock_get_main_table(state, record);
-            if (ret < 0) {
-                return ret;
-            }
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-        }
-    }
-    //只对主表加锁返回
-    if (_lock_type == pb::LOCK_GET_ONLY_PRIMARY) {
-        for (auto& record : put_records) {
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            auto ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true);
-            if (ret == -3) {
-                continue;
-            }
-            //代表存在
-            if (ret == 0) {
+    switch (_lock_type) {
+        //对主表加锁，同时对局部二级索引表加锁
+        case pb::LOCK_GET: {
+            txn->set_separate(false); // 只加锁不走kv模式
+            for (auto& record : put_records) {
                 //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-                _return_records[_pri_info->id].push_back(record);
-            } else {
-                //replace onduplicatekey update的反查主表，主表必须存在
-                DB_WARNING_STATE(state, "reverse main table must exist");
-                return -1;
+                auto ret = lock_get_main_table(state, record);
+                if (ret < 0) {
+                    return ret;
+                }
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
             }
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+            break;
         }
-    }
-    //对主表加锁操作，同时对局部二级索引加锁操作, 若是是get操作，删除的数据需要返回
-    if (_lock_type == pb::LOCK_DML || _lock_type == pb::LOCK_GET_DML) {
-        for (auto& record : delete_records) {
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            ret = delete_row(state, record);
-            if (ret < 0) {
-                DB_WARNING_STATE(state, "delete_row fail");
-                return -1;
+        //只对主表加锁返回
+        case pb::LOCK_GET_ONLY_PRIMARY: {
+            txn->set_separate(false); // 只加锁不走kv模式
+            for (auto& record : put_records) {
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                auto ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true);
+                if (ret == -3) {
+                    continue;
+                }
+                //代表存在
+                if (ret == 0) {
+                    //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                    _return_records[_pri_info->id].emplace_back(record);
+                } else {
+                    //replace onduplicatekey update的反查主表，主表必须存在
+                    DB_WARNING_STATE(state, "reverse main table must exist");
+                    return -1;
+                }
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
             }
-            if (ret == 1 && _lock_type == pb::LOCK_GET_DML) {
-                _return_records[_pri_info->id].push_back(record);
-            }
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            num_affected_rows += ret;
+            break;
         }
-        for (auto& record : put_records) {
-            //加锁写入
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            ret = insert_row(state, record);
-            if (ret < 0) {
-                DB_WARNING_STATE(state, "insert_row fail");
-                return -1;
+        //对主表加锁操作，同时对局部二级索引加锁操作, 若是是get操作，删除的数据需要返回
+        case pb::LOCK_DML:
+        case pb::LOCK_GET_DML: {
+            for (auto& record : delete_records) {
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                ret = delete_row(state, record);
+                if (ret < 0) {
+                    DB_WARNING_STATE(state, "delete_row fail");
+                    return -1;
+                }
+                if (ret == 1 && _lock_type == pb::LOCK_GET_DML) {
+                    _return_records[_pri_info->id].emplace_back(record);
+                }
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                num_affected_rows += ret;
             }
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            num_affected_rows += ret;
-        }
-    }
-    //不加锁，直接进行写入和删除
-    if (_lock_type == pb::LOCK_NO) {
-        for (auto& record : put_records) {
-            //加锁写入
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            ret = put_row(state, record);
-            if (ret < 0) {
-                DB_WARNING_STATE(state, "insert_row fail");
-                return -1;
+            for (auto& record : put_records) {
+                //加锁写入
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                ret = insert_row(state, record);
+                if (ret < 0) {
+                    DB_WARNING_STATE(state, "insert_row fail");
+                    return -1;
+                }
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                num_affected_rows += ret;
             }
-            //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-            num_affected_rows += ret;
+            break;
         }
+        //不加锁，直接进行写入和删除
+        case pb::LOCK_NO: {
+            for (auto& record : put_records) {
+                //加锁写入
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                ret = put_row(state, record);
+                if (ret < 0) {
+                    DB_WARNING_STATE(state, "insert_row fail");
+                    return -1;
+                }
+                //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+                num_affected_rows += ret;
+            }
+            break;
+        }
+        default:
+            DB_WARNING("error _lock_type:%s", LockCmdType_Name(_lock_type).c_str());
+            break;
     }
     state->set_num_increase_rows(_num_increase_rows);
     if (state->need_txn_limit) {
@@ -247,7 +259,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
     //代表存在
     if (ret == 0) {
         //DB_WARNING_STATE(state,"record:%s", primary_record->debug_string().c_str());
-        _return_records[_pri_info->id].push_back(primary_record);
+        _return_records[_pri_info->id].emplace_back(primary_record);
     } 
     for (auto& index_ptr: _affected_indexes) {
         if (index_ptr->id == _table_id) {
@@ -263,7 +275,7 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
             DB_WARNING("get lock fail txn_id: %lu", txn->txn_id());
             return -1;
         }
-        _return_records[index_ptr->id].push_back(get_record);
+        _return_records[index_ptr->id].emplace_back(get_record);
         //DB_WARNING_STATE(state,"record:%s", get_record->debug_string().c_str());
     }
     return 0;
@@ -271,8 +283,39 @@ int LockPrimaryNode::lock_get_main_table(RuntimeState* state, SmartRecord record
 int LockPrimaryNode::put_row(RuntimeState* state, SmartRecord record) {
     int ret = 0;
     auto txn = state->txn();
+    auto& reverse_index_map = state->reverse_index_map();
     for (auto& info_ptr : _affected_indexes) {
         if (info_ptr->id == _table_id) {
+            continue;
+        }
+        if (reverse_index_map.count(info_ptr->id) == 1) {
+            // inverted index only support single field
+            if (info_ptr->id == -1 || info_ptr->fields.size() != 1) {
+                return -1;
+            }
+            auto field = record->get_field_by_idx(info_ptr->fields[0].pb_idx);
+            if (record->is_null(field)) {
+                continue;
+            }
+            std::string word;
+            ret = record->get_reverse_word(*info_ptr, word);
+            if (ret < 0) {
+                DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", 
+                                 info_ptr->id);
+                return ret;
+            }
+            MutTableKey pk_key;
+            ret = record->encode_key(*_pri_info, pk_key, -1, false);
+            if (ret < 0) {
+                DB_WARNING_STATE(state, "encode key failed, ret:%d", ret);
+                return ret;
+            }
+            std::string pk_str = pk_key.data();
+            ret = reverse_index_map[info_ptr->id]->insert_reverse(txn->get_txn(), 
+                                                            word, pk_str, record);
+            if (ret < 0) {
+                return ret;
+            }
             continue;
         }
         ret = txn->put_secondary(_region_id, *info_ptr, record);

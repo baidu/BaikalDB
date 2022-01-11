@@ -19,6 +19,7 @@
 #include "ddl_manager.h"
 #include <unordered_set>
 
+DEFINE_int64(show_table_status_cache_time, 3600 * 1000 * 1000LL, "show table status cache time : 3600s");
 namespace baikaldb {
 void QueryTableManager::get_schema_info(const pb::QueryRequest* request,
         pb::QueryResponse* response) {
@@ -207,16 +208,30 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
     boost::trim(input_database);
     std::string input_namespace_name = request->namespace_name();
     boost::trim(input_namespace_name);
+    std::string key = input_namespace_name + "." + input_database + "." + input_table_name;
     TableManager* manager = TableManager::get_instance();
     std::unordered_map<int64_t, TableMem> table_info_map_tmp;
+    {
+        BAIDU_SCOPED_LOCK(_mutex);
+        if (_table_info_cache_time.find(key) != _table_info_cache_time.end()
+              && butil::gettimeofday_us() - _table_info_cache_time[key] < FLAGS_show_table_status_cache_time) {
+            // use cache data
+            for (auto& table_info : _table_infos_cache[key]) {
+                auto table = response->add_flatten_tables();
+                *table = table_info.second;
+            }
+            DB_WARNING("use cache for show table status on db: %s", key.c_str());
+            return;
+        }
+    }
     {
         BAIDU_SCOPED_LOCK(manager->_table_mutex);
         table_info_map_tmp = manager->_table_info_map;
     }
     std::map<std::string, pb::QueryTable> table_infos;
     for (auto& table_info : table_info_map_tmp) {
-        if (input_table_name.size() != 0 
-                && table_info.second.schema_pb.table_name() != input_table_name) {
+        if (input_table_name.size() != 0
+            && table_info.second.schema_pb.table_name() != input_table_name) {
             continue;
         }
         if (input_database.size() != 0 
@@ -237,6 +252,11 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
     for (auto& table_info : table_infos) {
         auto table = response->add_flatten_tables();
         *table = table_info.second;
+    }
+    {
+        BAIDU_SCOPED_LOCK(_mutex);
+        _table_info_cache_time[key] = butil::gettimeofday_us();
+        _table_infos_cache[key] = table_infos;
     }
 }
 

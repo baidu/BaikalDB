@@ -64,6 +64,7 @@ DEFINE_bool(enable_bottommost_compression, false, "enable zstd for bottommost_co
 DEFINE_int32(target_file_size_base, 128 * 1024 * 1024, "target_file_size_base");
 DEFINE_int32(addpeer_rate_limit_level, 1, "addpeer_rate_limit_level; "
         "0:no limit, 1:limit when stalling, 2:limit when compaction pending. default(1)");
+DEFINE_bool(delete_files_in_range, true, "delete_files_in_range");
 
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
@@ -339,7 +340,7 @@ rocksdb::Status RocksWrapper::remove_range(const rocksdb::WriteOptions& options,
         _mata_cf_remove_range_count << 1;
         mata_cf_remove_range_count++;
     }
-    if (delete_files_in_range) {
+    if (delete_files_in_range && FLAGS_delete_files_in_range) {
         auto s = rocksdb::DeleteFilesInRange(_txn_db, column_family, &begin, &end, false);
         if (!s.ok()) {
             return s;
@@ -443,15 +444,27 @@ void RocksWrapper::begin_split_adjust_option() {
     }
     Bthread bth;
     bth.run([this]() {
+        if (_txn_db == nullptr) {
+            return;
+        }
         uint64_t value;
         std::unordered_map<std::string, std::string> new_options;
+        value = _log_cf_option.max_write_buffer_number * 2;
+        new_options["max_write_buffer_number"] = std::to_string(value);
+        rocksdb::Status s = _txn_db->SetOptions(get_raft_log_handle(), new_options);
+        if (!s.ok()) {
+            DB_WARNING("begin_split_adjust_option raft_log_cf FAIL: %s", s.ToString().c_str());
+        }
+
         value = _data_cf_option.soft_pending_compaction_bytes_limit * 2;
         new_options["soft_pending_compaction_bytes_limit"] = std::to_string(value);
         value = _data_cf_option.level0_slowdown_writes_trigger * 2;
         new_options["level0_slowdown_writes_trigger"] = std::to_string(value);
-        rocksdb::Status s = _txn_db->SetOptions(get_data_handle(), new_options);
+        value = _data_cf_option.max_write_buffer_number * 2;
+        new_options["max_write_buffer_number"] = std::to_string(value);
+        s = _txn_db->SetOptions(get_data_handle(), new_options);
         if (!s.ok()) {
-            DB_WARNING("begin_split_adjust_option FAIL: %s", s.ToString().c_str());
+            DB_WARNING("begin_split_adjust_option data_cf FAIL: %s", s.ToString().c_str());
         }
     });
 }
@@ -461,15 +474,27 @@ void RocksWrapper::stop_split_adjust_option() {
     }
     Bthread bth;
     bth.run([this](){
+        if (_txn_db == nullptr) {
+            return;
+        }
         uint64_t value;
         std::unordered_map<std::string, std::string> new_options;
+        value = _log_cf_option.max_write_buffer_number;
+        new_options["max_write_buffer_number"] = std::to_string(value);
+        rocksdb::Status s = _txn_db->SetOptions(get_raft_log_handle(), new_options);
+        if(!s.ok()) {
+            DB_WARNING("stop_split_adjust_option raft_log_cf FAIL: %s", s.ToString().c_str());
+        }
+
         value = _data_cf_option.soft_pending_compaction_bytes_limit;
         new_options["soft_pending_compaction_bytes_limit"] = std::to_string(value);
         value = _data_cf_option.level0_slowdown_writes_trigger;
         new_options["level0_slowdown_writes_trigger"] = std::to_string(value);
-        rocksdb::Status s = _txn_db->SetOptions(get_data_handle(), new_options);
+        value = _data_cf_option.max_write_buffer_number;
+        new_options["max_write_buffer_number"] = std::to_string(value);
+        s = _txn_db->SetOptions(get_data_handle(), new_options);
         if(!s.ok()) {
-            DB_WARNING("stop_split_adjust_option FAIL: %s", s.ToString().c_str());
+            DB_WARNING("stop_split_adjust_option data_cf FAIL: %s", s.ToString().c_str());
         }
     });
 }

@@ -199,7 +199,7 @@ void AccessPath::calc_normal(Property& sort_property) {
                                     rg.left_record->get_field_by_tag(field.id), range.eq_in_values[vi]);
                             if ((++i) == offset) {
                                 i = 0;
-                                vi = ((++vi) % vs);
+                                vi = ((vi + 1) % vs);
                             }
                         }
                     } else {

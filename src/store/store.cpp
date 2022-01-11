@@ -33,7 +33,6 @@
 //#include <jemalloc/jemalloc.h>
 
 namespace baikaldb {
-DECLARE_int64(ttl_remove_max_cnt);
 DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(balance_periodicity);
 DECLARE_string(stable_uri);
@@ -239,13 +238,13 @@ int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
         auto init_call = [this, region_id]() {
             SmartRegion region = get_region(region_id);
             if (region == NULL) {
-                DB_FATAL("no region is store, region_id: %ld", region_id);
+                DB_WARNING("no region is store, region_id: %ld", region_id);
                 return;
             }
             //region raft node init
             int ret = region->init(false, 0);
             if (ret < 0) {
-                DB_FATAL("region init fail when store init, region_id: %ld", region_id);
+                DB_WARNING("region init fail when store init, region_id: %ld", region_id);
                 return;
             }
         };
@@ -437,6 +436,9 @@ void Store::region_raft_control(google::protobuf::RpcController* controller,
                          request,
                          response,
                          done_guard.release());
+    if (request->op_type() == pb::TransLeader && response->errcode() == pb::SUCCESS) {
+        region->transfer_leader_set_is_leader();
+    }
 }
 
 void Store::health_check(google::protobuf::RpcController* controller,
@@ -556,6 +558,10 @@ void Store::remove_region(google::protobuf::RpcController* controller,
             response->set_errmsg("input param error");
             return;
     }
+    _multi_thread_cond.increase();
+    ON_SCOPE_EXIT([this]() {
+        _multi_thread_cond.decrease_signal();
+    });
     DB_WARNING("call remove region_id: %ld, need_delay_drop:%d", 
             request->region_id(), request->need_delay_drop());
     drop_region_from_store(request->region_id(), request->need_delay_drop());
@@ -873,11 +879,8 @@ void Store::ttl_remove_thread() {
         });
 
         if (time.get_time() > FLAGS_ttl_remove_interval_s * 1000 * 1000LL) {
-            ttl_remove_rows = 0;
             traverse_copy_region_map([](const SmartRegion& region) {
-                if (ttl_remove_rows < FLAGS_ttl_remove_max_cnt) {
-                    region->ttl_remove_expired_data();
-                }
+                region->ttl_remove_expired_data();
             });
             time.reset();
         }
@@ -1274,7 +1277,7 @@ void Store::whether_split_thread() {
             int64_t region_capacity = 10000000;
             int ret = _factory->get_region_capacity(ptr_region->get_global_index_id(), region_capacity);
             if (ret != 0) {
-                DB_FATAL("table info not exist, region_id: %ld", region_ids[i]);
+                DB_WARNING("table info not exist, region_id: %ld", region_ids[i]);
                 continue;
             }
             region_capacity = std::max(FLAGS_min_split_lines, region_capacity);

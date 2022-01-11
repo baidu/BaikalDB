@@ -10,18 +10,28 @@ import "binlog.proto";
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
 
+
+message KvOp {
+    required OpType    op_type = 1;
+    optional bytes     key     = 2;
+    optional bytes     value   = 3;
+    optional int64     ttl_timestamp_us = 4;
+    optional bool      is_primary_key   = 5;
+};
+
 // CachePlan is used in three place:
 // 1) In-txn cmd cache in BaikalDB and region sides
 // 2) Write ahead log entry in BaikalDB side for prepared-transaction recovery
 // 3) replay transaction action for Region split and load_snapshot
 message CachePlan {
-    required OpType op_type = 1;  
+    required OpType op_type = 1;
     required int32  seq_id  = 2;
     required Plan   plan    = 3;  //cached query plan
     repeated TupleDescriptor tuples  = 4;
 
     //store to which regions commit will be sent, used for BaikalDB txn recovery
     repeated RegionInfo regions = 5;
+    repeated KvOp       kv_ops  = 6;
 };
 
 enum  TxnState {
@@ -52,13 +62,6 @@ message TransactionInfo {
     optional bool need_update_primary_timestamp = 17;
 };
 
-message KvOp {
-    required OpType    op_type = 1;
-    optional bytes     key     = 2;
-    optional bytes     value   = 3;
-    optional int64     ttl_timestamp_us = 4;
-};
-
 message AnalyzeInfo {
     required int32     depth   = 1;
     required int32     width   = 2;
@@ -80,7 +83,7 @@ message BinlogDesc {
 message BatchStoreReq {
     required int64      region_id        = 1;
     repeated int64      request_lens     = 2;  // 保存每个storeReq的长度，数据放在了request_attachment里
-    optional int64      start_pos        = 3;
+    optional int64      resend_start_pos = 3;  // not leader重发起始pos
 }
 
 message BatchStoreRes {

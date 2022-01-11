@@ -60,11 +60,11 @@ int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int
         }
         return time;
     } else if (index_info->type == pb::I_PRIMARY) {
-        value.remove_prefix(sizeof(uint64_t));
         TupleRecord tuple_record(value);
-        if(tuple_record.verification_fields(index_info->max_field_id) == 0) {
+        if (tuple_record.verification_fields(index_info->max_field_id) != 0) {
             DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
                 index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
+            value.remove_prefix(sizeof(uint64_t));
         } else {
             // 报警
             DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
@@ -110,7 +110,7 @@ int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int
 int Transaction::begin(const Transaction::TxnOptions& txn_opt) {
     rocksdb::TransactionOptions rocks_txn_opt;
     if (txn_opt.dml_1pc && txn_opt.in_fsm) {
-        // lock_timeout=0走try lock，rocksdb内部在用lock时会增加错误率
+        // 1pc在状态机内执行设置较小的lock_timeout
         rocks_txn_opt.lock_timeout = FLAGS_exec_1pc_in_fsm_timeout_ms;
     } else {
         rocks_txn_opt.lock_timeout = txn_opt.lock_timeout;
@@ -384,24 +384,23 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
     } else {
         value = "";
     }
+    auto res = put_kv_without_lock(key.data(), value, _write_ttl_timestamp_us);
+    if (res.IsTimedOut()) {
+        print_txninfo_holding_lock(key.data());        
+        int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+        DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                region_id, _txn_id, res.ToString().c_str(), record->debug_string().c_str());
+        return -1;
+    } else if (!res.ok()) {
+        DB_FATAL("put primary fail, error: %s", res.ToString().c_str());
+        return -1;
+    }
     if (_is_separate) {
-        add_kvop_put(key.data(), value, _write_ttl_timestamp_us);
-    } else {
-        auto res = put_kv_without_lock(key.data(), value, _write_ttl_timestamp_us);
-        if (res.IsTimedOut()) {
-            print_txninfo_holding_lock(key.data());        
-            int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
-            DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
-                    region_id, _txn_id, res.ToString().c_str(), record->debug_string().c_str());
-            return -1;
-        } else if (!res.ok()) {
-            DB_FATAL("put primary fail, error: %s", res.ToString().c_str());
-            return -1;
-        }
-        // cstore, put non-pk columns values to db
-        if (is_cstore()) {
-            return put_primary_columns(key, record, update_fields);
-        }
+        add_kvop_put(key.data(), value, _write_ttl_timestamp_us, true);
+    }
+    // cstore, put non-pk columns values to db
+    if (is_cstore()) {
+        return put_primary_columns(key, record, update_fields);
     }
     //DB_WARNING("put primary, region_id: %ld, index_id: %ld, put_key: %s, put_value: %s",
     //    region, pk_index.id, rocksdb::Slice(key.data()).ToString(true).c_str(), rocksdb::Slice(value).ToString(true).c_str());
@@ -438,8 +437,7 @@ int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord rec
         }
         if (_is_separate) {
             std::string value = "";
-            add_kvop_put(key.data(), value, _write_ttl_timestamp_us);
-            return 0;
+            add_kvop_put(key.data(), value, _write_ttl_timestamp_us, index.is_global);
         }
         res = put_kv_without_lock(key.data(), "", _write_ttl_timestamp_us);
         //DB_FATAL("data:%s", str_to_hex(key.data()).c_str());
@@ -450,8 +448,7 @@ int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord rec
             return -1;
         }
         if (_is_separate) {
-            add_kvop_put(key.data(), pk.data(), _write_ttl_timestamp_us);
-            return 0;
+            add_kvop_put(key.data(), pk.data(), _write_ttl_timestamp_us, index.is_global);
         }
         res = put_kv_without_lock(key.data(), pk.data(), _write_ttl_timestamp_us);
     }
@@ -583,6 +580,7 @@ int Transaction::get_update_primary(
 //TODO: update return status
 //if val == null, don't read value
 //return -3 when region not match
+//
 int Transaction::get_update_primary(
         int64_t         region,
         IndexInfo&      pk_index,
@@ -835,26 +833,25 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
             return -1;
         }
     }
-    
+
+    auto res = _txn->Delete(_data_cf, _key.data());
+    DB_DEBUG("delete key=%s", str_to_hex(_key.data()).c_str());
+    if (res.IsTimedOut()) {
+        print_txninfo_holding_lock(_key.data());        
+        int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+        DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                region_id, _txn_id, res.ToString().c_str(), key->debug_string().c_str());
+        return -1;
+    } else if (!res.ok()) {
+        DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
+        return -1;
+    }
     if (_is_separate) {
-        add_kvop_delete(_key.data());
-    } else {
-        auto res = _txn->Delete(_data_cf, _key.data());
-        DB_DEBUG("delete key=%s", str_to_hex(_key.data()).c_str());
-        if (res.IsTimedOut()) {
-            print_txninfo_holding_lock(_key.data());        
-            int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
-            DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
-                    region_id, _txn_id, res.ToString().c_str(), key->debug_string().c_str());
-            return -1;
-        } else if (!res.ok()) {
-            DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
-            return -1;
-        }
-        // for cstore only, remove_columns
-        if (index.type == pb::I_PRIMARY && is_cstore()) {
-            return remove_columns(_key);
-        }
+        add_kvop_delete(_key.data(), index.type == pb::I_PRIMARY || index.is_global);
+    }
+    // for cstore only, remove_columns
+    if (index.type == pb::I_PRIMARY && is_cstore()) {
+        return remove_columns(_key);
     }
     return 0;
 }
@@ -873,25 +870,24 @@ int Transaction::remove(int64_t region, IndexInfo& index, const TableKey& key) {
         DB_WARNING("cannot delete type KEY index");
         return -1;
     }
-    
+
+    auto res = _txn->Delete(_data_cf, _key.data());
+    if (res.IsTimedOut()) {
+        print_txninfo_holding_lock(_key.data());        
+        int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
+        DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
+                region_id, _txn_id, res.ToString().c_str(), key.decode_start_key_string(index).c_str());
+        return -1;
+    } else if (!res.ok()) {
+        DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
+        return -1;
+    }
     if (_is_separate) {
-        add_kvop_delete(_key.data());
-    } else {
-        auto res = _txn->Delete(_data_cf, _key.data());
-        if (res.IsTimedOut()) {
-            print_txninfo_holding_lock(_key.data());        
-            int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
-            DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
-                    region_id, _txn_id, res.ToString().c_str(), key.decode_start_key_string(index).c_str());
-            return -1;
-        } else if (!res.ok()) {
-            DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
-            return -1;
-        }
-        // for cstore only, remove_columns
-        if (index.type == pb::I_PRIMARY && is_cstore()) {
-            return remove_columns(_key);
-        }
+        add_kvop_delete(_key.data(), index.type == pb::I_PRIMARY || index.is_global);
+    }
+    // for cstore only, remove_columns
+    if (index.type == pb::I_PRIMARY && is_cstore()) {
+        return remove_columns(_key);
     }
     return 0;
 }
@@ -1020,6 +1016,7 @@ void Transaction::rollback_current_request() {
         }
     }
     _seq_id = first_seq_id;
+    _store_req.Clear();
     _is_applying = false;
     _current_req_point_seq.clear();
     _current_req_point_seq.insert(_seq_id);
@@ -1069,6 +1066,9 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
             if (!res.ok()) {
                 return -1;
             }
+            if (_is_separate) {
+                add_kvop_delete(key.data(), false);
+            }
             continue;
         }
         auto res = _txn->Put(_data_cf, key.data(), value);
@@ -1077,6 +1077,9 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
                  res.ToString().c_str());
         if (!res.ok()) {
             return -1;
+        }
+        if (_is_separate) {
+            add_kvop_put(key.data(), value, _write_ttl_timestamp_us, false);
         }
     }
     return 0;
@@ -1167,6 +1170,9 @@ int Transaction::remove_columns(const TableKey& primary_key) {
         } else if (!res.ok()) {
            DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
            return -1;
+        }
+        if (_is_separate) {
+            add_kvop_delete(key.data(), false);
         }
     }
     return 0;

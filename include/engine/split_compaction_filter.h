@@ -28,8 +28,8 @@ struct FilterRegionInfo {
     FilterRegionInfo(bool use_ttl, const std::string& end_key, int64_t online_ttl_base_expire_time_us) :
         use_ttl(use_ttl), end_key(end_key), online_ttl_base_expire_time_us(online_ttl_base_expire_time_us) {}
     bool use_ttl = false;
-    int64_t online_ttl_base_expire_time_us = 0;
     std::string end_key;
+    int64_t online_ttl_base_expire_time_us = 0;
 };
 typedef butil::FlatMap<int64_t, FilterRegionInfo*> KeyMap;
 typedef DoubleBuffer<KeyMap> DoubleBufKey;

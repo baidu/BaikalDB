@@ -1147,6 +1147,5 @@ public:
         return &instance;
     }
 };
-
 } // namespace baikaldb
 

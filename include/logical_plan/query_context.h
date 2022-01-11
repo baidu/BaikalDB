@@ -228,6 +228,7 @@ public:
     bool                has_information_schema = false;
     bool                is_complex = false;
     bool                use_backup = false;
+    bool                need_learner_backup = false;
     int64_t             prepared_table_id = -1;
     ExprParams          expr_params;
     // field: column_id

@@ -421,7 +421,7 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
             DB_WARNING("region status to doning becase of transfer leader of heartbeat response,"
                     " region_id: %ld", _region_id);
         }
-        int ret = region->_node.transfer_leadership_to(new_leader);
+        int ret = region->transfer_leader_to(new_leader);
         reset_region_status();
         if (ret != 0) {
             DB_WARNING("node:%s %s transfer leader fail",

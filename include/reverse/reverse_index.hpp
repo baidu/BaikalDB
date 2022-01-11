@@ -95,7 +95,6 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
 template <typename Schema>
 int ReverseIndex<Schema>::handle_reverse(
                                     myrocksdb::Transaction* txn,
-                                    pb::StoreReq* req,
                                     pb::ReverseNodeType flag,
                                     const std::string& word,
                                     const std::string& pk,
@@ -123,7 +122,7 @@ int ReverseIndex<Schema>::handle_reverse(
     }
     auto map_it = seg_res->begin();
     while (map_it != seg_res->end()) {
-        status = _insert_one_reverse_node(txn, req, map_it->first, &map_it->second);
+        status = _insert_one_reverse_node(txn, map_it->first, &map_it->second);
         if (status != 0) {
             return -1;
         }
@@ -136,21 +135,19 @@ int ReverseIndex<Schema>::handle_reverse(
 template <typename Schema>
 int ReverseIndex<Schema>::insert_reverse(
                                     myrocksdb::Transaction* txn,
-                                    pb::StoreReq* req,
                                     const std::string& word,
                                     const std::string& pk,
                                     SmartRecord record) {
-    return handle_reverse(txn, req, pb::REVERSE_NODE_NORMAL, word, pk, record);
+    return handle_reverse(txn, pb::REVERSE_NODE_NORMAL, word, pk, record);
 }
 
 template <typename Schema>
 int ReverseIndex<Schema>::delete_reverse(
                                     myrocksdb::Transaction* txn,
-                                    pb::StoreReq* req,
                                     const std::string& word,
                                     const std::string& pk,
                                     SmartRecord record) {
-    return handle_reverse(txn, req, pb::REVERSE_NODE_DELETE, word, pk, record);
+    return handle_reverse(txn, pb::REVERSE_NODE_DELETE, word, pk, record);
 }
 
 template <typename Schema>
@@ -631,8 +628,7 @@ int ReverseIndex<Schema>::_delete_level_reverse_list(
 
 template <typename Schema>
 int ReverseIndex<Schema>::_insert_one_reverse_node(
-                                    myrocksdb::Transaction* txn, 
-                                    pb::StoreReq* req,
+                                    myrocksdb::Transaction* txn,
                                     const std::string& term,
                                     const ReverseNode* node) {
     // 1. create the first level key (regionid + tableid + reverse_prefix + term + \0 + pk)
@@ -659,20 +655,12 @@ int ReverseIndex<Schema>::_insert_one_reverse_node(
         DB_WARNING("get rocksdb data column family failed");
         return -1;
     }
-    if (req != nullptr) {
-        pb::KvOp* kv_op = req->add_kv_ops();
-        kv_op->set_op_type(pb::OP_PUT_KV);
-        kv_op->set_key(key);
-        kv_op->set_value(value);
-    } else {
-        auto put_res = txn->Put(data_cf, key, value);
-        if (!put_res.ok()) {
-            DB_WARNING("rocksdb put error: code=%d, msg=%s",
-                       put_res.code(), put_res.ToString().c_str());
-            return -1;
-        }
+    auto put_res = txn->Put(data_cf, key, value);
+    if (!put_res.ok()) {
+        DB_WARNING("rocksdb put error: code=%d, msg=%s",
+                    put_res.code(), put_res.ToString().c_str());
+        return -1;
     }
-
     ++g_statistic_insert_key_num;
     return 0;
 }

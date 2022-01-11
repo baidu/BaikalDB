@@ -693,9 +693,7 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
                 res_instance->set_status("SUCCESS");
                 DB_WARNING("instance not migrate, request: %s, meta_bns: %s", 
                     instance.ShortDebugString().c_str(), meta_bns.c_str());
-                //return;
-            }
-            {
+            } else {
                 BAIDU_SCOPED_LOCK(bns_mutex);
                 if (bns != "" && bns_pre_ip_port.count(bns) == 1) {
                     ip_port = bns_pre_ip_port[bns];

@@ -316,13 +316,14 @@ struct WildCardField : public Node {
     }
 };
 struct SelectField : public Node {
-    int offset = 0;
     ExprNode* expr = nullptr;
     String as_name;
+    String org_name; //复杂存放解析前信息，兼容mysql返回的列头
     WildCardField* wild_card = nullptr;
     SelectField() {
         node_type = NT_SELECT_FEILD;
         as_name = nullptr;
+        org_name = nullptr;
     }
     virtual bool is_complex_node() {
         if (expr != nullptr) {

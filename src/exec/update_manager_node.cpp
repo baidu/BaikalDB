@@ -47,6 +47,10 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
     _affect_primary = false;
     std::vector<int64_t> local_affected_indices;
     std::vector<int64_t> global_affected_indices;
+    std::vector<int64_t> g_unique_indexs;
+    std::vector<int64_t> g_non_unique_indexs;
+    std::vector<int64_t> g_affected_unique_indexs;
+    std::vector<int64_t> g_affected_non_unique_indexs;
     for (auto index_id : _table_info->indices) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
@@ -54,10 +58,18 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
             return -1;
         }
         IndexInfo& info = *info_ptr;
+        if (info.state == pb::IS_NONE) {
+            DB_NOTICE("index info is NONE, skip.");
+            continue;
+        }
         if (info.is_global) {
-            _global_affected_index_ids.push_back(index_id);
+            if (info.type == pb::I_UNIQ) {
+                g_unique_indexs.emplace_back(index_id);
+            } else {
+                g_non_unique_indexs.emplace_back(index_id);
+            }
         } else {
-            _local_affected_index_ids.push_back(index_id);
+            _local_affected_index_ids.emplace_back(index_id);
         }
         bool has_id = false;
         for (auto& field : info.fields) {
@@ -70,15 +82,25 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
             if (info.id == _table_id) {
                 _affect_primary = true;
             } else if (info.is_global) {
-                global_affected_indices.push_back(index_id);
+                if (info.type == pb::I_UNIQ) {
+                    g_affected_unique_indexs.emplace_back(index_id);
+                } else {
+                    g_affected_non_unique_indexs.emplace_back(index_id);
+                }
             } else {
                 local_affected_indices.push_back(index_id);
             }
         }
     }
+
+    global_affected_indices.insert(global_affected_indices.end(), g_affected_unique_indexs.begin(), g_affected_unique_indexs.end());
+    global_affected_indices.insert(global_affected_indices.end(), g_affected_non_unique_indexs.begin(), g_affected_non_unique_indexs.end());
     
     // 如果更新主键或者ttl，那么影响了全部索引
-    if (!(_affect_primary || _table_info->ttl_info.ttl_duration_s > 0)) {
+    if (_affect_primary || (_table_info->ttl_info.ttl_duration_s > 0)) {
+        _global_affected_index_ids.insert(_global_affected_index_ids.end(), g_unique_indexs.begin(), g_unique_indexs.end());
+        _global_affected_index_ids.insert(_global_affected_index_ids.end(), g_non_unique_indexs.begin(), g_non_unique_indexs.end());
+    } else {
         _global_affected_index_ids.swap(global_affected_indices);
         _local_affected_index_ids.swap(local_affected_indices);
     }

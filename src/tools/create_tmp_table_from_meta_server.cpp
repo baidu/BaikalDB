@@ -35,6 +35,7 @@ DEFINE_string(resource_tag, "", "resouce_tag");
 DEFINE_string(suffix, "_tmp", "_tmp");
 DECLARE_string(meta_server_bns);
 DEFINE_string(meta_server_bns2, "", "meta server bns");
+DEFINE_int64(reduce_region_multiple, 1, "reduce_region");
 
 int create_table() {
     MetaServerInteract interact;
@@ -157,12 +158,11 @@ int create_table() {
         std::string index_name = split_keys.first;
         auto pb_split_keys = create_table_request.mutable_table_info()->add_split_keys();
         pb_split_keys->set_index_name(index_name);
-        //int n = 0;
+        int n = 0;
         for (auto& split_key : split_keys.second) {
-           // if (n++%10==0) {
-            pb_split_keys->add_split_keys(split_key);
-            //}
-
+            if (n++ % FLAGS_reduce_region_multiple == 0) {
+                pb_split_keys->add_split_keys(split_key);
+            }
         }
     }
 

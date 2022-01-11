@@ -728,7 +728,7 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
 
         DB_DEBUG("reverse debug, record[%s]", record->to_string().c_str());
         auto& reverse_index_map = state->reverse_index_map();
-        ret = reverse_index_map[_ddl_index_info->id]->insert_reverse(txn->get_txn(), nullptr, word, new_pk_str, record);
+        ret = reverse_index_map[_ddl_index_info->id]->insert_reverse(txn->get_txn(), word, new_pk_str, record);
         if (ret < 0) {
             DB_WARNING("DDL_LOG record [%s] insert_reverse failed[%d], index_id: %ld.", 
                 record->to_string().c_str(), ret, _ddl_index_info->id);

@@ -71,6 +71,7 @@ ExprValue from_unixtime(const std::vector<ExprValue>& input);
 ExprValue now(const std::vector<ExprValue>& input);
 ExprValue utc_timestamp(const std::vector<ExprValue>& input);
 ExprValue date_format(const std::vector<ExprValue>& input);
+ExprValue str_to_date(const std::vector<ExprValue>& input);
 ExprValue time_format(const std::vector<ExprValue>& input);
 ExprValue convert_tz(const std::vector<ExprValue>& input);
 ExprValue timediff(const std::vector<ExprValue>& input);

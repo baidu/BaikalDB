@@ -256,7 +256,7 @@ ErrorType FetcherStore::send_request(
     std::string backup;
     // 事务读也读leader
     if (op_type == pb::OP_SELECT && state->txn_id == 0 && 
-        info.learners_size() > 0 && FLAGS_fetcher_learner_read) {
+        info.learners_size() > 0 && (FLAGS_fetcher_learner_read || state->need_learner_backup())) {
         // 多机房优化
         if (retry_times == 0) {
             choose_opt_instance(info.region_id(), info.learners(), addr, nullptr);
@@ -264,10 +264,13 @@ ErrorType FetcherStore::send_request(
         req.set_select_without_leader(true);
     } else if (op_type == pb::OP_SELECT && state->txn_id == 0 && FLAGS_fetcher_follower_read) {
         // 多机房优化
-        if (retry_times == 0) {
-            choose_opt_instance(info.region_id(), info.peers(), addr, &backup);
-        } else if (retry_times == 4 && info.learners_size() > 0) {
-            choose_opt_instance(info.region_id(), info.learners(), addr, nullptr);
+        if (info.learners_size() > 0) {
+            choose_opt_instance(info.region_id(), info.peers(), addr, nullptr);
+            choose_opt_instance(info.region_id(), info.learners(), backup, nullptr);
+        } else {
+            if (retry_times == 0) {
+                choose_opt_instance(info.region_id(), info.peers(), addr, &backup);
+            }
         }
         req.set_select_without_leader(true);
     } else if (retry_times == 0) {
@@ -332,9 +335,9 @@ ErrorType FetcherStore::send_request(
     DB_DEBUG("fetch store req: %s", req.ShortDebugString().c_str());
     DB_DEBUG("fetch store res: %s", res.ShortDebugString().c_str());
     if (cost.get_time() > FLAGS_print_time_us || retry_times > 0) {
-        DB_WARNING("op_type:%s, lock:%ld, wait region_id: %ld "
+        DB_WARNING("op_type:%s, lock:%ld, wait region_id: %ld retry_times:%d "
                 "version:%ld time:%ld rpc_time: %ld log_id:%lu txn_id: %lu, ip:%s, addr:%s backup:%s",
-                pb::OpType_Name(op_type).c_str(), client_lock_tm, region_id,
+                pb::OpType_Name(op_type).c_str(), client_lock_tm, region_id, retry_times,
                 info.version(), cost.get_time(), query_time.get_time(), log_id, state->txn_id,
                 butil::endpoint2str(cntl.remote_side()).c_str(), addr.c_str(), backup.c_str());
     }
@@ -371,12 +374,13 @@ ErrorType FetcherStore::send_request(
             // store返回了leader，则相信store，不判断normal
             info.set_leader(res.leader());
             schema_factory->update_leader(info);
-            if (state->txn_id != 0 ) {
-                BAIDU_SCOPED_LOCK(client_conn->region_lock);
-                client_conn->region_infos[region_id].set_leader(res.leader());
-            }
         } else {
             other_normal_peer_to_leader(info, addr);
+           
+        }
+        if (state->txn_id != 0 ) {
+            BAIDU_SCOPED_LOCK(client_conn->region_lock);
+            client_conn->region_infos[region_id].set_leader(info.leader());
         }
         // leader切换在秒级
         bthread_usleep(retry_times * FLAGS_retry_interval_us);
@@ -412,7 +416,7 @@ ErrorType FetcherStore::send_request(
         if (res.regions_size() >= 2) {
             auto regions = res.regions();
             regions.Clear();
-            if (res.has_is_merge() && !res.is_merge()) {
+            if (!res.is_merge()) {
                 for (auto r : res.regions()) {
                     DB_WARNING("version region:%s", r.ShortDebugString().c_str());
                     if (end_key_compare(r.end_key(), info.end_key()) > 0) {
@@ -847,6 +851,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
             }
             other_normal_peer_to_leader(info, addr);
             bthread_usleep(FLAGS_retry_interval_us);
+            retry_times++;
             continue;
         }
         //DB_WARNING("binlog fetch store req: %s log_id:%lu", req.DebugString().c_str(), log_id);
@@ -1192,9 +1197,10 @@ int FetcherStore::run(RuntimeState* state,
                 --region_cnt;
             }
         } else {
-            for (auto& pair : cost_trace_map) {
-                pb::TraceNode* trace = store_request->get_trace()->add_child_nodes();
-                (*trace) = (*pair.second);
+            for (auto& pair : send_region_ids_map) {
+                for (auto& trace : pair.second) {
+                    (*store_request->get_trace()->add_child_nodes()) = *trace->trace_node;
+                }
             }
         }
     }

@@ -48,7 +48,7 @@ int IndexDDLManagerNode::open(RuntimeState* state) {
     int64_t router_index_id = scan_node->router_index_id();
     int64_t main_table_id = scan_node->table_id();
     if (router_index_id == main_table_id || scan_node->covering_index()) {
-        ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, pb::OP_SELECT_FOR_UPDATE);
+        ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT_FOR_UPDATE);
     }
     if (ret < 0) {
         DB_WARNING("task_%s select manager fetcher manager node open fail, txn_id: %lu, log_id:%lu", 

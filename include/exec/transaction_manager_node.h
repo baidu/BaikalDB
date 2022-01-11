@@ -30,7 +30,7 @@ public:
         _op_type = op_type;
     }
     virtual int exec_begin_node(RuntimeState* state, ExecNode* begin_node);
-    virtual int exec_prepared_node(RuntimeState* state, ExecNode* prepared_node, int64_t start_seq_id);
+    virtual int exec_prepared_node(RuntimeState* state, ExecNode* prepared_node, int start_seq_id);
     virtual int exec_commit_node(RuntimeState* state, ExecNode* commit_node);
     virtual int exec_rollback_node(RuntimeState* state, ExecNode* rollback_node);
 

@@ -221,11 +221,16 @@ private:
     SnapshotContextPtr get_snapshot(const std::string& path);
 
 private:
+    struct ContextEnv {
+        SnapshotContextPtr ptr;
+        int64_t count = 0;
+        TimeCost cost;
+    };
     int64_t             _region_id;
     bthread::Mutex      _snapshot_mutex;
     bthread::Mutex      _open_reader_adaptor_mutex;
     BthreadCond         _mutil_snapshot_cond;
-    typedef std::map<std::string, std::pair<SnapshotContextPtr, int64_t>> SnapshotMap;
+    typedef std::map<std::string, ContextEnv> SnapshotMap;
     SnapshotMap         _snapshots;
 };
 
