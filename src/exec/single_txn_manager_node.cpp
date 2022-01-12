@@ -54,7 +54,7 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
         push_cmd_to_cache(state, _op_type, dml_manager_node->children(0));
         _children.erase(_children.begin());
         dml_manager_node->clear_children();
-        state->set_single_txn_ceched();
+        state->set_single_txn_cached();
         delete dml_manager_node;
     } else {
         has_global_index = true;

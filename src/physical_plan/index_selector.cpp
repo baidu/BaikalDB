@@ -524,7 +524,18 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
     }
 
     std::vector<int64_t> index_ids = table_info->indices;
-    if (pb_scan_node->use_indexes_size() != 0) {
+    std::set<int64_t> force_indexs;
+    force_indexs.insert(std::begin(pb_scan_node->force_indexes()),
+        std::end(pb_scan_node->force_indexes()));
+    if (pb_scan_node->force_indexes_size() != 0){
+        index_ids.clear();
+        for (auto& index_id : pb_scan_node->force_indexes()) {
+            index_ids.push_back(index_id);
+        }
+        if (force_indexs.count(table_id) == 0){
+            index_ids.push_back(table_id);
+        }
+    } else if (pb_scan_node->use_indexes_size() != 0) {
         index_ids.clear();
         for (auto& index_id : pb_scan_node->use_indexes()) {
             index_ids.push_back(index_id);
@@ -576,6 +587,9 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
             }
         }
         SmartPath access_path = std::make_shared<AccessPath>();
+        if (force_indexs.count(index_id) == 1) {
+            access_path->hint = AccessPath::FORCE_INDEX;
+        }
         // 只有primary会走到这里
         if (ignore_indexs.count(index_id) == 1) {
             access_path->hint = AccessPath::IGNORE_INDEX;

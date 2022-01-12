@@ -74,7 +74,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
             if (index_info->type == pb::I_FULLTEXT) {
                 _reverse_indes.push_back(index_info);
             }
-            if (!index_info->is_global) {
+            if (!index_info->is_global && index_info->index_hint_status != pb::IHS_VIRTUAL) {
                 _all_indexes.push_back(index_info);
             }
         }

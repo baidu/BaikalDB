@@ -124,6 +124,7 @@ message ScanNode {
     optional LockCmdType lock = 8;
     optional bool is_ddl_work = 9;
     optional int64 ddl_index_id = 10;
+    repeated int64 force_indexes = 11;
 };
 
 message LimitNode {

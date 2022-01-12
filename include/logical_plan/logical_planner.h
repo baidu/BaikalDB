@@ -44,6 +44,7 @@ struct JoinMemTmp {
     std::multiset<std::string> right_full_table_names;
     bool is_derived_table = false;
     std::set<std::int64_t> use_indexes;
+    std::set<std::int64_t> force_indexes;
     std::set<std::int64_t> ignore_indexes;
     virtual ~JoinMemTmp() {
         delete left_node;
@@ -192,6 +193,7 @@ protected:
                                          const std::string alias,
                                          const bool is_derived_table,
                                          const std::vector<std::string>& use_index_names,
+                                         const std::vector<std::string>& force_index_names,
                                          const std::vector<std::string>& ignore_index_names, 
                                          JoinMemTmp** join_root_ptr); 
 

@@ -62,6 +62,10 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
             DB_NOTICE("index info is NONE, skip.");
             continue;
         }
+        if (info.index_hint_status == pb::IHS_VIRTUAL) {
+            DB_NOTICE("index info is virtual, skip.");
+            continue;
+        }
         if (info.is_global) {
             if (info.type == pb::I_UNIQ) {
                 g_unique_indexs.emplace_back(index_id);
