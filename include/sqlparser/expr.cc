@@ -166,8 +166,8 @@ void FuncExpr::to_stream(std::ostream& os) const {
     }
     os << "(";
     switch (func_type) {
-        case FT_COMMON: {
-        case FT_AGG:
+        case FT_COMMON:
+        case FT_AGG: {
             os << fn_name << "(";
             if (distinct) {
                 os << "DISTINCT ";
