@@ -184,6 +184,15 @@ void JoinNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
 }
 
 int JoinNode::hash_join(RuntimeState* state) {
+    SortNode* sort_node = static_cast<SortNode*>(_outer_node->get_node(pb::SORT_NODE));
+    if (sort_node != nullptr) {
+        JoinNode* join_node = static_cast<JoinNode*>(sort_node->get_node(pb::JOIN_NODE));
+        if (join_node == nullptr) {
+            std::vector<ExecNode*> scan_nodes;
+            _outer_node->get_node(pb::SCAN_NODE, scan_nodes);
+            do_plan_router(state, scan_nodes);
+        }
+    }
     int ret = _outer_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode:: left table open fail");
@@ -240,6 +249,15 @@ int JoinNode::hash_join(RuntimeState* state) {
 
 int JoinNode::nested_loop_join(RuntimeState* state) {
     _mem_row_desc = state->mem_row_desc();
+    SortNode* sort_node = static_cast<SortNode*>(_outer_node->get_node(pb::SORT_NODE));
+    if (sort_node != nullptr) {
+        JoinNode* join_node = static_cast<JoinNode*>(sort_node->get_node(pb::JOIN_NODE));
+        if (join_node == nullptr) {
+            std::vector<ExecNode*> scan_nodes;
+            _outer_node->get_node(pb::SCAN_NODE, scan_nodes);
+            do_plan_router(state, scan_nodes);
+        }
+    }
     int ret = _outer_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode:: left table open fail");
