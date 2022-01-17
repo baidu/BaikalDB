@@ -1667,11 +1667,16 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         }
         auto addr = request->instance_info().address();
         bool should_update = true;
-        bool delete_learner = false;
         for (auto& learner : master_region_info->learners()) {
             if (learner == addr) {
                 if (learner_region.state() == pb::STATUS_ERROR) {
-                    delete_learner = true;
+                    std::vector<std::string> candicate_remove_peers;
+                    candicate_remove_peers.reserve(1);
+                    candicate_remove_peers.emplace_back(addr);
+                    if (master_region_info->learners_size() > 0 && can_modify_learner(region_id)) {
+                        DB_NOTICE("region_id %ld remove learner, STATUS_ERROR", region_id);
+                        remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), candicate_remove_peers);
+                    }
                 } else {
                     should_update = false;
                 }
@@ -1683,14 +1688,6 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
             request.set_op_type(pb::OP_UPDATE_REGION);
             auto region_iter = request.add_region_infos();
             *region_iter = *master_region_info;
-            if (delete_learner) {
-                region_iter->clear_learners();
-                for (auto& learner : master_region_info->learners()) {
-                    if (learner != addr) {
-                        region_iter->add_learners(addr);
-                    }
-                }
-            }
             region_iter->add_learners(addr);
             SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
         }

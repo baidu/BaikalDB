@@ -267,6 +267,8 @@ service StoreService {
 
     rpc restore_region(RegionIds) returns(StoreRes);
 
+    rpc manual_split_region(RegionIds) returns(StoreRes);
+
     rpc query_region(RegionIds) returns (StoreRes);
     
     rpc query_illegal_region(RegionIds) returns (StoreRes);

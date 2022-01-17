@@ -756,6 +756,9 @@ public:
             if (table_info.second.is_global_index) {
                 continue;
             }
+            if (check_table_has_ddlwork(table_info.first)) {
+                continue;
+            }
             auto& schema_pb = table_info.second.schema_pb; 
             for (auto& index : schema_pb.indexs()) {
                 if (index.hint_status() == pb::IHS_DISABLE &&

@@ -116,6 +116,10 @@ public:
                                 const pb::RegionIds* request,
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done);
+    virtual void manual_split_region(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
     virtual void snapshot_region(google::protobuf::RpcController* controller,
                                 const pb::RegionIds* request,
                                 pb::StoreRes* response,

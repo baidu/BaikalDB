@@ -317,7 +317,7 @@ bool ScanNode::full_coverage(const std::unordered_set<int32_t>& smaller, const s
 // return  0 没有干掉任何一个
 // return -1 outer被干掉
 // return -2 inner被干掉
-int ScanNode::compare_two_path(SmartPath outer_path, SmartPath inner_path) {
+int ScanNode::compare_two_path(const SmartPath& outer_path, const SmartPath& inner_path) {
     if (_use_force_index) {
         // 只有primary可能不是FORCE_INDEX, 应该防止primary干掉force index
         // @ref: https://dev.mysql.com/doc/refman/5.6/en/index-hints.html

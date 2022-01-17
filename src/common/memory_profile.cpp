@@ -13,8 +13,9 @@
 // limitations under the License.
 
 #include "memory_profile.h"
-
+#ifdef BAIKAL_TCMALLOC
 #include <gperftools/malloc_extension.h>
+#endif
 
 namespace baikaldb {
 
@@ -26,6 +27,7 @@ DEFINE_int64(min_memory_free_size_to_release, 2147483648, "minimum memory free s
 DEFINE_int64(mem_tracker_gc_interval_s, 60, "do memory limit when row number more than #, default: 60");
 
 void MemoryGCHandler::memory_gc_thread() {
+#ifdef BAIKAL_TCMALLOC
     char stats_buffer[1000] = {0};
     const size_t BYTES_TO_GC = 8 * 1024 * 1024;
     TimeCost stats_cost;
@@ -69,6 +71,7 @@ void MemoryGCHandler::memory_gc_thread() {
         }
         bthread_usleep_fast_shutdown(FLAGS_memory_gc_interval_s * 1000 * 1000LL, _shutdown);
     }
+#endif
 }
 
 void MemTrackerPool::tracker_gc_thread() {

@@ -690,6 +690,37 @@ void Store::compact_region(google::protobuf::RpcController* controller,
     DB_WARNING("compact_db cost:%ld", cost.get_time());
 }
 
+void Store::manual_split_region(google::protobuf::RpcController* controller,
+                            const baikaldb::pb::RegionIds* request,
+                            pb::StoreRes* response,
+                            google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    response->set_errcode(pb::SUCCESS);
+    response->set_errmsg("success");
+    std::vector<int64_t> region_ids;
+    for (auto region_id : request->region_ids()) {
+        region_ids.emplace_back(region_id);
+    }
+    auto fun = [this, region_ids]() {
+        for (auto& region_id: region_ids) {
+            SmartRegion region = get_region(region_id);
+            // 分裂异步执行分裂
+            if (region->get_version() != 0) {
+                std::string split_key;
+                int64_t split_key_term = 0;
+                if (0 != region->get_split_key(split_key, split_key_term)) {
+                    DB_WARNING("get_split_key failed: region=%ld", region_id);
+                    continue;
+                }
+                process_split_request(region->get_global_index_id(), region_id, false, split_key, split_key_term);
+            }
+        }
+        DB_WARNING("all region finish");
+    };
+    Bthread bth(&BTHREAD_ATTR_SMALL);
+    bth.run(fun);
+}
+
 void Store::snapshot_region(google::protobuf::RpcController* controller,
                             const baikaldb::pb::RegionIds* request,
                             pb::StoreRes* response,
@@ -1283,7 +1314,7 @@ void Store::whether_split_thread() {
             region_capacity = std::max(FLAGS_min_split_lines, region_capacity);
             //DB_WARNING("region_id: %ld, split_capacity: %ld", region_ids[i], region_capacity);
             std::string split_key;
-            int64_t split_key_term;
+            int64_t split_key_term = 0;
             //如果是尾部分
             if (ptr_region->is_leader() 
                     && ptr_region->get_status() == pb::IDLE

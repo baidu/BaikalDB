@@ -1549,6 +1549,17 @@ void Region::dml_2pc(const pb::StoreReq& request,
         int64_t applied_index, 
         int64_t term,
         int32_t seq_id, bool need_txn_limit) {
+    QosType type = QOS_DML;
+    uint64_t sign = 0;
+    if (request.has_sql_sign()) {
+        sign = request.sql_sign();
+    }
+    
+    int64_t index_id = 0;
+    StoreQos::get_instance()->create_bthread_local(type, sign, index_id);
+    ON_SCOPE_EXIT(([this]() {
+        StoreQos::get_instance()->destroy_bthread_local();
+    }));
     // 只有leader有事务情况才能在raft外执行
     if (applied_index == 0 && term == 0 && !is_leader()) {
         // 非leader才返回
@@ -1792,6 +1803,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
     if (state.last_insert_id != INT64_MIN) {
         response.set_last_insert_id(state.last_insert_id);
     }
+    response.set_scan_rows(state.num_scan_rows());
     root->close(&state);
     ExecNode::destroy_tree(root);
     response.set_errcode(pb::SUCCESS);
@@ -1845,6 +1857,16 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
         const pb::Plan& plan, const RepeatedPtrField<pb::TupleDescriptor>& tuples, 
         pb::StoreRes& response, int64_t applied_index, int64_t term, braft::Closure* done) {
     //DB_WARNING("_num_table_lines:%ld region_id: %ld", _num_table_lines.load(), _region_id);
+    QosType type = QOS_DML;
+    uint64_t sign = 0;
+    if (request.has_sql_sign()) {
+        sign = request.sql_sign();
+    } 
+    int64_t index_id = 0;
+    StoreQos::get_instance()->create_bthread_local(type, sign, index_id);
+    ON_SCOPE_EXIT(([this]() {
+        StoreQos::get_instance()->destroy_bthread_local();
+    }));
     TimeCost cost;
     if (FLAGS_open_service_write_concurrency && (op_type == pb::OP_INSERT ||
         op_type == pb::OP_UPDATE ||
@@ -2603,6 +2625,7 @@ void Region::construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bo
 
     if (is_learner()) {
         pb::LearnerHeartBeat* learner_heart = request.add_learner_regions();
+        learner_heart->set_state(_region_status);
         pb::RegionInfo* learner_region =  learner_heart->mutable_region();
         copy_region(learner_region);
         learner_region->set_status(_region_control.get_status());
@@ -3820,8 +3843,8 @@ void Region::on_leader_stop(const butil::Status& status) {
 }
 
 void Region::on_error(const ::braft::Error& e) {
-    DB_FATAL("raft node meet error, region_id: %ld, error_type:%d, error_desc:%s",
-                _region_id, e.type(), e.status().error_cstr());
+    DB_FATAL("raft node meet error, is_learner:%d, region_id: %ld, error_type:%d, error_desc:%s",
+                is_learner(), _region_id, e.type(), e.status().error_cstr());
     _region_status = pb::STATUS_ERROR;
 }
 

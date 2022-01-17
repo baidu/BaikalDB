@@ -965,6 +965,9 @@ void TableManager::drop_field(const pb::MetaManagerRequest& request,
         drop_field_names.push_back(field.field_name());
     }
     for (auto& index : mem_schema_pb.indexs()) {
+        if (index.hint_status() == pb::IHS_DISABLE && index.state() == pb::IS_DELETE_LOCAL) {
+            continue;
+        }
         for (auto field_name : index.field_names()) {
             auto iter = std::find(drop_field_names.begin(),
                               drop_field_names.end(),

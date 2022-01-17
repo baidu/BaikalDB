@@ -215,7 +215,7 @@ public:
         bthread_cond_destroy(&_cond);
     }
 
-    int count() {
+    int count() const {
         return _count;
     }
 
@@ -368,6 +368,10 @@ public:
     }
     void join() {
         _cond.wait();
+    }
+
+    int count() const {
+        return _cond.count();
     }
 
 private:

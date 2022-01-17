@@ -791,6 +791,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
     binlog_desc->set_primary_region_id(client_conn->primary_region_id.load());
     auto binlog = req.mutable_binlog();
     binlog->set_start_ts(binlog_ctx->start_ts());
+    binlog->set_partition_key(binlog_ctx->get_partition_key());
     if (op_type == pb::OP_PREPARE) {
         binlog->set_type(pb::BinlogType::PREWRITE);
         req.set_op_type(pb::OP_PREWRITE_BINLOG);
