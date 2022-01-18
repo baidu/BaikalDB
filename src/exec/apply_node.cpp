@@ -369,7 +369,7 @@ int ApplyNode::loop_hash_apply(RuntimeState* state) {
         DB_WARNING("ExecNode::join open fail when fetch left table");
         return ret;
     }
-    DB_WARNING("data size:%ld", _outer_tuple_data.size());
+//    DB_WARNING("data size:%ld", _outer_tuple_data.size());
     _outer_iter = _outer_tuple_data.begin();
 
     std::vector<MemRow*> outer_tuple_data;
