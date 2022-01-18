@@ -87,6 +87,7 @@ private:
     bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id); 
 
     SchemaFactory* _factory = SchemaFactory::get_instance();
+    int64_t _row_ttl_duration = 0;
 };
 }
 

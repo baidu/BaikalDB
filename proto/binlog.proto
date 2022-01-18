@@ -17,6 +17,7 @@ message Binlog {
     optional PrewriteValue    prewrite_value = 5;
     optional bytes            ddl_query      = 6;
     optional bytes            stmts          = 7;
+    optional uint64           partition_key  = 8;
 }
 
 message PrewriteValue {

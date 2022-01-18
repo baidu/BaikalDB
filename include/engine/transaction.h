@@ -389,15 +389,15 @@ public:
     // (end == nullptr) denotes ignoring range end key checking;
     // The key to be checked does not include (region_id + index_id) prefix;
     static bool fits_region_range(
-            rocksdb::Slice      key, 
+            rocksdb::Slice      key,
             rocksdb::Slice      value,
-            const std::string*  start, 
-            const std::string*  end, 
+            const std::string*  start,
+            const std::string*  end,
             IndexInfo&          pk_index,
             IndexInfo&          index_info);
-    int fits_region_range_for_global_index(IndexInfo& pk_index, 
-            IndexInfo& index_info, 
-            SmartRecord record, 
+    int fits_region_range_for_global_index(IndexInfo& pk_index,
+            IndexInfo& index_info,
+            SmartRecord record,
             bool& result);
     int fits_region_range_for_primary(IndexInfo& pk_index,
         SmartRecord record,

@@ -19,9 +19,8 @@
 #include <atomic>
 
 namespace baikaldb {
-
-DECLARE_int64(memory_gc_interval_s);
-DECLARE_int64(memory_free_rate);
+//DECLARE_int64(memory_gc_interval_s);
+//DECLARE_int64(memory_free_rate);
 
 class MemoryGCHandler {
 public:
@@ -34,7 +33,9 @@ public:
     void memory_gc_thread();
 
     int init() {
+#ifdef BAIKAL_TCMALLOC
         _memory_gc_bth.run([this]() {memory_gc_thread();});
+#endif
         return 0;
     }
     void close() {

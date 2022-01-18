@@ -77,10 +77,6 @@ public:
         return _binlog_region;
     }
 
-    ExprValue& partition_key() {
-        return _partition_key;
-    }
-
     void set_partition_record(SmartRecord partition_record) {
         _partition_record = partition_record;
     }
@@ -93,15 +89,19 @@ public:
         _table_info = table_info;
     }
 
+    uint64_t get_partition_key() const {
+        return _partition_key;
+    }
+
 private:
     SmartTable            _table_info = nullptr;
     int64_t               _start_ts = -1;
     int64_t               _commit_ts = -1;
     pb::PrewriteValue     _binlog_value;
     SmartRecord           _partition_record;
-    ExprValue             _partition_key;
     pb::RegionInfo        _binlog_region;
     SchemaFactory*        _factory = nullptr;
+    uint64_t              _partition_key = 0;
 };
 
 } // namespace baikaldb

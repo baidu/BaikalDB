@@ -59,6 +59,7 @@ COPTS  = [
     "-Wno-unused-parameter",
     "-Wno-parentheses",
     "-Wno-deprecated-declarations",
+    "-DBAIKAL_TCMALLOC",
     "-UNDEBUG",
 ]
 

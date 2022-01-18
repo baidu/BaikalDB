@@ -71,7 +71,12 @@ private:
 
     // create tuples for table scan
     void create_agg_tuple_desc();
-
+    bool is_fullexport_condition();
+    bool is_range_compare(ExprNode* expr);
+    bool check_single_conjunct(ExprNode* conjunct);
+    bool check_conjuncts(std::vector<ExprNode*>& conjuncts);
+    bool is_pk_consistency(const std::vector<FieldInfo>& pk_fields_in_factory, const std::vector<int32_t>& select_pk_fields);
+    void get_conjuncts_condition(std::vector<ExprNode*>& conjuncts);
 private:
     parser::SelectStmt*                 _select;
 

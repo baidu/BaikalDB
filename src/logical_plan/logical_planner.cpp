@@ -932,17 +932,17 @@ int LogicalPlanner::create_join_node_from_table_source(const parser::TableSource
     for (int i = 0; i < table_source->index_hints.size(); ++i) {
         if (table_source->index_hints[i]->hint_type == parser::IHT_HINT_USE) {
             for (int j = 0; j < table_source->index_hints[i]->index_name_list.size(); ++j) {
-                use_index_names.push_back(table_source->index_hints[i]->index_name_list[j].value);
+                use_index_names.emplace_back(table_source->index_hints[i]->index_name_list[j].value);
             }
         }
         if (table_source->index_hints[i]->hint_type == parser::IHT_HINT_FORCE) {
             for (int j = 0; j < table_source->index_hints[i]->index_name_list.size(); ++j) {
-                force_index_names.push_back(table_source->index_hints[i]->index_name_list[j].value);
+                force_index_names.emplace_back(table_source->index_hints[i]->index_name_list[j].value);
             }
         }
         if (table_source->index_hints[i]->hint_type == parser::IHT_HINT_IGNORE) {
             for (int j = 0; j < table_source->index_hints[i]->index_name_list.size(); ++j) {
-                ignore_index_names.push_back(table_source->index_hints[i]->index_name_list[j].value);
+                ignore_index_names.emplace_back(table_source->index_hints[i]->index_name_list[j].value);
             }
         }
     }

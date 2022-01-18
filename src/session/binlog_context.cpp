@@ -61,6 +61,7 @@ int BinlogContext::get_binlog_regions(uint64_t log_id) {
         FieldInfo& link_filed = _table_info->link_field[0];
         auto field_desc = _partition_record->get_field_by_idx(link_filed.pb_idx);
         ExprValue value = _partition_record->get_value(field_desc);
+        _partition_key = value.get_numberic<uint64_t>();
         ret = _factory->get_binlog_regions(_table_info->id, _binlog_region, value);
     }
 

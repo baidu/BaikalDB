@@ -161,7 +161,7 @@ public:
 
     bool full_coverage(const std::unordered_set<int32_t>& smaller, const std::unordered_set<int32_t>& bigger);
 
-    int compare_two_path(SmartPath outer_path, SmartPath inner_path);
+    int compare_two_path(const SmartPath& outer_path, const SmartPath& inner_path);
 
     void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
 

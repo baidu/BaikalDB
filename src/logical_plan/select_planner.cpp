@@ -17,7 +17,10 @@
 #include "dual_scan_node.h"
 #include "network_socket.h"
 #include <boost/algorithm/string.hpp>
-
+#include "row_expr.h"
+#include "slot_ref.h"
+#include "scalar_fn_call.h"
+#include "common.h"
 namespace baikaldb {
 
 int SelectPlanner::plan() {
@@ -136,7 +139,9 @@ bool SelectPlanner::is_full_export() {
         return false;
     }
     if (_select->where != nullptr) {
-        return false;
+        if (!is_fullexport_condition()) {
+            return false;
+        }
     } 
     if (_select->group != nullptr) {
         return false;
@@ -167,6 +172,126 @@ bool SelectPlanner::is_full_export() {
     return true;
 }
 
+void SelectPlanner::get_conjuncts_condition(std::vector<ExprNode*>& conjuncts) {
+    conjuncts.reserve(_where_filters.size());
+    for (auto& expr : _where_filters) {
+        ExprNode* conjunct = nullptr;
+        int ret = ExprNode::create_tree(expr, &conjunct);
+        if (ret < 0) {
+            //如何释放资源
+            return ;
+        }
+        conjuncts.emplace_back(conjunct);
+    }
+}
+
+bool SelectPlanner::is_fullexport_condition() {
+    std::vector<ExprNode*> conjuncts;
+    get_conjuncts_condition(conjuncts);
+    //释放内存
+    ON_SCOPE_EXIT(([this, &conjuncts]() {
+        for (auto& conjunct : conjuncts) {
+            ExprNode::destroy_tree(conjunct);
+        }
+    }));
+    if (conjuncts.size() > 2 || _select->limit == nullptr) {
+        return false;
+    }
+    if (!check_conjuncts(conjuncts)) {
+        return false;
+    }
+    return true;
+}
+
+bool SelectPlanner::check_conjuncts(std::vector<ExprNode*>& conjuncts) {
+    for (auto& conjunct : conjuncts) {
+        if (!check_single_conjunct(conjunct)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SelectPlanner::check_single_conjunct(ExprNode* conjunct) {
+    //conjunct的size为1同时含有limit节点
+    auto& expr_head_node = conjunct;
+    auto expr_node_about_primary = expr_head_node->children(0);
+    if (!is_range_compare(expr_head_node)) {
+        return false;
+    }
+
+    int64_t& factory_table_id = _ctx->stat_info.table_id;
+    auto pk_field_info_ptr = _factory->get_index_info_ptr(factory_table_id);
+    if (pk_field_info_ptr == nullptr) {
+        return false;
+    }
+    auto& pk_fields_info = pk_field_info_ptr->fields;
+    //判断row_expr情况下的主键情况
+    if (expr_node_about_primary->is_row_expr()) {
+        RowExpr* row_expr = static_cast<RowExpr*>(expr_node_about_primary);
+        std::map<size_t, SlotRef*> slots;
+        row_expr->get_all_slot_ref(&slots);
+        std::vector<int32_t> pk_field_ids;
+        pk_field_ids.reserve(slots.size());
+        for (auto& pair : slots) {
+            pk_field_ids.emplace_back(pair.second->field_id());
+        }
+        if (pk_fields_info.size() != pk_field_ids.size()) {
+            return false;
+        }
+        if (is_pk_consistency(pk_fields_info, pk_field_ids)) {
+            return true;
+        } else {
+            return false;
+        }
+    } else if (expr_node_about_primary->is_slot_ref()) {
+        //判断为slot_ref情况下的主键情况
+        SlotRef* slot_expr = static_cast<SlotRef*>(expr_node_about_primary);
+        auto slot_expr_pk_field_id = slot_expr->field_id();
+        if (pk_fields_info.size() != 1) {
+            return false;
+        }
+        if (slot_expr_pk_field_id != pk_fields_info[0].id) {
+            return false;
+        } else {
+            return true;
+        }
+    }
+    return true;
+}
+
+bool SelectPlanner::is_pk_consistency(const std::vector<FieldInfo>& pk_fields_in_factory, const std::vector<int32_t>& select_pk_fields) {
+    if (pk_fields_in_factory.size() != select_pk_fields.size()) {
+        return false;
+    }
+    for (size_t i = 0;i < pk_fields_in_factory.size();i++) {
+        if (pk_fields_in_factory[i].id != select_pk_fields[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SelectPlanner::is_range_compare(ExprNode* expr) {
+    switch (expr->node_type()) {
+        case pb::FUNCTION_CALL: {
+            int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
+            switch (fn_op) {
+                case parser::FT_EQ:
+                case parser::FT_GE:
+                case parser::FT_GT:
+                case parser::FT_LE:
+                case parser::FT_LT:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        default:
+            return false;
+    }
+    return false;
+}
 
 void SelectPlanner::get_slot_column_mapping() {
     if (_ctx->has_derived_table) {

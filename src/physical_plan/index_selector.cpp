@@ -530,15 +530,15 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
     if (pb_scan_node->force_indexes_size() != 0){
         index_ids.clear();
         for (auto& index_id : pb_scan_node->force_indexes()) {
-            index_ids.push_back(index_id);
+            index_ids.emplace_back(index_id);
         }
         if (force_indexs.count(table_id) == 0){
-            index_ids.push_back(table_id);
+            index_ids.emplace_back(table_id);
         }
     } else if (pb_scan_node->use_indexes_size() != 0) {
         index_ids.clear();
         for (auto& index_id : pb_scan_node->use_indexes()) {
-            index_ids.push_back(index_id);
+            index_ids.emplace_back(index_id);
         }
     }
     std::set<int64_t> ignore_indexs;
