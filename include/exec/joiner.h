@@ -136,6 +136,12 @@ public:
                                MemRow* inner_mem_row,
                                bool& matched);
     int construct_null_result_batch(RowBatch* batch, MemRow* outer_mem_row);
+    std::unordered_set<int32_t>* left_tuple_ids() {
+        return &_left_tuple_ids;
+    }
+    std::unordered_set<int32_t>* right_tuple_ids() {
+        return &_right_tuple_ids;
+    }
 
 protected:
     pb::JoinType _join_type;
@@ -173,6 +179,8 @@ protected:
     bool    _child_eos = false;
     bool    _is_apply = false;
     bool    _conditions_has_agg = false;
+    bool    _use_loop_hash_map = false;
+    size_t  _loops = 0;
     RowBatch _inner_row_batch;
     std::map<int32_t, std::set<int32_t>> _inner_equal_field_ids; // 用于检查内查询的等值条件是否具有唯一性
 };

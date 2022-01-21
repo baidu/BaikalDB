@@ -22,6 +22,7 @@
 #include "logical_planner.h"
 #include "agg_node.h"
 #include "literal.h"
+#include "math.h"
 
 namespace baikaldb {
 int ApplyNode::init(const pb::PlanNode& node) {
@@ -244,6 +245,11 @@ int ApplyNode::open(RuntimeState* state) {
     }
     DB_WARNING("_use_hash_map:%d _max_one_row:%d _conditions_has_agg:%d", _use_hash_map, _max_one_row, _conditions_has_agg);
     if (_use_hash_map && !_max_one_row && !_conditions_has_agg) {
+        // inner_node会被多次调用
+        if (_parent->get_limit() > 0 && _join_type != pb::LEFT_JOIN && _join_type != pb::ANTI_SEMI_JOIN) {
+            _use_loop_hash_map = true;
+            return loop_hash_apply(state);
+        }
         return hash_apply(state);
     } else {
         _use_hash_map = false;
@@ -277,7 +283,7 @@ int ApplyNode::nested_loop_apply(RuntimeState* state) {
         _inner_node->create_trace();
         ret = _inner_node->open(state);
         if (ret < 0) {
-            DB_WARNING("ExecNode::inner table open fial");
+            DB_WARNING("ExecNode::inner table open fail");
             return -1;
         }
         return 0;
@@ -335,7 +341,7 @@ int ApplyNode::hash_apply(RuntimeState* state) {
     _inner_node->create_trace();
     ret = _inner_node->open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::inner table open fial");
+        DB_WARNING("ExecNode::inner table open fail");
         return -1;
     }
     if (_join_type == pb::LEFT_JOIN || _join_type == pb::ANTI_SEMI_JOIN) {
@@ -352,10 +358,58 @@ int ApplyNode::hash_apply(RuntimeState* state) {
     return 0;
 }
 
+int ApplyNode::loop_hash_apply(RuntimeState* state) {
+    int ret = _outer_node->open(state);
+    if (ret < 0) {
+        DB_WARNING("ExecNode:: left table open fail");
+        return ret;
+    }
+    ret = fetcher_full_table_data(state, _outer_node, _outer_tuple_data);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::join open fail when fetch left table");
+        return ret;
+    }
+//    DB_WARNING("data size:%ld", _outer_tuple_data.size());
+    _outer_iter = _outer_tuple_data.begin();
+
+    std::vector<MemRow*> outer_tuple_data;
+    while (_outer_iter != _outer_tuple_data.end() && outer_tuple_data.size() < get_loop_num()) {
+        outer_tuple_data.emplace_back(*_outer_iter);
+        _outer_iter++;
+    }
+    if (outer_tuple_data.size() == 0) {
+        DB_WARNING("no data");
+        _outer_table_is_null = true;
+        return 0;
+    }
+    _hash_map.clear();
+    construct_hash_map(outer_tuple_data, _outer_equal_slot);
+
+    if (_is_explain) {
+        _inner_node->create_trace();
+        ret = _inner_node->open(state);
+        if (ret < 0) {
+            DB_WARNING("ExecNode::inner table open fail");
+            return -1;
+        }
+        return 0;
+    }
+    _loops = 0;
+    _inner_node->get_node(pb::SCAN_NODE, _scan_nodes);
+    ret = fetcher_inner_table_data(state, outer_tuple_data, _scan_nodes, _inner_tuple_data);
+    if (ret < 0) {
+        return -1;
+    }
+    _inner_iter = _inner_tuple_data.begin();
+    return 0;
+}
 int ApplyNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     if (_outer_table_is_null) {
         *eos = true;
         return 0;
+    }
+    if (_use_loop_hash_map) {
+        return get_next_via_loop_outer_hash_map(state, batch, eos);
     }
     if (_use_hash_map) {
         if (_join_type == pb::LEFT_JOIN || _join_type == pb::ANTI_SEMI_JOIN) {
@@ -403,7 +457,7 @@ int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
     _inner_node->create_trace();
     ret = _inner_node->open(state);
     if (ret < 0) {
-        DB_WARNING("ExecNode::inner table open fial");
+        DB_WARNING("ExecNode::inner table open fail");
         return -1;
     }
     ret = fetcher_full_table_data(state, _inner_node, inner_tuple_data);
@@ -420,6 +474,54 @@ int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
     
     _inner_node->remove_additional_predicate(in_exprs_back);
     _inner_node->close(state);
+    return 0;
+}
+
+int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
+                                        const std::vector<MemRow*>& outer_tuple_data,
+                                        std::vector<ExecNode*>& scan_nodes,
+                                        std::vector<MemRow*>& inner_tuple_data) {
+    TimeCost time_cost;
+    _outer_join_values.clear();
+    construct_equal_values(outer_tuple_data, _outer_equal_slot);
+    std::vector<ExprNode*> in_exprs;
+    int ret = construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::create in condition for right table fail");
+        return ret;
+    }
+    std::vector<ExprNode*> in_exprs_back = in_exprs;
+    //表达式下推，下推的那个节点重新做索引选择，路由选择
+    _inner_node->predicate_pushdown(in_exprs);
+    if (in_exprs.size() > 0) {
+        DB_WARNING("inner node add filter node");
+        _inner_node->add_filter_node(in_exprs);
+    }
+    do_plan_router(state, scan_nodes);
+    _inner_node->create_trace();
+    ret = _inner_node->open(state);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::inner table open fail");
+        return -1;
+    }
+    ret = fetcher_full_table_data(state, _inner_node, inner_tuple_data);
+    if (ret < 0) {
+        DB_WARNING("fetcher inner node fail");
+        return ret;
+    }
+    if (_max_one_row && inner_tuple_data.size() > 1) {
+        state->error_code = ER_SUBQUERY_NO_1_ROW;
+        state->error_msg << "Subquery returns more than 1 row";
+        DB_WARNING("Subquery returns more than 1 row");
+        return -1;
+    }
+
+    _inner_node->remove_additional_predicate(in_exprs_back);
+    _inner_node->close(state);
+
+    _loops++;
+    DB_WARNING("fetcher_inner_table_data, loops:%d, outer:%ld, inner:%ld, time_cost:%ld",
+               _loops,  outer_tuple_data.size(), inner_tuple_data.size(), time_cost.get_time());
     return 0;
 }
 
@@ -620,6 +722,79 @@ int ApplyNode::get_next_via_outer_hash_map(RuntimeState* state, RowBatch* batch,
     return 0;
 }
 
+int ApplyNode::get_next_via_loop_outer_hash_map(RuntimeState* state, RowBatch* batch, bool* eos) {
+    if (_inner_iter == _inner_tuple_data.end()) {
+        // clear previous inner
+        for (auto& mem_row : _inner_tuple_data) {
+            delete mem_row;
+        }
+        _inner_tuple_data.clear();
+
+        // construct outer
+        if (_outer_iter == _outer_tuple_data.end()) {
+            DB_WARNING("when join, outer iter is end, loops:%d", _loops);
+            *eos = true;
+            return 0;
+        }
+        std::vector<MemRow*> outer_tuple_data;
+        while (_outer_iter != _outer_tuple_data.end() && outer_tuple_data.size() < get_loop_num()) {
+            outer_tuple_data.emplace_back(*_outer_iter);
+            _outer_iter++;
+        }
+        _hash_map.clear();
+        construct_hash_map(outer_tuple_data, _outer_equal_slot);
+
+        // fetcher inner
+        int ret = fetcher_inner_table_data(state, outer_tuple_data, _scan_nodes, _inner_tuple_data);
+        if (ret < 0) {
+            return -1;
+        }
+        _inner_iter = _inner_tuple_data.begin();
+    }
+
+    while (_inner_iter != _inner_tuple_data.end()) {
+        MemRow* inner_mem_row = *_inner_iter;
+        MutTableKey inner_key;
+        encode_hash_key(inner_mem_row, _inner_equal_slot, inner_key);
+        auto outer_mem_rows = _hash_map.seek(inner_key.data());
+        if (outer_mem_rows != NULL) {
+            for (; _result_row_index < outer_mem_rows->size(); ++_result_row_index) {
+                if (reached_limit()) {
+                    *eos = true;
+                    return 0;
+                }
+                if (batch->is_full()) {
+                    return 0;
+                }
+                bool matched = false;
+                int ret = construct_result_batch(batch, (*outer_mem_rows)[_result_row_index], inner_mem_row, matched);
+                if (ret < 0) {
+                    DB_WARNING("construct result batch fail");
+                    return ret;
+                }
+                _has_matched |= matched;
+                _all_matched &= matched;
+                ++_num_rows_returned;
+            }
+            if (_has_matched && _join_type == pb::SEMI_JOIN) {
+                if (_compare_type == pb::CMP_ALL && _all_matched) {
+                    int ret = construct_null_result_batch(batch, (*outer_mem_rows)[_result_row_index]);
+                    if (ret < 0) {
+                        DB_WARNING("construct result batch fail");
+                        return ret;
+                    }
+                }
+                _hash_map.erase(inner_key.data());
+            }
+        }
+        _result_row_index = 0;
+        _has_matched = false;
+        _all_matched = true;
+        _inner_iter++;
+    }
+
+    return 0;
+}
 }//namespace
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

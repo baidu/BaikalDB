@@ -597,11 +597,6 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
                 continue;
             }
         }
-        if (reached_limit()) {
-            DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
-            *eos = true;
-            return 0;
-        }
         std::unique_ptr<MemRow>& row = _child_row_batch.get_row();
         if (_is_explain || need_copy(row.get())) {
             batch->move_row(std::move(row));
@@ -610,6 +605,11 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             state->inc_num_filter_rows();
             ++where_filter_cnt;
             memory_limit_release(state, row.get());
+        }
+        if (reached_limit()) {
+            DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
+            *eos = true;
+            return 0;
         }
         _child_row_batch.next();
     }

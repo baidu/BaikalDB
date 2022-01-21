@@ -155,7 +155,16 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
                 || parent_node_ptr->node_type() == pb::TABLE_FILTER_NODE) {
             filter_node = static_cast<FilterNode*>(parent_node_ptr);
         }
-
+        SortNode* sort_node = nullptr;
+        while (parent_node_ptr != nullptr
+                && parent_node_ptr->node_type() != pb::SELECT_MANAGER_NODE
+                && parent_node_ptr->node_type() != pb::JOIN_NODE) {
+            if (parent_node_ptr->node_type() == pb::SORT_NODE) {
+                sort_node = static_cast<SortNode*>(parent_node_ptr);
+                break;
+            }
+            parent_node_ptr = parent_node_ptr->get_parent();
+        }
         auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
                 int32_t {return state->get_slot_id(tuple_id, field_id);};
 
@@ -168,7 +177,7 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
         IndexSelector().index_selector(state->tuple_descs(),
                                         scan_node, 
                                         filter_node,
-                                        NULL,
+                                        sort_node,
                                         NULL,
                                         NULL, field_range_type, "");
         if (!_is_explain) {

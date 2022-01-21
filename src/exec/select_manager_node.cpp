@@ -16,6 +16,8 @@
 #include "filter_node.h"
 #include "network_socket.h"
 #include "rocksdb_scan_node.h"
+#include "limit_node.h"
+#include "agg_node.h"
 
 namespace baikaldb {
 int SelectManagerNode::open(RuntimeState* state) {
@@ -54,7 +56,7 @@ int SelectManagerNode::open(RuntimeState* state) {
         ret = open_global_index(state, scan_node, router_index_id, main_table_id);
     } 
     if (ret < 0) {
-        DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
+        DB_WARNING("select manager fetcher manager node open fail, txn_id: %lu, log_id:%lu",
                 state->txn_id, state->log_id());
         return ret;
     }
@@ -160,6 +162,40 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
     auto client_conn = state->client_conn();
     //二级索引只执行scan_node，因为索引条件已经被下推到scan_node了
     ExecNode* store_exec = scan_node;
+    bool need_pushdown = true;
+    AggNode* agg_node = static_cast<AggNode*>(get_node(pb::AGG_NODE));;
+    SortNode* sort_node = static_cast<SortNode*>(get_node(pb::SORT_NODE));
+    FilterNode* filter_node = static_cast<FilterNode*>(get_node(pb::WHERE_FILTER_NODE));
+    if (need_pushdown && _limit < 0) {
+        need_pushdown = false;
+    }
+    if (need_pushdown && agg_node != nullptr) {
+        need_pushdown = false;
+    }
+    if (need_pushdown && filter_node != nullptr &&
+            filter_node->pruned_conjuncts().size() > 0) {
+        need_pushdown = false;
+    }
+    if (need_pushdown && sort_node != nullptr) {
+        std::unordered_set<int32_t> index_field_ids;
+        SmartIndex index_info = _factory->get_index_info_ptr(global_index_id);
+        for (auto& field : index_info->fields) {
+            index_field_ids.insert(field.id);
+        }
+        std::unordered_set<int32_t> expr_field_ids;
+        for (auto expr : sort_node->slot_order_exprs()) {
+            expr->get_all_field_ids(expr_field_ids);
+        }
+        for (auto field_id : expr_field_ids) {
+            if (index_field_ids.count(field_id) == 0) {
+                need_pushdown = false;
+                break;
+            }
+        }
+    }
+    if (need_pushdown) {
+        store_exec = _children[0];
+    }
     //agg or sort 不在二级索引表上执行
     /*
     if (_children[0]->node_type() != pb::SCAN_NODE
