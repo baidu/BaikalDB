@@ -277,8 +277,8 @@ void AccessPath::calc_normal(Property& sort_property) {
                     }
                     in_records.swap(comb_in_records);
                     comb_in_records.clear();
-
                 }
+                ++eq_count;
                 ++field_cnt;
                 hit_index_field_ids.insert(field.id);
                 left_field_cnt = field_cnt;
@@ -305,9 +305,7 @@ void AccessPath::calc_normal(Property& sort_property) {
             break;
         }
     }
-    if (!in_pred) {
-        is_sort_index = check_sort_use_index(sort_property);
-    }
+    is_sort_index = check_sort_use_index(sort_property);
     DB_DEBUG("is_sort_index:%d, eq_count:%d, sort_property:%lu", 
         is_sort_index, eq_count, sort_property.slot_order_exprs.size());
     pos_index.set_index_id(index_id);

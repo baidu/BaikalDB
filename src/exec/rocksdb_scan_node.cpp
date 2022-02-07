@@ -64,7 +64,12 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         _scan_conjuncts.emplace_back(index_conjunct);
     }
     if (pos_index.has_sort_index()) {
-        _sort_use_index = true;
+        if (pos_index.ranges_size() > 1) {
+            _sort_use_index_by_range = true;
+            _sort_limit_by_range = pos_index.sort_index().sort_limit();
+        } else {
+            _sort_use_index = true;
+        }
         _scan_forward = pos_index.sort_index().is_asc();
     }
 
@@ -960,7 +965,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
         if (batch->is_full()) {
             return 0;
         }
-        if (_table_iter == nullptr || !_table_iter->valid()) {
+        if (_table_iter == nullptr || !_table_iter->valid() || range_reach_limit()) {
             if (_idx >= _left_records.size() && _idx >= _left_keys.size()) {
                 *eos = true;
                 return 0;
@@ -999,6 +1004,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 if (_is_covering_index) {
                     _table_iter->set_mode(KEY_ONLY);
                 }
+                _num_rows_returned_by_range = 0;
                 _idx++;
                 continue;
             }
@@ -1041,6 +1047,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 batch->move_row(std::move(row));
             }
             ++_num_rows_returned;
+            ++_num_rows_returned_by_range;
         } else {
             // scan primary
             RowBatch row_batch;
@@ -1121,6 +1128,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                     batch->move_row(std::move(row));
                 }
                 ++_num_rows_returned;
+                ++_num_rows_returned_by_range;
             }
         }
     }
@@ -1173,7 +1181,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 return 0;
             }
         } else {
-            if (_index_iter == nullptr || !_index_iter->valid()) {
+            if (_index_iter == nullptr || !_index_iter->valid() || range_reach_limit()) {
                 if (_idx >= _left_records.size() && _idx >= _left_keys.size()) {
                     *eos = true;
                     return 0;
@@ -1208,6 +1216,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                         DB_WARNING_STATE(state, "open IndexIterator fail, index_id:%ld", _index_id);
                         return -1;
                     }
+                    _num_rows_returned_by_range = 0;
                     _idx++;
                     continue;
                 }
@@ -1280,6 +1289,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         }
         batch->move_row(std::move(row));
         ++_num_rows_returned;
+        ++_num_rows_returned_by_range;
         //DB_NOTICE("MemRow set: %ld", cost.get_time());
     }
 }
