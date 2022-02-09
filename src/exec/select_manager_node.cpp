@@ -165,15 +165,20 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
     bool need_pushdown = true;
     AggNode* agg_node = static_cast<AggNode*>(get_node(pb::AGG_NODE));;
     SortNode* sort_node = static_cast<SortNode*>(get_node(pb::SORT_NODE));
-    FilterNode* filter_node = static_cast<FilterNode*>(get_node(pb::WHERE_FILTER_NODE));
+    FilterNode* where_filter_node = static_cast<FilterNode*>(get_node(pb::WHERE_FILTER_NODE));
+    FilterNode* table_filter_node = static_cast<FilterNode*>(get_node(pb::TABLE_FILTER_NODE));
     if (need_pushdown && _limit < 0) {
         need_pushdown = false;
     }
     if (need_pushdown && agg_node != nullptr) {
         need_pushdown = false;
     }
-    if (need_pushdown && filter_node != nullptr &&
-            filter_node->pruned_conjuncts().size() > 0) {
+    if (need_pushdown && where_filter_node != nullptr &&
+        where_filter_node->pruned_conjuncts().size() > 0) {
+        need_pushdown = false;
+    }
+    if (need_pushdown && table_filter_node != nullptr &&
+        table_filter_node->pruned_conjuncts().size() > 0) {
         need_pushdown = false;
     }
     if (need_pushdown && sort_node != nullptr) {
