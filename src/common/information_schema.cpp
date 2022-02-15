@@ -34,6 +34,8 @@ int InformationSchema::init() {
     init_routines();
     init_key_column_usage();
     init_referential_constraints();
+    init_triggers();
+    init_views();
     return 0;
 }
 
@@ -847,6 +849,62 @@ void InformationSchema::init_routines() {
         {"DATABASE_COLLATION", pb::STRING},
     };
     int64_t table_id = construct_table("ROUTINES", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+void InformationSchema::init_triggers() {
+    // 定义字段信息
+    FieldVec fields {
+        {"TRIGGER_CATALOG", pb::STRING},
+        {"TRIGGER_SCHEMA", pb::STRING},
+        {"TRIGGER_NAME", pb::STRING},
+        {"EVENT_MANIPULATION", pb::STRING},
+        {"EVENT_OBJECT_CATALOG", pb::STRING},
+        {"EVENT_OBJECT_SCHEMA", pb::STRING},
+        {"EVENT_OBJECT_TABLE", pb::STRING},
+        {"ACTION_ORDER", pb::INT64},
+        {"ACTION_CONDITION", pb::STRING},
+        {"ACTION_STATEMENT", pb::STRING},
+        {"ACTION_ORIENTATION", pb::STRING},
+        {"ACTION_TIMING", pb::STRING},
+        {"ACTION_REFERENCE_OLD_TABLE", pb::STRING},
+        {"ACTION_REFERENCE_NEW_TABLE", pb::STRING},
+        {"ACTION_REFERENCE_OLD_ROW", pb::STRING},
+        {"ACTION_REFERENCE_NEW_ROW" , pb::STRING},
+        {"CREATED" , pb::DATETIME},
+        {"SQL_MODE" , pb::STRING},
+        {"DEFINER", pb::STRING},
+        {"CHARACTER_SET_CLIENT", pb::STRING},
+        {"COLLATION_CONNECTION", pb::STRING},
+        {"DATABASE_COLLATION", pb::STRING},
+    };
+    int64_t table_id = construct_table("TRIGGERS", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+void InformationSchema::init_views() {
+    // 定义字段信息
+    FieldVec fields {
+        {"TABLE_CATALOG", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"TABLE_NAME", pb::STRING},
+        {"VIEW_DEFINITION", pb::STRING},
+        {"CHECK_OPTION", pb::STRING},
+        {"IS_UPDATABLE", pb::STRING},
+        {"DEFINER", pb::STRING},
+        {"SECURITY_TYPE", pb::INT64},
+        {"CHARACTER_SET_CLIENT", pb::STRING},
+        {"COLLATION_CONNECTION", pb::STRING},
+    };
+    int64_t table_id = construct_table("VIEWS", fields);
     // 定义操作
     _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
         std::vector<SmartRecord> {

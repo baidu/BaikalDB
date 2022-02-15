@@ -1467,7 +1467,8 @@ int LogicalPlanner::handle_scalar_subquery(const parser::FuncExpr* func_item,
 int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item, 
         pb::Expr& expr, parser::FuncType op, const CreateExprOptions& options) {
     if (op == parser::FT_COMMON) {
-        if (item->fn_name.to_lower() == "last_insert_id" && item->children.size() == 0) {
+        std::string lower_fn_name = item->fn_name.to_lower();
+        if (lower_fn_name == "last_insert_id" && item->children.size() == 0) {
             pb::ExprNode* node = expr.add_nodes();
             node->set_node_type(pb::INT_LITERAL);
             node->set_col_type(pb::INT64);
@@ -1475,7 +1476,8 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
             node->mutable_derive_node()->set_int_val(_ctx->client_conn->last_insert_id);
             return 0;
         }
-        if (item->fn_name.to_lower() == "database") {
+        if (lower_fn_name == "database" ||
+            lower_fn_name == "schema") {
             pb::ExprNode* node = expr.add_nodes();
             if (_ctx->client_conn->current_db == "") {
                 node->set_node_type(pb::NULL_LITERAL);
@@ -1486,9 +1488,20 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
                 node->set_num_children(0);
                 node->mutable_derive_node()->set_string_val(_ctx->client_conn->current_db);
             }
-
             return 0;
         }
+        if (lower_fn_name == "user" ||
+            lower_fn_name == "session_user" ||
+            lower_fn_name == "system_user") {
+            pb::ExprNode* node = expr.add_nodes();
+            node->set_node_type(pb::STRING_LITERAL);
+            node->set_col_type(pb::STRING);
+            node->set_num_children(0);
+            node->mutable_derive_node()->set_string_val(_ctx->client_conn->username
+                + "@" + _ctx->client_conn->ip);
+            return 0;
+        }
+
         if (item->fn_name.to_lower() == "default" && item->children.size() == 1) {
             auto col_expr = (parser::ColumnName*)(item->children[0]);
             std::string alias_name = get_field_alias_name(col_expr);

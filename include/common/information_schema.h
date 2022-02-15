@@ -58,6 +58,8 @@ private:
     void init_routines();
     void init_key_column_usage();
     void init_referential_constraints();
+    void init_triggers();
+    void init_views();
 
     std::unordered_map<std::string, pb::SchemaInfo> _tables;
     //InformationSchema在baikaldb端运行

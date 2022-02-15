@@ -20,6 +20,7 @@
 
 DEFINE_int64(show_table_status_cache_time, 3600 * 1000 * 1000LL, "show table status cache time : 3600s");
 namespace baikaldb {
+
 void ShowHelper::init() {
     _calls[SQL_SHOW_ABNORMAL_REGIONS] = std::bind(&ShowHelper::_show_abnormal_regions,
             this, std::placeholders::_1, std::placeholders::_2);
@@ -53,6 +54,8 @@ void ShowHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_VARIABLES] = std::bind(&ShowHelper::_show_variables,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_STATUS] = std::bind(&ShowHelper::_show_variables,
+            this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_VIRTUAL_INDEX] = std::bind(&ShowHelper::_show_virtual_index,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_NAMESPACE] = std::bind(&ShowHelper::_handle_client_query_template_dispatch,
@@ -82,6 +85,18 @@ void ShowHelper::init() {
     _calls[SQL_SHOW_BINLOGS_INFO] = std::bind(&ShowHelper::_show_binlogs_info, this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_INSTANCE_PARAM] = std::bind(&ShowHelper::_show_instance_param,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_ENGINES] = std::bind(&ShowHelper::_show_engines,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_CHARSET] = std::bind(&ShowHelper::_show_charset,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_CHARACTER_SET] = std::bind(&ShowHelper::_show_charset,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_INDEX] = std::bind(&ShowHelper::_show_index,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_INDEXES] = std::bind(&ShowHelper::_show_index,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_KEYS] = std::bind(&ShowHelper::_show_index,
+            this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
 
@@ -105,7 +120,8 @@ bool ShowHelper::execute(const SmartSocket& client) {
     if (key == "full") {
         if(split_vec.size() > 2 && boost::iequals(split_vec[2], "tables")) {
             key = SQL_SHOW_FULL_TABLES;
-        } else if (split_vec.size() > 2 && boost::iequals(split_vec[2], "columns")) {
+        } else if (split_vec.size() > 2 &&
+                (boost::iequals(split_vec[2], "columns") || boost::iequals(split_vec[2], "fields"))) {
             key = SQL_SHOW_FULL_COLUMNS;
         } else {
             _wrapper->make_simple_ok_packet(client);
@@ -462,14 +478,20 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
     std::string db = client->current_db;
     std::string table;
     if (split_vec.size() == 4) {
-        table = remove_quote(split_vec[3].c_str(), '`');
-        std::vector<std::string> vec;
-        boost::split(vec, split_vec[3],
-                boost::is_any_of("."), boost::token_compress_on);
-        if (vec.size() == 2) {
-            db = remove_quote(vec[0].c_str(), '`');
-            table = remove_quote(vec[1].c_str(), '`');
+        std::string db_table = split_vec[3];
+        std::string::size_type position = db_table.find_first_of('.');
+        if (position == std::string::npos) {
+            // `table_name`
+            table = remove_quote(db_table.c_str(), '`');
+        } else {
+            // `db_name`.`table_name`
+            db = remove_quote(db_table.substr(0, position).c_str(), '`');
+            table = remove_quote(db_table.substr(position + 1,
+                    db_table.length() - position - 1).c_str(), '`');
         }
+    } else if (split_vec.size() == 5) {
+        db = remove_quote(split_vec[3].c_str(), '`');
+        table = remove_quote(split_vec[4].c_str(), '`');
     } else {
         client->state = STATE_ERROR;
         return false;
@@ -949,6 +971,7 @@ bool ShowHelper::_show_full_tables(const SmartSocket& client, const std::vector<
         current_db = remove_quote(split_vec[4].c_str(), '`');
     } else if (split_vec.size() == 3) {
     } else if (split_vec.size() == 7) {
+        // TODO: where [LIKE 'pattern' | WHERE expr]
         is_like_pattern = true;
         std::string like_str;
         current_db = remove_quote(split_vec[4].c_str(), '`');
@@ -1111,7 +1134,17 @@ bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector
     std::string db = client->current_db;
     std::string table;
     if (split_vec.size() == 5) {
-        table = remove_quote(split_vec[4].c_str(), '`');
+        std::string db_table = split_vec[4];
+        std::string::size_type position = db_table.find_first_of('.');
+        if (position == std::string::npos) {
+            // `table_name`
+            table = remove_quote(db_table.c_str(), '`');
+        } else {
+            // `db_name`.`table_name`
+            db = remove_quote(db_table.substr(0, position).c_str(), '`');
+            table = remove_quote(db_table.substr(position + 1,
+                    db_table.length() - position - 1).c_str(), '`');
+        }
     } else if (split_vec.size() == 7) {
         db = remove_quote(split_vec[6].c_str(), '`');
         table = remove_quote(split_vec[4].c_str(), '`');
@@ -1174,8 +1207,8 @@ bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector
             }
         }
         row.emplace_back(split_vec[split_vec.size() - 1]);
-        row.emplace_back("NULL");
         row.emplace_back(PrimitiveType_Name(field.type));
+        row.emplace_back("NULL");
         row.emplace_back(field.can_null ? "YES" : "NO");
         if (field_index.count(field.id) == 0) {
             row.emplace_back(" ");
@@ -1340,7 +1373,32 @@ bool ShowHelper::_show_table_status(const SmartSocket& client, const std::vector
 
     std::string namespace_ = client->user_info->namespace_;
     std::string db = client->current_db;
-    std::string key = namespace_ + "." + db;
+
+    std::vector< std::vector<std::string> > rows;
+    std::vector< std::vector<std::string> > assign_rows;
+    rows.reserve(10);
+    assign_rows.reserve(1);
+    std::string assign_table;
+    std::string table;
+    /* not support yet: 'WHERE expr'
+    SHOW TABLE STATUS
+    [{FROM | IN} db_name]
+    [LIKE 'pattern' | WHERE expr]
+    */
+    if (split_vec.size() == 3) {
+    } else if (split_vec.size() == 5) {
+        if (boost::iequals(split_vec[3], "from") || boost::iequals(split_vec[3], "in")) {
+            db = remove_quote(split_vec[4].c_str(), '`');
+        } else if (boost::iequals(split_vec[3], "like")) {
+            table = remove_quote(split_vec[4].c_str(), '\''); // handle like `pattern` as table_name
+        }
+    } else if (split_vec.size() == 7) {
+        db = remove_quote(split_vec[4].c_str(), '`');
+        table = remove_quote(split_vec[6].c_str(), '\'');
+    } else {
+        client->state = STATE_ERROR;
+        return false;
+    }
     if (db == "") {
         DB_WARNING("no database selected");
         _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
@@ -1350,15 +1408,8 @@ bool ShowHelper::_show_table_status(const SmartSocket& client, const std::vector
     if (db == "information_schema") {
         namespace_ = "INTERNAL";
     }
-
-    std::vector< std::vector<std::string> > rows;
-    std::vector< std::vector<std::string> > assign_rows;
-    rows.reserve(10);
-    assign_rows.reserve(1);
-    std::string assign_table;
-    if (split_vec.size() == 5) {
-        std::string table = remove_quote(split_vec[4].c_str(), '\'');
-        // 指定了table，查询是否存在
+    std::string key = namespace_ + "." + db;
+    if (!table.empty()) {
         std::string full_name = namespace_ + "." + db + "." + table;
         int64_t table_id = -1;
         if (factory->get_table_id(full_name, table_id) != 0) {
@@ -1366,9 +1417,6 @@ bool ShowHelper::_show_table_status(const SmartSocket& client, const std::vector
             return false;
         }
         assign_table = table;
-    } else if (split_vec.size() != 3) {
-        client->state = STATE_ERROR;
-        return false;
     }
 
     // 查看cache是否有效
@@ -3055,6 +3103,169 @@ bool ShowHelper::_show_instance_param(const SmartSocket& client, const std::vect
             rows.emplace_back(row);
         }
     }
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool ShowHelper::_show_engines(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if (client == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    fields.emplace_back(make_result_field("Engine", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Support", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Comment", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Transactions", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("XA", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Savepoints", MYSQL_TYPE_VARCHAR, 1024));
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    rows.reserve(10);
+    do {
+        std::vector<std::string> row;
+        rows.push_back({"InnoDB", "DEFAULT", "Supports transactions, row-level locking, and foreign keys",
+            "YES", "YES", "YES"});
+    } while (0);
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool ShowHelper::_show_charset(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if (client == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    fields.emplace_back(make_result_field("Charset", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Description", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Default collation", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Maxlen", MYSQL_TYPE_VARCHAR, 1024));
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    rows.reserve(10);
+    std::vector<std::string> row;
+    rows.push_back({"utf8", "UTF-8 Unicode", "utf8_general_ci", "3"});
+    rows.push_back({"gbk", "GBK Simplified Chinese", "gbk_chinese_ci", "2"});
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool ShowHelper::_show_index(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    // not-support yet: [WHERE expr]
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (client == nullptr || client->user_info == nullptr || factory == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+    // Make fields.
+    std::vector<ResultField> fields;
+    fields.reserve(15);
+    fields.emplace_back(make_result_field("Table", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Non_unique", MYSQL_TYPE_LONG, 10));
+    fields.emplace_back(make_result_field("Key_name", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Seq_in_index", MYSQL_TYPE_LONG, 10));
+    fields.emplace_back(make_result_field("Column_name", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Collation", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Cardinality", MYSQL_TYPE_LONG, 10));
+    fields.emplace_back(make_result_field("Sub_part", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Packed", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Null", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Index_type", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Comment", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Index_comment", MYSQL_TYPE_VARCHAR, 1024));
+
+    std::string db = client->current_db;
+    std::string table;
+    if (split_vec.size() == 4) {
+        std::string db_table = split_vec[3];
+        std::string::size_type position = db_table.find_first_of('.');
+        if (position == std::string::npos) {
+            // `table_name`
+            table = remove_quote(db_table.c_str(), '`');
+        } else {
+            // `db_name`.`table_name`
+            db = remove_quote(db_table.substr(0, position).c_str(), '`');
+            table = remove_quote(db_table.substr(position + 1,
+                    db_table.length() - position - 1).c_str(), '`');
+        }
+    } else if (split_vec.size() == 6) {
+        db = remove_quote(split_vec[5].c_str(), '`');
+        table = remove_quote(split_vec[3].c_str(), '`');
+    } else {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    std::string namespace_ = client->user_info->namespace_;
+    if (db == "information_schema") {
+        namespace_ = "INTERNAL";
+    }
+    std::string full_name = namespace_ + "." + db + "." + table;
+    int64_t table_id = -1;
+    if (factory->get_table_id(full_name, table_id) != 0) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    TableInfo info = factory->get_table_info(table_id);
+    std::map<int32_t, IndexInfo> field_index;
+    for (auto& index_id : info.indices) {
+        IndexInfo index_info = factory->get_index_info(index_id);
+    }
+    // Make rows.
+    std::vector<std::vector<std::string> > rows;
+    rows.reserve(info.indices.size());
+    uint32_t index_idx = 0;
+    for (auto& index_id : info.indices) {
+        IndexInfo index_info = factory->get_index_info(index_id);
+        if (index_info.index_hint_status == pb::IHS_DISABLE && index_info.state == pb::IS_DELETE_LOCAL) {
+            continue;
+        }
+        bool non_unique = index_info.type != pb::I_PRIMARY && index_info.type != pb::I_UNIQ;
+        std::string key_name = "PRIMARY";
+        if (index_info.type != pb::I_PRIMARY) {
+            std::vector<std::string> split_vec;
+            boost::split(split_vec, index_info.name,
+                         boost::is_any_of("."), boost::token_compress_on);
+            key_name = split_vec[split_vec.size() - 1];
+        }
+        for (size_t i = 0; i < index_info.fields.size(); ++i) {
+            rows.push_back({table, std::to_string(non_unique), key_name, std::to_string(i),
+                index_info.fields[i].short_name, "A", "2", "NULL", "NULL", "", "BTREE", "", ""});
+        }
+    }
+
     // Make mysql packet.
     if (_make_common_resultset_packet(client, fields, rows) != 0) {
         DB_FATAL_CLIENT(client, "Failed to make result packet.");

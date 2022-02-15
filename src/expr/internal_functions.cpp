@@ -725,6 +725,28 @@ ExprValue locate(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue instr(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+
+    for (auto s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    int begin_pos = 0;
+    ExprValue tmp(pb::INT32);
+    auto pos = input[0].get_string().find(input[1].get_string(), begin_pos);
+    if (pos != std::string::npos) {
+        tmp._u.int32_val = pos + 1;
+    } else {
+        tmp._u.int32_val = 0;
+    }
+
+    return tmp;
+}
+
 ExprValue substring_index(const std::vector<ExprValue>& input) {
     if (input.size() != 3) {
         return ExprValue::Null();

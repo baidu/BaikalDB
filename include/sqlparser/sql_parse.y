@@ -2359,6 +2359,11 @@ FunctionCallKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
+    | USER '(' ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "user";
+        $$ = fun;
+    }
     ;
 SumExpr:
     AVG '(' BuggyDefaultFalseDistinctOpt Expr')' {
@@ -2938,6 +2943,12 @@ Operators:
     }
     | Expr XOR Expr {
         $$ = FuncExpr::new_binary_op_node(FT_LOGIC_XOR, $1, $3, parser->arena);
+    }
+    | BINARY Expr {
+        $$ = $2;
+    }
+    | Expr COLLATE Expr {
+        $$ = $1;
     }
     ;
 
