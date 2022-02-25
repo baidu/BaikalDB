@@ -2359,11 +2359,6 @@ FunctionCallKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | USER '(' ')' {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "user";
-        $$ = fun;
-    }
     ;
 SumExpr:
     AVG '(' BuggyDefaultFalseDistinctOpt Expr')' {

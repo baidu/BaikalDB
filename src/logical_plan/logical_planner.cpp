@@ -1717,15 +1717,13 @@ int LogicalPlanner::create_common_subquery_expr(const parser::SubqueryExpr* item
                     row_node->set_num_children(_cur_sub_ctx->expr_params.row_filed_number);
                     for (int i = 0; i < _cur_sub_ctx->expr_params.row_filed_number; i++) {
                         pb::ExprNode* node = expr.add_nodes();
-                        node->set_node_type(pb::BOOL_LITERAL);
-                        node->set_col_type(pb::BOOL);
-                        node->mutable_derive_node()->set_bool_val(false);
+                        node->set_node_type(pb::NULL_LITERAL);
+                        node->set_col_type(pb::NULL_TYPE);
                     }
                 } else {
                     pb::ExprNode* node = expr.add_nodes();
-                    node->set_node_type(pb::BOOL_LITERAL);
-                    node->set_col_type(pb::BOOL);
-                    node->mutable_derive_node()->set_bool_val(false);
+                    node->set_node_type(pb::NULL_LITERAL);
+                    node->set_col_type(pb::NULL_TYPE);
                 }
             }
         }
