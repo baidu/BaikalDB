@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <unordered_set>
+#include <google/protobuf/descriptor.pb.h>
 #include <set>
 
 #include "schema_manager.h"
@@ -841,6 +842,16 @@ public:
         return false;
     }
 
+    bool check_field_is_compatible_type(pb::PrimitiveType src_type, pb::PrimitiveType target_type) {
+        int s = primitive_to_proto_type(src_type);
+        int t = primitive_to_proto_type(target_type);
+        if (s == t) return true;
+        if (s == FieldDescriptorProto::TYPE_SINT32 && t == FieldDescriptorProto::TYPE_SINT64) return true;
+        if (s == FieldDescriptorProto::TYPE_SINT64 && t == FieldDescriptorProto::TYPE_SINT32) return true;
+        if (s == FieldDescriptorProto::TYPE_UINT32 && t == FieldDescriptorProto::TYPE_UINT64) return true;
+        if (s == FieldDescriptorProto::TYPE_UINT64 && t == FieldDescriptorProto::TYPE_UINT32) return true;
+        return false;
+    }
     int get_index_state(int64_t table_id, int64_t index_id, pb::IndexState& index_state) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {

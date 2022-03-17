@@ -4715,7 +4715,7 @@ AsOrToOpt:
 
 ColumnPosOpt:
     {}
-    | FIRST ColumnName
+    | FIRST
     {}
     | AFTER ColumnName
     {}
@@ -4841,6 +4841,12 @@ AlterSpec:
             spec->set_list.push_back(assign, parser->arena);
         }
         spec->where = $5;
+    }
+    | MODIFY ColumnKwdOpt ColumnDef ColumnPosOpt
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_MODIFY_COLUMN;
+        spec->new_columns.push_back((ColumnDef*)$3, parser->arena);
         $$ = spec;
     }
     ;

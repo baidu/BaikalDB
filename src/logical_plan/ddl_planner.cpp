@@ -980,6 +980,30 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             return -1;
         } 
         field->set_field_name(spec->column_name.value);
+    } else if (spec->spec_type == parser::ALTER_SPEC_MODIFY_COLUMN && spec->new_columns.size() > 0) {
+        alter_request.set_op_type(pb::OP_MODIFY_FIELD);
+        int column_len = spec->new_columns.size();
+        if (column_len != 1) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "unsupported multi schema change";
+            return -1;
+        }
+        for (int idx = 0; idx < column_len; ++idx) {
+            parser::ColumnDef* column = spec->new_columns[idx];
+            if (column == nullptr) {
+                DB_WARNING("column is nullptr");
+                return -1;
+            }
+            if (0 != add_column_def(*table, column)) {
+                DB_WARNING("add column to table failed.");
+                return -1;
+            }
+        }
+        if (table->indexs_size() != 0) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "modify table column with index is not supported";
+            return -1;
+        }
     } else if (spec->spec_type == parser::ALTER_SPEC_RENAME_COLUMN) {
         alter_request.set_op_type(pb::OP_RENAME_FIELD);
         pb::FieldInfo* field = table->add_fields();

@@ -1168,10 +1168,34 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
             if (mem_field.field_name() == field_name) {
                 if (field.has_mysql_type()) {
+                    if (!check_field_is_compatible_type(mem_field.mysql_type(), field.mysql_type())) {
+                        // TODO 数据类型变更仅支持meta-only, 有损变更待支持
+                        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
+                                             "modify field data type unsupported lossy changes");
+                        return;
+                    }
                     mem_field.set_mysql_type(field.mysql_type());
+                }
+                if (field.has_can_null()) {
+                    // TODO NULL VALUE CHECK
+                    mem_field.set_can_null(field.can_null());
+                }
+                if (field.auto_increment() != mem_field.auto_increment()) {
+                    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
+                                         "modify field auto_increment unsupported");
+                    return;
+                }
+                if (field.has_default_value()) {
+                    mem_field.set_default_value(field.default_value());
+                    if (field.has_default_literal()) {
+                        mem_field.set_default_literal(field.default_literal());
+                    }
                 }
                 if (field.has_comment()) {
                     mem_field.set_comment(field.comment());
+                }
+                if (field.has_on_update_value()) {
+                    mem_field.set_on_update_value(field.on_update_value());
                 }
             }
         }
