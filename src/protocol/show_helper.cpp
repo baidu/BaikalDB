@@ -544,6 +544,11 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
     for (auto& index_id : info.indices) {
         IndexInfo index_info = factory->get_index_info(index_id);
         if (index_info.index_hint_status == pb::IHS_DISABLE && index_info.state == pb::IS_DELETE_LOCAL) {
+            if (++index_idx == info.indices.size()) { // trim ",\n" to "\n"
+                long curPos = oss.tellp();
+                oss.seekp(curPos - 2);
+                oss << "\n";
+            }
             continue;
         }
         if (index_info.is_global) {
