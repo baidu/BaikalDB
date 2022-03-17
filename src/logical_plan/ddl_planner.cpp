@@ -791,6 +791,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             return -1;
         }
     }
+    table.set_if_exist(!stmt->if_not_exist);
     return 0;
 }
 

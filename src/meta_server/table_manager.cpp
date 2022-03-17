@@ -203,7 +203,11 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
 
     if (_table_id_map.find(table_name) != _table_id_map.end()) {
         DB_WARNING("request table_name:%s already exist", table_name.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table already exist");
+        if (table_info.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table already exist");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
         return;
     }
 
