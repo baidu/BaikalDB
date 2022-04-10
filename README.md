@@ -20,7 +20,7 @@ baidu/BaikalDB is licensed under the Apache License 2.0
 * Thanks our friend team -- The Baidu TafDB team, who provide the space efficient snapshot scheme based on braft.
 * Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
 
-# WeiXin Group
+## WeiXin Group
 添加以下管理员加群，备注baikaldb
 
 <img src="./qrcode.jpeg" width="320" />
