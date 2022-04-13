@@ -394,6 +394,9 @@ void StateMachine::_print_query_time(SmartSocket client) {
         }
         if (stat_info->error_code != 1000) {
             sql_error << 1;
+            if (stat_info->error_code == 10004) {
+                exec_sql_error << 1;
+            }
         }
     }
 
