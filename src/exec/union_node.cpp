@@ -95,7 +95,12 @@ int UnionNode::open(RuntimeState* state) {
             if (batch_ptr->size() != 0) {
                 _sorter->add_batch(batch_ptr);
             }
+            runtime_state->inc_num_returned_rows(batch_ptr->size());
         } while (!eos);
+        state->set_num_affected_rows(state->num_affected_rows() + runtime_state->num_affected_rows());
+        state->set_num_scan_rows(state->num_scan_rows() + runtime_state->num_scan_rows());
+        state->set_num_filter_rows(state->num_filter_rows() + runtime_state->num_filter_rows());
+        state->region_count += runtime_state->region_count;
     }
     return 0;
 }

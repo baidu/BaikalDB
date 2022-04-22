@@ -264,7 +264,7 @@ bool AggFnCall::is_initialize(const std::string& key, MemRow* dst) {
 }
 
 // 聚合函数逻辑
-int AggFnCall::initialize(const std::string& key, int64_t& used_size, MemRow* dst) {
+int AggFnCall::initialize(const std::string& key, MemRow* dst) {
     ExprValue dst_val = dst->get_value(_tuple_id, _intermediate_slot_id);
     switch (_agg_type) {
         case COUNT_STAR:
@@ -310,7 +310,6 @@ int AggFnCall::initialize(const std::string& key, int64_t& used_size, MemRow* ds
                     dst->set_value(_tuple_id, _intermediate_slot_id, intermediate_val.val);
                 }
                 intermediate_val.is_assign = true;
-                used_size += intermediate_val.val.size();
             }
             return 0;
         }
@@ -335,7 +334,6 @@ int AggFnCall::initialize(const std::string& key, int64_t& used_size, MemRow* ds
                     // and第一次需要特殊处理
                     intermediate_val.is_assign = true;
                 }
-                used_size += intermediate_val.val.size();
             }
             return 0;
         }
@@ -353,7 +351,6 @@ int AggFnCall::initialize(const std::string& key, int64_t& used_size, MemRow* ds
                     dst->set_value(_tuple_id, _intermediate_slot_id, dst_val);
                 }
                 intermediate_val.is_assign = true;
-                used_size += intermediate_val.val.size();
             }
             return 0;
         }

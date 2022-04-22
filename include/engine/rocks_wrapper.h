@@ -208,6 +208,18 @@ public:
     }
     void begin_split_adjust_option();
     void stop_split_adjust_option();
+    void collect_rocks_options();
+    void adjust_option(std::map<std::string, std::string> new_options);
+    int get_rocks_statistic(uint64_t& level0_sst, uint64_t& pending_compaction_size) {
+        rocksdb::ColumnFamilyMetaData cf_meta;
+        _txn_db->GetColumnFamilyMetaData(get_data_handle(), &cf_meta);
+        if (cf_meta.levels.size() == 0) {
+            return -1;
+        }
+        level0_sst = cf_meta.levels[0].files.size();
+        _txn_db->GetIntProperty(get_data_handle(), "rocksdb.estimate-pending-compaction-bytes", &pending_compaction_size);
+        return 0;
+    }
 private:
 
     RocksWrapper();
@@ -231,5 +243,8 @@ private:
     bvar::Adder<int64_t>     _mata_cf_remove_range_count;
 
     std::atomic<int32_t> _split_num;
+    bthread::Mutex _options_mutex;
+    std::unordered_map<std::string, std::string> _rocks_options;
+    std::map<std::string, std::string> _defined_options;
 };
 }

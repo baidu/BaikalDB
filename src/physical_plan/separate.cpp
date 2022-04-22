@@ -40,7 +40,7 @@
 
 namespace baikaldb {
 int Separate::analyze(QueryContext* ctx) {
-    if (ctx->is_explain) {
+    if (ctx->is_explain && ctx->explain_type != SHOW_PLAN) {
         return 0;
     }
     ExecNode* plan = ctx->root;
@@ -130,6 +130,35 @@ int Separate::separate_union(QueryContext* ctx) {
     return 0;
 }
 
+int Separate::create_full_export_node(ExecNode* plan) {
+    std::vector<ExecNode*> scan_nodes;
+    plan->get_node(pb::SCAN_NODE, scan_nodes);
+    PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
+    LimitNode* limit_node = static_cast<LimitNode*>(plan->get_node(pb::LIMIT_NODE));
+    std::unique_ptr<ExecNode> export_node(new (std::nothrow) FullExportNode);
+    if (export_node == nullptr) {
+        DB_WARNING("new export node fail");
+        return -1;
+    }
+    pb::PlanNode pb_fetch_node;
+    pb_fetch_node.set_node_type(pb::FULL_EXPORT_NODE);
+    pb_fetch_node.set_limit(-1);
+    export_node->init(pb_fetch_node);
+    std::map<int64_t, pb::RegionInfo> region_infos =
+            static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
+    export_node->set_region_infos(region_infos);
+    if (limit_node == nullptr) {
+        export_node->add_child(packet_node->children(0));
+        packet_node->clear_children();
+        packet_node->add_child(export_node.release());
+    } else {
+        export_node->add_child(limit_node->children(0));
+        limit_node->clear_children();
+        limit_node->add_child(export_node.release());
+    }
+    return 0;
+}
+
 int Separate::separate_select(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     std::vector<ExecNode*> join_nodes;
@@ -137,32 +166,7 @@ int Separate::separate_select(QueryContext* ctx) {
     std::vector<ExecNode*> apply_nodes;
     plan->get_node(pb::APPLY_NODE, apply_nodes);
     if (ctx->is_full_export) {
-        std::vector<ExecNode*> scan_nodes;
-        plan->get_node(pb::SCAN_NODE, scan_nodes);
-        PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
-        LimitNode* limit_node = static_cast<LimitNode*>(plan->get_node(pb::LIMIT_NODE));
-        std::unique_ptr<ExecNode> export_node(new (std::nothrow) FullExportNode);
-        if (export_node == nullptr) {
-            DB_WARNING("new export node fail");
-            return -1;
-        }
-        pb::PlanNode pb_fetch_node;
-        pb_fetch_node.set_node_type(pb::FULL_EXPORT_NODE);
-        pb_fetch_node.set_limit(-1);
-        export_node->init(pb_fetch_node);
-        std::map<int64_t, pb::RegionInfo> region_infos =
-                static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
-        export_node->set_region_infos(region_infos);
-        if (limit_node == nullptr) {
-            export_node->add_child(packet_node->children(0));
-            packet_node->clear_children();
-            packet_node->add_child(export_node.release());
-        } else {
-            export_node->add_child(limit_node->children(0));
-            limit_node->clear_children();
-            limit_node->add_child(export_node.release());
-        }
-        return 0;
+        return create_full_export_node(plan);
     }
     if (join_nodes.size() == 0 && apply_nodes.size() == 0) {
         return separate_simple_select(ctx, plan);

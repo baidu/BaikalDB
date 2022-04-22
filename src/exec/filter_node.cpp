@@ -20,6 +20,7 @@
 #include "runtime_state.h"
 #include "query_context.h"
 #include "row_expr.h"
+#include "scan_node.h"
 #include "rapidjson/rapidjson.h"
 #include "rapidjson/reader.h"
 #include "rapidjson/writer.h"
@@ -29,16 +30,18 @@
 
 namespace baikaldb {
 
-DECLARE_int64(store_row_number_to_check_memory);
+DECLARE_bool(open_nonboolean_sql_forbid);
+DECLARE_bool(open_nonboolean_sql_statistics);
 
 int FilterNode::init(const pb::PlanNode& node) {
-    int ret = 0;
-    ret = ExecNode::init(node);
+    int ret = ExecNode::init(node);
     if (ret < 0) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
-    for (auto& expr : node.derive_node().filter_node().conjuncts()) {
+    pb::FilterNode filter_node;
+    filter_node.ParseFromString(node.derive_node().filter_node());
+    for (auto& expr : filter_node.conjuncts()) {
         ExprNode* conjunct = nullptr;
         ret = ExprNode::create_tree(expr, &conjunct);
         if (ret < 0) {
@@ -47,6 +50,17 @@ int FilterNode::init(const pb::PlanNode& node) {
         }
         _conjuncts.emplace_back(conjunct);
     }
+    for (auto& expr : node.derive_node().raw_filter_node().conjuncts()) {
+        ExprNode* conjunct = nullptr;
+        ret = ExprNode::create_tree(expr, &conjunct);
+        if (ret < 0) {
+            //如何释放资源
+            return ret;
+        }
+        _conjuncts.emplace_back(conjunct);
+    }
+
+    _pb_node.mutable_derive_node()->clear_raw_filter_node();
     return 0;
 }
 
@@ -114,7 +128,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
     };
     // has eq, replace all other exprs can be constant
     if (preds.eq_preds.size() > 0) {
-        DB_NOTICE("enter eq_preds");
+        DB_DEBUG("enter eq_preds");
         ExprValue eq;
         if (preds.eq_preds[0]->children(0)->is_row_expr()) {
             int idx = get_slot_ref_idx(preds.eq_preds[0]->children(0));
@@ -142,7 +156,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
     }
     // 多个in条件合并,只有in条件都是常量才处理
     if (preds.in_preds.size() > 0) {
-        DB_NOTICE("enter in_preds");
+        DB_DEBUG("enter in_preds");
         // 取交集
         std::map<std::string, ExprNode*> and_map;
         std::map<std::string, ExprNode*> out_map;
@@ -271,7 +285,7 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
                 }
             }
         }
-        DB_NOTICE("in size:%lu", preds.in_preds[0]->children_size() -1);
+        DB_DEBUG("in size:%lu", preds.in_preds[0]->children_size() -1);
 
         return 0;
     }
@@ -335,6 +349,15 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         if (ret < 0) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
+        }
+        //非bool型表达式判断
+        if (expr->col_type() != pb::BOOL) {
+            ExprNode::_s_non_boolean_sql_cnts << 1;
+            DB_WARNING("current sql [%s] is not bool type, current exprnode_type is [%s]", 
+                ctx->sql.c_str(), pb::ExprNodeType_Name(expr->node_type()).c_str());
+            if (FLAGS_open_nonboolean_sql_forbid) {
+                return -1;
+            }
         }
         // TODO 除了not in外，其他计算null的地方在index_selector判断了，应该统一处理
         if (expr->node_type() == pb::NOT_PREDICATE) {
@@ -525,30 +548,52 @@ int FilterNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
         return ret;
     }
-
-    std::vector<int64_t>& scan_indices = state->scan_indices();
+    bool check_memory = false;
+    int64_t expr_used_size = 0;
+    if (_conjuncts.size() > 10000) {
+        check_memory = true;
+    }
     for (auto conjunct : _conjuncts) {
-        //如果该条件已经被扫描使用的index包含，则不需要再过滤该条件
-        // TODO 后续baikaldb直接过滤掉条件，不需要这个了
-        if (conjunct->contained_by_index(scan_indices)) {
-            continue;
-        }
         ret = conjunct->open();
         if (ret < 0) {
             DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
+        if (check_memory) {
+            expr_used_size += conjunct->used_size();
+        }
         _pruned_conjuncts.emplace_back(conjunct);
+    }
+    if (check_memory && 0 != state->memory_limit_exceeded(std::numeric_limits<int>::max(), expr_used_size)) {
+        return -1;
     }
     return 0;
 }
 
 void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
-    auto filter_node = pb_node->mutable_derive_node()->mutable_filter_node();
-    filter_node->clear_conjuncts();
-    for (auto expr : _pruned_conjuncts) {
-        ExprNode::create_pb_expr(filter_node->add_conjuncts(), expr);
+    std::vector<ExecNode*> scan_nodes;
+    ScanNode* scan_node = nullptr;
+    get_node(pb::SCAN_NODE, scan_nodes);
+    if (scan_nodes.size() == 1) {
+        scan_node = static_cast<ScanNode*>(scan_nodes[0]);
+    }
+    if (!_is_explain) {
+        if (scan_node != nullptr && scan_node->current_use_global_backup()) {
+            pb::FilterNode filter_node;
+            for (const auto& conjunct : _raw_filter_node.conjuncts_learner()) {
+                auto c = filter_node.add_conjuncts();
+                c->CopyFrom(conjunct);
+            }
+            std::string filter_string;
+            filter_node.SerializeToString(&filter_string);
+            pb_node->mutable_derive_node()->set_filter_node(filter_string);
+        } else {
+            pb_node->mutable_derive_node()->set_filter_node(_filter_node);
+        }
+    } else {
+        auto filter_node = pb_node->mutable_derive_node()->mutable_raw_filter_node();
+        filter_node->CopyFrom(_raw_filter_node);
     }
 }
 
@@ -604,7 +649,7 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         } else {
             state->inc_num_filter_rows();
             ++where_filter_cnt;
-            memory_limit_release(state, row.get());
+            state->memory_limit_release(state->num_scan_rows(), row->used_size());
         }
         if (reached_limit()) {
             DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
@@ -614,13 +659,6 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         _child_row_batch.next();
     }
     return 0;
-}
-
-void FilterNode::memory_limit_release(RuntimeState* state, MemRow* row) {
-    if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
-        state->memory_limit_release(row->used_size());
-        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), row->used_size());
-    }
 }
 
 void FilterNode::remove_additional_predicate(std::vector<ExprNode*>& input_exprs) {
@@ -645,6 +683,8 @@ void FilterNode::remove_additional_predicate(std::vector<ExprNode*>& input_exprs
     }
     _pruned_conjuncts.clear();
     _child_row_batch.clear();
+    _raw_filter_node.Clear();
+    _filter_node.clear();
     _child_row_idx = 0;
     _child_eos = false;
 }

@@ -30,7 +30,6 @@ DEFINE_int64(qos_reject_timeout_s,           30*60,  "qos_reject_timeout_s, defa
 DEFINE_int64(qos_reject_max_scan_ratio,      50,     "qos_reject_max_scan_ratio, default: 50%");
 DEFINE_int64(qos_reject_growth_multiple,     100,    "qos_reject_growth_multiple, default: 100倍");
 DEFINE_int64(qos_need_reject,                0,      "qos_need_reject, default: 0");
-DEFINE_string(sign_blacklist,                "",     "sign blacklist");
 
 // need_statistics: 超过最小超额令牌时，不计入统计信息
 int64_t TokenBucket::consume(int64_t expect_tokens, int64_t* expire_time, bool* need_statistics) {
@@ -285,71 +284,6 @@ void QosReject::wheather_need_reject() {
         }
     } 
 }
-
-void QosReject::update_blacklist() {
-    std::set<uint64_t> cur_blacklist;
-    if (!FLAGS_sign_blacklist.empty()) {
-        std::vector<std::string> vec;
-        boost::split(vec, FLAGS_sign_blacklist, boost::is_any_of(","));
-        for (auto& sign : vec) {
-            std::string sign_str = string_trim(sign);
-            cur_blacklist.insert(atoll(sign_str.c_str()));
-        }
-    } 
-
-    if (cur_blacklist.empty() && _last_blacklist.empty()) {
-        return;
-    }
-
-    std::set<uint64_t> clear_list;
-    std::set<uint64_t> set_list;
-    
-    for (uint64_t sign : _last_blacklist) {
-        if (cur_blacklist.find(sign) != cur_blacklist.end()) {
-            clear_list.insert(sign);
-        }
-    }
-
-    for (uint64_t sign : cur_blacklist) {
-        if (_last_blacklist.find(sign) != _last_blacklist.end()) {
-            set_list.insert(sign);
-        }
-    }
-
-    if (!clear_list.empty()) {
-        StoreQos::get_instance()->update_blacklist(clear_list, true);
-    }
-
-    if (!set_list.empty()) {
-        StoreQos::get_instance()->update_blacklist(set_list, false);
-    }
-
-    _last_blacklist.clear();
-    _last_blacklist = cur_blacklist;
-}
-
-void StoreQos::update_blacklist(const std::set<uint64_t>& signs, const bool is_clear) {
-    DoubleBufQos::ScopedPtr ptr;
-    if (_sign_sqlqos_map.Read(&ptr) != 0) {
-        return;
-    }
-    if (ptr->empty()) {
-        DB_WARNING("sign sqlqos map is empty");
-        return;
-    }
-
-    for (const auto& sign : signs) {
-        auto iter = ptr->find(sign);
-        if (iter != ptr->end()) {
-            if (is_clear) {
-                iter->second->clear_blacklist();
-            } else {
-                iter->second->set_blacklist();
-            }
-        }
-    }
-} 
-
 
 void StoreQos::token_bucket_modify() {
     int64_t max_token        = FLAGS_max_tokens_per_second; // 最大qps限制

@@ -124,6 +124,10 @@ public:
         return 0;
     }
 
+    int64_t used_size() override {
+        return sizeof(*this) + _value.size();
+    }
+
     virtual bool is_place_holder() {
         return _is_place_holder;
     }

@@ -83,8 +83,8 @@ int StreamReceiver::on_received_messages(brpc::StreamId id,
             if (_file_num == 1) {
                 _meta_file_streaming.flush();
                 _data_file_streaming.flush();
-                _status = (!_meta_file_streaming.bad() && !_data_file_streaming.bad()) ? 
-                    StreamState::SS_SUCCESS : StreamState::SS_FAIL;
+                _status = (!_meta_file_streaming.bad() && !_data_file_streaming.bad()) ?
+                          pb::StreamState::SS_SUCCESS : pb::StreamState::SS_FAIL;
             }
         } else {
             break;
@@ -122,7 +122,7 @@ int StreamReceiver::on_received_messages(brpc::StreamId id,
             _meta_file_streaming.flush();
             _data_file_streaming.flush();
             _status = (!_meta_file_streaming.bad() && !_data_file_streaming.bad()) ?
-                StreamState::SS_SUCCESS : StreamState::SS_FAIL;
+                      pb::StreamState::SS_SUCCESS : pb::StreamState::SS_FAIL;
         }
         break;
     }

@@ -373,6 +373,7 @@ int ApplyNode::loop_hash_apply(RuntimeState* state) {
     _outer_iter = _outer_tuple_data.begin();
 
     std::vector<MemRow*> outer_tuple_data;
+    outer_tuple_data.reserve(get_loop_num());
     while (_outer_iter != _outer_tuple_data.end() && outer_tuple_data.size() < get_loop_num()) {
         outer_tuple_data.emplace_back(*_outer_iter);
         _outer_iter++;
@@ -520,7 +521,7 @@ int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
     _inner_node->close(state);
 
     _loops++;
-    DB_WARNING("fetcher_inner_table_data, loops:%d, outer:%ld, inner:%ld, time_cost:%ld",
+    DB_WARNING("fetcher_inner_table_data, loops:%lu, outer:%ld, inner:%ld, time_cost:%ld",
                _loops,  outer_tuple_data.size(), inner_tuple_data.size(), time_cost.get_time());
     return 0;
 }
@@ -732,11 +733,12 @@ int ApplyNode::get_next_via_loop_outer_hash_map(RuntimeState* state, RowBatch* b
 
         // construct outer
         if (_outer_iter == _outer_tuple_data.end()) {
-            DB_WARNING("when join, outer iter is end, loops:%d", _loops);
+            DB_WARNING("when join, outer iter is end, loops:%lu", _loops);
             *eos = true;
             return 0;
         }
         std::vector<MemRow*> outer_tuple_data;
+        outer_tuple_data.reserve(get_loop_num());
         while (_outer_iter != _outer_tuple_data.end() && outer_tuple_data.size() < get_loop_num()) {
             outer_tuple_data.emplace_back(*_outer_iter);
             _outer_iter++;

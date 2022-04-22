@@ -43,13 +43,13 @@ int IndexDDLManagerNode::open(RuntimeState* state) {
                     state->txn_id, state->log_id());
         return -1;
     }
+    ON_SCOPE_EXIT(([this, state]() {
+        state->memory_limit_release_all();
+    }));
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);
     auto limit = scan_node->get_limit();
-    int64_t router_index_id = scan_node->router_index_id();
     int64_t main_table_id = scan_node->table_id();
-    if (router_index_id == main_table_id || scan_node->covering_index()) {
-        ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT_FOR_UPDATE);
-    }
+    ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT_FOR_UPDATE);
     if (ret < 0) {
         DB_WARNING("task_%s select manager fetcher manager node open fail, txn_id: %lu, log_id:%lu", 
                 _task_id.c_str(), state->txn_id, state->log_id());
@@ -126,11 +126,8 @@ int IndexDDLManagerNode::open(RuntimeState* state) {
                     if (max_pk_key.data() > max_pk_str) {
                         DB_DEBUG("get max pk key %s", str_to_hex(max_pk_key.data()).c_str());
                         max_pk_str = max_pk_key.data();
-                        if (record->encode(max_record) == -1) {
-                            DB_FATAL("task_%s encode error.", _task_id.c_str());
-                            return -1;
-                        }
                     }
+                    state->ddl_pk_key_is_full = max_pk_key.get_full();
                 }
 
             }

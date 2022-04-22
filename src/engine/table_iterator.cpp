@@ -112,6 +112,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     int right_primary_field_cnt = -1;
 
     if (_idx_type == pb::I_KEY) {
+        // region_id+index_id+索引字段+主键字段，这里考虑了把主键字段编码进来的情况，baikaldb侧目前未实现
         left_primary_field_cnt = std::max(0, (range.left_field_cnt - col_cnt));
         right_primary_field_cnt = std::max(0, (range.right_field_cnt - col_cnt));
     }
@@ -131,8 +132,8 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
                 return -1;
             }
         }
-    } else if (range.left_key) {
-        _start.append_index(*range.left_key);
+    } else if (range.left_key.size() > 0) {
+        _start.append_index(range.left_key);
     } else {
         //没有指定left bound时，forward遍历从seek region+table开始，backward遍历到左边界停止
         _left_open = false;
@@ -154,8 +155,8 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
                 return -1;
             }
         }
-    } else if (range.right_key) {
-        _end.append_index(*range.right_key);
+    } else if (range.right_key.size() > 0) {
+        _end.append_index(range.right_key);
     } else {
         _right_open = false;
     }

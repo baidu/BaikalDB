@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+#include <boost/filesystem.hpp>
 #include "backup.h"
 #include "region.h"
 
@@ -382,37 +382,58 @@ void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
     const pb::BackupRequest* request, pb::BackupResponse* response) {
 
     BackupInfo backup_info;
-    backup_info.meta_info.path = std::to_string(_region_id) + ".upload.meta.sst";
-    backup_info.data_info.path = std::to_string(_region_id) + ".upload.data.sst";
+    // path加个随机数，防多个sst冲突
+    int64_t rand = butil::gettimeofday_us() + butil::fast_rand();
+    backup_info.meta_info.path = std::to_string(_region_id) + "." + std::to_string(rand) + ".upload.meta.sst";
+    backup_info.data_info.path = std::to_string(_region_id) + "." + std::to_string(rand) + ".upload.data.sst";
     std::shared_ptr<StreamReceiver> receiver(new StreamReceiver);
     if (!receiver->set_info(backup_info)) {
         DB_WARNING("region_%ld set backup info error.", _region_id);
         return;
     }
+
+    int64_t row_size = request->row_size(); // 需要调整的num_table_lines
+    int64_t data_sst_to_process_size = request->data_sst_to_process_size();
+    if (data_sst_to_process_size > 0) {
+        receiver->set_only_data_sst(data_sst_to_process_size);
+    }
+
     brpc::StreamId sd;
     brpc::StreamOptions stream_options;
     stream_options.handler = receiver.get();
     stream_options.max_buf_size = FLAGS_streaming_max_buf_size;
-    stream_options.idle_timeout_ms = FLAGS_streaming_idle_timeout_ms;
+    stream_options.idle_timeout_ms = FLAGS_streaming_idle_timeout_ms; 
     if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
         cntl->SetFailed("Fail to accept stream");
         DB_WARNING("fail to accept stream.");
         return;
     }
-
+    response->set_streaming_id(sd);
+    DB_WARNING("region_id: %ld, data sst size: %ld, path: %s remote_side: %s, stream_id: %lu",
+               _region_id, data_sst_to_process_size, backup_info.data_info.path.c_str(),
+               butil::endpoint2str(cntl->remote_side()).c_str(), sd);
     //async
     if (auto region_ptr = _region.lock()) {
+        brpc::StreamId id = request->streaming_id();
         Bthread streaming_work{&BTHREAD_ATTR_NORMAL};
         streaming_work.run(
-            [this, region_ptr, ingest_store_latest_sst, sd, receiver, backup_info]() {
-                upload_sst_info_streaming(sd, receiver, ingest_store_latest_sst, backup_info, region_ptr);
+            [this, region_ptr, ingest_store_latest_sst, data_sst_to_process_size, sd, receiver, backup_info, row_size, id]() {
+                int ret = upload_sst_info_streaming(sd, receiver, ingest_store_latest_sst,
+                        data_sst_to_process_size, backup_info, region_ptr, id);
+                if (ret == 0 && row_size > 0) {
+                    region_ptr->add_num_table_lines(row_size);
+                }
+                region_ptr->update_streaming_result(sd, ret == 0 ? pb::StreamState::SS_SUCCESS :
+                                                        pb::StreamState::SS_FAIL);
             }
         );
     }
 }
 int Backup::upload_sst_info_streaming(
     brpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
-    bool ingest_store_latest_sst, const BackupInfo& backup_info, SmartRegion region_ptr) {
+    bool ingest_store_latest_sst, int64_t data_sst_to_process_size, const BackupInfo& backup_info,
+    SmartRegion region_ptr, brpc::StreamId client_sd) {
+    TimeCost time_cost;
     region_ptr->_multi_thread_cond.increase();
     ON_SCOPE_EXIT([region_ptr]() {
         region_ptr->_multi_thread_cond.decrease_signal();
@@ -425,36 +446,52 @@ int Backup::upload_sst_info_streaming(
                 std::remove(backup_info.meta_info.path.c_str());
                 }));
 
-    while (receiver->get_status() == StreamReceiver::StreamState::SS_INIT) {
+    while (receiver->get_status() == pb::StreamState::SS_INIT) {
         bthread_usleep(100 * 1000);
-        DB_WARNING("waiting receiver status chanege region_%lu.", _region_id);
+        DB_WARNING("waiting receiver status change region_%lu, stream_id: %lu", _region_id, sd);
     }
     auto streaming_status = receiver->get_status();
-    if (streaming_status == StreamReceiver::StreamState::SS_FAIL) {
+    brpc::StreamClose(sd);
+    receiver->wait();
+    if (streaming_status == pb::StreamState::SS_FAIL) {
         DB_WARNING("streaming error.");
         return -1;
     }
-    brpc::StreamClose(sd);
-    receiver->wait();
     //设置禁写，新数据写入sst.
-
+    /*
     region_ptr->set_disable_write();
     ON_SCOPE_EXIT(([this, region_ptr]() {
         region_ptr->reset_allow_write();
     }));
+
     int ret = region_ptr->_real_writing_cond.timed_wait(FLAGS_disable_write_wait_timeout_us * 10);
     if (ret != 0) {
         DB_FATAL("upload real_writing_cond wait timeout, region_id: %ld", _region_id);
         return -1;
     }
+    */
+    if (data_sst_to_process_size > 0) {
+        if (boost::filesystem::exists(boost::filesystem::path(backup_info.data_info.path))) {
+            int64_t data_sst_size = boost::filesystem::file_size(boost::filesystem::path(backup_info.data_info.path));
+            if (data_sst_size != data_sst_to_process_size) {
+                DB_FATAL("region_id: %ld, local sst data diff with remote, %ld vs %ld", 
+                    _region_id, data_sst_size, data_sst_to_process_size);
+                return -1;
+            }
+        } else {
+            DB_FATAL("region_id: %ld, has no data sst, path: %s", _region_id, backup_info.data_info.path.c_str());
+            return -1;
+        }
+    }
 
-    ret = region_ptr->ingest_sst(backup_info.data_info.path, backup_info.meta_info.path);
+    int ret = region_ptr->ingest_sst(backup_info.data_info.path, backup_info.meta_info.path);
     if (ret != 0) {
         DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
         return -1;
     }
 
-    DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d]", _region_id, int(ingest_store_latest_sst));
+    DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d] data sst size [%ld], time_cost [%ld]", 
+        _region_id, int(ingest_store_latest_sst), data_sst_to_process_size, time_cost.get_time());
     if (!ingest_store_latest_sst) {
         DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
         return 0;

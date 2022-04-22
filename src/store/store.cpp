@@ -21,6 +21,8 @@
 #include <boost/algorithm/string.hpp>
 #include <gflags/gflags.h>
 #include "rocksdb/utilities/memory_util.h"
+#include "rocksdb/iostats_context.h"
+#include "rocksdb/perf_context.h"
 #include "mut_table_key.h"
 #include "closure.h"
 #include "my_raft_log_storage.h"
@@ -31,6 +33,7 @@
 #include "mut_table_key.h"
 #include "my_raft_log_storage.h"
 //#include <jemalloc/jemalloc.h>
+#include "qos.h"
 
 namespace baikaldb {
 DECLARE_int64(store_heart_beat_interval_us);
@@ -72,6 +75,10 @@ DEFINE_int64(rocks_cf_flush_remove_range_times, 10, "rocks_cf_flush_remove_range
 DEFINE_int64(rocks_force_flush_max_wals, 100, "rocks_force_flush_max_wals, default(100)");
 DEFINE_string(network_segment, "", "network segment of store set by user");
 DEFINE_string(container_id, "", "container_id for zoombie instance");
+DEFINE_int32(rocksdb_perf_level, rocksdb::kDisable, "rocksdb_perf_level");
+DEFINE_bool(stop_ttl_data, false, "stop ttl data");
+
+BRPC_VALIDATE_GFLAG(rocksdb_perf_level, brpc::NonNegativeInteger);
 
 Store::~Store() {
     bthread_mutex_destroy(&_param_mutex);
@@ -166,12 +173,6 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     for (auto& region_info : region_infos) {
         DB_WARNING("region_info:%s when init store", region_info.ShortDebugString().c_str());
         int64_t region_id = region_info.region_id();
-        if (region_info.version() == 0) {
-            DB_WARNING("region_id: %ld version is 0, dropped. region_info: %s",
-                    region_id, region_info.ShortDebugString().c_str() );
-            RegionControl::clear_all_infos_for_region(region_id);
-            continue;
-        }
         //construct region
         braft::GroupId groupId(std::string("region_")
                 + boost::lexical_cast<std::string>(region_id));
@@ -209,6 +210,15 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         region->set_restart(true);
         set_region(region);
         init_region_ids.push_back(region_id);
+        // version=0可能是分裂后addpeer的，通用延迟删除
+        if (region_info.version() == 0) {
+            Bthread bth(&BTHREAD_ATTR_SMALL);
+            std::function<void()> check_region_legal_fun = 
+                [this, region_id] () { check_region_legal_complete(region_id);};
+            bth.run(check_region_legal_fun);
+            DB_WARNING("init region verison is 0, should check region legal. region_id: %ld", 
+                        region_id);
+        }
     }
     int64_t new_region_process_time = step_time_cost.get_time();
     ret = _meta_writer->parse_doing_snapshot(doing_snapshot_regions);
@@ -447,6 +457,25 @@ void Store::health_check(google::protobuf::RpcController* controller,
                   google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     response->set_errcode(pb::SUCCESS);
+
+    // 判断是否BUSY
+    int64_t qps = RocksdbVars::get_instance()->rocksdb_get_time_cost_qps.get_value(bvar::FLAGS_bvar_dump_interval) + 
+                  RocksdbVars::get_instance()->rocksdb_seek_time_cost_qps.get_value(bvar::FLAGS_bvar_dump_interval) + 
+                  RocksdbVars::get_instance()->rocksdb_scan_time_cost_qps.get_value(bvar::FLAGS_bvar_dump_interval) / FLAGS_get_token_weight;
+    int64_t fetch_token_qps = RocksdbVars::get_instance()->qos_fetch_tokens_qps.get_value(bvar::FLAGS_bvar_dump_interval);
+    bool match_reject_condition = StoreQos::get_instance()->match_reject_condition();
+    static TimeCost last_print_time;
+    // 三个条件满足其一就认为是BUSY
+    if (match_reject_condition || 
+        (qps * 100) > (FLAGS_max_tokens_per_second * 70) || 
+        (fetch_token_qps * 100) > (FLAGS_max_tokens_per_second * 70)) {
+        if (last_print_time.get_time() > 60 * 1000 * 1000LL) {
+            DB_WARNING("qps: %ld, fetch_token_qps: %ld, match_reject_condition: %d, store busy", 
+                    qps, fetch_token_qps, match_reject_condition);
+            last_print_time.reset();
+        }
+        response->set_errcode(pb::STORE_BUSY);
+    }
 }
 
 void Store::async_apply_log_entry(google::protobuf::RpcController* controller,
@@ -482,6 +511,18 @@ void Store::query(google::protobuf::RpcController* controller,
                   pb::StoreRes* response,
                   google::protobuf::Closure* done) {
     bthread_usleep(20);
+    static thread_local TimeCost last_perf;
+    if (FLAGS_rocksdb_perf_level > rocksdb::kDisable && last_perf.get_time() > 1000 * 1000) {
+        DB_WARNING("perf_context:%s", rocksdb::get_perf_context()->ToString(true).c_str());
+        DB_WARNING("iostats_context:%s", rocksdb::get_iostats_context()->ToString(true).c_str());
+        rocksdb::SetPerfLevel((rocksdb::PerfLevel)FLAGS_rocksdb_perf_level);
+        rocksdb::get_perf_context()->Reset();
+        rocksdb::get_iostats_context()->Reset();
+        last_perf.reset();
+    }
+    if (FLAGS_rocksdb_perf_level == rocksdb::kDisable) {
+        rocksdb::SetPerfLevel(rocksdb::kDisable);
+    }
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl =
             static_cast<brpc::Controller*>(controller);
@@ -911,7 +952,9 @@ void Store::ttl_remove_thread() {
 
         if (time.get_time() > FLAGS_ttl_remove_interval_s * 1000 * 1000LL) {
             traverse_copy_region_map([](const SmartRegion& region) {
-                region->ttl_remove_expired_data();
+                if (!FLAGS_stop_ttl_data) {
+                    region->ttl_remove_expired_data();
+                }
             });
             time.reset();
         }
@@ -1294,6 +1337,10 @@ void Store::whether_split_thread() {
                 DB_WARNING("region_id: %ld has be removed", region_ids[i]);
                 continue;
             }
+            if (_factory->is_in_fast_importer(ptr_region->get_table_id())) {
+                DB_DEBUG("region_id: %ld is in fast importer", region_ids[i]);
+                continue;
+            }
             //分区region，不分裂、不merge
             //if (ptr_region->get_partition_num() > 1) {
             //    DB_NOTICE("partition region %ld not split.", region_ids[i]);
@@ -1406,8 +1453,9 @@ void Store::start_db_statistics() {
             boost::split(items, str, boost::is_any_of("\n"));
             for (auto& item : items) {
                 (void)item;
-                SELF_TRACE("statistics: %s", item.c_str());
+                DB_WARNING("statistics: %s", item.c_str());
             }
+            db_options.statistics->Reset();
             monitor_memory();
             print_properties("rocksdb.num-immutable-mem-table");
             print_properties("rocksdb.mem-table-flush-pending");
@@ -1433,7 +1481,7 @@ void Store::start_db_statistics() {
                     cost.get_time(), con.snapshot_load_concurrency.count(),
                     con.recieve_add_peer_concurrency.count(), con.add_peer_concurrency.count(),
                     con.service_write_concurrency.count());
-            bthread_usleep(30 * 1000 * 1000);
+            bthread_usleep(60 * 1000 * 1000);
         }
      };
     bth.run(dump_options);
@@ -1538,7 +1586,13 @@ void Store::construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
     }
     //构造instance信息
     pb::InstanceInfo* instance_info = request.mutable_instance_info();
-    instance_info->set_address(_address);
+    // init_before_listen的心跳不加入meta
+    // 解决迁移后老实例没删掉问题
+    if (count == 1) {
+        instance_info->set_address("");
+    } else {
+        instance_info->set_address(_address);
+    }
     instance_info->set_physical_room(_physical_room);
     instance_info->set_resource_tag(_resource_tag);
     instance_info->set_dml_latency(dml_time_cost.latency(60));
@@ -1581,6 +1635,7 @@ void Store::construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
 void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& response) {
     {
         BAIDU_SCOPED_LOCK(_param_mutex);
+        std::unordered_map<std::string, std::string> rocks_options;
         for (auto& param : response.instance_params()) {
             for (auto& item : param.params()) {
                 if (!item.is_meta_param()) {
@@ -1592,6 +1647,7 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
         for (auto& iter : _param_map) {
             update_param(iter.first, iter.second);
         }
+        RocksWrapper::get_instance()->adjust_option(_param_map);
     }
     std::map<int64_t, int64_t> reverse_index_map;
     for (auto& schema_info : response.schema_change_info()) {
@@ -1791,6 +1847,7 @@ void Store::backup(google::protobuf::RpcController* controller,
     int64_t region_id = request->region_id();
     SmartRegion region = get_region(region_id);
     if (region == nullptr) {
+        response->set_errcode(pb::REGION_NOT_EXIST);
         DB_WARNING("backup no region in store, region_id: %ld", region_id);
         return;
     }
@@ -1801,8 +1858,44 @@ void Store::backup(google::protobuf::RpcController* controller,
         DB_NOTICE("backup upload sst region[%ld]", region_id);
         region->process_upload_sst_streaming(cntl, request->ingest_store_latest_sst(), 
             request, response);
+    } else if (request->backup_op() == pb::BACKUP_QUERY_PEERS) {
+        region->process_query_peers(cntl, request, response);
+    } else if (request->backup_op() == pb::BACKUP_QUERY_STREAMING){
+        region->process_query_streaming_result(cntl, request, response);
     } else {
         DB_WARNING("unknown sst backup streaming op.");
     }
+}
+
+void Store::get_rocks_statistic(google::protobuf::RpcController* controller,
+                         const pb::RocksStatisticReq* request,
+                         pb::RocksStatisticRes* response,
+                         google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    _multi_thread_cond.increase();
+    ON_SCOPE_EXIT([this]() {
+        _multi_thread_cond.decrease_signal();
+    });
+    uint64_t level0_ssts = 0;
+    uint64_t pending_compaction_size = 0;
+    int ret = RocksWrapper::get_instance()->get_rocks_statistic(level0_ssts, pending_compaction_size);
+    if (ret < 0) {
+        response->set_errcode(pb::EXEC_FAIL);
+        DB_WARNING("get_rocks_statistic failed");
+    }
+    response->set_level0_sst_num(level0_ssts);
+    response->set_compaction_data_size(pending_compaction_size);
+    DB_WARNING("level0: %lu, compaction: %lu", level0_ssts, pending_compaction_size);
+    for (auto& key : request->keys()) {
+        std::string value;
+        if (!google::GetCommandLineOption(key.c_str(), &value)) {
+            response->set_errcode(pb::EXEC_FAIL);
+            DB_WARNING("get command line: %s failed", key.c_str());
+            return;
+        }
+        response->add_key(key);
+        response->add_value(value);
+    }
+    response->set_errcode(pb::SUCCESS);
 }
 } //namespace

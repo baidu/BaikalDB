@@ -148,6 +148,18 @@ message RegionRaftStat {
     optional int64  dml_latency         = 5;
 };
 
+message RocksStatisticReq {
+    repeated bytes keys                 = 1;
+};
+
+message RocksStatisticRes {
+    required ErrCode errcode              = 1;
+    optional uint64 level0_sst_num        = 2;
+    optional uint64 compaction_data_size  = 3;
+    repeated bytes  key                   = 4;
+    repeated bytes  value                 = 5;
+}
+
 message StoreRes {
     required ErrCode errcode        = 1;
     optional bytes errmsg           = 2;
@@ -209,6 +221,8 @@ message BackUpRes {};
 enum BackupOp {
     BACKUP_DOWNLOAD = 0;
     BACKUP_UPLOAD = 1;
+    BACKUP_QUERY_PEERS = 2;
+    BACKUP_QUERY_STREAMING = 3;
 };
 
 message BackupRequest {
@@ -216,11 +230,19 @@ message BackupRequest {
     optional int64 log_index   = 2;
     optional BackupOp backup_op = 3;
     optional bool ingest_store_latest_sst = 4;
+    optional int64 data_sst_to_process_size = 5;
+    optional int64 row_size = 6;
+    optional uint64 streaming_id = 7;
 };
 
 message BackupResponse {
-    optional int64 log_index   = 1;
-    optional ErrCode errcode        = 2;
+    optional int64 log_index             = 1;
+    optional ErrCode errcode             = 2;
+    optional string leader               = 3;
+    repeated string peers                = 4;
+    repeated string unstable_followers   = 5;
+    optional uint64 streaming_id         = 6;
+    optional StreamState streaming_state = 7;
 };
 
 message HealthCheck {
@@ -276,4 +298,6 @@ service StoreService {
     rpc backup_region(BackUpReq) returns (BackUpRes);
 
     rpc backup(BackupRequest) returns (BackupResponse);
+
+    rpc get_rocks_statistic(RocksStatisticReq) returns (RocksStatisticRes);
 };

@@ -40,7 +40,6 @@ public:
     }
 
 private:
-    FetcherStore    _fetcher_store;
     int64_t _table_id {0};
     int64_t _index_id {0};
     std::string _task_id;

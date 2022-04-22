@@ -113,7 +113,6 @@ private:
         }
         return ExprValue::True();
     }
-
 protected:
     pb::Function _fn;
     bool _is_row_expr = false;

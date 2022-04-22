@@ -401,7 +401,11 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
         if (region == nullptr) {
             return;
         }
-        RpcSender::get_peer_applied_index(new_leader, _region_id, peer_applied_index, peer_dml_latency);
+        int ret = RpcSender::get_peer_applied_index(new_leader, _region_id, peer_applied_index, peer_dml_latency);
+        if (ret != 0) {
+            DB_WARNING("get_peer_applied_index fail,region_id: %ld", region->get_region_id());
+            return;
+        }
         if ((region->_applied_index - peer_applied_index) * peer_dml_latency
                 > (FLAGS_transfer_leader_catchup_time_threshold)) {
             DB_WARNING("peer applied index: %ld is less than applied index: %ld, peer_dml_latency: %ld",
@@ -421,7 +425,7 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
             DB_WARNING("region status to doning becase of transfer leader of heartbeat response,"
                     " region_id: %ld", _region_id);
         }
-        int ret = region->transfer_leader_to(new_leader);
+        ret = region->transfer_leader_to(new_leader);
         reset_region_status();
         if (ret != 0) {
             DB_WARNING("node:%s %s transfer leader fail",

@@ -29,7 +29,6 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
     }
 
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
-        auto& table_statistics_mapping = schema.table_statistics_mapping;
         for (auto& info_pair : schema.table_info_mapping) {
             if (info_pair.second->engine != pb::ROCKSDB &&
                     info_pair.second->engine != pb::ROCKSDB_CSTORE && 
@@ -50,12 +49,6 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
                 auto req_info = request.add_schema_infos();
                 req_info->set_table_id(index_id);
                 req_info->set_version(1);
-                int64_t version = 0;
-                auto iter = table_statistics_mapping.find(index_id);
-                if (iter != table_statistics_mapping.end()) {
-                    version = iter->second->version();
-                }
-                req_info->set_statis_version(version);
 
                 if (index_id == info_pair.second->id) {
                     req_info->set_version(info_pair.second->version);

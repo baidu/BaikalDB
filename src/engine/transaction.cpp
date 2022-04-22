@@ -568,9 +568,9 @@ int Transaction::get_update_primary(
         int64_t         region,
         IndexInfo&      pk_index,
         const TableKey& key,
-        GetMode         mode,
         const SmartRecord&   val,
         std::map<int32_t, FieldInfo*>& fields,
+        GetMode         mode,
         bool            check_region,
         int64_t&             ttl_ts) {
     return get_update_primary(region, pk_index, key, 
@@ -700,7 +700,7 @@ int Transaction::get_update_secondary(
         int64_t             region, 
         IndexInfo&          pk_index,
         IndexInfo&          index,
-        SmartRecord         key,
+        const SmartRecord&  key,
         GetMode             mode,
         bool                check_region) {
     last_active_time = butil::gettimeofday_us();
@@ -711,7 +711,13 @@ int Transaction::get_update_secondary(
         //DB_WARNING("invalid index type: %d", index.type);
         return -2;
     }
-    int res = get_update_secondary(region, pk_index, index, key, mode, pk_val, check_region);
+    MutTableKey secondary_key;
+    //full key, no prefix allowed
+    if (0 != secondary_key.append_index(index, key.get(), -1, false)) {
+        DB_WARNING("Fail to append_index, reg:%ld, tab:%ld", region, pk_index.id);
+        return -1;
+    }
+    int res = get_update_secondary(region, pk_index, index, secondary_key, key, mode, pk_val, check_region);
     if (res == 0 && index.type == pb::I_UNIQ && (mode == GET_ONLY || mode == GET_LOCK)) {
         int pos = 0;
         ret = key->decode_primary_key(index, pk_val, pos);
@@ -724,10 +730,39 @@ int Transaction::get_update_secondary(
 }
 
 int Transaction::get_update_secondary(
+            int64_t             region,
+            IndexInfo&          pk_index,
+            IndexInfo&          index,
+            const TableKey&     key,
+            const SmartRecord&  val, 
+            GetMode             mode,
+            bool                check_region) {
+    last_active_time = butil::gettimeofday_us();
+
+    MutTableKey pk_val;
+    int ret = -1;
+    if (index.type != pb::I_UNIQ) {
+        //DB_WARNING("invalid index type: %d", index.type);
+        return -2;
+    }
+    int res = get_update_secondary(region, pk_index, index, key, val, mode, pk_val, check_region);
+    if (res == 0 && index.type == pb::I_UNIQ && (mode == GET_ONLY || mode == GET_LOCK)) {
+        int pos = 0;
+        ret = val->decode_primary_key(index, pk_val, pos);
+        if (ret != 0) {
+            DB_WARNING("decode value failed: %ld", index.pk);
+            return -1;
+        }
+    }
+    return res;
+}
+
+int Transaction::get_update_secondary(
         int64_t             region, 
         IndexInfo&          pk_index,
         IndexInfo&          index,
-        const SmartRecord   key,
+        const TableKey&     key,
+        const SmartRecord&  val,
         GetMode             mode,
         MutTableKey&        pk,
         bool                check_region) {
@@ -746,20 +781,8 @@ int Transaction::get_update_secondary(
         return -2;
     }
     MutTableKey _key;
-    _key.append_i64(region).append_i64(index.id);
+    _key.append_i64(region).append_i64(index.id).append_index(key);
 
-    //full key, no prefix allowed
-    if (0 != _key.append_index(index, key.get(), -1, false)) {
-        DB_FATAL("Fail to append_index, region:%ld,tab:%ld", region, index.id);
-        return -1;
-    }
-    // if (index.type == pb::I_KEY) {
-    //     if (0 != _key.append_index(pk_index, key.get(), -1, false)) {
-    //         DB_FATAL("Fail to append_pk_index, region:%ld,tab:%ld", region, index.id);
-    //         return -1;
-    //     }
-    // }
-    //std::string* val_ptr = nullptr;
     rocksdb::PinnableSlice pin_slice;
     rocksdb::Status res;
     TimeCost cost;
@@ -786,7 +809,7 @@ int Transaction::get_update_secondary(
         print_txninfo_holding_lock(_key.data());        
         int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
         DB_WARNING("lock failed, region_id: %ld, txn:%ld, timedout: %s, key:%s", 
-                region_id, _txn_id, res.ToString().c_str(), key->debug_string().c_str());
+                region_id, _txn_id, res.ToString().c_str(), val->debug_string().c_str());
         return -5;
     } else {
         DB_WARNING("unknown error: %d, %s", res.code(), res.ToString().c_str());

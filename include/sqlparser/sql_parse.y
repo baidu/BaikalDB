@@ -34,7 +34,6 @@ using parser::TableName;
 using parser::PriorityEnum;
 using parser::CreateTableStmt;
 
-
 using namespace parser;
 #include "sql_lex.flex.h"
 #include "sql_parse.yacc.hh"
@@ -479,7 +478,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     OptCollate
     DBName
     FunctionNameCurtime
-    FunctionNameCurTimestamp
     FunctionaNameCurdate
     FunctionaNameDateRelate
     FunctionNameDateArithMultiForms
@@ -674,6 +672,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DuplicateOpt
     LocalOpt
     ForceOrNot
+    GlobalOrLocal
 
 %type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
@@ -2358,14 +2357,6 @@ FunctionCallKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | REPLACE '(' Expr ',' Expr ',' Expr ')' {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "replace";
-        fun->children.push_back($3, parser->arena);
-        fun->children.push_back($5, parser->arena);
-        fun->children.push_back($7, parser->arena);
-        $$ = fun;
-    }
     ;
 SumExpr:
     AVG '(' BuggyDefaultFalseDistinctOpt Expr')' {
@@ -3305,7 +3296,9 @@ FunctionCallCurTimestamp:
     | FunctionNameCurTimestamp '(' ')'
     ;
 FunctionNameCurTimestamp:
-    CURRENT_TIMESTAMP | LOCALTIME | LOCALTIMESTAMP
+    CURRENT_TIMESTAMP 
+    | LOCALTIME 
+    | LOCALTIMESTAMP 
     ;
 
 PrimaryOpt:
@@ -3386,11 +3379,11 @@ ConstraintElem:
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | KeyOrIndex GLOBAL IndexName '(' ColumnNameList ')' IndexOptionList
+    | KeyOrIndex GlobalOrLocal IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
-        item->global = true;
+        item->index_dist = static_cast<IndexDistibuteType>($2);
         item->name = $3;
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
@@ -3398,17 +3391,28 @@ ConstraintElem:
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | UNIQUE KeyOrIndexOpt GLOBAL IndexName '(' ColumnNameList ')' IndexOptionList
+    | UNIQUE KeyOrIndexOpt GlobalOrLocal IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_UNIQ;
-        item->global = true;
+        item->index_dist = static_cast<IndexDistibuteType>($3);
         item->name = $4;
         for (int idx = 0; idx < $6->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
         }
         item->index_option = (IndexOption*)$8;
         $$ = item;
+    }
+    ;
+
+GlobalOrLocal:
+    GLOBAL 
+    {
+        $$ = INDEX_DIST_GLOBAL;
+    }
+    | LOCAL 
+    {
+        $$ = INDEX_DIST_LOCAL;
     }
     ;
 
@@ -4747,7 +4751,7 @@ AlterSpec:
         spec->new_constraints.push_back((Constraint*)$4, parser->arena);
         $$ = spec;
     }
-    | DROP INDEX IndexName ForceOrNot
+    | DROP KeyOrIndex IndexName ForceOrNot
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_DROP_INDEX;
@@ -4755,7 +4759,7 @@ AlterSpec:
         spec->force = $4;
         $$ = spec;
     }
-    | DROP VIRTUAL INDEX IndexName
+    | DROP VIRTUAL KeyOrIndex IndexName
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_DROP_INDEX;
@@ -4763,7 +4767,7 @@ AlterSpec:
         spec->index_name = $4;
         $$ = spec;
     }
-    | RESTORE INDEX IndexName
+    | RESTORE KeyOrIndex IndexName
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_RESTORE_INDEX;

@@ -37,6 +37,7 @@
 using google::protobuf::RepeatedPtrField;
 
 namespace baikaldb {
+DECLARE_int32(single_store_concurrency);
 DECLARE_int32(per_txn_max_num_locks);
 struct TxnLimitMap {
     static TxnLimitMap* get_instance() {
@@ -69,6 +70,8 @@ class QueryContext;
 class NetworkSocket;
 
 class RuntimeStatePool;
+typedef std::shared_ptr<MemRowDescriptor> SmartDescriptor;
+typedef std::unordered_map<int64_t, std::pair<TimeCost, SmartDescriptor>> MemRowDescriptorMap;
 class RuntimeState {
 
 public:
@@ -76,7 +79,7 @@ public:
         bthread_mutex_init(&_mem_lock, NULL);
     }
     ~RuntimeState() {
-        memory_limit_release(_used_bytes);
+        memory_limit_release_all();
         bthread_mutex_destroy(&_mem_lock);
     }
 
@@ -130,7 +133,7 @@ public:
         return _tuple_descs;
     }
     MemRowDescriptor* mem_row_desc() {
-        return &_mem_row_desc;
+        return _mem_row_desc.get();
     }
     int64_t region_id() {
         return _region_id;
@@ -243,14 +246,6 @@ public:
 
     size_t row_batch_capacity() {
         return std::min(_row_batch_capacity * 2, ROW_BATCH_CAPACITY);
-    }
-
-    void add_scan_index(int64_t scan_index) {
-        _scan_indices.push_back(scan_index);
-    }
-
-    std::vector<int64_t>& scan_indices() {
-        return _scan_indices;
     }
 
     // Only used on baikaldb side
@@ -368,8 +363,15 @@ public:
     int64_t primary_region_id() const {
         return _primary_region_id;
     }
-    int memory_limit_exceeded(int64_t bytes);
-    int memory_limit_release(int64_t bytes);
+    int memory_limit_exceeded(int64_t rows_to_check, int64_t bytes);
+    int memory_limit_release(int64_t rows_to_check, int64_t bytes);
+    int memory_limit_release_all();
+
+    int64_t get_single_store_concurrency() {
+        return _single_store_concurrency;
+    }
+
+    void set_single_store_concurrency();
 
 public:
     uint64_t          txn_id = 0;
@@ -387,9 +389,12 @@ public:
     int64_t          last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
     pb::StoreRes*    response = nullptr;
 
+    bool             need_statistics = true; // 用于动态超时的时间统计，如果请求的实例非NORMAL或着返回backup的结果，则不记入统计
+
     // global index ddl 使用
     int32_t            ddl_scan_size = 0;
     int32_t            region_count = 0;
+    bool               ddl_pk_key_is_full = true;
     std::string        ddl_max_pk_key;
     std::string        ddl_max_router_key;
     MysqlErrCode       ddl_error_code = ER_ERROR_FIRST;
@@ -407,7 +412,8 @@ private:
     bool _single_txn_cached = false;
     bool _is_expr_subquery = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
-    MemRowDescriptor _mem_row_desc;
+    SmartDescriptor _mem_row_desc;
+    // MemRowDescriptor _mem_row_desc;
     int64_t          _region_id = 0;
     int64_t          _region_version = 0;
     // index_id => ReverseIndex
@@ -421,7 +427,7 @@ private:
     int64_t _num_returned_rows = 0; //存储baikaldb读返回的行数
     int64_t _num_scan_rows     = 0; //存储baikalStore扫描行数
     int64_t _num_filter_rows   = 0; //存储过滤行数
-    int64_t _log_id = 0;
+    uint64_t _log_id = 0;
 
     bool              _single_sql_autocommit = true;     // used for baikaldb and store
     bool              _optimize_1pc = false;  // 2pc de-generates to 1pc when autocommit=true and
@@ -435,7 +441,7 @@ private:
     SmartTransaction  _txn = nullptr;         // used for store
     std::shared_ptr<RegionResource> _resource;// used for store
     int64_t           _primary_region_id = -1;// used for store
-
+    int64_t           _single_store_concurrency = FLAGS_single_store_concurrency;// used for store
     std::vector<int64_t> _scan_indices;
     size_t _row_batch_capacity = ROW_BATCH_CAPACITY;
     int _multiple = 1;
@@ -444,10 +450,14 @@ private:
     std::vector<TraceTimeCost> _trace_cost_vec;
     std::vector<std::vector<ExprValue>> _subquery_exprs;
     // mem limit
-    int64_t _used_bytes = 0;
+    std::atomic<int64_t> _used_bytes{0};
     bthread_mutex_t  _mem_lock;
     SmartMemTracker  _mem_tracker = nullptr;
     std::string      _remote_side;
+
+    //清理长期不使用的sql签名对应的MemRowDescriptor释放内存
+    void clear_mem_row_descriptor(MemRowDescriptorMap& sql_sign_to_mem_row_descriptor);
+    uint64_t tuple_descs_to_sign();
 };
 typedef std::shared_ptr<RuntimeState> SmartState;
 }

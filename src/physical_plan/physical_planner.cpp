@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "physical_planner.h"
-
+#include "query_context.h"
 namespace baikaldb {
 DEFINE_int32(cmsketch_depth, 5, "cmsketch_depth");
 DEFINE_int32(cmsketch_width, 2048, "cmsketch_width");
@@ -124,6 +124,9 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
          ctx->stat_info.error_code = state.error_code;
         return ret;
     }
+    if (ctx->stmt_type == parser::NT_SELECT) {
+        state.set_single_store_concurrency();
+    }
     state.explain_type = ctx->explain_type;
     if (state.explain_type == ANALYZE_STATISTICS) {
         //如果为analyze模式需要初始化cmsketch
@@ -155,13 +158,8 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
         ctx->stat_info.num_scan_rows = state.num_scan_rows();
         return ret;
     }
-    ctx->stat_info.num_returned_rows = state.num_returned_rows();
-    ctx->stat_info.num_affected_rows = state.num_affected_rows();
-    ctx->stat_info.num_scan_rows = state.num_scan_rows();
-    ctx->stat_info.num_filter_rows = state.num_filter_rows();
     ctx->stat_info.error_code = state.error_code;
-    ctx->stat_info.region_count = state.region_count;
-    
+    ctx->update_ctx_stat_info(&state, ctx->get_ctx_total_time());
     return 0;
 }
 
@@ -202,13 +200,9 @@ int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, b
     }
     if (state.is_eos() || shutdown) {
         root->close(&state);
-        ctx->stat_info.num_returned_rows = state.num_returned_rows();
-        ctx->stat_info.num_affected_rows = state.num_affected_rows();
-        ctx->stat_info.num_scan_rows = state.num_scan_rows();
-        ctx->stat_info.num_filter_rows = state.num_filter_rows();
         ctx->stat_info.error_code = state.error_code;
         ctx->stat_info.error_msg.str(state.error_msg.str());
-        ctx->stat_info.region_count = state.region_count;
+        ctx->update_ctx_stat_info(&state, ctx->get_ctx_total_time());
     }
     return 0;            
 }

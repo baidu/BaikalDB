@@ -1028,10 +1028,21 @@ bool HandleHelper::_handle_instance_param(const SmartSocket& client, const std::
         client->state = STATE_ERROR;
         return false;
     }
+    bool need_delete = false;
+    if (split_vec[4] == "delete") {
+        need_delete = true;
+    }
     std::string key, value, instance = "";
     instance = split_vec[2];
     key = split_vec[3];
-    value = split_vec[4];
+    auto trim = [] (std::string str) -> std::string {
+        size_t first = str.find_first_not_of(" `\'\"");
+        if (first == std::string::npos)
+            return "";
+        size_t last = str.find_last_not_of(" `\'\"");
+        return str.substr(first, (last-first+1));
+    };
+    value = trim(split_vec[4]);
     pb::MetaManagerRequest request;
     pb::MetaManagerResponse response;
     request.set_op_type(pb::OP_UPDATE_INSTANCE_PARAM);
@@ -1042,6 +1053,7 @@ bool HandleHelper::_handle_instance_param(const SmartSocket& client, const std::
     params->set_key(key);
     params->set_value(value);
     params->set_is_meta_param(is_meta_param);
+    params->set_need_delete(need_delete);
 
     MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
@@ -1100,6 +1112,12 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
     } else if (key == "pk_prefix_balance") {
         int32_t pk_prefix_balance = strtol(split_vec[4].c_str(), NULL, 10);
         schema_conf->set_pk_prefix_balance(pk_prefix_balance);
+    } else if (key == "backup_table") {
+        int32_t number = pb::BackupTable_descriptor()->FindValueByName(split_vec[4])->number();
+        DB_WARNING("backup table enum %s => %d", split_vec[4].c_str(), number);
+        schema_conf->set_backup_table(static_cast<pb::BackupTable>(number));
+    } else if (key == "in_fast_import") {
+        schema_conf->set_in_fast_import(is_open);
     } else {
         DB_FATAL("param invalid");
         client->state = STATE_ERROR;

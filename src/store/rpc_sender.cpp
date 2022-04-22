@@ -35,7 +35,7 @@ int RpcSender::send_no_op_request(const std::string& instance,
     return ret;
 }
 
-void RpcSender::get_peer_applied_index(const std::string& peer, int64_t region_id,
+int RpcSender::get_peer_applied_index(const std::string& peer, int64_t region_id,
                                        int64_t& applied_index, int64_t& dml_latency) {
     pb::GetAppliedIndex request;
     request.set_region_id(region_id);
@@ -50,6 +50,7 @@ void RpcSender::get_peer_applied_index(const std::string& peer, int64_t region_i
             dml_latency = 50000;
         }
     }
+    return ret;
 }
 
 void RpcSender::get_peer_snapshot_size(const std::string& peer, int64_t region_id,

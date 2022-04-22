@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "ddl_planner.h"
+#include "expr_value.h"
 #include "meta_server_interact.hpp"
 #include "proto/meta.interface.pb.h"
 #include <boost/algorithm/string/predicate.hpp>
@@ -21,6 +22,8 @@
 #include <rapidjson/document.h>
 
 namespace baikaldb {
+DEFINE_bool(unique_index_default_global, true, "unique_index_default_global");
+DEFINE_bool(normal_index_default_global, false, "normal_index_default_global");
 int DDLPlanner::plan() {
     pb::MetaManagerRequest request;
     // only CREATE TABLE is supported
@@ -124,14 +127,28 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             index->set_index_name(col_name + "_key");
             index->set_index_type(pb::I_UNIQ);
             index->add_field_names(col_name);
-        } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL) {
-            field->set_default_value(col_option->expr->to_string());
-            if (field->default_value() == "(current_timestamp())") {
-                field->set_default_literal(ExprValue::Now().get_string());
+        } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL && col_option->expr != nullptr) {
+            if (col_option->expr->to_string() == "(current_timestamp())") {
+                if (is_datetime_specic(data_type)) {
+                    field->set_default_literal(ExprValue::Now().get_string());
+                    field->set_default_value("(current_timestamp())");
+                    continue;
+                } else {
+                    DB_WARNING("invalid default value for '%s'", column->name->name.value);
+                    _ctx->stat_info.error_code = ER_INVALID_DEFAULT;
+                    _ctx->stat_info.error_msg << "invalid default value for '" << column->name->name.value << "'";
+                    return -1;
+                }
+            } 
+            if (col_option->expr->expr_type != parser::ET_LITETAL) {
+                DB_WARNING("Invalid default value for '%s'", column->name->name.value);
+                _ctx->stat_info.error_code = ER_INVALID_DEFAULT;
+                _ctx->stat_info.error_msg << "Invalid default value for '" << column->name->name.value << "'";
+                return -1;
             }
             parser::LiteralExpr* lit = static_cast<parser::LiteralExpr*>(col_option->expr);
             // default null不需要存
-            if (lit != nullptr && lit->literal_type != parser::LT_NULL) {
+            if (lit->literal_type != parser::LT_NULL) {
                 std::string str = lit->to_string();
                 // 简单校验下类型
                 if (is_int(data_type) || is_double(data_type)) {
@@ -145,7 +162,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
                         _ctx->stat_info.error_msg << "Invalid default value for '" << column->name->name.value << "'";
                         return -1;
                     }
-                } else if (field->default_value() != "(current_timestamp())" && is_datetime_specic(data_type)) {
+                } else if (is_datetime_specic(data_type)) {
                     bool is_datetime_format = std::all_of(str.begin(), str.end(),
                             [](char i) {
                                 return (i >= '0' && i <= '9') || i == '-' || i == '.' || i == ' ' || i == ':';
@@ -168,11 +185,261 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             return -1;
         }
     }
-    // can_null default is false
+    // can_null default is true
     if (!field->has_can_null()) {
-        field->set_can_null(false);
+        field->set_can_null(true);
     }
     field->set_flag(column->type->flag);
+    return 0;
+}
+
+
+int DDLPlanner::pre_split_index(const std::string& start_key,
+                                const std::string& end_key,
+                                int32_t region_num,
+                                pb::SchemaInfo& table,
+                                const pb::IndexInfo* pk_index,
+                                const pb::IndexInfo* index,
+                                const std::vector<const pb::FieldInfo*>& pk_index_fields,
+                                const std::vector<const pb::FieldInfo*>& index_fields) {
+    if (pk_index == nullptr || index == nullptr || index_fields.size() == 0 || pk_index_fields.size() == 0) {
+        return 0;
+    }
+    std::set<std::string> index_filed_names;
+    for (auto filed : index_fields) {
+        if (filed == nullptr) {
+            DB_FATAL("filed nullptr");
+            return -1;
+        }
+        index_filed_names.insert(filed->field_name());
+    }
+
+    auto fill_other_fileds = [index_fields, index, index_filed_names, pk_index_fields](MutTableKey& key) -> int {
+        for(auto i = 1; i < index_fields.size(); ++i) {
+            if (index_fields[i] == nullptr) {
+                return -1;
+            }
+            ExprValue value(index_fields[i]->mysql_type(), "");
+            key.append_value(value);
+        }
+        if (index->index_type() == pb::I_KEY) {
+            // 不是unique的全局索引，需要补齐其他主键字段
+            for(auto field : pk_index_fields) {
+                if (field == nullptr) {
+                    return -1;
+                }
+                if (index_filed_names.find(field->field_name()) == index_filed_names.end()) {
+                    ExprValue value(field->mysql_type(), "");
+                    key.append_value(value);
+                }
+            }
+        }
+        if (index->is_global()) {
+            uint8_t null_flag = 0;
+            key.append_u8(null_flag);
+        }
+        return 0;
+    };
+    auto split_keys = table.add_split_keys();
+    split_keys->set_index_name(index->index_name());
+    switch (index_fields[0]->mysql_type()) {
+        case pb::INT8:
+        case pb::INT16:
+        case pb::INT32:
+        case pb::INT64: {
+                int64_t start_value_i = strtoll(start_key.c_str(), NULL, 10);
+                int64_t end_value_i = strtoll(end_key.c_str(), NULL, 10);
+                if (region_num <= 0 || end_value_i < start_value_i) {
+                    DB_FATAL("pre split param not valid");
+                    return -1;
+                }
+                int64_t step = (end_value_i - start_value_i) / region_num;
+                int64_t split_value = start_value_i;
+                if (step <= 0) {
+                    return -1;
+                }
+                // 生成split key
+                for (; split_value <= end_value_i; split_value += step) {
+                    MutTableKey key;
+                    if (index->is_global()) {
+                        uint8_t null_flag = 0;
+                        key.append_u8(null_flag);
+                    }
+                    ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
+                    key.append_value(first_filed_value);
+                    if (fill_other_fileds(key) < 0) {
+                        return -1;
+                    }
+                    split_keys->add_split_keys(key.data());
+                }
+            }
+            break;
+        case pb::UINT8:
+        case pb::UINT16:
+        case pb::UINT32:
+        case pb::UINT64: {
+                uint64_t start_value_u = strtoull(start_key.c_str(), NULL, 10);
+                uint64_t end_value_u = strtoull(end_key.c_str(), NULL, 10);
+                if (region_num <= 0 || end_value_u < start_value_u) {
+                    DB_FATAL("pre split param not valid");
+                    return -1;
+                }
+                uint64_t step = (end_value_u - start_value_u) / region_num;
+                uint64_t split_value = start_value_u;
+                if (step <= 0) {
+                    return -1;
+                }
+                // 生成split key
+                for (; split_value <= end_value_u; split_value += step) {
+                    MutTableKey key;
+                    if (index->is_global()) {
+                        uint8_t null_flag = 0;
+                        key.append_u8(null_flag);
+                    }
+                    ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
+                    key.append_value(first_filed_value);
+                    if (fill_other_fileds(key) < 0) {
+                        return -1;
+                    }
+                    split_keys->add_split_keys(key.data());
+                }
+            }
+            break;
+        case pb::FLOAT:
+        case pb::DOUBLE: {
+                double start_value_d = strtod(start_key.c_str(), NULL);
+                double end_value_d = strtod(end_key.c_str(), NULL);
+                if (region_num <= 0 || end_value_d < start_value_d) {
+                    DB_FATAL("pre split param not valid");
+                    return -1;
+                }
+                double step = (end_value_d - start_value_d) / region_num;
+                double split_value = start_value_d;
+                if (step <= 1e-6) {
+                    return -1;
+                }
+                // 生成split key
+                for (; split_value <= end_value_d; split_value += step) {
+                    MutTableKey key;
+                    if (index->is_global()) {
+                        uint8_t null_flag = 0;
+                        key.append_u8(null_flag);
+                    }
+                    ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
+                    key.append_value(first_filed_value);
+                    if (fill_other_fileds(key) < 0) {
+                        return -1;
+                    }
+                    split_keys->add_split_keys(key.data());
+                }
+            }
+            break;
+        case pb::STRING: {
+                if (region_num <= 0 || end_key < start_key) {
+                    DB_FATAL("pre split param not valid: start_key: %s, end_key: %s, region_num: %d",
+                             start_key.c_str(), end_key.c_str(), region_num);
+                    return -1;
+                }
+                ExprValue start_key_value(pb::STRING);
+                ExprValue end_key_value(pb::STRING);
+                start_key_value.str_val = start_key;
+                end_key_value.str_val = end_key;
+                // 最长公共前缀
+                int prefix_len = start_key_value.common_prefix_length(end_key_value);
+                // 后取8个字节，计算diff
+                uint64_t start_uint64 = start_key_value.unit64_value(prefix_len);
+                uint64_t end_uint64 = end_key_value.unit64_value(prefix_len);
+                uint64_t step = (end_uint64 - start_uint64) / region_num;
+                std::string common_prefix = start_key.substr(0, prefix_len);
+                if (step <= 0) {
+                    return -1;
+                }
+                DB_WARNING("start_uint: %lu, end_uint: %lu, step: %lu, prefix_len: %d, common_prefix: %s",
+                           start_uint64, end_uint64, step, prefix_len, common_prefix.c_str());
+                for (; start_uint64 <= end_uint64; start_uint64 += step) {
+                    // uint64转string
+                    uint64_t val = start_uint64;
+                    std::string key;
+                    while (val > 0) {
+                        key += char(val & 0xFF);
+                        val >>= 8;
+                    }
+                    std::reverse(key.begin(), key.end());
+                    DB_WARNING("uint64: %lu, key: %s", start_uint64, key.c_str());
+                    // 生成key
+                    MutTableKey split_key;
+                    if (index->is_global()) {
+                        uint8_t null_flag = 0;
+                        split_key.append_u8(null_flag);
+                    }
+                    ExprValue first_filed_value(index_fields[0]->mysql_type(), common_prefix + key);
+                    split_key.append_value(first_filed_value);
+                    if (fill_other_fileds(split_key) < 0) {
+                        return -1;
+                    }
+                    split_keys->add_split_keys(split_key.data());
+                }
+            }
+            break;
+        default:
+            DB_FATAL("not support type: %d for pre split", index_fields[0]->mysql_type());
+            return -1;
+    }
+    return 0;
+}
+
+
+int DDLPlanner::parse_pre_split_keys(std::string start_key,
+                                     std::string end_key,
+                                     std::string global_start_key,
+                                     std::string global_end_key,
+                                     int32_t region_num,
+                                     pb::SchemaInfo& table) {
+    std::unordered_map<std::string, const pb::FieldInfo*> fields;
+    std::vector<const pb::FieldInfo*> primary_index_fields;
+    std::vector<const pb::FieldInfo*> global_index_fields;
+    const pb::IndexInfo* primary_index = nullptr;
+    const pb::IndexInfo* gloabal_index = nullptr;
+    DB_WARNING("split_start_key: %s, split_end_key: %s, region_num: %d, pb: %s",
+               start_key.c_str(), end_key.c_str(), region_num, table.ShortDebugString().c_str());
+    for (auto& filed : table.fields()) {
+        fields[filed.field_name()] = &filed;
+    }
+    for (auto& index_info : table.indexs()) {
+        if (index_info.index_type() == pb::I_PRIMARY) {
+            primary_index = &index_info;
+            for (auto& field_name : index_info.field_names()) {
+                if (fields.find(field_name) == fields.end()) {
+                    DB_WARNING("no matching filed: %s, table: %s", field_name.c_str(), table.ShortDebugString().c_str());
+                    return -1;
+                }
+                primary_index_fields.emplace_back(fields[field_name]);
+            }
+        }
+        else if (index_info.is_global()) {
+            gloabal_index = &index_info;
+            for (auto& field_name : index_info.field_names()) {
+                if (fields.find(field_name) == fields.end()) {
+                    DB_WARNING("no matching filed: %s, table: %s", field_name.c_str(), table.ShortDebugString().c_str());
+                    return -1;
+                }
+                global_index_fields.emplace_back(fields[field_name]);
+            }
+        }
+    }
+    if (primary_index_fields.size() == 0) {
+        DB_FATAL("no primary index filed for pre split, table: %s", table.ShortDebugString().c_str());
+        return -1;
+    }
+
+    int ret = pre_split_index(start_key, end_key, region_num, table, primary_index, primary_index, primary_index_fields, primary_index_fields);
+    if (ret < 0) {
+        return -1;
+    }
+    ret = pre_split_index(global_start_key, global_end_key, region_num, table, primary_index, gloabal_index, primary_index_fields, global_index_fields);
+    if (ret < 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -212,24 +479,35 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
     bool has_arrow_fulltext = false;
     bool has_pb_fulltext = false;
     int constraint_len = stmt->constraints.size();
+    std::string split_start_key;
+    std::string split_end_key;
+    std::string global_split_start_key;
+    std::string global_split_end_key;
+    int32_t split_region_num = 0;
     for (int idx = 0; idx < constraint_len; ++idx) {
         parser::Constraint* constraint = stmt->constraints[idx];
         pb::IndexInfo* index = table.add_indexs();
-        if (constraint->global == true) {
-            index->set_is_global(true);
-        }
         if (constraint->type == parser::CONSTRAINT_PRIMARY) {
             index->set_index_type(pb::I_PRIMARY);
         } else if (constraint->type == parser::CONSTRAINT_INDEX) {
             index->set_index_type(pb::I_KEY);
+            if (constraint->index_dist == parser::INDEX_DIST_DEFAULT) {
+                index->set_is_global(FLAGS_normal_index_default_global);
+            }
         } else if (constraint->type == parser::CONSTRAINT_UNIQ) {
             index->set_index_type(pb::I_UNIQ);
+            if (constraint->index_dist == parser::INDEX_DIST_DEFAULT) {
+                index->set_is_global(FLAGS_unique_index_default_global);
+            }
         } else if (constraint->type == parser::CONSTRAINT_FULLTEXT) {
             index->set_index_type(pb::I_FULLTEXT);
             can_support_ttl = false;
         } else {
             DB_WARNING("unsupported constraint_type: %d", constraint->type);
             return -1;
+        }
+        if (constraint->index_dist == parser::INDEX_DIST_GLOBAL) {
+            index->set_is_global(true);
         }
         if (constraint->type == parser::CONSTRAINT_PRIMARY) {
             index->set_index_name("primary_key");
@@ -276,7 +554,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         }
         for (int col_idx = 0; col_idx < constraint->columns.size(); ++col_idx) {
             parser::ColumnName* col_name = constraint->columns[col_idx];
-            if (_column_can_null[col_name->name.value]) {
+            if (_column_can_null[col_name->name.value] && index->index_type() != pb::I_FULLTEXT) {
                 DB_WARNING("index column : %s should NOT NULL", col_name->name.value);
                 _ctx->stat_info.error_code = ER_NO_DB_ERROR;
                 _ctx->stat_info.error_msg << "index column : " << col_name->name.value << " should NOT NULL";
@@ -427,6 +705,27 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         DB_WARNING("comment: %s", comment.c_str());
                     }
                 }
+                // 预分裂相关参数
+                json_iter = root.FindMember("split_start_key");
+                if (json_iter != root.MemberEnd() && root["split_start_key"].IsString()) {
+                    split_start_key = json_iter->value.GetString();
+                }
+                json_iter = root.FindMember("split_end_key");
+                if (json_iter != root.MemberEnd() && root["split_end_key"].IsString()) {
+                    split_end_key = json_iter->value.GetString();
+                }
+                json_iter = root.FindMember("global_split_start_key");
+                if (json_iter != root.MemberEnd() && root["global_split_start_key"].IsString()) {
+                    global_split_start_key = json_iter->value.GetString();
+                }
+                json_iter = root.FindMember("global_split_end_key");
+                if (json_iter != root.MemberEnd() && root["global_split_end_key"].IsString()) {
+                    global_split_end_key = json_iter->value.GetString();
+                }
+                json_iter = root.FindMember("split_region_num");
+                if (json_iter != root.MemberEnd() && root["split_region_num"].IsNumber()) {
+                    split_region_num = json_iter->value.GetInt64();
+                }
             } catch (...) {
                 // 兼容mysql语法
                 table.set_comment(option->str_value.value);
@@ -483,6 +782,13 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         DB_WARNING("no namespace set, use default: %s", 
             _ctx->user_info->namespace_.c_str());
         table.set_namespace_name(_ctx->user_info->namespace_);
+    }
+    if (split_region_num > 0) {
+        int ret = parse_pre_split_keys(split_start_key, split_end_key,
+                global_split_start_key, global_split_end_key, split_region_num, table);
+        if (ret < 0) {
+            return -1;
+        }
     }
     return 0;
 }
@@ -874,9 +1180,15 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
     switch (constraint->type) {
         case parser::CONSTRAINT_INDEX:
             index_type = pb::I_KEY;
+            if (constraint->index_dist == parser::INDEX_DIST_DEFAULT) {
+                index->set_is_global(FLAGS_normal_index_default_global);
+            }
             break;
         case parser::CONSTRAINT_UNIQ:
             index_type = pb::I_UNIQ;
+            if (constraint->index_dist == parser::INDEX_DIST_DEFAULT) {
+                index->set_is_global(FLAGS_unique_index_default_global);
+            }
             break;
         case parser::CONSTRAINT_FULLTEXT:
             index_type = pb::I_FULLTEXT;
@@ -894,7 +1206,9 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
         DB_WARNING("lack of index name");
         return -1;
     }
-    index->set_is_global(constraint->global);
+    if (constraint->index_dist == parser::INDEX_DIST_GLOBAL) {
+        index->set_is_global(true);
+    }
     index->set_index_type(index_type);
     index->set_hint_status(pb::IHS_DISABLE);
     index->set_index_name(constraint->name.value);
@@ -907,13 +1221,13 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
 
     for (int32_t column_index = 0; column_index < constraint->columns.size(); ++column_index) {
         std::string column_name = constraint->columns[column_index]->name.value;
-        if (_column_can_null[column_name]) {
+        if (_column_can_null[column_name] && index->index_type() != pb::I_FULLTEXT) {
             DB_WARNING("index column : %s should NOT NULL", column_name.c_str());
             _ctx->stat_info.error_code = ER_NO_DB_ERROR;
             _ctx->stat_info.error_msg << "index column : " << column_name << " should NOT NULL";
             return -1;
         }
-        index->add_field_names(constraint->columns[column_index]->name.value);
+        index->add_field_names(column_name);
     }
     if (constraint->index_option != nullptr) {
         rapidjson::Document root;

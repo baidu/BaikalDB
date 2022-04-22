@@ -271,6 +271,8 @@ protected:
     void plan_commit_and_begin_txn();
     void plan_rollback_and_begin_txn();
 
+    int generate_sql_sign(const pb::Plan& plan, QueryStat* stat_info, parser::StmtNode* stmt, bool* need_learner_backup);
+
 private:
     int create_n_ary_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
@@ -279,7 +281,7 @@ private:
     int create_in_predicate(const parser::FuncExpr* func_item, 
             pb::Expr& expr,
             const CreateExprOptions& options);
-    int exec_subquery_expr(QueryContext* sub_ctx);
+    int exec_subquery_expr(QueryContext* sub_ctx, QueryContext* ctx);
     int create_common_subquery_expr(const parser::SubqueryExpr* item, pb::Expr& expr,
             const CreateExprOptions& options, bool& is_correlate);
     int handle_in_subquery(const parser::FuncExpr* func_item,
@@ -304,6 +306,7 @@ private:
 
 protected:
     QueryContext*       _ctx = nullptr;
+    std::shared_ptr<QueryContext> _cur_sub_ctx = nullptr;
     SmartPlanTableCtx      _plan_table_ctx;
     SchemaFactory*      _factory = nullptr;
 

@@ -29,4 +29,27 @@ int QueryContext::create_plan_tree() {
     return ExecNode::create_tree(plan, &root);
 }
 
+void QueryContext::update_ctx_stat_info(RuntimeState* state, int64_t query_total_time) {
+    stat_info.num_returned_rows += state->num_returned_rows();
+    stat_info.num_affected_rows += state->num_affected_rows();
+    stat_info.num_scan_rows += state->num_scan_rows();
+    stat_info.num_filter_rows += state->num_filter_rows();
+    stat_info.region_count += state->region_count;
+    if (stmt_type == parser::NT_SELECT && stat_info.error_code == 1000 && state->sign != 0) {
+        auto sql_info = SchemaFactory::get_instance()->get_sql_stat(state->sign);
+        if (sql_info == nullptr) {
+            sql_info = SchemaFactory::get_instance()->create_sql_stat(state->sign);
+        }
+        // 前几个请求可以计算，用做限制并发RuntimeState::set_single_store_concurrency
+        if (state->need_statistics || sql_info->counter < SqlStatistics::SQL_COUNTS_RANGE) {
+            sql_info->update(query_total_time, stat_info.num_scan_rows);
+        }
+    }
+}
+
+int64_t QueryContext::get_ctx_total_time() {
+    gettimeofday(&(stat_info.end_stamp), NULL);
+    stat_info.total_time = timestamp_diff(stat_info.start_stamp, stat_info.end_stamp);
+    return stat_info.total_time;
+}
 }

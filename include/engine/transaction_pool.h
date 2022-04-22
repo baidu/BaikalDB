@@ -101,14 +101,21 @@ public:
 
     void update_txn_num_rows_after_split(const std::vector<pb::TransactionInfo>& txn_infos);
 
-    void txn_query_primary_region(SmartTransaction txn, Region* region, pb::RegionInfo& region_info);
-    void txn_commit_through_raft(SmartTransaction txn, pb::RegionInfo& region_info, pb::OpType op_type);
+    void txn_query_primary_region(uint64_t txn_id, Region* region, pb::RegionInfo& region_info);
+    void txn_commit_through_raft(uint64_t txn_id, pb::RegionInfo& region_info, pb::OpType op_type);
     void get_txn_state(const pb::StoreReq* request, pb::StoreRes* response);
     void read_only_txn_process(int64_t region_id, SmartTransaction txn, pb::OpType op_type, bool optimize_1pc);
     int get_region_info_from_meta(int64_t region_id, pb::RegionInfo& region_info);
     //清空所有的状态
     void clear();
 private:
+    struct TxnParams {
+        bool is_primary_region = true;
+        bool is_finished = false;
+        bool is_prepared = false;
+        int seq_id = 0;
+        int64_t primary_region_id = -1;
+    };
     int64_t _region_id = 0;
     int64_t _latest_active_txn_ts = 0;
     bool _use_ttl = false;

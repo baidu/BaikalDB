@@ -56,9 +56,6 @@ public:
         } 
         return false;
     }
-    std::map<int64_t, pb::PossibleIndex>* mutable_region_primary() {
-        return &_region_primary;
-    }
     void set_related_manager_node(SelectManagerNode* manager_node) {
         _related_manager_node = manager_node;
     }
@@ -71,12 +68,6 @@ public:
         for (auto& expr : _index_conjuncts) {
             expr->find_place_holder(placeholders);
         }
-    }
-    void add_index_id(int64_t index_id) {
-        _index_ids.push_back(index_id);
-    }
-    const std::vector<int64_t>& index_ids() {
-        return _index_ids;
     }
 
     int32_t get_partition_field() {
@@ -116,8 +107,6 @@ private:
         return false;
     }
 
-    int memory_limit_exceeded(RuntimeState* state, RowBatch* batch);
-
 private:
     std::map<int32_t, FieldInfo*> _field_ids;
     std::vector<int32_t> _filt_field_ids;
@@ -132,9 +121,6 @@ private:
     bool _is_ddl_work = false;
     int64_t _ddl_index_id = -1;
 
-    //record all used indices here (LIKE & MATCH may use multiple indices)
-    std::vector<int64_t> _index_ids;
-
     // 如果用了排序列做索引，就不需要排序了
     bool _sort_use_index = false;
     bool _scan_forward = true; //scan的方向
@@ -142,11 +128,14 @@ private:
     //被选择的索引
     std::vector<SmartRecord> _left_records;
     std::vector<SmartRecord> _right_records;
+    std::vector<MutTableKey> _left_keys;
+    std::vector<MutTableKey> _right_keys;
     std::vector<int> _left_field_cnts;
     std::vector<int> _right_field_cnts;
     std::vector<bool> _left_opens;
     std::vector<bool> _right_opens;
     std::vector<bool> _like_prefixs;
+    bool _use_encoded_key = false;
     // trace使用
     int _scan_rows = 0;
     size_t _idx = 0;
@@ -169,7 +158,6 @@ private:
     MutilReverseIndex<ArrowSchema> _m_arrow_index;
     bool _bool_and = false;
 
-    std::map<int64_t, pb::PossibleIndex> _region_primary;
     std::map<int32_t, int32_t> _index_slot_field_map;
     pb::StorageType _storage_type = pb::ST_UNKNOWN;
     std::vector<int64_t> _partitions {0};

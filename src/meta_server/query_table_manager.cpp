@@ -39,7 +39,7 @@ void QueryTableManager::get_schema_info(const pb::QueryRequest* request,
             if (manager->_table_id_map.find(table_name) == manager->_table_id_map.end()) {
                 response->set_errmsg("table not exist");
                 response->set_errcode(pb::INPUT_PARAM_ERROR);
-                DB_FATAL("namespace: %s database: %s table_name: %s not exist", 
+                DB_WARNING("namespace: %s database: %s table_name: %s not exist",
                             namespace_name.c_str(), database.c_str(), table_name.c_str());
                 return;
             }

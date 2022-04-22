@@ -141,8 +141,12 @@ public:
     virtual void backup(google::protobuf::RpcController* controller,
         const pb::BackupRequest* request,
         pb::BackupResponse* response,
-        google::protobuf::Closure* done); 
+        google::protobuf::Closure* done);
 
+    virtual void get_rocks_statistic(google::protobuf::RpcController* controller,
+                                     const pb::RocksStatisticReq* request,
+                                     pb::RocksStatisticRes* response,
+                                     google::protobuf::Closure* done);
     //上报心跳
     void heart_beat_thread();
 

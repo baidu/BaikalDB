@@ -49,8 +49,6 @@ public:
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& used_size, int64_t& release_size);
-    void memory_limit_release(RuntimeState* state, int64_t size);
-    int memory_limit_exceeded(RuntimeState* state, int64_t size);
     std::vector<ExprNode*>* mutable_group_exprs() {
         return &_group_exprs;
     }
@@ -74,6 +72,7 @@ private:
     //需要推导_agg_tuple_id内部slot的类型
     std::vector<ExprNode*> _group_exprs;
     int32_t _agg_tuple_id;
+    int     _row_cnt = 0;
     pb::TupleDescriptor* _group_tuple_desc;
     std::vector<AggFnCall*> _agg_fn_calls;
     std::set<int> _agg_slot_set;

@@ -19,6 +19,10 @@
 
 namespace baikaldb {
 std::string timestamp_to_str(time_t timestamp) {
+    // 内部存储采用了uint32，因此小于0的都不合法
+    if (timestamp <= 0) {
+        return "0000-00-00 00:00:00";
+    }
     char str_time[21] = {0};
     struct tm tm;
     localtime_r(&timestamp, &tm);  
@@ -185,6 +189,9 @@ uint64_t bin_date_to_datetime(DateTime time_struct) {
 }
 
 time_t datetime_to_timestamp(uint64_t datetime) {
+    if (datetime == 0) {
+        return 0;
+    }
     struct tm tm;
     memset(&tm, 0, sizeof(tm));
 
@@ -200,10 +207,14 @@ time_t datetime_to_timestamp(uint64_t datetime) {
 
     tm.tm_year -= 1900;
     tm.tm_mon--;
-    return mktime(&tm);
+    time_t t = mktime(&tm);
+    return t <= 0 ? 0 : t;
 }
 
 uint64_t timestamp_to_datetime(time_t timestamp) {
+    if (timestamp == 0) {
+        return 0;
+    }
     uint64_t datetime = 0;
 
     struct tm tm;

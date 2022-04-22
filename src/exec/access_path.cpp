@@ -23,6 +23,44 @@
 namespace baikaldb {
 using namespace range;
 DEFINE_uint64(max_in_records_num, 10000, "max_in_records_num");
+DEFINE_int64(index_use_for_learner_delay_s, 3600, "1h");
+
+bool AccessPath::need_add_to_learner_paths() {
+    int64_t _1h = FLAGS_index_use_for_learner_delay_s * 1000 * 1000LL;
+    int64_t _2h = 2 * _1h;
+    if (table_info_ptr->learner_resource_tags.size() > 0) {
+        if (index_info_ptr->index_hint_status == pb::IHS_NORMAL) {
+            if (butil::gettimeofday_us() - index_info_ptr->disable_time < _2h && butil::gettimeofday_us() - index_info_ptr->restore_time < _1h) {
+                // 关闭以后马上打开，可以使用
+                return true;
+            } else if (butil::gettimeofday_us() - index_info_ptr->restore_time > _1h) {
+                // 正常打开超过1h可以使用
+                return true;
+            }
+            return false;
+        } else if (index_info_ptr->index_hint_status == pb::IHS_DISABLE) {
+            if (butil::gettimeofday_us() - index_info_ptr->restore_time < _2h && butil::gettimeofday_us() - index_info_ptr->disable_time < _1h) {
+                // 打开以后马上关闭，不可以使用
+                return false;
+            } else if (butil::gettimeofday_us() - index_info_ptr->disable_time > _1h) {
+                // 关闭超过1h不可以使用
+                return false;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool AccessPath::need_select_learner_index() {
+    if (butil::gettimeofday_us() - index_info_ptr->restore_time < FLAGS_index_use_for_learner_delay_s * 1000 * 1000LL
+            && table_info_ptr->learner_resource_tags.size() > 0) {
+        return true;
+    }
+
+    return false;
+}
 
 void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
         std::vector<ExprValue>& values, SmartRecord record, size_t field_idx, bool* out_open, int* out_field_cnt) {
@@ -293,11 +331,25 @@ void AccessPath::calc_normal(Property& sort_property) {
             }
             filter.insert(str);
             auto range = pos_index.add_ranges();
-            range->set_left_pb_record(str);
-            if (rg.right_record != nullptr) {
-                rg.right_record->encode(str);
+            MutTableKey  left;
+            MutTableKey  right;
+            if (rg.left_record->encode_key(*index_info_ptr.get(), left, left_field_cnt, false, like_prefix) != 0) {
+                DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
+                continue;
             }
-            range->set_right_pb_record(str);
+            range->set_left_key(left.data());
+            range->set_left_full(left.get_full());
+            if (rg.right_record != nullptr) {
+                if (rg.right_record->encode_key(*index_info_ptr.get(), right, right_field_cnt, false, like_prefix) != 0) {
+                    DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
+                    continue;
+                }
+                range->set_right_key(right.data());
+                range->set_right_full(right.get_full());
+            } else {
+                range->set_right_key(left.data());
+                range->set_right_full(left.get_full());
+            }
             range->set_left_field_cnt(left_field_cnt);
             range->set_right_field_cnt(right_field_cnt);
             range->set_left_open(left_open);
@@ -307,12 +359,20 @@ void AccessPath::calc_normal(Property& sort_property) {
     } else {
         is_possible = true;
         auto range = pos_index.add_ranges();
-        std::string str1;
-        std::string str2;
-        left_record->encode(str1);
-        right_record->encode(str2);
-        range->set_left_pb_record(str1);
-        range->set_right_pb_record(str2);
+        MutTableKey  left;
+        MutTableKey  right;
+        if (left_record->encode_key(*index_info_ptr.get(), left, left_field_cnt, false, like_prefix) != 0) {
+            DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
+            return;
+        }
+        if (right_record->encode_key(*index_info_ptr.get(), right, right_field_cnt, false, like_prefix) != 0) {
+            DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
+            return;
+        }
+        range->set_left_key(left.data());
+        range->set_left_full(left.get_full());
+        range->set_right_key(right.data());
+        range->set_right_full(right.get_full());
         range->set_left_field_cnt(left_field_cnt);
         range->set_right_field_cnt(right_field_cnt);
         range->set_left_open(left_open);

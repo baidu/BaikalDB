@@ -142,6 +142,15 @@ public:
             e->close();
         }
     }
+
+    virtual int64_t used_size() {
+        int64_t size = sizeof(*this);
+        for (auto c : _children) {
+            size += c->used_size();
+        }
+        return size;
+    }
+
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
         for (size_t idx = 0; idx < _children.size(); ++idx) {
             _children[idx]->find_place_holder(placeholders);
@@ -201,23 +210,6 @@ public:
         _col_flag = col_flag;
     }
 
-    void clear_filter_index() {
-        _index_ids.clear();
-    }
-
-    void add_filter_index(int64_t index_id) {
-        _index_ids.insert(index_id);
-    }
-
-    bool contained_by_index(std::vector<int64_t> index_ids) {
-        for (auto index_id : index_ids) {
-            if (_index_ids.count(index_id) == 1) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     void flatten_or_expr(std::vector<ExprNode*>* or_exprs) {
         if (node_type() != pb::OR_PREDICATE) {
             or_exprs->push_back(this);
@@ -254,7 +246,7 @@ public:
     }
 
     void print_expr_info();
-    
+    static bvar::Adder<int64_t>  _s_non_boolean_sql_cnts;
 protected:
     pb::ExprNodeType _node_type;
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;
@@ -265,9 +257,7 @@ protected:
     bool    _replace_agg_to_slot = true;
     int32_t _tuple_id = -1;
     int32_t _slot_id = -1;
-    // 过滤条件对应的index_id值，用于过滤条件剪枝使用
-    std::unordered_set<int64_t> _index_ids;
-    
+    bool is_logical_and_or_not();
 public:
     static int create_expr_node(const pb::ExprNode& node, ExprNode** expr_node);
 private:

@@ -70,7 +70,9 @@ public:
 
     void clear() {
         for (auto& t : _tuples) {
-            t->Clear();
+            if (t != nullptr) {
+                t->Clear();
+            }
         }
         std::fill(_tuples_assignd.begin(), _tuples_assignd.end(), false);
         _used_size = 0;
@@ -134,7 +136,7 @@ public:
     }
 
     int64_t byte_size_long() {
-        int64_t used_size = 9 * _tuples.size() + sizeof(MemRow);
+        int64_t used_size = 9 * _tuples.size() + sizeof(*this);
         for (auto& t : _tuples) {
             if (t != nullptr) {
                 used_size += t->ByteSizeLong();
@@ -148,7 +150,8 @@ public:
     }
 
     int64_t used_size() const {
-        return _used_size + 9 * _tuples.size() + sizeof(MemRow);
+        // 1.5系数为内存消耗估值，MemRow与string转换消耗
+        return _used_size * 1.5 + 9 * _tuples.size() + sizeof(*this);
     }
 
 private:

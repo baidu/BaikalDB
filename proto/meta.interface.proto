@@ -36,6 +36,7 @@ enum Status {
     MIGRATE= 4; // 迁移状态，该状态不能被改变，后续只能删除该实例
     FULL   = 5;
     SLOW   = 6; // 同集群比其他实例慢很多
+    BUSY   = 7;
 };
 enum RegionStatus {
     IDLE = 1;
@@ -291,7 +292,7 @@ message PhysicalRoom {
 };
 
 message InstanceInfo {
-    required string address         = 1;
+    optional string address         = 1;
     optional int64 capacity         = 2;
     //第一次上报心跳的时候需要填该参数
     //实际该参数并不需要存储
@@ -402,10 +403,11 @@ message ParamDesc {
     optional string key     = 1;
     optional string value   = 2; // 为通用，使用string，如果使用其他类型需要自己转成string
     optional bool is_meta_param = 3; //true则meta使用，store不需要更新本地配置
+    optional bool need_delete   = 4; //需要删除
 };
 
 message InstanceParam {
-    optional string          resource_tag_or_address    = 1;
+    optional string          resource_tag_or_address    = 1; // 警告！！！db和store共用这个存储结构，后续如果db也使用resource_tag需要确保和store resource_tag不同
     repeated ParamDesc       params                     = 2;
 };
 
@@ -583,14 +585,13 @@ message BaikalSchemaHeartBeat {
     required int64 table_id             = 1;
     required int64 version              = 2;
     repeated RegionHeartBeat regions    = 3;
-    optional int64 statis_version       = 4;
 };
 
 message BaikalHeartBeatRequest {
     //物理机房和逻辑机房对应关系
     repeated BaikalSchemaHeartBeat schema_infos    = 1;
     optional int64        last_updated_index       = 2;
-    optional bool         not_need_statistics      = 3; // meta能识别到时，说明baikaldb已经升级，不再通过该心跳更新统计信息
+    // optional bool         not_need_statistics      = 3; // meta能识别到时，说明baikaldb已经升级，不再通过该心跳更新统计信息
     repeated RegionDdlWork region_ddl_works        = 4;
     repeated DdlWorkInfo  ddl_works                = 5;
     optional bool can_do_ddlwork                   = 6;
@@ -605,6 +606,7 @@ message BaikalOtherHeartBeat {
 
 message BaikalOtherHeartBeatRequest {
     repeated BaikalOtherHeartBeat schema_infos    = 1;
+    optional string baikaldb_resource_tag         = 2;
 };
 
 message BaikalOtherHeartBeatResponse {
@@ -612,6 +614,7 @@ message BaikalOtherHeartBeatResponse {
     optional string errmsg                        = 2;
     optional string leader                        = 3;
     repeated Statistics   statistics              = 4;
+    optional InstanceParam instance_param         = 5; // baikaldb动态参数
 };
 
 message IdcInfo {
@@ -661,6 +664,7 @@ enum QueryOpType {
     QUERY_NETWORK_SEGMENT                         = 307;
     QUERY_RESOURCE_TAG_SWITCH                     = 308;
     QUERY_SHOW_VIRINDX_INFO_SQL                   = 309;//展示虚拟索引的影响   
+    QUERY_REGION_LEARNER_STATUS                   = 310;
 };
 
 message PhysicalInstance {

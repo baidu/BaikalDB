@@ -159,6 +159,7 @@ public:
 
     int decode(const std::string& in) {
         if (_message->ParseFromString(in)) {
+            _used_size += in.size();
             return 0;
         }
         return -1;
@@ -258,9 +259,14 @@ public:
         }
     }
 
+    int64_t used_size() {
+        return sizeof(TableRecord) + _used_size + get_protobuf_space_size(*_message);
+    }
+
     static SmartRecord new_record(int64_t tableid);
 
 private:
     Message* _message = nullptr;
+    int64_t  _used_size = 0;
 };
 }

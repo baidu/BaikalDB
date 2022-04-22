@@ -18,6 +18,9 @@
 namespace baikaldb {
 
 int32_t MemRowDescriptor::init(std::vector<pb::TupleDescriptor>& tuple_desc) {
+    if (tuple_desc.size() == 0) {
+        return 0;
+    }
     if (nullptr == (_factory 
             = new (std::nothrow)google::protobuf::DynamicMessageFactory(&_pool))) {
         return -1;

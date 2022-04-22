@@ -176,6 +176,19 @@ struct ExprValue {
         }
     }
 
+    explicit ExprValue(pb::PrimitiveType primitive_type, const std::string& value_str) {
+        type = pb::STRING;
+        str_val = value_str;
+        if (primitive_type == pb::STRING 
+            || primitive_type == pb::HEX 
+            || primitive_type == pb::BITMAP 
+            || primitive_type == pb::HLL 
+            || primitive_type == pb::TDIGEST) {
+            return;
+        }
+        cast_to(primitive_type);
+    }
+
     int common_prefix_length(const ExprValue& other) const {
         if (type != pb::STRING || other.type != pb::STRING) {
             return 0;
@@ -238,6 +251,24 @@ struct ExprValue {
             default:
                 return 0.0;
         }
+    }
+    uint64_t unit64_value(int prefix_len) {
+        DB_WARNING("unit64_value, prefix: %d, str: %s", prefix_len, str_val.c_str());
+        uint64_t val = 0;
+        if (type == pb::STRING) {
+            if (prefix_len >= (int)str_val.size()) {
+                return 0;
+            }
+            for (int i = prefix_len; i < prefix_len + 8; i++) {
+                val <<= 8;
+                if (i < (int)str_val.size()) {
+                    val += uint8_t(str_val[i]);
+                }
+                DB_WARNING("i: %d, val: %lu", i, val);
+            }
+            return val;
+        }
+        return 0;
     }
     void to_proto(pb::ExprValue* value) {
         value->set_type(type);
@@ -726,7 +757,7 @@ struct ExprValue {
     }
 
     bool is_string() const {
-        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP || type == pb::HLL;
+        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP || type == pb::HLL || type == pb::TDIGEST;
     }
 
     bool is_double() const {
@@ -830,6 +861,14 @@ struct ExprValue {
         gettimeofday(&tv, NULL);
         tmp._u.uint64_val |= tv.tv_usec;
         return tmp;
+    }
+    // For string, end-self
+    double calc_diff(const ExprValue& end, int prefix_len) {
+        ExprValue tmp_end = end;
+        double ret = tmp_end.float_value(prefix_len) - float_value(prefix_len);
+        DB_WARNING("start:%s, end:%s, prefix_len:%d, ret:%f",
+                 get_string().c_str(), end.get_string().c_str(), prefix_len, ret);
+        return ret;
     }
 };
 }

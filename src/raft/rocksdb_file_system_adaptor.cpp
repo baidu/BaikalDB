@@ -55,13 +55,15 @@ const char* PosixDirReader::name() const {
 RocksdbReaderAdaptor::RocksdbReaderAdaptor(int64_t region_id,
                                             const std::string& path,
                                             RocksdbFileSystemAdaptor* rs,
-                                            SnapshotContextPtr context,
+                                            IteratorContextPtr context,
                                             bool is_meta_reader) :
             _region_id(region_id), 
             _path(path),
             _rs(rs),
             _context(context),
-            _is_meta_reader(is_meta_reader) {}
+            _is_meta_reader(is_meta_reader) {
+                _region_ptr = Store::get_instance()->get_region(_region_id);
+            }
 
 RocksdbReaderAdaptor::~RocksdbReaderAdaptor() {
     close();
@@ -74,38 +76,35 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         return -1;
     }
     if (offset < 0) {
-        DB_FATAL("region_id: %ld red error. offset: %ld", _region_id, offset);
+        DB_FATAL("region_id: %ld read error. offset: %ld", _region_id, offset);
         return -1;
     }
 
     TimeCost time_cost;
-    IteratorContext* iter_context = _context->data_context;
-    if (_is_meta_reader) {
-        iter_context = _context->meta_context;
-    } else if (!_context->need_copy_data) {
-        iter_context->done = true;
+    if (!_is_meta_reader && !_context->need_copy_data) {
+        _context->done = true;
         DB_WARNING("region_id: %ld need not copy data, time_cost: %ld", 
                 _region_id, time_cost.get_time());
         return 0;
     }
-    if (offset > iter_context->offset) {
+    if (offset > _context->offset) {
         DB_FATAL("region_id: %ld, retry last_offset, offset biger fail "
                 "time_cost: %ld, last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
-                _region_id, time_cost.get_time(), _last_offset, offset, iter_context->offset, size);
+                _region_id, time_cost.get_time(), _last_offset, offset, _context->offset, size);
         return -1;
     }
-    if (offset < iter_context->offset) {
+    if (offset < _context->offset) {
         // 缓存上一个包，重试一次可以恢复
         if (_last_offset == offset) {
             *portal = _last_package;
             DB_FATAL("region_id: %ld, retry last_offset time_cost: %ld, "
                     "off:%lu, ctx->off:%lu, size:%lu, ret_size:%lu", 
-                    _region_id, time_cost.get_time(), offset, iter_context->offset, size, _last_package.size());
+                    _region_id, time_cost.get_time(), offset, _context->offset, size, _last_package.size());
             return _last_package.size();
         }
         DB_FATAL("region_id: %ld, retry last_offset fail time_cost: %ld, "
                 "last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
-                _region_id, time_cost.get_time(), _last_offset, offset, iter_context->offset, size);
+                _region_id, time_cost.get_time(), _last_offset, offset, _context->offset, size);
         return -1;
     }
 
@@ -115,51 +114,57 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     std::string txn_info_prefix = MetaWriter::get_instance()->transcation_pb_key_prefix(_region_id);
     std::string pre_commit_prefix = MetaWriter::get_instance()->pre_commit_key_prefix(_region_id);
     std::string region_info_key = MetaWriter::get_instance()->region_info_key(_region_id);
+    // 大region addpeer中重置time_cost，防止version=0超时删除
+    _region_ptr->reset_timecost();
     
     while (count < size) {
-        if (!iter_context->iter->Valid()
-                || !iter_context->iter->key().starts_with(iter_context->prefix)) {
-            iter_context->done = true;
+        if (!_context->iter->Valid()
+                || !_context->iter->key().starts_with(_context->prefix)) {
+            _context->done = true;
             //portal->append((void*)iter_context->offset, sizeof(size_t));
-            DB_WARNING("region_id: %ld snapshot read over, total size: %ld", _region_id, iter_context->offset);
+            DB_WARNING("region_id: %ld snapshot read over, total size: %ld", _region_id, _context->offset);
             auto region = Store::get_instance()->get_region(_region_id);
-            if (iter_context->is_meta_sst) {
-                region->set_snapshot_meta_size(iter_context->offset);
+            if (region == nullptr) {
+                DB_FATAL("region_id: %ld is null region", _region_id);
+                return -1;
+            }
+            if (_context->is_meta_sst) {
+                region->set_snapshot_meta_size(_context->offset);
             } else {
-                region->set_snapshot_data_size(iter_context->offset);
+                region->set_snapshot_data_size(_context->offset);
             }
             break;
         }
         // debug meta region_info applied_index
-        if (iter_context->is_meta_sst && iter_context->iter->key().compare(region_info_key) == 0) {
+        if (_context->is_meta_sst && _context->iter->key().compare(region_info_key) == 0) {
             pb::RegionInfo region_info;
-            region_info.ParseFromArray(iter_context->iter->value().data_,
-                    iter_context->iter->value().size_);
+            region_info.ParseFromArray(_context->iter->value().data_,
+                    _context->iter->value().size_);
             DB_WARNING("region_id: %ld meta_sst region_info:%s", _region_id,
                     region_info.ShortDebugString().c_str());
         }
         //txn_info请求不发送，理论上leader上没有该类请求
-        if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(txn_info_prefix)) {
-            iter_context->iter->Next();
+        if (_context->is_meta_sst && _context->iter->key().starts_with(txn_info_prefix)) {
+            _context->iter->Next();
             continue;
         }
-        if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(pre_commit_prefix)) {
+        if (_context->is_meta_sst && _context->iter->key().starts_with(pre_commit_prefix)) {
             DB_FATAL("region_id: %ld should not have this message, txn_id: %lu", _region_id,
-                        MetaWriter::get_instance()->decode_pre_commit_key(iter_context->iter->key()));
-            iter_context->iter->Next();
+                        MetaWriter::get_instance()->decode_pre_commit_key(_context->iter->key()));
+            _context->iter->Next();
             continue;
         }
         //如果是prepared事务的log_index记录需要解析出store_req
         int64_t read_size = 0;
-        if (iter_context->is_meta_sst && iter_context->iter->key().starts_with(log_index_prefix)) {
-            int64_t log_index = MetaWriter::get_instance()->decode_log_index_value(iter_context->iter->value());
-            uint64_t txn_id = MetaWriter::get_instance()->decode_log_index_key(iter_context->iter->key());
+        if (_context->is_meta_sst && _context->iter->key().starts_with(log_index_prefix)) {
+            int64_t log_index = MetaWriter::get_instance()->decode_log_index_value(_context->iter->value());
+            uint64_t txn_id = MetaWriter::get_instance()->decode_log_index_key(_context->iter->key());
             std::map<int64_t, std::string> txn_infos;
-            auto ret  = LogEntryReader::get_instance()->read_log_entry(_region_id, log_index, iter_context->applied_index, txn_id, txn_infos);
+            auto ret  = LogEntryReader::get_instance()->read_log_entry(_region_id, log_index, _context->applied_index, txn_id, txn_infos);
             if (ret < 0) {
-                iter_context->done = true;
+                _context->done = true;
                 DB_FATAL("read txn info fail, may be has removed, region_id: %ld", _region_id);
-                iter_context->iter->Next();
+                _context->iter->Next();
                 continue;
             }
             for (auto& txn_info : txn_infos) {
@@ -170,13 +175,13 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
             
         } else {
             key_num++;
-            read_size += serialize_to_iobuf(portal, iter_context->iter->key());
-            read_size += serialize_to_iobuf(portal, iter_context->iter->value());
+            read_size += serialize_to_iobuf(portal, _context->iter->key());
+            read_size += serialize_to_iobuf(portal, _context->iter->value());
         }
         count += read_size;
         ++_num_lines;
-        iter_context->offset += read_size;
-        iter_context->iter->Next();
+        _context->offset += read_size;
+        _context->iter->Next();
     }
     DB_WARNING("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld, "
             "off:%lu, size:%lu, last_off:%lu, last_count:%lu", 
@@ -199,13 +204,8 @@ bool RocksdbReaderAdaptor::close() {
 }
 
 ssize_t RocksdbReaderAdaptor::size() {
-    IteratorContext* iter_context = _context->data_context;
-    if (_is_meta_reader) {
-        iter_context = _context->meta_context;
-    } 
-    
-    if (iter_context->done) {
-        return iter_context->offset;
+    if (_context->done) {
+        return _context->offset;
     }
     return std::numeric_limits<ssize_t>::max();
 }
@@ -585,13 +585,13 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
     }
 
     bool is_meta_reader = false;
-    IteratorContext* iter_context = nullptr;
+    IteratorContextPtr iter_context = nullptr;
     if (is_snapshot_data_file(path)) {
         is_meta_reader = false;
         iter_context = sc->data_context;
         //first open snapshot file
         if (iter_context == nullptr) {
-            iter_context = new IteratorContext;
+            iter_context.reset(new IteratorContext);
             iter_context->prefix = prefix;
             iter_context->is_meta_sst = false;
             iter_context->upper_bound = upper_bound;
@@ -621,7 +621,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
                 }
             }
             if (sc->data_index < peer_next_index) {
-                sc->need_copy_data = false;
+                iter_context->need_copy_data = false;
             }
             sc->data_context = iter_context;
             DB_WARNING("region_id: %ld open reader, data_index:%ld,peer_next_index:%ld, path: %s, time_cost: %ld", 
@@ -635,7 +635,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
         is_meta_reader = true;
         iter_context = sc->meta_context;
         if (iter_context == nullptr) {
-            iter_context = new IteratorContext;
+            iter_context.reset(new IteratorContext);
             iter_context->prefix = prefix;
             iter_context->is_meta_sst = true;
             rocksdb::ReadOptions read_options;
@@ -661,7 +661,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
         return nullptr;
     }
     iter_context->reading = true;
-    auto reader = new RocksdbReaderAdaptor(_region_id, path, this, sc, is_meta_reader);
+    auto reader = new RocksdbReaderAdaptor(_region_id, path, this, iter_context, is_meta_reader);
     reader->open();
     DB_WARNING("region_id: %ld open reader: path: %s snapshot_index: %ld applied_index: %ld data_index: %ld , time_cost: %ld", 
                 _region_id, path.c_str(), snapshot_index, applied_index, data_index, time_cost.get_time());
@@ -782,10 +782,10 @@ void RocksdbFileSystemAdaptor::close(const std::string& path) {
     auto& snapshot_ctx = iter->second;
     if (is_snapshot_data_file(path) && snapshot_ctx.ptr->data_context != nullptr) {
         DB_WARNING("read snapshot data file close, path: %s", path.c_str());
-        snapshot_ctx.ptr->data_context->reading = false;
+        snapshot_ctx.ptr->data_context.reset();
     } else if (snapshot_ctx.ptr->meta_context != nullptr) {
         DB_WARNING("read snapshot meta data file close, path: %s", path.c_str());
-        snapshot_ctx.ptr->meta_context->reading = false;
+        snapshot_ctx.ptr->meta_context.reset();
     }
 }
 

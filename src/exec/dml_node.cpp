@@ -283,12 +283,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
 
         if (!_ddl_need_write && (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
             index_state != pb::IS_WRITE_LOCAL)) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         } else if (_ddl_need_write && info_ptr->id != _ddl_index_id && (index_state == pb::IS_WRITE_ONLY &&
             index_state == pb::IS_WRITE_LOCAL)) {
-            DB_DEBUG("DDL_LOG index_selector skip stale index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip stale index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -361,12 +361,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         auto index_state = info.state;
         if (!_ddl_need_write && (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
             index_state != pb::IS_WRITE_LOCAL)) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         } else if (_ddl_need_write && info_ptr->id != _ddl_index_id && (index_state == pb::IS_WRITE_ONLY &&
             index_state == pb::IS_WRITE_LOCAL)) {
-            DB_DEBUG("DDL_LOG index_selector skip stale index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip stale index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -455,7 +455,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
         }
         auto index_state = info.state;
         if (index_state == pb::IS_NONE) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }

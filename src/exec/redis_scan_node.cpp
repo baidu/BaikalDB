@@ -51,7 +51,8 @@ int RedisScanNode::open(RuntimeState* state) {
     }
     // 简单kv只有primary
     // 如果数据源支持各种索引，可以在这边做处理
-    const pb::PossibleIndex& pos_index = _pb_node.derive_node().scan_node().indexes(0);
+    pb::PossibleIndex pos_index;
+    pos_index.ParseFromString(_pb_node.derive_node().scan_node().indexes(0));
     _index_id = pos_index.index_id();
     SchemaFactory* factory = SchemaFactory::get_instance();
     auto index_info_ptr = factory->get_index_info_ptr(_index_id);

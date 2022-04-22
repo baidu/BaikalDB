@@ -142,7 +142,7 @@ int DDLWorkPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& t
         pb::PlanNode plan_node;
         plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
         plan_node.set_num_children(0);
-        plan_node.set_limit(-1);
+        plan_node.set_limit(_limit);
         plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_lock_type(
             _is_uniq ? pb::LOCK_GLOBAL_DDL : pb::LOCK_NO_GLOBAL_DDL);
         plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_global_index_id(_index_id);
@@ -172,28 +172,30 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     _ctx->open_binlog = false;
     _ctx->client_conn->open_binlog = false;
 
-    scan_node->set_router_index_id(_table_id);
     pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->
         mutable_derive_node()->mutable_scan_node();       
 
     pb_scan_node->set_lock(pb::LOCK_GET);
-    auto pos_index = pb_scan_node->add_indexes();
-    pos_index->set_index_id(_table_id);
-    auto range_index = pos_index->add_ranges();
+    _pos_index.Clear();
+    _pos_index.set_index_id(_table_id);
+    auto range_index = _pos_index.add_ranges();
     if (_start_key != "") {
-        range_index->set_left_pb_record(_start_key);
+        range_index->set_left_key(_start_key);
+        range_index->set_left_full(_ddl_pk_key_is_full);
         range_index->set_left_field_cnt(_field_num);
         range_index->set_left_open(false);
     }
-    if (_end_key != "") {
-        range_index->set_right_pb_record(_end_key);
-        range_index->set_right_field_cnt(_field_num);
-        range_index->set_right_open(true);
-    }
+    // 暂时用不上
+    // if (_end_key != "") {
+    //     range_index->set_right_pb_record(_end_key);
+    //     range_index->set_right_field_cnt(_field_num);
+    //     range_index->set_right_open(true);
+    // }
     if (!_is_global_index) {
         pb_scan_node->set_is_ddl_work(true);
         pb_scan_node->set_ddl_index_id(_index_id);
     }
+    
     google::protobuf::RepeatedPtrField<pb::RegionInfo> old_region_infos;
     auto old_region_info = old_region_infos.Add();
     old_region_info->set_table_id(_table_id);
@@ -203,7 +205,7 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     scan_node->set_old_region_infos(std::move(old_region_infos));
     scan_node->set_router_policy(RouterPolicy::RP_REGION);
     // 更新 路由 index信息
-    scan_node->set_router_index(pb_scan_node->mutable_indexes(0));
+    scan_node->serialize_index_and_set_router_index(_pos_index, &_pos_index, true);
 
     // scan 路由
     ret = PlanRouter().scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node.get()), _ctx, false);
@@ -236,6 +238,7 @@ int DDLWorkPlanner::execute() {
                 uint64_t log_id = butil::fast_rand();
                 state.set_log_id(log_id);
                 retry_times = 0;
+                _ddl_pk_key_is_full = state.ddl_pk_key_is_full;
                 _start_key = state.ddl_max_pk_key;
                 _router_start_key = state.ddl_max_router_key;
             }

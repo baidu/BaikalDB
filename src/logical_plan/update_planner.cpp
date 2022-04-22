@@ -16,6 +16,7 @@
 #include "network_socket.h"
 
 namespace baikaldb {
+DEFINE_bool(open_non_where_sql_forbid, false, "open non where conjunct sql forbid switch default:false");
 int UpdatePlanner::plan() {
     if (_ctx->stmt == nullptr) {
         DB_WARNING("no sql command set");
@@ -158,7 +159,8 @@ int UpdatePlanner::parse_kv_list() {
             DB_WARNING("create update value expr failed");
             return -1;
         }
-        if (field_info->on_update_value == "(current_timestamp())") {
+        if (field_info->on_update_value == "(current_timestamp())" 
+                || field_info->default_value == "(current_timestamp())") {
             if (value_expr.nodes(0).node_type() == pb::NULL_LITERAL) {
                 auto node = value_expr.mutable_nodes(0);
                 node->set_num_children(0);
@@ -190,6 +192,10 @@ int UpdatePlanner::parse_kv_list() {
 
 int UpdatePlanner::parse_where() {
     if (_update->where == nullptr) {
+        DB_WARNING("update sql [%s] does not contain where conjunct", _ctx->sql.c_str());
+        if (FLAGS_open_non_where_sql_forbid) {
+            return -1;
+        }
         return 0;
     }
     if (0 != flatten_filter(_update->where, _where_filters, CreateExprOptions())) {

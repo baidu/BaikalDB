@@ -29,6 +29,7 @@ DECLARE_bool(need_check_slow);
 struct InstanceStateInfo {
     int64_t timestamp; //上次收到该实例心跳的时间戳
     pb::Status state; //实例状态
+    TimeCost state_duration; //目前状态持续时间，主要给MIGRATE状态用
 };
 
 struct InstanceSchedulingInfo {
@@ -135,6 +136,8 @@ public:
     void process_instance_heartbeat_for_store(const pb::InstanceInfo& request);
     void process_instance_param_heartbeat_for_store(const pb::StoreHeartBeatRequest* request, 
                 pb::StoreHeartBeatResponse* response);
+    void process_instance_param_heartbeat_for_baikal(const pb::BaikalOtherHeartBeatRequest* request,
+                pb::BaikalOtherHeartBeatResponse* response);
     void process_peer_heartbeat_for_store(const pb::StoreHeartBeatRequest* request, 
                 pb::StoreHeartBeatResponse* response);
     void process_pk_prefix_load_balance(std::unordered_map<std::string, int64_t>& pk_prefix_region_counts,
@@ -405,6 +408,7 @@ public:
         for (auto& instance_pair : _instance_info) {
             instance_pair.second.instance_status.state = pb::NORMAL;
             instance_pair.second.instance_status.timestamp = butil::gettimeofday_us();
+            instance_pair.second.instance_status.state_duration.reset();
         }
     }
 
@@ -469,102 +473,10 @@ public:
     }
     
     // return -1: add instance -2: update instance
-    int update_instance_info(const pb::InstanceInfo& instance_info) {
-        std::string instance = instance_info.address();
-        BAIDU_SCOPED_LOCK(_instance_mutex);
-        if (_instance_info.find(instance) == _instance_info.end()) {
-            // 校验container_id和address是否一致，不一致则不加到meta中
-            if (same_with_container_id_and_address(instance_info.container_id(),
-                        instance_info.address())) {
-                return -1;
-            } else {
-                return 0;
-            }
-        }
-        if (_instance_info[instance].resource_tag != instance_info.resource_tag()) {
-            return -2;
-        }
-        auto& is = _instance_info[instance];
-        if(instance_info.has_network_segment() && (instance_info.network_segment() != is.network_segment_self_defined)) {
-            // store gflag-network_segment changed
-            return -2;
-        }
-        is.capacity = instance_info.capacity();
-        is.used_size = instance_info.used_size();
-        is.resource_tag = instance_info.resource_tag();
-        is.version = instance_info.version();
-        is.instance_status.timestamp = butil::gettimeofday_us();
-        is.dml_latency = instance_info.dml_latency();
-        is.dml_qps = instance_info.dml_qps();
-        is.raft_total_latency = instance_info.raft_total_latency();
-        is.raft_total_qps = instance_info.raft_total_qps();
-        is.select_latency = instance_info.select_latency();
-        is.select_qps = instance_info.select_qps();
-        is.instance_status.timestamp = butil::gettimeofday_us();
-        auto& status = is.instance_status.state;
-        if (status == pb::NORMAL) {
-            if (!FLAGS_need_check_slow || is.dml_latency == 0 || is.raft_total_latency / is.dml_latency <= 10) {
-                return 0;
-            }
-            int64_t all_raft_total_latency = 0;
-            int64_t all_dml_latency = 0;
-            int64_t cnt = 0;
-            for (auto& pair : _instance_info) {
-                if (pair.second.resource_tag == is.resource_tag &&
-                    pair.first != instance) {
-                    all_raft_total_latency += pair.second.raft_total_latency;
-                    all_dml_latency += pair.second.dml_latency;
-                    ++cnt;
-                }
-            }
-            size_t max_slow_size = cnt * 5 / 100 + 1;
-            if (cnt > 5 && is.raft_total_latency > 100 * all_raft_total_latency / cnt &&
-                    _slow_instances.size() < max_slow_size) {
-                DB_WARNING("instance:%s status SLOW, resource_tag: %s, raft_total_latency:%ld, dml_latency:%ld, "
-                        "cnt:%ld, avg_raft_total_latency:%ld, avg_dml_latency:%ld",
-                        instance.c_str(), is.resource_tag.c_str(), is.raft_total_latency, is.dml_latency, 
-                        cnt, all_raft_total_latency / cnt, all_dml_latency / cnt);
-                status = pb::SLOW;
-                _slow_instances.insert(instance);
-            }
-        } else if (status == pb::SLOW) {
-            if (is.dml_latency > 0 &&
-                    is.raft_total_latency / is.dml_latency > 10) {
-                return 0;
-            }
-            int64_t all_raft_total_latency = 0;
-            int64_t all_dml_latency = 0;
-            int64_t cnt = 0;
-            for (auto& pair : _instance_info) {
-                if (pair.second.resource_tag == is.resource_tag && pair.first != instance) {
-                    all_raft_total_latency += pair.second.raft_total_latency;
-                    all_dml_latency += pair.second.dml_latency;
-                    ++cnt;
-                }
-            }
-            if (cnt > 0 && is.dml_latency <= 2 * all_dml_latency / cnt) {
-                DB_WARNING("instance:%s status NORMAL, resource_tag: %s, raft_total_latency:%ld, dml_latency:%ld, "
-                        "cnt:%ld, avg_raft_total_latency:%ld, avg_dml_latency:%ld",
-                        instance.c_str(), is.resource_tag.c_str(), is.raft_total_latency, is.dml_latency, 
-                        cnt, all_raft_total_latency / cnt, all_dml_latency / cnt);
-                _slow_instances.erase(instance);
-                status = pb::NORMAL;
-            }
-        } else if (status != pb::MIGRATE) {
-            DB_WARNING("instance:%s status return NORMAL, resource_tag: %s",
-                    instance.c_str(), is.resource_tag.c_str());
-            status = pb::NORMAL;
-        }
-        return 0;
-    }
+    int update_instance_info(const pb::InstanceInfo& instance_info);
     
     int set_migrate_for_instance(const std::string& instance) {
-        BAIDU_SCOPED_LOCK(_instance_mutex);
-        if (_instance_info.find(instance) == _instance_info.end()) {
-            return -1;
-        }
-        _instance_info[instance].instance_status.state = pb::MIGRATE;
-        return 0;
+        return set_status_for_instance(instance, pb::MIGRATE);
     }
    
     int set_status_for_instance(const std::string& instance, const pb::Status& status) {
@@ -572,7 +484,10 @@ public:
         if (_instance_info.find(instance) == _instance_info.end()) {
             return -1;
         }
-        _instance_info[instance].instance_status.state = status;
+        if (_instance_info[instance].instance_status.state != status) {
+            _instance_info[instance].instance_status.state = status;
+            _instance_info[instance].instance_status.state_duration.reset();
+        }
         return 0;
     }
 
@@ -673,6 +588,20 @@ private:
     int load_logical_snapshot(const std::string& logical_prefix,
                                 const std::string& key, 
                                 const std::string& value);
+    int get_meta_param(const std::string& resource_tag, const std::string& key, int64_t* value) {
+        BAIDU_SCOPED_LOCK(_instance_param_mutex);
+        auto iter = _instance_param_map.find(resource_tag);
+        if (iter == _instance_param_map.end()) {
+            return -1;
+        }
+        for (auto& param : iter->second.params()) {
+            if (param.is_meta_param() && param.key() == key) {
+                *value = strtoll(param.value().c_str(), NULL, 10);
+                return 0;
+            }
+        }
+        return -1;
+    }
 private:
     bthread_mutex_t                                             _physical_mutex;
     //物理机房与逻辑机房对应关系 , key:物理机房， value:逻辑机房
@@ -690,13 +619,12 @@ private:
 
     //实例信息
     std::unordered_map<std::string, Instance>                   _instance_info;
-    std::unordered_map<std::string, std::string>                _container_id_to_ip;
+    std::unordered_map<std::string, TimeCost>                   _tombstone_instance;
     std::unordered_set<std::string>                             _slow_instances;
 
     bthread_mutex_t                                             _instance_param_mutex;
     // 集群或实例的配置
     std::unordered_map<std::string, pb::InstanceParam>          _instance_param_map;
-    int                                                         _migrate_concurrency = 2;
 
     // 调度相关的信息（leader balance, peer balance, pk_prefix balance)
     DoubleBufferedSchedulingInfo     _scheduling_info;

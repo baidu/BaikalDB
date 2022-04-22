@@ -19,6 +19,7 @@
 
 namespace baikaldb {
 DEFINE_bool(delete_all_to_truncate, false,  "delete from xxx; treat as truncate");
+DECLARE_bool(open_non_where_sql_forbid);
 int DeletePlanner::plan() {
     if (_ctx->stmt_type == parser::NT_TRUNCATE) {
         if (_ctx->client_conn->txn_id != 0) {
@@ -192,6 +193,10 @@ int DeletePlanner::reset_auto_incr_id() {
 
 int DeletePlanner::parse_where() {
     if (_delete_stmt->where == nullptr) {
+        DB_WARNING("delete sql [%s] does not contain where conjunct", _ctx->sql.c_str());
+        if (FLAGS_open_non_where_sql_forbid) {
+            return -1;
+        }
         return 0;
     }
     if (0 != flatten_filter(_delete_stmt->where, _where_filters, CreateExprOptions())) {

@@ -52,6 +52,7 @@ static const std::string TABLE_OP_VERSION      = "op_version";                //
 static const std::string TABLE_OP_DESC         = "op_desc";                   //操作描述信息
 static const std::string TABLE_FILTER_RATIO    = "filter_ratio";              //过滤率
 static const std::string VIRTUAL_DATABASE_NAME = "__virtual_db";              // 临时表数据库名
+static const std::string TABLE_IN_FAST_IMPORTER= "in_fast_import";
 struct UserInfo;
 class TableRecord;
 typedef std::shared_ptr<TableRecord> SmartRecord;
@@ -379,6 +380,8 @@ struct IndexInfo {
     pb::StorageType storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
     pb::IndexHintStatus     index_hint_status = pb::IHS_NORMAL;
     int64_t                 write_only_time = -1;
+    int64_t                 restore_time = -1;
+    int64_t                 disable_time = -1;
     int32_t                 max_field_id = 0;
 };
 
@@ -438,6 +441,7 @@ using DoubleBufferedUser = butil::DoublyBufferedData<std::unordered_map<std::str
 
 struct SqlStatistics {
     static const int64_t TOTAL_COUNT = 1000000;
+    static const int64_t SQL_COUNTS_RANGE = 3;
     double qps = 0.0;
     int64_t avg_scan_rows = 0;
     int64_t scan_rows_9999 = 0;
@@ -460,6 +464,12 @@ struct SqlStatistics {
         }
         if (latency_us_9999 > 0 || latency_us > 0) {
             return std::max(latency_us_9999 / 1000, latency_us * times_avg_and_9999 / 1000);
+        }
+        return -1;
+    }
+    int64_t latency_heap_top() {
+        if (!latency_heap.empty()) {
+            return latency_heap.top();
         }
         return -1;
     }
@@ -505,7 +515,7 @@ using SqlStatMap = std::unordered_map<uint64_t, std::shared_ptr<SqlStatistics>>;
 using DoubleBufferedSql = butil::DoublyBufferedData<SqlStatMap>;
 
 class SchemaFactory {
-typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec; 
+typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec;
 typedef ::google::protobuf::RepeatedPtrField<pb::SchemaInfo> SchemaVec;
 typedef ::google::protobuf::RepeatedPtrField<pb::DataBaseInfo> DataBaseVec;
 typedef ::google::protobuf::RepeatedPtrField<pb::Statistics> StatisticsVec;
@@ -543,7 +553,7 @@ public:
     void update_tables_double_buffer_sync(const SchemaVec& tables);
 
     void update_instance_canceled(const std::string& addr);
-    void update_instance(const std::string& addr, pb::Status s, bool user_check);
+    void update_instance(const std::string& addr, pb::Status s, bool user_check, bool cover_dead);
     int update_instance_internal(IdcMapping& idc_mapping, const std::string& addr, pb::Status s, bool user_check);
     void update_idc(const pb::IdcInfo& idc_info);
     int update_idc_internal(IdcMapping& background, const pb::IdcInfo& idc_info);
@@ -656,6 +666,7 @@ public:
     bool get_merge_switch(int64_t table_id);
     bool get_separate_switch(int64_t table_id);
     bool is_switch_open(const int64_t table_id, const std::string& switch_name);
+    bool is_in_fast_importer(int64_t table_id);
     void get_cost_switch_open(std::vector<std::string>& database_table);
     void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
     void get_table_by_filter(std::vector<std::string>& database_table, 
@@ -670,24 +681,25 @@ public:
     int get_all_region_by_table_id(int64_t table_id, 
             std::map<std::string, pb::RegionInfo>* region_infos,
             const std::vector<int64_t>& partitions = std::vector<int64_t>{0});
+    int check_region_ranges_consecutive(int64_t table_id);
     int get_region_by_key(int64_t main_table_id, 
             IndexInfo& index,
             const pb::PossibleIndex* primary,
             std::map<int64_t, pb::RegionInfo>& region_infos,
-            std::map<int64_t, pb::PossibleIndex>* region_primary = nullptr,
+            std::map<int64_t, std::string>* region_primary = nullptr,
             const std::vector<int64_t>& partitions = std::vector<int64_t>{0});
     // only used for pk (not null)
     int get_region_by_key(IndexInfo& index, 
             const pb::PossibleIndex* primary,
             std::map<int64_t, pb::RegionInfo>& region_infos,
-            std::map<int64_t, pb::PossibleIndex>* region_primary = nullptr);
+            std::map<int64_t, std::string>* region_primary = nullptr);
 
     int get_region_by_key(
             const RepeatedPtrField<pb::RegionInfo>& input_regions,
             std::map<int64_t, pb::RegionInfo>& output_regions);
 
     int get_region_by_key(IndexInfo& index,
-            std::vector<SmartRecord> records,
+            const std::vector<SmartRecord>& records,
             std::map<int64_t, std::vector<SmartRecord>>& region_ids,
             std::map<int64_t, pb::RegionInfo>& region_infos);
 
@@ -697,6 +709,10 @@ public:
             std::map<int64_t, std::vector<SmartRecord>>& insert_region_ids,
             std::map<int64_t, std::vector<SmartRecord>>& delete_region_ids,
             std::map<int64_t, pb::RegionInfo>& region_infos);
+
+    int get_region_ids_by_key(IndexInfo& index,
+                              const std::vector<SmartRecord>&  records,
+                              std::vector<int64_t>& region_ids);
 
     bool exist_tableid(int64_t table_id);
     
@@ -974,6 +990,11 @@ public:
     int is_unique_field_ids(int64_t table_id, const std::set<int32_t>& field_ids);
 
     int fill_default_value(SmartRecord record, FieldInfo& field);
+
+    int64_t get_baikaldb_alive_time_us() {
+        return _baikaldb_restart_time.get_time();
+    }
+
 private:
     SchemaFactory() {
         _is_inited = false;
@@ -1025,6 +1046,8 @@ private:
     int64_t     _last_updated_index = 0;
     bvar::Adder<VirtualIndexMap> _virtual_index_info; // 虚拟索引使用
 
+    //记录baikaldb模块的起始时间用于计算启动时长
+    TimeCost _baikaldb_restart_time;
 };
 }
 
