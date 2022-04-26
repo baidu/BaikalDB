@@ -55,6 +55,9 @@ enum IndexHint {
                 break;
         }
     }
+
+    bool need_add_to_learner_paths();
+    bool need_select_learner_index();
     
     void calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
             std::vector<ExprValue>& values, SmartRecord record, size_t field_idx, bool* out_open, int* out_field_cnt);
@@ -95,7 +98,6 @@ enum IndexHint {
                 // primary 没有过滤index_conjuncts，后续store会增加这个过滤
                 if (all_in_index(expr_field_ids, cover_field_ids) && index_type != pb::I_PRIMARY) {
                     index_other_condition.insert(expr);
-                    ExprNode::create_pb_expr(pos_index.add_index_conjuncts(), expr);
                     index_other_field_ids.insert(expr_field_ids.begin(), expr_field_ids.end());
                 } else {
                     other_condition.insert(expr);

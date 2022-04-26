@@ -91,6 +91,7 @@ int InsertPlanner::gen_select_plan() {
             _ctx->stat_info.error_msg << "Column count doesn't match value count at row 1";
             return -1;            
         }
+        _ctx->add_sub_ctx(_cur_sub_ctx);
     }
     return 0;
 }
@@ -127,6 +128,15 @@ int InsertPlanner::parse_db_table(pb::InsertNode* node) {
 }
 
 int InsertPlanner::parse_kv_list() {
+    if (_insert_stmt->on_duplicate.size() == 0) {
+        return 0;
+    }
+    auto tbl_ptr = _factory->get_table_info_ptr(_table_id);
+    if (tbl_ptr == nullptr) {
+        DB_WARNING("no table found with id: %ld", _table_id);
+        return -1;
+    }
+    std::set<int32_t> update_field_ids;
     for (int i = 0; i < _insert_stmt->on_duplicate.size(); ++i) {
         if (_insert_stmt->on_duplicate[i]->name == nullptr) {
             DB_WARNING("on_duplicate name[%d] is enmty", i);
@@ -149,14 +159,41 @@ int InsertPlanner::parse_kv_list() {
         }
         auto slot = get_scan_ref_slot(alias_name, 
                 field_info->table_id, field_info->id, field_info->type);
-        _update_slots.push_back(slot);
+        _update_slots.emplace_back(slot);
+        update_field_ids.insert(field_info->id);
 
         pb::Expr value_expr;
         if (0 != create_expr_tree(_insert_stmt->on_duplicate[i]->expr, value_expr, CreateExprOptions())) {
             DB_WARNING("create update value expr failed");
             return -1;
         }
-        _update_values.push_back(value_expr);
+        if (field_info->on_update_value == "(current_timestamp())" 
+                || field_info->default_value == "(current_timestamp())") {
+            if (value_expr.nodes(0).node_type() == pb::NULL_LITERAL) {
+                auto node = value_expr.mutable_nodes(0);
+                node->set_num_children(0);
+                node->set_node_type(pb::STRING_LITERAL);
+                node->set_col_type(pb::STRING);
+                node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
+            }
+        }
+        _update_values.emplace_back(value_expr);
+    }
+    for (auto& field : tbl_ptr->fields) {
+        if (update_field_ids.count(field.id) != 0) {
+            continue;
+        }
+        if (field.on_update_value == "(current_timestamp())") {
+            pb::Expr value_expr;
+            auto node = value_expr.add_nodes();
+            node->set_num_children(0);
+            node->set_node_type(pb::STRING_LITERAL);
+            node->set_col_type(pb::STRING);
+            node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
+            auto slot = get_scan_ref_slot(tbl_ptr->name, field.table_id, field.id, field.type);
+            _update_slots.emplace_back(slot);
+            _update_values.emplace_back(value_expr);
+        }
     }
     return 0;
 }
@@ -191,13 +228,13 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
             DB_WARNING("invalid field name in: %s", full_name.c_str());
             return -1;
         }
-        _fields.push_back(*field_info);
+        _fields.emplace_back(*field_info);
         field_ids.insert(field_info->id);
         node->add_field_ids(field_info->id);
     }
     for (auto& field : tbl.fields) {
         if (field_ids.count(field.id) == 0) {
-            _default_fields.push_back(field);
+            _default_fields.emplace_back(field);
         }
     }
     //DB_WARNING("insert_node:%s", node->DebugString().c_str());
@@ -238,7 +275,7 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
                     return -1;
                 }
             }
-            _ctx->insert_records.push_back(row);
+            _ctx->insert_records.emplace_back(row);
         }
     }
     return 0;

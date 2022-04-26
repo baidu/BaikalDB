@@ -31,8 +31,6 @@
 
 namespace baikaldb {
 
-DEFINE_int64(db_sql_memory_bytes_limit, 8589934592, "minimum memory use size , default: 8G");
-
 // Signal handlers.
 void handle_exit_signal() {
     NetworkServer::get_instance()->graceful_shutdown();
@@ -103,7 +101,7 @@ int main(int argc, char **argv) {
     baikaldb::HandleHelper::get_instance()->init();
     baikaldb::ShowHelper::get_instance()->init();
     baikaldb::MemoryGCHandler::get_instance()->init();
-    baikaldb::MemTrackerPool::get_instance()->init(baikaldb::FLAGS_db_sql_memory_bytes_limit);
+    baikaldb::MemTrackerPool::get_instance()->init();
     // Initail server.
     baikaldb::NetworkServer* server = baikaldb::NetworkServer::get_instance();
     if (!server->init()) {

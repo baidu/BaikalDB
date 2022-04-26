@@ -324,7 +324,6 @@ void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request,
         if (!healthy || has_bad_peer || !region_state.ilegal_peers_state.empty()) {
             for (auto& peer_status : region_state.legal_peers_state) {
                 peer_status.set_region_id(region_id);
-                peer_status.set_peer_id(peer_status.peer_id());
                 region_peer_status_vec.emplace_back(peer_status);
             }  
         }
@@ -353,6 +352,62 @@ void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request,
         }
     };
     manager->region_peer_state_map().traverse_with_key_value(func);
+}
+
+void QueryRegionManager::get_region_learner_status(const pb::QueryRequest* request, pb::QueryResponse* response) {
+    RegionManager* manager = RegionManager::get_instance();
+    std::map<int64_t, std::string> table_id_name_map;
+
+    TableManager::get_instance()->get_table_by_learner_resource_tag(request->resource_tag(), table_id_name_map);
+    
+    auto func = [&table_id_name_map, response](const int64_t& region_id, RegionLearnerState& region_state) {
+        int64_t table_id = 0;
+        std::vector<pb::PeerStateInfo> region_peer_status_vec;
+        region_peer_status_vec.reserve(100);
+        bool healthy = false;
+        bool has_bad_peer = false;
+        for (auto& pair : region_state.learner_state_map) {
+            auto& peer_id = pair.first;
+            auto& peer_status = pair.second;
+            if (peer_status.has_table_id()) {
+                table_id = peer_status.table_id();
+                if (table_id_name_map.count(table_id) == 0) {
+                    return;
+                }
+            } else {
+                return;
+            }
+
+            if (peer_status.peer_status() == pb::STATUS_NORMAL
+                && (butil::gettimeofday_us() - peer_status.timestamp() >
+                FLAGS_store_heart_beat_interval_us * FLAGS_region_faulty_interval_times * 4)) {
+                peer_status.set_peer_status(pb::STATUS_NOT_HEARTBEAT);
+                has_bad_peer = true;
+            }
+            if (peer_status.peer_status() == pb::STATUS_NORMAL) {
+                healthy = true;
+            } else {
+                has_bad_peer = true;
+            }
+            peer_status.set_region_id(region_id);
+            peer_status.set_peer_id(peer_id);
+            region_peer_status_vec.emplace_back(peer_status);
+        }
+        if (!healthy || has_bad_peer) {
+            if (!region_peer_status_vec.empty()) {
+                pb::RegionStateInfo* region_info = response->add_region_status_infos();
+                region_info->set_table_id(region_peer_status_vec[0].table_id());
+                region_info->set_region_id(region_peer_status_vec[0].region_id());
+                region_info->set_table_name(table_id_name_map[table_id]);
+                region_info->set_is_healthy(healthy);
+                for (auto peer_status : region_peer_status_vec) {
+                    pb::PeerStateInfo* peer_info = region_info->add_peer_status_infos();
+                    *peer_info = peer_status;
+                }
+            }
+        }
+    };
+    manager->_region_learner_peer_state_map.traverse_with_key_value(func);
 }
 
 void QueryRegionManager::send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response) {

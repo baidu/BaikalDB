@@ -33,6 +33,10 @@ public:
         _full(full), 
         _data(key.data_, key.size_) {}
 
+    MutTableKey(const std::string& key, bool full) : 
+        _full(full),
+        _data(key.data(), key.size()) { }
+
     MutTableKey(const TableKey& key);
 
     MutTableKey& append_i8(int8_t val) {
@@ -70,10 +74,10 @@ public:
     }
 
     MutTableKey& replace_i32(int32_t val, size_t pos) { // cstore
-       uint32_t encode = KeyEncoder::to_endian_u32(KeyEncoder::encode_i32(val));
-       size_t len = sizeof(uint32_t);
-       _data.replace(pos, len, (char*)&encode, sizeof(uint32_t));
-       return *this;
+        uint32_t encode = KeyEncoder::to_endian_u32(KeyEncoder::encode_i32(val));
+        size_t len = sizeof(uint32_t);
+        _data.replace(pos, len, (char*)&encode, sizeof(uint32_t));
+        return *this;
     }
 
     MutTableKey& append_u32(uint32_t val) {
@@ -181,7 +185,6 @@ public:
         _data.append(key);
         return *this;
     }
-
 
     int append_index(IndexInfo& index, TableRecord* record, int field_cnt, bool clear);
 

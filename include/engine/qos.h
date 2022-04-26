@@ -348,16 +348,7 @@ public:
 
     void set_need_reject(const uint64_t index_id) { _reject_index_id = index_id; } 
 
-    void set_blacklist() { _in_blacklist = true; }
-
-    void clear_blacklist() { _in_blacklist = false; }
-
     bool need_reject(const uint64_t index_id) {
-        // 在黑名单中直接拒绝
-        if (_in_blacklist) {
-            return true;
-        } 
-
         if (index_id != 0 && index_id == _reject_index_id.load(std::memory_order_relaxed)) {
             return true;
         }
@@ -379,7 +370,6 @@ public:
 
 private:
     std::atomic<uint64_t> _reject_index_id = { 0 }; // 需要拒绝的index_id
-    bool     _in_blacklist = false; // 是否在黑名单中
     uint64_t _sign = 0;
     // 承诺令牌桶
     TokenBucket _committed_bucket;
@@ -423,9 +413,14 @@ public:
         }
     }
 
-    void wheather_need_reject();
+    bool match_reject_condition() {
+        const int window_count = FLAGS_qos_reject_interval_s * 1000 / FLAGS_token_bucket_burst_window_ms;
+        const int count = _count.get_value();
+        bool match_reject_condition = (count * 100 / window_count > FLAGS_qos_reject_ratio);
+        return match_reject_condition;
+    }
 
-    void update_blacklist();
+    void wheather_need_reject();
 
 private:
     bool _has_reject   = false;
@@ -464,7 +459,6 @@ public:
             return;
         }
 
-        int64_t now = butil::gettimeofday_us();
         auto iter = ptr->begin();
         while (iter != ptr->end()) {
             auto cur_iter = iter++;
@@ -658,8 +652,6 @@ public:
         while (!_shutdown) {
             // 判断是否需要拒绝
             _qos_reject.wheather_need_reject();
-            // 判断黑名单
-            _qos_reject.update_blacklist();
             bthread_usleep_fast_shutdown(FLAGS_qos_reject_interval_s * 1000 * 1000LL, _shutdown);
         }
     }
@@ -680,8 +672,11 @@ public:
         _token_bucket_bth.join();
         _qos_reject_bth.join();
     }
+
+    bool match_reject_condition() {
+        return _qos_reject.match_reject_condition();
+    }
     
-    void update_blacklist(const std::set<uint64_t>& signs, const bool is_clear);
 private:
 
     StoreQos() 

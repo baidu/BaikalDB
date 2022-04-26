@@ -98,7 +98,7 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
         int64_t table_id = scan_node->table_id();
         int ret = schema_factory->get_region_info(table_id, ctx->debug_region_id, info);
         if (ret == 0) {
-            scan_node->set_router_index_id(table_id);
+            // scan_node->set_router_index_id(table_id);
             (scan_node->region_infos())[ctx->debug_region_id] = info;
             return 0;
         }
@@ -111,7 +111,7 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
             ret = schema_factory->get_region_info(index_id, ctx->debug_region_id, info);
             if (ret == 0) {
                 (scan_node->region_infos())[ctx->debug_region_id] = info;
-                scan_node->set_router_index_id(index_id);
+                // scan_node->set_router_index_id(index_id);
                 scan_node->set_covering_index(true);
                 return 0;
             }
@@ -134,60 +134,77 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     int64_t main_table_id = scan_node->table_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance(); 
 
-    pb::PossibleIndex* router_index = scan_node->router_index();
-    int64_t router_index_id = scan_node->router_index_id();
+    bool hit_global = false;
+    bool covering_index = true;
+    int idx = 0;
+    for (auto& scan_index_info : scan_node->scan_indexs()) {
+        if (!scan_index_info.covering_index) {
+            covering_index = false;
+        }
 
-    auto index_ptr = schema_factory->get_index_info_ptr(router_index_id);
-    if (index_ptr == nullptr) {
-        DB_WARNING("invalid index info: %ld", router_index_id);
-        return -1;
-    }
-    /*
-    if (router_index != nullptr) {
-        DB_WARNING("index:%ld router_index_id:%ld", router_index->index_id(), router_index_id);
-    }*/
-    auto ret = 0;
+        // 非首个index只有两种情况需要router，其他情况continue
+        // 1. global learner
+        // 2. router_index_id == index_id
+        if (idx++ > 0 && scan_index_info.use_for != ScanIndexInfo::U_GLOBAL_LEARNER) {
+            if (scan_index_info.router_index_id != scan_index_info.index_id) {
+                continue;
+            }
+        }
 
-    switch (scan_node->router_policy()) {
-    
-    case RouterPolicy::RP_RANGE: {
-        ret = schema_factory->get_region_by_key(main_table_id, 
-            *index_ptr, router_index,
-            scan_node->region_infos(),
-            scan_node->mutable_region_primary(),
-            scan_node->get_partition());
-        break;
-    }
-    case RouterPolicy::RP_REGION: {
-        ret = schema_factory->get_region_by_key(scan_node->old_region_infos(), 
-            scan_node->region_infos());
-        break;
-    }
-    default:
-        ret = -1;
-        break;
-    }
-    
-    if (ret < 0) {
-        DB_WARNING("get_region_by_key:fail :%d", ret);
-        return ret;
-    }
-    if (router_index != nullptr && scan_node->mutable_region_primary()->size() > 0) {
-        router_index->mutable_ranges()->Clear();
+        auto index_ptr = schema_factory->get_index_info_ptr(scan_index_info.router_index_id);
+        if (index_ptr == nullptr) {
+            DB_WARNING("invalid index info: %ld", scan_index_info.router_index_id);
+            return -1;
+        }
+
+        if (index_ptr->is_global) {
+            hit_global = true;
+        }
+
+        int ret = 0;
+        switch (scan_node->router_policy()) {
+        
+        case RouterPolicy::RP_RANGE: {
+            ret = schema_factory->get_region_by_key(main_table_id, 
+                *index_ptr, scan_index_info.router_index,
+                scan_index_info.region_infos,
+                &scan_index_info.region_primary,
+                scan_node->get_partition());
+            scan_node->set_region_infos(scan_index_info.region_infos);
+            break;
+        }
+        case RouterPolicy::RP_REGION: {
+            ret = schema_factory->get_region_by_key(scan_node->old_region_infos(), 
+                scan_index_info.region_infos);
+            scan_node->set_region_infos(scan_index_info.region_infos);
+            break;
+        }
+        default:
+            ret = -1;
+            break;
+        }
+        
+        if (ret < 0) {
+            DB_WARNING("get_region_by_key:fail :%d", ret);
+            return ret;
+        }
+        if (scan_index_info.router_index != nullptr && scan_index_info.region_primary.size() > 0) {
+            scan_index_info.router_index->mutable_ranges()->Clear();
+        }
     }
     //如果该表没有全局二级索引
     if (!schema_factory->has_global_index(main_table_id)) {
         return 0;
     }
     //或者命中的不是全局二级索引，并且不是join,直接结束 
-    if (!has_join && !index_ptr->is_global) {
+    if (!has_join && !hit_global) {
         return 0;
     }
     // 如果是索引覆盖，则不需要进行后续的操作
     // 如有涉及有全局二级索引的join表时，把主表的fields_id全部放到tuple里。
     // 该步骤后续如有性能问题的话，可以优化为在join_node里做plan router的是按需放进去。
     // 但按需放进去时， tuple已经在state->init时生成，要destory 掉，然后重新生成。这块处理一定要小心
-    if (scan_node->covering_index() && !has_join) { 
+    if (covering_index && !has_join) { 
         return 0;
     }
     //如果不是覆盖索引，需要把主键的field_id全部加到slot_id
@@ -264,6 +281,9 @@ int PlanRouter::kill_node_analyze(KillNode* kill_node, QueryContext* ctx) {
     }
     ExecNode* plan = ctx->kill_ctx->root;
     if (plan == nullptr) {
+        if (kill_node->region_infos().size() != 0) {
+            return 0;
+        }
         DB_FATAL("ctx->kill_ctx->root is null");
         return -1;
     }

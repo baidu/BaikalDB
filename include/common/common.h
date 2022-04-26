@@ -33,9 +33,10 @@
 #include <base/containers/flat_map.h>
 #include <base/endpoint.h>
 #include <base/base64.h>
-#include <webfoot_naming.h>
 #include <base/fast_rand.h>
 #include <base/sha1.h>
+#include "baidu/rpc/reloadable_flags.h"
+#include <webfoot_naming.h>
 #include "naming.pb.h"
 #else
 #include <bthread/bthread.h>
@@ -47,6 +48,7 @@
 #include <butil/base64.h>
 #include <butil/fast_rand.h>
 #include <butil/sha1.h>
+#include "brpc/reloadable_flags.h"
 #endif
 #include <bthread/execution_queue.h>
 #include <gflags/gflags.h>
@@ -64,6 +66,7 @@ namespace raft {
 namespace butil = base;
 namespace brpc = baidu::rpc;
 namespace braft = raft;
+#define BRPC_VALIDATE_GFLAG BAIDU_RPC_VALIDATE_GFLAG
 #endif
 
 namespace baikaldb {
@@ -496,6 +499,18 @@ public:
         }
         return _map[idx][key];
     }
+
+    bool call_and_get(const KEY& key, const std::function<void(VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            return false;
+        } else {
+            call(_map[idx][key]);
+        }
+        return true;
+    }
+
     const VALUE get_or_put(const KEY& key, const VALUE& value) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
@@ -505,6 +520,16 @@ public:
         }
         return _map[idx][key];
     }
+
+    const VALUE get_or_put_call(const KEY& key, const std::function<VALUE(VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            return call(_map[idx][key]);
+        }
+        return _map[idx][key];
+    }
+
     VALUE& operator[](const KEY& key) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
@@ -522,6 +547,19 @@ public:
         BAIDU_SCOPED_LOCK(_mutex[idx]);
         return _map[idx].erase(key);
     }
+
+    bool call_and_erase(const KEY& key, const std::function<void(VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            return false;
+        } else {
+            call(_map[idx][key]);
+            _map[idx].erase(key);
+        }
+        return true;
+    }
+
     // 会加锁，轻量级操作采用traverse否则用copy
     void traverse(const std::function<void(VALUE& value)>& call) {
         for (uint32_t i = 0; i < MAP_COUNT; i++) {
@@ -1001,6 +1039,9 @@ public:
     size_t size() const {
         return _heap.size();
     }
+    bool empty() const {
+        return _heap.empty();
+    }
 private:
     void shiftdown(size_t index) {
         size_t left_index = index * 2 + 1;
@@ -1042,6 +1083,15 @@ inline void update_param(const std::string& name, const std::string& value) {
     } else {
         DB_WARNING("set command line: %s %s => %s", name.c_str(), target.c_str(), value.c_str());
     }
+}
+
+template<typename T>
+inline uint32_t get_protobuf_space_size(const T& message) {
+#if GOOGLE_PROTOBUF_VERSION >= 3004000
+    return message.SpaceUsedLong();
+#else
+    return static_cast<uint32_t>((message).SpaceUsed());
+#endif
 }
 
 extern int64_t timestamp_diff(timeval _start, timeval _end);

@@ -383,7 +383,7 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
         TableManager::get_instance()->check_update_or_drop_table(request, response); 
         //判断是否有新增的表没有下推给baikaldb
         std::vector<int64_t> new_add_region_ids;
-        TableManager::get_instance()->check_add_table(report_table_ids, new_add_region_ids, request->not_need_statistics(), response);
+        TableManager::get_instance()->check_add_table(report_table_ids, new_add_region_ids, response);
         RegionManager::get_instance()->add_region_info(new_add_region_ids, response);      
     }
     int64_t update_table_time = step_time_cost.get_time();
@@ -609,10 +609,14 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     if (!table_info.has_resource_tag()) {
         std::string namespace_name = table_info.namespace_name();
         std::string database_name = namespace_name + "\001" + table_info.database();
+        int64_t namespace_id = NamespaceManager::get_instance()->get_namespace_id(namespace_name);
+        std::string namespace_resource_tag = NamespaceManager::get_instance()->get_resource_tag(namespace_id);
         int64_t database_id = DatabaseManager::get_instance()->get_database_id(database_name);
         std::string database_resource_tag = DatabaseManager::get_instance()->get_resource_tag(database_id);
         if (database_resource_tag != "") {
             resource_tag = database_resource_tag;
+        } else if (namespace_resource_tag != "") {
+            resource_tag = namespace_resource_tag;
         }
     }
 

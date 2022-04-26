@@ -66,6 +66,7 @@ private:
     int64_t _table_id = 0;
     int64_t _index_id = 0;
     QueryContext* _ctx = nullptr;
+    bool    _ddl_pk_key_is_full = true;
     std::string _start_key;
     std::string _end_key;
     std::string _router_start_key;
@@ -77,6 +78,7 @@ private:
     int64_t _partition_id = 0;
     std::string _task_id;
     int32_t _field_num = 0;
+    pb::PossibleIndex _pos_index;
 };
     
 } // namespace baikaldb

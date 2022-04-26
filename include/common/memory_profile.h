@@ -19,8 +19,6 @@
 #include <atomic>
 
 namespace baikaldb {
-//DECLARE_int64(memory_gc_interval_s);
-//DECLARE_int64(memory_free_rate);
 
 class MemoryGCHandler {
 public:
@@ -52,20 +50,30 @@ private:
 
 class MemTracker {
 public:
-    MemTracker(uint64_t log_id, int64_t bytes_limit) : _bytes_limit(bytes_limit), _log_id(log_id) {
-    }
-    ~MemTracker() {
-        DB_DEBUG("~MemTracker %p log_id:%lu used_bytes:%ld", this, _log_id, _bytes_consumed.load());
-    }
+    explicit MemTracker(uint64_t log_id, int64_t bytes_limit, MemTracker* parent = nullptr);
+    ~MemTracker();
+
     bool check_bytes_limit() {
         return _bytes_limit > 0 && _bytes_consumed > _bytes_limit;
     }
+    bool any_limit_exceeded() {
+        if (limit_exceeded() || (_parent !=nullptr && _parent->limit_exceeded())) {
+            return true;
+        }
+        return false;
+    }
+
+    bool limit_exceeded() const { return _bytes_limit >= 0 && bytes_consumed() > _bytes_limit; }
+
     void consume(int64_t bytes) {
         _last_active_time = butil::gettimeofday_us();
-        if (bytes <= 0 ) {
+        if (bytes <= 0) {
             return ;
         }
         _bytes_consumed.fetch_add(bytes, std::memory_order_relaxed);
+        if (_parent != nullptr) {
+            _parent->_bytes_consumed.fetch_add(bytes, std::memory_order_relaxed);
+        }
     }
 
     void release(int64_t bytes) {
@@ -74,6 +82,9 @@ public:
             return ;
         }
         _bytes_consumed.fetch_sub(bytes, std::memory_order_relaxed);
+        if (_parent != nullptr) {
+            _parent->_bytes_consumed.fetch_sub(bytes, std::memory_order_relaxed);
+        }
     }
     uint64_t log_id() const {
         return _log_id;
@@ -85,13 +96,26 @@ public:
         return _last_active_time;
     }
     int64_t bytes_consumed() const {
-        return _bytes_consumed.load();
+        return _bytes_consumed.load(std::memory_order_relaxed);
     }
+    bool has_limit_exceeded() const {
+        return _limit_exceeded;
+    }
+    void set_limit_exceeded() {
+        _limit_exceeded = true;
+    }
+    MemTracker* get_parent() {
+        return _parent;
+    }
+
 private:
-    int64_t _bytes_limit = 0;
-    uint64_t _log_id = 0;
-    std::atomic<int64_t> _bytes_consumed = {0};
-    int64_t  _last_active_time = butil::gettimeofday_us();
+
+    uint64_t _log_id;
+    int64_t _bytes_limit;
+    int64_t  _last_active_time;
+    std::atomic<int64_t> _bytes_consumed;
+    MemTracker* _parent = nullptr;
+    bool _limit_exceeded;
 };
 
 typedef std::shared_ptr<MemTracker> SmartMemTracker;
@@ -103,18 +127,12 @@ public:
         return &_instance;
     }
 
-    SmartMemTracker get_mem_tracker(uint64_t log_id) {
-        SmartMemTracker tmp = SmartMemTracker(new MemTracker(log_id, _bytes_limit));
-        return _mem_tracker_pool.get_or_put(log_id, tmp);
-    }
+    SmartMemTracker get_mem_tracker(uint64_t log_id);
 
     void tracker_gc_thread();
 
-    int init(int64_t bytes_limit) {
-        _bytes_limit = bytes_limit;
-        _tracker_gc_bth.run([this]() {tracker_gc_thread();});
-        return 0;
-    }
+    int init();
+
     void close() {
         _shutdown = true;
         _tracker_gc_bth.join();
@@ -122,12 +140,15 @@ public:
 
 private:
     MemTrackerPool() {}
-    int64_t _bytes_limit = 0;
-    ThreadSafeMap<uint64_t, SmartMemTracker, 13> _mem_tracker_pool;
+    int64_t _query_bytes_limit;
     bool _shutdown = false;
+    SmartMemTracker _root_tracker = nullptr;
     Bthread _tracker_gc_bth;
+    ThreadSafeMap<uint64_t, SmartMemTracker> _mem_tracker_pool;
 
     DISALLOW_COPY_AND_ASSIGN(MemTrackerPool);
 };
+
+
 
 } //namespace baikaldb

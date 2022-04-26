@@ -24,7 +24,7 @@ public:
                             int64_t recevie_region_id,
                             int64_t request_version);
 
-    static void get_peer_applied_index(const std::string& peer, int64_t region_id,
+    static int get_peer_applied_index(const std::string& peer, int64_t region_id,
                             int64_t& applied_index, int64_t& dml_latency);
     static void get_peer_snapshot_size(const std::string& peer, int64_t region_id, 
             uint64_t* data_size, uint64_t* meta_size, int64_t* snapshot_index);

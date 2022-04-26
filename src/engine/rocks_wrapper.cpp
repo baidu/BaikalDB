@@ -50,7 +50,6 @@ DEFINE_bool(rocks_data_dynamic_level_bytes, true,
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
 DEFINE_int64(flush_memtable_interval_us, 10 * 60 * 1000 * 1000LL, 
             "flush memtable interval, default(10 min)");
-
 DEFINE_int32(max_background_jobs, 24, "max_background_jobs");
 DEFINE_int32(max_write_buffer_number, 6, "max_write_buffer_number");
 DEFINE_int32(write_buffer_size, 128 * 1024 * 1024, "write_buffer_size");
@@ -65,7 +64,7 @@ DEFINE_int32(target_file_size_base, 128 * 1024 * 1024, "target_file_size_base");
 DEFINE_int32(addpeer_rate_limit_level, 1, "addpeer_rate_limit_level; "
         "0:no limit, 1:limit when stalling, 2:limit when compaction pending. default(1)");
 DEFINE_bool(delete_files_in_range, true, "delete_files_in_range");
-
+DEFINE_bool(l0_compaction_use_lz4, true, "L0 sst compaction use lz4 or not");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log";
@@ -178,6 +177,8 @@ int32_t RocksWrapper::init(const std::string& path) {
     // prefix length: regionid(8 Bytes) tableid(8 Bytes)
     _data_cf_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(sizeof(int64_t) * 2));
+    _data_cf_option.memtable_prefix_bloom_size_ratio = 0.1;
+    _data_cf_option.memtable_whole_key_filtering = true;
     _data_cf_option.OptimizeLevelStyleCompaction();
     _data_cf_option.compaction_pri = static_cast<rocksdb::CompactionPri>(FLAGS_rocks_data_compaction_pri);
     _data_cf_option.compaction_filter = SplitCompactionFilter::get_instance();
@@ -199,6 +200,15 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
 
     _data_cf_option.max_bytes_for_level_base = FLAGS_max_bytes_for_level_base;
+    if (FLAGS_l0_compaction_use_lz4) {
+        _data_cf_option.compression_per_level = {rocksdb::CompressionType::kNoCompression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression};
+    }
 
     if (FLAGS_enable_bottommost_compression) {
         _data_cf_option.bottommost_compression_opts.enabled = true;
@@ -318,8 +328,27 @@ int32_t RocksWrapper::init(const std::string& path) {
         }
     }
     _is_init = true;
+
+    collect_rocks_options();
     DB_WARNING("rocksdb init success");
     return 0;
+}
+
+void RocksWrapper::collect_rocks_options() {
+    // gflag -> option_name, 可以通过setOption动态改的参数
+    _rocks_options["level0_file_num_compaction_trigger"] = "level0_file_num_compaction_trigger";
+    _rocks_options["slowdown_write_sst_cnt"] = "level0_slowdown_writes_trigger";
+    _rocks_options["stop_write_sst_cnt"] = "level0_stop_writes_trigger";
+    _rocks_options["rocks_hard_pending_compaction_g"] = "hard_pending_compaction_bytes_limit"; // * 1073741824ull;
+    _rocks_options["rocks_soft_pending_compaction_g"] = "soft_pending_compaction_bytes_limit"; // * 1073741824ull;
+    _rocks_options["target_file_size_base"] = "target_file_size_base";
+    _rocks_options["rocks_level_multiplier"] = "max_bytes_for_level_multiplier";
+    _rocks_options["max_write_buffer_number"] = "max_write_buffer_number";
+    _rocks_options["write_buffer_size"] = "write_buffer_size";
+    _rocks_options["max_bytes_for_level_base"] = "max_bytes_for_level_base";
+    _rocks_options["rocks_max_background_compactions"] = "max_background_compactions";
+    _rocks_options["rocks_max_subcompactions"] = "max_subcompactions";
+    _rocks_options["max_background_jobs"] = "max_background_jobs";
 }
 
 rocksdb::Status RocksWrapper::remove_range(const rocksdb::WriteOptions& options,
@@ -447,6 +476,7 @@ void RocksWrapper::begin_split_adjust_option() {
         if (_txn_db == nullptr) {
             return;
         }
+        BAIDU_SCOPED_LOCK(_options_mutex);
         uint64_t value;
         std::unordered_map<std::string, std::string> new_options;
         value = _log_cf_option.max_write_buffer_number * 2;
@@ -477,6 +507,7 @@ void RocksWrapper::stop_split_adjust_option() {
         if (_txn_db == nullptr) {
             return;
         }
+        BAIDU_SCOPED_LOCK(_options_mutex);
         uint64_t value;
         std::unordered_map<std::string, std::string> new_options;
         value = _log_cf_option.max_write_buffer_number;
@@ -495,6 +526,74 @@ void RocksWrapper::stop_split_adjust_option() {
         s = _txn_db->SetOptions(get_data_handle(), new_options);
         if(!s.ok()) {
             DB_WARNING("stop_split_adjust_option data_cf FAIL: %s", s.ToString().c_str());
+        }
+    });
+}
+void RocksWrapper::adjust_option(std::map<std::string, std::string> new_options) {
+    bool options_changed = false;
+    std::unordered_map<std::string, std::string> cf_new_options;
+    std::unordered_map<std::string, std::string> db_new_options;
+    for (auto& pair : new_options) {
+        auto& flag = pair.first;
+        if (_rocks_options.find(flag) == _rocks_options.end()) {
+            // 不是rocksdb的gflag参数
+            continue;
+        }
+        auto& option_name = _rocks_options[flag];
+        if (_defined_options.find(flag) == _defined_options.end()
+                || _defined_options[flag] != pair.second) {
+            options_changed = true;
+            // 需要是SetDBOptions
+            if (flag == "rocks_max_background_compactions" 
+                    || flag == "rocks_max_subcompactions" 
+                    || flag == "max_background_jobs") {
+                db_new_options[option_name] = pair.second;
+                continue;
+            }
+            // 需要是SetOptions
+            if (flag == "rocks_hard_pending_compaction_g"
+                    || flag == "rocks_soft_pending_compaction_g" ) {
+                int64_t value = strtoull(pair.second.c_str(), nullptr, 10);
+                cf_new_options[option_name] = std::to_string(value * 1073741824ull);
+            } else {
+                cf_new_options[option_name] = pair.second;
+            }
+            if (flag == "max_write_buffer_number") {
+                cf_new_options["max_write_buffer_number_to_maintain"] = pair.second;
+            }
+        }
+    }
+    if (!options_changed) {
+        return;
+    }
+    _defined_options = new_options;
+    Bthread bth;
+    bth.run([this, cf_new_options, db_new_options]() {
+        if (_txn_db == nullptr) {
+            return;
+        }
+        BAIDU_SCOPED_LOCK(_options_mutex);
+        if (!db_new_options.empty()) {
+            rocksdb::Status s = _txn_db->SetDBOptions(db_new_options);
+            if (!s.ok()) {
+                DB_WARNING("adjust_option data_cf FAIL: %s", s.ToString().c_str());
+            }
+        }
+        if (!cf_new_options.empty()) {
+            for (auto& kv : cf_new_options) {
+                // 是否和split设置的有冲突
+                if (kv.first == "soft_pending_compaction_bytes_limit") {
+                    _data_cf_option.soft_pending_compaction_bytes_limit = strtoull(kv.second.c_str(), nullptr, 10);
+                } else if (kv.first == "level0_slowdown_writes_trigger") {
+                    _data_cf_option.level0_slowdown_writes_trigger = strtod(kv.second.c_str(), nullptr);
+                } else if (kv.first == "max_write_buffer_number") {
+                    _data_cf_option.max_write_buffer_number = strtod(kv.second.c_str(), nullptr);
+                }
+            }
+            rocksdb::Status s = _txn_db->SetOptions(get_data_handle(), cf_new_options);
+            if (!s.ok()) {
+                DB_WARNING("adjust_option data_cf FAIL: %s", s.ToString().c_str());
+            }
         }
     });
 }

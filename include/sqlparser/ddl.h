@@ -110,6 +110,12 @@ enum ConstraintType : unsigned char {
     CONSTRAINT_FULLTEXT
 };
 
+enum IndexDistibuteType : unsigned char {
+    INDEX_DIST_DEFAULT = 0,
+    INDEX_DIST_LOCAL,
+    INDEX_DIST_GLOBAL
+};
+
 enum TableOptionType : unsigned char {
     TABLE_OPT_NONE = 0,
     TABLE_OPT_ENGINE,
@@ -142,7 +148,7 @@ enum DatabaseOptionType : unsigned char {
 // https://dev.mysql.com/doc/refman/8.0/en/alter-table.html
 enum AlterSpecType : unsigned char {
     ALTER_SPEC_ADD_COLUMN = 0,   // only support add column at the tail
-    ALTER_SPEC_ADD_INDEX,        // not supported yet
+    ALTER_SPEC_ADD_INDEX,        
     ALTER_SPEC_ADD_CONSTRAINT,
     ALTER_SPEC_ADD_FULLTEXT,
 
@@ -262,7 +268,7 @@ struct Constraint : public Node {
     Vector<ColumnName*> columns;  // Used for PRIMARY KEY, KEY, UNIQUE, FULLTEXT
     // ReferenceDef*   refer = nullptr;    // Used for foreign key.
     IndexOption* index_option = nullptr;
-    bool            global = false;
+    IndexDistibuteType index_dist = INDEX_DIST_DEFAULT;
 
     Constraint() {
         node_type = NT_CONSTRAINT;

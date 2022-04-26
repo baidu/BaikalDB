@@ -431,6 +431,7 @@ void ClusterManager::drop_instance(const pb::MetaManagerRequest& request, braft:
         // 删除instance，同时删除instance对应的网段索引
         _instance_physical_map.erase(address);
         _instance_info.erase(address);
+        _tombstone_instance[address] = TimeCost();
 
         _resource_tag_instance_map[resource_tag].erase(address);
         if (_physical_instance_map.find(physical_room) != _physical_instance_map.end()) {
@@ -524,7 +525,11 @@ inline void agg_instance_param(const pb::InstanceParam& old_param, const pb::Ins
         kv_map[iterm.key()] = iterm;
     }
     for (auto& iterm : new_param.params()) {
-        kv_map[iterm.key()] = iterm;
+        if (iterm.need_delete()) {
+            kv_map.erase(iterm.key());
+        } else {
+            kv_map[iterm.key()] = iterm;
+        }
     }
 
     for (auto iter : kv_map) {
@@ -538,42 +543,55 @@ void ClusterManager::update_instance_param(const pb::MetaManagerRequest& request
     keys.reserve(5);
     std::vector<std::string> values;
     values.reserve(5);
+    std::vector<std::string> delete_keys;
+    delete_keys.reserve(5);
     {
         BAIDU_SCOPED_LOCK(_instance_param_mutex);
-        for (auto& param : request.instance_params()) {
-            auto iter = _instance_param_map.find(param.resource_tag_or_address());
+        for (auto& new_param : request.instance_params()) {
+            pb::InstanceParam old_param;
+            pb::InstanceParam out_param;
+            old_param.set_resource_tag_or_address(new_param.resource_tag_or_address());
+            out_param.set_resource_tag_or_address(new_param.resource_tag_or_address());
+            auto iter = _instance_param_map.find(new_param.resource_tag_or_address());
             if (iter != _instance_param_map.end()) {
-                pb::InstanceParam tmp_param;
-                tmp_param.set_resource_tag_or_address(param.resource_tag_or_address());
-                agg_instance_param(iter->second, param, &tmp_param);
-                _instance_param_map[param.resource_tag_or_address()] = tmp_param;
+                old_param.CopyFrom(iter->second);
+            } 
+
+            agg_instance_param(old_param, new_param, &out_param);
+            if (out_param.params_size() > 0) {
                 std::string value;
-                if (!tmp_param.SerializeToString(&value)) { 
+                if (!out_param.SerializeToString(&value)) { 
                     DB_FATAL("SerializeToString fail");
                     continue;
                 }
-                keys.emplace_back(construct_instance_param_key(param.resource_tag_or_address()));
+                _instance_param_map[out_param.resource_tag_or_address()] = out_param;
+                keys.emplace_back(construct_instance_param_key(out_param.resource_tag_or_address()));
                 values.emplace_back(value);
-                DB_WARNING("add instance param:%s", tmp_param.ShortDebugString().c_str());
+                DB_WARNING("add instance param:%s", out_param.ShortDebugString().c_str());
+            } else if (old_param.params_size() > 0) {
+                _instance_param_map.erase(out_param.resource_tag_or_address());
+                delete_keys.emplace_back(construct_instance_param_key(out_param.resource_tag_or_address()));
+                DB_WARNING("erase instance param:%s", old_param.ShortDebugString().c_str());
             } else {
-                std::string value;
-                if (!param.SerializeToString(&value)) { 
-                    DB_FATAL("SerializeToString fail");
-                    continue;
-                }
-                keys.emplace_back(construct_instance_param_key(param.resource_tag_or_address()));
-                values.emplace_back(value);
-                _instance_param_map[param.resource_tag_or_address()] = param;
-                DB_WARNING("add instance param:%s", param.ShortDebugString().c_str());
+                // 新旧都为空，do nothing
             }
         }
     }
-
-    auto ret = MetaRocksdb::get_instance()->put_meta_info(keys, values);
-    if (ret < 0) {
-        DB_WARNING("add phyical room:%s to rocksdb fail", request.ShortDebugString().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
-        return;
+    if (!keys.empty()) {
+        int ret = MetaRocksdb::get_instance()->put_meta_info(keys, values);
+        if (ret < 0) {
+            DB_WARNING("modify instance param:%s to rocksdb fail", request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+            return;
+        }
+    }
+    if (!delete_keys.empty()) {
+        int ret = MetaRocksdb::get_instance()->delete_meta_info(delete_keys);
+        if (ret < 0) {
+            DB_WARNING("modify instance param:%s to rocksdb fail", request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+            return;
+        }
     }
     
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
@@ -665,19 +683,26 @@ void ClusterManager::set_instance_migrate(const pb::MetaManagerRequest* request,
         return;
     }
     if (!request->has_instance()) {
-        //ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, "no instance", request->op_type(), log_id)
+        DB_WARNING("reuqest no instance");
         response->set_errmsg("ALLOWED");
         return;
     }
     std::string instance = request->instance().address(); 
     auto ret = set_migrate_for_instance(instance);
     if (ret < 0) {
+        DB_WARNING("instance:%s not exist", instance.c_str());
         response->set_errmsg("ALLOWED");
         return;
     }
     std::vector<int64_t> region_ids;
+    region_ids.reserve(100);
     RegionManager::get_instance()->get_region_ids(instance, region_ids);
-    if (region_ids.size() == 0) {
+    std::vector<int64_t> learner_ids;
+    learner_ids.reserve(100);
+    RegionManager::get_instance()->get_learner_ids(instance, learner_ids);
+    DB_WARNING("instance:%s region size:%lu, learner size:%lu", 
+            instance.c_str(), region_ids.size(), learner_ids.size());
+    if (region_ids.size() == 0 && learner_ids.size() == 0) {
         response->set_errmsg("ALLOWED");
         return;
     }
@@ -765,6 +790,20 @@ void ClusterManager::process_instance_param_heartbeat_for_store(const pb::StoreH
         *(response->add_instance_params()) = iter->second;
     }
 
+}
+
+// 获取实例参数
+void ClusterManager::process_instance_param_heartbeat_for_baikal(const pb::BaikalOtherHeartBeatRequest* request,
+        pb::BaikalOtherHeartBeatResponse* response) {
+    if (request->has_baikaldb_resource_tag()) {
+        BAIDU_SCOPED_LOCK(_instance_param_mutex);
+
+        auto iter = _instance_param_map.find(request->baikaldb_resource_tag());
+        if (iter != _instance_param_map.end()) {
+            auto instance_param = response->mutable_instance_param();
+            instance_param->CopyFrom(iter->second);
+        }
+    }
 }
     
 void ClusterManager::get_switch(const pb::QueryRequest* request, pb::QueryResponse* response) {
@@ -857,12 +896,14 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
     std::unordered_map<int64_t, int32_t> table_pk_prefix_dimension;
     std::unordered_map<std::string, std::vector<int64_t>> pk_prefix_regions;
     std::unordered_map<std::string, int64_t> pk_prefix_region_counts;
+    std::set<std::string> clusters_in_fast_importer;
     
     if (!request->has_need_peer_balance() || !request->need_peer_balance()) {
         return;
     }
     // 一次性拿到所有开启了pk_prefix balance的表id及其维度信息
     TableManager::get_instance()->get_pk_prefix_dimensions(table_pk_prefix_dimension);
+    TableManager::get_instance()->get_clusters_in_fast_importer(clusters_in_fast_importer);
     for (auto& peer_info : request->peer_infos()) {
         table_regions[peer_info.table_id()].push_back(peer_info.region_id());
         is_learner_tables[peer_info.table_id()] = peer_info.is_learner();
@@ -893,6 +934,10 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
     if (!_meta_state_machine->get_load_balance(resource_tag)) {
         DB_WARNING("meta state machine close peer load balance, resource_tag: %s, instance: %s", 
                     resource_tag.c_str(), instance.c_str());
+        return;
+    }
+    if (clusters_in_fast_importer.find(resource_tag) != clusters_in_fast_importer.end()) {
+        DB_WARNING("resource_tag: %s in fast importer, stop peer load balance", resource_tag.c_str());
         return;
     }
     DB_WARNING("peer load balance, instance_info: %s, resource_tag: %s", 
@@ -1089,22 +1134,22 @@ void ClusterManager::store_healthy_check_function() {
     }
     for (auto& store_pair : migrate_stores) {
         // 内部限制迁移并发，不需要每次让opera配
-        int concurrency = _migrate_concurrency;
-        {
-            BAIDU_SCOPED_LOCK(_instance_param_mutex);
-            auto iter = _instance_param_map.find(store_pair.first);
-            if (iter != _instance_param_map.end()) {
-                for (auto& param : iter->second.params()) {
-                    if (param.is_meta_param() && param.key() == "migrate_concurrency") {
-                        concurrency = strtoull(param.value().c_str(), NULL, 10);
-                    }
-                }
-            }
-        }
+        int64_t concurrency = 2;
+        get_meta_param(store_pair.first, "migrate_concurrency", &concurrency);
+        int64_t delay = 0;
+        get_meta_param(store_pair.first, "migrate_delay_s", &delay);
+        std::sort(store_pair.second.begin(), store_pair.second.end(),
+                [](const Instance& l, const Instance& r) {
+                    return l.instance_status.state_duration.get_time() >
+                    r.instance_status.state_duration.get_time();
+                });
         for (auto& store : store_pair.second) {
-            DB_WARNING("store:%s is migrating, resource_tag: %s", 
-                    store.address.c_str(), store_pair.first.c_str());
-            if (_meta_state_machine->get_migrate(store_pair.first) && concurrency-- > 0) {
+            if (_meta_state_machine->get_migrate(store_pair.first)
+                && !TableManager::get_instance()->is_cluster_in_fast_importer(store_pair.first)
+                && store.instance_status.state_duration.get_time() > delay * 1000 * 1000
+                && concurrency-- > 0) {
+                DB_WARNING("store:%s is migrating, resource_tag: %s", 
+                        store.address.c_str(), store_pair.first.c_str());
                 RegionManager::get_instance()->add_peer_for_store(store.address,
                         store.instance_status);
             }
@@ -1742,6 +1787,104 @@ int ClusterManager::load_logical_snapshot(const std::string& logical_prefix,
     BAIDU_SCOPED_LOCK(_physical_mutex);
     for (auto logical_room : logical_info.logical_rooms()) {
         _logical_physical_map[logical_room] = std::set<std::string>{};
+    }
+    return 0;
+}
+
+// return -1: add instance -2: update instance
+int ClusterManager::update_instance_info(const pb::InstanceInfo& instance_info) {
+    std::string instance = instance_info.address();
+    if (instance.empty()) {
+        return 0;
+    }
+    BAIDU_SCOPED_LOCK(_instance_mutex);
+    if (_instance_info.find(instance) == _instance_info.end()) {
+        auto tom_iter = _tombstone_instance.find(instance);
+        // 删除一小时内不能插入，解决opera交替迁移导致region迁移到旧实例
+        if (tom_iter != _tombstone_instance.end() && tom_iter->second.get_time() < 3600 * 1000 * 1000LL) {
+            return 0;
+        }
+        // 校验container_id和address是否一致，不一致则不加到meta中
+        if (same_with_container_id_and_address(instance_info.container_id(),
+                    instance_info.address())) {
+            return -1;
+        } else {
+            return 0;
+        }
+    }
+    if (_instance_info[instance].resource_tag != instance_info.resource_tag()) {
+        return -2;
+    }
+    auto& is = _instance_info[instance];
+    if(instance_info.has_network_segment() && (instance_info.network_segment() != is.network_segment_self_defined)) {
+        // store gflag-network_segment changed
+        return -2;
+    }
+    is.capacity = instance_info.capacity();
+    is.used_size = instance_info.used_size();
+    is.resource_tag = instance_info.resource_tag();
+    is.version = instance_info.version();
+    is.instance_status.timestamp = butil::gettimeofday_us();
+    is.dml_latency = instance_info.dml_latency();
+    is.dml_qps = instance_info.dml_qps();
+    is.raft_total_latency = instance_info.raft_total_latency();
+    is.raft_total_qps = instance_info.raft_total_qps();
+    is.select_latency = instance_info.select_latency();
+    is.select_qps = instance_info.select_qps();
+    is.instance_status.timestamp = butil::gettimeofday_us();
+    auto& status = is.instance_status.state;
+    if (status == pb::NORMAL) {
+        if (!FLAGS_need_check_slow || is.dml_latency == 0 || is.raft_total_latency / is.dml_latency <= 10) {
+            return 0;
+        }
+        int64_t all_raft_total_latency = 0;
+        int64_t all_dml_latency = 0;
+        int64_t cnt = 0;
+        for (auto& pair : _instance_info) {
+            if (pair.second.resource_tag == is.resource_tag &&
+                pair.first != instance) {
+                all_raft_total_latency += pair.second.raft_total_latency;
+                all_dml_latency += pair.second.dml_latency;
+                ++cnt;
+            }
+        }
+        size_t max_slow_size = cnt * 5 / 100 + 1;
+        if (cnt > 5 && is.raft_total_latency > 100 * all_raft_total_latency / cnt &&
+                _slow_instances.size() < max_slow_size) {
+            DB_WARNING("instance:%s status SLOW, resource_tag: %s, raft_total_latency:%ld, dml_latency:%ld, "
+                    "cnt:%ld, avg_raft_total_latency:%ld, avg_dml_latency:%ld",
+                    instance.c_str(), is.resource_tag.c_str(), is.raft_total_latency, is.dml_latency, 
+                    cnt, all_raft_total_latency / cnt, all_dml_latency / cnt);
+            status = pb::SLOW;
+            _slow_instances.insert(instance);
+        }
+    } else if (status == pb::SLOW) {
+        if (is.dml_latency > 0 &&
+                is.raft_total_latency / is.dml_latency > 10) {
+            return 0;
+        }
+        int64_t all_raft_total_latency = 0;
+        int64_t all_dml_latency = 0;
+        int64_t cnt = 0;
+        for (auto& pair : _instance_info) {
+            if (pair.second.resource_tag == is.resource_tag && pair.first != instance) {
+                all_raft_total_latency += pair.second.raft_total_latency;
+                all_dml_latency += pair.second.dml_latency;
+                ++cnt;
+            }
+        }
+        if (cnt > 0 && is.dml_latency <= 2 * all_dml_latency / cnt) {
+            DB_WARNING("instance:%s status NORMAL, resource_tag: %s, raft_total_latency:%ld, dml_latency:%ld, "
+                    "cnt:%ld, avg_raft_total_latency:%ld, avg_dml_latency:%ld",
+                    instance.c_str(), is.resource_tag.c_str(), is.raft_total_latency, is.dml_latency, 
+                    cnt, all_raft_total_latency / cnt, all_dml_latency / cnt);
+            _slow_instances.erase(instance);
+            status = pb::NORMAL;
+        }
+    } else if (status != pb::MIGRATE) {
+        DB_WARNING("instance:%s status return NORMAL, resource_tag: %s",
+                instance.c_str(), is.resource_tag.c_str());
+        status = pb::NORMAL;
     }
     return 0;
 }

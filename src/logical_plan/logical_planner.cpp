@@ -41,6 +41,8 @@ DECLARE_int32(bthread_concurrency); //bthread.cpp
 
 namespace baikaldb {
 DECLARE_string(log_plat_name);
+DEFINE_string(sign_blacklist,       "",     "sign blacklist");
+DEFINE_string(sign_forcelearner,    "",     "sign forcelearner");
 
 std::map<parser::JoinType, pb::JoinType> LogicalPlanner::join_type_mapping {
         { parser::JT_NONE, pb::NULL_JOIN},    
@@ -111,8 +113,8 @@ int LogicalPlanner::construct_in_predicate_node(const parser::FuncExpr* func_ite
         DB_WARNING("op:%d fn_name is empty", func_item->func_type);
         return -1;
     }
-    func->set_name(func_item->fn_name.value);
-    func->set_fn_op(func_item->func_type);
+    func->set_name(func_item->fn_name.value); // in
+    func->set_fn_op(func_item->func_type); // FT_IN
     *node = node_val;
     return 0;
 }
@@ -199,11 +201,9 @@ int LogicalPlanner::handle_in_subquery(const parser::FuncExpr* func_item,
             DB_WARNING("create child 1 expr failed");
             return -1;
         }
-        auto sub_ctx = _ctx->sub_query_plans.back();
-        _ctx->sub_query_plans.pop_back();
         CreateExprOptions tm_options = options;
         tm_options.row_expr_size = row_expr_size;
-        ret = construct_apply_node(sub_ctx.get(), expr, join_type, tm_options); 
+        ret = construct_apply_node(_cur_sub_ctx.get(), expr, join_type, tm_options);
         if (ret < 0) {
             DB_WARNING("construct apply node failed");
             return -1;
@@ -327,6 +327,7 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
             ctx->explain_type = SHOW_TRACE2;
         } else if (format == "plan") {
             ctx->explain_type = SHOW_PLAN;
+            ctx->is_explain = true;
         } else if (format == "analyze") { 
             ctx->explain_type = ANALYZE_STATISTICS;
         } else if (format == "histogram") {
@@ -346,8 +347,8 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         ctx->is_complex = ctx->stmt->is_complex_node();
     }
     ctx->stmt_type = ctx->stmt->node_type;
-    if (ctx->stmt_type != parser::NT_SELECT && (ctx->is_explain || explain_is_trace(ctx->explain_type))) {
-        DB_WARNING("not support explain except select");
+    if (ctx->stmt_type != parser::NT_SELECT && ctx->explain_type != EXPLAIN_NULL) {
+        DB_WARNING("dml only support normal explain");
         return -1;
     }
 
@@ -406,87 +407,113 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         DB_WARNING("gen plan failed, type:%d", ctx->stmt_type);
         return -1;
     }
-    //ctx->succ_after_logical_plan = true;
-    //ctx->is_full_export =false;
-    ctx->stmt->set_print_sample(true);
-    auto stat_info = &(ctx->stat_info);
-    pb::OpType op_type = pb::OP_NONE;
-    if (ctx->plan.nodes_size() > 0 && ctx->plan.nodes(0).node_type() == pb::PACKET_NODE) {
-        op_type = ctx->plan.nodes(0).derive_node().packet_node().op_type();
+    int ret = planner->generate_sql_sign(ctx->plan, &(ctx->stat_info), ctx->stmt, &ctx->need_learner_backup);
+    if (ret < 0) {
+        return -1;
     }
+    return 0;
+}
 
+int LogicalPlanner::generate_sql_sign(const pb::Plan& plan, QueryStat* stat_info, parser::StmtNode* stmt, bool* need_learner_backup) {
+    pb::OpType op_type = pb::OP_NONE;
+    if (plan.nodes_size() > 0 && plan.nodes(0).node_type() == pb::PACKET_NODE) {
+        op_type = plan.nodes(0).derive_node().packet_node().op_type();
+    }
+    stmt->set_print_sample(true);
     if (!stat_info->family.empty() && !stat_info->table.empty() ) {
-        std::string resource_tag;
-        auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(stat_info->table_id);
-        if (table_ptr == nullptr) {
-            resource_tag = "unknown";
-            stat_info->table_id = -1;
-        } else {
-            resource_tag = table_ptr->resource_tag;
-        }
         stat_info->sample_sql << "family_table_tag_optype_plat=[" << stat_info->family << "\t"
-            << stat_info->table << "\t" << resource_tag << "\t" << op_type << "\t"
-            << FLAGS_log_plat_name << "] sql=[" << ctx->stmt << "]";
-
+            << stat_info->table << "\t" << stat_info->resource_tag << "\t" << op_type << "\t"
+            << FLAGS_log_plat_name << "] sql=[" << stmt << "]";
         uint64_t out[2];
         butil::MurmurHash3_x64_128(stat_info->sample_sql.str().c_str(), stat_info->sample_sql.str().size(), 0x1234, out);
         stat_info->sign = out[0];
+        if (!FLAGS_sign_blacklist.empty()) {
+            std::vector<std::string> vec;
+            boost::split(vec, FLAGS_sign_blacklist, boost::is_any_of(","));
+            for (auto& sign : vec) {
+                std::string sign_str = string_trim(sign);
+                if (std::to_string(stat_info->sign) == sign_str) {
+                    DB_WARNING("sql sign[%s] in blacklist[%s], sample_sql[%s]", sign_str.c_str(), 
+                        FLAGS_sign_blacklist.c_str(), stat_info->sample_sql.str().c_str());
+                    return -1;
+                }
+            }
+        } 
+
+        if (!(*need_learner_backup) && !FLAGS_sign_forcelearner.empty()) {
+            std::vector<std::string> vec;
+            boost::split(vec, FLAGS_sign_forcelearner, boost::is_any_of(","));
+            for (auto& sign : vec) {
+                std::string sign_str = string_trim(sign);
+                if (std::to_string(stat_info->sign) == sign_str) {
+                    *need_learner_backup = true;
+                    DB_WARNING("sql sign[%s] in forcelearner[%s], sample_sql[%s]", sign_str.c_str(), 
+                        FLAGS_sign_forcelearner.c_str(), stat_info->sample_sql.str().c_str());
+                    break;
+                }
+            }
+        }
     }
+
     return 0;
 }
 
 int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlanTableCtx& plan_state,
         const ExprParams& expr_params) {
-    std::shared_ptr<QueryContext> subquery_ctx(new (std::nothrow)QueryContext());
-    if (subquery_ctx.get() == nullptr) {
-        DB_WARNING("create subquery context failed");
-        return -1;
-    }
+    _cur_sub_ctx = std::make_shared<QueryContext>();
     auto client = _ctx->client_conn;
-    subquery_ctx->stmt = subquery;
-    subquery_ctx->expr_params = expr_params;
-    subquery_ctx->stmt_type = subquery->node_type;
-    subquery_ctx->cur_db = _ctx->cur_db;
-    subquery_ctx->is_explain = _ctx->is_explain;
-    subquery_ctx->stat_info.log_id = _ctx->stat_info.log_id;
-    subquery_ctx->user_info = _ctx->user_info;
-    subquery_ctx->row_ttl_duration = _ctx->row_ttl_duration;
-    subquery_ctx->is_complex = _ctx->is_complex;
-    subquery_ctx->get_runtime_state()->set_client_conn(client);
-    subquery_ctx->client_conn = client;
-    subquery_ctx->sql = subquery->to_string();
+    _cur_sub_ctx->stmt = subquery;
+    _cur_sub_ctx->expr_params = expr_params;
+    _cur_sub_ctx->stmt_type = subquery->node_type;
+    _cur_sub_ctx->cur_db = _ctx->cur_db;
+    _cur_sub_ctx->is_explain = _ctx->is_explain;
+    _cur_sub_ctx->stat_info.log_id = _ctx->stat_info.log_id;
+    _cur_sub_ctx->user_info = _ctx->user_info;
+    _cur_sub_ctx->row_ttl_duration = _ctx->row_ttl_duration;
+    _cur_sub_ctx->is_complex = _ctx->is_complex;
+    _cur_sub_ctx->get_runtime_state()->set_client_conn(client);
+    _cur_sub_ctx->client_conn = client;
+    _cur_sub_ctx->sql = subquery->to_string();
     std::unique_ptr<LogicalPlanner> planner;
-    if (subquery_ctx->stmt_type == parser::NT_SELECT) {
-        planner.reset(new SelectPlanner(subquery_ctx.get(), plan_state));
-    } else if (subquery_ctx->stmt_type == parser::NT_UNION) {
-        planner.reset(new UnionPlanner(subquery_ctx.get(), plan_state));
+    if (_cur_sub_ctx->stmt_type == parser::NT_SELECT) {
+        planner.reset(new SelectPlanner(_cur_sub_ctx.get(), plan_state));
+    } else if (_cur_sub_ctx->stmt_type == parser::NT_UNION) {
+        planner.reset(new UnionPlanner(_cur_sub_ctx.get(), plan_state));
     }
     if (planner->plan() != 0) {
-        _ctx->stat_info.error_code = subquery_ctx->stat_info.error_code;
-        _ctx->stat_info.error_msg << subquery_ctx->stat_info.error_msg.str();
-        DB_WARNING("gen plan failed, type:%d", subquery_ctx->stmt_type);
+        _ctx->stat_info.error_code = _cur_sub_ctx->stat_info.error_code;
+        _ctx->stat_info.error_msg << _cur_sub_ctx->stat_info.error_msg.str();
+        DB_WARNING("gen plan failed, type:%d", _cur_sub_ctx->stmt_type);
         return -1;
     }
-    //DB_WARNING("subquery sql:%s", subquery_ctx->sql.c_str());
-    _ctx->stat_info.family = subquery_ctx->stat_info.family;
-    _ctx->stat_info.table = subquery_ctx->stat_info.table;
-    _ctx->cur_db = subquery_ctx->cur_db;
+    if (_ctx->stat_info.family.empty()) {
+        _ctx->stat_info.family = _cur_sub_ctx->stat_info.family;
+    }
+    if (_ctx->stat_info.table.empty()) {
+        _ctx->stat_info.table = _cur_sub_ctx->stat_info.table;
+    }
+    if (_ctx->stat_info.resource_tag.empty()) {
+        _ctx->stat_info.resource_tag = _cur_sub_ctx->stat_info.resource_tag;
+    }
+    _ctx->cur_db = _cur_sub_ctx->cur_db;
     if (!expr_params.is_expr_subquery) {
         if (_select_names.size() == 0) {
             _select_names = planner->select_names();
         }
     }
-    subquery_ctx->expr_params.row_filed_number = planner->select_names().size();
-    subquery_ctx->is_full_export = false;
-    int ret = subquery_ctx->create_plan_tree();
+    _cur_sub_ctx->expr_params.row_filed_number = planner->select_names().size();
+    int ret = _cur_sub_ctx->create_plan_tree();
     if (ret < 0) {
         DB_WARNING("Failed to pb_plan to execnode");
         return -1;
     }
-    _ctx->sub_query_plans.push_back(subquery_ctx);
+    _ctx->set_kill_ctx(_cur_sub_ctx);
+    ret = generate_sql_sign(_cur_sub_ctx->plan, &(_cur_sub_ctx->stat_info), subquery, &_cur_sub_ctx->need_learner_backup);
+    if (ret < 0) {
+        return -1;
+    }
     return 0;
 }
-
 
 int LogicalPlanner::add_derived_table(const std::string& database, const std::string& table,
         const std::string& alias) {
@@ -598,7 +625,6 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             _ctx->stat_info.error_msg << "table: " << database << "." << table << " not exist";
             return -1;
         }
-        _ctx->stat_info.table_id = tableid;
         auto tbl_ptr = _factory->get_table_info_ptr(tableid);
         if (tbl_ptr == nullptr) {
             DB_WARNING("no table found with id: %ld", tableid);
@@ -606,7 +632,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             _ctx->stat_info.error_msg << "table: " << database << "." << table << " not exist";
             return -1;
         }
-
+        _ctx->stat_info.resource_tag = tbl_ptr->resource_tag;
         // learner降级
         if (tbl_ptr->need_learner_backup) {
             _ctx->need_learner_backup = true;
@@ -625,7 +651,6 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
                 _ctx->stat_info.error_msg << "table: " << database << "." << table << " not exist";
                 return -1;
             }
-            _ctx->stat_info.table_id = tableid;
             tbl_ptr = SchemaFactory::get_backup_instance()->get_table_info_ptr(tableid);
             if (tbl_ptr == nullptr) {
                 DB_WARNING("no table found with id: %ld", tableid);
@@ -669,6 +694,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
     } else {
         _table_names.emplace(alias_full_name);
     }
+    _ctx->stat_info.table_id = tableid;
     ScanTupleInfo* tuple_info = get_scan_tuple(alias_full_name, tableid);
     _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
     _ctx->current_table_tuple_ids.emplace(tuple_info->tuple_id);
@@ -1071,6 +1097,7 @@ int LogicalPlanner::parse_db_name_from_table_source(const parser::TableSource* t
             DB_WARNING("gen subquery plan failed");
             return -1;
         }
+        _ctx->add_sub_ctx(_cur_sub_ctx);
         return 0;
     }
     parser::TableName* table_name = table_source->table_name;
@@ -1401,11 +1428,9 @@ int LogicalPlanner::handle_scalar_subquery(const parser::FuncExpr* func_item,
             child_node->CopyFrom(tmp_expr.nodes(i));
         }
     } else {
-        auto sub_ctx = _ctx->sub_query_plans.back();
-        _ctx->sub_query_plans.pop_back();
         CreateExprOptions tm_options = options;
         tm_options.row_expr_size = row_expr_size;
-        ret = construct_apply_node(sub_ctx.get(), expr, pb::SEMI_JOIN, tm_options); 
+        ret = construct_apply_node(_cur_sub_ctx.get(), expr, pb::SEMI_JOIN, tm_options);
         if (ret < 0) {
             DB_WARNING("construct apply node failed");
             return -1;
@@ -1566,7 +1591,7 @@ void LogicalPlanner::construct_literal_expr(const ExprValue& value, pb::ExprNode
 }
 
 
-int LogicalPlanner::exec_subquery_expr(QueryContext* sub_ctx) {
+int LogicalPlanner::exec_subquery_expr(QueryContext* sub_ctx, QueryContext* ctx) {
     int ret = PhysicalPlanner::analyze(sub_ctx);
     if (ret < 0) {
         DB_WARNING("exec PhysicalPlanner failed");
@@ -1579,8 +1604,12 @@ int LogicalPlanner::exec_subquery_expr(QueryContext* sub_ctx) {
         return -1;
     }
     state.set_is_expr_subquery(true);
+    if (sub_ctx->stmt_type == parser::NT_SELECT) {
+        state.set_single_store_concurrency();
+    }
     ret = sub_ctx->root->open(&state);
     sub_ctx->root->close(&state);
+    ctx->update_ctx_stat_info(&state, sub_ctx->get_ctx_total_time());
     if (ret < 0) {
         return -1;
     }
@@ -1598,16 +1627,14 @@ int LogicalPlanner::create_common_subquery_expr(const parser::SubqueryExpr* item
         return -1;
     }
 
-    auto sub_ctx = _ctx->sub_query_plans.back();
-    if (!sub_ctx->expr_params.is_correlated_subquery) {
-        ret = exec_subquery_expr(sub_ctx.get());
+    if (!_cur_sub_ctx->expr_params.is_correlated_subquery) {
+        ret = exec_subquery_expr(_cur_sub_ctx.get(), _ctx);
         if (ret < 0) {
             DB_WARNING("exec subquery failed");
             return -1;
         }
-        _ctx->sub_query_plans.pop_back();
-        RuntimeState& state = *sub_ctx->get_runtime_state();
-        auto& subquery_exprs_vec = state.get_subquery_exprs();
+        auto state = _cur_sub_ctx->get_runtime_state();
+        auto& subquery_exprs_vec = state->get_subquery_exprs();
         if (options.max_one_row && subquery_exprs_vec.size() > 1) {
             _ctx->stat_info.error_code = ER_SUBQUERY_NO_1_ROW;
             _ctx->stat_info.error_msg << "Subquery returns more than 1 row";
@@ -1647,12 +1674,12 @@ int LogicalPlanner::create_common_subquery_expr(const parser::SubqueryExpr* item
                     }
                 }
             } else {
-                DB_WARNING("not data row_filed_number:%d", sub_ctx->expr_params.row_filed_number);
-                if (sub_ctx->expr_params.row_filed_number > 1) {
+                DB_WARNING("not data row_filed_number:%d", _cur_sub_ctx->expr_params.row_filed_number);
+                if (_cur_sub_ctx->expr_params.row_filed_number > 1) {
                     pb::ExprNode* row_node = expr.add_nodes();
                     row_node->set_node_type(pb::ROW_EXPR);
-                    row_node->set_num_children(sub_ctx->expr_params.row_filed_number);
-                    for (int i = 0; i < sub_ctx->expr_params.row_filed_number; i++) {
+                    row_node->set_num_children(_cur_sub_ctx->expr_params.row_filed_number);
+                    for (int i = 0; i < _cur_sub_ctx->expr_params.row_filed_number; i++) {
                         pb::ExprNode* node = expr.add_nodes();
                         node->set_node_type(pb::BOOL_LITERAL);
                         node->set_col_type(pb::BOOL);
@@ -1705,22 +1732,20 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
     if (ret < 0) {
         return -1;
     }
-    auto sub_ctx = _ctx->sub_query_plans.back();
-    _ctx->sub_query_plans.pop_back();
     // 非相关子查询表达式，直接执行获取结果
-    if (!sub_ctx->expr_params.is_correlated_subquery) {
-        ret = exec_subquery_expr(sub_ctx.get());
+    if (!_cur_sub_ctx->expr_params.is_correlated_subquery) {
+        ret = exec_subquery_expr(_cur_sub_ctx.get(), _ctx);
         if (ret < 0) {
             return -1;
         }
-        RuntimeState& state = *sub_ctx->get_runtime_state();
-        auto& subquery_exprs_vec = state.get_subquery_exprs();
+        auto state = _cur_sub_ctx->get_runtime_state();
+        auto& subquery_exprs_vec = state->get_subquery_exprs();
         bool is_eq_all = false;
         ExprValue first_val;
         bool always_false = false;
         bool is_neq_any = false;
         // =
-        if (sub_ctx->expr_params.func_type == parser::FT_EQ) {
+        if (_cur_sub_ctx->expr_params.func_type == parser::FT_EQ) {
             pb::ExprNode* node = compare_expr.mutable_nodes(0);
             node->set_col_type(pb::BOOL);
             node->set_node_type(pb::IN_PREDICATE);
@@ -1728,7 +1753,7 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
             func->set_name("in");
             func->set_fn_op(parser::FT_IN);
             // = all (xxx) 子查询返回的不同值最多1个，否则恒为false
-            if (sub_ctx->expr_params.cmp_type == parser::CMP_ALL) {
+            if (_cur_sub_ctx->expr_params.cmp_type == parser::CMP_ALL) {
                 is_eq_all = true;
             }
             
@@ -1750,7 +1775,7 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
                 node->set_num_children(2);
             }
         // != all -> not in (xxx)
-        } else if (sub_ctx->expr_params.func_type == parser::FT_NE) {
+        } else if (_cur_sub_ctx->expr_params.func_type == parser::FT_NE) {
             pb::ExprNode* node = compare_expr.mutable_nodes(0);
             node->set_col_type(pb::BOOL);
             node->set_node_type(pb::NOT_PREDICATE);
@@ -1766,7 +1791,7 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
             pb::Function* func = node->mutable_fn();
             func->set_name("in");
             func->set_fn_op(parser::FT_IN);
-            if (sub_ctx->expr_params.cmp_type != parser::CMP_ALL) {
+            if (_cur_sub_ctx->expr_params.cmp_type != parser::CMP_ALL) {
                 is_neq_any = true;
             }
             if (subquery_exprs_vec.size() > 0) {
@@ -1786,9 +1811,9 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
             } else {
                  node->set_num_children(2);
             }
-        } else if (sub_ctx->expr_params.func_type == parser::FT_GT
-            || sub_ctx->expr_params.func_type == parser::FT_GE) {
-            if (sub_ctx->expr_params.cmp_type == parser::CMP_ALL 
+        } else if (_cur_sub_ctx->expr_params.func_type == parser::FT_GT
+            || _cur_sub_ctx->expr_params.func_type == parser::FT_GE) {
+            if (_cur_sub_ctx->expr_params.cmp_type == parser::CMP_ALL 
                 && subquery_exprs_vec.size() == 1 && subquery_exprs_vec[0][0].is_null()) {
                 // > >= all (null) 恒为true
                 pb::ExprNode* node = expr.add_nodes();
@@ -1842,7 +1867,7 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
             default:
                 break;
         }
-        ret = construct_apply_node(sub_ctx.get(), expr, pb::LEFT_JOIN, tmp_options); 
+        ret = construct_apply_node(_cur_sub_ctx.get(), expr, pb::LEFT_JOIN, tmp_options);
         if (ret < 0) {
             DB_WARNING("construct apply node failed");
             return -1;
@@ -1870,17 +1895,15 @@ int LogicalPlanner::handle_exists_subquery(const parser::ExprNode* expr_item, pb
         DB_WARNING("gen subquery plan failed");
         return -1;
     }
-    auto sub_ctx = _ctx->sub_query_plans.back();
-    _ctx->sub_query_plans.pop_back();
+
     // 非相关子查询表达式，直接执行获取结果
-    if (!sub_ctx->expr_params.is_correlated_subquery) {
-        ret = exec_subquery_expr(sub_ctx.get());
+    if (!_cur_sub_ctx->expr_params.is_correlated_subquery) {
+        ret = exec_subquery_expr(_cur_sub_ctx.get(), _ctx);
         if (ret < 0) {
             return -1;
         }
-        RuntimeState& state = *sub_ctx->get_runtime_state();
-        auto& subquery_exprs_vec = state.get_subquery_exprs();
-    
+        auto state = _cur_sub_ctx->get_runtime_state();
+        auto& subquery_exprs_vec = state->get_subquery_exprs();
         pb::ExprNode* node = expr.add_nodes();
         node->set_node_type(pb::BOOL_LITERAL);
         node->set_col_type(pb::BOOL);
@@ -1897,7 +1920,7 @@ int LogicalPlanner::handle_exists_subquery(const parser::ExprNode* expr_item, pb
         if (is_not) {
             join_type = pb::ANTI_SEMI_JOIN;
         }
-        ret = construct_apply_node(sub_ctx.get(), expr, join_type, options); 
+        ret = construct_apply_node(_cur_sub_ctx.get(), expr, join_type, options);
         if (ret < 0) {
             DB_WARNING("construct apply node failed");
             return -1;
@@ -1914,9 +1937,7 @@ int LogicalPlanner::handle_common_subquery(const parser::ExprNode* expr_item,
         return -1;
     }
     if (_is_correlate_subquery_expr && options.is_select_field) {
-        auto sub_ctx = _ctx->sub_query_plans.back();
-        _ctx->sub_query_plans.pop_back();
-        ret = construct_apply_node(sub_ctx.get(), expr, pb::LEFT_JOIN, options); 
+        ret = construct_apply_node(_cur_sub_ctx.get(), expr, pb::LEFT_JOIN, options);
         if (ret < 0) {
             DB_WARNING("construct apply node failed");
             return -1;
@@ -2507,13 +2528,13 @@ int LogicalPlanner::create_filter_node(std::vector<pb::Expr>& filters,
     where_node->set_is_explain(_ctx->is_explain);
     where_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = where_node->mutable_derive_node();
-    pb::FilterNode* filter = derive->mutable_filter_node();
+    pb::FilterNode* filter = derive->mutable_raw_filter_node();
     
     for (uint32_t idx = 0; idx < filters.size(); ++idx) {
         pb::Expr* expr = filter->add_conjuncts();
         expr->CopyFrom(filters[idx]);
     }
-    //DB_WARNING("filter node: %s", pb2json(*where_node).c_str());
+    //DB_NOTICE("filter:%s", filter->ShortDebugString().c_str());
     return 0;
 }
 

@@ -649,6 +649,12 @@ public:
         _num_table_lines.store(table_line);
         DB_WARNING("region_id: %ld, table_line:%ld", _region_id, _num_table_lines.load());
     }
+    void add_num_table_lines(int64_t row_line) {
+        int64_t table_line = _num_table_lines.load() + row_line;
+        MetaWriter::get_instance()->update_num_table_lines(_region_id, table_line);
+        _num_table_lines.store(table_line);
+        DB_WARNING("region_id: %ld, table_line:%ld", _region_id, _num_table_lines.load());
+    }
     bool removed() const {
         return _removed;
     }
@@ -821,7 +827,12 @@ public:
     void process_upload_sst_streaming(brpc::Controller* controller, bool is_ingest,
         const pb::BackupRequest* request,
         pb::BackupResponse* response);
-    
+    void process_query_peers(brpc::Controller* controller,
+        const pb::BackupRequest* request,
+        pb::BackupResponse* response);
+    void process_query_streaming_result(brpc::Controller *cntl,
+                                        const pb::BackupRequest *request,
+                                        pb::BackupResponse *response);
     std::shared_ptr<Region> get_ptr() {
         return shared_from_this();
     }
@@ -1021,7 +1032,6 @@ private:
 
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
     bool has_sst_data(int64_t* seek_table_lines);
-    bool ingest_has_sst_data();
     bool wait_rocksdb_normal(int64_t timeout = -1) {
         TimeCost cost;
         TimeCost total_cost;
@@ -1073,6 +1083,16 @@ private:
             } 
             max_ts = _binlog_read_max_ts.load();
         }
+    }
+
+    void update_streaming_result(brpc::StreamId id, pb::StreamState state) {
+        BAIDU_SCOPED_LOCK(_streaming_result.mutex);
+        if (_streaming_result.last_update_time.get_time() > 3600 * 1000 * 1000LL) {
+            DB_WARNING("clean streaming result");
+            _streaming_result.state.clear();
+        }
+        _streaming_result.state[id] = state;
+        _streaming_result.last_update_time.reset();
     }
 
 private:
@@ -1240,6 +1260,12 @@ private:
     };
     AsyncApplyParam _async_apply_param;
     ExecutionQueue _async_apply_log_queue;
+    struct StreamingResult {
+        bthread::Mutex  mutex;
+        std::unordered_map<brpc::StreamId, pb::StreamState> state;
+        TimeCost last_update_time;
+    };
+    StreamingResult _streaming_result;
 };
 
 } // end of namespace

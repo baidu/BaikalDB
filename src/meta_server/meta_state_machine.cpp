@@ -191,7 +191,10 @@ void MetaStateMachine::baikal_other_heartbeat(google::protobuf::RpcController* c
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
     TableManager::get_instance()->check_update_statistics(request, response);
+    ClusterManager::get_instance()->process_instance_param_heartbeat_for_baikal(request, response);
     int64_t schema_time = step_time_cost.get_time();
+
+
     DB_NOTICE("baikaldb:%s heart beat, wait time: %ld, update_cost: %ld, log_id: %lu", 
                 butil::endpoint2str(cntl->remote_side()).c_str(),
                 wait_time, schema_time, log_id);

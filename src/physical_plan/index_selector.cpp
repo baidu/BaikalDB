@@ -87,15 +87,6 @@ int IndexSelector::analyze(QueryContext* ctx) {
             ctx->index_ids.insert(ret);
             ctx->field_range_type = field_range_type;
         }
-        pb::ScanNode* pb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->mutable_pb_node()->
-            mutable_derive_node()->mutable_scan_node();
-        if (pb_scan_node->indexes_size() == 0) {
-            //主键扫描
-            pb::PossibleIndex* pos_index = pb_scan_node->add_indexes();
-            pos_index->set_index_id(static_cast<ScanNode*>(scan_node_ptr)->table_id());
-            ctx->index_ids.insert(pos_index->index_id());
-            pos_index->add_ranges();
-        }
     }
     return 0;
 }
@@ -141,7 +132,6 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
         if (!expr->children(i)->is_row_expr()) {
             return;
         }
-        std::map<size_t, ExprValue> row_value;
         for (auto& pair : slots) {
             size_t idx = pair.first;
             values[idx].push_back(static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx));
@@ -560,16 +550,16 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         if (info_ptr == nullptr) {
             continue;
         }
-
-        if (info_ptr->index_hint_status == pb::IHS_DISABLE) {
-            DB_DEBUG("index[%s] is disabled", info_ptr->name.c_str());
-            continue;
-        }
+        // 不在此处跳过disable的索引，在add_path处判断，这样learner可以使用
+        // if (info_ptr->index_hint_status == pb::IHS_DISABLE) {
+        //     DB_DEBUG("index[%s] is disabled", info_ptr->name.c_str());
+        //     continue;
+        // }
         IndexInfo& index_info = *info_ptr;
         pb::IndexType index_type = index_info.type;
         auto index_state = index_info.state;
         if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }

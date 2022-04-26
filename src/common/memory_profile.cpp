@@ -21,10 +21,11 @@ namespace baikaldb {
 
 DEFINE_int64(memory_gc_interval_s, 10, "mempry GC interval , default: 10s");
 DEFINE_int64(memory_stats_interval_s, 60, "mempry GC interval , default: 60s");
-DEFINE_int64(memory_free_rate, 20, "mempry free rate , default: 20");
 DEFINE_int64(min_memory_use_size, 8589934592, "minimum memory use size , default: 8G");
 DEFINE_int64(min_memory_free_size_to_release, 2147483648, "minimum memory free size to release, default: 2G");
 DEFINE_int64(mem_tracker_gc_interval_s, 60, "do memory limit when row number more than #, default: 60");
+DEFINE_int64(process_memory_limit_bytes, -1, "all memory use size, default: -1");
+DEFINE_int64(query_memory_limit_ratio, 90, "query memory use ratio , default: 90%");
 
 void MemoryGCHandler::memory_gc_thread() {
 #ifdef BAIKAL_TCMALLOC
@@ -74,6 +75,21 @@ void MemoryGCHandler::memory_gc_thread() {
 #endif
 }
 
+MemTracker::MemTracker(uint64_t log_id, int64_t bytes_limit, MemTracker* parent) :
+                _log_id(log_id), _bytes_limit(bytes_limit),
+                _last_active_time(butil::gettimeofday_us()),
+                _bytes_consumed(0), _parent(parent),
+                _limit_exceeded(false) {
+}
+
+MemTracker::~MemTracker() {
+        DB_DEBUG("~MemTracker %p log_id:%lu used_bytes:%ld", this, _log_id, _bytes_consumed.load());
+        int64_t bytes = bytes_consumed();
+        if (bytes > 0 && _parent) {
+            _parent->release(_bytes_consumed.load());
+        }
+    }
+
 void MemTrackerPool::tracker_gc_thread() {
     while (!_shutdown) {
         bthread_usleep_fast_shutdown(FLAGS_memory_gc_interval_s * 1000 * 1000LL, _shutdown);
@@ -89,6 +105,25 @@ void MemTrackerPool::tracker_gc_thread() {
             }
         }
     }
+}
+
+int MemTrackerPool::init() {
+    _query_bytes_limit = -1;
+    if (FLAGS_process_memory_limit_bytes > 0) {
+        _query_bytes_limit = FLAGS_process_memory_limit_bytes * FLAGS_query_memory_limit_ratio / 100;
+    }
+    _root_tracker =  std::make_shared<MemTracker>(0, FLAGS_process_memory_limit_bytes, nullptr);
+    DB_NOTICE("root_limit_size :%ld _query_bytes_limit:%ld", FLAGS_process_memory_limit_bytes, _query_bytes_limit);
+    _tracker_gc_bth.run([this]() {tracker_gc_thread();});
+    return 0;
+}
+
+SmartMemTracker MemTrackerPool::get_mem_tracker(uint64_t log_id) {
+    auto call = [this, log_id](SmartMemTracker& tracker) -> SmartMemTracker {
+        tracker = std::make_shared<MemTracker>(log_id, _query_bytes_limit, _root_tracker.get());
+        return tracker;
+    };
+    return _mem_tracker_pool.get_or_put_call(log_id, call);
 }
 
 } //namespace baikal

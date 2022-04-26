@@ -346,7 +346,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
     pb::OpType op_type = pb::OP_NONE;
     if (root != nullptr) {
         op_type = root->op_type();
-        rows = (root->op_type() == pb::OP_SELECT) ?
+        rows = (root->op_type() == pb::OP_SELECT || root->op_type() == pb::OP_UNION) ?
             stat_info->num_returned_rows : stat_info->num_affected_rows;
     }
 
@@ -361,23 +361,18 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 index_id = *ctx->index_ids.begin();
             } else if (ctx->index_ids.size() == 1) {
                 index_id = *ctx->index_ids.begin();
+                /*
                 index_recommend_st << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id,
                         stat_info->total_time, err_count * stat_info->total_time, rows, stat_info->num_scan_rows,
                         stat_info->num_filter_rows, stat_info->region_count,
                         ctx->field_range_type, err_count);
+                */
             }
             std::map<int32_t, int> field_range_type;
             sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id,
                     stat_info->total_time, err_count * stat_info->total_time, rows, stat_info->num_scan_rows,
                     stat_info->num_filter_rows, stat_info->region_count,
                     field_range_type, err_count);
-        }
-        if (op_type == pb::OP_SELECT && stat_info->error_code == 1000) {
-            SchemaFactory* factory = SchemaFactory::get_instance();
-            std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(stat_info->sign);
-            if (sql_info != nullptr) {
-                sql_info->update(stat_info->total_time, stat_info->num_scan_rows);
-            }
         }
 
         if (op_type == pb::OP_SELECT) {
@@ -424,7 +419,6 @@ void StateMachine::_print_query_time(SmartSocket client) {
 #else
         if (stat_info->total_time > FLAGS_print_time_us || stat_info->error_code != 1000) {
 #endif
-            boost::replace_all(ctx->sql, "\n", " ");
             std::string sql;
             if (ctx->mysql_cmd == COM_QUERY || ctx->mysql_cmd == COM_STMT_CLOSE
                     || ctx->mysql_cmd == COM_STMT_RESET) {
@@ -435,7 +429,20 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     sql = iter->second->sql;
                 }
             }
-            RE2::GlobalReplace(&sql, "\\s+", " ");
+            size_t slow_idx = 0;
+            bool is_blank = false;
+            for (size_t i = 0; i < sql.size(); i++) {
+                if (sql[i] == ' ' || sql[i] == '\t' || sql[i] == '\n') {
+                    if (!is_blank) {
+                        sql[slow_idx++] = ' ';
+                        is_blank = true;
+                    }
+                } else {
+                    is_blank = false;
+                    sql[slow_idx++] = sql[i];
+                }
+            }
+            sql.resize(slow_idx);
             DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%ld] scan_row=[%ld] bufsize=[%zu] "
                     "key=[%d] changeid=[%lu] logid=[%lu] traceid=[%s] family_ip=[%s] cache=[%d] stmt_name=[%s] "
@@ -1093,13 +1100,13 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
     option.set_utf8(false);
     option.set_case_sensitive(false);
     option.set_perl_classes(true);
-    re2::RE2 reg("(\\/\\*.*?\\*\\/)(.*)", option);
+    re2::RE2 reg("^\\/\\*(.*?)\\*\\/", option);
 
     // Remove ignore character.
-    boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
     boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
+    boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
 
-    while (boost::algorithm::istarts_with(ctx->sql, "/*")) {
+    while (boost::algorithm::starts_with(ctx->sql, "/*")) {
         size_t len = ctx->sql.size();
         std::string comment;
         if (!RE2::Extract(ctx->sql, reg, "\\1", &comment)) {
@@ -1107,26 +1114,18 @@ void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
         }
         if (comment.size() != 0) {
             ctx->comments.push_back(comment);
-        }
-        if (!RE2::Replace(&(ctx->sql), reg, "\\2")) {
-            DB_WARNING("extract sql error.");
+            ctx->sql = ctx->sql.substr(comment.size() + 4);
         }
         if (ctx->sql.size() == len) {
             break;
         }
         // Remove ignore character.
         boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
-        boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
     }
 }
 
 int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
-    for (auto& comment : ctx->comments) {
-        if (comment.size() < 4) {
-            continue;
-        }
-        const std::string& json_str = comment.substr(2,comment.size() - 4);
-        DB_DEBUG("comment: %s", comment.c_str());
+    for (auto& json_str : ctx->comments) {
         rapidjson::Document root;
         try {
             root.Parse<0>(json_str.c_str());
@@ -1703,7 +1702,6 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         ExecNode::create_pb_plan(0, &plan, client->query_ctx->root);
         std::string plan_str = "logical_plan:" + client->query_ctx->plan.DebugString() + "\n" +
                                "physical_plan:" + plan.DebugString();
-
         std::vector<ResultField> fields;
         ResultField field;
         field.name = "Plan";

@@ -61,23 +61,50 @@ public:
             expr->replace_slot_ref_to_literal(sign_set, literal_maps);
         }
     }
-    void modifiy_pruned_conjuncts_by_index(const std::unordered_set<ExprNode*>& other_condition) {
-        // 先清理，后续transfer pb会填充 _pruned_conjuncts
-        mutable_pb_node()->mutable_derive_node()->mutable_filter_node()->clear_conjuncts();
+    void modifiy_pruned_conjuncts_by_index(std::vector<ExprNode*>& filter_condition) {
         _pruned_conjuncts.clear();
-        _pruned_conjuncts.insert(_pruned_conjuncts.end(), other_condition.begin(), other_condition.end());
+        _raw_filter_node.Clear();
+        _filter_node.clear();
+        _pruned_conjuncts.swap(filter_condition);
+        if (!_pruned_conjuncts.empty()) {
+            for (auto expr : _pruned_conjuncts) {
+                ExprNode::create_pb_expr(_raw_filter_node.add_conjuncts(), expr);
+            }
+        }
+        _raw_filter_node.SerializeToString(&_filter_node);
+    }
+    void modifiy_pruned_conjuncts_by_index_learner(std::vector<ExprNode*>& filter_condition) {
+        _pruned_conjuncts_learner.clear();
+        _pruned_conjuncts_learner.swap(filter_condition);
+        if (!_pruned_conjuncts_learner.empty()) {
+            for (auto expr : _pruned_conjuncts_learner) {
+                ExprNode::create_pb_expr(_raw_filter_node.add_conjuncts_learner(), expr);
+            }
+        }
     }
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
+
+    void reset(RuntimeState* state) override {
+        _child_eos = false;
+        _child_row_idx = 0;
+        _raw_filter_node.Clear();
+        _filter_node.clear();
+        for (auto e : _children) {
+            e->reset(state);
+        }
+    }
+
 private:
     bool need_copy(MemRow* row);
-    void memory_limit_release(RuntimeState* state, MemRow* row);
-
 private:
     std::vector<ExprNode*> _conjuncts;
     std::vector<ExprNode*> _pruned_conjuncts;
+    std::vector<ExprNode*> _pruned_conjuncts_learner; // learner集群使用
     RowBatch _child_row_batch;
     size_t  _child_row_idx = 0;
     bool    _child_eos = false;
+    pb::FilterNode _raw_filter_node;
+    std::string    _filter_node;
 };
 }
 

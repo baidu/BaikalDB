@@ -79,6 +79,8 @@ void ShowHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_ALL_TABLES] = std::bind(&ShowHelper::_show_all_tables,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_INSTANCE_PARAM] = std::bind(&ShowHelper::_show_instance_param,
+            this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
 
@@ -129,8 +131,12 @@ bool ShowHelper::_show_abnormal_regions(const SmartSocket& client, const std::ve
     std::string resource_tag;
     auto split_vec = split_vec_arg;
     bool unhealthy = false;
+    bool is_learner = false;
     if (split_vec.back() == "unhealthy") {
         unhealthy = true;
+        split_vec.pop_back();
+    } else if (split_vec.back() == "learner") {
+        is_learner = true;
         split_vec.pop_back();
     }
     if (split_vec.size() == 4) {
@@ -142,11 +148,15 @@ bool ShowHelper::_show_abnormal_regions(const SmartSocket& client, const std::ve
 
     pb::QueryRequest req;
     req.set_op_type(pb::QUERY_REGION_PEER_STATUS);
+    if (is_learner) {
+        req.set_op_type(pb::QUERY_REGION_LEARNER_STATUS);
+    }
     if (resource_tag != "") {
         req.set_resource_tag(resource_tag);
     }
     pb::QueryResponse res;
     MetaServerInteract::get_instance()->send_request("query", req, res);
+    //DB_WARNING("res:%s", res.ShortDebugString().c_str());
     std::vector< std::vector<std::string> > rows;
     rows.reserve(10);
     size_t max_size = 0;
@@ -452,9 +462,13 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
     std::string table;
     if (split_vec.size() == 4) {
         table = remove_quote(split_vec[3].c_str(), '`');
-    } else if (split_vec.size() == 5) {
-        db = remove_quote(split_vec[3].c_str(), '`');
-        table = remove_quote(split_vec[4].c_str(), '`');
+        std::vector<std::string> vec;
+        boost::split(vec, split_vec[3],
+                boost::is_any_of("."), boost::token_compress_on);
+        if (vec.size() == 2) {
+            db = remove_quote(vec[0].c_str(), '`');
+            table = remove_quote(vec[1].c_str(), '`');
+        }
     } else {
         client->state = STATE_ERROR;
         return false;
@@ -514,8 +528,10 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
         }
         if (index_info.is_global) {
             oss << " " << index_map[index_info.type] << " GLOBAL ";
-        }  else {
-            oss << "  " << index_map[index_info.type] << " ";
+        } else if (index_info.type == pb::I_PRIMARY || index_info.type == pb::I_FULLTEXT) {
+            oss << " " << index_map[index_info.type] << " ";
+        } else {
+            oss << "  " << index_map[index_info.type] << " LOCAL ";
         }
         if (index_info.index_hint_status == pb::IHS_VIRTUAL) {
             oss << "VIRTUAL ";
@@ -1441,7 +1457,9 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
     std::unordered_set<std::string> allowed_conf = {"need_merge",
                                                     "storage_compute_separate",
                                                     "select_index_by_cost",
-                                                    "pk_prefix_balance"};
+                                                    "pk_prefix_balance",
+                                                    "backup_table",
+                                                    "in_fast_import"};
     // 前三个conf按照bool解析, pk_prefix_balance按照int32来解析
     if (split_vec.size() != 3 || allowed_conf.find(split_vec[2]) == allowed_conf.end()) {
         client->state = STATE_ERROR;
@@ -1466,7 +1484,7 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
     }
 
     std::vector<std::string> names = { "namespace", "database_name", "table_name" };
-    if (split_vec[2] == "pk_prefix_balance") {
+    if (split_vec[2] == "pk_prefix_balance" || split_vec[2] == "backup_table") {
         names.emplace_back("value");
     }
 
@@ -1508,6 +1526,25 @@ bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<s
     };
     type_func_map["ttl"] = [](const SmartTable& table) {
         return table != nullptr && table->ttl_info.ttl_duration_s > 0;
+    };
+    type_func_map["fulltext"] = [](const SmartTable& table) {
+        return table != nullptr && table->has_fulltext;
+    };
+    type_func_map["cstore"] = [](const SmartTable& table) {
+        return table != nullptr && table->engine == pb::ROCKSDB_CSTORE;
+    };
+    type_func_map["learner"] = [](const SmartTable& table) {
+        return table != nullptr && !table->learner_resource_tags.empty();
+    };
+    type_func_map["type_timestamp"] = [](const SmartTable& table) {
+        if (table != nullptr) {
+            for (auto& f : table->fields) {
+                if (f.type == pb::TIMESTAMP) {
+                    return true;
+                }
+            }
+        }
+        return false;
     };
 
     if (type_func_map[split_vec[2]] != nullptr) {
@@ -2239,14 +2276,16 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
             }
             rows.emplace_back(row);
         }
-        std::vector<std::string> row;
-        row.reserve(6);
-        row.emplace_back("Idle : " + std::to_string(work_idle_count));
-        row.emplace_back("Doing : " + std::to_string(work_doing_count));
-        row.emplace_back("Done : " + std::to_string(work_done_count));
-        row.emplace_back("Fail : " + std::to_string(work_fail_count));
-        row.emplace_back("Error : " + std::to_string(work_error_count));
-        rows.emplace_back(row);
+        if (!rows.empty()) {
+            std::vector<std::string> row;
+            row.reserve(6);
+            row.emplace_back("Idle : " + std::to_string(work_idle_count));
+            row.emplace_back("Doing : " + std::to_string(work_doing_count));
+            row.emplace_back("Done : " + std::to_string(work_done_count));
+            row.emplace_back("Fail : " + std::to_string(work_fail_count));
+            row.emplace_back("Error : " + std::to_string(work_error_count));
+            rows.emplace_back(row);
+        }
     } else {
         for (auto ddl : response.ddlwork_infos()) {
             std::vector<std::string> row;
@@ -2647,6 +2686,59 @@ bool ShowHelper::_show_switch(const SmartSocket& client, const std::vector<std::
     return true;
 }
 
+bool ShowHelper::_show_instance_param(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if (client == nullptr || client->query_ctx == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::string resource_tag_or_instance = "";
+    if (split_vec.size() == 3) {
+        resource_tag_or_instance = split_vec[2];
+    } else if (split_vec.size() != 2) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    std::vector<ResultField> fields;
+    fields.reserve(4);
+    std::vector<std::string> names = {"resource tag or instance", "key", "value", "is meta"};
+    for(auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.emplace_back(field);
+    }
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    rows.reserve(10);
+    pb::QueryRequest request;
+    pb::QueryResponse response;
+    request.set_op_type(pb::QUERY_INSTANCE_PARAM);
+    request.set_resource_tag(resource_tag_or_instance);
+    MetaServerInteract::get_instance()->send_request("query", request, response);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    for (auto& info : response.instance_params()) {
+        for (auto& kv : info.params()) {
+            std::vector<std::string> row = {info.resource_tag_or_address(),
+                                            kv.key(),
+                                            kv.value(),
+                                            kv.is_meta_param() ? "true" : "false"};
+            rows.emplace_back(row);
+        }
+    }
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
 
 bool ShowHelper::_handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (boost::iequals(split_vec[1], "meta")) {

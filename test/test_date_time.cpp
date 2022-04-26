@@ -53,6 +53,7 @@ TEST(test_stamp_to_str, case_all) {
     EXPECT_EQ(timestamp_to_str(1512300524), "2017-12-03 19:28:44");
     EXPECT_EQ(timestamp_to_str(1512300480), "2017-12-03 19:28:00");
     EXPECT_EQ(timestamp_to_str(1512230400), "2017-12-03 00:00:00");
+    std::cout << timestamp_to_str(-100) << std::endl;
 }
 /*
 TEST(test_str_to_stamp, case_all) {
@@ -101,6 +102,14 @@ TEST(test_datetime_str_other, case_all) {
     EXPECT_EQ(datetime_to_str(str_to_datetime("891203192844.111")), "1989-12-03 19:28:44.111000");
     EXPECT_EQ(datetime_to_str(str_to_datetime("19891203192844.111")), "1989-12-03 19:28:44.111000");
     std::cout << "tm:" << str_to_datetime("20111303") << std::endl;
+    std::cout << "tm2:" << str_to_datetime("0000-00-00 00:00:00") << std::endl;
+    std::cout << "tm3:" << datetime_to_timestamp(0) << std::endl;
+    std::cout << "tm4:" << str_to_datetime("1970-01-01 08:00:00") << std::endl;
+    std::cout << "tm5:" << str_to_datetime("1970-01-01 08:00:01") << std::endl;
+    std::cout << "tm5:" << str_to_datetime("1970-01-01 07:00:01") << std::endl;
+    std::cout << "tm4:" << datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:00")) << std::endl;
+    std::cout << "tm5:" << datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:01")) << std::endl;
+    std::cout << "tm5:" << datetime_to_timestamp(str_to_datetime("1970-01-01 07:00:01")) << std::endl;
 }
 int32_t str_to_time2(const char* str_time) {
     int hour = 0;
@@ -199,6 +208,12 @@ TEST(test_datetime_time, case_all) {
 
 TEST(test_datetime_timestamp, case_all) {
     EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("2017-12-03 19:28:44.123456"))), "2017-12-03 19:28:44");
+    EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("0000-00-00 00:00:00"))), "0000-00-00 00:00:00");
+    EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:00"))), "0000-00-00 00:00:00");
+    EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:01"))), "1970-01-01 08:00:01");
+    EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("2040-01-01 08:00:01"))), "2040-01-01 08:00:01");
+    // < 1970-01-01 08:00:01非法，都当做0
+    EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("1970-01-01 07:00:01"))), "0000-00-00 00:00:00");
     //EXPECT_EQ(datetime_to_str(timestamp_to_datetime(str_to_timestamp("2017-12-03 19:28:44"))), "2017-12-03 19:28:44");
 }
 

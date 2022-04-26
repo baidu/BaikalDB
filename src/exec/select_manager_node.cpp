@@ -27,7 +27,6 @@ int SelectManagerNode::open(RuntimeState* state) {
     if (_return_empty) {
         return 0;
     }
-    int ret = 0;
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
         DB_WARNING("connection is nullptr: %lu", state->txn_id);
@@ -47,28 +46,8 @@ int SelectManagerNode::open(RuntimeState* state) {
         return -1;
     }
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);
-    int64_t router_index_id = scan_node->router_index_id();
-    int64_t main_table_id = scan_node->table_id();
-    //如果命中的不是全局二级索引，或者全局二级索引是covering_index, 则直接在主表或者索引表上做scan即可
-    if (router_index_id == main_table_id || scan_node->covering_index()) {
-        ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
-    } else {
-        ret = open_global_index(state, scan_node, router_index_id, main_table_id);
-    } 
-    if (ret < 0) {
-        DB_WARNING("select manager fetcher manager node open fail, txn_id: %lu, log_id:%lu",
-                state->txn_id, state->log_id());
-        return ret;
-    }
-    for (auto& pair : _fetcher_store.start_key_sort) {
-        auto& batch = _fetcher_store.region_batch[pair.second];
-        if (batch != nullptr && batch->size() != 0) {
-            _sorter->add_batch(batch);
-        }
-    }
-    // 无sort节点时不会排序，按顺序输出
-    _sorter->merge_sort();
-    return _fetcher_store.affected_rows.load();
+
+    return fetcher_store_run(state, scan_node);
 }
 
 int SelectManagerNode::subquery_open(RuntimeState* state) {
@@ -156,14 +135,156 @@ int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos)
     return 0;
 }
 
-int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_node, 
+int SelectManagerNode::single_fetcher_store_open(FetcherInfo* fetcher, RuntimeState* state, ExecNode* exec_node) {
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
+    ScanIndexInfo* scan_index_info = fetcher->scan_index;
+    int64_t router_index_id = scan_index_info->router_index_id;
+    int64_t main_table_id = scan_node->table_id();
+    auto client_conn = state->client_conn();
+    int ret = 0;
+    // 如果命中的不是全局二级索引，或者全局二级索引是covering_index, 则直接在主表或者索引表上做scan即可
+    if (router_index_id == main_table_id || scan_index_info->covering_index) {
+        ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, _children[0], 
+                client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
+    } else {
+        ret = open_global_index(fetcher, state, scan_node, router_index_id, main_table_id);
+    }
+    fetcher->fetcher_store.update_state_info(state);
+    if (ret < 0) {
+        DB_WARNING("select manager fetcher manager node open fail, txn_id: %lu, log_id:%lu, "
+                "router_index_id: %ld, main_table_id: %ld, covering_index: %d",
+                state->txn_id, state->log_id(), router_index_id, main_table_id, scan_index_info->covering_index);
+        return ret;
+    }
+
+    return 0;
+}
+
+void SelectManagerNode::multi_fetcher_store_open(FetcherInfo* self_fetcher, FetcherInfo* other_fetcher,  
+        RuntimeState* state, ExecNode* exec_node) {
+    if (self_fetcher->dynamic_timeout_ms > 0) {
+        int64_t timeout_us = self_fetcher->dynamic_timeout_ms * 1000LL;
+        // 暂时以打散sleep时间的方式达到及时唤醒的目的，如果此方式存在唤醒不及时的问题，需要换成条件变量
+        TimeCost cost;
+        while (true) {
+            // 检查另一个fetcher是否已经完成
+            if (other_fetcher->status == FetcherInfo::S_SUCC) {
+                return;
+            } else if (other_fetcher->status == FetcherInfo::S_FAIL) {
+                break;
+            } else {
+                // do nothing
+            }
+            int64_t time_used = cost.get_time();
+            if (time_used > timeout_us) {
+                break;
+            }
+            if (timeout_us - time_used < 5000) {
+                bthread_usleep(timeout_us - time_used);
+            } else {
+                bthread_usleep(5000);
+            }
+        }
+    }
+
+    int ret = single_fetcher_store_open(self_fetcher, state, exec_node);
+    if (ret < 0) {
+        self_fetcher->status = FetcherInfo::S_FAIL;
+    } else {
+        self_fetcher->status = FetcherInfo::S_SUCC;
+        // 取消另一个请求
+        if (other_fetcher->status != FetcherInfo::S_SUCC) {
+            other_fetcher->fetcher_store.cancel_rpc();
+        }
+    }
+}
+
+int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_node) {
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
+    FetcherStore* fetcher_store = nullptr;
+    FetcherInfo main_fetcher;
+    FetcherInfo backup_fetcher;
+    ScanIndexInfo* main_scan_index = scan_node->main_scan_index();
+    ScanIndexInfo* backup_scan_index = scan_node->backup_scan_index();
+    int64_t dynamic_timeout_ms = FetcherStore::get_dynamic_timeout_ms(exec_node, pb::OP_SELECT, state->sign);
+    int ret = 0;
+
+    if (main_scan_index == nullptr) {
+        return -1;
+    }
+
+    if (backup_scan_index != nullptr && dynamic_timeout_ms > 0 && state->txn_id == 0) {
+        // 非事务情况下才进行全局二级索引降级，txn_id != 0 情况下state中会有修改，无法多个请求并发使用state
+        // 可以降级
+        main_fetcher.scan_index = main_scan_index;
+        main_fetcher.global_backup_type = GBT_MAIN;
+        backup_fetcher.scan_index = backup_scan_index;
+        backup_fetcher.global_backup_type = GBT_LEARNER;
+        backup_fetcher.dynamic_timeout_ms = dynamic_timeout_ms;
+
+        Bthread main_bth;
+        Bthread backup_bth;
+
+        auto main_func = [this, &main_fetcher, &backup_fetcher, state, scan_node]() {
+            multi_fetcher_store_open(&main_fetcher, &backup_fetcher, state, scan_node);
+        };
+        auto backup_func = [this, &main_fetcher, &backup_fetcher, state, scan_node]() {
+            multi_fetcher_store_open(&backup_fetcher, &main_fetcher, state, scan_node);
+        };
+
+        main_bth.run(main_func);
+        backup_bth.run(backup_func);
+
+        // 等待两个线程都结束
+        main_bth.join();
+        backup_bth.join();
+
+        if (main_fetcher.status == FetcherInfo::S_SUCC) {
+            fetcher_store = &main_fetcher.fetcher_store;
+        } else if (backup_fetcher.status == FetcherInfo::S_SUCC) {
+            fetcher_store = &backup_fetcher.fetcher_store;
+        } else {
+            state->error_code = main_fetcher.fetcher_store.error_code;
+            state->error_msg.swap(main_fetcher.fetcher_store.error_msg);
+            DB_WARNING("both router index fail, txn_id: %lu, log_id:%lu, main router index_id: %ld" 
+                "backup router index_id: %ld", state->txn_id, state->log_id(), 
+                main_fetcher.scan_index->router_index_id, backup_fetcher.scan_index->router_index_id);
+            return -1;
+        }
+    } else {
+        // 没有开启动态超时，不满足降级条件，只使用main router
+        main_fetcher.scan_index = main_scan_index;
+        fetcher_store = &main_fetcher.fetcher_store;
+        ret = single_fetcher_store_open(&main_fetcher, state, exec_node);
+        if (ret < 0) {
+            state->error_code = fetcher_store->error_code;
+            state->error_msg.swap(fetcher_store->error_msg);
+            DB_WARNING("single_fetcher_store_open fail, txn_id: %lu, log_id:%lu, router index_id: %ld",
+                state->txn_id, state->log_id(), main_fetcher.scan_index->router_index_id);
+            return -1;
+        }
+    } 
+
+    for (auto& pair : fetcher_store->start_key_sort) {
+        auto& batch = fetcher_store->region_batch[pair.second];
+        if (batch != nullptr && batch->size() != 0) {
+            _sorter->add_batch(batch);
+        }
+    }
+    // 无sort节点时不会排序，按顺序输出
+    _sorter->merge_sort();
+    return fetcher_store->affected_rows.load();
+
+}
+
+int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* state, ExecNode* exec_node, 
         int64_t global_index_id, int64_t main_table_id) {
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
     auto client_conn = state->client_conn();
     //二级索引只执行scan_node，因为索引条件已经被下推到scan_node了
     ExecNode* store_exec = scan_node;
     bool need_pushdown = true;
-    AggNode* agg_node = static_cast<AggNode*>(get_node(pb::AGG_NODE));;
+    AggNode* agg_node = static_cast<AggNode*>(get_node(pb::AGG_NODE));
     SortNode* sort_node = static_cast<SortNode*>(get_node(pb::SORT_NODE));
     FilterNode* where_filter_node = static_cast<FilterNode*>(get_node(pb::WHERE_FILTER_NODE));
     FilterNode* table_filter_node = static_cast<FilterNode*>(get_node(pb::TABLE_FILTER_NODE));
@@ -174,11 +295,11 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
         need_pushdown = false;
     }
     if (need_pushdown && where_filter_node != nullptr &&
-        where_filter_node->pruned_conjuncts().size() > 0) {
+            where_filter_node->pruned_conjuncts().size() > 0) {
         need_pushdown = false;
     }
     if (need_pushdown && table_filter_node != nullptr &&
-        table_filter_node->pruned_conjuncts().size() > 0) {
+            table_filter_node->pruned_conjuncts().size() > 0) {
         need_pushdown = false;
     }
     if (need_pushdown && sort_node != nullptr) {
@@ -207,18 +328,21 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
         && _children[0]->node_type() != pb::WHERE_FILTER_NODE) {
         store_exec = _children[0]->children(0);
     }*/
-    auto ret = _fetcher_store.run(state, _region_infos, store_exec, client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
+    auto ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, store_exec, 
+            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());
         return ret;
     }
-    ret = construct_primary_possible_index(state, scan_node, main_table_id);
+    ret = construct_primary_possible_index(fetcher->fetcher_store, fetcher->scan_index, state, scan_node, main_table_id);
     if (ret < 0) {
         DB_WARNING("construct primary possible index failed");
         return ret;
     }
-    ret = _fetcher_store.run(state, _region_infos, _children[0], client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
+
+    ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, _children[0], 
+            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());
@@ -228,6 +352,8 @@ int SelectManagerNode::open_global_index(RuntimeState* state, ExecNode* exec_nod
 }
 
 int SelectManagerNode::construct_primary_possible_index(
+                      FetcherStore& fetcher_store,
+                      ScanIndexInfo* scan_index_info, 
                       RuntimeState* state,
                       ExecNode* exec_node,
                       int64_t main_table_id) {
@@ -238,14 +364,21 @@ int SelectManagerNode::construct_primary_possible_index(
         DB_WARNING("pri index info not found table_id:%ld", main_table_id);
         return -1;
     }
-    scan_node->clear_possible_indexes();
-    pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
-    auto pos_index = pb_scan_node->add_indexes();
-    pos_index->set_index_id(main_table_id);
-    scan_node->set_router_index_id(main_table_id);
+    // 不能直接清理所有索引，可能有backup请求使用scan_node
+    // scan_node->clear_possible_indexes();
+    // pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
+    // auto pos_index = pb_scan_node->add_indexes();
+    scan_index_info->router_index = nullptr;
+    scan_index_info->raw_index.clear();
+    scan_index_info->region_infos.clear();
+    scan_index_info->region_primary.clear();
+    scan_index_info->router_index_id = main_table_id;
+    scan_index_info->index_id = main_table_id;
+    pb::PossibleIndex pos_index;
+    pos_index.set_index_id(main_table_id);
     SmartRecord record_template = _factory->new_record(main_table_id);
-    for (auto& pair : _fetcher_store.start_key_sort) {
-        auto& batch = _fetcher_store.region_batch[pair.second];
+    for (auto& pair : fetcher_store.start_key_sort) {
+        auto& batch = fetcher_store.region_batch[pair.second];
         if (batch == nullptr) {
             continue;
         }
@@ -261,20 +394,27 @@ int SelectManagerNode::construct_primary_possible_index(
                 }
                 record->set_value(record->get_field_by_tag(field_id), mem_row->get_value(tuple_id, slot_id));
             }
-            auto range = pos_index->add_ranges();
-            std::string str;
-            record->encode(str);
-            range->set_left_pb_record(str);
-            range->set_right_pb_record(str);
+            auto range = pos_index.add_ranges();
+            MutTableKey  key;
+            if (record->encode_key(*pri_info.get(), key, pri_info->fields.size(), false, false) != 0) {
+                DB_FATAL("Fail to encode_key left, table:%ld", pri_info->id);
+                return -1;
+            }
+            range->set_left_key(key.data());
+            range->set_left_full(key.get_full());
+            range->set_right_key(key.data());
+            range->set_right_full(key.get_full());
             range->set_left_field_cnt(pri_info->fields.size());
             range->set_right_field_cnt(pri_info->fields.size());
             range->set_left_open(false);
             range->set_right_open(false);
         }
     }
+
+    pos_index.SerializeToString(&scan_index_info->raw_index);
+
     //重新做路由选择
-    _region_infos.clear();
-    return _factory->get_region_by_key(*pri_info, pos_index, _region_infos, 
-                static_cast<RocksdbScanNode*>(scan_node)->mutable_region_primary());
+    return _factory->get_region_by_key(*pri_info, &pos_index, scan_index_info->region_infos, 
+                &scan_index_info->region_primary);
 }
 }

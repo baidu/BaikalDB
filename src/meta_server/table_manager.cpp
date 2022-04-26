@@ -431,11 +431,12 @@ void TableManager::drop_table_tombstone(const pb::MetaManagerRequest& request, c
     std::vector<std::string> delete_rocksdb_keys;
     int64_t table_id = request.table_info().table_id();
     // 删除rocksdb
-    delete_rocksdb_keys.push_back(construct_table_key(table_id));
+    delete_rocksdb_keys.emplace_back(construct_table_key(table_id));
+    delete_rocksdb_keys.emplace_back(construct_statistics_key(table_id));
    
     int ret = MetaRocksdb::get_instance()->delete_meta_info(delete_rocksdb_keys);
     if (ret < 0) {
-        DB_WARNING("restore table fail, request：%s", request.ShortDebugString().c_str());
+        DB_WARNING("drop table tombstone fail, request：%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
@@ -540,13 +541,16 @@ void TableManager::restore_table(const pb::MetaManagerRequest& request, const in
     }
     DatabaseManager::get_instance()->add_table_id(database_id, table_id);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
-    DB_NOTICE("restore table success, request:%s", request.ShortDebugString().c_str());
+    DB_NOTICE("restore table success, request:%s, info:%s", 
+            request.ShortDebugString().c_str(), schema_info.ShortDebugString().c_str());
     if (done) {
         Bthread bth_restore_region(&BTHREAD_ATTR_SMALL);
         std::string resource_tag = schema_info.resource_tag();
         std::function<void()> restore_function = [table_id, resource_tag]() {
                 std::set<std::string> instances;
                 ClusterManager::get_instance()->get_instances(resource_tag, instances);
+                DB_WARNING("restore table, resource_tag:%s, instances.size:%lu", 
+                        resource_tag.c_str(), instances.size());
                 for (auto& instance : instances) {
                     pb::RegionIds request;
                     request.set_table_id(table_id);
@@ -624,37 +628,11 @@ bool TableManager::check_and_update_incremental(const pb::BaikalHeartBeatRequest
         response->set_last_updated_index(last_updated_index);
     }
 
-    last_updated_index = request->last_updated_index();
-    if (request->not_need_statistics()) {
-        // 识别到baikaldb已经有这个标记，说明已更新到最新版本,统计信息不再通过该流程更新
-        return false;
-    }
-    auto update_st_func = [response](const std::vector<pb::Statistics>& st_infos) {
-        for (auto info : st_infos) {
-            *(response->add_statistics()) = info;
-            DB_WARNING("incremental update statistics, table_id:%ld, version:%ld", info.table_id(), info.version());
-        }
-    };
-
-    need_upd = _incremental_statistics_info.check_and_update_incremental(update_st_func, last_updated_index, applied_index);
-    if (need_upd) {
-        //全量更新统计信息
-        full_update_statistics(request, response);
-    } else {
-        if (response->last_updated_index() < last_updated_index) {
-            response->set_last_updated_index(last_updated_index);
-        }
-    }
-
     return false;
 }
 
 void TableManager::put_incremental_schemainfo(const int64_t apply_index, std::vector<pb::SchemaInfo>& schema_infos) {
     _incremental_schemainfo.put_incremental_info(apply_index, schema_infos);
-}
-
-void TableManager::put_incremental_statistics_info(const int64_t apply_index, std::vector<pb::Statistics>& st_infos) {
-    _incremental_statistics_info.put_incremental_info(apply_index, st_infos);
 }
 
 void TableManager::update_byte_size(const pb::MetaManagerRequest& request,
@@ -719,7 +697,10 @@ void TableManager::update_schema_conf(const pb::MetaManagerRequest& request,
     if (request.table_info().schema_conf().has_pk_prefix_balance()) {
         update_pk_prefix_balance_timestamp(request.table_info().table_id(),
                 request.table_info().schema_conf().pk_prefix_balance());
-    } 
+    }
+    if (request.table_info().schema_conf().has_in_fast_import())  {
+        update_tables_in_fast_importer(request, request.table_info().schema_conf().in_fast_import());
+    }
 }
 
 void TableManager::update_statistics(const pb::MetaManagerRequest& request,
@@ -752,8 +733,6 @@ void TableManager::update_statistics(const pb::MetaManagerRequest& request,
         BAIDU_SCOPED_LOCK(_table_mutex);
         _table_info_map[table_id].statistics_version = version;
     }
-    std::vector<pb::Statistics> st_infos{stat_pb};
-    put_incremental_statistics_info(apply_index, st_infos);
 
     //增加op version
     pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
@@ -1198,75 +1177,50 @@ void TableManager::check_update_or_drop_table(
         if (_table_info_map[table_id].schema_pb.version() > schema_heart_beat.version()) {
             *(response->add_schema_change_info()) = _table_info_map[table_id].schema_pb;
         }
-
-        //统计信息更新
-        // 识别到baikaldb已经有这个标记，说明已更新到最新版本,统计信息不再通过该流程更新
-        if (!request->not_need_statistics()) {
-            if (schema_heart_beat.has_statis_version() && 
-                _table_info_map[table_id].statistics_version > schema_heart_beat.statis_version()) {
-                pb::Statistics stat_pb;
-                int ret = get_statistics(table_id, stat_pb);
-                if (ret < 0) {
-                    continue;
-                }
-                response->add_statistics()->Swap(&stat_pb);
-                DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_version);
-            }
-        }
-    }
-}
-
-void TableManager::full_update_statistics(const pb::BaikalHeartBeatRequest* request,
-        pb::BaikalHeartBeatResponse* response) {
-    BAIDU_SCOPED_LOCK(_table_mutex);
-    for (auto& schema_heart_beat : request->schema_infos()) {
-        int64_t table_id = schema_heart_beat.table_id();
-        //表已经删除
-        if (_table_info_map.find(table_id) == _table_info_map.end()) {
-            continue;
-        }
-
-        //统计信息更新
-        if (schema_heart_beat.has_statis_version() && 
-            _table_info_map[table_id].statistics_version > schema_heart_beat.statis_version()) {
-            pb::Statistics stat_pb;
-            int ret = get_statistics(table_id, stat_pb);
-            if (ret < 0) {
-                continue;
-            }
-            response->add_statistics()->Swap(&stat_pb);
-            DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_version);
-        }
     }
 }
 
 void TableManager::check_update_statistics(const pb::BaikalOtherHeartBeatRequest* request,
         pb::BaikalOtherHeartBeatResponse* response) {
-    BAIDU_SCOPED_LOCK(_table_mutex);
-    for (auto& schema_heart_beat : request->schema_infos()) {
-        int64_t table_id = schema_heart_beat.table_id();
-        //表已经删除
-        if (_table_info_map.find(table_id) == _table_info_map.end()) {
-            continue;
-        }
-        int upd_cnt = 0;
-        //统计信息更新，如果需要更新直接从rocksdb读，避免占用内存
-        if (schema_heart_beat.has_statis_version() && 
-                _table_info_map[table_id].statistics_version > schema_heart_beat.statis_version()) {
-            pb::Statistics stat_pb; 
-            int ret = get_statistics(table_id, stat_pb);
-            if (ret < 0) {
+    std::map<int64_t, int64_t> table_version_map;
+    // 先加锁获取需要更新的table_id
+    {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        for (auto& schema_heart_beat : request->schema_infos()) {
+            int64_t table_id = schema_heart_beat.table_id();
+            //表已经删除
+            auto iter = _table_info_map.find(table_id);
+            if (iter == _table_info_map.end()) {
                 continue;
             }
-            if (response->ByteSizeLong() + stat_pb.ByteSizeLong() > FLAGS_statistics_heart_beat_bytesize) {
-                DB_WARNING("response size: %lu, statistics size: %lu, big than %ld; count: %d", 
-                    response->ByteSizeLong(), stat_pb.ByteSizeLong(), FLAGS_statistics_heart_beat_bytesize, upd_cnt);
-                break;
+            
+            if (schema_heart_beat.has_statis_version() && 
+                    iter->second.statistics_version > schema_heart_beat.statis_version()) {
+                table_version_map[table_id] = iter->second.statistics_version;
             }
-            upd_cnt++;
-            response->add_statistics()->Swap(&stat_pb);
-            DB_WARNING("update statistics, table_id:%ld, version:%ld", table_id, _table_info_map[table_id].statistics_version);
         }
+    }
+
+    if (table_version_map.empty()) {
+        return;
+    }
+
+    //统计信息更新，如果需要更新直接从rocksdb读，避免占用内存
+    int upd_cnt = 0;
+    for (const auto& iter : table_version_map) {
+        pb::Statistics stat_pb; 
+        int ret = get_statistics(iter.first, stat_pb);
+        if (ret < 0) {
+            continue;
+        }
+        if (response->ByteSizeLong() + stat_pb.ByteSizeLong() > FLAGS_statistics_heart_beat_bytesize) {
+            DB_WARNING("response size: %lu, statistics size: %lu, big than %ld; count: %d", 
+                response->ByteSizeLong(), stat_pb.ByteSizeLong(), FLAGS_statistics_heart_beat_bytesize, upd_cnt);
+            break;
+        }
+        upd_cnt++;
+        response->add_statistics()->Swap(&stat_pb);
+        DB_WARNING("update statistics, table_id:%ld, version:%ld", iter.first, iter.second);
     }
 }
 
@@ -1289,7 +1243,6 @@ int TableManager::get_statistics(const int64_t table_id, pb::Statistics& stat_pb
 
 void TableManager::check_add_table(std::set<int64_t>& report_table_ids, 
             std::vector<int64_t>& new_add_region_ids,
-            bool not_need_statistics, 
             pb::BaikalHeartBeatResponse* response) {
     BAIDU_SCOPED_LOCK(_table_mutex);
     for (auto& table_info_pair : _table_info_map) {
@@ -1300,18 +1253,6 @@ void TableManager::check_add_table(std::set<int64_t>& report_table_ids,
         if (!table_info_pair.second.is_global_index) {
             auto schema_info = response->add_schema_change_info();
             *schema_info = table_info_pair.second.schema_pb;
-            // 识别到baikaldb已经有这个标记，说明已更新到最新版本,统计信息不再通过该流程更新
-            if (!not_need_statistics) {
-                if (table_info_pair.second.statistics_version > 0) {
-                    pb::Statistics stat_pb;
-                    int ret = get_statistics(table_info_pair.first, stat_pb);
-                    if (ret < 0) {
-                        continue;
-                    }
-                    auto stat_info = response->add_statistics();
-                    stat_info->Swap(&stat_pb);
-                }
-            }
         }
         for (auto& partition_region : table_info_pair.second.partition_regions) {
             for (auto& region_id : partition_region.second) {
@@ -1413,11 +1354,20 @@ int TableManager::load_table_snapshot(const std::string& value) {
     if (table_pb.has_schema_conf()
         && table_pb.schema_conf().has_pk_prefix_balance()
         && table_pb.schema_conf().pk_prefix_balance() > 0) {
-        auto call_func = [](TablePkPrefixSchedulingInfo& infos, int64_t table_id, int32_t dimension) -> int {
+        auto call_func = [](TableSchedulingInfo& infos, int64_t table_id, int32_t dimension) -> int {
             infos.table_pk_prefix_dimension[table_id] = dimension;
             return 1;
         };
-        _table_pk_prefix_infos.Modify(call_func, table_pb.table_id(), table_pb.schema_conf().pk_prefix_balance());
+        _table_scheduling_infos.Modify(call_func, table_pb.table_id(), table_pb.schema_conf().pk_prefix_balance());
+    }
+    if (table_pb.has_schema_conf()
+        && table_pb.schema_conf().in_fast_import()
+        && !table_pb.deleted()) {
+        auto call_func = [](TableSchedulingInfo &infos, int64_t table_id, const std::string &resource_tag) -> int {
+            infos.table_in_fast_importer[table_id] = resource_tag;
+            return 1;
+        };
+        _table_scheduling_infos.Modify(call_func, table_pb.table_id(), table_pb.resource_tag());
     }
     return 0;
 }
@@ -3367,11 +3317,11 @@ void TableManager::unlink_binlog(const pb::MetaManagerRequest& request, const in
 
 void TableManager::on_leader_start() {
     _table_timer.start();
-    auto call_func = [](TablePkPrefixSchedulingInfo& infos) -> int {
+    auto call_func = [](TableSchedulingInfo& infos) -> int {
         infos.table_pk_prefix_timestamp = butil::gettimeofday_us();
         return 1;
     };
-    _table_pk_prefix_infos.Modify(call_func);
+    _table_scheduling_infos.Modify(call_func);
 }
 void TableManager::on_leader_stop() {
     _table_timer.stop();

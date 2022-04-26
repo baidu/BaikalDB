@@ -123,7 +123,7 @@ public:
                 continue;
             }
             if (response.errcode() == pb::NOT_LEADER) {
-                DB_WARNING("connect with meat server:%s fail. not leader, redirect to :%s, log_id:%lu",
+                DB_WARNING("connect with meta server:%s fail. not leader, redirect to :%s, log_id:%lu",
                             butil::endpoint2str(cntl.remote_side()).c_str(),
                             response.leader().c_str(), cntl.log_id());
                 butil::EndPoint leader_addr;

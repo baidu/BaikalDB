@@ -96,12 +96,15 @@ struct TableMem {
     }
 };
 
-struct TablePkPrefixSchedulingInfo {
+struct TableSchedulingInfo {
+    // 快速导入
+    std::unordered_map<int64_t, std::string> table_in_fast_importer; // table_id -> resource_tag
+    // pk prefix balance
     std::unordered_map<int64_t, std::vector<pb::PrimitiveType>> table_pk_types;
     std::unordered_map<int64_t, int32_t> table_pk_prefix_dimension;
     int64_t table_pk_prefix_timestamp;
 };
-using DoubleBufferedTablePkPrefixInfo = butil::DoublyBufferedData<TablePkPrefixSchedulingInfo>;
+using DoubleBufferedTableSchedulingInfo = butil::DoublyBufferedData<TableSchedulingInfo>;
 
 
 class TableTimer : public braft::RepeatedTimerTask {
@@ -171,8 +174,6 @@ public:
                 std::unordered_map<int64_t, int64_t>& store_table_id_version,
                 pb::StoreHeartBeatResponse* response);
 
-    void full_update_statistics(const pb::BaikalHeartBeatRequest* request,
-        pb::BaikalHeartBeatResponse* response);
     void check_update_statistics(const pb::BaikalOtherHeartBeatRequest* request,
         pb::BaikalOtherHeartBeatResponse* response);
     int get_statistics(const int64_t table_id, pb::Statistics& stat_pb);
@@ -183,7 +184,6 @@ public:
                     pb::StoreHeartBeatResponse* response);
     void check_add_table(std::set<int64_t>& report_table_ids,
             std::vector<int64_t>& new_add_region_ids,
-            bool not_need_statistics,
             pb::BaikalHeartBeatResponse* response);
 
     void check_add_region(const std::set<std::int64_t>& report_table_ids,
@@ -331,6 +331,7 @@ public:
         }
         _table_tombstone_map[table_id] = _table_info_map[table_id];
         _table_tombstone_map[table_id].schema_pb.set_deleted(true);
+        // tombstone靠这个time来gc
         _table_tombstone_map[table_id].schema_pb.set_timestamp(time(NULL));
         // region相关信息清理，只保留表元信息
         _table_tombstone_map[table_id].clear_regions();
@@ -466,6 +467,25 @@ public:
         }
     }
 
+    //if resource_tag is "" return all tables
+    void get_table_by_learner_resource_tag(const std::string& resource_tag, std::map<int64_t, std::string>& table_id_name_map) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        for (auto& pair : _table_info_map) {
+            if (resource_tag == "") {
+                std::string name = pair.second.schema_pb.database() + "." + pair.second.schema_pb.table_name();
+                table_id_name_map.insert(std::make_pair(pair.first, name));
+            } else {
+                for (auto& t : pair.second.schema_pb.learner_resource_tags()) {
+                    if (t == resource_tag) {
+                        std::string name = pair.second.schema_pb.database() + "." + pair.second.schema_pb.table_name();
+                        table_id_name_map.insert(std::make_pair(pair.first, name));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     void get_table_info(const std::set<int64_t> table_ids, 
             std::unordered_map<int64_t, int64_t>& table_replica_nums,
             std::unordered_map<int64_t, std::string>& table_resource_tags,
@@ -519,8 +539,61 @@ public:
         }
         return false;
     }
+    void get_clusters_in_fast_importer(std::set<std::string>& clusters_in_fast_importer) {
+        DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+        if (_table_scheduling_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        for (auto& pair : info->table_in_fast_importer) {
+            clusters_in_fast_importer.insert(pair.second);
+        }
+    }
+    bool is_cluster_in_fast_importer(const std::string &resource_tag) {
+        DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+        if (_table_scheduling_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        for (auto& pair : info->table_in_fast_importer) {
+            if (pair.second == resource_tag) {
+                return true;
+            }
+        }
+        return false;
+    }
+    bool update_tables_in_fast_importer(const pb::MetaManagerRequest& request, bool in_fast_importer) {
+        auto call_func = [request, in_fast_importer](TableSchedulingInfo& infos) -> int {
+            int64_t  table_id = request.table_info().table_id();
+            std::string resource_tag = request.table_info().resource_tag();
+            int tables_cnt = 0;
+            for (auto& pair : infos.table_in_fast_importer) {
+                if (pair.second == resource_tag) {
+                    tables_cnt++;
+                }
+            }
+            if (in_fast_importer) {
+                if (infos.table_in_fast_importer.find(table_id) == infos.table_in_fast_importer.end()) {
+                    if (tables_cnt == 0) {
+                        ClusterManager::get_instance()->update_instance_param(request, nullptr);
+                    }
+                    infos.table_in_fast_importer[table_id] = resource_tag;
+                }
+            } else {
+                if (infos.table_in_fast_importer.find(table_id) != infos.table_in_fast_importer.end()) {
+                    if (tables_cnt == 1) {
+                        ClusterManager::get_instance()->update_instance_param(request, nullptr);
+                    }
+                    infos.table_in_fast_importer.erase(table_id);
+                }
+            }
+            return 1;
+        };
+        _table_scheduling_infos.Modify(call_func);
+        return true;
+    }
     bool update_pk_prefix_balance_timestamp(int64_t table_id, int32_t pk_prefix_dimension) {
-        auto call_func = [table_id, pk_prefix_dimension](TablePkPrefixSchedulingInfo& infos) -> int {
+        auto call_func = [table_id, pk_prefix_dimension](TableSchedulingInfo& infos) -> int {
             if (pk_prefix_dimension == 0) {
                 infos.table_pk_prefix_dimension.erase(table_id);
             } else if (infos.table_pk_prefix_dimension[table_id] != pk_prefix_dimension) {
@@ -530,13 +603,13 @@ public:
             }
             return 1;
         };
-        _table_pk_prefix_infos.Modify(call_func);
+        _table_scheduling_infos.Modify(call_func);
         return true;
     }
     bool get_pk_prefix_key(int64_t table_id, int32_t pk_prefix_dimension, const std::string& start_key, std::string& key) {
         {
-            DoubleBufferedTablePkPrefixInfo::ScopedPtr info;
-            if (_table_pk_prefix_infos.Read(&info) != 0) {
+            DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+            if (_table_scheduling_infos.Read(&info) != 0) {
                 DB_WARNING("read double_buffer_table error.");
                 return false;
             }
@@ -580,24 +653,24 @@ public:
         }
         TableKey tableKey(start_key, true);
         key = std::to_string(table_id) + "_" + tableKey.decode_start_key_string(pk_types, pk_prefix_dimension);
-        auto call_func = [table_id, pk_types](TablePkPrefixSchedulingInfo& infos) -> int {
+        auto call_func = [table_id, pk_types](TableSchedulingInfo& infos) -> int {
             infos.table_pk_types[table_id] = pk_types;
             return 1;
         };
-        _table_pk_prefix_infos.Modify(call_func);
+        _table_scheduling_infos.Modify(call_func);
         return true;
     }
     void get_pk_prefix_dimensions(std::unordered_map<int64_t, int32_t>& pk_prefix_dimension) {
-        DoubleBufferedTablePkPrefixInfo::ScopedPtr info;
-        if (_table_pk_prefix_infos.Read(&info) != 0) {
+        DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+        if (_table_scheduling_infos.Read(&info) != 0) {
             DB_WARNING("read double_buffer_table error.");
             return;
         }
         pk_prefix_dimension = info->table_pk_prefix_dimension;
     }
     bool can_do_pk_prefix_balance() {
-        DoubleBufferedTablePkPrefixInfo::ScopedPtr info;
-        if (_table_pk_prefix_infos.Read(&info) != 0) {
+        DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+        if (_table_scheduling_infos.Read(&info) != 0) {
             DB_WARNING("read double_buffer_table error.");
             return false;
         }
@@ -688,15 +761,14 @@ public:
         _table_id_map.clear();
         _table_info_map.clear();
         _incremental_schemainfo.clear();
-        _incremental_statistics_info.clear();
         _virtual_index_sql_map.clear();
         _just_add_virtual_index_info.clear();
-        auto call_func = [](TablePkPrefixSchedulingInfo& infos) -> int {
+        auto call_func = [](TableSchedulingInfo& infos) -> int {
             infos.table_pk_prefix_dimension.clear();
             infos.table_pk_prefix_timestamp = 0;
             return 1;
         };
-        _table_pk_prefix_infos.Modify(call_func);
+        _table_scheduling_infos.Modify(call_func);
     }
 
     int load_ddl_snapshot(const std::string& value);
@@ -866,13 +938,6 @@ private:
         return table_key;
     }
 
-    std::string construct_ddl_key(int64_t table_id) {
-        std::string ddl_key;
-        ddl_key = MetaServer::SCHEMA_IDENTIFY + MetaServer::DDLWORK_IDENTIFY;
-        ddl_key.append((char*)&table_id, sizeof(int64_t));
-        return ddl_key;
-    }
-
     std::string construct_max_table_id_key() {
         std::string max_table_id_key = MetaServer::SCHEMA_IDENTIFY
                             + MetaServer::MAX_ID_SCHEMA_IDENTIFY
@@ -888,7 +953,6 @@ private:
     int init_global_index_region(TableMem& table_mem, braft::Closure* done, pb::IndexInfo& index_info);
 
     void put_incremental_schemainfo(const int64_t apply_index, std::vector<pb::SchemaInfo>& schema_infos);
-    void put_incremental_statistics_info(const int64_t apply_index, std::vector<pb::Statistics>& st_infos);
 
     bool partition_check_region_when_update(int64_t table_id, 
         std::string min_start_key, 
@@ -911,10 +975,9 @@ private:
     //用一个set<std::string>保存刚被删除的虚拟索引记录
     std::set<int64_t>                          _just_add_virtual_index_info;
     IncrementalUpdate<std::vector<pb::SchemaInfo>> _incremental_schemainfo;
-    IncrementalUpdate<std::vector<pb::Statistics>> _incremental_statistics_info;
     TableTimer _table_timer;
 
-    DoubleBufferedTablePkPrefixInfo             _table_pk_prefix_infos;
+    DoubleBufferedTableSchedulingInfo             _table_scheduling_infos;
 }; //class
 
 }//namespace

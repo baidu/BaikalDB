@@ -21,11 +21,6 @@
 #include "meta_util.h"
 #include "table_manager.h"
 #include "meta_rocksdb.h"
-#ifdef BAIDU_INTERNAL
-#include "baidu/rpc/reloadable_flags.h"
-#else
-#include "brpc/reloadable_flags.h"
-#endif
 
 namespace baikaldb {
 DECLARE_int32(concurrency_num);
@@ -34,11 +29,7 @@ DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(region_faulty_interval_times);
 DEFINE_int64(modify_learner_peer_interval_us, 100 * 1000 * 1000LL, "modify learner peer interval");
 DEFINE_int32(balance_add_peer_num, 10, "add peer num each time, default(10)");
-#ifdef BAIDU_INTERNAL
-BAIDU_RPC_VALIDATE_GFLAG(balance_add_peer_num, brpc::PositiveInteger);
-#else
 BRPC_VALIDATE_GFLAG(balance_add_peer_num, brpc::PositiveInteger);
-#endif
 
 //增加或者更新region信息
 //如果是增加，则需要更新表信息, 只有leader的上报会调用该接口
@@ -373,12 +364,12 @@ void RegionManager::add_peer_for_store(const std::string& instance,
     std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
     int64_t instance_count = ClusterManager::get_instance()->get_instance_count(resource_tag, logical_room);
     int64_t leader_count = get_leader_count(instance);
-    //实例上已经没有reigon了，直接删除该实例即可
     std::vector<int64_t> learner_ids;
     get_learner_ids(instance, learner_ids);
     if (learner_ids.size() > 0) {
-        remove_all_learner_for_store(instance, learner_ids);
+        add_all_learner_for_store(instance, learner_ids);
     }
+    //实例上已经没有reigon了，直接删除该实例即可
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
     if (region_ids.size() == 0 && learner_ids.size() == 0) {
@@ -461,20 +452,24 @@ void RegionManager::send_add_learner_request(const std::vector<std::pair<std::st
     }
 }
 
-void RegionManager::remove_all_learner_for_store(const std::string& instance, const std::vector<int64_t>& learner_ids) {
-    DB_NOTICE("delete all learner for store instance %s", instance.c_str());
+void RegionManager::add_all_learner_for_store(const std::string& instance, const std::vector<int64_t>& learner_ids) {
+    DB_WARNING("add all learner for store instance %s", instance.c_str());
     std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
     std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
     std::vector<std::pair<std::string, pb::InitRegion>> add_learner_requests;
     for (auto& region_id : learner_ids) {
-        DB_NOTICE("process instance %s region_id %ld", instance.c_str(), region_id);
+        DB_WARNING("process instance %s region_id %ld", instance.c_str(), region_id);
         auto ptr_region = get_region_info(region_id);
-        if (ptr_region == nullptr || can_modify_learner(region_id)) {
+        if (ptr_region == nullptr) {
             DB_WARNING("region %ld is null.", region_id);
             continue;
         }
         const static int64_t learner_replica_num = 1;
-        if (ptr_region->learners_size() <= learner_replica_num) {
+        std::vector<std::string> current_resource_learners;
+        current_resource_learners.reserve(3);
+        int64_t resource_learner_count = ClusterManager::get_instance()->get_resource_tag_count(
+                ptr_region->learners(), resource_tag, current_resource_learners);
+        if (resource_learner_count <= learner_replica_num) {
             add_learner_peer(region_id, add_learner_requests, ptr_region.get(), resource_tag);
         }
     }
@@ -493,7 +488,7 @@ void RegionManager::delete_all_region_for_store(const std::string& instance,
     std::vector<int64_t> learner_ids;
     get_learner_ids(instance, learner_ids);
     if (learner_ids.size() > 0) {
-        remove_all_learner_for_store(instance, learner_ids);
+        add_all_learner_for_store(instance, learner_ids);
     }
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
@@ -1669,16 +1664,15 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         bool should_update = true;
         for (auto& learner : master_region_info->learners()) {
             if (learner == addr) {
+                should_update = false;
                 if (learner_region.state() == pb::STATUS_ERROR) {
                     std::vector<std::string> candicate_remove_peers;
                     candicate_remove_peers.reserve(1);
                     candicate_remove_peers.emplace_back(addr);
-                    if (master_region_info->learners_size() > 0 && can_modify_learner(region_id)) {
-                        DB_NOTICE("region_id %ld remove learner, STATUS_ERROR", region_id);
+                    if (master_region_info->learners_size() > 0) {
+                        DB_WARNING("region_id %ld remove learner, STATUS_ERROR", region_id);
                         remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), candicate_remove_peers);
                     }
-                } else {
-                    should_update = false;
                 }
                 break;
             }
@@ -1753,23 +1747,22 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
                 current_resource_learners.reserve(3);
                 int64_t resource_learner_count = ClusterManager::get_instance()->get_resource_tag_count(
                     master_region_info->learners(), learner_resource, current_resource_learners);
-                if (can_modify_learner(region_id)) {
-                    if (resource_learner_count < learner_replica_num) {
-                        add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
-                    } else if (resource_learner_count > learner_replica_num) {
-                        DB_DEBUG("region_id %ld remove learner", region_id);
-                        remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), current_resource_learners);
-                    } else {
-                        for (auto current_resource_learner : current_resource_learners) {
-                            bool is_health = get_learner_health_status(current_resource_learner, region_id);
-                            if (!is_health) {
-                                auto instance_status = ClusterManager::get_instance()->get_instance_status(current_resource_learner);
-                                // 实例故障，等待实例迁移。
-                                if (instance_status == pb::FAULTY || instance_status == pb::DEAD || instance_status == pb::MIGRATE) {
-                                    continue;
-                                } else {
-                                    add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
-                                }
+
+                if (resource_learner_count < learner_replica_num) {
+                    add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
+                } else if (resource_learner_count > learner_replica_num) {
+                    DB_WARNING("region_id %ld remove learner", region_id);
+                    remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), current_resource_learners);
+                } else {
+                    for (auto current_resource_learner : current_resource_learners) {
+                        bool is_health = get_learner_health_status(current_resource_learner, region_id);
+                        if (!is_health) {
+                            auto instance_status = ClusterManager::get_instance()->get_instance_status(current_resource_learner);
+                            // 实例故障，等待实例迁移。
+                            if (instance_status == pb::FAULTY || instance_status == pb::DEAD || instance_status == pb::MIGRATE) {
+                                continue;
+                            } else {
+                                add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
                             }
                         }
                     }
@@ -1783,8 +1776,8 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
                 candicate_remove_peers.emplace_back(learner_peer);
             }
     
-            if (master_region_info->learners_size() > 0 && can_modify_learner(region_id)) {
-                DB_NOTICE("region_id %ld remove learner", region_id);
+            if (master_region_info->learners_size() > 0) {
+                DB_WARNING("region_id %ld remove learner", region_id);
                 remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), candicate_remove_peers);
             }
         }
@@ -1794,51 +1787,51 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
     auto add_learn_fun = 
         [this, add_learner_requests]() {
             for (auto request : add_learner_requests) {
-                    StoreInteract store_interact(request.first);
-                    pb::StoreRes response; 
-                    auto ret = store_interact.send_request("init_region", request.second, response);
-                    DB_WARNING("send add learn request:%s, response:%s, ret: %d, instance %s",
-                                request.second.ShortDebugString().c_str(),
-                                response.ShortDebugString().c_str(), ret, request.first.c_str());
-                    if (ret != 0) {
-                        DB_WARNING("add learner node error.");
-                    }
+                StoreInteract store_interact(request.first);
+                pb::StoreRes response; 
+                auto ret = store_interact.send_request("init_region", request.second, response);
+                DB_WARNING("send add learn request:%s, response:%s, ret: %d, instance %s",
+                            request.second.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str(), ret, request.first.c_str());
+                if (ret != 0) {
+                    DB_WARNING("add learner node error.");
                 }
+            }
         };
     auto remove_learn_fun = 
         [this, remove_learner_requests]() {
             for (auto& remove_req : remove_learner_requests) {
-                    StoreInteract store_interact(remove_req.first);
-                    pb::StoreRes response; 
-                    auto ret = store_interact.send_request("remove_region", remove_req.second, response);
-                    DB_WARNING("send remove learn request:%s, response:%s, ret: %d",
-                                remove_req.second.ShortDebugString().c_str(),
-                                response.ShortDebugString().c_str(), ret);
-                    if (ret != 0) {
-                        DB_WARNING("remove learner node error.");
-                    }
-
-                    pb::MetaManagerRequest request;
-                    request.set_op_type(pb::OP_UPDATE_REGION);
-                    auto region_iter = request.add_region_infos();
-                    int64_t region_id = remove_req.second.region_id();
-                    auto ptr_region = get_region_info(region_id);
-                    if (ptr_region == nullptr) {
-                        DB_WARNING("master region %ld ptr is nullptr.", region_id);
-                        continue;
-                    }
-                    *region_iter = *ptr_region;
-                    region_iter->clear_learners();
-                    for (auto& learn : ptr_region->learners()) {
-                        if (learn != remove_req.first) {
-                            region_iter->add_learners(learn);
-                        }
-                    }
-                    SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);               
-                    _region_learner_peer_state_map.update(region_id, [&remove_req](RegionLearnerState learner_state){
-                        learner_state.learner_state_map.erase(remove_req.first);
-                    });
+                StoreInteract store_interact(remove_req.first);
+                pb::StoreRes response; 
+                auto ret = store_interact.send_request("remove_region", remove_req.second, response);
+                DB_WARNING("send remove learn request:%s, response:%s, ret: %d",
+                            remove_req.second.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str(), ret);
+                if (ret != 0) {
+                    DB_WARNING("remove learner node error.");
                 }
+
+                pb::MetaManagerRequest request;
+                request.set_op_type(pb::OP_UPDATE_REGION);
+                auto region_iter = request.add_region_infos();
+                int64_t region_id = remove_req.second.region_id();
+                auto ptr_region = get_region_info(region_id);
+                if (ptr_region == nullptr) {
+                    DB_WARNING("master region %ld ptr is nullptr.", region_id);
+                    continue;
+                }
+                *region_iter = *ptr_region;
+                region_iter->clear_learners();
+                for (auto& learn : ptr_region->learners()) {
+                    if (learn != remove_req.first) {
+                        region_iter->add_learners(learn);
+                    }
+                }
+                SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);               
+                _region_learner_peer_state_map.update(region_id, [&remove_req](RegionLearnerState learner_state){
+                    learner_state.learner_state_map.erase(remove_req.first);
+                });
+            }
         };
     learn_bth.run(add_learn_fun);
     learn_bth.run(remove_learn_fun);
@@ -1952,9 +1945,12 @@ void RegionManager::check_whether_update_region(int64_t region_id,
 void RegionManager::remove_learner_peer(int64_t region_id,
         std::vector<std::pair<std::string, pb::RemoveRegion>>& remove_learner_requests,
         pb::RegionInfo* master_region_info,
-        const std::vector<std::string>& candicate_remove_learners
-    ) {
-    DB_NOTICE("process remove_learner_peer region %ld", region_id);
+        const std::vector<std::string>& candicate_remove_learners) {
+    if (!can_modify_learner(region_id)) {
+        DB_WARNING("region_id: %ld can't modify learner", region_id);
+        return;
+    }
+    DB_WARNING("process remove_learner_peer region %ld", region_id);
     std::string remove_learner;        
     int32_t max_peer_count = 0;
     int64_t table_id = master_region_info->table_id();
@@ -2001,7 +1997,7 @@ void RegionManager::remove_learner_peer(int64_t region_id,
         remove_region_request.set_need_delay_drop(false);
         remove_region_request.set_force(true);
         remove_region_request.set_region_id(region_id);
-        DB_NOTICE("remove learner peer %s instance %s", remove_region_request.ShortDebugString().c_str(), remove_learner.c_str());
+        DB_WARNING("remove learner peer %s instance %s", remove_region_request.ShortDebugString().c_str(), remove_learner.c_str());
         remove_learner_requests.emplace_back(remove_learner, remove_region_request);
 
     }
@@ -2010,8 +2006,11 @@ void RegionManager::remove_learner_peer(int64_t region_id,
 void RegionManager::add_learner_peer(int64_t region_id,
         std::vector<std::pair<std::string, pb::InitRegion>>& add_learner_requests,
         pb::RegionInfo* master_region_info,
-        const std::string& learner_resource_tag
-    ) {
+        const std::string& learner_resource_tag) {
+    if (!can_modify_learner(region_id)) {
+        DB_WARNING("region_id: %ld can't modify learner", region_id);
+        return;
+    }
     std::string new_instance;
     auto ret = ClusterManager::get_instance()->select_instance_rolling(
             learner_resource_tag,
@@ -2568,8 +2567,7 @@ void RegionManager::region_healthy_check_function() {
     }
     whether_add_instance(uniq_instance);
     //set learner peer
-    std::vector<std::pair<std::string, pb::InitRegion>> add_learner_requests;
-    _region_learner_peer_state_map.traverse_with_key_value([this, &add_learner_requests] (
+    _region_learner_peer_state_map.traverse_with_key_value([this] (
         int64_t region_id, RegionLearnerState& learner_map) {
         for (auto& learner_state : learner_map.learner_state_map) {
             if (butil::gettimeofday_us() - learner_state.second.timestamp() >
@@ -2650,12 +2648,31 @@ void RegionManager::erase_region_info(const std::vector<int64_t>& drop_region_id
     }
 }
 
+bool RegionManager::check_table_in_resource_tags(int64_t table_id,
+                const std::set<std::string>& resource_tags) {
+    std::string resource_tag;
+    int ret = TableManager::get_instance()->get_resource_tag(table_id, resource_tag);
+    if (ret < 0) {
+        DB_WARNING("tag not exist table_id:%ld", table_id);
+        return false;
+    }
+    if (resource_tags.size() > 0 && (resource_tags.count(resource_tag) == 0)) {
+        // 不在需求的resource_tag内
+        return false;
+    }
+    return true;
+}
+
 void RegionManager::remove_error_peer(const int64_t region_id,
+                                const std::set<std::string>& resource_tags,
                                 std::set<std::string> peers,
                                 std::vector<pb::PeerStateInfo>& recover_region_way) {
     SmartRegionInfo region_ptr = _region_info_map.get(region_id);
     if (region_ptr == nullptr) {
         DB_WARNING("region_id:%ld not found when remove_error_peer", region_id);
+        return;
+    }
+    if (!check_table_in_resource_tags(region_ptr->table_id(), resource_tags)) {
         return;
     }
     std::string leader;
@@ -2716,11 +2733,15 @@ void RegionManager::remove_error_peer(const int64_t region_id,
 }
 
 void RegionManager::remove_illegal_peer(const int64_t region_id,
+                                const std::set<std::string>& resource_tags,
                                 std::set<std::string> peers,
                                 std::vector<pb::PeerStateInfo>& recover_region_way) {
     SmartRegionInfo region_ptr = _region_info_map.get(region_id);
     if (region_ptr == nullptr) {
         DB_WARNING("region_id:%ld not found when remove_illegal_peer", region_id);
+        return;
+    }
+    if (!check_table_in_resource_tags(region_ptr->table_id(), resource_tags)) {
         return;
     }
     for (auto& peer : peers) {
@@ -3084,13 +3105,13 @@ void RegionManager::recovery_all_region(const pb::MetaManagerRequest& request,
         int64_t region_id = iter->first;
         std::set<std::string> peers = iter->second;
         if (recover_opt == pb::DO_REMOVE_PEER) {
-            auto remove_func = [this, region_id, peers, &recover_region_way]() {
-                remove_error_peer(region_id, peers, recover_region_way);
+            auto remove_func = [this, region_id, resource_tags, peers, &recover_region_way]() {
+                remove_error_peer(region_id, resource_tags, peers, recover_region_way);
             };
             recovery_bth.run(remove_func);
         } else if (recover_opt == pb::DO_REMOVE_ILLEGAL_PEER) {
-            auto remove_func = [this, region_id, peers, &recover_region_way]() {
-                remove_illegal_peer(region_id, peers, recover_region_way);
+            auto remove_func = [this, region_id, resource_tags, peers, &recover_region_way]() {
+                remove_illegal_peer(region_id, resource_tags, peers, recover_region_way);
             };
             recovery_bth.run(remove_func);
         } else {

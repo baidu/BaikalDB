@@ -38,7 +38,6 @@ DECLARE_int32(store_port);
 DECLARE_bool(use_fulltext_wordweight_segment);
 DECLARE_bool(use_fulltext_wordseg_wordrank_segment);
 DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
-DEFINE_int64(store_sql_memory_bytes_limit, 17179869184, "minimum memory use size , default: 16G");
 } // namespace baikaldb
 DEFINE_bool(stop_server_before_core, true, "stop_server_before_core");
 
@@ -182,7 +181,7 @@ int main(int argc, char **argv) {
         return -1;
     }
     baikaldb::MemoryGCHandler::get_instance()->init();
-    baikaldb::MemTrackerPool::get_instance()->init(baikaldb::FLAGS_store_sql_memory_bytes_limit);
+    baikaldb::MemTrackerPool::get_instance()->init();
     //注册处理Store逻辑的service服务
     baikaldb::Store* store = baikaldb::Store::get_instance();
     std::vector<std::int64_t> init_region_ids;

@@ -21,12 +21,13 @@
 #include "row_expr.h"
 
 namespace baikaldb {
+bvar::Adder<int64_t> ExprNode::_s_non_boolean_sql_cnts{"non_boolean_sql_cnts"};
 // only pre_calc children nodes
 void ExprNode::const_pre_calc() {
     if (_children.size() == 0 || _node_type == pb::AGG_EXPR) {
         return;
     }
-    //标量函数RowExpr会走到这
+    //标量函数和RowExpr会走到这
     _is_constant = true;
     for (auto& c : _children) {
         c->const_pre_calc();
@@ -202,11 +203,6 @@ void ExprNode::transfer_pb(pb::ExprNode* pb_node) {
 }
 
 void ExprNode::create_pb_expr(pb::Expr* expr, ExprNode* root) {
-    if (root->_index_ids.size() > 0) {
-        for (auto index : root->_index_ids) {
-            expr->add_index_ids(index);
-        }
-    }
     pb::ExprNode* pb_node = expr->add_nodes();
     root->transfer_pb(pb_node);
     for (size_t i = 0; i < root->children_size(); i++) {
@@ -240,11 +236,6 @@ int ExprNode::create_tree(const pb::Expr& expr, int* idx, ExprNode* parent, Expr
     if (ret < 0) {
         DB_FATAL("create_expr_node fail");
         return ret;
-    }
-    if (*idx == 0 && expr.index_ids_size() > 0) {
-        for (auto index : expr.index_ids()) {
-             expr_node->add_filter_index(index);
-        }
     }
     if (parent != nullptr) {
         parent->add_child(expr_node);
@@ -355,6 +346,12 @@ void ExprNode::print_expr_info() {
     }
 }
 
+bool ExprNode::is_logical_and_or_not() {
+    if (_node_type == pb::NOT_PREDICATE || _node_type == pb::AND_PREDICATE || _node_type == pb::OR_PREDICATE) {
+        return true;
+    }
+    return false;
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

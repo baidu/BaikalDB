@@ -42,7 +42,6 @@
 namespace baikaldb {
 int ExecNode::init(const pb::PlanNode& node) {
     _pb_node = node;
-    //_id = node.node_id();
     _limit = node.limit();
     _num_rows_returned = 0;
     _node_type = node.node_type();

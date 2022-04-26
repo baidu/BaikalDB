@@ -150,11 +150,22 @@ public:
     int get_update_primary(int64_t region, 
             IndexInfo&      pk_index, 
             const TableKey& key,
-            GetMode         mode, 
             const SmartRecord& val,
             std::map<int32_t, FieldInfo*>& fields,
+            GetMode         mode,
             bool            check_region,
             int64_t&        ttl_ts);
+    
+    int get_update_primary(int64_t region, 
+            IndexInfo&      pk_index, 
+            const TableKey& key,
+            const SmartRecord& val,
+            std::map<int32_t, FieldInfo*>& fields,
+            GetMode         mode,
+            bool            check_region) {
+                int64_t  ttl_ts = 0;
+                return get_update_primary(region, pk_index, key, val, fields, mode, check_region, ttl_ts);
+            }
 
     int get_update_primary_columns(
             const TableKey& primary_key,
@@ -168,18 +179,19 @@ public:
             int64_t         region,
             IndexInfo&      pk_index,
             IndexInfo&      index,
-            SmartRecord     key, 
+            const SmartRecord& key, 
+            GetMode         mode,
+            bool            check_region);
+    
+    int get_update_secondary(
+            int64_t         region,
+            IndexInfo&      pk_index,
+            IndexInfo&      index,
+            const TableKey& key,
+            const SmartRecord&  val, 
             GetMode         mode,
             bool            check_region);
 
-    int get_update_secondary(
-            int64_t           region, 
-            IndexInfo&        pk_index,
-            IndexInfo&        index,
-            const SmartRecord key, 
-            GetMode           mode, 
-            MutTableKey&      pk_val,
-            bool              check_region);
     int get_for_update(const std::string& key, std::string* value);
     rocksdb::Status put_kv_without_lock(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
     int put_kv(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
@@ -249,6 +261,10 @@ public:
 
     int64_t prepare_time_us() {
         return _prepare_time_us;
+    }
+
+    bool txn_set_process_cas(bool expected, bool desire) {
+        return _in_process.compare_exchange_strong(expected, desire);
     }
 
     void select_update_txn_status(int seq_id) {
@@ -487,6 +503,16 @@ private:
             bool            parse_key,
             bool            check_region,
             int64_t&        ttl_ts);
+    
+    int get_update_secondary(
+            int64_t           region, 
+            IndexInfo&        pk_index,
+            IndexInfo&        index,
+            const TableKey& key,
+            const SmartRecord& val, 
+            GetMode           mode, 
+            MutTableKey&      pk_val,
+            bool              check_region);
     
     void add_kvop_put(std::string& key, std::string& value, int64_t ttl_timestamp_us, bool is_primary_key) {
         //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,

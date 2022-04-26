@@ -205,9 +205,13 @@ TEST(test_cond, wait) {
         Bthread bth;
         // increase一定要在主线程里
         cond.increase();
-        bth.run([&cond] () {
+        bth.run([&cond, i] () {
+            static thread_local int a;
+            int* b = &a;
+            *b = i;
+            DB_NOTICE("start cond test %d, %d, %p", i, *b, b);
             bthread_usleep(1000 * 1000);
-            DB_NOTICE("cond test");
+            DB_NOTICE("end cond test %d, %d, %p %p", i, *b, b, &a);
             cond.decrease_signal();
         });
     }

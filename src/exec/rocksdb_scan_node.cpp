@@ -25,8 +25,8 @@
 
 namespace baikaldb {
 
-DEFINE_int64(store_row_number_to_check_memory, 1024, "do memory limit when row number more than #, default: 1024");
 DEFINE_bool(reverse_seek_first_level, false, "reverse index seek first level, default(false)");
+DEFINE_int32(in_predicate_check_threshold, 4096, "in predicate threshold to check memory, default(4096)");
 
 int RocksdbScanNode::choose_index(RuntimeState* state) {
     // 做完logical plan还没有索引
@@ -35,8 +35,9 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         DB_FATAL_STATE(state, "no index");
         return -1;
     }
-
-    const pb::PossibleIndex& pos_index = scan_pb.indexes(0);
+    
+    pb::PossibleIndex pos_index;
+    pos_index.ParseFromString(scan_pb.indexes(0));
     if (_pb_node.derive_node().scan_node().has_fulltext_index()) {
         _new_fulltext_tree = true;
     }
@@ -60,7 +61,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             DB_WARNING_STATE(state, "ExprNode::create_tree fail, ret:%d", ret);
             return ret;
         }
-        _index_conjuncts.push_back(index_conjunct);
+        _index_conjuncts.emplace_back(index_conjunct);
     }
     if (pos_index.has_sort_index()) {
         _sort_use_index = true;
@@ -102,7 +103,9 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
                 return ret;
             }
         }
-        for (auto& pos_index : scan_pb.indexes()) {
+        for (auto& raw_index : scan_pb.indexes()) {
+            pb::PossibleIndex pos_index;
+            pos_index.ParseFromString(raw_index);
             auto index_id = pos_index.index_id();
             auto index_info = _factory->get_index_info_ptr(index_id);
             if (index_info == nullptr|| index_info->id == -1) {
@@ -118,17 +121,15 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
                     DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", index_id);
                     return ret;
                 }
-                _reverse_infos.push_back(*index_info);
-                _query_words.push_back(word);
-                _match_modes.push_back(range.match_mode());
+                _reverse_infos.emplace_back(*index_info);
+                _query_words.emplace_back(word);
+                _match_modes.emplace_back(range.match_mode());
             }
-            _index_ids.push_back(index_id);
             _bool_and = pos_index.bool_and();
             //DB_WARNING_STATE(state, "use multi %d", _reverse_infos.size());
         }
         return 0;
     }
-    _index_ids.push_back(_index_id);
     if (pos_index.ranges_size() == 0) {
         return 0;
     }
@@ -137,20 +138,45 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
 
     bool is_eq = true;
     bool like_prefix = true;
+    int64_t ranges_used_size = 0;
+    bool check_memory = false;
+    if (pos_index.ranges_size() > FLAGS_in_predicate_check_threshold) {
+        check_memory = true;
+    }
     for (auto& range : pos_index.ranges()) {
-        // 空指针容易出错
-        SmartRecord left_record = _factory->new_record(_table_id);
-        SmartRecord right_record = _factory->new_record(_table_id);
-        left_record->decode(range.left_pb_record());
-        right_record->decode(range.right_pb_record());
+        if (range.has_left_key()) {
+            _use_encoded_key = true;
+            if (range.left_key() != range.right_key()) {
+                is_eq = false;
+            }
+            _left_keys.emplace_back(range.left_key(), range.left_full());
+            _right_keys.emplace_back(range.right_key(), range.right_full());
+            if (check_memory) {
+                ranges_used_size += range.left_key().size() * 2;
+                ranges_used_size += range.right_key().size() * 2;
+                ranges_used_size += 100; // 估计值
+            }
+        } else {
+            SmartRecord left_record = _factory->new_record(_table_id);
+            SmartRecord right_record = _factory->new_record(_table_id);
+            left_record->decode(range.left_pb_record());
+            right_record->decode(range.right_pb_record());
+            if (range.left_pb_record() != range.right_pb_record()) {
+                is_eq = false;
+            }
+            _left_records.emplace_back(left_record);
+            _right_records.emplace_back(right_record);
+            if (check_memory) {
+                ranges_used_size += left_record->used_size();
+                ranges_used_size += right_record->used_size();
+                ranges_used_size += 100; // 估计值
+            }
+        }
         int left_field_cnt = range.left_field_cnt();
         int right_field_cnt = range.right_field_cnt();
         bool left_open = range.left_open();
         bool right_open = range.right_open();
         like_prefix = range.like_prefix();
-        if (range.left_pb_record() != range.right_pb_record()) {
-            is_eq = false;
-        }
         if (left_field_cnt != right_field_cnt) {
             is_eq = false;
         }
@@ -158,13 +184,14 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         if (left_open || right_open) {
             is_eq = false;
         }
-        _left_records.push_back(left_record);
-        _right_records.push_back(right_record);
-        _left_field_cnts.push_back(left_field_cnt);
-        _right_field_cnts.push_back(right_field_cnt);
-        _left_opens.push_back(left_open);
-        _right_opens.push_back(right_open);
-        _like_prefixs.push_back(like_prefix);
+        _left_field_cnts.emplace_back(left_field_cnt);
+        _right_field_cnts.emplace_back(right_field_cnt);
+        _left_opens.emplace_back(left_open);
+        _right_opens.emplace_back(right_open);
+        _like_prefixs.emplace_back(like_prefix);
+    }
+    if (check_memory && 0 != state->memory_limit_exceeded(std::numeric_limits<int>::max(), ranges_used_size)) {
+        return -1;
     }
     if (_index_info->type == pb::I_PRIMARY || _index_info->type == pb::I_UNIQ) {
         if (_left_field_cnts[_idx] == (int)_index_info->fields.size() && is_eq && !like_prefix) {
@@ -242,10 +269,6 @@ bool RocksdbScanNode::need_pushdown(ExprNode* expr) {
     if (_use_get || (index_type == pb::I_PRIMARY && !is_cstore_table_seek)) {
         return false;
     }
-    // 该条件用于指定索引，在filternode里处理了
-    if (expr->contained_by_index(_index_ids)) {
-        return false;
-    }
     if (index_type == pb::I_KEY || index_type == pb::I_UNIQ) {
         // 普通索引只要全包含slot id就可以下推
         std::unordered_set<int32_t> slot_ids;
@@ -303,11 +326,10 @@ int RocksdbScanNode::index_condition_pushdown() {
     auto iter = parent_conditions->begin();
     while (iter != parent_conditions->end()) {
         if (need_pushdown(*iter)) {
-            _index_conjuncts.push_back(*iter);
+            _index_conjuncts.emplace_back(*iter);
             iter = parent_conditions->erase(iter);
-            //DB_WARNING("expr is push_down")
         } else {
-            iter++;
+            ++iter;
         }
     }
     return 0;
@@ -387,7 +409,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
         //TODO 为不影响原流程暂时保留，后续删除。
         for (auto& info : _reverse_infos) {
             if (reverse_index_map.count(info.id) == 1) {
-                _reverse_indexes.push_back(reverse_index_map[info.id]);
+                _reverse_indexes.emplace_back(reverse_index_map[info.id]);
             } else {
                 DB_WARNING_STATE(state, "index:%ld is not FULLTEXT", info.id);
                 return -1;
@@ -413,12 +435,6 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 return -1;
             }
         } else {
-            //DB_WARNING_STATE(state, "_m_index search");
-            // reverse has in, need not or boolean
-            //if (_reverse_indexes.size() > _index_ids.size()) {
-            //    or_bool = false;
-            //}
-            //DB_NOTICE("or_bool:%d", or_bool);
             // 为了性能,多索引倒排查找不seek
 
             if (_factory->get_index_storage_type(_index_id, _storage_type) == -1) {
@@ -430,7 +446,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 std::vector<ReverseIndex<CommonSchema>*> common_reverse_indexes;
                 common_reverse_indexes.reserve(4);
                 for (auto index_ptr : _reverse_indexes) {
-                    common_reverse_indexes.push_back(static_cast<ReverseIndex<CommonSchema>*>(index_ptr));
+                    common_reverse_indexes.emplace_back(static_cast<ReverseIndex<CommonSchema>*>(index_ptr));
                 }
                 _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
                     common_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
@@ -438,7 +454,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 std::vector<ReverseIndex<ArrowSchema>*> arrow_reverse_indexes;
                 arrow_reverse_indexes.reserve(4);
                 for (auto index_ptr : _reverse_indexes) {
-                    arrow_reverse_indexes.push_back(static_cast<ReverseIndex<ArrowSchema>*>(index_ptr));
+                    arrow_reverse_indexes.emplace_back(static_cast<ReverseIndex<ArrowSchema>*>(index_ptr));
                 }
                 _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
                     arrow_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
@@ -463,9 +479,6 @@ int RocksdbScanNode::open(RuntimeState* state) {
             return ret;
         }
     }
-    for (auto id : _index_ids) {
-        state->add_scan_index(id);
-    }
 
     if (!_use_get && _table_info->engine == pb::ROCKSDB_CSTORE && _index_id == _table_id) {
         std::unordered_set<int32_t> filt_field_ids;
@@ -474,9 +487,9 @@ int RocksdbScanNode::open(RuntimeState* state) {
         }
         for (auto& iter : _field_ids) {
             if (filt_field_ids.count(iter.first)) {
-                _filt_field_ids.push_back(iter.first);
+                _filt_field_ids.emplace_back(iter.first);
             } else {
-                _trivial_field_ids.push_back(iter.first);
+                _trivial_field_ids.emplace_back(iter.first);
             }
         }
     }
@@ -525,7 +538,7 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         return ret;
     }
 
-    if (0 != memory_limit_exceeded(state, batch)) {
+    if (0 != state->memory_limit_exceeded(_scan_rows, batch->used_bytes_size())) {
         return -1;
     }
     return 0;
@@ -536,7 +549,6 @@ void RocksdbScanNode::close(RuntimeState* state) {
     for (auto expr : _index_conjuncts) {
         expr->close();
     }
-    _index_ids.clear();
     _idx = 0;
     _reverse_infos.clear();
     _query_words.clear();
@@ -545,15 +557,13 @@ void RocksdbScanNode::close(RuntimeState* state) {
 }
 
 int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos) {
-    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
+    int64_t index_filter_cnt = 0;
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this, &index_filter_cnt](TraceLocalNode& local_node) {
         local_node.set_scan_rows(_scan_rows);
+        local_node.add_index_filter_rows(index_filter_cnt);
     }));
     auto txn = state->txn();
-    if (txn == nullptr) {
-        DB_WARNING_STATE(state, "txn is nullptr");
-        return -1;
-    }
-    SmartRecord record;
+    SmartRecord record = _factory->new_record(_table_id);
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -567,22 +577,35 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
         if (batch->is_full()) {
             return 0;
         }
-        if (_idx >= _left_records.size()) {
+        if (_idx >= _left_records.size() && _idx >= _left_keys.size()) {
             *eos = true;
             return 0;
-        } else {
-            record = _left_records[_idx++];
         }
         ++_scan_rows;
-        int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, state->need_check_region());
-        if (ret < 0) {
-            continue;
+        if (_use_encoded_key) {
+            int ret = txn->get_update_primary(_region_id, *_pri_info, _left_keys[_idx++], record,
+                        _field_ids, GET_ONLY, state->need_check_region());
+            if (ret < 0) {
+                continue;
+            }
+        } else {
+            record = _left_records[_idx++];
+            int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY,
+                       state->need_check_region());
+            if (ret < 0) {
+                continue;
+            }
         }
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
         for (auto slot : _tuple_desc->slots()) {
             auto field = record->get_field_by_tag(slot.field_id());
             row->set_value(slot.tuple_id(), slot.slot_id(),
                     record->get_value(field));
+        }
+        if (!need_copy(row.get(), _index_conjuncts)) {
+            state->inc_num_filter_rows();
+            ++index_filter_cnt;
+            continue;
         }
         batch->move_row(std::move(row));
         ++_num_rows_returned;
@@ -591,9 +614,12 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
 
 int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch, bool* eos) {
     int64_t get_primary_cnt = 0;
-    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this, &get_primary_cnt](TraceLocalNode& local_node) {
+    int64_t index_filter_cnt = 0;
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, 
+    ([this, &get_primary_cnt, &index_filter_cnt](TraceLocalNode& local_node) {
         local_node.add_get_primary_rows(get_primary_cnt);
         local_node.set_scan_rows(_scan_rows);
+        local_node.add_index_filter_rows(index_filter_cnt);
     }));
 
     bool is_global_index = false;
@@ -601,7 +627,8 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
         && _region_info->main_table_id() != _region_info->table_id()) {
         is_global_index = true;
     }
-    SmartRecord record;
+    auto txn = state->txn();
+    SmartRecord record = _factory->new_record(_table_id);
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -615,35 +642,48 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
         if (batch->is_full()) {
             return 0;
         }
-        if (_idx >= _left_records.size()) {
+        if (_idx >= _left_records.size() && _idx >= _left_keys.size()) {
             *eos = true;
             return 0;
+        }
+        ++_scan_rows;
+        if (_use_encoded_key) {
+            int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, _left_keys[_idx], record,
+                        GET_ONLY, true);
+            if (ret < 0) {
+                _idx++;
+                continue;
+            }
+            if (_index_info->type == pb::I_UNIQ) {
+                record->decode_key(*_index_info, _left_keys[_idx].data());
+            }
+            _idx++;
         } else {
             record = _left_records[_idx++];
-        }
-        auto txn = state->txn();
-        ++_scan_rows;
-        int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, record, GET_ONLY, true);
-        if (ret < 0) {
-            //DB_WARNING_STATE(state, "get index:%ld fail, not exist, ret:%d, record: %s", 
-            //        _table_id, ret, record->to_string().c_str());
-            continue;
+            int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, record, GET_ONLY, true);
+            if (ret < 0) {
+                continue;
+            }
         }
         if (!_is_covering_index && !is_global_index) {
             ++get_primary_cnt;
-            ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
+            int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
             if (ret < 0) {
                 DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s", 
                         _table_id, ret, record->to_string().c_str());
                 continue;
             }
         }
-
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
         for (auto slot : _tuple_desc->slots()) {
             auto field = record->get_field_by_tag(slot.field_id());
             row->set_value(slot.tuple_id(), slot.slot_id(),
                     record->get_value(field));
+        }
+        if (!need_copy(row.get(), _index_conjuncts)) {
+            state->inc_num_filter_rows();
+            ++index_filter_cnt;
+            continue;
         }
         batch->move_row(std::move(row));
         ++_num_rows_returned;
@@ -784,15 +824,6 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
     return 0;
 }
 
-int RocksdbScanNode::memory_limit_exceeded(RuntimeState* state, RowBatch* batch) {
-    if (_scan_rows > FLAGS_store_row_number_to_check_memory) {
-        if (0 != state->memory_limit_exceeded(batch->used_bytes_size())) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
 int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
     int64_t index_filter_cnt = 0;
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this, &index_filter_cnt](TraceLocalNode& local_node) {
@@ -814,20 +845,34 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             return 0;
         }
         if (_table_iter == nullptr || !_table_iter->valid()) {
-            if (_idx >= _left_records.size()) {
+            if (_idx >= _left_records.size() && _idx >= _left_keys.size()) {
                 *eos = true;
                 return 0;
             } else {
-                IndexRange range(_left_records[_idx].get(), 
-                        _right_records[_idx].get(), 
-                        _index_info.get(),
-                        _pri_info.get(),
-                        _region_info,
-                        _left_field_cnts[_idx], 
-                        _right_field_cnts[_idx], 
-                        _left_opens[_idx], 
-                        _right_opens[_idx],
-                        _like_prefixs[_idx]);
+                IndexRange range;
+                if (_use_encoded_key) {
+                    range = IndexRange(_left_keys[_idx], 
+                            _right_keys[_idx], 
+                            _index_info.get(),
+                            _pri_info.get(),
+                            _region_info,
+                            _left_field_cnts[_idx], 
+                            _right_field_cnts[_idx], 
+                            _left_opens[_idx], 
+                            _right_opens[_idx],
+                            _like_prefixs[_idx]);
+                } else {
+                    range = IndexRange(_left_records[_idx].get(), 
+                            _right_records[_idx].get(), 
+                            _index_info.get(),
+                            _pri_info.get(),
+                            _region_info,
+                            _left_field_cnts[_idx], 
+                            _right_field_cnts[_idx], 
+                            _left_opens[_idx], 
+                            _right_opens[_idx],
+                            _like_prefixs[_idx]);
+                }
                 delete _table_iter;
                 _table_iter = Iterator::scan_primary(
                         state->txn(), range, _field_ids, _field_slot, state->need_check_region(), _scan_forward);
@@ -989,20 +1034,34 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             }
         } else {
             if (_index_iter == nullptr || !_index_iter->valid()) {
-                if (_idx >= _left_records.size()) {
+                if (_idx >= _left_records.size() && _idx >= _left_keys.size()) {
                     *eos = true;
                     return 0;
                 } else {
-                    IndexRange range(_left_records[_idx].get(), 
-                            _right_records[_idx].get(), 
-                            _index_info.get(),
-                            _pri_info.get(),
-                            _region_info,
-                            _left_field_cnts[_idx], 
-                            _right_field_cnts[_idx], 
-                            _left_opens[_idx], 
-                            _right_opens[_idx],
-                            _like_prefixs[_idx]);
+                    IndexRange range;
+                    if (_use_encoded_key) {
+                        range = IndexRange(_left_keys[_idx], 
+                                _right_keys[_idx], 
+                                _index_info.get(),
+                                _pri_info.get(),
+                                _region_info,
+                                _left_field_cnts[_idx], 
+                                _right_field_cnts[_idx], 
+                                _left_opens[_idx], 
+                                _right_opens[_idx],
+                                _like_prefixs[_idx]);
+                    } else {
+                        range = IndexRange(_left_records[_idx].get(), 
+                                _right_records[_idx].get(), 
+                                _index_info.get(),
+                                _pri_info.get(),
+                                _region_info,
+                                _left_field_cnts[_idx], 
+                                _right_field_cnts[_idx], 
+                                _left_opens[_idx], 
+                                _right_opens[_idx],
+                                _like_prefixs[_idx]);
+                    }
                     delete _index_iter;
                     _index_iter = Iterator::scan_secondary(state->txn(), range, _field_slot, true, _scan_forward);
                     if (_index_iter == nullptr) {
@@ -1053,7 +1112,6 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 row->set_value(_tuple_id, pair.first, record->get_value(field));
             }
         }
-        //DB_NOTICE("record_before:%s", record->debug_string().c_str());
         if (!need_copy(row.get(), _index_conjuncts)) {
             state->inc_num_filter_rows();
             ++index_filter_cnt;
@@ -1064,6 +1122,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         if (!_is_covering_index && !is_global_index) {
             ++get_primary_cnt;
             auto txn = state->txn();
+            // todo: 反查直接用encode_key
             ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
             if (ret < 0) {
                 if (_reverse_indexes.size() == 0 && _reverse_index == nullptr) {
@@ -1087,19 +1146,40 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
 void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
     auto scan_pb = pb_node->mutable_derive_node()->mutable_scan_node();
-    if (region_id == 0 || _region_primary.count(region_id) == 0) {
-        return;
-    }
-    pb::PossibleIndex* primary = nullptr;
-    for (auto& pos_index : *scan_pb->mutable_indexes()) {
-        if (pos_index.index_id() == _router_index_id) {
-            primary = &pos_index;
-            break;
+    scan_pb->clear_use_indexes();
+    scan_pb->clear_indexes();
+    scan_pb->clear_learner_index();
+
+    for (auto& scan_index_info : _scan_indexs) {
+        if (_is_explain) {
+            scan_pb->add_use_indexes(scan_index_info.index_id);
+            scan_pb->add_indexes(scan_index_info.raw_index);
+            continue;
+        }
+
+        // 记录index_id供store qos使用
+        scan_pb->add_use_indexes(scan_index_info.index_id);
+        if ((_current_global_backup && scan_index_info.use_for != ScanIndexInfo::U_GLOBAL_LEARNER) || 
+            (!_current_global_backup && scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER)) {
+            continue;
+        } 
+
+        if (scan_index_info.index_id == scan_index_info.router_index_id 
+                && scan_index_info.region_primary.count(region_id) > 0) {
+            if (scan_index_info.use_for == ScanIndexInfo::U_LOCAL_LEARNER) {
+                scan_pb->set_learner_index(scan_index_info.region_primary[region_id]);
+            } else {
+                scan_pb->add_indexes(scan_index_info.region_primary[region_id]);
+            }
+        } else {
+            if (scan_index_info.use_for == ScanIndexInfo::U_LOCAL_LEARNER) {
+                scan_pb->set_learner_index(scan_index_info.raw_index);
+            } else {
+                scan_pb->add_indexes(scan_index_info.raw_index);
+            }
         }
     }
-    if (primary != nullptr) {
-        primary->CopyFrom(_region_primary[region_id]);
-    }
+
 }
 
 }

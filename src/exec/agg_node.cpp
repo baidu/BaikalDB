@@ -17,7 +17,6 @@
 #include "query_context.h"
 
 namespace baikaldb {
-DECLARE_int64(store_row_number_to_check_memory);
 
 int AggNode::init(const pb::PlanNode& node) {
     int ret = 0;
@@ -126,7 +125,6 @@ int AggNode::open(RuntimeState* state) {
     TimeCost cost;
     int64_t agg_time = 0;
     int64_t scan_time = 0;
-    int row_cnt = 0;
     for (auto child : _children) {
         bool eos = false;
         do {
@@ -149,9 +147,9 @@ int AggNode::open(RuntimeState* state) {
             int64_t release_size = 0;
             process_row_batch(state, batch, used_size, release_size);
             agg_time += cost.get_time();
-            row_cnt += batch.size();
-            memory_limit_release(state, release_size);
-            if (memory_limit_exceeded(state, used_size) != 0) {
+            _row_cnt += batch.size();
+            state->memory_limit_release(_row_cnt, release_size);
+            if (state->memory_limit_exceeded(_row_cnt, used_size) != 0) {
                 _iter = _hash_map.begin();
                 DB_WARNING_STATE(state, "memory limit exceeded");
                 return -1;
@@ -163,9 +161,7 @@ int AggNode::open(RuntimeState* state) {
         } while (!eos);
     }
     LOCAL_TRACE_DESC << "agg time cost:" << agg_time << 
-        " scan time cost:" << scan_time << " rows:" << row_cnt;
-    //DB_WARNING_STATE(state, "region:%ld, agg time:%ld ,scan time:%ld total:%ld, row_cnt:%d", 
-        //state->region_id(), agg_time, scan_time, cost.get_time(), row_cnt);
+        " scan time cost:" << scan_time << " rows:" << _row_cnt;
 
     // 兼容mysql: select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
@@ -173,8 +169,7 @@ int AggNode::open(RuntimeState* state) {
         uint8_t null_flag = 0;
         MutTableKey key;
         key.append_u8(null_flag);
-        int64_t used_size = 0;
-        AggFnCall::initialize_all(_agg_fn_calls, key.data(), used_size, row.get());
+        AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get());
         _hash_map.insert(key.data(), row.release());
     }
     _iter = _hash_map.begin();
@@ -215,7 +210,8 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& u
                     continue;
                 }
             }
-            AggFnCall::initialize_all(_agg_fn_calls, key.data(), used_size, *agg_row);
+            used_size += cur_row->used_size();
+            AggFnCall::initialize_all(_agg_fn_calls, key.data(), *agg_row);
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);
         } else {
@@ -227,22 +223,6 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& u
             AggFnCall::update_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
         }
     }
-}
-
-void AggNode::memory_limit_release(RuntimeState* state, int64_t size) {
-    if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
-        state->memory_limit_release(size);
-        DB_DEBUG("log_id:%lu release %ld bytes.", state->log_id(), size);
-    }
-}
-
-int AggNode::memory_limit_exceeded(RuntimeState* state, int64_t size) {
-    if (state->num_scan_rows() > FLAGS_store_row_number_to_check_memory) {
-        if (0 != state->memory_limit_exceeded(size)) {
-            return -1;
-        }
-    }
-    return 0;
 }
 
 int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {

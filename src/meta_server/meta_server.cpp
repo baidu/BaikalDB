@@ -480,6 +480,17 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         QueryRegionManager::get_instance()->get_region_peer_status(request, response);
         break;                           
     }
+    case pb::QUERY_REGION_LEARNER_STATUS: {
+        if (!_meta_state_machine->is_leader()) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("not leader");
+            response->set_leader(butil::endpoint2str(_meta_state_machine->get_leader()).c_str());
+            DB_WARNING("meta state machine is not leader, request: %s", request->ShortDebugString().c_str());
+            return;
+        }
+        QueryRegionManager::get_instance()->get_region_learner_status(request, response);
+        break;                           
+    }
     case pb::QUERY_INDEX_DDL_WORK: {
         DDLManager::get_instance()->get_index_ddlwork_info(request, response);
         break;
@@ -669,19 +680,21 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
         }
 
         if (event == "EXPECTED_MIGRATE") {
-            DB_WARNING("bns: %s, meta_bns: %s is migrating", bns.c_str(), meta_bns.c_str());
             pb::MetaManagerRequest internal_req;
             pb::MetaManagerResponse internal_res;
             internal_req.set_op_type(pb::OP_SET_INSTANCE_MIGRATE);
             internal_req.mutable_instance()->set_address(ip_port);
             ret = meta_proxy(meta_bns)->send_request("meta_manager", internal_req, internal_res);
             if (ret != 0) {
-                DB_WARNING("internal request fail, %s, %s", 
+                DB_WARNING("internal request fail, bns:%s, %s, %s", 
+                        bns.c_str(),
                         internal_req.ShortDebugString().c_str(), 
                         internal_res.ShortDebugString().c_str());
                 res_instance->set_status("PROCESSING");
                 return;
             }
+            DB_WARNING("bns: %s, meta_bns: %s, status:%s", 
+                    bns.c_str(), meta_bns.c_str(), internal_res.errmsg().c_str());
             res_instance->set_status(internal_res.errmsg());
             if (internal_res.errmsg() == "ALLOWED") {
                 DB_WARNING("bns: %s, meta_bns: %s ALLOWED", bns.c_str(), meta_bns.c_str());

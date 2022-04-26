@@ -46,27 +46,23 @@ struct IteratorContext {
     int64_t offset = 0;
     int64_t snapshot_index = 0;
     int64_t applied_index = 0;
+    bool need_copy_data = true;
 };
+
+typedef std::shared_ptr<IteratorContext> IteratorContextPtr;
 
 struct SnapshotContext {
     SnapshotContext()
         : snapshot(RocksWrapper::get_instance()->get_snapshot()) {}
     ~SnapshotContext() {
-        if (data_context != nullptr) {
-            delete data_context;
-        }
-        if (meta_context != nullptr) {
-            delete meta_context;
-        }
         if (snapshot != nullptr) {
             RocksWrapper::get_instance()->relase_snapshot(snapshot);
         }
     }
     const rocksdb::Snapshot* snapshot = nullptr;
-    IteratorContext* data_context = nullptr;
-    IteratorContext* meta_context = nullptr;
+    IteratorContextPtr data_context = nullptr;
+    IteratorContextPtr meta_context = nullptr;
     int64_t data_index = 0;
-    bool need_copy_data = true;
 };
 
 typedef std::shared_ptr<SnapshotContext> SnapshotContextPtr;
@@ -111,7 +107,7 @@ protected:
     RocksdbReaderAdaptor(int64_t region_id,
                         const std::string& path,
                         RocksdbFileSystemAdaptor* rs,
-                        SnapshotContextPtr context,
+                        IteratorContextPtr context,
                         bool is_meta_reader);
 
 private:
@@ -126,9 +122,10 @@ private:
 private:
 
     int64_t _region_id;
+    SmartRegion _region_ptr;
     std::string _path;
     RocksdbFileSystemAdaptor* _rs = nullptr;
-    SnapshotContextPtr _context = nullptr;
+    IteratorContextPtr _context = nullptr;
     bool _is_meta_reader = false;
     bool _closed = true;
     size_t _num_lines = 0;

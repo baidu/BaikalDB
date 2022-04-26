@@ -82,6 +82,8 @@ private:
             const std::vector<int64_t>& local_affected_indexs, 
             ExecNode* manager_node);
 
+    int create_full_export_node(ExecNode* plan);
+
     SelectManagerNode* create_select_manager_node();
     bool need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id);
     bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id); 

@@ -45,7 +45,7 @@ int SortNode::init(const pb::PlanNode& node) {
             node->set_col_type(expr.nodes(0).col_type());
             node->set_num_children(0);
             node->mutable_derive_node()->set_tuple_id(_tuple_id);
-            node->mutable_derive_node()->set_slot_id(slot_id);
+            node->mutable_derive_node()->set_slot_id(slot_id++);
             ret = ExprNode::create_tree(slot_expr, &order_expr);
             if (ret < 0) {
                 //如何释放资源

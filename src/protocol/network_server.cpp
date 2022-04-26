@@ -42,7 +42,7 @@ DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
 DEFINE_int32(backup_pv_threshold, 50, "backup_pv_threshold");
 DEFINE_double(backup_error_percent, 0.5, "use backup table if backup_error_percent > 0.5");
 DEFINE_int64(health_check_interval_us, 10 * 1000 * 1000, "health_check_interval_us");
-DEFINE_bool(need_health_check, true, "need_health_check");
+DECLARE_bool(need_health_check);
 DEFINE_int64(health_check_store_timeout_ms, 2000, "health_check_store_timeout_ms");
 DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for generate transaction id");
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
@@ -408,7 +408,7 @@ void NetworkServer::print_agg_sql() {
                 factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
                 std::string recommend_index = "-";
                 std::string field_desc = "-";
-                index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
+                //index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
                 butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
                 std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(out[0]);
                 int64_t dynamic_timeout_ms = -1;
@@ -570,13 +570,17 @@ static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
             DB_WARNING("addr:%s is faulty, errcode:%d, error:%s", 
                     addr.c_str(), cntl->ErrorCode(), cntl->ErrorText().c_str());
         }
+    } else if (response->errcode() == pb::STORE_BUSY) {
+        new_status = pb::BUSY;
+        DB_WARNING("addr:%s is busy", addr.c_str());
     }
+
     if (old_status != new_status) {
         // double check for dead status
-        if (old_status == pb::NORMAL) {
+        if (old_status == pb::NORMAL && new_status == pb::DEAD) {
             new_status = pb::FAULTY;
         }
-        SchemaFactory::get_instance()->update_instance(addr, new_status, false);
+        SchemaFactory::get_instance()->update_instance(addr, new_status, false, true);
     }
 }
 
@@ -619,6 +623,7 @@ void NetworkServer::store_health_check() {
     }
 }
 
+//other心跳内容包括：代价统计信息；baikaldb参数动态调整
 void NetworkServer::construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
@@ -639,12 +644,21 @@ void NetworkServer::construct_other_heart_beat_request(pb::BaikalOtherHeartBeatR
         }
     };
     factory->schema_info_scope_read(schema_read_recallback);
+    request.set_baikaldb_resource_tag("__baikaldb"); // baikaldb暂时没有resource_tag，使用"__baikaldb"会全平台同时更新参数
 }
 
 void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
+    }
+
+    if (response.has_instance_param()) {
+        for (auto& item : response.instance_param().params()) {
+            if (!item.is_meta_param()) {
+                update_param(item.key(), item.value());
+            }
+        }
     }
 }
 

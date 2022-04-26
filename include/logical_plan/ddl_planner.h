@@ -41,7 +41,19 @@ private:
     int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec);
     bool is_fulltext_type_constraint(pb::StorageType pb_storage_type, bool& has_arrow_type, bool& has_pb_type) const;
     pb::PrimitiveType to_baikal_type(parser::FieldType* field_type);
-
+    int parse_pre_split_keys(std::string split_start_key,
+                             std::string split_end_key,
+                             std::string global_start_key,
+                             std::string global_end_key,
+                             int32_t split_region_num, pb::SchemaInfo& table);
+    int pre_split_index(const std::string& start_key,
+                        const std::string& end_key,
+                        int32_t region_num,
+                        pb::SchemaInfo& table,
+                        const pb::IndexInfo* pk_index,
+                        const pb::IndexInfo* index,
+                        const std::vector<const pb::FieldInfo*>& pk_fields,
+                        const std::vector<const pb::FieldInfo*>& index_fields);
     std::map<std::string, bool> _column_can_null;
 };
 } //namespace baikal

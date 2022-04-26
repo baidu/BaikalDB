@@ -109,10 +109,11 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         return 0;
     }
     
-    ConcurrencyBthread region_bth(FLAGS_region_per_batch, &BTHREAD_ATTR_SMALL);
     int region_per_batch = 0;
     _fetcher_store.scan_rows = 0;
-    _fetcher_store.memory_limit_release(state);
+    state->memory_limit_release_all();
+    std::vector<pb::RegionInfo*> infos;
+    infos.reserve(FLAGS_region_per_batch);
     for (auto id_iter = _send_region_ids.begin(); id_iter != _send_region_ids.end();) {
         if (region_per_batch >= FLAGS_region_per_batch) {
             break;
@@ -126,24 +127,18 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             id_iter = _send_region_ids.erase(id_iter);
             continue;
         }
+        infos.emplace_back(info);
         DB_WARNING("send region_id:%ld log_id:%lu", region_id, log_id);
         ++region_per_batch;
         ++state->region_count;
-        auto region_thread = [this, state, region_id, info, log_id]() {
-            auto ret = _fetcher_store.send_request(state, _children[0], *info, region_id, region_id, 
-                log_id, 0, state->seq_id, state->seq_id, _op_type);
-            if (ret != E_OK) {
-                DB_WARNING("rpc error, region_id:%ld, log_id:%lu", region_id, log_id);
-                _error = ret;
-            }
-        };
-        region_bth.run(region_thread);
         id_iter = _send_region_ids.erase(id_iter);
         _sent_region_ids.push_back(region_id);
     }
-
-    region_bth.join();
-
+    if (infos.empty()) {
+        return 0;
+    }
+    _fetcher_store.send_request(state, _children[0], infos, state->seq_id, state->seq_id, _op_type);
+    _error = _fetcher_store.error;
     if (_error != E_OK) {
         return -1;
     }

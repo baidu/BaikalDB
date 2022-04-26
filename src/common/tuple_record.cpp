@@ -45,7 +45,7 @@ int TupleRecord::verification_fields(int32_t max_field_id) {
         wired_type = field_key & 0x07;
         
         if (_offset >= _size) {
-            DB_WARNING("error: %lu, %lu", _offset, _size);
+            DB_DEBUG("error: %lu, %lu", _offset, _size);
             return -1;
         }
 
@@ -53,7 +53,7 @@ int TupleRecord::verification_fields(int32_t max_field_id) {
             field_num, wired_type, max_field_id, _offset);
 
         if (field_num > max_field_id || field_num == 0) {
-            DB_WARNING("error: field_num: %lu, wired_type: %d, max_field_id: %d", 
+            DB_DEBUG("error: field_num: %lu, wired_type: %d, max_field_id: %d", 
                 field_num, wired_type, max_field_id);
             return -1;
         }
@@ -72,7 +72,7 @@ int TupleRecord::verification_fields(int32_t max_field_id) {
                 skip_fixed<float>();
                 break;
             default:
-                DB_WARNING("invalid wired_type: %d, offset: %lu,%lu", wired_type, _offset, _size);
+                DB_DEBUG("invalid wired_type: %d, offset: %lu,%lu", wired_type, _offset, _size);
                 return -1;
         }
     }

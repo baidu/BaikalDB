@@ -54,6 +54,7 @@ struct QueryStat {
     //std::string traceid;
     std::string family;
     std::string table;
+    std::string resource_tag;
     std::string server_ip;
     std::ostringstream sample_sql;
     std::string trace_id;
@@ -184,7 +185,28 @@ public:
         return plan.add_nodes();
     }
     int create_plan_tree();
+
+    void add_sub_ctx(std::shared_ptr<QueryContext>& ctx) {
+        std::unique_lock<bthread::Mutex> lck(_kill_lock);
+        sub_query_plans.emplace_back(ctx);
+    }
+    void set_kill_ctx(std::shared_ptr<QueryContext>& ctx) {
+        std::unique_lock<bthread::Mutex> lck(_kill_lock);
+        kill_ctx = ctx;
+    }
+    void kill_all_ctx() {
+        std::unique_lock<bthread::Mutex> lck(_kill_lock);
+        get_runtime_state()->cancel();
+        for (auto& ctx : sub_query_plans) {
+            ctx->get_runtime_state()->cancel();
+        }
+        if (kill_ctx) {
+            kill_ctx->get_runtime_state()->cancel();
+        }
+    }
+    void update_ctx_stat_info(RuntimeState* state, int64_t total_time);
     
+    int64_t get_ctx_total_time();
 public:
     std::string         sql;
     std::vector<std::string> comments;
@@ -262,5 +284,6 @@ public:
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;
+    bthread::Mutex _kill_lock;
 };
 } //namespace baikal

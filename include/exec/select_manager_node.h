@@ -16,6 +16,7 @@
 
 #include "exec_node.h"
 #include "sort_node.h"
+#include "scan_node.h"
 #include "table_record.h"
 #include "proto/store.interface.pb.h"
 #include "sorter.h"
@@ -23,6 +24,19 @@
 #include "fetcher_store.h"
 
 namespace baikaldb {
+struct FetcherInfo {
+    enum Status {
+        S_INIT = 0,
+        S_SUCC,
+        S_FAIL
+    };
+    int64_t dynamic_timeout_ms = -1;
+    GlobalBackupType global_backup_type = GBT_INIT;
+    ScanIndexInfo* scan_index = nullptr;
+    std::atomic<Status> status = { S_INIT }; 
+    FetcherStore fetcher_store;
+};
+
 class SelectManagerNode : public ExecNode {
 public:
     SelectManagerNode() {
@@ -48,7 +62,6 @@ public:
             expr->close();
         }
         _sorter = nullptr;
-        _fetcher_store.clear();
     }
     int init_sort_info(SortNode* sort_node) {
         _slot_order_exprs = sort_node->slot_order_exprs();
@@ -56,11 +69,18 @@ public:
         _is_null_first = sort_node->is_null_first();
         return 0;
     }
-    int open_global_index(RuntimeState* state,
+    int single_fetcher_store_open(FetcherInfo* fetcher, RuntimeState* state, ExecNode* exec_node);
+
+    void multi_fetcher_store_open(FetcherInfo* self_fetcher, FetcherInfo* other_fetcher,  
+        RuntimeState* state, ExecNode* exec_node);
+    int fetcher_store_run(RuntimeState* state, ExecNode* exec_node);
+    int open_global_index(FetcherInfo* fetcher, RuntimeState* state,
                           ExecNode* exec_node,
                           int64_t global_index_id,
                           int64_t main_table_id);
     int construct_primary_possible_index(
+                          FetcherStore& fetcher_store,
+                          ScanIndexInfo* scan_index_info,
                           RuntimeState* state,
                           ExecNode* exec_node,
                           int64_t main_table_id);
@@ -91,7 +111,6 @@ private:
     std::vector<bool> _is_null_first;
     std::shared_ptr<MemRowCompare> _mem_row_compare;
     std::shared_ptr<Sorter> _sorter;
-    FetcherStore    _fetcher_store;
     std::map<int32_t, int32_t> _index_slot_field_map;
     SchemaFactory*  _factory = nullptr;
     RuntimeState*   _sub_query_runtime_state = nullptr;

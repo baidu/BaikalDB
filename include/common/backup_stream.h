@@ -45,13 +45,6 @@ public:
         RS_DATA_FILE
     };
 
-    enum class StreamState : int8_t {
-        SS_INIT,
-        SS_PROCESSING,
-        SS_SUCCESS,
-        SS_FAIL
-    };
-
     virtual int on_received_messages(brpc::StreamId id, 
         butil::IOBuf *const messages[], 
         size_t size) {
@@ -65,14 +58,18 @@ public:
 
     virtual void on_idle_timeout(brpc::StreamId id) {
         DB_WARNING("idle timeout %lu", id);
-        _status = StreamState::SS_FAIL;
+        _status = pb::StreamState::SS_FAIL;
     }
 
     void wait() {
         _cond.wait();
     }
 
-    StreamState get_status() const {
+    int timed_wait(int64_t timeout) {
+        return _cond.timed_wait(timeout);
+    }
+
+    pb::StreamState get_status() const {
         return _status;
     }
     
@@ -96,7 +93,7 @@ protected:
     }
 protected:
     BthreadCond _cond {1};
-    StreamState _status {StreamState::SS_INIT};
+    pb::StreamState _status {pb::StreamState::SS_INIT};
 };
 
 class StreamReceiver : public CommonStreamReceiver {
@@ -108,7 +105,7 @@ public:
             std::ios::out | std::ios::binary | std::ios::trunc);
         auto ret = _meta_file_streaming.is_open() && _data_file_streaming.is_open();
         if (!ret) {
-            _status = StreamState::SS_FAIL;
+            _status = pb::StreamState::SS_FAIL;
         }
         return ret;
     }
@@ -116,6 +113,20 @@ public:
     virtual int on_received_messages(brpc::StreamId id, 
         butil::IOBuf *const messages[],
         size_t size) override;
+
+    void set_only_data_sst(size_t to_process_size) {
+        if (to_process_size > 0) {
+            _to_process_size = to_process_size;
+            _state = ReceiverState::RS_DATA_FILE;
+        }
+    }
+    virtual void on_closed(brpc::StreamId id) override {
+        DB_NOTICE("id[%lu] closed.", id);
+        if (_to_process_size > 0) {
+            _status = pb::StreamState::SS_FAIL;
+        }
+        _cond.decrease_signal();
+    }
 
 private:
     int8_t _file_num {0};

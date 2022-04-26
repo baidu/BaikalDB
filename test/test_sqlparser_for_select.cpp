@@ -91,7 +91,6 @@ TEST(test_parser, case_option) {
         ASSERT_FALSE(select_stmt->select_opt->straight_join);
         ASSERT_EQ(0, select_stmt->select_opt->priority);
         std::cout << select_stmt->to_string() << std::endl; 
-        exit(0);
     }
     //select
     {
@@ -109,15 +108,15 @@ TEST(test_parser, case_option) {
         ASSERT_FALSE(select_stmt->select_opt->straight_join);
         ASSERT_EQ(0, select_stmt->select_opt->priority);
         std::cout << select_stmt->to_string() << std::endl; 
-        ASSERT_STREQ(select_stmt->fields[0]->org_name.c_str(), "");
-        ASSERT_STREQ(select_stmt->fields[1]->org_name.c_str(), "");
+        ASSERT_STREQ(select_stmt->fields[0]->org_name.c_str(), NULL);
+        ASSERT_STREQ(select_stmt->fields[1]->org_name.c_str(), NULL);
         ASSERT_STREQ(select_stmt->fields[2]->org_name.c_str(), "1+1");
         ASSERT_STREQ(select_stmt->fields[3]->org_name.c_str(), "count(*)");
         ASSERT_STREQ(select_stmt->fields[4]->org_name.c_str(), "(select 1 +1)");
-        ASSERT_STREQ(select_stmt->fields[5]->org_name.c_str(), "");
+        ASSERT_STREQ(select_stmt->fields[5]->org_name.c_str(), NULL);
         ASSERT_STREQ(select_stmt->fields[6]->org_name.c_str(), "((1.1+1))");
-        ASSERT_STREQ(select_stmt->fields[7]->org_name.c_str(), "");
-        exit(0);
+        ASSERT_STREQ(select_stmt->fields[7]->org_name.c_str(), "count(*)");
+        ASSERT_STREQ(select_stmt->fields[7]->as_name.c_str(), "A");
     }
     {
         parser::SqlParser parser;

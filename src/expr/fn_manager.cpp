@@ -245,6 +245,8 @@ void FunctionManager::register_operators() {
 
     register_object_ret("version", version, pb::STRING);
     register_object_ret("last_insert_id", last_insert_id, pb::INT64);
+    //
+    register_object_ret("point_distance", point_distance, pb::INT64);
     register_object_ret("cast_to_date", cast_to_date, pb::DATE);
     register_object_ret("cast_to_time", cast_to_time, pb::TIME);
     register_object_ret("cast_to_datetime", cast_to_datetime, pb::DATETIME);
@@ -342,6 +344,9 @@ int FunctionManager::complete_fn(pb::Function& fn, std::vector<pb::PrimitiveType
             return 0;
         case parser::FT_COMMON:
             fn.set_return_type(return_type_map[fn.name()]);
+            complete_common_fn(fn, types);
+            return 0;
+        case parser::FT_MATCH_AGAINST:
             complete_common_fn(fn, types);
             return 0;
         default:
@@ -450,6 +455,8 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
         }
         DB_DEBUG("merge type : [%s]", pb::PrimitiveType_Name(ret_type).c_str());
         fn.set_return_type(ret_type);
+    } else if (fn.name() == "match_against") {
+        fn.set_return_type(pb::BOOL);
     }
 }
 }

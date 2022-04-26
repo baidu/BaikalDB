@@ -69,7 +69,7 @@ public:
     // default for DEAD
     void delete_all_region_for_store(const std::string& instance, InstanceStateInfo status);
 
-    void remove_all_learner_for_store(const std::string& instance, const std::vector<int64_t>& learner_ids);
+    void add_all_learner_for_store(const std::string& instance, const std::vector<int64_t>& learner_ids);
     void pre_process_remove_peer_for_store(const std::string& instance,
                                                 pb::Status status, std::vector<pb::RaftControlRequest>& requests); 
     void pre_process_add_peer_for_store(const std::string& instance, pb::Status status,
@@ -252,9 +252,11 @@ public:
     }
 
     void remove_error_peer(const int64_t region_id,
+                                const std::set<std::string>& resource_tags,
                                 std::set<std::string> peers,
                                 std::vector<pb::PeerStateInfo>& recover_region_way);
     void remove_illegal_peer(const int64_t region_id,
+                                const std::set<std::string>& resource_tags,
                                 std::set<std::string> peers,
                                 std::vector<pb::PeerStateInfo>& recover_region_way);
     void recovery_single_region_by_set_peer(const int64_t region_id,
@@ -488,6 +490,7 @@ public:
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index); 
     
     void send_add_learner_request(const std::vector<std::pair<std::string, pb::InitRegion>>& requests);
+    bool check_table_in_resource_tags(int64_t table_id, const std::set<std::string>& resource_tags);
     
 private:
     RegionManager(): _max_region_id(0) {

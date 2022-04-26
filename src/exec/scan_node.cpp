@@ -25,7 +25,7 @@
 #include "redis_scan_node.h"
 
 namespace baikaldb {
-int64_t ScanNode::select_index() {
+int64_t AccessPathMgr::select_index_common() {
     std::multimap<uint32_t, int64_t> prefix_ratio_id_mapping;
     std::unordered_set<int32_t> primary_fields;
     primary_fields = _paths[_table_id]->hit_index_field_ids;
@@ -37,9 +37,9 @@ int64_t ScanNode::select_index() {
     
     for (auto& pair : _paths) {
         int64_t index_id = pair.first;
-        auto& path = pair.second;
-        auto& pos_index = path->pos_index;
-        auto info_ptr = path->index_info_ptr;
+        const auto& path = pair.second;
+        const auto& pos_index = path->pos_index;
+        const auto info_ptr = path->index_info_ptr;
         if (info_ptr == nullptr) {
             continue;
         }
@@ -49,7 +49,7 @@ int64_t ScanNode::select_index() {
         }
         auto index_state = info.state;
         if (index_state != pb::IS_PUBLIC) {
-            DB_DEBUG("DDL_LOG index_selector skip index [%ld] state [%s] ", 
+            DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -69,20 +69,6 @@ int64_t ScanNode::select_index() {
         } else {
             index_priority = 0;
         }
-        // 普通索引如果都包含在主键里，则不选
-        // 外部pre_process_select_index上线生效后此处可以不用判断，TODO
-        if (info.type == pb::I_UNIQ || info.type == pb::I_KEY) {
-            bool contain_by_primary = true;
-            for (int j = 0; j < field_count; j++) {
-                if (primary_fields.count(info.fields[j].id) == 0) {
-                    contain_by_primary = false;
-                    break;
-                }
-            }
-            if (contain_by_primary && !pos_index.has_sort_index() && field_count > 0) {
-                continue;
-            }
-        }
         // sort index 权重调整到全命中unique或primary索引之后
         if (pos_index.has_sort_index() && field_count > 0) {
             prefix_ratio_round = 100;
@@ -100,7 +86,7 @@ int64_t ScanNode::select_index() {
             prefix_ratio_index_score = 0;
         }
         prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, index_id));
-
+        //DB_NOTICE("index_id:%ld prefix_ratio_index_score:%u", index_id,prefix_ratio_index_score);
         // 优先选倒排，没有就取第一个
         switch (info.type) {
             case pb::I_FULLTEXT:
@@ -133,11 +119,12 @@ int ScanNode::init(const pb::PlanNode& node) {
     }
     _tuple_id = node.derive_node().scan_node().tuple_id();
     _table_id = node.derive_node().scan_node().table_id();
-    _router_index_id = _table_id;
     _lock = node.derive_node().scan_node().lock();
     if (node.derive_node().scan_node().has_engine()) {
         _engine = node.derive_node().scan_node().engine();
     }
+    _main_path.init(_table_id);
+    _learner_path.init(_table_id);
     return 0;
 }
 
@@ -158,7 +145,6 @@ int ScanNode::open(RuntimeState* state) {
 void ScanNode::close(RuntimeState* state) {
     ExecNode::close(state);
     clear_possible_indexes();
-    _multi_reverse_index.clear();
 }
 void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
     std::map<std::string, std::string> explain_info = {
@@ -176,11 +162,11 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
     };
     auto factory = SchemaFactory::get_instance();
     explain_info["table"] = factory->get_table_info(_table_id).name;
-    if (!has_index()) {
+    if (!has_index() && _scan_indexs.empty()) {
         explain_info["type"] = "ALL";
     } else {
         explain_info["possible_keys"] = "";
-        for (auto& pair : _paths) {
+        for (auto& pair : _main_path.paths()) {
             auto& path = pair.second;
             if (path->is_possible) {
                 int64_t index_id = path->index_id;
@@ -197,7 +183,7 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         auto pri_info = factory->get_index_info(_table_id);
         explain_info["key"] = index_info.short_name;
         explain_info["type"] = "range";
-        auto& pos_index = _paths[index_id]->pos_index;
+        auto& pos_index = _main_path.path(index_id)->pos_index;
         if (pos_index.ranges_size() == 1) {
             int field_cnt = pos_index.ranges(0).left_field_cnt();
             if (field_cnt == (int)index_info.fields.size() && 
@@ -236,7 +222,7 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
     output.push_back(explain_info);
 }
 
-void ScanNode::show_cost(std::vector<std::map<std::string, std::string>>& path_infos) {
+void AccessPathMgr::show_cost(std::vector<std::map<std::string, std::string>>& path_infos) {
     for (auto& pair : _paths) {
         auto& path = pair.second;
         std::map<std::string, std::string> path_info;
@@ -247,9 +233,7 @@ void ScanNode::show_cost(std::vector<std::map<std::string, std::string>>& path_i
     }
 }
 
-//干掉被另一个索引完全覆盖的
-
-int64_t ScanNode::select_index_by_cost() {
+int64_t AccessPathMgr::select_index_by_cost() {
     double min_cost = DBL_MAX;
     int64_t min_idx = 0;
     bool multi_0_0 = false;
@@ -298,12 +282,12 @@ int64_t ScanNode::select_index_by_cost() {
     if (enable_use_cost) {
         return min_idx;
     } else {
-        return select_index();
+        return select_index_common();
     }
 }
 
 // 判断是否全覆盖，只有被全覆盖的索引可以被干掉
-bool ScanNode::full_coverage(const std::unordered_set<int32_t>& smaller, const std::unordered_set<int32_t>& bigger) {
+bool full_coverage(const std::unordered_set<int32_t>& smaller, const std::unordered_set<int32_t>& bigger) {
     for (int32_t field_id : smaller) {
         if (bigger.count(field_id) == 0) {
             return false;
@@ -317,7 +301,7 @@ bool ScanNode::full_coverage(const std::unordered_set<int32_t>& smaller, const s
 // return  0 没有干掉任何一个
 // return -1 outer被干掉
 // return -2 inner被干掉
-int ScanNode::compare_two_path(const SmartPath& outer_path, const SmartPath& inner_path) {
+int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path) {
     if (_use_force_index) {
         // 只有primary可能不是FORCE_INDEX, 应该防止primary干掉force index
         // @ref: https://dev.mysql.com/doc/refman/5.6/en/index-hints.html
@@ -325,9 +309,55 @@ int ScanNode::compare_two_path(const SmartPath& outer_path, const SmartPath& inn
             return 0;
         }
     }
+    // 主键ignore，靠select那边来按最低优先级处理
+    if (outer_path->hint == AccessPath::IGNORE_INDEX || inner_path->hint == AccessPath::IGNORE_INDEX) {
+        return 0;
+    }
     if (outer_path->hit_index_field_ids.size() == inner_path->hit_index_field_ids.size()) {
         if (!full_coverage(outer_path->hit_index_field_ids, inner_path->hit_index_field_ids)) {
             return 0;
+        }
+
+        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
+            outer_path->is_sort_index == inner_path->is_sort_index) {
+            if (outer_path->index_other_condition.size() > 
+                inner_path->index_other_condition.size()) {
+                inner_path->is_possible = false;
+                return -2;
+            } else if (outer_path->index_other_condition.size() < 
+                    inner_path->index_other_condition.size()) {
+                outer_path->is_possible = false;
+                return -1;
+            } else {
+                if (outer_path->index_type == pb::I_PRIMARY) {
+                    outer_path->is_possible = false;
+                    return -1;
+                } else if (outer_path->index_info_ptr->is_global != inner_path->index_info_ptr->is_global) {
+                    //优先选global，防止广播
+                    if (inner_path->index_info_ptr->is_global) {
+                        outer_path->is_possible = false;
+                        return -1;
+                    } else {
+                        inner_path->is_possible = false;
+                        return -2;
+                    }
+                } else if (outer_path->index_info_ptr->length > 0 
+                        && inner_path->index_info_ptr->length > 0) {
+                    if (outer_path->index_info_ptr->length > inner_path->index_info_ptr->length) {
+                        outer_path->is_possible = false;
+                        return -1;
+                    } else {
+                        inner_path->is_possible = false;
+                        return -2;
+                    }
+                } else if (outer_path->cover_field_ids.size() > inner_path->cover_field_ids.size()) {
+                    outer_path->is_possible = false;
+                    return -1;
+                } else {
+                    inner_path->is_possible = false;
+                    return -2;
+                }
+            }
         }
 
         if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
@@ -339,13 +369,6 @@ int ScanNode::compare_two_path(const SmartPath& outer_path, const SmartPath& inn
             inner_path->is_possible = false;
             return -2;
         }
-
-        if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
-            outer_path->is_sort_index == inner_path->is_sort_index) {
-            inner_path->is_possible = false;
-            return -2;
-        }
-
     } else if (outer_path->hit_index_field_ids.size() < inner_path->hit_index_field_ids.size()) {
         if (!full_coverage(outer_path->hit_index_field_ids, inner_path->hit_index_field_ids)) {
             return 0;
@@ -381,10 +404,10 @@ int ScanNode::compare_two_path(const SmartPath& outer_path, const SmartPath& inn
     return 0;
 }
 
-void ScanNode::inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter) {
+void AccessPathMgr::inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter) {
     auto inner_loop_iter = outer_loop_iter;
     while ((++inner_loop_iter) != _paths.end()) {
-        if (!inner_loop_iter->second->is_possible || inner_loop_iter->second->is_virtual) {
+        if (!inner_loop_iter->second->is_possible) {
             continue;
         }
 
@@ -403,7 +426,7 @@ void ScanNode::inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator out
 }
 
 // 两两比较，根据一些简单规则干掉次优索引
-int64_t ScanNode::pre_process_select_index() {
+int64_t AccessPathMgr::pre_process_select_index() {
     if (_paths.empty()) {
         return 0;
     }
@@ -416,7 +439,7 @@ int64_t ScanNode::pre_process_select_index() {
     int cover_index_cnt = 0;
     int64_t possible_index = 0;
     for (auto outer_loop_iter = _paths.begin(); outer_loop_iter != _paths.end(); outer_loop_iter++) {
-        if (!outer_loop_iter->second->is_possible || outer_loop_iter->second->is_virtual) {
+        if (!outer_loop_iter->second->is_possible) {
             continue;
         }
 
@@ -450,12 +473,6 @@ int64_t ScanNode::pre_process_select_index() {
     _cover_index_cnt = cover_index_cnt;
     _possible_index_cnt = possible_cnt;
 
-    //1. 使用虚拟索引情况下正常走预处理逻辑(虚拟索引不会被干掉，也不会干掉任何正常索引)
-    //2. 存在虚拟索引时不使用预处理初选的索引。case：只有主键和虚拟索引的情况下possible_cnt = 1，会直接选择
-    if (_use_virtual_index) {
-        return 0;
-    }
-
     // 仅有一个possible index直接选择这个索引
     if (possible_cnt == 1) {
         return possible_index;
@@ -465,11 +482,7 @@ int64_t ScanNode::pre_process_select_index() {
 
 }
 
-int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
-    pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
-    _router_index_id = _table_id; 
-    _router_index = &_paths[_table_id]->pos_index;
-    // 预处理，使用倒排索引的sql不进行预处理，如果select_idx大于0则已经选出索引
+int64_t AccessPathMgr::select_index() {
     int64_t select_idx = pre_process_select_index();
     if (select_idx == 0) {
         if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
@@ -477,66 +490,119 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
             DB_DEBUG("table %ld has statistics", _table_id);
             select_idx = select_index_by_cost();
         } else {
-            select_idx = select_index();
+            select_idx = select_index_common();
         }
-    } 
-    if (_paths[select_idx]->is_virtual) {
+    }
+
+    return select_idx; 
+}
+
+int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
+    pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
+    // 预处理，使用倒排索引的sql不进行预处理，如果select_idx大于0则已经选出索引
+    int64_t select_idx = _main_path.select_index();
+    auto path = _main_path.path(select_idx);
+    if (path->is_virtual) {
         // 虚拟索引需要重新选择
-        _router_index_id = _table_id; 
-        _router_index = nullptr;
-        _multi_reverse_index.clear();
-        _paths[select_idx]->is_possible = false; // 确保下次不再选择该虚拟索引
-        std::string& name = _paths[select_idx]->index_info_ptr->short_name;
+        _scan_indexs.clear();
+        // 删除，确保下次不再选择该虚拟索引
+        _main_path.delete_possible_index(select_idx);
+        _main_path.reset();
+        std::string& name = path->index_info_ptr->short_name;
         SchemaFactory::get_instance()->update_virtual_index_info(select_idx, name, sample_sql);
         DB_WARNING("hit virtual index, table_id: %ld, virtual_index_id: %ld, virtual_index_name: %s, sample_sql: %s", 
             _table_id, select_idx, name.c_str(), sample_sql.c_str());
         return select_index_in_baikaldb(sample_sql);
     }
-    std::unordered_set<ExprNode*> other_condition;
-    if (_multi_reverse_index.size() > 0) {
+
+    std::vector<ExprNode*> filter_condition;
+    std::vector<int64_t> multi_reverse_index = _main_path.multi_reverse_index();
+    if (multi_reverse_index.size() > 0) {
+        _scan_indexs.clear();
         //有倒排索引，创建倒排索引树
         create_fulltext_index_tree();
+        std::unordered_set<ExprNode*> other_condition;
         std::unordered_set<ExprNode*> need_cut_condition;
-        select_idx = _multi_reverse_index[0];
-        for (auto index_id : _multi_reverse_index) {
-            auto pos_index = pb_scan_node->add_indexes();
-            pos_index->CopyFrom(_paths[index_id]->pos_index);
-            need_cut_condition.insert(_paths[index_id]->need_cut_index_range_condition.begin(), 
-                    _paths[index_id]->need_cut_index_range_condition.end());
+        select_idx = multi_reverse_index[0];
+        for (auto index_id : multi_reverse_index) {
+            auto path = _main_path.path(index_id);
+            serialize_index_and_set_router_index(path->pos_index, &_main_path.path(_table_id)->pos_index,
+                    path->is_covering_index);
+            need_cut_condition.insert(path->need_cut_index_range_condition.begin(), 
+                    path->need_cut_index_range_condition.end());
         }
         // 倒排多索引，直接上到其他过滤条件里
-        for (auto index_id : _multi_reverse_index) {
-            for (auto expr : _paths[index_id]->index_other_condition) {
+        for (auto index_id : multi_reverse_index) {
+            auto path = _main_path.path(index_id);
+            for (auto expr : path->index_other_condition) {
                 if (need_cut_condition.count(expr) == 0) {
                     other_condition.insert(expr);
                 }
             }
-            for (auto expr : _paths[index_id]->other_condition) {
+            for (auto expr : path->other_condition) {
                 if (need_cut_condition.count(expr) == 0) {
                     other_condition.insert(expr);
                 }
             }
         }
-        _is_covering_index = _paths[select_idx]->is_covering_index;
+        filter_condition.insert(filter_condition.end(), other_condition.begin(), other_condition.end());
     } else {
-        auto pos_index = pb_scan_node->add_indexes();
-        pos_index->CopyFrom(_paths[select_idx]->pos_index);
-        int64_t index_id = _paths[select_idx]->index_id;
-        _is_covering_index = _paths[select_idx]->is_covering_index;
-        // 索引还有清理逻辑，在plan_router里;primary->mutable_ranges()->Clear();
-        if (SchemaFactory::get_instance()->is_global_index(index_id) || 
-                _paths[select_idx]->index_type == pb::I_PRIMARY) {
-            _router_index_id = index_id;
-            _router_index = pos_index;
+        auto path = _main_path.path(select_idx);
+        for (auto& expr : path->index_other_condition) {
+            ExprNode::create_pb_expr(path->pos_index.add_index_conjuncts(), expr);
         }
-        other_condition = _paths[select_idx]->other_condition;
+        _scan_indexs.clear();
+        // 索引还有清理逻辑，在plan_router里;primary->mutable_ranges()->Clear();
+        if (path->index_info_ptr->is_global) {
+            serialize_index_and_set_router_index(path->pos_index, &path->pos_index,
+                    path->is_covering_index);
+        } else {
+            serialize_index_and_set_router_index(path->pos_index, &_main_path.path(_table_id)->pos_index,
+                    path->is_covering_index);
+        }
+        filter_condition.insert(filter_condition.end(), path->other_condition.begin(),
+                path->other_condition.end());
+        _learner_use_diff_index = false;
+        int64_t learner_idx = 0;
+        if (path->need_select_learner_index() || _learner_path.has_disable_index()) {
+            _learner_path.reset();
+            learner_idx = _learner_path.select_index();
+        }
+        if (learner_idx != 0 && learner_idx != path->index_id) {
+            auto learner_path = _learner_path.path(learner_idx);
+            for (auto& expr : learner_path->index_other_condition) {
+                ExprNode::create_pb_expr(learner_path->pos_index.add_index_conjuncts(), expr);
+            }
+            if (learner_path->index_info_ptr->is_global) {
+                serialize_index_and_set_router_index(learner_path->pos_index, &learner_path->pos_index,
+                    learner_path->is_covering_index, ScanIndexInfo::U_GLOBAL_LEARNER);
+            } else {
+                // 如果主集群和backup选择的索引都非全局二级索引则使用learner
+                ScanIndexInfo::IndexUseFor backup_use_for = ScanIndexInfo::U_GLOBAL_LEARNER;
+                if (!path->index_info_ptr->is_global) {
+                    backup_use_for = ScanIndexInfo::U_LOCAL_LEARNER;
+                } 
+                serialize_index_and_set_router_index(learner_path->pos_index, &_main_path.path(_table_id)->pos_index,
+                    learner_path->is_covering_index, backup_use_for);
+            }
+            _learner_use_diff_index = true;
+            DB_WARNING("need_select_learner_index: %d, has_disable_index: %d, index_id: %ld, learner_idx: %ld, sample_sql: %s", 
+                path->need_select_learner_index(), _learner_path.has_disable_index(), 
+                path->index_id, learner_idx, sample_sql.c_str());
+            std::vector<ExprNode*> learner_condition;
+            learner_condition.insert(learner_condition.end(), learner_path->other_condition.begin(),
+                    learner_path->other_condition.end());
+            if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+                get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
+                static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index_learner(learner_condition);
+            }
+        }
     }
     // modify filter conjuncts
     if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
         get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
-        static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index(other_condition);
+        static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index(filter_condition);
     }
-
     return select_idx;
 }
 
@@ -559,7 +625,7 @@ ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node) {
     return nullptr;
 }
 
-int ScanNode::choose_arrow_pb_reverse_index() {
+int AccessPathMgr::choose_arrow_pb_reverse_index() {
     if (_multi_reverse_index.size() > 1) {
         int pb_type_num = 0;
         int arrow_type_num = 0;
@@ -671,7 +737,7 @@ int ScanNode::create_fulltext_index_tree() {
         DB_WARNING("create fulltext index tree error.");
         return -1;
     } else {
-        if (_fulltext_use_arrow) {
+        if (_main_path.fulltext_use_arrow()) {
             pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
             auto fulltext_index_iter = pb_scan_node->mutable_fulltext_index();
             fulltext_index_iter->CopyFrom(*_fulltext_index_pb);

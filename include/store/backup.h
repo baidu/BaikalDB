@@ -114,7 +114,8 @@ private:
 
     int upload_sst_info_streaming(
         brpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
-        bool ingest_store_latest_sst, const BackupInfo& backup_info, SmartRegion region_ptr);
+        bool ingest_store_latest_sst, int64_t data_sst_to_process_size,
+        const BackupInfo& backup_info, SmartRegion region_ptr, brpc::StreamId client_sd = 0);
 
     template<typename WritePolicy>
     int send_file(BackupInfo& backup_info, WritePolicy* pa, int64_t log_index) {

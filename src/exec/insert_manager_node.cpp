@@ -489,7 +489,7 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
             // 移除冲突行
             for (auto id : ids_set) {
                 if (_record_ids.erase(id)) {
-                    update_record(_on_dup_key_update_records[index_id][key]);
+                    update_record(_on_dup_key_update_records[index_id][key], _origin_records[id]);
                 }
             }
         }
@@ -501,10 +501,10 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
                 for (auto it = std::next(min); it != ids_set.end(); ++it) {
                     if (_record_ids.erase(*it)) {
                         dup_record_ids.insert(*it);
-                        update_record(_origin_records[*min]);
+                        update_record(_origin_records[*min], _origin_records[*it]);
                     }
                 }
-                _record_ids.insert(*min);
+                //_record_ids.insert(*min);
             }
         }
     }
@@ -576,14 +576,14 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
     return _affected_rows;
 }
 
-void InsertManagerNode::update_record(SmartRecord record) {
+void InsertManagerNode::update_record(const SmartRecord& record, const SmartRecord& origin_record) {
     // 处理values函数
     _dup_update_row->clear();
     if (_values_tuple_desc != nullptr) {
         for (auto slot : _values_tuple_desc->slots()) {
-            auto field = record->get_field_by_tag(slot.field_id());
+            auto field = origin_record->get_field_by_tag(slot.field_id());
             _dup_update_row->set_value(slot.tuple_id(), slot.slot_id(),
-                    record->get_value(field));
+                    origin_record->get_value(field));
         }
     }
     // 更新数据

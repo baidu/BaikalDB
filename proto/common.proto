@@ -35,6 +35,8 @@ enum ErrCode {
     RETRY_LATER  = 28;
     LESS_THAN_OLDEST_TS  = 29;
     IN_PROCESS   = 30;
+    STORE_BUSY   = 31;
+    LEARNER_NOT_READY = 32;
 };
 
 enum PrimitiveType {
@@ -81,6 +83,13 @@ enum BackupTable {
     BT_LEARNER = 4;
 };
 
+enum StreamState {
+    SS_INIT = 0;
+    SS_PROCESSING = 1;
+    SS_SUCCESS = 2;
+    SS_FAIL = 3;
+};
+
 message SchemaConf {
     optional bool need_merge                = 1;
     optional bool storage_compute_separate  = 2; 
@@ -90,6 +99,7 @@ message SchemaConf {
     optional float filter_ratio             = 6;
     optional BackupTable backup_table       = 7;
     optional int32 pk_prefix_balance        = 8;
+    optional bool in_fast_import            = 9;  // 快速导入中，不调度，不分裂
 };
 
 enum Engine {
@@ -112,7 +122,7 @@ message SlotDescriptor {
 
 //tuple可以与table对应，也可以是中间表达式和聚合结果
 message TupleDescriptor {
-    required int32 tuple_id = 1;
+    required int32 tuple_id = 1; //从0开始
     optional int64 table_id = 2; //与表映射才填
     repeated SlotDescriptor slots = 3; 
 };

@@ -60,8 +60,6 @@ public:
         _on_dup_key_update_records.clear();
         _record_ids.clear();
         _index_keys_record_map.clear();
-        _insert_scan_records.clear();
-        _del_scan_records.clear();
         _seq_ids.clear();
         _primary_record_key_record_map_construct = false;
         _primary_record_key_record_map.clear();
@@ -139,7 +137,7 @@ public:
     }
 
 private:
-    void update_record(SmartRecord record);
+    void update_record(const SmartRecord& record, const SmartRecord& origin_record);
     int64_t     _table_id = -1;
     int32_t     _tuple_id = -1;
     int32_t     _values_tuple_id = -1;
@@ -154,17 +152,17 @@ private:
     std::vector<ExprNode*>            _update_exprs;
     std::vector<pb::SlotDescriptor>   _update_slots;
     std::vector<ExprNode*>   _insert_values;
-    std::vector<SmartRecord> _origin_records;
+    std::vector<SmartRecord> _origin_records;  // insert的数据
+    std::set<int32_t>            _record_ids; // 对应的_origin_records的下标
+    // index_id -> <key->record_id>
+    std::map<int64_t, std::map<std::string, std::set<int32_t>>> _index_keys_record_map;
+    std::map<int64_t, SmartIndex> _index_info_map;
     // index_id -> records
     std::map<int64_t, std::vector<SmartRecord>> _store_records;
     /* on_dup_key_update冲突时更新的是原表数据，_on_dup_key_update_records保存原表记录
        index_id -> <key -> record> 
     */
     std::map<int64_t, std::map<std::string, SmartRecord>> _on_dup_key_update_records;
-    std::set<int32_t>            _record_ids;
-    // index_id -> <key->record_id>
-    std::map<int64_t, std::map<std::string, std::set<int32_t>>> _index_keys_record_map;
-    std::map<int64_t, SmartIndex> _index_info_map;
 
     std::vector<int32_t>     _selected_field_ids;
 

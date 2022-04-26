@@ -60,7 +60,7 @@ public:
     bool is_initialize(const std::string& key, MemRow* dst);
     // 聚合函数逻辑
     // 初始化分配内存
-    int initialize(const std::string& key, int64_t& used_size, MemRow* dst);
+    int initialize(const std::string& key, MemRow* dst);
     // update每次更新一行
     int update(const std::string& key, MemRow* src, MemRow* dst);
     // merge表示store预聚合后，最终merge到一起
@@ -81,10 +81,9 @@ public:
 
     static void initialize_all(std::vector<AggFnCall*>& agg_calls,
             const std::string& key,
-            int64_t& used_size,
             MemRow* dst) {
         for (auto call : agg_calls) {
-            call->initialize(key, used_size, dst);
+            call->initialize(key, dst);
         }
     }
     static void update_all(std::vector<AggFnCall*>& agg_calls, const std::string& key, MemRow* src, MemRow* dst) {

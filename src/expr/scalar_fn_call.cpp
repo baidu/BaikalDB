@@ -19,6 +19,7 @@
 #include "parser.h"
 
 namespace baikaldb {
+DEFINE_bool(open_nonboolean_sql_forbid, false, "open nonboolean sqls forbid default:false");
 int ScalarFnCall::init(const pb::ExprNode& node) {
     int ret = 0;
     ret = ExprNode::init(node);
@@ -82,6 +83,18 @@ int ScalarFnCall::type_inferer() {
         if (c->col_type() == pb::INVALID_TYPE && !c->is_row_expr()) {
             DB_WARNING("_children is pb::INVALID_TYPE, node:%d", c->node_type());
             return -1;
+        }
+        if (is_logical_and_or_not()) {
+            //类型推导过程中分析表达式节点类型是否为bool型
+            if (c->col_type() != pb::BOOL) {
+                DB_WARNING("_children is not bool type, ScalarFnCall ExprNode type is [%s], children node_type_is [%s]", 
+                    pb::ExprNodeType_Name(_node_type).c_str(),
+                    pb::ExprNodeType_Name(c->node_type()).c_str());
+                    ExprNode::_s_non_boolean_sql_cnts << 1;
+                if (FLAGS_open_nonboolean_sql_forbid) {
+                    return -1;
+                }
+            }
         }
         types.push_back(c->col_type());
     }

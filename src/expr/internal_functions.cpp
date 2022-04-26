@@ -1175,7 +1175,7 @@ ExprValue week(const std::vector<ExprValue>& input) {
 }
 
 ExprValue datediff(const std::vector<ExprValue>& input) {
-    if (input.size() == 0 || input[0].is_null() || input[1].is_null()) {
+    if (input.size() != 2 || input[0].is_null() || input[1].is_null()) {
         return ExprValue::Null();
     }
     ExprValue left = input[0];
@@ -1873,6 +1873,24 @@ ExprValue last_insert_id(const std::vector<ExprValue>& input) {
     return tmp.cast_to(pb::INT64);
 }
 
+ExprValue point_distance(const std::vector<ExprValue>& input) {
+    if (input.size() < 4) {
+        return ExprValue::Null();
+    }
+    double latitude1 = input[0].get_numberic<double>();
+    double longitude1 = input[1].get_numberic<double>();
+    double latitude2 = input[2].get_numberic<double>();
+    double longitude2 = input[3].get_numberic<double>();
+    ExprValue result(pb::INT64);
+    double tmp_pow1 = std::pow(std::sin((latitude1 * M_PI / 180 - latitude2 * M_PI / 180) / 2),2);
+    double tmp_pow2 = std::pow(std::sin((longitude1  * M_PI / 180 - longitude2  * M_PI / 180) / 2),2);
+    double tmp_cos_multi = std::cos(latitude1  * M_PI / 180) * std::cos(latitude2  * M_PI / 180);
+    double tmp_sqrt = std::sqrt(tmp_pow1 + tmp_cos_multi * tmp_pow2);
+    double tmp_asin = std::asin(tmp_sqrt);
+    result._u.int64_val = std::round(1000 * 6378.138 * 2 * tmp_asin);
+    return result;
+}
+
 ExprValue cast_to_date(const std::vector<ExprValue>& input) {
     if (input.size() != 1) {
         return ExprValue::Null();
@@ -1920,6 +1938,7 @@ ExprValue cast_to_unsigned(const std::vector<ExprValue>& input) {
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::UINT64);
 }
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -72,17 +72,17 @@ int UnionPlanner::gen_select_stmts_plan() {
         if (ret < 0) {
             return -1;
         }
-        auto sub_ctx = _ctx->sub_query_plans.back();
         if (stmt_idx == 0) {
             final_select_names = _select_names;
         }
         // union的每个select的column个数必须一样
-        if (final_select_names.size() != sub_ctx->expr_params.row_filed_number) {
+        if (final_select_names.size() != _cur_sub_ctx->expr_params.row_filed_number) {
             _ctx->stat_info.error_code = ER_WRONG_NUMBER_OF_COLUMNS_IN_SELECT;
             _ctx->stat_info.error_msg << "The used SELECT statements have a different number of columns";
-            DB_WARNING("have a different number of columns %zu %d", final_select_names.size(), sub_ctx->expr_params.row_filed_number);
+            DB_WARNING("have a different number of columns %zu %d", final_select_names.size(), _cur_sub_ctx->expr_params.row_filed_number);
             return -1;
         }
+        _ctx->add_sub_ctx(_cur_sub_ctx);
     }
     _select_names.swap(final_select_names);
     return 0;

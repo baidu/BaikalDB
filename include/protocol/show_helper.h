@@ -51,6 +51,7 @@ const std::string SQL_SHOW_DIFF_REGION_SIZE      = "diff_region_size";      // s
 const std::string SQL_SHOW_NETWORK_SEGMENT       = "network_segment";       // show network_segment resourceTag;
 const std::string SQL_SHOW_SWITCH                = "switch";                // show switch
 const std::string SQL_SHOW_ALL_TABLES            = "all_tables";            // show all_tables [ttl/binlog/...]
+const std::string SQL_SHOW_INSTANCE_PARAM        = "instance_param";        // show instance_param [resource_tag/instance]
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -128,6 +129,8 @@ private:
     bool _show_network_segment(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show switch
     bool _show_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show instance_param ResourceTag / Instance
+    bool _show_instance_param(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 
             std::vector<ResultField>& fields,

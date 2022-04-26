@@ -116,7 +116,7 @@ int SelectPlanner::plan() {
     if (0 != create_agg_node()) {
         return -1;
     }
-    // greate_filter_node
+    // create_filter_node
     if (0 != create_filter_node(_where_filters, pb::WHERE_FILTER_NODE)) {
         return -1;
     }
@@ -215,7 +215,6 @@ bool SelectPlanner::check_conjuncts(std::vector<ExprNode*>& conjuncts) {
 bool SelectPlanner::check_single_conjunct(ExprNode* conjunct) {
     //conjunct的size为1同时含有limit节点
     auto& expr_head_node = conjunct;
-    auto expr_node_about_primary = expr_head_node->children(0);
     if (!is_range_compare(expr_head_node)) {
         return false;
     }
@@ -226,7 +225,11 @@ bool SelectPlanner::check_single_conjunct(ExprNode* conjunct) {
         return false;
     }
     auto& pk_fields_info = pk_field_info_ptr->fields;
+    if (expr_head_node->children_size() == 0) {
+        return false;
+    }
     //判断row_expr情况下的主键情况
+    auto expr_node_about_primary = expr_head_node->children(0);
     if (expr_node_about_primary->is_row_expr()) {
         RowExpr* row_expr = static_cast<RowExpr*>(expr_node_about_primary);
         std::map<size_t, SlotRef*> slots;
