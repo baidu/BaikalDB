@@ -462,7 +462,7 @@ public:
         }
         return false;
     }
-    static void choose_other_if_faulty(pb::RegionInfo& info, std::string& addr);
+    static void choose_other_if_dead(pb::RegionInfo& info, std::string& addr);
     static void other_normal_peer_to_leader(pb::RegionInfo& info, std::string& addr);
     ErrorType process_binlog_start(RuntimeState* state, pb::OpType op_type);
     void process_binlog_done(RuntimeState* state, pb::OpType op_type) {

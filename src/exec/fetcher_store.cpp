@@ -291,7 +291,7 @@ void OnRPCDone::select_addr() {
     } else if (_retry_times == 0) {
         // 重试前已经选择了normal的实例
         // 或者store返回了正确的leader
-        FetcherStore::choose_other_if_faulty(_info, _addr);
+        FetcherStore::choose_other_if_dead(_info, _addr);
     }
 
     // 存在全局索引降级的情况，强制访问主集群的情况下不要backup
@@ -788,10 +788,10 @@ void OnRPCDone::send_request() {
     }
 }
 
-void FetcherStore::choose_other_if_faulty(pb::RegionInfo& info, std::string& addr) {
+void FetcherStore::choose_other_if_dead(pb::RegionInfo& info, std::string& addr) {
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     auto status = schema_factory->get_instance_status(addr);
-    if (status.status == pb::NORMAL) {
+    if (status.status != pb::DEAD) {
         return;
     }
 
@@ -935,7 +935,7 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
         if (retry_times == 0) {
             // 重试前已经选择了normal的实例
             // 或者store返回了正确的leader
-            choose_other_if_faulty(info, addr);
+            choose_other_if_dead(info, addr);
         }
         ret = channel.Init(addr.c_str(), &option);
         if (ret != 0) {
