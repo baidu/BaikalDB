@@ -91,9 +91,9 @@ bind(
 
 new_http_archive(
     name = "com_github_facebook_rocksdb",
-    url = "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz",
-    strip_prefix = "rocksdb-6.8.1",
-    sha256 = "ca192a06ed3bcb9f09060add7e9d0daee1ae7a8705a3d5ecbe41867c5e2796a2",
+    url = "https://github.com/facebook/rocksdb/archive/v6.26.0.tar.gz",
+    strip_prefix = "rocksdb-6.26.0",
+    sha256 = "b793066463da71d31a46f31946e4fca435a7c3e73435e2bb1d062d95e0a20116",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
 )
 
