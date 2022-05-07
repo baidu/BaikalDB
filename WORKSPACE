@@ -87,7 +87,7 @@ _RULES_BOOST_COMMIT = "6367a1ac9ba05318e170fc376d0aed335aa0d8e2"
 
 http_archive(
     name = "com_github_nelhage_rules_boost",
-    sha256 = "c1b8b2adc3b4201683cf94dda7eef3fc0f4f4c0ea5caa3ed3feffe07e1fb5b15",
+    sha256 = "c2b7bbf1d6e01a3aa0ff245fa2c4b924752b13c598a165b78c19b6b7359e2650",
     strip_prefix = "rules_boost-%s" % _RULES_BOOST_COMMIT,
     urls = [
         "https://github.com/nelhage/rules_boost/archive/%s.tar.gz" % _RULES_BOOST_COMMIT,
