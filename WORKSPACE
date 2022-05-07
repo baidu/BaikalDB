@@ -66,9 +66,24 @@ new_http_archive(
   url = "https://github.com/google/leveldb/archive/a53934a3ae1244679f812d998a4f16f2c7f309a6.tar.gz"
 )
 
+
+#zstd
+new_http_archive(
+    name = "com_github_facebook_zstd",
+    urls = ["https://github.com/facebook/zstd/archive/v1.4.4.tar.gz",],
+    strip_prefix = "zstd-1.4.4",
+    build_file = "third-party/zstd.BUILD",
+    sha256 = "a364f5162c7d1a455cc915e8e3cf5f4bd8b75d09bc0f53965b0c9ca1383c52c8",
+)
+
+bind(
+    name = "zstd",
+    actual = "@com_github_facebook_zstd//:zstd",
+)
+
 # from https://github.com/nelhage/rules_boost
 # load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-_RULES_BOOST_COMMIT = "652b21e35e4eeed5579e696da0facbe8dba52b1f"
+_RULES_BOOST_COMMIT = "6367a1ac9ba05318e170fc376d0aed335aa0d8e2"
 
 http_archive(
     name = "com_github_nelhage_rules_boost",
@@ -167,19 +182,6 @@ bind(
     actual = "@com_github_lz4_lz4//:lz4",
 )
 
-#zstd
-new_http_archive(
-    name = "com_github_facebook_zstd",
-    urls = ["https://github.com/facebook/zstd/archive/v1.4.4.tar.gz",],
-    strip_prefix = "zstd-1.4.4",
-    build_file = "third-party/zstd.BUILD",
-    sha256 = "a364f5162c7d1a455cc915e8e3cf5f4bd8b75d09bc0f53965b0c9ca1383c52c8",
-)
-
-bind(
-    name = "zstd",
-    actual = "@com_github_facebook_zstd//:zstd",
-)
 
 
 git_repository(
