@@ -368,6 +368,7 @@ public:
         if (ret < 0) {
             state->error_code = error_code;
             state->error_msg.clear();
+            state->error_msg.str("");
             state->error_msg << error_msg.str();
             return -1;
         }
