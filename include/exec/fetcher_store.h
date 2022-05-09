@@ -367,7 +367,8 @@ public:
         update_state_info(state);
         if (ret < 0) {
             state->error_code = error_code;
-            state->error_msg.swap(error_msg);
+            state->error_msg.clear();
+            state->error_msg << error_msg.str();
             return -1;
         }
         return affected_rows.load();
