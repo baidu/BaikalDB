@@ -188,7 +188,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         _right_field_cnts.emplace_back(right_field_cnt);
         _left_opens.push_back(left_open);
         _right_opens.push_back(right_open);
-        _like_prefixs.emplace_back(like_prefix);
+        _like_prefixs.push_back(like_prefix);
     }
     if (check_memory && 0 != state->memory_limit_exceeded(std::numeric_limits<int>::max(), ranges_used_size)) {
         return -1;
