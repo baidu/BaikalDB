@@ -246,7 +246,7 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
         } else {
             state->error_code = main_fetcher.fetcher_store.error_code;
             state->error_msg.str("");
-            state->error_msg = main_fetcher.fetcher_store.error_msg.str();
+            state->error_msg << main_fetcher.fetcher_store.error_msg.str();
             DB_WARNING("both router index fail, txn_id: %lu, log_id:%lu, main router index_id: %ld" 
                 "backup router index_id: %ld", state->txn_id, state->log_id(), 
                 main_fetcher.scan_index->router_index_id, backup_fetcher.scan_index->router_index_id);
@@ -260,7 +260,7 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
         if (ret < 0) {
             state->error_code = fetcher_store->error_code;
             state->error_msg.str("");
-            state->error_msg = fetcher_store->error_msg.str();
+            state->error_msg << fetcher_store->error_msg.str();
             DB_WARNING("single_fetcher_store_open fail, txn_id: %lu, log_id:%lu, router index_id: %ld",
                 state->txn_id, state->log_id(), main_fetcher.scan_index->router_index_id);
             return -1;
