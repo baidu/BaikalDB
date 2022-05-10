@@ -16,7 +16,7 @@ jobs:
           - centos-7
           - centos-8
     container:
-      image: ghcr.io/baikalgroup/baikal-dev:${{ matrix.os }}
+      image: baikalgroup/baikal-dev:${{ matrix.os }}
     steps:
       - uses: actions/checkout@v2
         with: 
