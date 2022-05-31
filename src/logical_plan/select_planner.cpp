@@ -464,7 +464,7 @@ int SelectPlanner::create_agg_node() {
     }
     pb::PlanNode* agg_node = _ctx->add_plan_node();
     agg_node->set_node_type(pb::AGG_NODE);
-    if (!_distinct_agg_funcs.empty()) {
+    if (!_distinct_agg_funcs.empty() || !_orderby_agg_exprs.empty()) {
         agg_node->set_node_type(pb::MERGE_AGG_NODE);
     }
     agg_node->set_limit(-1);
@@ -487,7 +487,7 @@ int SelectPlanner::create_agg_node() {
     }
     agg->set_agg_tuple_id(_agg_tuple_id);
 
-    if (!_distinct_agg_funcs.empty()) {
+    if (!_distinct_agg_funcs.empty() || !_orderby_agg_exprs.empty()) {
         pb::PlanNode* agg_node2 = _ctx->add_plan_node();
         agg_node2->set_node_type(pb::AGG_NODE);
         agg_node2->set_limit(-1);
@@ -501,12 +501,40 @@ int SelectPlanner::create_agg_node() {
             expr->CopyFrom(_group_exprs[idx]);
         }
         for (uint32_t idx = 0; idx < _distinct_agg_funcs.size(); ++idx) {
-            for (int expr_idx = 1; expr_idx < _distinct_agg_funcs[idx].nodes_size(); expr_idx++) {
+            if (_distinct_agg_funcs[idx].nodes(0).fn().name() == "group_concat_distinct") {
+                int expr_idx = 2;
+                for (int i = 0; i < _distinct_agg_funcs[idx].nodes(1).num_children(); i++) {
+                    pb::Expr* expr = agg2->add_group_exprs();
+                    ExprNode::get_pb_expr(_distinct_agg_funcs[idx], &expr_idx, expr);
+                }
+                continue;
+            }
+            int expr_idx = 1;
+            while (expr_idx < _distinct_agg_funcs[idx].nodes_size()) {
                 pb::Expr* expr = agg2->add_group_exprs();
-                expr->add_nodes()->CopyFrom(_distinct_agg_funcs[idx].nodes(expr_idx));
+                ExprNode::get_pb_expr(_distinct_agg_funcs[idx], &expr_idx, expr);
             }
         }
+        for (uint32_t idx = 0; idx < _orderby_agg_exprs.size(); ++idx) {
+            pb::Expr* expr = agg2->add_group_exprs();
+            expr->CopyFrom(_orderby_agg_exprs[idx]);
+        }
         for (uint32_t idx = 0; idx < _agg_funcs.size(); ++idx) {
+            if (_agg_funcs[idx].nodes(0).fn().name() == "group_concat" &&
+                    _agg_funcs[idx].nodes(0).num_children() > 2) {
+                int expr_idx = 1; // expr_list
+                ExprNode::get_pb_expr(_agg_funcs[idx], &expr_idx, nullptr); // expr_list
+                ExprNode::get_pb_expr(_agg_funcs[idx], &expr_idx, nullptr); // separator
+
+                // 保留expr row与separate, 去掉by_expr_row 与 is_desc_row
+                pb::Expr* expr = agg2->add_agg_funcs();
+                for (int i = 0; i < expr_idx; i++) {
+                    expr->add_nodes()->CopyFrom(_agg_funcs[idx].nodes(i));
+                }
+                expr->mutable_nodes(0)->set_num_children(2); // agg_node
+
+                continue;
+            }
             pb::Expr* expr = agg2->add_agg_funcs();
             expr->CopyFrom(_agg_funcs[idx]);
         }

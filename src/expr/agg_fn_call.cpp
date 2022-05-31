@@ -48,6 +48,7 @@ int AggFnCall::init(const pb::ExprNode& node) {
         {"tdigest_agg", TDIGEST_AGG},
         {"tdigest_build_agg", TDIGEST_BUILD_AGG},
         {"group_concat", GROUP_CONCAT},
+        {"group_concat_distinct", GROUP_CONCAT},
     };
     //所有agg都是非const的
     _is_constant = false;
@@ -63,7 +64,8 @@ int AggFnCall::init(const pb::ExprNode& node) {
     }
     if (_fn.name() == "count_distinct" ||
             _fn.name() == "sum_distinct" ||
-            _fn.name() == "avg_distinct") {
+            _fn.name() == "avg_distinct" ||
+            _fn.name() == "group_concat_distinct") {
         _is_distinct = true;
     }
     return 0;
@@ -223,6 +225,75 @@ int AggFnCall::open() {
             _agg_type = COUNT_STAR;
         }
     }
+    if (_agg_type == GROUP_CONCAT) {
+        int children_size = _children.size();
+        if (children_size < 2) {
+            DB_WARNING("children_size %d less than 2", children_size);
+            return -1;
+        }
+        if (_children[1]->is_literal()) {
+            ExprValue value = _children[1]->get_value(nullptr);
+            if (!value.is_null()) {
+                _sep = value.get_string();
+            }
+        }
+        if (children_size == 4) {
+            if (!_children[2]->is_row_expr() || !_children[3]->is_row_expr() ||
+                _children[2]->children_size() != _children[3]->children_size()) {
+                DB_WARNING("children_size not equal");
+                return -1;
+            }
+            pb::TupleDescriptor order_tuple;
+            _order_tuple_id = 0;
+            order_tuple.set_tuple_id(_order_tuple_id);
+            for (size_t i = 0; i < _children[2]->children_size(); i++) {
+                ExprNode* order_expr = _children[2]->children(i);
+                bool is_asc = !_children[3]->children(i)->get_value(nullptr)._u.bool_val;
+                int ret = order_expr->expr_optimize();
+                if (ret < 0) {
+                    return ret;
+                }
+                pb::SlotDescriptor* slot = order_tuple.add_slots();
+                slot->set_slot_id(i + 1);
+                slot->set_tuple_id(_order_tuple_id);
+                slot->set_slot_type(order_expr->col_type());
+
+                ExprNode* slot_order_expr = nullptr;
+                //create slot ref
+                pb::Expr slot_expr;
+                pb::ExprNode* node = slot_expr.add_nodes();
+                node->set_node_type(pb::SLOT_REF);
+                node->set_col_type(order_expr->col_type());
+                node->set_num_children(0);
+                node->mutable_derive_node()->set_tuple_id(_order_tuple_id);
+                node->mutable_derive_node()->set_slot_id(i + 1);
+                ret = ExprNode::create_tree(slot_expr, &slot_order_expr);
+                if (ret < 0) {
+                    //如何释放资源
+                    return ret;
+                }
+                _order_exprs.push_back(order_expr);
+                _slot_order_exprs.push_back(slot_order_expr);
+                _is_asc.push_back(is_asc);
+                _is_null_first.push_back(is_asc);
+            }
+            // agg dst expr
+            pb::SlotDescriptor* slot = order_tuple.add_slots();
+            slot->set_slot_id(_slot_order_exprs.size() + 1);
+            slot->set_tuple_id(_order_tuple_id);
+            slot->set_slot_type(pb::STRING);
+
+           _mem_row_desc = std::make_shared<MemRowDescriptor>();
+           std::vector<pb::TupleDescriptor> tuple_descs;
+           tuple_descs.push_back(order_tuple);
+           int ret = _mem_row_desc->init(tuple_descs);
+           if (ret < 0) {
+               DB_WARNING("_mem_row_desc init fail");
+               return -1;
+           }
+            _mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
+        }
+    }
     return 0;
 }
 
@@ -369,8 +440,13 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst, int64_t& used_siz
             return 0;
         }
         case GROUP_CONCAT: {
+            if (_mem_row_compare != nullptr) {
+                if (_intermediate_row_batch_map.count(key) == 0) {
+                    _intermediate_row_batch_map[key] = std::make_shared<RowBatch>();
+                }
+            }
             if (dst_val.is_null()) {
-                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(pb::STRING));
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
             }
             return 0;
         }
@@ -533,13 +609,38 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst, int64_t&
             return 0;
         }
         case GROUP_CONCAT: {
-            ExprValue value = _children[0]->get_value(src);
-            if (!value.is_null()) {
-                ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
-                if (result.str_val.length() > 0) {
-                    result.str_val += ",";
+            std::string val = "";
+            bool all_is_null = true;
+            for (size_t i = 0; i < _children[0]->children_size(); i++) {
+                ExprValue value = _children[0]->children(i)->get_value(src);
+                if (!value.is_null()) {
+                    all_is_null = false;
+                    val += value.get_string();
                 }
-                result.str_val += value.get_string();
+            }
+            if (_mem_row_compare != nullptr) {
+                if (!all_is_null) {
+                    auto& batch = _intermediate_row_batch_map[key];
+                    std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+                    for (size_t i = 0; i < _order_exprs.size(); i++) {
+                        ExprValue v = _order_exprs[i]->get_value(src);
+                        row->set_value(_order_tuple_id, i + 1, v);
+                    }
+                    ExprValue value = ExprValue(pb::STRING);
+                    value.str_val = val;
+                    row->set_value(_order_tuple_id, _slot_order_exprs.size() + 1, value);
+                    batch->move_row(std::move(row));
+                }
+                return 0;
+            }
+            if (!all_is_null) {
+                ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
+                if (result.type != pb::STRING) { // is_null
+                    result = ExprValue(pb::STRING);
+                } else {
+                    result.str_val += _sep;
+                }
+                result.str_val += val;
                 used_size += result.size();
                 dst->set_value(_tuple_id, _intermediate_slot_id, result);
             }
@@ -554,6 +655,20 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& 
         //distinct agg, 无merge概念
         //普通agg与distinct agg一起出现时，普通agg需要多计算一次，因此需要merge
         return update(key, src, dst, used_size);
+    }
+    if (_agg_type == GROUP_CONCAT && _mem_row_compare != nullptr) {
+        ExprValue value = src->get_value(_tuple_id, _intermediate_slot_id);
+        if (!value.is_null()) {
+            auto& batch = _intermediate_row_batch_map[key];
+            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+            for (size_t i = 0; i < _order_exprs.size(); i++) {
+                ExprValue v = _order_exprs[i]->get_value(src);
+                row->set_value(_order_tuple_id, i + 1, v);
+            }
+            row->set_value(_order_tuple_id, _slot_order_exprs.size() + 1, value);
+            batch->move_row(std::move(row));
+        }
+        return 0;
     }
     //首行不需要merge
     if (src == dst) {
@@ -687,8 +802,10 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& 
             ExprValue value = src->get_value(_tuple_id, _intermediate_slot_id);
             if (!value.is_null()) {
                 ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
-                if (result.str_val.length() > 0) {
-                    result.str_val += ",";
+                if (result.type != pb::STRING) { // is_null
+                    result = ExprValue(pb::STRING);
+                } else {
+                    result.str_val += _sep;
                 }
                 result.str_val += value.get_string();
                 used_size += result.size();
@@ -701,6 +818,38 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& 
     }
 }
 int AggFnCall::finalize(const std::string& key, MemRow* dst) {
+    if (_agg_type == GROUP_CONCAT && _mem_row_compare != nullptr) {
+        auto& intermediate_row_batch = _intermediate_row_batch_map[key];
+        if (intermediate_row_batch == nullptr || intermediate_row_batch->size() == 0) {
+            dst->set_value(_tuple_id, _final_slot_id,  ExprValue::Null());
+            return 0;
+        }
+        _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
+        _sorter->add_batch(intermediate_row_batch);
+        _sorter->sort();
+
+        ExprValue result(pb::STRING);
+        bool eos = false;
+        do {
+            std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
+            int ret = _sorter->get_next(batch.get(), &eos);
+            if (ret < 0) {
+                DB_WARNING("get_next fail:%d", ret);
+                return ret;
+            }
+            for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
+                ExprValue value = batch->get_row()->get_value(_order_tuple_id, _slot_order_exprs.size() + 1);
+                if (!value.is_null()) {
+                    if (result.str_val.length() > 0) {
+                        result.str_val += _sep;
+                    }
+                    result.str_val += value.get_string();
+                }
+            }
+        } while (!eos);
+        dst->set_value(_tuple_id, _intermediate_slot_id, result);
+        return 0;
+    }
     if (_intermediate_slot_id == _final_slot_id) {
         if (is_bitmap_agg() || is_tdigest_agg() || is_hll_agg()) {
             auto& val = _intermediate_val_map[key];

@@ -316,6 +316,7 @@ protected:
     int32_t                 _agg_slot_cnt = 1;
     std::vector<pb::Expr>   _agg_funcs;
     std::vector<pb::Expr>   _distinct_agg_funcs;
+    std::vector<pb::Expr>   _orderby_agg_exprs;
     std::unordered_map<std::string, std::vector<pb::SlotDescriptor>> _agg_slot_mapping;
 
     // table names, the order in From clause is preserved
