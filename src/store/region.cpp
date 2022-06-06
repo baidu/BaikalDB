@@ -5226,7 +5226,9 @@ void Region::write_local_rocksdb_for_split() {
                 continue;
             }
             auto read_and_write_column = [this, &pk_info, &write_sst_lines, end_key,
-                                   field_id] () {
+                                   field_id, new_region] () {
+                std::unique_ptr<SstFileWriter> writer(new SstFileWriter(
+                            _rocksdb->get_options(_rocksdb->get_data_handle())));
                 MutTableKey table_prefix;
                 table_prefix.append_i64(_region_id);
                 table_prefix.append_i32(get_global_index_id()).append_i32(field_id);
@@ -5242,10 +5244,34 @@ void Region::write_local_rocksdb_for_split() {
 
                 std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _data_cf));
                 table_prefix.append_index(_split_param.split_key);
+
                 int64_t count = 0;
+                std::ostringstream os;
+                // 使用FLAGS_db_path，保证ingest能move成功
+                os << FLAGS_db_path << "/" << "region_split_ingest_sst." << _region_id << "."
+                    << _split_param.new_region_id << "." << field_id;
+                std::string path = os.str();
+
+                ScopeGuard auto_fail_guard([path, this]() {
+                    _split_param.err_code = -1;
+                    butil::DeleteFile(butil::FilePath(path), false);
+                });
+
+                auto s = writer->open(path);
+                if (!s.ok()) {
+                    DB_FATAL("open sst file path: %s failed, err: %s, region_id: %ld, field_id: %ld", path.c_str(), s.ToString().c_str(), _region_id, field_id);
+                    _split_param.err_code = -1;
+                    return;
+                }
+
                 for (iter->Seek(table_prefix.data()); iter->Valid(); iter->Next()) {
                     ++count;
-                    if (count % 100 == 0 && (!is_leader() || _shutdown)) {
+                    if (count % 1000 == 0) {
+                        // 大region split中重置time_cost，防止version=0超时删除
+                        new_region->reset_timecost();
+                    }
+
+                    if (count % 1000 == 0 && (!is_leader() || _shutdown)) {
                         DB_WARNING("field %d, old region_id: %ld write to new region_id: %ld failed, not leader",
                                     field_id, _region_id, _split_param.new_region_id);
                         _split_param.err_code = -1;
@@ -5261,18 +5287,37 @@ void Region::write_local_rocksdb_for_split() {
                     }
                     MutTableKey key(iter->key());
                     key.replace_i64(_split_param.new_region_id, 0);
-                    auto s = _rocksdb->put(write_options, _data_cf, key.data(), iter->value());
+                    auto s = writer->put(key.data(), iter->value());
                     if (!s.ok()) {
                         DB_FATAL("field %d, old region_id: %ld write to new region_id: %ld failed, status: %s",
-                                field_id, _region_id, _split_param.new_region_id, s.ToString().c_str());
+                                    field_id, _region_id, _split_param.new_region_id, s.ToString().c_str());
                         _split_param.err_code = -1;
                         return;
                     }
                     num_write_lines++;
                 }
+                s = writer->finish();
+                uint64_t file_size = writer->file_size();
+                if (num_write_lines > 0) {
+                    if (!s.ok()) {
+                        DB_FATAL("finish sst file path: %s failed, err: %s, region_id: %ld, field_id %ld",
+                                path.c_str(), s.ToString().c_str(), _region_id, field_id);
+                        _split_param.err_code = -1;
+                        return;
+                    }
+                    int ret_data = RegionControl::ingest_data_sst(path, _region_id, true);
+                    if (ret_data < 0) {
+                        DB_FATAL("ingest sst fail, path:%s, region_id: %ld", path.c_str(), _region_id);
+                        _split_param.err_code = -1;
+                        return;
+                    }
+                } else {
+                    butil::DeleteFile(butil::FilePath(path), false);
+                }
                 write_sst_lines += num_write_lines;
-                DB_WARNING("scan filed:%d, cost=%ld, lines=%ld, skip:%ld, region_id: %ld",
-                            field_id, cost.get_time(), num_write_lines, skip_write_lines, _region_id);
+                auto_fail_guard.release();
+                DB_WARNING("scan field:%d, cost=%ld, file_size=%lu, lines=%ld, skip:%ld, region_id: %ld",
+                            field_id, cost.get_time(), file_size, num_write_lines, skip_write_lines, _region_id);
 
             };
             copy_bth.run(read_and_write_column);
