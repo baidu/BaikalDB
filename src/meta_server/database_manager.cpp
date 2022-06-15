@@ -135,7 +135,9 @@ void DatabaseManager::modify_database(const pb::MetaManagerRequest& request, bra
     
     pb::DataBaseInfo tmp_database_info = _database_info_map[database_id];
     tmp_database_info.set_version(tmp_database_info.version() + 1);
-    tmp_database_info.set_quota(database_info.quota());
+    if (database_info.has_quota()) {
+        tmp_database_info.set_quota(database_info.quota());
+    }
     if (database_info.has_resource_tag()) {
         tmp_database_info.set_resource_tag(database_info.resource_tag());
     }
