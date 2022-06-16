@@ -68,8 +68,8 @@ int UpdatePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
-    int64_t table_id = iter->second.table_id;
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
+    int64_t table_id = info.table_id;
     _ctx->prepared_table_id = table_id;
     if (!_ctx->is_prepared) {
         set_dml_txn_state(table_id);
@@ -93,10 +93,18 @@ int UpdatePlanner::parse_limit() {
 int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
     if (_plan_table_ctx->table_tuple_mapping.size() != 1) {
         DB_WARNING("no database name, specify database by USE cmd");
+    }
+    if (_current_tables.size() != 1 || _plan_table_ctx->table_tuple_mapping.count(try_to_lower(_current_tables[0])) == 0) {
+        DB_WARNING("invalid sql format: %s", _ctx->sql.c_str());
         return -1;
     }
-    auto iter = _plan_table_ctx->table_tuple_mapping.begin();
-    int64_t table_id = iter->second.table_id;
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
+    int64_t table_id = info.table_id;
+
+    if (_apply_root != nullptr) {
+        DB_WARNING("not support correlation subquery sql format: %s", _ctx->sql.c_str());
+        return -1;
+    }
 
     update_node->set_node_type(pb::UPDATE_NODE);
     update_node->set_limit(_limit_count);
@@ -117,14 +125,15 @@ int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
         return -1;
     }
     for (auto& field : pk->fields) {
-        auto& slot = get_scan_ref_slot(iter->first, table_id, field.id, field.type);
+        auto& slot = get_scan_ref_slot(try_to_lower(_current_tables[0]), table_id, field.id, field.type);
         update->add_primary_slots()->CopyFrom(slot);
     }
     return 0;
 }
 
 int UpdatePlanner::parse_kv_list() {
-    int64_t table_id = _plan_table_ctx->table_tuple_mapping.begin()->second.table_id;
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
+    int64_t table_id = info.table_id;
     auto table_info_ptr = _factory->get_table_info_ptr(table_id); 
     if (table_info_ptr == nullptr) {
         DB_WARNING("table:%ld is nullptr", table_id);
