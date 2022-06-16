@@ -36,6 +36,56 @@ int InformationSchema::init() {
     init_referential_constraints();
     init_triggers();
     init_views();
+    init_character_sets();
+    init_collation_character_set_applicability();
+    init_collations();
+    init_column_privileges();
+    init_engines();
+    init_events();
+    init_files();
+    init_global_status();
+    init_global_variables();
+    init_innodb_buffer_page();
+    init_innodb_buffer_page_lru();
+    init_innodb_buffer_pool_stats();
+    init_innodb_cmp();
+    init_innodb_cmpmem();
+    init_innodb_cmpmem_reset();
+    init_innodb_cmp_per_index();
+    init_innodb_cmp_per_index_reset();
+    init_innodb_cmp_reset();
+    init_innodb_ft_being_deleted();
+    init_innodb_ft_config();
+    init_innodb_ft_default_stopword();
+    init_innodb_ft_deleted();
+    init_innodb_ft_index_cache();
+    init_innodb_ft_index_table();
+    init_innodb_locks();
+    init_innodb_lock_waits();
+    init_innodb_metrics();
+    init_innodb_sys_columns();
+    init_innodb_sys_datafiles();
+    init_innodb_sys_fields();
+    init_innodb_sys_foreign();
+    init_innodb_sys_foreign_cols();
+    init_innodb_sys_indexes();
+    init_innodb_sys_tables();
+    init_innodb_sys_tablespaces();
+    init_innodb_sys_tablestats();
+    init_innodb_trx();
+    init_optimizer_trace();
+    init_parameters();
+    init_partitions();
+    init_plugins();
+    init_processlist();
+    init_profiling();
+    init_schema_privileges();
+    init_session_status();
+    init_session_variables();
+    init_table_constraints();
+    init_table_privileges();
+    init_tablespaces();
+    init_user_privileges();
     return 0;
 }
 
@@ -906,6 +956,998 @@ void InformationSchema::init_views() {
     };
     int64_t table_id = construct_table("VIEWS", fields);
     // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_character_sets() {
+    FieldVec fields {
+        {"CHARACTER_SET_NAME", pb::STRING},
+        {"DEFAULT_COLLATE_NAME", pb::STRING},
+        {"DESCRIPTION", pb::STRING},
+        {"MAXLEN", pb::INT64},
+    };
+    int64_t table_id = construct_table("CHARACTER_SETS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_collation_character_set_applicability() {
+    FieldVec fields {
+        {"COLLATION_NAME", pb::STRING},
+        {"CHARACTER_SET_NAME", pb::STRING},
+    };
+    int64_t table_id = construct_table("COLLATION_CHARACTER_SET_APPLICABILITY", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_collations() {
+    FieldVec fields {
+        {"COLLATION_NAME", pb::STRING},
+        {"CHARACTER_SET_NAME", pb::STRING},
+        {"ID", pb::INT64},
+        {"IS_DEFAULT", pb::STRING},
+        {"IS_COMPILED", pb::STRING},
+        {"SORTLEN", pb::INT64},
+    };
+    int64_t table_id = construct_table("COLLATIONS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_column_privileges() {
+    FieldVec fields {
+        {"GRANTEE", pb::STRING},
+        {"TABLE_CATALOG", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"TABLE_NAME", pb::STRING},
+        {"COLUMN_NAME", pb::STRING},
+        {"PRIVILEGE_TYPE", pb::STRING},
+        {"IS_GRANTABLE", pb::STRING},
+    };
+    int64_t table_id = construct_table("COLUMN_PRIVILEGES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_engines() {
+    FieldVec fields {
+        {"ENGINE", pb::STRING},
+        {"SUPPORT", pb::STRING},
+        {"COMMENT", pb::STRING},
+        {"TRANSACTIONS", pb::STRING},
+        {"XA", pb::STRING},
+        {"SAVEPOINTS", pb::STRING},
+    };
+    int64_t table_id = construct_table("ENGINES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_events() {
+    FieldVec fields {
+        {"EVENT_CATALOG", pb::STRING},
+        {"EVENT_SCHEMA", pb::STRING},
+        {"EVENT_NAME", pb::STRING},
+        {"DEFINER", pb::STRING},
+        {"TIME_ZONE", pb::STRING},
+        {"EVENT_BODY", pb::STRING},
+        {"EVENT_DEFINITION", pb::STRING},
+        {"EVENT_TYPE", pb::STRING},
+        {"EXECUTE_AT", pb::DATETIME},
+        {"INTERVAL_VALUE", pb::STRING},
+        {"INTERVAL_FIELD", pb::STRING},
+        {"SQL_MODE", pb::STRING},
+        {"STARTS", pb::DATETIME},
+        {"ENDS", pb::DATETIME},
+        {"STATUS", pb::STRING},
+        {"ON_COMPLETION", pb::STRING},
+        {"CREATED", pb::DATETIME},
+        {"LAST_ALTERED", pb::DATETIME},
+        {"LAST_EXECUTED", pb::DATETIME},
+        {"EVENT_COMMENT", pb::STRING},
+        {"ORIGINATOR", pb::INT64},
+        {"CHARACTER_SET_CLIENT", pb::STRING},
+        {"COLLATION_CONNECTION", pb::STRING},
+        {"DATABASE_COLLATION", pb::STRING},
+    };
+    int64_t table_id = construct_table("EVENTS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_files() {
+    FieldVec fields {
+        {"FILE_ID", pb::INT64},
+        {"FILE_NAME", pb::STRING},
+        {"FILE_TYPE", pb::STRING},
+        {"TABLESPACE_NAME", pb::STRING},
+        {"TABLE_CATALOG", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"TABLE_NAME", pb::STRING},
+        {"LOGFILE_GROUP_NAME", pb::STRING},
+        {"LOGFILE_GROUP_NUMBER", pb::INT64},
+        {"ENGINE", pb::STRING},
+        {"FULLTEXT_KEYS", pb::STRING},
+        {"DELETED_ROWS", pb::INT64},
+        {"UPDATE_COUNT", pb::INT64},
+        {"FREE_EXTENTS", pb::INT64},
+        {"TOTAL_EXTENTS", pb::INT64},
+        {"EXTENT_SIZE", pb::INT64},
+        {"INITIAL_SIZE", pb::UINT64},
+        {"MAXIMUM_SIZE", pb::UINT64},
+        {"AUTOEXTEND_SIZE", pb::UINT64},
+        {"CREATION_TIME", pb::DATETIME},
+        {"LAST_UPDATE_TIME", pb::DATETIME},
+        {"LAST_ACCESS_TIME", pb::DATETIME},
+        {"RECOVER_TIME", pb::INT64},
+        {"TRANSACTION_COUNTER", pb::INT64},
+        {"VERSION", pb::UINT64},
+        {"ROW_FORMAT", pb::STRING},
+        {"TABLE_ROWS", pb::UINT64},
+        {"AVG_ROW_LENGTH", pb::UINT64},
+        {"DATA_LENGTH", pb::UINT64},
+        {"MAX_DATA_LENGTH", pb::UINT64},
+        {"INDEX_LENGTH", pb::UINT64},
+        {"DATA_FREE", pb::UINT64},
+        {"CREATE_TIME", pb::DATETIME},
+        {"UPDATE_TIME", pb::DATETIME},
+        {"CHECK_TIME", pb::DATETIME},
+        {"CHECKSUM", pb::UINT64},
+        {"STATUS", pb::STRING},
+        {"EXTRA", pb::STRING},
+    };
+    int64_t table_id = construct_table("FILES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_global_status() {
+    FieldVec fields {
+        {"VARIABLE_NAME", pb::STRING},
+        {"VARIABLE_VALUE", pb::STRING},
+    };
+    int64_t table_id = construct_table("GLOBAL_STATUS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_global_variables() {
+    FieldVec fields {
+        {"VARIABLE_NAME", pb::STRING},
+        {"VARIABLE_VALUE", pb::STRING},
+    };
+    int64_t table_id = construct_table("GLOBAL_VARIABLES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_buffer_page() {
+    FieldVec fields {
+        {"POOL_ID", pb::UINT64},
+        {"BLOCK_ID", pb::UINT64},
+        {"SPACE", pb::UINT64},
+        {"PAGE_NUMBER", pb::UINT64},
+        {"PAGE_TYPE", pb::STRING},
+        {"FLUSH_TYPE", pb::UINT64},
+        {"FIX_COUNT", pb::UINT64},
+        {"IS_HASHED", pb::STRING},
+        {"NEWEST_MODIFICATION", pb::UINT64},
+        {"OLDEST_MODIFICATION", pb::UINT64},
+        {"ACCESS_TIME", pb::UINT64},
+        {"TABLE_NAME", pb::STRING},
+        {"INDEX_NAME", pb::STRING},
+        {"NUMBER_RECORDS", pb::UINT64},
+        {"DATA_SIZE", pb::UINT64},
+        {"COMPRESSED_SIZE", pb::UINT64},
+        {"PAGE_STATE", pb::STRING},
+        {"IO_FIX", pb::STRING},
+        {"IS_OLD", pb::STRING},
+        {"FREE_PAGE_CLOCK", pb::UINT64},
+    };
+    int64_t table_id = construct_table("INNODB_BUFFER_PAGE", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_buffer_page_lru() {
+    FieldVec fields {
+        {"POOL_ID", pb::UINT64},
+        {"LRU_POSITION", pb::UINT64},
+        {"SPACE", pb::UINT64},
+        {"PAGE_NUMBER", pb::UINT64},
+        {"PAGE_TYPE", pb::STRING},
+        {"FLUSH_TYPE", pb::UINT64},
+        {"FIX_COUNT", pb::UINT64},
+        {"IS_HASHED", pb::STRING},
+        {"NEWEST_MODIFICATION", pb::UINT64},
+        {"OLDEST_MODIFICATION", pb::UINT64},
+        {"ACCESS_TIME", pb::UINT64},
+        {"TABLE_NAME", pb::STRING},
+        {"INDEX_NAME", pb::STRING},
+        {"NUMBER_RECORDS", pb::UINT64},
+        {"DATA_SIZE", pb::UINT64},
+        {"COMPRESSED_SIZE", pb::UINT64},
+        {"COMPRESSED", pb::STRING},
+        {"IO_FIX", pb::STRING},
+        {"IS_OLD", pb::STRING},
+        {"FREE_PAGE_CLOCK", pb::UINT64},
+    };
+    int64_t table_id = construct_table("INNODB_BUFFER_PAGE_LRU", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_buffer_pool_stats() {
+    FieldVec fields {
+        {"POOL_ID", pb::UINT64},
+        {"POOL_SIZE", pb::UINT64},
+        {"FREE_BUFFERS", pb::UINT64},
+        {"DATABASE_PAGES", pb::UINT64},
+        {"OLD_DATABASE_PAGES", pb::UINT64},
+        {"MODIFIED_DATABASE_PAGES", pb::UINT64},
+        {"PENDING_DECOMPRESS", pb::UINT64},
+        {"PENDING_READS", pb::UINT64},
+        {"PENDING_FLUSH_LRU", pb::UINT64},
+        {"PENDING_FLUSH_LIST", pb::UINT64},
+        {"PAGES_MADE_YOUNG", pb::UINT64},
+        {"PAGES_NOT_MADE_YOUNG", pb::UINT64},
+        {"PAGES_MADE_YOUNG_RATE", pb::DOUBLE},
+        {"PAGES_MADE_NOT_YOUNG_RATE", pb::DOUBLE},
+        {"NUMBER_PAGES_READ", pb::UINT64},
+        {"NUMBER_PAGES_CREATED", pb::UINT64},
+        {"NUMBER_PAGES_WRITTEN", pb::UINT64},
+        {"PAGES_READ_RATE", pb::DOUBLE},
+        {"PAGES_CREATE_RATE", pb::DOUBLE},
+        {"PAGES_WRITTEN_RATE", pb::DOUBLE},
+        {"NUMBER_PAGES_GET", pb::UINT64},
+        {"HIT_RATE", pb::UINT64},
+        {"YOUNG_MAKE_PER_THOUSAND_GETS", pb::UINT64},
+        {"NOT_YOUNG_MAKE_PER_THOUSAND_GETS", pb::UINT64},
+        {"NUMBER_PAGES_READ_AHEAD", pb::UINT64},
+        {"NUMBER_READ_AHEAD_EVICTED", pb::UINT64},
+        {"READ_AHEAD_RATE", pb::DOUBLE},
+        {"READ_AHEAD_EVICTED_RATE", pb::DOUBLE},
+        {"LRU_IO_TOTAL", pb::UINT64},
+        {"LRU_IO_CURRENT", pb::UINT64},
+        {"UNCOMPRESS_TOTAL", pb::UINT64},
+        {"UNCOMPRESS_CURRENT", pb::UINT64},
+    };
+    int64_t table_id = construct_table("INNODB_BUFFER_POOL_STATS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_cmp() {
+    FieldVec fields {
+        {"page_size", pb::INT32},
+        {"compress_ops", pb::INT32},
+        {"compress_ops_ok", pb::INT32},
+        {"compress_time", pb::INT32},
+        {"uncompress_ops", pb::INT32},
+        {"uncompress_time", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_CMP", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_cmpmem() {
+    FieldVec fields {
+        {"page_size", pb::INT32},
+        {"buffer_pool_instance", pb::INT32},
+        {"pages_used", pb::INT32},
+        {"pages_free", pb::INT32},
+        {"relocation_ops", pb::INT64},
+        {"relocation_time", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_CMPMEM", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_cmpmem_reset() {
+    FieldVec fields {
+        {"page_size", pb::INT32},
+        {"buffer_pool_instance", pb::INT32},
+        {"pages_used", pb::INT32},
+        {"pages_free", pb::INT32},
+        {"relocation_ops", pb::INT64},
+        {"relocation_time", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_CMPMEM_RESET", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_cmp_per_index() {
+    FieldVec fields {
+        {"database_name", pb::STRING},
+        {"table_name", pb::STRING},
+        {"index_name", pb::STRING},
+        {"compress_ops", pb::INT32},
+        {"compress_ops_ok", pb::INT32},
+        {"compress_time", pb::INT32},
+        {"uncompress_ops", pb::INT32},
+        {"uncompress_time", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_CMP_PER_INDEX", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_cmp_per_index_reset() {
+    FieldVec fields {
+        {"database_name", pb::STRING},
+        {"table_name", pb::STRING},
+        {"index_name", pb::STRING},
+        {"compress_ops", pb::INT32},
+        {"compress_ops_ok", pb::INT32},
+        {"compress_time", pb::INT32},
+        {"uncompress_ops", pb::INT32},
+        {"uncompress_time", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_CMP_PER_INDEX_RESET", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_cmp_reset() {
+    FieldVec fields {
+        {"page_size", pb::INT32},
+        {"compress_ops", pb::INT32},
+        {"compress_ops_ok", pb::INT32},
+        {"compress_time", pb::INT32},
+        {"uncompress_ops", pb::INT32},
+        {"uncompress_time", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_CMP_RESET", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_ft_being_deleted() {
+    FieldVec fields {
+        {"DOC_ID", pb::UINT64},
+    };
+    int64_t table_id = construct_table("INNODB_FT_BEING_DELETED", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_ft_config() {
+    FieldVec fields {
+        {"KEY", pb::STRING},
+        {"VALUE", pb::STRING},
+    };
+    int64_t table_id = construct_table("INNODB_FT_CONFIG", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_ft_default_stopword() {
+    FieldVec fields {
+        {"value", pb::STRING},
+    };
+    int64_t table_id = construct_table("INNODB_FT_DEFAULT_STOPWORD", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_ft_deleted() {
+    FieldVec fields {
+        {"DOC_ID", pb::UINT64},
+    };
+    int64_t table_id = construct_table("INNODB_FT_DELETED", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_ft_index_cache() {
+    FieldVec fields {
+        {"WORD", pb::STRING},
+        {"FIRST_DOC_ID", pb::UINT64},
+        {"LAST_DOC_ID", pb::UINT64},
+        {"DOC_COUNT", pb::UINT64},
+        {"DOC_ID", pb::UINT64},
+        {"POSITION", pb::UINT64},
+    };
+    int64_t table_id = construct_table("INNODB_FT_INDEX_CACHE", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_ft_index_table() {
+    FieldVec fields {
+        {"WORD", pb::STRING},
+        {"FIRST_DOC_ID", pb::UINT64},
+        {"LAST_DOC_ID", pb::UINT64},
+        {"DOC_COUNT", pb::UINT64},
+        {"DOC_ID", pb::UINT64},
+        {"POSITION", pb::UINT64},
+    };
+    int64_t table_id = construct_table("INNODB_FT_INDEX_TABLE", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_locks() {
+    FieldVec fields {
+        {"lock_id", pb::STRING},
+        {"lock_trx_id", pb::STRING},
+        {"lock_mode", pb::STRING},
+        {"lock_type", pb::STRING},
+        {"lock_table", pb::STRING},
+        {"lock_index", pb::STRING},
+        {"lock_space", pb::UINT64},
+        {"lock_page", pb::UINT64},
+        {"lock_rec", pb::UINT64},
+        {"lock_data", pb::STRING},
+    };
+    int64_t table_id = construct_table("INNODB_LOCKS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_lock_waits() {
+    FieldVec fields {
+        {"requesting_trx_id", pb::STRING},
+        {"requested_lock_id", pb::STRING},
+        {"blocking_trx_id", pb::STRING},
+        {"blocking_lock_id", pb::STRING},
+    };
+    int64_t table_id = construct_table("INNODB_LOCK_WAITS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_metrics() {
+    FieldVec fields {
+        {"NAME", pb::STRING},
+        {"SUBSYSTEM", pb::STRING},
+        {"COUNT", pb::INT64},
+        {"MAX_COUNT", pb::INT64},
+        {"MIN_COUNT", pb::INT64},
+        {"AVG_COUNT", pb::DOUBLE},
+        {"COUNT_RESET", pb::INT64},
+        {"MAX_COUNT_RESET", pb::INT64},
+        {"MIN_COUNT_RESET", pb::INT64},
+        {"AVG_COUNT_RESET", pb::DOUBLE},
+        {"TIME_ENABLED", pb::DATETIME},
+        {"TIME_DISABLED", pb::DATETIME},
+        {"TIME_ELAPSED", pb::INT64},
+        {"TIME_RESET", pb::DATETIME},
+        {"STATUS", pb::STRING},
+        {"TYPE", pb::STRING},
+        {"COMMENT", pb::STRING},
+    };
+    int64_t table_id = construct_table("INNODB_METRICS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_columns() {
+    FieldVec fields {
+        {"TABLE_ID", pb::UINT64},
+        {"NAME", pb::STRING},
+        {"POS", pb::UINT64},
+        {"MTYPE", pb::INT32},
+        {"PRTYPE", pb::INT32},
+        {"LEN", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_COLUMNS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_datafiles() {
+    FieldVec fields {
+        {"SPACE", pb::UINT32},
+        {"PATH", pb::STRING},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_DATAFILES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_fields() {
+    FieldVec fields {
+        {"INDEX_ID", pb::UINT64},
+        {"NAME", pb::STRING},
+        {"POS", pb::UINT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_FIELDS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_foreign() {
+    FieldVec fields {
+        {"ID", pb::STRING},
+        {"FOR_NAME", pb::STRING},
+        {"REF_NAME", pb::STRING},
+        {"N_COLS", pb::UINT32},
+        {"TYPE", pb::UINT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_FOREIGN", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_foreign_cols() {
+    FieldVec fields {
+        {"ID", pb::STRING},
+        {"FOR_COL_NAME", pb::STRING},
+        {"REF_COL_NAME", pb::STRING},
+        {"POS", pb::UINT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_FOREIGN_COLS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_indexes() {
+    FieldVec fields {
+        {"INDEX_ID", pb::UINT64},
+        {"NAME", pb::STRING},
+        {"TABLE_ID", pb::UINT64},
+        {"TYPE", pb::INT32},
+        {"N_FIELDS", pb::INT32},
+        {"PAGE_NO", pb::INT32},
+        {"SPACE", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_INDEXES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_tables() {
+    FieldVec fields {
+        {"TABLE_ID", pb::UINT64},
+        {"NAME", pb::STRING},
+        {"FLAG", pb::INT32},
+        {"N_COLS", pb::INT32},
+        {"SPACE", pb::INT32},
+        {"FILE_FORMAT", pb::STRING},
+        {"ROW_FORMAT", pb::STRING},
+        {"ZIP_PAGE_SIZE", pb::UINT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_TABLES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_tablespaces() {
+    FieldVec fields {
+        {"SPACE", pb::UINT32},
+        {"NAME", pb::STRING},
+        {"FLAG", pb::UINT32},
+        {"FILE_FORMAT", pb::STRING},
+        {"ROW_FORMAT", pb::STRING},
+        {"PAGE_SIZE", pb::UINT32},
+        {"ZIP_PAGE_SIZE", pb::UINT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_TABLESPACES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_sys_tablestats() {
+    FieldVec fields {
+        {"TABLE_ID", pb::UINT64},
+        {"NAME", pb::STRING},
+        {"STATS_INITIALIZED", pb::STRING},
+        {"NUM_ROWS", pb::UINT64},
+        {"CLUST_INDEX_SIZE", pb::UINT64},
+        {"OTHER_INDEX_SIZE", pb::UINT64},
+        {"MODIFIED_COUNTER", pb::UINT64},
+        {"AUTOINC", pb::UINT64},
+        {"REF_COUNT", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_SYS_TABLESTATS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_innodb_trx() {
+    FieldVec fields {
+        {"trx_id", pb::STRING},
+        {"trx_state", pb::STRING},
+        {"trx_started", pb::DATETIME},
+        {"trx_requested_lock_id", pb::STRING},
+        {"trx_wait_started", pb::DATETIME},
+        {"trx_weight", pb::UINT64},
+        {"trx_mysql_thread_id", pb::UINT64},
+        {"trx_query", pb::STRING},
+        {"trx_operation_state", pb::STRING},
+        {"trx_tables_in_use", pb::UINT64},
+        {"trx_tables_locked", pb::UINT64},
+        {"trx_lock_structs", pb::UINT64},
+        {"trx_lock_memory_bytes", pb::UINT64},
+        {"trx_rows_locked", pb::UINT64},
+        {"trx_rows_modified", pb::UINT64},
+        {"trx_concurrency_tickets", pb::UINT64},
+        {"trx_isolation_level", pb::STRING},
+        {"trx_unique_checks", pb::INT32},
+        {"trx_foreign_key_checks", pb::INT32},
+        {"trx_last_foreign_key_error", pb::STRING},
+        {"trx_adaptive_hash_latched", pb::INT32},
+        {"trx_adaptive_hash_timeout", pb::UINT64},
+        {"trx_is_read_only", pb::INT32},
+        {"trx_autocommit_non_locking", pb::INT32},
+    };
+    int64_t table_id = construct_table("INNODB_TRX", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_optimizer_trace() {
+    FieldVec fields {
+        {"QUERY", pb::STRING},
+        {"TRACE", pb::STRING},
+        {"MISSING_BYTES_BEYOND_MAX_MEM_SIZE", pb::INT32},
+        {"INSUFFICIENT_PRIVILEGES", pb::INT32},
+    };
+    int64_t table_id = construct_table("OPTIMIZER_TRACE", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_parameters() {
+    FieldVec fields {
+        {"SPECIFIC_CATALOG", pb::STRING},
+        {"SPECIFIC_SCHEMA", pb::STRING},
+        {"SPECIFIC_NAME", pb::STRING},
+        {"ORDINAL_POSITION", pb::INT32},
+        {"PARAMETER_MODE", pb::STRING},
+        {"PARAMETER_NAME", pb::STRING},
+        {"DATA_TYPE", pb::STRING},
+        {"CHARACTER_MAXIMUM_LENGTH", pb::INT32},
+        {"CHARACTER_OCTET_LENGTH", pb::INT32},
+        {"NUMERIC_PRECISION", pb::UINT64},
+        {"NUMERIC_SCALE", pb::INT32},
+        {"DATETIME_PRECISION", pb::UINT64},
+        {"CHARACTER_SET_NAME", pb::STRING},
+        {"COLLATION_NAME", pb::STRING},
+        {"DTD_IDENTIFIER", pb::STRING},
+        {"ROUTINE_TYPE", pb::STRING},
+    };
+    int64_t table_id = construct_table("PARAMETERS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_partitions() {
+    FieldVec fields {
+        {"TABLE_CATALOG", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"TABLE_NAME", pb::STRING},
+        {"PARTITION_NAME", pb::STRING},
+        {"SUBPARTITION_NAME", pb::STRING},
+        {"PARTITION_ORDINAL_POSITION", pb::UINT64},
+        {"SUBPARTITION_ORDINAL_POSITION", pb::UINT64},
+        {"PARTITION_METHOD", pb::STRING},
+        {"SUBPARTITION_METHOD", pb::STRING},
+        {"PARTITION_EXPRESSION", pb::STRING},
+        {"SUBPARTITION_EXPRESSION", pb::STRING},
+        {"PARTITION_DESCRIPTION", pb::STRING},
+        {"TABLE_ROWS", pb::UINT64},
+        {"AVG_ROW_LENGTH", pb::UINT64},
+        {"DATA_LENGTH", pb::UINT64},
+        {"MAX_DATA_LENGTH", pb::UINT64},
+        {"INDEX_LENGTH", pb::UINT64},
+        {"DATA_FREE", pb::UINT64},
+        {"CREATE_TIME", pb::DATETIME},
+        {"UPDATE_TIME", pb::DATETIME},
+        {"CHECK_TIME", pb::DATETIME},
+        {"CHECKSUM", pb::UINT64},
+        {"PARTITION_COMMENT", pb::STRING},
+        {"NODEGROUP", pb::STRING},
+        {"TABLESPACE_NAME", pb::STRING},
+    };
+    int64_t table_id = construct_table("PARTITIONS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_plugins() {
+    FieldVec fields {
+        {"PLUGIN_NAME", pb::STRING},
+        {"PLUGIN_VERSION", pb::STRING},
+        {"PLUGIN_STATUS", pb::STRING},
+        {"PLUGIN_TYPE", pb::STRING},
+        {"PLUGIN_TYPE_VERSION", pb::STRING},
+        {"PLUGIN_LIBRARY", pb::STRING},
+        {"PLUGIN_LIBRARY_VERSION", pb::STRING},
+        {"PLUGIN_AUTHOR", pb::STRING},
+        {"PLUGIN_DESCRIPTION", pb::STRING},
+        {"PLUGIN_LICENSE", pb::STRING},
+        {"LOAD_OPTION", pb::STRING},
+    };
+    int64_t table_id = construct_table("PLUGINS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_processlist() {
+    FieldVec fields {
+        {"ID", pb::UINT64},
+        {"USER", pb::STRING},
+        {"HOST", pb::STRING},
+        {"DB", pb::STRING},
+        {"COMMAND", pb::STRING},
+        {"TIME", pb::INT32},
+        {"STATE", pb::STRING},
+        {"INFO", pb::STRING},
+    };
+    int64_t table_id = construct_table("PROCESSLIST", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_profiling() {
+    FieldVec fields {
+        {"QUERY_ID", pb::INT32},
+        {"SEQ", pb::INT32},
+        {"STATE", pb::STRING},
+        {"DURATION", pb::DOUBLE},
+        {"CPU_USER", pb::DOUBLE},
+        {"CPU_SYSTEM", pb::DOUBLE},
+        {"CONTEXT_VOLUNTARY", pb::INT32},
+        {"CONTEXT_INVOLUNTARY", pb::INT32},
+        {"BLOCK_OPS_IN", pb::INT32},
+        {"BLOCK_OPS_OUT", pb::INT32},
+        {"MESSAGES_SENT", pb::INT32},
+        {"MESSAGES_RECEIVED", pb::INT32},
+        {"PAGE_FAULTS_MAJOR", pb::INT32},
+        {"PAGE_FAULTS_MINOR", pb::INT32},
+        {"SWAPS", pb::INT32},
+        {"SOURCE_FUNCTION", pb::STRING},
+        {"SOURCE_FILE", pb::STRING},
+        {"SOURCE_LINE", pb::INT32},
+    };
+    int64_t table_id = construct_table("PROFILING", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_schema_privileges() {
+    FieldVec fields {
+        {"GRANTEE", pb::STRING},
+        {"TABLE_CATALOG", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"PRIVILEGE_TYPE", pb::STRING},
+        {"IS_GRANTABLE", pb::STRING},
+    };
+    int64_t table_id = construct_table("SCHEMA_PRIVILEGES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_session_status() {
+    FieldVec fields {
+        {"VARIABLE_NAME", pb::STRING},
+        {"VARIABLE_VALUE", pb::STRING},
+    };
+    int64_t table_id = construct_table("SESSION_STATUS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_session_variables() {
+    FieldVec fields {
+        {"VARIABLE_NAME", pb::STRING},
+        {"VARIABLE_VALUE", pb::STRING},
+    };
+    int64_t table_id = construct_table("SESSION_VARIABLES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_table_constraints() {
+    FieldVec fields {
+        {"CONSTRAINT_CATALOG", pb::STRING},
+        {"CONSTRAINT_SCHEMA", pb::STRING},
+        {"CONSTRAINT_NAME", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"TABLE_NAME", pb::STRING},
+        {"CONSTRAINT_TYPE", pb::STRING},
+    };
+    int64_t table_id = construct_table("TABLE_CONSTRAINTS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_table_privileges() {
+    FieldVec fields {
+        {"GRANTEE", pb::STRING},
+        {"TABLE_CATALOG", pb::STRING},
+        {"TABLE_SCHEMA", pb::STRING},
+        {"TABLE_NAME", pb::STRING},
+        {"PRIVILEGE_TYPE", pb::STRING},
+        {"IS_GRANTABLE", pb::STRING},
+    };
+    int64_t table_id = construct_table("TABLE_PRIVILEGES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_tablespaces() {
+    FieldVec fields {
+        {"TABLESPACE_NAME", pb::STRING},
+        {"ENGINE", pb::STRING},
+        {"TABLESPACE_TYPE", pb::STRING},
+        {"LOGFILE_GROUP_NAME", pb::STRING},
+        {"EXTENT_SIZE", pb::UINT64},
+        {"AUTOEXTEND_SIZE", pb::UINT64},
+        {"MAXIMUM_SIZE", pb::UINT64},
+        {"NODEGROUP_ID", pb::UINT64},
+        {"TABLESPACE_COMMENT", pb::STRING},
+    };
+    int64_t table_id = construct_table("TABLESPACES", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            return records;
+    };
+}
+
+void InformationSchema::init_user_privileges() {
+    FieldVec fields {
+        {"GRANTEE", pb::STRING},
+        {"TABLE_CATALOG", pb::STRING},
+        {"PRIVILEGE_TYPE", pb::STRING},
+        {"IS_GRANTABLE", pb::STRING},
+    };
+    int64_t table_id = construct_table("USER_PRIVILEGES", fields);
     _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
         std::vector<SmartRecord> {
             std::vector<SmartRecord> records;
