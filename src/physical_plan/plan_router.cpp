@@ -296,7 +296,9 @@ int PlanRouter::kill_node_analyze(KillNode* kill_node, QueryContext* ctx) {
     }
     ExecNode* plan = ctx->kill_ctx->root;
     if (plan == nullptr) {
-        if (kill_node->region_infos().size() != 0) {
+        if (kill_node->region_infos().size() == 0) {
+//            DB_WARNING("region_infos.size = 0");
+//            ctx->return_empty = true;
             return 0;
         }
         DB_FATAL("ctx->kill_ctx->root is null");
