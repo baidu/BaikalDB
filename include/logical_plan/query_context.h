@@ -272,6 +272,10 @@ public:
     // /*{"region_id":$region_id}*/ preceding a Select statement 
     int64_t             debug_region_id = -1;
 
+    // user can scan data in specific peer by comments
+    // /*{"peer_index":$peer_index}*/ preceding a Select statement
+    int64_t             peer_index = -1;
+
     // in autocommit mode, two phase commit is disabled by default (for better formance)
     // user can enable 2pc by comments /*{"enable_2pc":1}*/ preceding a DML statement
     bool                enable_2pc = false;

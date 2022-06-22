@@ -284,8 +284,28 @@ void OnRPCDone::select_addr() {
             }
         } else {
             if (_retry_times == 0) {
-                pb::Status addr_status = pb::NORMAL;
-                FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, &_backup);
+                if (_client_conn->query_ctx->peer_index != -1) {
+                    int64_t peer_index = _client_conn->query_ctx->peer_index;
+                    std::vector<std::string> sorted_peers; // leader first
+                    sorted_peers.emplace_back(_info.leader());
+                    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+                    for (auto& peer: _info.peers()) {
+                        auto status = schema_factory->get_instance_status(peer);
+                        if (status.status != pb::NORMAL) {
+                            continue;
+                        }
+                        if (_info.leader() != peer) {
+                            sorted_peers.emplace_back(peer);
+                        }
+                    }
+                    if (peer_index < sorted_peers.size()) {
+                        _addr = sorted_peers[peer_index];
+                        DB_WARNING("choose peer %s, index: %ld", _addr.c_str(), peer_index);
+                    }
+                } else {
+                    pb::Status addr_status = pb::NORMAL;
+                    FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, &_backup);
+                }
             }
         }
         _request.set_select_without_leader(true);
