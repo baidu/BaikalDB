@@ -332,6 +332,8 @@ ErrorType OnRPCDone::send_async() {
     if (_fetcher_store->dynamic_timeout_ms > 0 && !_backup.empty() && _backup != _addr) {
         option.backup_request_ms = _fetcher_store->dynamic_timeout_ms;
     }
+    // SelectiveChannel在init时会出core,开源版先注释掉
+#ifdef BAIDU_INTERNAL
     brpc::SelectiveChannel channel;
     int ret = channel.Init("rr", &option);
     if (ret != 0) {
@@ -350,7 +352,7 @@ ErrorType OnRPCDone::send_async() {
     }
     channel.AddChannel(sub_channel1, NULL);
     if (_fetcher_store->dynamic_timeout_ms > 0 && !_backup.empty() && _backup != _addr) {
-#ifdef BAIDU_INTERNAL
+
         //开源版brpc和内部不大一样
         brpc::SocketId sub_id2;
         brpc::Channel* sub_channel2 = new brpc::Channel;
@@ -366,11 +368,17 @@ ErrorType OnRPCDone::send_async() {
         brpc::ExcludedServers* exclude = brpc::ExcludedServers::Create(1);
         exclude->Add(sub_id2);
         _cntl.set_excluded_servers(exclude);
+
+#else
+        brpc::Channel channel;
+        int ret = 0;
+        ret = channel.Init(_addr.c_str(), &option);
+        if (ret != 0) {
+            DB_WARNING("channel init failed, addr:%s, ret:%d, region_id: %ld, log_id:%lu",
+                       _addr.c_str(), ret, _region_id, _state->log_id());
+            return E_FATAL;
+        }
 #endif
-    } else {
-        //命中backup可以不cancel
-        _client_conn->insert_callid(_addr, _region_id, _cntl.call_id());
-    }
     _fetcher_store->insert_callid(_cntl.call_id());
     _query_time.reset();
     pb::StoreService_Stub(&channel).query(&_cntl, &_request, &_response, this);
