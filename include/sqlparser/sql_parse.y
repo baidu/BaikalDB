@@ -2191,6 +2191,18 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
+    | CONVERT '(' Expr ',' DECIMAL ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_double";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS DECIMAL ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_double";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
     | USER '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;

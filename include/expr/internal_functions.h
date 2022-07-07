@@ -164,6 +164,7 @@ ExprValue cast_to_datetime(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_signed(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_unsigned(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_string(const std::vector<ExprValue>& inpt);
+ExprValue cast_to_double(const std::vector<ExprValue>& inpt);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

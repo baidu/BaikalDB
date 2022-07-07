@@ -1982,6 +1982,14 @@ ExprValue cast_to_unsigned(const std::vector<ExprValue>& input) {
     return tmp.cast_to(pb::UINT64);
 }
 
+ExprValue cast_to_double(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DOUBLE);
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */
