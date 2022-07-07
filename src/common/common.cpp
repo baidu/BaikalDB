@@ -65,6 +65,8 @@ DEFINE_bool(open_service_write_concurrency, true, "open service_write_concurrenc
 DEFINE_int32(baikal_heartbeat_interval_us, 10 * 1000 * 1000, "baikal_heartbeat_interval(us)");
 DEFINE_bool(schema_ignore_case, false, "whether ignore case when match db/table name");
 DEFINE_bool(disambiguate_select_name, false, "whether use the first when select name is ambiguous, default false");
+DEFINE_int32(new_sign_read_concurrency, 20, "new_sign_read concurrency, default:20");
+DEFINE_bool(open_new_sign_read_concurrency, false, "open new_sign_read concurrency, default: false");
 
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 

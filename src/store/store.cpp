@@ -1543,10 +1543,10 @@ void Store::start_db_statistics() {
         print_properties("rocksdb.block-cache-pinned-usage");
         auto& con = *Concurrency::get_instance();
         DB_WARNING("get properties cost: %ld, concurrency:"
-                "snapshot:%d, recieve_add_peer:%d, add_peer:%d, service_write:%d", 
+                "snapshot:%d, recieve_add_peer:%d, add_peer:%d, service_write:%d, new_sign_read:%d",
                 cost.get_time(), con.snapshot_load_concurrency.count(),
                 con.recieve_add_peer_concurrency.count(), con.add_peer_concurrency.count(),
-                con.service_write_concurrency.count());
+                con.service_write_concurrency.count(), con.new_sign_read_concurrency.count());
 
         // 获取和打印level0数量
         uint64_t level0_ssts = 0;
