@@ -41,6 +41,7 @@ namespace baikaldb {
 DECLARE_int32(snapshot_load_num);
 DECLARE_int32(raft_write_concurrency);
 DECLARE_int32(service_write_concurrency);
+DECLARE_int32(new_sign_read_concurrency);
 const static uint64_t split_thresh = 100 * 1024 * 1024;
 const static int max_region_map_count = 23;
 inline int map_idx(int64_t region_id) {

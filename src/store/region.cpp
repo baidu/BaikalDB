@@ -90,6 +90,7 @@ DECLARE_int64(min_split_lines);
 DECLARE_bool(use_approximate_size);
 DECLARE_bool(use_approximate_size_to_split);
 DECLARE_bool(open_service_write_concurrency);
+DECLARE_bool(open_new_sign_read_concurrency);
 DECLARE_bool(stop_ttl_data);
 //const size_t  Region::REGION_MIN_KEY_SIZE = sizeof(int64_t) * 2 + sizeof(uint8_t);
 const uint8_t Region::PRIMARY_INDEX_FLAG = 0x01;                                   
@@ -2250,6 +2251,27 @@ int Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
         DB_WARNING("sign: %lu, reject", sign);
         return -1;
     }
+
+    TimeCost cost;
+    bool is_new_sign = false;
+    if (FLAGS_open_new_sign_read_concurrency && (StoreQos::get_instance()->is_new_sign())) {
+        is_new_sign = true;
+        Concurrency::get_instance()->new_sign_read_concurrency.increase_wait();
+    }
+    int64_t wait_cost = cost.get_time();
+    ON_SCOPE_EXIT([&]() {
+        if (FLAGS_open_new_sign_read_concurrency && is_new_sign) {
+            Concurrency::get_instance()->new_sign_read_concurrency.decrease_broadcast();
+            if (wait_cost > FLAGS_print_time_us) {
+                DB_NOTICE("select type: %s, region_id: %ld, "
+                        "time_cost: %ld, log_id: %lu, sign: %lu, rows: %ld, scan_rows: %ld",
+                        pb::OpType_Name(request.op_type()).c_str(), _region_id,
+                        cost.get_time(), request.log_id(), sign,
+                        response.affected_rows(), response.scan_rows());
+            }
+        }
+    });
+
 
     int ret = 0;
     if (_is_learner) {
