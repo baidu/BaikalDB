@@ -41,6 +41,10 @@ public:
         return 0;
     }
     virtual void children_swap() {}
+    // 等价谓词变换
+    // Done: DATE_FORMAT(create_time, '%Y-%m-%d') < '2022-07-07' => create_time < '2022-07-07';
+    // TODO: id + 2 - 4 => id - 2;
+    virtual ExprNode* transfer() { return this; }
 
     bool is_literal() {
         switch (_node_type) {

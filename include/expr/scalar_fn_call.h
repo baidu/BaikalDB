@@ -24,6 +24,7 @@ public:
     virtual int init(const pb::ExprNode& node);
     virtual int type_inferer();
     virtual void children_swap();
+    virtual ExprNode* transfer();
     virtual int open();
     virtual ExprValue get_value(MemRow* row);
     pb::Function fn() {
@@ -113,6 +114,8 @@ private:
         }
         return ExprValue::True();
     }
+    ExprNode* transfer_date_format();
+    ExprNode* transfer_from_or_to_in();
 protected:
     pb::Function _fn;
     bool _is_row_expr = false;

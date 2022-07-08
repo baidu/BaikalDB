@@ -17,6 +17,7 @@
 #include "row_expr.h"
 #include "literal.h"
 #include "parser.h"
+#include "predicate.h"
 
 namespace baikaldb {
 DEFINE_bool(open_nonboolean_sql_forbid, false, "open nonboolean sqls forbid default:false");
@@ -136,7 +137,7 @@ int ScalarFnCall::open() {
         return ret;
     }
     if ((int)_children.size() < _fn.arg_types_size()) {
-        DB_WARNING("_children.size:%lu < _fn.arg_types_size:%d", 
+        DB_WARNING("_children.size:%lu < _fn.arg_types_size:%d",
                 _children.size(), _fn.arg_types_size());
         return -1;
     }
@@ -146,7 +147,7 @@ int ScalarFnCall::open() {
             _fn.fn_op() != parser::FT_GE &&
             _fn.fn_op() != parser::FT_GT &&
             _fn.fn_op() != parser::FT_LE &&
-            _fn.fn_op() != parser::FT_LT && 
+            _fn.fn_op() != parser::FT_LT &&
             _fn.fn_op() != parser::FT_MATCH_AGAINST) {
             DB_FATAL("Operand should contain 1 column(s)");
             return -1;
@@ -217,6 +218,285 @@ ExprValue ScalarFnCall::get_value(MemRow* row) {
         args[i].cast_to(_fn.arg_types(i));
     }
     return _fn_call(args).cast_to(_col_type);
+}
+
+ExprNode* ScalarFnCall::transfer() {
+    for (size_t i = 0; i < _children.size(); i++) {
+        ExprNode* e = _children[i]->transfer();
+        if (e != _children[i]) {
+            delete _children[i];
+            _children[i] = e;
+        }
+    }
+    ExprNode* to = this;
+    switch (_fn.fn_op()) {
+//        case parser::FT_EQ:
+//        case parser::FT_NE:
+        case parser::FT_GE:
+        case parser::FT_GT:
+        case parser::FT_LE:
+        case parser::FT_LT: {
+            if (_children[0]->node_type() == pb::FUNCTION_CALL) {
+                ScalarFnCall* e = static_cast<ScalarFnCall*>(_children[0]);
+                if (e->fn().name() == "date_format") {
+                    to = transfer_date_format();
+                }
+            }
+            break;
+        }
+        case parser::FT_LOGIC_OR: {
+            to = transfer_from_or_to_in();
+            break;
+        }
+        default:
+            break;
+    }
+    return to;
+}
+
+ExprNode* ScalarFnCall::transfer_date_format() {
+    // [YY]YY-MM-DD HH:MM:SS.xxxxxx => %[Y|y]-%m-%d %H:%i:%[s|S].%f
+    // [YY]YYMMDDHHMMSS.xxxxxx => %[Y|y]%m%d%H%i%[s|S].%f
+    ExprNode* to = this;
+    ScalarFnCall* e = static_cast<ScalarFnCall*>(_children[0]);
+    if (e->children_size() != 2) {
+        return to;
+    }
+    if (!e->children(0)->is_slot_ref() || !is_datetime_specic(e->children(0)->col_type())) {
+        return to;
+    }
+    if (!e->children(1)->is_literal() || e->children(1)->col_type() != pb::STRING) {
+        return to;
+    }
+    if (!_children[1]->is_literal()) {
+        return to;
+    }
+    std::string fmt = e->children(1)->get_value(nullptr).get_string();
+    std::string date = _children[1]->get_value(nullptr).get_string();
+    // 求出前缀匹配精度，例如fmt="%Y-%m-%d %H:%i", date="2022-07-15 16 12"
+    // 则精度 = 小时，fmt="%Y-%m-%d %H" + ":%i", date="2022-07-15 16" + " 12"
+    // fmt与date将从精度处拆分为匹配部分，不匹配部分比较大小即可
+    size_t fi = 0;
+    size_t di = 0;
+    size_t di_matched = 0;
+    bool is_format = false;
+    bool matched = true;
+    int time_unit = 0;
+    int cmp = 0;
+    auto match = [&fmt, &fi, &date, &di, &time_unit](char c, size_t len)->bool {
+        if (fmt[fi] != c) {
+            return false;
+        }
+        for (size_t i = 0; i < len; i++) {
+            if (!isdigit(date[di])) {
+                return false;
+            }
+            di++;
+        }
+        time_unit++;
+        return true;
+    };
+    while (matched) {
+        if (is_format) {
+            switch (time_unit) {
+                case 0: matched = match('Y', 4) || match('y', 2); break;
+                case 1: matched = match('m', 2); break;
+                case 2: matched = match('d', 2); break;
+                case 3: matched = match('H', 2); break;
+                case 4: matched = match('i', 2); break;
+                case 5: matched = match('s', 2) || match('S', 2); break;
+                case 6: matched = match('f', 6); break;
+                default: break;
+            }
+            di_matched = di;
+            is_format = false;
+        } else {
+            if (fmt[fi] == '%' ) {
+                is_format = true;
+            } else {
+                cmp = fmt[fi] - date[di];
+                if (fmt[fi] == '\0' || cmp != 0) {
+                    break; // fmt[fi] == '\0' or date[di] == '\0' 都会退出循环
+                } else {
+                    di++;
+                }
+            }
+        }
+        fi++;
+    }
+    if (!matched || time_unit == 0) {
+        return to;
+    }
+    ExprValue value = children(1)->get_value(nullptr);
+    value.str_val = date.substr(0, di_matched);
+    ExprValue v = value.cast_to(pb::DATETIME);
+    if (value._u.uint64_val == 0) { // 非法日期
+        return to;
+    }
+    // "2022-02-29"经过2次转化后,变为"2022-03-01"
+    v.cast_to(pb::TIMESTAMP).cast_to(pb::DATETIME);
+    if ((v._u.uint64_val >> 24) != (value._u.uint64_val >> 24)) {
+        return to;
+    }
+    ExprNode* slot =  static_cast<SlotRef*>(e->children(0))->clone();
+    delete _children[0];
+    _children[0] = slot;
+
+    auto date_add = [](ExprValue& date, int time_unit) {
+        uint64_t& datetime = date._u.uint64_val;
+        if (time_unit == 1 || time_unit == 2) {
+
+        }
+        switch (time_unit) {
+            case 1: // year
+            case 2: { // month
+                uint64_t year_month = ((datetime >> 46) & 0x1FFFF);
+                uint64_t year = year_month / 13;
+                uint64_t month = year_month % 13;
+                if (time_unit == 1) {
+                    year++;
+                } else {
+                    month++;
+                    if (month == 13) {
+                        month = 0;
+                        year++;
+                    }
+                }
+                year_month = year * 13 + month;
+                datetime = (datetime << 18) >> 18;
+                datetime |= (year_month << 46);
+                break;
+            }
+            case 3: // day
+            case 4: // hour
+            case 5: // minuter
+            case 6: { // second
+                date.cast_to(pb::TIMESTAMP);
+                uint32_t val = 0;
+                if (time_unit == 3) {
+                    val = 24 * 60 * 60;
+                } else if (time_unit == 4) {
+                    val = 60 * 60;
+                } else if (time_unit == 5) {
+                    val = 60;
+                } else if (time_unit == 6) {
+                    val = 1;
+                }
+                date._u.uint32_val += val;
+                date.cast_to(pb::DATETIME);
+                break;
+            }
+            case 7: {
+                uint64_t macrosec = (datetime & 0xFFFFFF);
+                datetime = (datetime >> 24) << 24;
+                macrosec = (macrosec + 1) % 1000000;
+                if (macrosec == 0) { // +1s
+                    date.cast_to(pb::TIMESTAMP);
+                    date._u.uint32_val += 1;
+                    date.cast_to(pb::DATETIME);
+                }
+                datetime |= macrosec;
+                break;
+            }
+            default: break;
+        }
+    };
+    auto date_sub_macrosec = [](ExprValue& date) {
+        uint64_t& datetime = date._u.uint64_val;
+        uint64_t macrosec = (datetime & 0xFFFFFF);
+        if (macrosec != 0) {
+            date._u.uint64_val--;
+        } else {
+            macrosec = 999999;
+            datetime = (datetime >> 24) << 24;
+            date.cast_to(pb::TIMESTAMP);
+            date._u.uint32_val--;
+            date.cast_to(pb::DATETIME);
+            datetime |= macrosec;
+        }
+    };
+    //  +1: 代表原时间单位+1,例如 2022-07-28, time_unit=天, +1后为 2022-07-29
+    //  -Δ: 代表时间的最小刻度%f -1,即-1us
+    //  op  cmp=0       cmp>0       cmp<0
+    //  >=  [0, +∞)     [0, +∞)     [1, +∞)
+    //  >   (1-Δ, +∞)   (0-Δ, +∞)   (1-Δ, +∞)
+    //  <=  (-∞, 1-Δ]   (-∞, 0-Δ]   (-∞, 1-Δ]
+    //  <   (-∞, 0)     (-∞, 0)     (-∞, 1)
+    switch (_fn.fn_op()) {
+        case parser::FT_GE:
+        case parser::FT_LT: {
+            if (cmp < 0) {
+                date_add(value, time_unit);
+            }
+            break;
+        }
+        case parser::FT_GT:
+        case parser::FT_LE: {
+            if (cmp <= 0) {
+                date_add(value, time_unit);
+            }
+            date_sub_macrosec(value);
+            break;
+        }
+        default:
+            break;
+    }
+    delete  _children[1];;
+    _children[1] = new Literal(value);
+    return to;
+}
+
+ExprNode* ScalarFnCall::transfer_from_or_to_in() {
+    ExprNode* to = this;
+    if (_children.size() != 2) {
+        return to;
+    }
+    ExprNode * slot = nullptr;
+    std::vector<ExprNode*> literal_list;
+    for (size_t i = 0; i < _children.size(); ++ i) {
+        if (_children[i]->node_type() != pb::FUNCTION_CALL && _children[i]->node_type() != pb::IN_PREDICATE) {
+            return to;
+        }
+        auto child = static_cast<ScalarFnCall*>(_children[i]);
+        if (child->_fn.fn_op() != parser::FT_IN && child->_fn.fn_op() != parser::FT_EQ) {
+            return to;
+        }
+        int slot_cnt = 0;
+        for (size_t j = 0; j < child->children_size(); ++ j) {
+            auto c = child->children(j);
+            if (c->is_slot_ref()) {
+                if (slot == nullptr) {
+                    slot = c;
+                } else if (c->tuple_id() != slot->tuple_id() || c->slot_id() != slot->slot_id()) {
+                    return to;
+                }
+                slot_cnt += 1;
+            } else {
+                if (!c->is_literal()) {
+                    return to;
+                }
+                literal_list.push_back(c);
+            }
+        }
+        if (slot_cnt != 1) {
+            return to;
+        }
+    }
+    pb::ExprNode node;
+    node.set_col_type(pb::BOOL);
+    node.set_node_type(pb::IN_PREDICATE);
+    pb::Function* fn = node.mutable_fn();
+    fn->set_name("in");
+    fn->set_fn_op(parser::FT_IN);
+    to = new InPredicate();
+    to->init(node);
+    // add child
+    to->add_child(static_cast<SlotRef*>(slot)->clone());
+    for (auto c : literal_list) {
+        to->add_child(new Literal(c->get_value(nullptr)));
+    }
+    to->expr_optimize();
+    return to;
 }
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

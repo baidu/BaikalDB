@@ -343,6 +343,7 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
     }
     // sign => pred
     std::map<int64_t, SlotPredicate> pred_map;
+    size_t idx = 0;
     for (auto& expr : _conjuncts) {
         //类型推导
         ret = expr->expr_optimize();
@@ -367,9 +368,18 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
                 return 0;
             }
         }
+
+        ExprNode* e = expr->transfer();
+        if (e != expr) {
+            delete expr;
+            _conjuncts[idx] = e;
+            expr = e;
+        }
+        idx++;
         if (expr->children_size() < 2) {
             continue;
         }
+
         // 处理in_row_expr
         // in_row_expr的preds只有涉及字段全部匹配索引才会在index_selector环节别裁剪掉, 此处仅裁剪 in里面的记录
         // 例如： key idx_abcd(a, b, c, d),
