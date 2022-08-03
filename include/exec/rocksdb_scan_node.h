@@ -70,6 +70,14 @@ public:
         }
     }
 
+    // todo: 编码到PossibleIndex的条件未处理
+    bool check_satisfy_condition(MemRow* row) override {
+        if (!need_copy(row, _index_conjuncts)) {
+            return false;
+        }
+        return true;
+    }
+
     int32_t get_partition_field() {
         return _table_info->partition_info.partition_field();
     }

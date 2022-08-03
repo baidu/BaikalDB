@@ -35,6 +35,17 @@ public:
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return &_conjuncts;
     }
+    bool check_satisfy_condition(MemRow* row) override {
+        if (!need_copy(row)) {
+            return false;
+        }
+        for (auto e : _children) {
+            if (!e->check_satisfy_condition(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     void add_conjunct(ExprNode* conjunct) {
         _conjuncts.push_back(conjunct);

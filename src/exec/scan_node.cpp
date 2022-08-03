@@ -136,6 +136,7 @@ int ScanNode::open(RuntimeState* state) {
         return ret;
     }
     _tuple_desc = state->get_tuple_desc(_tuple_id);
+    state->tuple_id = _tuple_id;
     if (_tuple_desc == nullptr) {
         return -1;
     }

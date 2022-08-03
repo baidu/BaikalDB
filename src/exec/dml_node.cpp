@@ -33,6 +33,22 @@ int DMLNode::expr_optimize(QueryContext* ctx) {
     }
     return 0;
 }
+
+void DMLNode::add_delete_conditon_fields() {
+    if (_node_type == pb::DELETE_NODE) {
+        std::set<int32_t> cond_field_ids;
+        for (auto& slot : _tuple_desc->slots()) {
+            cond_field_ids.insert(slot.field_id());
+        }
+        for (auto& field_info : _table_info->fields) {
+            if (cond_field_ids.count(field_info.id) > 0
+                && _pri_field_ids.count(field_info.id) == 0) {
+                _field_ids[field_info.id] = &field_info;
+            }
+        }
+    }
+}
+
 int DMLNode::init_schema_info(RuntimeState* state) {
     _region_id = state->region_id();
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id); 
@@ -105,6 +121,16 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
         return -1;
     }
+    if (_node_type == pb::UPDATE_NODE || _node_type == pb::DELETE_NODE) {
+        if (state->tuple_id >= 0) {
+            _tuple_desc = state->get_tuple_desc(state->tuple_id);
+            if (_tuple_desc == nullptr) {
+                DB_WARNING_STATE(state, "_tuple_desc nullptr: tuple_id:%d", state->tuple_id);
+                return -1;
+            }
+            add_delete_conditon_fields();
+        }
+    }
     if (!_update_slots.empty()) {
         std::set<int32_t> affect_field_ids;
         for (auto& slot : _update_slots) {
@@ -149,6 +175,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
                         }
                     }
                 }
+                add_delete_conditon_fields();
             }
         } else {
             _affected_indexes = _all_indexes;
@@ -515,7 +542,31 @@ int DMLNode::delete_row(RuntimeState* state, SmartRecord record) {
         DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
         return -1;
     }
+    if (!satisfy_condition_again(state, record)) {
+        DB_WARNING_STATE(state, "condition changed when delete record:%s", record->debug_string().c_str());
+        // UndoGetForUpdate(pk_str)?
+        return 0;
+    }
     return remove_row(state, record, pk_str, true);
+}
+// todo : 全局索引update/delete流程不同，重新判断条件待完善
+bool DMLNode::satisfy_condition_again(RuntimeState* state, SmartRecord record) {
+    if (!state->need_condition_again) {
+        return true;
+    }
+    if (_node_type != pb::DELETE_NODE &&  _node_type != pb::UPDATE_NODE) {
+        return true;
+    }
+    if (_tuple_desc != nullptr) {
+        std::unique_ptr<MemRow> new_row = state->mem_row_desc()->fetch_mem_row();
+        for (auto slot : _tuple_desc->slots()) {
+            auto field = record->get_field_by_tag(slot.field_id());
+            new_row->set_value(slot.tuple_id(), slot.slot_id(),
+                    record->get_value(field));
+        }
+        return check_satisfy_condition(new_row.get());
+    }
+    return true;
 }
 
 int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
@@ -531,6 +582,11 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     } else if (ret != 0) {
         DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
         return -1;
+    }
+    if (!satisfy_condition_again(state, record)) {
+        DB_WARNING_STATE(state, "condition changed when update record:%s", record->debug_string().c_str());
+        // UndoGetForUpdate(pk_str)? 同一个txn GetForUpdate与UndoGetForUpdate之间不要写pk_str
+        return 0;
     }
     _indexes_ptr = &_affected_indexes;
     // 影响了主键需要删除旧的行

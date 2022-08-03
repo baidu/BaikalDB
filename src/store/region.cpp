@@ -1702,6 +1702,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
         DB_FATAL("RuntimeState init fail, region_id: %ld, txn_id: %lu", _region_id, txn_id);
         return;
     }
+    state.need_condition_again = (applied_index > 0) ? false : true;
     state.need_txn_limit = need_txn_limit;
     _state_pool.set(db_conn_id, state_ptr);
     ON_SCOPE_EXIT(([this, db_conn_id]() {
@@ -1940,6 +1941,7 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
                     _region_id, applied_index);
         return;
     }
+    state.need_condition_again = (applied_index > 0) ? false : true;
     _state_pool.set(db_conn_id, state_ptr);
     ON_SCOPE_EXIT(([this, db_conn_id]() {
         _state_pool.remove(db_conn_id);

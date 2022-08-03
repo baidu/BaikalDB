@@ -117,6 +117,14 @@ public:
         }
         return nullptr;
     }
+    virtual bool check_satisfy_condition(MemRow* row) {
+        for (auto child : _children) {
+            if (!child->check_satisfy_condition(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
     void set_parent(ExecNode* parent_node) {
         _parent = parent_node;
     }
