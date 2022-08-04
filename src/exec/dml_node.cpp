@@ -121,7 +121,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
         return -1;
     }
-    if (_node_type == pb::UPDATE_NODE || _node_type == pb::DELETE_NODE) {
+    if (_node_type == pb::UPDATE_NODE || _node_type == pb::DELETE_NODE || _node_type == pb::LOCK_PRIMARY_NODE) {
         if (state->tuple_id >= 0) {
             _tuple_desc = state->get_tuple_desc(state->tuple_id);
             if (_tuple_desc == nullptr) {
@@ -554,7 +554,7 @@ bool DMLNode::satisfy_condition_again(RuntimeState* state, SmartRecord record) {
     if (!state->need_condition_again) {
         return true;
     }
-    if (_node_type != pb::DELETE_NODE &&  _node_type != pb::UPDATE_NODE) {
+    if (_node_type != pb::DELETE_NODE &&  _node_type != pb::UPDATE_NODE && _node_type != pb::LOCK_PRIMARY_NODE) {
         return true;
     }
     if (_tuple_desc != nullptr) {
