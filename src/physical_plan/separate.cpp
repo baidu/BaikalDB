@@ -913,6 +913,18 @@ int Separate::separate_global_update(
             delete_manager_node.get());
     LockPrimaryNode* pri_node = static_cast<LockPrimaryNode*>(delete_manager_node->children(1));
     pri_node->set_affect_primary(manager_node->affect_primary());
+    FilterNode* where_filter_node = static_cast<FilterNode*>(delete_manager_node->get_node(pb::WHERE_FILTER_NODE));
+    if (where_filter_node != nullptr) {
+        for (auto conjunct : *(where_filter_node->mutable_conjuncts())) {
+            pri_node->add_conjunct(conjunct);
+        }
+    }
+    FilterNode* table_filter_node = static_cast<FilterNode*>(delete_manager_node->get_node(pb::TABLE_FILTER_NODE));
+    if (table_filter_node != nullptr) {
+        for (auto conjunct : *(table_filter_node->mutable_conjuncts())) {
+            pri_node->add_conjunct(conjunct);
+        }
+    }
 
     manager_node->add_child(delete_manager_node.release());
     //生成basic_insert
@@ -966,6 +978,20 @@ int Separate::separate_global_delete(
     create_lock_node(main_table_id, pb::LOCK_GET_DML, Separate::PRIMARY, manager_node);
     create_lock_node(main_table_id, pb::LOCK_DML, Separate::GLOBAL, manager_node);
     // manager_node->children(0)->add_child(delete_node->children(0));
+
+    LockPrimaryNode* pri_node = static_cast<LockPrimaryNode*>(manager_node->children(1));
+    FilterNode* where_filter_node = static_cast<FilterNode*>(manager_node->get_node(pb::WHERE_FILTER_NODE));
+        if (where_filter_node != nullptr) {
+            for (auto conjunct : *(where_filter_node->mutable_conjuncts())) {
+                pri_node->add_conjunct(conjunct);
+            }
+        }
+    FilterNode* table_filter_node = static_cast<FilterNode*>(manager_node->get_node(pb::TABLE_FILTER_NODE));
+    if (table_filter_node != nullptr) {
+        for (auto conjunct : *(table_filter_node->mutable_conjuncts())) {
+            pri_node->add_conjunct(conjunct);
+        }
+    }
     delete delete_node;
     return 0;
 }

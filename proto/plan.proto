@@ -241,6 +241,8 @@ message LockPrimaryNode {
     optional bool         affect_primary = 5 [default = true];
     repeated int64        affect_index_ids = 6;
     optional int64        row_ttl_duration_s = 7;
+    repeated Expr         conjuncts      = 8 ; // for satisfy_condition_again
+
 };
 
 enum LockSecondaryType {
