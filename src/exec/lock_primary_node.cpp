@@ -38,6 +38,7 @@ int LockPrimaryNode::init(const pb::PlanNode& node) {
 
     if (lock_primary_node.conjuncts_size() > 0) {
         _conjuncts.clear();
+        _conjuncts_need_destory = true;
         for (auto i = 0; i < lock_primary_node.conjuncts_size(); i++) {
             ExprNode* conjunct = nullptr;
             int ret = ExprNode::create_tree(lock_primary_node.conjuncts(i), &conjunct);
@@ -47,7 +48,6 @@ int LockPrimaryNode::init(const pb::PlanNode& node) {
             }
             _conjuncts.emplace_back(conjunct);
         }
-        _conjuncts_need_destory = true;
     }
     return 0;
 }
