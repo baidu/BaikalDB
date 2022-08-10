@@ -36,6 +36,18 @@ public:
     int64_t other_limit() {
         return _offset + _limit;
     }
+    int64_t get_offset() {
+	return _offset;
+    }
+    int64_t get_num_rows_skipped() {
+	return _num_rows_skipped;
+    }
+    int64_t add_num_rows_skipped(int64_t num) {
+	_num_rows_skipped += num;
+    }
+    int64_t get_limit() {
+	return _limit;
+    }
 private:
     int64_t _offset;
     int64_t _num_rows_skipped;
