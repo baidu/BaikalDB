@@ -128,6 +128,35 @@ enum IndexHint {
     bool is_cover_index() {
         return is_covering_index || index_type == pb::I_PRIMARY;
     }
+
+    // 参考choose_index函数
+    bool is_eq_or_in() {
+        if (pos_index.ranges_size() > 0) {
+            const auto& range = pos_index.ranges(0);
+            bool is_eq = true;
+            if (range.has_left_key()) {
+                if (range.left_key() != range.right_key()) {
+                    is_eq = false;
+                }
+            } else {
+                if (range.left_pb_record() != range.right_pb_record()) {
+                    is_eq = false;
+                }
+            }
+
+            if (range.left_field_cnt() != range.right_field_cnt()) {
+                is_eq = false;
+            }
+
+            if (range.left_open() || range.right_open()) {
+                is_eq = false;
+            }
+
+            return is_eq && !range.like_prefix();
+        }
+
+        return false;
+    }
     
 public:
     //TODO 先mock一个，后面从schema读取

@@ -58,10 +58,12 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
-    // 目前只对纯inner join重排序，方便使用索引和构造等值join
-    ret = JoinReorder().analyze(ctx);
-    if (ret < 0) {
-        return ret;
+    if (!ctx->is_straight_join) { // straight join
+        // 目前只对纯inner join重排序，方便使用索引和构造等值join
+        ret = JoinReorder().analyze(ctx);
+        if (ret < 0) {
+            return ret;
+        }
     }
     // 查询region路由表，得到需要推送到哪些region
     ret = PlanRouter().analyze(ctx);

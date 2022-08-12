@@ -14,6 +14,7 @@
 
 #include "limit_calc.h"
 #include "join_node.h"
+#include "filter_node.h"
 
 namespace baikaldb {
 int LimitCalc::analyze(QueryContext* ctx) {
@@ -33,7 +34,14 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
     switch (node->node_type()) {
         case pb::TABLE_FILTER_NODE:
         case pb::WHERE_FILTER_NODE:
-        case pb::HAVING_FILTER_NODE:
+        case pb::HAVING_FILTER_NODE: {
+            // 空filter可以下推
+            if (static_cast<FilterNode*>(node)->pruned_conjuncts().empty()) {
+                break;
+            } else {
+                return;
+            }
+        }
         case pb::SORT_NODE:
         case pb::MERGE_AGG_NODE:
         case pb::AGG_NODE:
@@ -41,10 +49,17 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
         default:
             break;
     }
+
+    if (node->node_type() == pb::APPLY_NODE) {
+        return;
+    }
     
     if (node->node_type() == pb::JOIN_NODE) {
         JoinNode* join_node = static_cast<JoinNode*>(node);
         if (join_node->join_type() == pb::INNER_JOIN) {
+            if (ctx->is_full_export) {
+                _analyze_limit(ctx, join_node->children(0), limit);
+            }
             return;
         }
         if (join_node->join_type() == pb::LEFT_JOIN) {
@@ -57,9 +72,8 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
         }
     }
     
-    int64_t other_limit = limit;
     for (auto& child : node->children()) {
-        _analyze_limit(ctx, child, other_limit); 
+        _analyze_limit(ctx, child, limit); 
     }
 }
 }

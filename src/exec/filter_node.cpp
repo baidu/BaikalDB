@@ -356,7 +356,7 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             DB_WARNING("current sql [%s] is not bool type, current exprnode_type is [%s]", 
                 ctx->sql.c_str(), pb::ExprNodeType_Name(expr->node_type()).c_str());
             if (FLAGS_open_nonboolean_sql_forbid) {
-                return -1;
+                return NOT_BOOL_ERRCODE;
             }
         }
         // TODO 除了not in外，其他计算null的地方在index_selector判断了，应该统一处理
@@ -589,6 +589,13 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
             filter_node.SerializeToString(&filter_string);
             pb_node->mutable_derive_node()->set_filter_node(filter_string);
         } else {
+#ifndef NDEBUG
+            // 调试日志
+            pb::FilterNode filter_node;
+            std::string str = _filter_node;
+            filter_node.ParseFromString(str);
+            DB_DEBUG("filter_node: %s", filter_node.ShortDebugString().c_str());
+#endif
             pb_node->mutable_derive_node()->set_filter_node(_filter_node);
         }
     } else {
@@ -625,7 +632,9 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             return 0;
         }
         if (_child_row_batch.is_traverse_over()) {
-            if (_child_eos) {
+            // 兼容fullexport多轮计算
+            if (_child_eos && 
+                (state->is_eos() || !state->is_full_export)) {
                 *eos = true;
                 return 0;
             } else {

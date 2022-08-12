@@ -89,7 +89,10 @@ int LoadPlanner::plan() {
     }
 
     set_dml_txn_state(_table_id);
-    set_socket_txn_tid_set();
+    // 局部索引binlog处理标记
+    if (_ctx->open_binlog && !_factory->has_global_index(_table_id)) {
+        insert_node->set_local_index_binlog(true);
+    }
     return 0;
 }
 

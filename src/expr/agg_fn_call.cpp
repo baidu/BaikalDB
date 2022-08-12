@@ -18,6 +18,9 @@
 #include "slot_ref.h"
 
 namespace baikaldb {
+
+DEFINE_bool(transfor_hll_raw_to_sparse, false, "try transfor raw hll to sparse");
+
 int AggFnCall::init(const pb::ExprNode& node) {
     ExprNode::init(node);
     if (!node.has_fn()) {
@@ -264,8 +267,16 @@ bool AggFnCall::is_initialize(const std::string& key, MemRow* dst) {
 }
 
 // 聚合函数逻辑
-int AggFnCall::initialize(const std::string& key, MemRow* dst) {
+int AggFnCall::initialize(const std::string& key, MemRow* dst, int64_t& used_size, bool only_count) {
     ExprValue dst_val = dst->get_value(_tuple_id, _intermediate_slot_id);
+    if (only_count) {
+        if (_agg_type == COUNT_STAR || _agg_type == COUNT) {
+            if (dst_val.is_null()) {
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue(pb::INT64));
+            }
+        }
+        return 0;
+    }
     switch (_agg_type) {
         case COUNT_STAR:
         case COUNT: {
@@ -309,6 +320,7 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                     hll::hll_merge_agg(intermediate_val.val.str_val, dst_val.str_val);
                     dst->set_value(_tuple_id, _intermediate_slot_id, intermediate_val.val);
                 }
+                used_size += intermediate_val.val.size();
                 intermediate_val.is_assign = true;
             }
             return 0;
@@ -334,6 +346,7 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                     // and第一次需要特殊处理
                     intermediate_val.is_assign = true;
                 }
+                used_size += intermediate_val.val.size();
             }
             return 0;
         }
@@ -351,6 +364,7 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
                     dst->set_value(_tuple_id, _intermediate_slot_id, dst_val);
                 }
                 intermediate_val.is_assign = true;
+                used_size += intermediate_val.val.size();
             }
             return 0;
         }
@@ -365,7 +379,7 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst) {
     }
 }
 
-int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
+int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst, int64_t& used_size) {
     switch (_agg_type) {
         case COUNT_STAR: {
             ExprValue result = dst->get_value(_tuple_id, _intermediate_slot_id);
@@ -429,7 +443,9 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null()) {
                 auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
                 hll::hll_add(intermediate_val.val.str_val, value.hash());
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
@@ -437,7 +453,9 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null() && value.is_hll()) {
                 auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
                 hll::hll_merge_agg(intermediate_val.val.str_val, value.str_val);
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
@@ -446,7 +464,9 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null() && value.is_bitmap()) {
                 auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
                 *intermediate_val.val._u.bitmap |= *value._u.bitmap;
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
@@ -455,12 +475,14 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null() && value.is_bitmap()) {
                 auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
                 if (intermediate_val.is_assign) {
                     *intermediate_val.val._u.bitmap &= *value._u.bitmap;
                 } else {
                     *intermediate_val.val._u.bitmap = *value._u.bitmap;
                     intermediate_val.is_assign = true;
-                }              
+                }
+                used_size += intermediate_val.val.size() - old_used_size;          
             }
             return 0;
         }
@@ -469,25 +491,32 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null() && value.is_bitmap()) {
                 auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
                 *intermediate_val.val._u.bitmap ^= *value._u.bitmap;
+                used_size += intermediate_val.val.size() - old_used_size; 
             }
             return 0;
         }
         case RB_BUILD_AGG: {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null()) {
-                auto& intermediate_val = _intermediate_val_map[key].val;
-                intermediate_val._u.bitmap->add(value.get_numberic<uint32_t>());
+                auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
+                intermediate_val.val._u.bitmap->add(value.get_numberic<uint32_t>());
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
         case TDIGEST_AGG: {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null() && value.is_tdigest()) {
-                auto& intermediate_val = _intermediate_val_map[key].val;
+                auto& intermediate_val = _intermediate_val_map[key];
+                
                 if (tdigest::is_td_object(value.str_val)) {
-                    tdigest::td_merge((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
+                    int64_t old_used_size = intermediate_val.val.size();
+                    tdigest::td_merge((tdigest::td_histogram_t *)intermediate_val.val.str_val.data(),
                             (tdigest::td_histogram_t *)value.str_val.data());
+                    used_size += intermediate_val.val.size() - old_used_size;
                 }
             }
             return 0;
@@ -495,9 +524,11 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
         case TDIGEST_BUILD_AGG: {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null()) {
-                auto& intermediate_val = _intermediate_val_map[key].val;
-                tdigest::td_add((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
+                auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
+                tdigest::td_add((tdigest::td_histogram_t *)intermediate_val.val.str_val.data(),
                         value.get_numberic<double>(), 1);
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
@@ -509,6 +540,7 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
                     result.str_val += ",";
                 }
                 result.str_val += value.get_string();
+                used_size += result.size();
                 dst->set_value(_tuple_id, _intermediate_slot_id, result);
             }
             return 0;
@@ -517,11 +549,11 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst) {
             return -1;
     }
 }
-int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
+int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& used_size) {
     if (_is_distinct) {
         //distinct agg, 无merge概念
         //普通agg与distinct agg一起出现时，普通agg需要多计算一次，因此需要merge
-        return update(key, src, dst);
+        return update(key, src, dst, used_size);
     }
     //首行不需要merge
     if (src == dst) {
@@ -601,8 +633,10 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
             ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
             if (!src_value.is_null()) {
                 src_value.cast_to(pb::BITMAP);
-                auto& intermediate_val = _intermediate_val_map[key].val;
-                *intermediate_val._u.bitmap |= *src_value._u.bitmap;
+                auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
+                *intermediate_val.val._u.bitmap |= *src_value._u.bitmap;
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
@@ -612,12 +646,14 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
             if (!src_value.is_null()) {
                 src_value.cast_to(pb::BITMAP);
                 auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
                 if (intermediate_val.is_assign) {
                     *intermediate_val.val._u.bitmap &= *src_value._u.bitmap;
                 } else {
                     *intermediate_val.val._u.bitmap = *src_value._u.bitmap;
                     intermediate_val.is_assign = true;
                 }
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
@@ -626,8 +662,10 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
             ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
             if (!src_value.is_null()) {
                 src_value.cast_to(pb::BITMAP);
-                auto& intermediate_val = _intermediate_val_map[key].val;
-                *intermediate_val._u.bitmap ^= *src_value._u.bitmap;
+                auto& intermediate_val = _intermediate_val_map[key];
+                int64_t old_used_size = intermediate_val.val.size();
+                *intermediate_val.val._u.bitmap ^= *src_value._u.bitmap;
+                used_size += intermediate_val.val.size() - old_used_size;
             }
             return 0;
         }
@@ -635,10 +673,12 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
         case TDIGEST_BUILD_AGG: {
             ExprValue src_value = src->get_value(_tuple_id, _intermediate_slot_id);
             if (!src_value.is_null()) {
-                auto& intermediate_val = _intermediate_val_map[key].val;
+                auto& intermediate_val = _intermediate_val_map[key];
                 if (tdigest::is_td_object(src_value.str_val)) {
-                    tdigest::td_merge((tdigest::td_histogram_t *)intermediate_val.str_val.data(),
+                    int64_t old_used_size = intermediate_val.val.size();
+                    tdigest::td_merge((tdigest::td_histogram_t *)intermediate_val.val.str_val.data(),
                         (tdigest::td_histogram_t *)src_value.str_val.data());
+                    used_size += intermediate_val.val.size() - old_used_size;
                 }
             }
             return 0;
@@ -651,6 +691,7 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst) {
                     result.str_val += ",";
                 }
                 result.str_val += value.get_string();
+                used_size += result.size();
                 dst->set_value(_tuple_id, _intermediate_slot_id, result);
             }
             return 0;
@@ -664,8 +705,9 @@ int AggFnCall::finalize(const std::string& key, MemRow* dst) {
         if (is_bitmap_agg() || is_tdigest_agg() || is_hll_agg()) {
             auto& val = _intermediate_val_map[key];
             if (val.is_assign) {
-                if (is_hll_agg()) {
+                if (is_hll_agg() && FLAGS_transfor_hll_raw_to_sparse) {
                     if (hll::hll_raw_to_sparse(val.val.str_val) < 0) {
+                        DB_WARNING("hll raw to sparse failed");
                         return -1;
                     }
                 }

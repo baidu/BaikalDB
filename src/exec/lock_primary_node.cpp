@@ -311,7 +311,7 @@ int LockPrimaryNode::put_row(RuntimeState* state, SmartRecord record) {
                 return ret;
             }
             std::string pk_str = pk_key.data();
-            ret = reverse_index_map[info_ptr->id]->insert_reverse(txn->get_txn(), 
+            ret = reverse_index_map[info_ptr->id]->insert_reverse(txn,
                                                             word, pk_str, record);
             if (ret < 0) {
                 return ret;

@@ -54,6 +54,9 @@ private:
                         const pb::IndexInfo* index,
                         const std::vector<const pb::FieldInfo*>& pk_fields,
                         const std::vector<const pb::FieldInfo*>& index_fields);
+    int parse_modify_column(pb::MetaManagerRequest& alter_request,
+                              const parser::TableName* table_name,
+                              const parser::AlterTableSpec* alter_spec);
     std::map<std::string, bool> _column_can_null;
 };
 } //namespace baikal

@@ -20,6 +20,10 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
         _reverse_remove_range_for_third_level(2);
         _reverse_remove_range_for_third_level(3);
     }
+    if (_write_count <= 0) {
+        return 0;
+    }
+    _write_count = 0;
     int8_t status = 0;
     TimeCost timer;
 
@@ -57,7 +61,7 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
     }
     int64_t seek_time = timer.get_time();
     if (end_flag) {
-        DB_DEBUG("seek end merge dowith time:%ld, seek time:%ld, region_id:%ld, cache:%s, "
+        DB_WARNING("seek end merge dowith time:%ld, seek time:%ld, region_id:%ld, cache:%s, "
                 "seg_cache:%s, prefix:%d,level_1_scan_count:%ld", 
                 timer.get_time(), seek_time, _region_id, 
                 _cache.get_info().c_str(), _seg_cache.get_info().c_str(), prefix, _level_1_scan_count);
@@ -94,7 +98,7 @@ int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remo
 
 template <typename Schema>
 int ReverseIndex<Schema>::handle_reverse(
-                                    myrocksdb::Transaction* txn,
+                                    SmartTransaction& txn,
                                     pb::ReverseNodeType flag,
                                     const std::string& word,
                                     const std::string& pk,
@@ -102,6 +106,7 @@ int ReverseIndex<Schema>::handle_reverse(
     if (word.empty()) {
         return 0;
     }
+    txn->set_reverse_set(this);
     static bvar::LatencyRecorder reverse_time_cost("reverse_time_cost");
     TimeCost cost;
     int8_t status;
@@ -122,7 +127,7 @@ int ReverseIndex<Schema>::handle_reverse(
     }
     auto map_it = seg_res->begin();
     while (map_it != seg_res->end()) {
-        status = _insert_one_reverse_node(txn, map_it->first, &map_it->second);
+        status = _insert_one_reverse_node(txn->get_txn(), map_it->first, &map_it->second);
         if (status != 0) {
             return -1;
         }
@@ -134,7 +139,7 @@ int ReverseIndex<Schema>::handle_reverse(
 
 template <typename Schema>
 int ReverseIndex<Schema>::insert_reverse(
-                                    myrocksdb::Transaction* txn,
+                                    SmartTransaction& txn,
                                     const std::string& word,
                                     const std::string& pk,
                                     SmartRecord record) {
@@ -143,7 +148,7 @@ int ReverseIndex<Schema>::insert_reverse(
 
 template <typename Schema>
 int ReverseIndex<Schema>::delete_reverse(
-                                    myrocksdb::Transaction* txn,
+                                    SmartTransaction& txn,
                                     const std::string& word,
                                     const std::string& pk,
                                     SmartRecord record) {
@@ -350,7 +355,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) 
             std::string last_key = third_msg.reverse_nodes(old_count - 1).key();
             if (first_key >= _key_range.first &&
                     end_key_compare(last_key, _key_range.second) < 0) {
-                DB_WARNING("in range need not remove, region_id: %ld, index_id: %ld, old_count: %d",
+                DB_DEBUG("in range need not remove, region_id: %ld, index_id: %ld, old_count: %d",
                         _region_id, _index_id, old_count);
                 continue;
             }

@@ -905,6 +905,7 @@ enum MysqlErrCode : int32_t {
     ER_GEN_PLAN_FAILED                                           = 10003,
     ER_EXEC_PLAN_FAILED                                          = 10004,
     ER_QUERY_EXCEED_QUOTA                                        = 10005,
-    ER_SQL_TOO_BIG                                               = 10006
+    ER_SQL_TOO_BIG                                               = 10006,
+    ER_SQL_REFUSE                                                = 10007
 };
 } // end of namespace baikaldb

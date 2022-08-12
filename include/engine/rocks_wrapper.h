@@ -121,6 +121,8 @@ public:
             const rocksdb::Slice& begin, 
             const rocksdb::Slice& end,
             bool delete_files_in_range);
+
+    int32_t get_binlog_value(int64_t ts, std::string& binlog_value);
     
     rocksdb::Iterator* new_iterator(const rocksdb::ReadOptions& options, 
                                     rocksdb::ColumnFamilyHandle* family) {
@@ -182,7 +184,13 @@ public:
                 return true;
             }
             _txn_db->GetAggregatedIntProperty("rocksdb.estimate-pending-compaction-bytes", &value);
-            if (value > _data_cf_option.soft_pending_compaction_bytes_limit / 2) {
+            uint64_t level0_sst = 0;
+            uint64_t pending_compaction_size = 0;
+            get_rocks_statistic(level0_sst, pending_compaction_size);
+            if (level0_sst > _data_cf_option.level0_slowdown_writes_trigger) {
+                return true;
+            }
+            if (pending_compaction_size > _data_cf_option.soft_pending_compaction_bytes_limit / 2) {
                 return true;
             }
         }
@@ -220,6 +228,10 @@ public:
         _txn_db->GetIntProperty(get_data_handle(), "rocksdb.estimate-pending-compaction-bytes", &pending_compaction_size);
         return 0;
     }
+    void update_oldest_ts_in_binlog_cf();
+    int64_t get_oldest_ts_in_binlog_cf() const {
+        return _oldest_ts_in_binlog_cf;
+    }
 private:
 
     RocksWrapper();
@@ -232,6 +244,7 @@ private:
     rocksdb::Cache*         _cache;
 
     std::map<std::string, rocksdb::ColumnFamilyHandle*> _column_families;
+    rocksdb::ColumnFamilyHandle* _old_binlog_cf = nullptr;
 
     rocksdb::ColumnFamilyOptions _log_cf_option;
     rocksdb::ColumnFamilyOptions _binlog_cf_option;
@@ -246,5 +259,6 @@ private:
     bthread::Mutex _options_mutex;
     std::unordered_map<std::string, std::string> _rocks_options;
     std::map<std::string, std::string> _defined_options;
+    int64_t _oldest_ts_in_binlog_cf = 0;
 };
 }

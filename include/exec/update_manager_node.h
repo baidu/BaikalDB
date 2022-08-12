@@ -53,6 +53,8 @@ public:
     void set_update_exprs(std::vector<ExprNode*>& update_exprs) {
         _update_exprs = update_exprs;
     }
+
+    int process_binlog(RuntimeState* state, bool is_local);
     void update_record(RuntimeState* state, SmartRecord record);
 
 private:

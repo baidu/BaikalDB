@@ -24,12 +24,13 @@ namespace baikaldb {
 
 DEFINE_int32(baikaldb_max_concurrent, 5, "ddl work baikaldb concurrent");
 DEFINE_int32(single_table_ddl_max_concurrent, 50, "ddl work baikaldb concurrent");
+DEFINE_int32(submit_task_number_per_round, 20, "submit task number per round");
 DEFINE_int32(ddl_status_update_interval_us, 10 * 1000 * 1000, "ddl_status_update_interval(us)");
 DEFINE_int32(max_region_num_ratio, 2, "max region number ratio");
 DEFINE_int32(max_ddl_retry_time, 30, "max ddl retry time");
 DECLARE_int32(baikal_heartbeat_interval_us);
 
-std::string construct_index_ddl_key(const std::string& identify, const std::initializer_list<int64_t>& ids) {
+std::string construct_ddl_work_key(const std::string& identify, const std::initializer_list<int64_t>& ids) {
     std::string ddl_key;
     ddl_key = MetaServer::SCHEMA_IDENTIFY + identify;
     for (auto id : ids) {
@@ -203,7 +204,7 @@ void DBManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* reque
     DB_DEBUG("dll_response : %s address %s", response->ShortDebugString().c_str(), address.c_str());
 }
 
-bool DBManager::round_robin_select(std::string* selected_address) {
+bool DBManager::round_robin_select(std::string* selected_address, bool is_column_ddl) {
     BAIDU_SCOPED_LOCK(_address_instance_mutex);
     auto iter = _address_instance_map.find(_last_rolling_instance);
     if (iter == _address_instance_map.end() || (++iter) == _address_instance_map.end()) {
@@ -223,8 +224,8 @@ bool DBManager::round_robin_select(std::string* selected_address) {
         auto find_task_map = _common_task_map.init_if_not_exist_else_update(iter->first, false, [&current_task_number](CommonTaskMap& db_task_map){
             current_task_number = db_task_map.doing_task_map.size() + db_task_map.to_do_task_map.size();
         });
-
-        if (!find_task_map || current_task_number < FLAGS_baikaldb_max_concurrent) {
+        int32_t max_concurrent = is_column_ddl ? FLAGS_baikaldb_max_concurrent * 5 : FLAGS_baikaldb_max_concurrent;
+        if (!find_task_map || current_task_number < max_concurrent) {
             _last_rolling_instance = iter->first;
             *selected_address = iter->first;
             DB_NOTICE("select address %s", iter->first.c_str());
@@ -235,8 +236,8 @@ bool DBManager::round_robin_select(std::string* selected_address) {
     return false;
 }
 
-bool DBManager::select_instance(std::string* selected_address) {
-    return round_robin_select(selected_address);
+bool DBManager::select_instance(std::string* selected_address, bool is_column_ddl) {
+    return round_robin_select(selected_address, is_column_ddl);
 }
 
 int DBManager::execute_task(MemRegionDdlWork& work) {
@@ -258,9 +259,11 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
             ++iter2;
         }
     });
-    if (all_task_count_by_table_id > FLAGS_single_table_ddl_max_concurrent) {
+    int32_t max_concurrent = work.region_info.op_type() == pb::OP_MODIFY_FIELD ?
+        FLAGS_single_table_ddl_max_concurrent * 10 : FLAGS_single_table_ddl_max_concurrent;
+    if (all_task_count_by_table_id > max_concurrent) {
         DB_NOTICE("table %s ddl task count %d reach max concurrency %d", table_id_prefix.c_str(),
-            all_task_count_by_table_id, FLAGS_single_table_ddl_max_concurrent);
+            all_task_count_by_table_id, max_concurrent);
         return -1;
     }
 
@@ -268,7 +271,7 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
     auto& region_ddl_info = work.region_info;
     work.update_timestamp = butil::gettimeofday_us();
     std::string address;
-    if (select_instance(&address)) {
+    if (select_instance(&address, work.region_info.op_type() == pb::OP_MODIFY_FIELD)) {
         auto task_id = std::to_string(region_ddl_info.table_id()) + "_" + std::to_string(region_ddl_info.region_id());
         auto retry_time = region_ddl_info.retry_time();
         region_ddl_info.set_retry_time(++retry_time);
@@ -454,14 +457,14 @@ int DDLManager::init_del_index_ddlwork(int64_t table_id, const pb::IndexInfo& in
         return -1;
     }
     if(MetaRocksdb::get_instance()->put_meta_info(
-        construct_index_ddl_key(MetaServer::DDLWORK_IDENTIFY, {table_id}), index_ddl_string) != 0) {
+        construct_ddl_work_key(MetaServer::DDLWORK_IDENTIFY, {table_id}), index_ddl_string) != 0) {
         DB_FATAL("put meta info error.");
         return -1;
     }
     return 0;
 }
 
-int DDLManager::init_index_ddlwork(int64_t table_id, pb::IndexInfo& index_info, 
+int DDLManager::init_index_ddlwork(int64_t table_id, const pb::IndexInfo& index_info, 
     std::unordered_map<int64_t, std::set<int64_t>>& partition_regions) {
     DB_NOTICE("init ddl tid_%ld iid_%ld", table_id, index_info.index_id());
     BAIDU_SCOPED_LOCK(_table_mutex);
@@ -483,7 +486,7 @@ int DDLManager::init_index_ddlwork(int64_t table_id, pb::IndexInfo& index_info,
         return -1;
     }
     if(MetaRocksdb::get_instance()->put_meta_info(
-        construct_index_ddl_key(MetaServer::DDLWORK_IDENTIFY, {table_id}), index_ddl_string) != 0) {
+        construct_ddl_work_key(MetaServer::DDLWORK_IDENTIFY, {table_id}), index_ddl_string) != 0) {
         DB_FATAL("put meta info error.");
         return -1;
     }
@@ -513,6 +516,7 @@ int DDLManager::init_index_ddlwork(int64_t table_id, pb::IndexInfo& index_info,
     for (const auto& region_info : region_infos) {
         pb::RegionDdlWork region_work;
         region_work.set_table_id(table_id);
+        region_work.set_op_type(pb::OP_ADD_INDEX);
         region_work.set_region_id(region_info->region_id());
         region_work.set_start_key(region_info->start_key());
         region_work.set_end_key(region_info->end_key());
@@ -532,7 +536,7 @@ int DDLManager::init_index_ddlwork(int64_t table_id, pb::IndexInfo& index_info,
         auto task_id = std::to_string(table_id) + "_" + std::to_string(region_work.region_id());
         DB_NOTICE("init region_ddlwork task_%s table%ld region_%ld region_%s", task_id.c_str(), table_id, 
             region_info->region_id(), region_work.ShortDebugString().c_str());
-        region_ddl_work_keys.emplace_back(construct_index_ddl_key(MetaServer::INDEX_DDLWORK_REGION_IDENTIFY, 
+        region_ddl_work_keys.emplace_back(construct_ddl_work_key(MetaServer::INDEX_DDLWORK_REGION_IDENTIFY, 
                     {table_id, region_info->region_id()}));
         region_ddl_work_values.emplace_back(region_work_string);
         if (region_ddl_work_keys.size() == 100) {
@@ -552,6 +556,98 @@ int DDLManager::init_index_ddlwork(int64_t table_id, pb::IndexInfo& index_info,
     }
     return 0;
 }
+
+int DDLManager::init_column_ddlwork(int64_t table_id, const pb::DdlWorkInfo& work_info, 
+    std::unordered_map<int64_t, std::set<int64_t>>& partition_regions) {
+    DB_NOTICE("init column ddl tid_%ld opt:%s", table_id, work_info.opt_sql().c_str());
+    BAIDU_SCOPED_LOCK(_table_mutex);
+    if (_table_ddl_mem.count(table_id) == 1) {
+        DB_WARNING("table_id_%ld add index is running..", table_id);
+        return -1;
+    }
+    MemDdlInfo mem_info;
+    mem_info.work_info.CopyFrom(work_info);
+    mem_info.work_info.set_errcode(pb::IN_PROCESS);
+    mem_info.work_info.set_status(pb::DdlWorkIdle);
+    mem_info.work_info.set_job_state(pb::IS_NONE);
+    _table_ddl_mem.emplace(table_id, mem_info);
+    std::string ddl_work_string;
+    if (!mem_info.work_info.SerializeToString(&ddl_work_string)) {
+        DB_FATAL("serialzeTostring error.");
+        return -1;
+    }
+    if(MetaRocksdb::get_instance()->put_meta_info(
+        construct_ddl_work_key(MetaServer::DDLWORK_IDENTIFY, {table_id}), ddl_work_string) != 0) {
+        DB_FATAL("put meta info error.");
+        return -1;
+    }
+    std::vector<int64_t> region_ids;
+    std::unordered_map<int64_t, int64_t> region_partition_map;
+    region_ids.reserve(1000);
+    for (const auto& partition_region : partition_regions) {
+        for (auto& region_id :  partition_region.second) {
+            region_ids.emplace_back(region_id);    
+            region_partition_map[region_id] = partition_region.first;
+        }
+    }
+    DB_NOTICE("work %s region size %zu", mem_info.work_info.ShortDebugString().c_str(), region_ids.size());
+    std::vector<SmartRegionInfo> region_infos;
+    RegionManager::get_instance()->get_region_info(region_ids, region_infos);
+
+    MemRegionDdlWorkMapPtr region_map_ptr;
+    {
+        BAIDU_SCOPED_LOCK(_region_mutex);
+        _region_ddlwork[table_id].reset(new ThreadSafeMap<int64_t, MemRegionDdlWork>);
+        region_map_ptr = _region_ddlwork[table_id];
+    }
+    std::vector<std::string> region_ddl_work_keys;
+    std::vector<std::string> region_ddl_work_values;
+    region_ddl_work_keys.reserve(100);
+    region_ddl_work_values.reserve(100);
+    for (const auto& region_info : region_infos) {
+        pb::RegionDdlWork region_work;
+        region_work.set_table_id(table_id);
+        region_work.set_op_type(pb::OP_MODIFY_FIELD);
+        region_work.set_region_id(region_info->region_id());
+        region_work.set_start_key(region_info->start_key());
+        region_work.set_end_key(region_info->end_key());
+        region_work.set_status(pb::DdlWorkIdle);
+        region_work.set_partition(region_partition_map[region_info->region_id()]);
+        region_work.mutable_column_ddl_info()->CopyFrom(work_info.column_ddl_info());
+        std::string region_work_string;
+        if (!region_work.SerializeToString(&region_work_string)) {
+            DB_FATAL("serialze region work error.");
+            return -1;
+        }
+        MemRegionDdlWork region_ddl_work;
+        region_ddl_work.region_info = region_work;
+        
+        region_map_ptr->set(region_info->region_id(), region_ddl_work);
+
+        auto task_id = std::to_string(table_id) + "_" + std::to_string(region_work.region_id());
+        DB_NOTICE("init region_ddlwork task_%s table%ld region_%ld region_%s", task_id.c_str(), table_id, 
+            region_info->region_id(), region_work.ShortDebugString().c_str());
+        region_ddl_work_keys.emplace_back(construct_ddl_work_key(MetaServer::INDEX_DDLWORK_REGION_IDENTIFY, 
+                    {table_id, region_info->region_id()}));
+        region_ddl_work_values.emplace_back(region_work_string);
+        if (region_ddl_work_keys.size() == 100) {
+            if(MetaRocksdb::get_instance()->put_meta_info(region_ddl_work_keys, region_ddl_work_values) != 0) {
+                DB_FATAL("put region info error.");
+                return -1;
+            }
+            region_ddl_work_keys.clear();
+            region_ddl_work_values.clear();
+        }
+    }
+    if (region_ddl_work_keys.size() != 0) {
+        if(MetaRocksdb::get_instance()->put_meta_info(region_ddl_work_keys, region_ddl_work_values) != 0) {
+            DB_FATAL("put region info error.");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 // 定时线程处理所有ddl work。
 int DDLManager::work() {
     DB_NOTICE("sleep, wait ddl manager init.");
@@ -594,6 +690,8 @@ int DDLManager::work() {
                 drop_index_ddlwork(table_ddl_info.second.work_info);
             } else if (op_type == pb::OP_ADD_INDEX) {
                 add_index_ddlwork(table_ddl_info.second.work_info);
+            } else if (op_type == pb::OP_MODIFY_FIELD) {
+                add_column_ddlwork(table_ddl_info.second.work_info);
             } else {
                 DB_FATAL("unknown optype.");
             }
@@ -609,7 +707,11 @@ int DDLManager::load_table_ddl_snapshot(const pb::DdlWorkInfo& ddl_work) {
     DB_NOTICE("load table ddl snapshot %s.", ddl_work.ShortDebugString().c_str());
     MemDdlInfo mem_info;
     mem_info.work_info = ddl_work;
-    _table_ddl_mem.emplace(ddl_work.table_id(), mem_info);
+    if (ddl_work.op_type() == pb::OP_MODIFY_FIELD && ddl_work.job_state() == pb::IS_PUBLIC) {
+        _table_ddl_done_mem.emplace(ddl_work.table_id(), mem_info);
+    } else {
+        _table_ddl_mem.emplace(ddl_work.table_id(), mem_info);
+    }
     return 0;
 }
 
@@ -662,6 +764,11 @@ void DDLManager::get_ddlwork_info(int64_t table_id, pb::QueryResponse* query_res
         auto iter = _table_ddl_mem.find(table_id);
         if (iter != _table_ddl_mem.end()) {
             query_response->add_ddlwork_infos()->CopyFrom(iter->second.work_info);
+        } else {
+            auto iter2 = _table_ddl_done_mem.find(table_id);
+            if (iter2 != _table_ddl_done_mem.end()) {
+                query_response->add_ddlwork_infos()->CopyFrom(iter2->second.work_info);
+            }
         }
     }
     MemRegionDdlWorkMapPtr region_work_ptr;
@@ -791,8 +898,7 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
         return 0;
     }
 
-    switch (current_state)
-    {
+    switch (current_state) {
     case pb::IS_NONE:
         if (_update_policy.should_change(table_id, current_state)) {
             ddl_work.set_job_state(pb::IS_DELETE_ONLY);
@@ -800,14 +906,14 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
             update_table_ddl_mem(ddl_work);
             TableManager::get_instance()->update_index_status(ddl_work);
         }
-        break; 
+        break;
     case pb::IS_DELETE_ONLY:
         if (_update_policy.should_change(table_id, current_state)) {
             ddl_work.set_job_state(pb::IS_WRITE_ONLY);
             update_table_ddl_mem(ddl_work);
             TableManager::get_instance()->update_index_status(ddl_work);
         }
-        break; 
+        break;
     case pb::IS_WRITE_ONLY:
         {
             if (!exist_wait_txn_info(table_id)) {
@@ -842,7 +948,7 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
         {
             bool done = true;
             bool rollback = false;
-            const size_t max_task_number = 20;
+            size_t max_task_number = FLAGS_submit_task_number_per_round;
             size_t current_task_number = 0;
             int32_t wait_num = 0;
             MemRegionDdlWorkMapPtr region_map_ptr;
@@ -956,6 +1062,116 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
     return 0;
 }
 
+int DDLManager::add_column_ddlwork(pb::DdlWorkInfo& ddl_work) {
+    bool done = true;
+    bool rollback = false;
+    const size_t max_task_number = FLAGS_submit_task_number_per_round * 10;
+    size_t current_task_number = 0;
+    int32_t wait_num = 0;
+    int64_t table_id = ddl_work.table_id();
+    size_t region_size = TableManager::get_instance()->get_region_size(table_id);
+    if (ddl_work.errcode() == pb::EXEC_FAIL) {
+        DB_FATAL("ddl work %s fail", ddl_work.ShortDebugString().c_str());
+        return 0;
+    }
+    MemRegionDdlWorkMapPtr region_map_ptr;
+    {
+        BAIDU_SCOPED_LOCK(_region_mutex);
+        region_map_ptr = _region_ddlwork[table_id];
+    }
+    if (region_map_ptr == nullptr) {
+        DB_WARNING("ddl work table_id %ld is done.", table_id);
+        return 0;
+    }
+
+    int32_t doing_work_number = get_doing_work_number(table_id);
+    if (doing_work_number == -1) {
+        return 0;
+    } else if (doing_work_number > region_size * FLAGS_max_region_num_ratio) {
+        DB_NOTICE("table_%ld not enough region.", table_id);
+        return 0;
+    }
+    ddl_work.set_job_state(pb::IS_WRITE_LOCAL);
+    ddl_work.set_status(pb::DdlWorkDoing);
+    update_table_ddl_mem(ddl_work);
+    region_map_ptr->traverse_with_early_return([&done, &rollback, this, table_id, region_size, 
+        &current_task_number, max_task_number, &ddl_work, &wait_num](MemRegionDdlWork& region_work) -> bool {
+        auto task_id = std::to_string(region_work.region_info.table_id()) + 
+                "_" + std::to_string(region_work.region_info.region_id());
+        if (region_work.region_info.status() == pb::DdlWorkIdle) {
+            done = false;
+            DB_NOTICE("execute task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
+            if (DBManager::get_instance()->execute_task(region_work) == 0) {
+                //提交任务成功，设置状态为DOING.
+                region_work.region_info.set_status(pb::DdlWorkDoing);
+                if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
+                    DB_NOTICE("table_%ld not enough region.", table_id);
+                    return false;
+                }
+                current_task_number++;
+                if (current_task_number > max_task_number) {
+                    DB_NOTICE("table_%ld launch task next round.", table_id);
+                    return false;
+                }
+            } else {
+                DB_NOTICE("table_%ld not enough baikaldb to execute.", table_id);
+                return false;
+            }
+        }
+        if (region_work.region_info.status() != pb::DdlWorkDone) {
+            DB_NOTICE("wait task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
+            wait_num++;
+            done = false;
+        }
+        if (region_work.region_info.status() == pb::DdlWorkFail) {
+            auto retry_time = region_work.region_info.retry_time();
+            if (retry_time < FLAGS_max_ddl_retry_time) {
+                if (DBManager::get_instance()->execute_task(region_work) == 0) {
+                    region_work.region_info.set_status(pb::DdlWorkDoing);
+                    if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
+                        DB_NOTICE("not enough region.");
+                        return false;
+                    }
+                    DB_NOTICE("retry task_%s %s", task_id.c_str(), 
+                        region_work.region_info.ShortDebugString().c_str());
+                }
+            } else {
+                rollback = true;
+                DB_NOTICE("rollback task_%s %s", task_id.c_str(), 
+                    region_work.region_info.ShortDebugString().c_str());
+            }
+            done = false;
+            } else if (region_work.region_info.status() == pb::DdlWorkDupUniq ||
+                        region_work.region_info.status() == pb::DdlWorkError) {
+                DB_FATAL("region task_%s %s dup uniq or create index region error.", task_id.c_str(), 
+                    region_work.region_info.ShortDebugString().c_str());
+                done = false;
+                rollback = true;
+            }
+
+            if (rollback) {
+                DB_FATAL("ddl work %s rollback.", ddl_work.ShortDebugString().c_str());
+                ddl_work.set_errcode(pb::EXEC_FAIL);
+                ddl_work.set_job_state(pb::IS_PUBLIC);
+                ddl_work.set_status(pb::DdlWorkFail);
+                ddl_work.set_end_timestamp(butil::gettimeofday_s());
+                update_table_ddl_mem(ddl_work);
+                return false;
+            }
+            return true;
+        });
+    if (done) {
+        ddl_work.set_job_state(pb::IS_PUBLIC);
+        ddl_work.set_errcode(pb::SUCCESS);
+        ddl_work.set_status(pb::DdlWorkDone);
+        ddl_work.set_end_timestamp(butil::gettimeofday_s());
+        update_table_ddl_mem(ddl_work);
+    } else {
+        DB_NOTICE("wait %d ddl work to finish.", wait_num);
+    }
+    return 0;
+}
+
 int DDLManager::update_region_ddlwork(const pb::RegionDdlWork& work) {
     auto table_id = work.table_id();
     if (work.status() != pb::DdlWorkDoing) {
@@ -976,7 +1192,7 @@ int DDLManager::delete_index_ddlwork_region_info(int64_t table_id) {
         _region_ddlwork.erase(table_id);
     }
     rocksdb::WriteOptions write_options;
-    std::string begin_key = construct_index_ddl_key(MetaServer::INDEX_DDLWORK_REGION_IDENTIFY, 
+    std::string begin_key = construct_ddl_work_key(MetaServer::INDEX_DDLWORK_REGION_IDENTIFY, 
                         {table_id});
     std::string end_key = begin_key;
     end_key.append(8, 0xFF);
@@ -990,21 +1206,42 @@ int DDLManager::delete_index_ddlwork_region_info(int64_t table_id) {
     return 0; 
 }
 
-int DDLManager::delete_index_ddlwork_info(int64_t table_id) {
+int DDLManager::delete_index_ddlwork_info(int64_t table_id,
+            const pb::DdlWorkInfo& work_info) {
     DB_NOTICE("delete ddl table info.");
     {
         BAIDU_SCOPED_LOCK(_table_mutex);
         _table_ddl_mem.erase(table_id);
+        _table_ddl_done_mem.erase(table_id);
+        if (work_info.op_type() == pb::OP_MODIFY_FIELD) {
+            MemDdlInfo mem_info;
+            mem_info.work_info.CopyFrom(work_info);
+            _table_ddl_done_mem[table_id] = mem_info;
+        }
     }
     _update_policy.clear(table_id);
     {
         BAIDU_SCOPED_LOCK(_txn_mutex);
         _wait_txns.erase(table_id);
     }
-    std::vector<std::string> keys {construct_index_ddl_key(MetaServer::DDLWORK_IDENTIFY, {table_id})};
-    if(MetaRocksdb::get_instance()->delete_meta_info(keys) != 0) {
-        DB_FATAL("delete meta info error.");
-        return -1;
+    std::string ddlwork_key = construct_ddl_work_key(MetaServer::DDLWORK_IDENTIFY, {table_id});
+    // 保存最新一条column ddl任务信息
+    if (work_info.op_type() == pb::OP_MODIFY_FIELD) {
+        std::string ddl_string;
+        if (!work_info.SerializeToString(&ddl_string)) {
+            DB_FATAL("serialzeTostring error.");
+            return -1;
+        }
+        if (MetaRocksdb::get_instance()->put_meta_info(ddlwork_key, ddl_string) != 0) {
+            DB_FATAL("put meta info error.");
+            return -1;
+        }
+    } else {
+        std::vector<std::string> keys {ddlwork_key};
+        if (MetaRocksdb::get_instance()->delete_meta_info(keys) != 0) {
+            DB_FATAL("delete meta info error.");
+            return -1;
+        } 
     }
     return 0;
 }
@@ -1019,8 +1256,8 @@ int DDLManager::update_ddl_status(bool is_suspend, int64_t table_id) {
             DB_FATAL("serialzeTostring error.");
             return -1;
         }
-        if(MetaRocksdb::get_instance()->put_meta_info(
-            construct_index_ddl_key(MetaServer::DDLWORK_IDENTIFY, {table_id}), index_ddl_string) != 0) {
+        if (MetaRocksdb::get_instance()->put_meta_info(
+            construct_ddl_work_key(MetaServer::DDLWORK_IDENTIFY, {table_id}), index_ddl_string) != 0) {
             DB_FATAL("put meta info error.");
             return -1;
         }   
@@ -1065,6 +1302,7 @@ void DDLManager::delete_ddlwork(const pb::MetaManagerRequest& request, braft::Cl
         auto iter = _table_ddl_mem.find(table_id);
         if (iter != _table_ddl_mem.end()) {
             find = true;
+            iter->second.work_info.CopyFrom(request.ddlwork_info());
             del_work = iter->second.work_info;
         }
     }
@@ -1072,7 +1310,7 @@ void DDLManager::delete_ddlwork(const pb::MetaManagerRequest& request, braft::Cl
         TableManager::get_instance()->drop_index_request(del_work);
     }
     delete_index_ddlwork_region_info(table_id);
-    delete_index_ddlwork_info(table_id);
+    delete_index_ddlwork_info(table_id, del_work);
     Bthread _rm_th;
     _rm_th.run([table_id](){
         DBManager::get_instance()->clear_task(table_id);
@@ -1105,7 +1343,7 @@ int DDLManager::update_index_ddlwork_region_info(const pb::RegionDdlWork& work) 
         return -1;
     }
     if(MetaRocksdb::get_instance()->put_meta_info(
-            construct_index_ddl_key(MetaServer::INDEX_DDLWORK_REGION_IDENTIFY, 
+            construct_ddl_work_key(MetaServer::INDEX_DDLWORK_REGION_IDENTIFY, 
                 {work.table_id(), work.region_id()}), region_ddl_string) != 0) {
         DB_FATAL("put region info error.");
         return -1;

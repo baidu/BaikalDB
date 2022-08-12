@@ -33,6 +33,8 @@ public:
         return _del_scan_records;
     }
 
+    int process_binlog(RuntimeState* state, bool is_local);
+
 private:
     int64_t                         _table_id = -1;
     int32_t                         _tuple_id = -1;

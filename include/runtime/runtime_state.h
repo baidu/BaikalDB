@@ -376,10 +376,12 @@ public:
 public:
     uint64_t          txn_id = 0;
     int32_t           seq_id = 0;
+    int32_t           tuple_id = -1;
     MysqlErrCode      error_code = ER_ERROR_FIRST;
     std::ostringstream error_msg;
     bool              is_full_export = false;
     bool              is_separate = false;
+    bool              need_condition_again = true; // update/delete在raft状态机外再次检查条件
     BthreadCond       txn_cond;
     std::function<void(RuntimeState* state, SmartTransaction txn)> raft_func;
     bool              need_txn_limit = false;

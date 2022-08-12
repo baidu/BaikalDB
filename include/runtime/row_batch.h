@@ -75,19 +75,24 @@ public:
     }
     //move_row会转移所有权
     void move_row(std::unique_ptr<MemRow> row) {
-        _rows.push_back(std::move(row));
+        _rows.emplace_back(std::move(row));
     }
+    // 使用者保证idx < size()
     void replace_row(std::unique_ptr<MemRow> row, size_t idx) {
-        if (size() < idx + 1) {
-            return;
+        if (size() == 0) {
+            _rows.emplace_back(std::move(row));
+        } else {
+            _rows[idx] = std::move(row);
         }
-        _rows[idx] = std::move(row);
     }
     std::unique_ptr<MemRow>& get_row() {
         return _rows[_idx];
     }
     std::unique_ptr<MemRow>& get_row(size_t i) {
         return _rows[i];
+    }
+    std::unique_ptr<MemRow>& back() {
+        return _rows.back();
     }
     void next() {
         _idx++;

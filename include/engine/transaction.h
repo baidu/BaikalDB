@@ -30,6 +30,7 @@
 
 namespace baikaldb {
 DECLARE_bool(disable_wal);
+class ReverseIndexBase;
 
 typedef std::map<int, pb::CachePlan> CachePlanMap;
 
@@ -484,6 +485,10 @@ public:
 
     void rollback_current_request();
 
+    void set_reverse_set(ReverseIndexBase* base) {
+        _reverse_set.insert(base);
+    }
+
 public:
     int64_t     num_increase_rows = 0;
     int64_t     last_active_time = 0;
@@ -579,6 +584,7 @@ private:
     int64_t                         _txn_timeout = 0;
     // 执行累加时间, 主要是auto_commit dml_latency在prepare的时候记录到dml_cost_time
     int64_t                         _txn_time_cost = 0;
+    std::set<ReverseIndexBase*>     _reverse_set;
 };
 
 typedef std::shared_ptr<Transaction> SmartTransaction;

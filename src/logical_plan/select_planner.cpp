@@ -53,6 +53,9 @@ int SelectPlanner::plan() {
         }
         return 0;
     }
+    if (_select->select_opt != nullptr) {
+        _ctx->is_straight_join = _select->select_opt->straight_join;
+    }
 
     // parse from
     if (0 != parse_db_tables(_select->table_refs, &_join_root)) {

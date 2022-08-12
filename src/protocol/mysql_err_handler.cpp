@@ -911,6 +911,7 @@ bool MysqlErrHandler::init() {
         { ER_EXEC_PLAN_FAILED, "ER_EXEC_PLAN_FAILED", "HY000", "" },
         { ER_QUERY_EXCEED_QUOTA, "ER_QUERY_EXCEED_QUOTA", "HY000", "" },
         { ER_SQL_TOO_BIG, "ER_SQL_TOO_BIG", "HY000", "" },
+        { ER_SQL_REFUSE, "ER_SQL_REFUSE", "HY000", "" },
     };
     for (auto& item : mysql_err_item) {
         if (item.state_odbc == "" && item.state_jdbc == "") {

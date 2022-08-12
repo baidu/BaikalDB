@@ -448,7 +448,7 @@ int TableRecord::encode_field_for_cstore(const FieldInfo& field_info, std::strin
     return 0;
 }
 
-int TableRecord::field_to_string(const FieldInfo& field_info, std::string* out) {
+int TableRecord::field_to_string(const FieldInfo& field_info, std::string* out, bool* is_null) {
     const Reflection* reflection = _message->GetReflection();
     int32_t field_id = field_info.id;
     pb::PrimitiveType field_type = field_info.type;
@@ -457,7 +457,12 @@ int TableRecord::field_to_string(const FieldInfo& field_info, std::string* out) 
         DB_WARNING("invalid field: %d", field_id);
         return -1;
     }
-    *out = get_value(field).cast_to(field_type).get_string();
+    auto v = get_value(field);
+    if (v.is_null()) {
+        *is_null = true;
+    } else {
+        *out = v.cast_to(field_type).get_string();
+    }
     return 0;
 }
 

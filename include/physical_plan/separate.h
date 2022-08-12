@@ -90,6 +90,7 @@ private:
 
     SchemaFactory* _factory = SchemaFactory::get_instance();
     int64_t _row_ttl_duration = 0;
+    bool _is_first_full_export = true;
 };
 }
 

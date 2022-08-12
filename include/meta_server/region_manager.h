@@ -192,11 +192,15 @@ public:
         return _max_region_id;
     }
     
-    void get_region_peers(int64_t region_id, std::vector<std::string>& peers) {
+    // include all peer and leaner
+    void get_all_region_peers(int64_t region_id, std::vector<std::string>& peers) {
         SmartRegionInfo region_ptr = _region_info_map.get(region_id);
         if (region_ptr != nullptr) {
-            for (auto peer : region_ptr->peers()) {
-                peers.push_back(peer);
+            for (auto& peer : region_ptr->peers()) {
+                peers.emplace_back(peer);
+            }
+            for (auto& peer : region_ptr->learners()) {
+                peers.emplace_back(peer);
             }
         }
     }
@@ -207,7 +211,7 @@ public:
         }
         for (auto& table_ids : _instance_region_map[instance]) {
             for (auto& region_id : table_ids.second) {
-                region_ids.push_back(region_id);
+                region_ids.emplace_back(region_id);
             }
         }
     }
@@ -345,6 +349,7 @@ public:
     void erase_region_state(const std::vector<std::int64_t>& drop_region_ids) {
         for (auto& region_id : drop_region_ids) {
             _region_state_map.erase(region_id);
+            _region_peer_state_map.erase(region_id);
         }
     }
     void set_region_mem_info(int64_t region_id, 
@@ -488,8 +493,7 @@ public:
     void put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos);
     bool check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index); 
-    
-    void send_add_learner_request(const std::vector<std::pair<std::string, pb::InitRegion>>& requests);
+
     bool check_table_in_resource_tags(int64_t table_id, const std::set<std::string>& resource_tags);
     
 private:

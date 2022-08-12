@@ -76,7 +76,7 @@ enum MatchMode {
 };
 message PossibleIndex {
     message Range {
-        optional bytes left_pb_record = 3;
+        optional bytes left_pb_record = 3; // 全文索引在用，后续优化删掉
         optional bytes right_pb_record = 4;
         optional int32 left_field_cnt = 5;
         optional int32 right_field_cnt = 6;
@@ -118,6 +118,13 @@ message FulltextIndex {
     repeated FulltextIndex nested_fulltext_indexes = 3;
 };
 
+enum DDLType {
+    DDL_NONE           = 0;
+    DDL_LOCAL_INDEX    = 1;
+    DDL_GLOBAL_INDEX   = 2;
+    DDL_COLUMN         = 3;
+};
+
 message ScanNode {
     required int32 tuple_id = 1;  //tuple中记录有读取列信息与table信息
     required int64 table_id = 2;
@@ -126,11 +133,13 @@ message ScanNode {
     optional Engine engine = 5;
     repeated int64 ignore_indexes = 6;
     optional FulltextIndex fulltext_index = 7;
-    optional LockCmdType lock = 8;
-    optional bool is_ddl_work = 9;
-    optional int64 ddl_index_id = 10;
-    repeated int64 force_indexes = 11;
-    optional bytes learner_index = 12;
+    optional LockCmdType lock      = 8;
+    optional bool is_ddl_work      = 9;
+    optional int64 ddl_index_id    = 10;
+    repeated int64 force_indexes   = 11;
+    optional bytes learner_index   = 12;
+    optional DDLType ddl_work_type = 13;
+    optional ColumnDdlInfo column_ddl_info = 14;
 };
 
 message LimitNode {
@@ -337,6 +346,7 @@ message PlanNode {
     optional int64 limit = 5;
     optional DerivePlanNode derive_node = 6;
     optional bool is_explain = 7;
+    optional bool local_index_binlog = 8;
 };
 
 message Plan {

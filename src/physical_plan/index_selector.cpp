@@ -563,7 +563,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
-        if (index_info.type == pb::I_FULLTEXT && index_info.index_hint_status != pb::IHS_VIRTUAL) {
+        if (index_info.type == pb::I_FULLTEXT && index_info.index_hint_status == pb::IHS_NORMAL) {
             if (index_info.fields.size() == 1) {
                 if (fulltext_fields.count((index_info.fields[0].id << 5) + index_info.storage_type) == 1) {
                     DB_WARNING("skip fulltext index %ld", index_id);

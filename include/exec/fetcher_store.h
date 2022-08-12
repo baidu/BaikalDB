@@ -41,8 +41,8 @@ class RPCCtrl;
 class FetcherStore;
 #define DB_DONE(level, _fmt_, args...) \
     do {\
-        DB_##level("old_region_id[%ld], region_id[%ld], retry_times[%d], start_seq_id[%d], current_seq_id[%d], "   \
-                   "op_type[%s], log_id[%lu], txn_id[%lu], sign[%lu], addr[%s], backup[%s]." _fmt_,                \
+        DB_##level("old_region_id: %ld, region_id: %ld, retry_times: %d, start_seq_id: %d, current_seq_id: %d, "   \
+                   "op_type: %s, log_id: %lu, txn_id: %lu, sign: %lu, addr: %s, backup: %s; " _fmt_,               \
             _old_region_id, _region_id, _retry_times, _start_seq_id, _current_seq_id,                              \
             pb::OpType_Name(_op_type).c_str(), _state->log_id(), _state->txn_id, _state->sign,                     \
             _addr.c_str(), _backup.c_str(), ##args);                                                               \
@@ -478,6 +478,8 @@ public:
 
 public:
     std::map<int64_t, std::vector<SmartRecord>>  index_records; //key: index_id
+    std::vector<std::string>  return_str_records;
+    std::vector<std::string>  return_str_old_records;
     std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
     std::map<int64_t, std::shared_ptr<RowBatch>> split_region_batch;
     std::map<int64_t, std::vector<int64_t>> region_id_ttl_timestamp_batch;

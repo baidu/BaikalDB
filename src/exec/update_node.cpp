@@ -43,6 +43,7 @@ int UpdateNode::init(const pb::PlanNode& node) {
         }
         _update_exprs.push_back(up_expr);
     }
+    _local_index_binlog = node.local_index_binlog();
     return 0;
 }
 int UpdateNode::open(RuntimeState* state) { 

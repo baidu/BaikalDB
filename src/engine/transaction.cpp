@@ -17,6 +17,7 @@
 #include "tuple_record.h"
 #include <boost/scoped_array.hpp>
 #include <gflags/gflags.h>
+#include "reverse_index.h"
 
 namespace baikaldb {
 DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raft log");
@@ -65,10 +66,23 @@ int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int
             DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
                 index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
             value.remove_prefix(sizeof(uint64_t));
-        } else {
+        } else {  
             // 报警
-            DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
-                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
+            DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, value size: %lu, base_expire_time_us: %ld, value: %s", 
+                    index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size(), base_expire_time_us, value.ToString(true).c_str());          
+            // 使用临时Slice删除8字节前缀然后再次解析确认
+            rocksdb::Slice tmp_slice_value(value);
+            tmp_slice_value.remove_prefix(sizeof(uint64_t));
+            TupleRecord tmp_tuple_record(tmp_slice_value);
+            if (tmp_tuple_record.verification_fields(index_info->max_field_id) != 0) {
+                // 去掉前缀后解析不通过，则说明该数据确实没有时间前缀
+                DB_WARNING("has no prefix timestamp index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
+                    index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
+                return base_expire_time_us;
+            } else {
+                // 去掉前缀解析通过则认为时间前缀是合法的，通过报警提示跟进为什么有无前缀都能解析通过
+                value.remove_prefix(sizeof(uint64_t));
+            }
         }
         return time;
     } else if (index_info->type == pb::I_UNIQ) {
@@ -951,6 +965,9 @@ rocksdb::Status Transaction::commit() {
     auto res = _txn->Commit();
     if (res.ok()) {
         _is_finished = true;
+    }
+    for (auto& base : _reverse_set) {
+        base->add_write_count();
     }
     return res;
 }

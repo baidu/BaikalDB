@@ -77,7 +77,8 @@ message BinlogDesc {
     optional int64     txn_id            = 2;
     optional int64     start_ts          = 3;
     optional int64     primary_region_id = 4;
-    optional int64     read_binlog_cnt   = 6;
+    optional int64     read_binlog_cnt   = 6; // 读binlog使用capture填写，需要读多少条
+    optional int64     binlog_row_cnt    = 7; // 写binlog使用write binlog使用，写了多少条
 };
 
 message BatchStoreReq {
@@ -137,7 +138,9 @@ message RegionLeader {
 };
 message IndexRecords {
     required int64  index_id        = 1;
-    repeated bytes  records         = 2;  
+    repeated bytes  records         = 2;
+    repeated bytes  old_records     = 3;
+    optional bool   local_index_binlog = 4;
 };
 
 message RegionRaftStat {
@@ -160,6 +163,16 @@ message RocksStatisticRes {
     repeated bytes  value                 = 5;
 }
 
+message BinlogQueryInfo {
+    optional int64 region_id = 1;
+    optional int64 oldest_ts = 2;
+    optional int64 check_point_ts = 3;
+    optional int64 region_oldest_ts = 4;
+    optional int64 binlog_cf_oldest_ts = 5;
+    optional int64 data_cf_oldest_ts = 6;
+    optional string region_ip = 7;
+}
+
 message StoreRes {
     required ErrCode errcode        = 1;
     optional bytes errmsg           = 2;
@@ -176,7 +189,7 @@ message StoreRes {
     optional int64  region_count   = 12;
     repeated RegionLeader region_leaders = 13;
     optional bool  is_merge        = 14;//fetch node use it when error code is VERSION_OLD
-    repeated IndexRecords  records        = 15;
+    repeated IndexRecords  records  = 15;
     optional int64  scan_rows     = 16;
     optional CMsketch cmsketch    = 17;
     optional int64  filter_rows   = 18;
@@ -186,6 +199,7 @@ message StoreRes {
     optional int64 last_insert_id = 22;
     optional RegionRaftStat region_raft_stat = 23;
     repeated int64 ttl_timestamp = 24;
+    optional BinlogQueryInfo binlog_info     = 26; //存放binlog信息
 };
 message InitRegion {
     required RegionInfo region_info     = 1;

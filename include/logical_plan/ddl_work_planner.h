@@ -25,6 +25,7 @@ namespace baikaldb {
 class DDLWorkPlanner : public LogicalPlanner {
 public:
     DDLWorkPlanner(QueryContext* ctx) : LogicalPlanner(ctx), _ctx(ctx) {}
+    ~DDLWorkPlanner() { }
     int plan(); 
     int execute();
 
@@ -38,19 +39,21 @@ public:
         _index_id = _work.index_id();
         _partition_id = _work.partition();
         _task_id = std::to_string(work.table_id()) + "_" + std::to_string(work.region_id());
-
-        auto index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
-        if (index_ptr == nullptr) {
-            DB_FATAL("task_%s get index info error.", _task_id.c_str());
-            return -1;
+        if (work.op_type() == pb::OP_ADD_INDEX) {
+            auto index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
+            if (index_ptr == nullptr) {
+                DB_FATAL("task_%s get index info error.", _task_id.c_str());
+                return -1;
+            }
+            _is_uniq = index_ptr->type == pb::I_UNIQ;
+            _is_global_index = index_ptr->is_global;
         }
+        _is_column_ddl = (_work.op_type() == pb::OP_MODIFY_FIELD);
         auto pri_index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_table_id);
         if (pri_index_ptr == nullptr) {
             DB_FATAL("task_%s get index info error.", _task_id.c_str());
             return -1;
         }
-        _is_uniq = index_ptr->type == pb::I_UNIQ;
-        _is_global_index = index_ptr->is_global;
         _field_num = pri_index_ptr->fields.size();
 
         _router_start_key = _work.start_key();
@@ -58,6 +61,9 @@ public:
         DB_NOTICE("process table_id_%ld index_id_%ld field_num %d", _table_id, _index_id, _field_num);
         return 0;
     }
+
+    int create_index_ddl_plan();
+    int create_column_ddl_plan();
 
     int create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& tnx_node, std::unique_ptr<ScanNode> scan_node);
     std::unique_ptr<ScanNode> create_scan_node();
@@ -75,6 +81,7 @@ private:
     int64_t _last_num = 100;
     bool _is_uniq = false;
     bool _is_global_index = false;
+    bool _is_column_ddl = false;
     int64_t _partition_id = 0;
     std::string _task_id;
     int32_t _field_num = 0;

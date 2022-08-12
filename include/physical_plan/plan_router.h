@@ -45,6 +45,7 @@ private:
     int kill_node_analyze(KillNode* kill_node, QueryContext* ctx);
     int transaction_node_analyze(TransactionNode* txn_node, QueryContext* ctx);
     int select_index(pb::ScanNode* scan_node, std::vector<int>& multi_reverse_index);
+    bool _is_full_export = false;
 };
 
 class PartitionAnalyze {

@@ -18,6 +18,7 @@
 #include "expr_value.h"
 #include "scalar_fn_call.h"
 #include "re2/re2.h"
+#include <boost/optional.hpp>
 
 namespace baikaldb {
 class AndPredicate : public ScalarFnCall {
@@ -114,20 +115,43 @@ private:
 
 class LikePredicate : public ScalarFnCall {
 public:
+    struct Binary {
+        Binary(const std::string& s) : str(s) {}
+        rocksdb::Slice next_code_point(size_t idx) {
+            return rocksdb::Slice(&str[idx], 1);
+        }
+        const std::string& str;
+    };
+    struct UTF8Charset {
+        UTF8Charset(const std::string& s) : str(s) {}
+        size_t get_char_size(size_t idx);
+        rocksdb::Slice next_code_point(size_t idx);
+        const std::string& str;
+    };
+    struct GBKCharset {
+        GBKCharset(const std::string& s) : str(s) {}
+        bool in_range(uint8_t min, uint8_t ch, uint8_t max) {
+            return (ch >= min) && (ch <= max);
+        }
+        rocksdb::Slice next_code_point(size_t idx);
+        const std::string& str;
+    };
+
     //todo liguoqiang
     virtual int open();
-    void covent_pattern(const std::string& pattern);
-    void covent_exact_pattern(const std::string& pattern);
     void hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_value);
     virtual ExprValue get_value(MemRow* row);
+    
+    template<class Charset>
+    boost::optional<bool> like(const std::string& target, const std::string& pattern);
+    bool like_one(const std::string& target, const std::string& pattern, pb::Charset charset);
 
 private:
-    void reset_regex(MemRow* row);
-    std::unique_ptr<re2::RE2> _regex_ptr;
-    std::string _regex_pattern;
+    void reset_pattern(MemRow* row);
+    std::string _pattern;
+    std::vector<std::string> _patterns;
     char _escape_char = '\\';
-    bool _const_regex = true;
-    re2::RE2::Options _option;
+    bool _const_pattern = true;
 };
 
 class RegexpPredicate : public ScalarFnCall {
@@ -160,6 +184,80 @@ public:
         return false;
     }
 };
+
+template<class Charset>
+boost::optional<bool> LikePredicate::like(const std::string& target, const std::string& pattern) {
+    DB_DEBUG("process %s %s ", target.c_str(), pattern.c_str());
+    size_t tx = 0, px = 0, ntx = 0, npx = 0;
+    const static rocksdb::Slice under_score("_", 1);
+    const static rocksdb::Slice percent("%", 1);
+    rocksdb::Slice escape(&_escape_char, 1);
+
+    Charset target_charset(target), pattern_charset(pattern);
+    while (tx < target.size() || px < pattern.size()) {
+        if (px < pattern.size()) {
+            auto p_point = pattern_charset.next_code_point(px);
+            if (p_point.size() == 0) {
+                return boost::none;
+            }
+            DB_DEBUG("get pattern %s", p_point.ToString().c_str());
+            if (p_point.compare(under_score) == 0) {
+                if (tx < target.size()) {
+                    size_t t_offset = 1;
+                    auto t_point = target_charset.next_code_point(tx);
+                    if (t_point.size() > 0) {
+                        t_offset = t_point.size();
+                    }
+                    px++;
+                    tx += t_offset;
+                    continue;
+                }
+            } else if (p_point.compare(percent) == 0) {
+                size_t t_offset = 1;
+                if (tx < target.size()) {
+                    auto t_point = target_charset.next_code_point(tx);
+                    if (t_point.size() > 0) {
+                        t_offset = t_point.size();
+                    }
+                }
+                npx = px;
+                ntx = tx + t_offset;
+                px++;
+                continue;
+            } else {
+                if (p_point.compare(escape) == 0 && px + escape.size() < pattern.size()) {
+                    px += escape.size();
+                    p_point = pattern_charset.next_code_point(px);
+                    DB_DEBUG("get pattern %s", p_point.ToString().c_str());
+                    if (p_point.size() == 0) {
+                        return boost::none;
+                    }
+                }
+                if (tx < target.size()) {
+                    auto t_point = target_charset.next_code_point(tx);
+                    DB_DEBUG("get target pattern %s", t_point.ToString().c_str());
+                    if (t_point.size() == 0) {
+                        return boost::none;
+                    }
+                    if (p_point.compare(t_point) == 0) {
+                        px += p_point.size();
+                        tx += t_point.size();
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if (ntx > 0 && ntx <= target.size()) {
+            px = npx;
+            tx = ntx;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

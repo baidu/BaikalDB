@@ -397,6 +397,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     STATUS
     SUPER
     SOME
+    SWAP
     GLOBAL
     TABLES
     TEMPORARY
@@ -4736,6 +4737,13 @@ AlterSpec:
         spec->new_table_name = (TableName*)$3;
         $$ = spec;
     }
+    | SWAP AsOrToOpt TableName
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_SWAP_TABLE;
+        spec->new_table_name = (TableName*)$3;
+        $$ = spec;
+    }
     | ADD ConstraintKeywordOpt ConstraintElem
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
@@ -4786,6 +4794,18 @@ AlterSpec:
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_DROP_LEARNER;
         spec->resource_tag = $3;
+        $$ = spec;
+    }
+    | MODIFY COLUMN SET AssignmentList WhereClauseOptional
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_MODIFY_COLUMN;
+        spec->set_list.reserve($4->children.size(), parser->arena);
+        for (int i = 0; i < $4->children.size(); i++) {
+            Assignment* assign = (Assignment*)$4->children[i];
+            spec->set_list.push_back(assign, parser->arena);
+        }
+        spec->where = $5;
         $$ = spec;
     }
     ;

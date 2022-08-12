@@ -71,7 +71,22 @@ void QueryRegionManager::construct_query_region(const pb::RegionInfo* region_inf
     } else {
         peers.clear();
     }
-    query_region_info->set_peers(peers);
+
+    //console展示region的peer信息时，补充learner信息
+    std::string learner_peers, total_peers;
+    if (region_info->is_learner()) {
+        for (const auto& learner_peer : region_info->learners()) {
+            learner_peers = learner_peers + learner_peer + "(learner), ";
+        }
+        if (learner_peers.size() > 2) {
+            learner_peers.pop_back();//pop空格
+            learner_peers.pop_back();//pop逗号
+        } else {
+            learner_peers.clear();
+        }
+        total_peers = peers + "," + learner_peers; //拼接得到所有peers的信息
+    }
+    query_region_info->set_peers(total_peers);
     query_region_info->set_leader(region_info->leader());
     query_region_info->set_status(region_info->status());
     query_region_info->set_used_size(region_info->used_size());

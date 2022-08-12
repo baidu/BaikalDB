@@ -21,6 +21,7 @@
 #include "proto/expr.pb.h"
 
 namespace baikaldb {
+const int NOT_BOOL_ERRCODE = -100;
 class ExprNode {
 public:
     ExprNode() {}
@@ -35,6 +36,9 @@ public:
         _node_type = node.node_type();
         _col_type = node.col_type();
         _col_flag = node.col_flag();
+        if (node.has_charset()) {
+            _charset = node.charset();
+        }
         return 0;
     }
     virtual void children_swap() {}
@@ -206,6 +210,13 @@ public:
     uint32_t col_flag() {
         return _col_flag;
     }
+
+    void set_charset(pb::Charset charset) {
+        _charset = charset;
+    }
+    pb::Charset charset() {
+        return _charset;
+    }
     void set_col_flag(uint32_t col_flag) {
         _col_flag = col_flag;
     }
@@ -252,6 +263,7 @@ protected:
     pb::PrimitiveType _col_type = pb::INVALID_TYPE;
     std::vector<ExprNode*> _children;
     uint32_t _col_flag = 0;
+    pb::Charset _charset = pb::CS_UNKNOWN;
     bool    _is_constant = true;
     bool    _has_null = false;
     bool    _replace_agg_to_slot = true;

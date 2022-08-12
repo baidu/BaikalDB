@@ -30,6 +30,7 @@ int InformationSchema::init() {
     init_schemata();
     init_tables();
     init_virtual_index_influence_info();
+    init_sign_list();
     init_routines();
     init_key_column_usage();
     init_referential_constraints();
@@ -740,6 +741,76 @@ void InformationSchema::init_virtual_index_influence_info() {
             return records;
     };
 }
+
+void InformationSchema::init_sign_list() {
+    //定义字段信息
+    FieldVec fields {
+        {"namespace",pb::STRING},
+        {"database_name",pb::STRING},
+        {"table_name",pb::STRING},
+        {"sign",pb::STRING},
+    };
+
+    int64_t blacklist_table_id = construct_table("SIGN_BLACKLIST", fields);
+    int64_t forcelearner_table_id = construct_table("SIGN_FORCELEARNER", fields);
+    //定义操作
+    _calls[blacklist_table_id] = [blacklist_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) -> 
+            std::vector <SmartRecord> {
+        std::vector <SmartRecord> records;
+        records.reserve(10);
+        auto blacklist_table = SchemaFactory::get_instance()->get_table_info_ptr(blacklist_table_id);
+        auto func = [&records, &blacklist_table](const SmartTable& table) -> bool {
+            for (auto sign : table->sign_blacklist) {
+                auto record = SchemaFactory::get_instance()->new_record(*blacklist_table);
+                record->set_string(record->get_field_by_name("namespace"), table->namespace_);
+                std::string db_name;
+                std::vector<std::string> vec;
+                boost::split(vec, table->name, boost::is_any_of("."));
+                if (!vec.empty()) {
+                    db_name = vec[0];
+                }
+                record->set_string(record->get_field_by_name("database_name"), db_name);
+                record->set_string(record->get_field_by_name("table_name"),table->short_name);
+                record->set_string(record->get_field_by_name("sign"), std::to_string(sign));
+                records.emplace_back(record);
+            }
+            return false;
+        };
+        std::vector<std::string> database_table;
+        std::vector<std::string> binlog_table;
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, binlog_table, func);
+        return records;
+    };
+
+    _calls[forcelearner_table_id] = [forcelearner_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) -> 
+            std::vector <SmartRecord> {
+        std::vector <SmartRecord> records;
+        records.reserve(10);
+        auto forcelearner_table = SchemaFactory::get_instance()->get_table_info_ptr(forcelearner_table_id);
+        auto func = [&records, &forcelearner_table](const SmartTable& table) -> bool {
+            for (auto sign : table->sign_forcelearner) {
+                auto record = SchemaFactory::get_instance()->new_record(*forcelearner_table);
+                record->set_string(record->get_field_by_name("namespace"), table->namespace_);
+                std::string db_name;
+                std::vector<std::string> vec;
+                boost::split(vec, table->name, boost::is_any_of("."));
+                if (!vec.empty()) {
+                    db_name = vec[0];
+                }
+                record->set_string(record->get_field_by_name("database_name"), db_name);
+                record->set_string(record->get_field_by_name("table_name"),table->short_name);
+                record->set_string(record->get_field_by_name("sign"), std::to_string(sign));
+                records.emplace_back(record);
+            }
+            return false;
+        };
+        std::vector<std::string> database_table;
+        std::vector<std::string> binlog_table;
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, binlog_table, func);
+        return records;
+    };
+}
+
 void InformationSchema::init_routines() {
     // 定义字段信息
     FieldVec fields {

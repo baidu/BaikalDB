@@ -306,6 +306,8 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.arrow_reverse_fields.clear();
         tbl_info.has_global_not_none = false;
         tbl_info.has_index_write_only_or_write_local = false;
+        tbl_info.sign_blacklist.clear();
+        tbl_info.sign_forcelearner.clear();
     }
     TableInfo& tbl_info = *tbl_info_ptr;
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
@@ -344,6 +346,27 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             tbl_info.need_read_backup = false;
             tbl_info.need_write_backup = false;
             tbl_info.need_learner_backup = false;
+        }
+
+        if (tbl_info.schema_conf.has_sign_blacklist() && tbl_info.schema_conf.sign_blacklist() != "") {
+            DB_DEBUG("sign_blacklist: %s", tbl_info.schema_conf.sign_blacklist().c_str());
+            std::vector<std::string> vec;
+            boost::split(vec, tbl_info.schema_conf.sign_blacklist(), boost::is_any_of(","));
+            for (auto& sign_str : vec) {
+                uint64_t sign_num = strtoull(sign_str.c_str(), nullptr, 10);
+                tbl_info.sign_blacklist.emplace(sign_num);
+                DB_DEBUG("sing_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
+            }
+        }
+        if (tbl_info.schema_conf.has_sign_forcelearner() && tbl_info.schema_conf.sign_forcelearner() != "") {
+            DB_DEBUG("sign_forcelearner: %s", tbl_info.schema_conf.sign_forcelearner().c_str());
+            std::vector<std::string> vec;
+            boost::split(vec, tbl_info.schema_conf.sign_forcelearner(), boost::is_any_of(","));
+            for (auto& sign_str : vec) {
+                uint64_t sign_num = strtoull(sign_str.c_str(), nullptr, 10);
+                tbl_info.sign_forcelearner.emplace(sign_num);
+                DB_DEBUG("sing_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
+            }
         }
     }
 
@@ -1760,7 +1783,7 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
     return;
 }
 
-void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table,
+void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table, std::vector<std::string>& link_table,
         const std::function<bool(const SmartTable&)>& select_table) {
         DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {
@@ -1772,10 +1795,34 @@ void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table
     for (auto& table : table_info_mapping) {
         if (select_table(table.second)) {
             database_table.emplace_back(table.second->namespace_ + "." + table.second->name);
+            auto iter = table_info_mapping.find(table.second->binlog_id);
+            if (iter != table_info_mapping.end()) {
+                link_table.emplace_back(iter->second->name);
+            } else {
+                link_table.emplace_back("");
+            }
         }
     }
 
     return;
+}
+
+int SchemaFactory::sql_force_learner_read(int64_t table_id, uint64_t sign) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return 0;
+    }
+
+    auto& table_info_mapping = table_ptr->table_info_mapping;
+    auto iter = table_info_mapping.find(table_id);
+    if (iter != table_info_mapping.end()) {
+        if (iter->second != nullptr && iter->second->sign_forcelearner.count(sign) > 0) {
+            return 1;
+        }
+    } 
+
+    return 0;
 }
 
 void SchemaFactory::get_schema_conf_op_info(const int64_t table_id, int64_t& op_version, std::string& op_desc) {
@@ -2035,7 +2082,8 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
                                     const pb::PossibleIndex* primary,
                                     std::map<int64_t, pb::RegionInfo>& region_infos,
                                     std::map<int64_t, std::string>* region_primary,
-                                    const std::vector<int64_t>& partitions) {
+                                    const std::vector<int64_t>& partitions,
+                                    bool is_full_export) {
     region_infos.clear();
     if (region_primary != nullptr) {
         region_primary->clear();
@@ -2142,12 +2190,16 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
                         (!right_open && boost::starts_with(region_iter->first, end.data()))) {
                     int64_t region_id = region_iter->second;
                     frontground->get_region_info(region_id, region_infos[region_id]);
-
-                    if (region_primary != nullptr) {
+                    // 只有in/多个范围才拆分primary
+                    if (range_size > 1 && region_primary != nullptr) {
                         if (region_pb_primary.count(region_id) == 0) {
                             region_pb_primary[region_id].CopyFrom(template_primary);
                         }
                         region_pb_primary[region_id].add_ranges()->CopyFrom(range);
+                    }
+                    // full_export只取1个region，在full_export_node里用完会循环获取
+                    if (is_full_export) {
+                        break;
                     }
                 } else {
                     break;
@@ -2546,6 +2598,46 @@ int SchemaFactory::fill_default_value(SmartRecord record, FieldInfo& field) {
     return 0;
 }
 
+//table_id => (partition_id, vector<RegionInfo1, RegionInfo2, RegionInfo3, ...>)
+int SchemaFactory::get_partition_binlog_regions(const std::string& db_table_name, int64_t partition_input_value, 
+                std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& table_id_partition_binlogs) {
+    DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+    if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+        DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
+        return -1; 
+    }
+
+    auto iter = table_region_mapping_ptr->begin();
+    while (iter != table_region_mapping_ptr->end()) {
+        auto cur_iter = iter++;
+        int64_t table_id = cur_iter->first;
+        auto& region_info_ptr = cur_iter->second;
+        auto table_info = get_table_info(table_id);
+        if (table_info.engine != pb::BINLOG) {
+            continue;
+        }
+
+        if (!db_table_name.empty() && table_info.name != db_table_name) {
+            continue;
+        }
+
+        for (const auto& region_info_pair : region_info_ptr->key_region_mapping) {
+            auto& key_region_id_map = region_info_pair.second;
+            int64_t cur_partition_id = region_info_pair.first;
+            if (partition_input_value >= 0 && cur_partition_id != partition_input_value) {
+                continue;
+            }
+
+            for (const auto& key_to_region_id : key_region_id_map) {
+                int64_t region_id = key_to_region_id.second;
+                auto& struct_region_info = region_info_ptr->region_info_mapping[region_id];
+                table_id_partition_binlogs[table_id][cur_partition_id].emplace_back(struct_region_info.region_info);
+            }
+        }
+    }
+    return 0;
+}
+
 int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_index, std::map<int64_t, pb::RegionInfo>& region_infos) {
         DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
         if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
@@ -2574,7 +2666,7 @@ int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_index
             DB_WARNING("not find table %ld partition %ld region info.", binlog_id, partition_index);
             return -1;
         }
-    }
+}
 }//namespace
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

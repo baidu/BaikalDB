@@ -79,6 +79,7 @@ void ShowHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_ALL_TABLES] = std::bind(&ShowHelper::_show_all_tables,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_BINLOGS_INFO] = std::bind(&ShowHelper::_show_binlogs_info, this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_INSTANCE_PARAM] = std::bind(&ShowHelper::_show_instance_param,
             this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
@@ -710,6 +711,10 @@ bool ShowHelper::_show_processlist(const SmartSocket& client, const std::vector<
     // Make fields.
     std::vector<ResultField> fields;
     fields.reserve(8);
+    bool only_show_doing_sql = false;
+    if (!split_vec.empty() && split_vec.back() == "sql") {
+        only_show_doing_sql = true;
+    }
     do {
         ResultField field;
         field.name = "Id";
@@ -781,6 +786,9 @@ bool ShowHelper::_show_processlist(const SmartSocket& client, const std::vector<
         if (!sock->user_info || !sock->query_ctx) {
             DB_FATAL("param invalid");
             return false;
+        }
+        if (only_show_doing_sql && sock->query_ctx->sql.size() == 0) {
+            continue;
         }
         DB_WARNING_CLIENT(sock, "processlist, free:%d", sock->is_free);
         std::vector<std::string> row;
@@ -1507,6 +1515,252 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
     return true;
 }
 
+bool ShowHelper::_process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+        std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info) {
+    std::vector<std::string> field_names = {"table_id", "region_id", "instance_ip", "table_name", "check_point_datetime", "max_oldest_datetime", 
+                                    "region_oldest_datetime", "binlog_cf_oldest_datetime", "data_cf_oldest_datetime"};
+    std::vector<ResultField> result_fields;
+    result_fields.reserve(3);
+    for (auto& field_name : field_names) {
+        ResultField field;
+        field.name = field_name;
+        field.type = MYSQL_TYPE_STRING;
+        result_fields.emplace_back(field);
+    }
+
+    std::vector<std::vector<std::string>> result_rows;
+    for (const auto& region_id_peers_info: table_id_to_query_info) {
+        int64_t table_id = region_id_peers_info.first;
+        const std::string table_name = SchemaFactory::get_instance()->get_table_info(table_id).name;
+        for (const auto& region_id_peer_info : region_id_peers_info.second) {
+            int64_t region_id = region_id_peer_info.first;
+            pb::RegionInfo region_info_tmp;
+            SchemaFactory::get_instance()->get_region_info(table_id, region_id, region_info_tmp);
+            int64_t current_partition_id = region_info_tmp.partition_id();
+            const std::vector<pb::StoreRes>& pb_peer_info_vec = region_id_peer_info.second;
+            for (const auto& binlog_peer_info : pb_peer_info_vec) {
+                const auto& binlog_info = binlog_peer_info.binlog_info();
+                const std::string& instance_ip = binlog_info.region_ip();
+                const std::string check_point_datetime = ts_to_datetime_str(binlog_info.check_point_ts());
+                const std::string oldest_datetime = ts_to_datetime_str(binlog_info.oldest_ts());
+                const std::string region_oldest_datetime = ts_to_datetime_str(binlog_info.region_oldest_ts());
+                const std::string binlog_cf_oldest_datetime = ts_to_datetime_str(binlog_info.binlog_cf_oldest_ts());
+                const std::string data_cf_oldest_datetime = ts_to_datetime_str(binlog_info.data_cf_oldest_ts());
+                std::vector<std::string> row;
+                row.reserve(10);
+                row.emplace_back(std::to_string(table_id));
+                row.emplace_back(std::to_string(region_id));
+                row.emplace_back(instance_ip);
+                row.emplace_back(table_name);
+                row.emplace_back(check_point_datetime);
+                row.emplace_back(oldest_datetime);
+                row.emplace_back(region_oldest_datetime);
+                row.emplace_back(binlog_cf_oldest_datetime);
+                row.emplace_back(data_cf_oldest_datetime);
+                result_rows.emplace_back(row);
+            }
+        }
+    }
+    //泛型排序，让展示结果有序
+    std::sort(result_rows.begin(), result_rows.end(), [](const std::vector<std::string>& a, const std::vector<std::string>& b) { 
+        if (a.size() < 2 || b.size() < 2) {
+            return false;
+        }
+        const std::string str_prefix_a = a[0] + a[1];
+        const std::string str_prefix_b = b[0] + b[1];
+        errno = 0;
+        int64_t value_prefix_a = strtoll(str_prefix_a.c_str(), NULL, 10);
+        int64_t value_prefix_b = strtoll(str_prefix_b.c_str(), NULL, 10);
+        return value_prefix_a <= value_prefix_b;
+    });
+
+    if (_make_common_resultset_packet(client, result_fields, result_rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool ShowHelper::_process_partition_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+        std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info) {
+    std::vector<std::string> field_names = {"table_id", "partition_index", "check_point_datetime", "oldest_datetime",  "table_name"};
+    std::vector<ResultField> result_fields;
+    result_fields.reserve(3);
+    for (auto& field_name : field_names) {
+        ResultField field;
+        field.name = field_name;
+        field.type = MYSQL_TYPE_STRING;
+        result_fields.emplace_back(field);
+    }
+
+    std::vector<std::vector<std::string>> result_rows;
+    for (const auto& region_id_peers_info: table_id_to_query_info) {
+        int64_t table_id = region_id_peers_info.first;
+        const std::string table_name = SchemaFactory::get_instance()->get_table_info(table_id).name;
+        for (const auto& region_id_peer_info : region_id_peers_info.second) {
+            int64_t region_id = region_id_peer_info.first;
+            pb::RegionInfo region_info_tmp;
+            SchemaFactory::get_instance()->get_region_info(table_id, region_id, region_info_tmp);
+            int64_t current_partition_id = region_info_tmp.partition_id();
+            const std::vector<pb::StoreRes>& pb_peer_info_vec = region_id_peer_info.second;
+            int64_t max_check_point_ts = INT64_MIN;
+            int64_t min_oldest_ts = INT64_MAX;
+            for (const auto& binlog_peer_info : pb_peer_info_vec) {
+                int64_t check_point_ts = binlog_peer_info.binlog_info().check_point_ts();
+                int64_t oldest_ts = binlog_peer_info.binlog_info().oldest_ts();
+                max_check_point_ts = std::max(max_check_point_ts, check_point_ts);
+                min_oldest_ts = std::min(min_oldest_ts, oldest_ts);
+            }
+            std::vector<std::string> row;
+            row.reserve(3);
+            row.emplace_back(std::to_string(table_id));
+            row.emplace_back(std::to_string(current_partition_id));
+            row.emplace_back(ts_to_datetime_str(max_check_point_ts));
+            row.emplace_back(ts_to_datetime_str(min_oldest_ts));
+            row.emplace_back(table_name);
+            result_rows.emplace_back(row);
+        }
+    }
+
+    std::map<std::string, std::vector<std::string>> map_final_result;
+    for (const auto& vec_result_row : result_rows) {
+        const std::string& table_id_str = vec_result_row[0];
+        const std::string& partition_index_str = vec_result_row[1];
+        const std::string prefix_str = table_id_str + partition_index_str;
+        if (map_final_result.count(prefix_str) > 0) {
+            map_final_result[prefix_str][2] = std::max(vec_result_row[2], map_final_result[prefix_str][2]);
+            map_final_result[prefix_str][3] = std::min(vec_result_row[3], map_final_result[prefix_str][3]);
+        } else {
+            map_final_result[prefix_str] = vec_result_row;
+        }
+    }
+
+    std::vector<std::vector<std::string>> resutl_res_final;
+    resutl_res_final.reserve(10);
+    for (const auto& final_result : map_final_result) {
+        resutl_res_final.emplace_back(final_result.second);
+    }
+
+    //泛型排序，让展示结果有序
+    std::sort(resutl_res_final.begin(), resutl_res_final.end(), [](const std::vector<std::string>& a, const std::vector<std::string>& b) { 
+        if (a.size() < 3 || b.size() < 3) {
+            return false;
+        }
+        const std::string str_prefix_a = a[0] + a[1];
+        const std::string str_prefix_b = b[0] + b[1];
+        errno = 0;
+        int64_t value_prefix_a = strtoll(str_prefix_a.c_str(), NULL, 10);
+        int64_t value_prefix_b = strtoll(str_prefix_b.c_str(), NULL, 10);
+        return value_prefix_a <= value_prefix_b;
+    });
+
+    if (_make_common_resultset_packet(client, result_fields, resutl_res_final) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool ShowHelper::_show_binlogs_info(const SmartSocket& client, const std::vector<std::string>& split_params) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr) {
+        DB_WARNING("factory is null, need check");
+        return false;
+    }
+
+    std::string input_table_name = "";
+    int64_t input_partition_id = -1;
+    bool is_detailed = false;
+    if (split_params.size() < 3) {
+        return false;
+    } else if (split_params.size() == 3) {
+        if (split_params[2] == "detailed") {
+            DB_WARNING("input parameter does not contain table_name");
+            return false;
+        }
+        input_table_name = split_params[2];
+    } else if (split_params.size() == 4) {
+        if (split_params[2] == "detailed") {
+            input_table_name = split_params[3];
+            is_detailed = true;
+        } else {
+            input_table_name = split_params[2];
+            input_partition_id = strtoll(split_params[3].c_str(), NULL, 10);
+        }
+    } else if (split_params.size() > 4) {
+        DB_WARNING("input parameters counts is above four");
+        return false;
+    }
+
+    std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>> table_id_partition_binlogs;
+    std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>> table_id_to_query_info;
+    factory->get_partition_binlog_regions(input_table_name, input_partition_id, table_id_partition_binlogs);
+    _query_regions_concurrent(table_id_to_query_info, table_id_partition_binlogs);
+    if (is_detailed) {
+        return _process_binlogs_info(client, table_id_to_query_info);
+    } else {
+        return _process_partition_binlogs_info(client, table_id_to_query_info);
+    }
+}
+
+void ShowHelper::_query_regions_concurrent(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
+        std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos) {
+    std::mutex mutex_query_info;
+    for (const auto& partition_binlog_regions_info : partition_binlog_region_infos) {
+        int64_t current_table_id = partition_binlog_regions_info.first;
+        for (const auto& partition_binlog_region_info : partition_binlog_regions_info.second) {
+            int64_t current_partition_id = partition_binlog_region_info.first;
+            for (const auto& binlog_region_info : partition_binlog_region_info.second) {
+                const int64_t& table_id = binlog_region_info.table_id();
+                const int64_t& region_id = binlog_region_info.region_id();
+                const int64_t& version = binlog_region_info.version();
+                std::vector<std::string> peers_vec;
+                std::string str_peer;
+                peers_vec.reserve(3);
+                for (const auto& peer : binlog_region_info.peers()) {
+                    str_peer += peer + ",";
+                    peers_vec.emplace_back(peer);
+                }
+                str_peer.pop_back();
+                const std::string& table_name = binlog_region_info.table_name();
+                ConcurrencyBthread bth_each_peer(6);
+                for (auto& peer : peers_vec) {
+                    static std::mutex mutex_binlog_ts;
+                    auto send_to_binlog_peer = [&]() {
+                        brpc::Channel channel;
+                        brpc::Controller cntl;
+                        brpc::ChannelOptions option;
+                        option.max_retry = 1;
+                        option.connect_timeout_ms = 30000;
+                        option.timeout_ms = 30000;
+                        channel.Init(peer.c_str(), &option);
+                        pb::StoreReq req;
+                        pb::StoreRes res;
+                        req.set_region_version(version);
+                        req.set_region_id(region_id);
+                        req.set_op_type(pb::OP_QUERY_BINLOG);
+                        pb::StoreService_Stub(&channel).query_binlog(&cntl, &req, &res, NULL);
+                        if (!cntl.Failed()) {
+                            BAIDU_SCOPED_LOCK(mutex_query_info);
+                            auto binlog_info = res.mutable_binlog_info();
+                            binlog_info->set_region_ip(peer);
+                            table_id_to_binlog_info[table_id][region_id].emplace_back(res);
+                        }
+                    };
+                    bth_each_peer.run(send_to_binlog_peer);
+                }
+                bth_each_peer.join();
+            }
+        }
+    }
+}
+
 bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     if (client == nullptr || client->query_ctx == nullptr || factory == nullptr) {
@@ -1547,14 +1801,16 @@ bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<s
         return false;
     };
 
+    std::vector<std::string> link_table;
     if (type_func_map[split_vec[2]] != nullptr) {
-        factory->get_table_by_filter(database_table, type_func_map[split_vec[2]]);
+        factory->get_table_by_filter(database_table, link_table, type_func_map[split_vec[2]]);
     } else {
         DB_WARNING("not support type:%s", split_vec[2].c_str());
         return false;
     }
     std::vector< std::vector<std::string> > rows;
     rows.reserve(10);
+    size_t i = 0;
     for (auto& d_t_name : database_table) {
         DB_WARNING("%s", d_t_name.c_str());
         std::vector<std::string> split_vec;
@@ -1564,13 +1820,17 @@ bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<s
             DB_FATAL("database table name:%s", d_t_name.c_str());
             continue;
         }
+        if (i < link_table.size()) {
+            split_vec.emplace_back(link_table[i]);
+        }
+        i++;
         rows.emplace_back(split_vec);
     }
 
-    std::vector<std::string> names = { "namespace", "database_name", "table_name" };
+    std::vector<std::string> names = { "namespace", "database_name", "table_name", "binlog" };
 
     std::vector<ResultField> fields;
-    fields.reserve(3);
+    fields.reserve(4);
     for (auto& name : names) {
         ResultField field;
         field.name = name;
@@ -2174,10 +2434,12 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
     }
 
     bool show_region = false;
+    bool show_column_ddl = false;
     if (split_vec.size() == 4 && boost::iequals(split_vec[3], "region")) {
         show_region = true;
-    }
-    else if (split_vec.size() != 3) {
+    } else if (split_vec.size() == 4 && boost::iequals(split_vec[3], "column")) {
+        show_column_ddl = true;
+    } else if (split_vec.size() != 3) {
         DB_FATAL("param invalid");
         client->state = STATE_ERROR;
         return false;
@@ -2203,6 +2465,8 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
     fields.reserve(10);
     if (show_region) {
         names = {"index_id", "region_id", "status", "start_key", "end_key"};
+    } else if (show_column_ddl) {
+        names = {"table", "status", "done/all", "cost_time", "opt sql"};
     } else {
         names = {"op_type", "index_state", "index_id", "begin_timestamp",
                  "end_timestamp", "rollback", "errcode", "deleted", "status",
@@ -2286,8 +2550,70 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
             row.emplace_back("Error : " + std::to_string(work_error_count));
             rows.emplace_back(row);
         }
+    } else if (show_column_ddl) {
+        int work_done_count = 0;
+        int work_to_be_done_count = 0;
+        for(auto info : response.region_ddl_infos()) {
+            switch (info.status()) {
+                case pb::DdlWorkIdle:
+                case pb::DdlWorkDoing: {
+                    ++work_to_be_done_count;
+                    break;
+                }
+                case pb::DdlWorkDone:
+                case pb::DdlWorkFail:
+                case pb::DdlWorkDupUniq:
+                case pb::DdlWorkError: {
+                    ++work_done_count;
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+        for (auto ddl : response.ddlwork_infos()) {
+            if (ddl.op_type() == pb::OP_MODIFY_FIELD) {
+                std::vector<std::string> row;
+                row.reserve(5);
+                row.emplace_back(client->current_db + "." + table_name);
+                row.emplace_back(ddl.has_status() ? state[ddl.status()] : "");
+                int64_t cost_s = butil::gettimeofday_s() - ddl.begin_timestamp();
+                if (ddl.job_state() == pb::IS_PUBLIC) {
+                    cost_s = ddl.end_timestamp() - ddl.begin_timestamp();
+                    row.emplace_back("   -  ");
+                } else {
+                    row.emplace_back(std::to_string(work_done_count) + "/" + std::to_string(work_done_count + work_to_be_done_count));
+                }
+                int64_t hour = cost_s / (3600LL);
+                int64_t min = (cost_s - hour * 3600LL) / (60LL);
+                int64_t sec = cost_s -  hour * 3600LL - min * 60LL;
+                std::string cost_time_str;
+                if (hour > 0) {
+                    cost_time_str += std::to_string(hour);
+                    cost_time_str += "h:";
+                }
+                if (min > 0) {
+                    cost_time_str += std::to_string(min);
+                    cost_time_str += "m:";
+                }
+                if (sec > 0) {
+                    cost_time_str += std::to_string(sec);
+                    cost_time_str += "s:";
+                }
+                if (cost_time_str.size() > 0) {
+                    cost_time_str.pop_back();
+                }
+                row.emplace_back(cost_time_str);
+                row.emplace_back(ddl.opt_sql());
+                rows.emplace_back(row);
+            }
+        }
     } else {
         for (auto ddl : response.ddlwork_infos()) {
+            if (ddl.op_type() == pb::OP_MODIFY_FIELD
+                && ddl.job_state() == pb::IS_PUBLIC) {
+                continue;
+            }
             std::vector<std::string> row;
             row.emplace_back(std::to_string(ddl.op_type()));
             row.emplace_back(ddl.has_job_state() ? index_state[ddl.job_state()] : "");

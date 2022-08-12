@@ -1,13 +1,23 @@
+// Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include "baikal_capturer.h"
 
 namespace baikaldb {
 DEFINE_string(capture_namespace, "TEST_NAMESPACE", "capture_namespace");
 DEFINE_int64(capture_partition_id, 0, "capture_partition_id");
 DEFINE_string(capture_tables, "db.tb1;tb.tb2", "capture_tables");
-
-uint32_t get_timestamp_internal(int64_t offset) {
-    return ((offset >> 18) + tso::base_timestamp_ms) / 1000;
-}
 
 CaptureStatus FetchBinlog::run(int32_t fetch_num) {
     //TODO 退出机制
@@ -29,8 +39,8 @@ CaptureStatus FetchBinlog::run(int32_t fetch_num) {
         int32_t fetch_num_per_region = fetch_num / region_map.size();
 
         if (_wait_microsecs != 0 && tc.get_time() > _wait_microsecs) {
-            DB_FATAL("timeout %lu", _log_id);
-            return CS_TIMEOUT;
+            DB_WARNING("timeout %lu", _log_id);
+            return CS_EMPTY;
         }
         DB_DEBUG("get table_id %ld partition %ld region size %lu log_id: %lu", 
             _binlog_id, _partition_id, region_map.size(), _log_id);
@@ -70,7 +80,7 @@ CaptureStatus FetchBinlog::run(int32_t fetch_num) {
                             if (response->binlogs_size() == 0) {
                                 DB_WARNING("region %ld no binlog data store %s log_id %lu.", 
                                     region_info.second.region_id(), peer.c_str(), _log_id);
-                                return -1;
+                                return -2;
                             } else {
                                 if (response->binlogs_size() != response->commit_ts_size()) {
                                     DB_FATAL("binlog size != commit_ts size. log_id %lu", _log_id);
@@ -85,22 +95,34 @@ CaptureStatus FetchBinlog::run(int32_t fetch_num) {
                         }
                         return 0;
                     };
-                    if (request_binlog(region_info.second.leader()) == 0) {
+                    int no_data_num = 0;
+                    int rc = request_binlog(region_info.second.leader());
+                    if (rc == 0) {
                         DB_NOTICE("request leader[%s] success %lu", region_info.second.leader().c_str(), _log_id);
                         return 0;
+                    } else if (rc == -2) {
+                        ++no_data_num;
                     }
                     for (const auto& peer : region_info.second.peers()) {
                         if (peer == region_info.second.leader()) {
                             continue;
                         }
-                        if (request_binlog(peer) == 0) {
+                        int rc = request_binlog(peer);
+                        if (rc == 0) {
                             DB_DEBUG("request peer[%s] success %lu", peer.c_str(), _log_id);
-                            break;
+                            return 0;
+                        } else if (rc == -2) {
+                            ++no_data_num;
                         }
                     }
+
                     if (less_then_oldest_ts_num == region_info.second.peers_size()) {
-                        DB_WARNING("all peer less then oldest ts logid %lu", _log_id);
+                        DB_FATAL("all peer less then oldest ts logid %lu", _log_id);
                         ret = CS_LESS_THEN_OLDEST;
+                    } else if (no_data_num == 0) {
+                        // 如果没有peer返回no data则说明全部失败
+                        DB_FATAL("all peer failed, logid %lu", _log_id);
+                        ret = CS_FAIL;
                     }
                     return 0;
                 };
@@ -108,7 +130,7 @@ CaptureStatus FetchBinlog::run(int32_t fetch_num) {
             }
         }
         req_threads.join();
-        if (ret == CS_LESS_THEN_OLDEST) {
+        if (ret == CS_LESS_THEN_OLDEST || ret == CS_FAIL) {
             return ret;
         }
         _is_finish = (_region_res.size() == region_map.size());
@@ -182,7 +204,7 @@ CaptureStatus MergeBinlog::run(int64_t& commit_ts) {
 int BinLogTransfer::init() {
     //获取主键index_info
     for (auto table_id : _origin_ids) {
-        DB_NOTICE("config table id [%ld]", table_id);
+        //DB_NOTICE("config table id [%ld]", table_id);
         auto& cap_info = _cap_infos[table_id];
 
         cap_info.table_info = baikaldb::SchemaFactory::get_instance()->get_table_info_ptr(table_id);
@@ -227,6 +249,7 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
         auto& binlog = store_req_ptr_commit.req_ptr->binlog();
         commit_ts = store_req_ptr_commit.commit_ts;
         DB_DEBUG("get binlog commit_ts[%ld] logid[%lu]", commit_ts, _log_id);
+        auto partition_key = binlog.partition_key();
         for (const auto& mutation : binlog.prewrite_value().mutations()) {
             RecordCollection records;
             int64_t table_id = mutation.table_id();
@@ -234,6 +257,13 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
             if (_cap_infos.count(table_id) == 0) {
                 DB_DEBUG("table_id[%ld] is filter.", table_id);
                 continue;
+            }
+            if (_two_way_sync != nullptr) {
+                auto& cap_info = _cap_infos[table_id];
+                if (_two_way_sync->two_way_sync_table_name == cap_info.db_name + "." + cap_info.table_info->short_name) {
+                    //DB_NOTICE("table %s filter", _two_way_sync->two_way_sync_table_name.c_str());
+                    break;
+                }
             }
             if (transfer_mutation(mutation, records) != 0) {
                 DB_FATAL("transfer mutation error.");
@@ -247,15 +277,15 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
             insert_size += records.insert_records.size();
             delete_size += records.delete_records.size();
             update_size += records.update_records.size();
-            if (multi_records_to_event(records.insert_records, mysub::INSERT_EVENT, commit_ts, table_id) != 0) {
+            if (multi_records_to_event(records.insert_records, mysub::INSERT_EVENT, commit_ts, table_id, partition_key) != 0) {
                 DB_FATAL("insert records to event error.");
                 return -1;
             }
-            if (multi_records_to_event(records.delete_records, mysub::DELETE_EVENT, commit_ts, table_id) != 0) {
+            if (multi_records_to_event(records.delete_records, mysub::DELETE_EVENT, commit_ts, table_id, partition_key) != 0) {
                 DB_FATAL("delete records to event error.");
                 return -1;
             }
-            if (multi_records_update_to_event(records.update_records, commit_ts, table_id) != 0) {
+            if (multi_records_update_to_event(records.update_records, commit_ts, table_id, partition_key) != 0) {
                 DB_FATAL("update records to event error.");
                 return -1;
             }
@@ -266,14 +296,14 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
         insert_size, delete_size, update_size, _log_id);
     return 0;
 }
-int BinLogTransfer::multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t table_id) {
+int BinLogTransfer::multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t table_id, uint64_t partition_key) {
     for (const auto& record : update_records) {
         std::shared_ptr<mysub::Event> event(new mysub::Event);
         auto delete_insert_records = std::make_pair(
             record.first.get(),
             record.second.get()
             );
-        if (single_record_to_event(event.get(), delete_insert_records, mysub::UPDATE_EVENT, commit_ts, table_id) !=0) {
+        if (single_record_to_event(event.get(), delete_insert_records, mysub::UPDATE_EVENT, commit_ts, table_id, partition_key) !=0) {
             DB_WARNING("insert update record error.");
             return -1;
         }
@@ -282,14 +312,14 @@ int BinLogTransfer::multi_records_update_to_event(const UpdatePairVec& update_re
     return 0;
 }
 
-int BinLogTransfer::multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id) {
+int BinLogTransfer::multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id, uint64_t partition_key) {
     for (const auto& record : records) {
         std::shared_ptr<mysub::Event> event(new mysub::Event);
         auto delete_insert_records = std::make_pair(
             event_type == mysub::DELETE_EVENT ? record.second.get() : nullptr,
             event_type == mysub::INSERT_EVENT ? record.second.get() : nullptr
             );
-        if (single_record_to_event(event.get(), delete_insert_records, event_type, commit_ts, table_id) != 0) {
+        if (single_record_to_event(event.get(), delete_insert_records, event_type, commit_ts, table_id, partition_key) != 0) {
             DB_WARNING("insert/delete  record error.");
             return -1;
         }
@@ -299,7 +329,7 @@ int BinLogTransfer::multi_records_to_event(const RecordMap& records, mysub::Even
 }
 
 int BinLogTransfer::single_record_to_event(mysub::Event* event, 
-    const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id) {
+    const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id, uint64_t partition_key) {
     auto& cap_info = _cap_infos[table_id];
     auto delete_record = delete_insert_records.first;
     auto insert_record = delete_insert_records.second;
@@ -307,8 +337,9 @@ int BinLogTransfer::single_record_to_event(mysub::Event* event,
     event->set_table(cap_info.table_info->short_name);
     event->set_event_type(event_type);
     event->set_binlog_type(event_type);
-    event->set_timestamp(get_timestamp_internal(commit_ts));
+    event->set_timestamp(tso::get_timestamp_internal(commit_ts));
     event->set_charset(cap_info.table_info->charset == pb::UTF8 ? "utf8" : "gbk");
+    event->set_partition_key(partition_key);
     auto row_iter = event->mutable_row();
     for (const auto& field : cap_info.table_info->fields) {
         auto field_iter = row_iter->add_field();
@@ -317,18 +348,22 @@ int BinLogTransfer::single_record_to_event(mysub::Event* event,
         field_iter->set_is_signed(cap_info.signed_map[field.id]);
         field_iter->set_is_pk(cap_info.pk_map[field.id]);
         if (insert_record != nullptr) {
-            int ret = insert_record->field_to_string(field, field_iter->mutable_new_value());
+            bool is_null = false;
+            int ret = insert_record->field_to_string(field, field_iter->mutable_new_value(), &is_null);
             if (ret != 0) {
                 DB_WARNING("insert new value error.");
                 return -1;
             }
+            field_iter->set_is_new_null(is_null);
         }
         if (delete_record != nullptr) {
-            int ret = delete_record->field_to_string(field, field_iter->mutable_old_value());
+            bool is_null = false;
+            int ret = delete_record->field_to_string(field, field_iter->mutable_old_value(), &is_null);
             if (ret != 0) {
                 DB_WARNING("delete old value error.");
                 return -1;
             }
+            field_iter->set_is_old_null(is_null);
         }
     }
     DB_DEBUG("event str %s log_id[%lu] commit_ts[%ld]", 
@@ -372,7 +407,7 @@ int BinLogTransfer::transfer_mutation(const pb::TableMutation& mutation, RecordC
     }
     return 0;
 }
-#ifdef BAIDU_INTERNAL
+#if BAIDU_INTERNAL
 int Capturer::init(Json::Value& config) {
     if (!config.isMember("db_shard") || !config["db_shard"].isNumeric()) {
         DB_FATAL("config db_shard info error.");
@@ -396,6 +431,15 @@ int Capturer::init(Json::Value& config) {
                 return -1;
             }
             _table_infos.push_back(table_info["name"].asString());
+        }
+    }
+    if (config.isMember("event_filter")) {
+        DB_NOTICE("config twoway sync event_filter");
+        auto&& event_filter_config = config["event_filter"];
+        if (event_filter_config.isMember("type") && event_filter_config["type"].isString()) {
+            if (event_filter_config["type"].asString() == "TwoWaySyncEventFilter") {
+                _two_way_sync.reset(new TwoWaySync(event_filter_config["table_name"].asString()));
+            }
         }
     }
     return init_binlog();
@@ -447,11 +491,11 @@ int Capturer::init_binlog() {
 }
 
 int64_t Capturer::get_offset(uint32_t timestamp) {
-    return (((int64_t)timestamp) * 1000 - tso::base_timestamp_ms) << 18;
+    return timestamp_to_ts(timestamp);
 }
 
 uint32_t Capturer::get_timestamp(int64_t offset) {
-    return get_timestamp_internal(offset);
+    return tso::get_timestamp_internal(offset);
 }
 
 CaptureStatus Capturer::subscribe(std::vector<std::shared_ptr<mysub::Event>>& event_vec, 
@@ -481,7 +525,7 @@ CaptureStatus Capturer::subscribe(std::vector<std::shared_ptr<mysub::Event>>& ev
         return merge_status;
     }
 
-    BinLogTransfer transfer(_binlog_id, merger.get_result(), event_vec, _origin_ids, log_id);
+    BinLogTransfer transfer(_binlog_id, merger.get_result(), event_vec, _origin_ids, log_id, get_two_way_sync());
     if (transfer.init() != 0) {
         DB_FATAL("BinLogTransfer error %ld return commit_ts %ld.", log_id, commit_ts);
         return CS_FAIL;

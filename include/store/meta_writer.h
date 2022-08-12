@@ -40,6 +40,7 @@ public:
     static const std::string BINLOG_OLDEST_IDENTIFY;
     static const std::string LEARNER_IDENTIFY;
     static const std::string LOCAL_STORAGE_IDENTIFY;
+    static const std::string ROCKS_HANG_CHECK_IDENTIFY;
 
     virtual ~MetaWriter() {}
    
@@ -93,6 +94,7 @@ public:
     std::string binlog_oldest_ts_key(int64_t region_id) const;
     int write_binlog_oldest_ts(int64_t region_id, int64_t ts);
     int64_t read_binlog_oldest_ts(int64_t region_id);
+    int rocks_hang_check();
 public:
     std::string region_info_key(int64_t region_id) const;
     std::string region_for_store_key(int64_t region_id) const;

@@ -65,9 +65,11 @@ DEFINE_int32(addpeer_rate_limit_level, 1, "addpeer_rate_limit_level; "
         "0:no limit, 1:limit when stalling, 2:limit when compaction pending. default(1)");
 DEFINE_bool(delete_files_in_range, true, "delete_files_in_range");
 DEFINE_bool(l0_compaction_use_lz4, true, "L0 sst compaction use lz4 or not");
+DEFINE_bool(real_delete_old_binlog_cf, true, "default true");
+DEFINE_bool(rocksdb_fifo_allow_compaction, false, "default false");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
-const std::string RocksWrapper::BIN_LOG_CF  = "bin_log";
+const std::string RocksWrapper::BIN_LOG_CF  = "bin_log_new";
 const std::string RocksWrapper::DATA_CF     = "data";
 const std::string RocksWrapper::METAINFO_CF = "meta_info";
 std::atomic<int64_t> RocksWrapper::raft_cf_remove_range_count = {0};
@@ -168,11 +170,13 @@ int32_t RocksWrapper::init(const std::string& path) {
     //如果观察到TTL无法让文件总数量少于配置的大小，RocksDB会暂时下降到基于大小的FIFO删除
     //https://rocksdb.org.cn/doc/FIFO-compaction-style.html
     fifo_option.max_table_files_size = FLAGS_rocks_binlog_max_files_size_gb * 1024 * 1024 * 1024LL; 
+    fifo_option.allow_compaction = FLAGS_rocksdb_fifo_allow_compaction;
     _binlog_cf_option.ttl = 0;
     _binlog_cf_option.periodic_compaction_seconds = 0;
     _binlog_cf_option.compaction_options_fifo = fifo_option;
     _binlog_cf_option.write_buffer_size = FLAGS_write_buffer_size;
     _binlog_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
+    _binlog_cf_option.level0_file_num_compaction_trigger = FLAGS_level0_file_num_compaction_trigger;
     //todo
     // prefix length: regionid(8 Bytes) tableid(8 Bytes)
     _data_cf_option.prefix_extractor.reset(
@@ -240,6 +244,8 @@ int32_t RocksWrapper::init(const std::string& path) {
                 column_family_desc.push_back(rocksdb::ColumnFamilyDescriptor(RAFT_LOG_CF, _log_cf_option));
             } else if (column_family_name == BIN_LOG_CF) {
                 column_family_desc.push_back(rocksdb::ColumnFamilyDescriptor(BIN_LOG_CF, _binlog_cf_option));
+            } else if (column_family_name == "bin_log") {
+                column_family_desc.push_back(rocksdb::ColumnFamilyDescriptor("bin_log", _binlog_cf_option));
             } else if (column_family_name == DATA_CF) {
                 column_family_desc.push_back(rocksdb::ColumnFamilyDescriptor(DATA_CF, _data_cf_option));
             } else if (column_family_name == METAINFO_CF) {
@@ -259,7 +265,11 @@ int32_t RocksWrapper::init(const std::string& path) {
         if (s.ok()) {
             DB_WARNING("reopen db:%s success", path.c_str());
             for (auto& handle : handles) {
-                _column_families[handle->GetName()] = handle;
+                if (handle->GetName() == "bin_log") {
+                    _old_binlog_cf = handle;
+                } else {
+                    _column_families[handle->GetName()] = handle;
+                }
                 DB_WARNING("open column family:%s", handle->GetName().c_str());
             }
         } else {
@@ -275,6 +285,33 @@ int32_t RocksWrapper::init(const std::string& path) {
             DB_FATAL("open db:%s fail, err_message:%s", path.c_str(), s.ToString().c_str());
             return -1;
         }
+    }
+    if (_old_binlog_cf != nullptr) {
+        // 一个小时后删除old bin_log cf
+        Bthread bth;
+        bth.run([this]() {
+            bthread_usleep(3600 * 1000 * 1000LL);
+            // 暂时假删，避免出问题
+            DB_WARNING("erase bin_log cf");
+            if (FLAGS_real_delete_old_binlog_cf) {
+                auto handle = _old_binlog_cf;
+                _old_binlog_cf = nullptr;
+                // 避免删除时有并发，sleep 5分钟后真正删除
+                bthread_usleep(300 * 1000 * 1000LL);
+                auto res = _txn_db->DropColumnFamily(handle);
+                if (!res.ok()) {
+                    DB_FATAL("drop old binlog column_family failed, err_message:%s", res.ToString().c_str());
+                } else {
+                    res = _txn_db->DestroyColumnFamilyHandle(handle);
+                    if (!res.ok()) {
+                        DB_FATAL("destroy old binlog column_family failed, err_message:%s", 
+                                res.ToString().c_str());
+                    }
+                }
+            } else {
+                _old_binlog_cf = nullptr;
+            }
+        });
     }
     if (0 == _column_families.count(RAFT_LOG_CF)) {
         //create raft_log column_familiy
@@ -328,7 +365,7 @@ int32_t RocksWrapper::init(const std::string& path) {
         }
     }
     _is_init = true;
-
+    update_oldest_ts_in_binlog_cf();
     collect_rocks_options();
     DB_WARNING("rocksdb init success");
     return 0;
@@ -381,6 +418,74 @@ rocksdb::Status RocksWrapper::remove_range(const rocksdb::WriteOptions& options,
     rocksdb::WriteBatch batch;
     batch.DeleteRange(column_family, begin, end);
     return _txn_db->Write(options, opt, &batch);
+}
+
+int32_t RocksWrapper::get_binlog_value(int64_t ts, std::string& binlog_value) {
+    std::string key;
+    uint64_t ts_endian = KeyEncoder::to_endian_u64(
+                            KeyEncoder::encode_i64(ts));
+    key.append((char*)&ts_endian, sizeof(uint64_t));
+
+    auto binlog_handle = get_bin_log_handle();
+    if (binlog_handle == nullptr) {
+        DB_WARNING("no binlog handle: ts: %ld", ts);
+        return -1;
+    }
+    
+    rocksdb::ReadOptions option;
+    auto status = _txn_db->Get(option, binlog_handle, rocksdb::Slice(key), &binlog_value);
+    if (status.IsNotFound()) {
+        // 没有找到则从老的binlog cf中找
+        auto handle = _old_binlog_cf;
+        if (handle == nullptr) {
+            DB_FATAL("rocksdb has no old bin log cf, ts: %ld", ts);
+            return -1;
+        }
+        std::string key_in_old_cf;
+        key_in_old_cf.append((char*)&ts, sizeof(uint64_t));
+        status = _txn_db->Get(option, handle, rocksdb::Slice(key_in_old_cf), &binlog_value);
+        if (!status.ok()) {
+            DB_FATAL("get binlog fail in old cf, err_msg: %s, ts: %ld", status.ToString().c_str(), ts);
+            return -1;
+        }
+        DB_WARNING("binlog get in old cf, ts: %ld", ts);
+    } else if (!status.ok()) {
+        DB_WARNING("get binlog fail, err_msg: %s, ts: %ld", status.ToString().c_str(), ts);
+        return -1;
+    }
+
+    return 0;
+}
+
+void RocksWrapper::update_oldest_ts_in_binlog_cf() {
+    std::string start_key;
+    uint64_t endian_ts = KeyEncoder::to_endian_u64(
+                            KeyEncoder::encode_i64(0));
+    start_key.append((char*)&endian_ts, sizeof(uint64_t));
+
+    rocksdb::ReadOptions option;
+    const uint64_t endian_max = UINT64_MAX;
+    std::string end_key;
+    end_key.append((char*)&endian_max, sizeof(uint64_t));
+    rocksdb::Slice upper_bound_slice = end_key;
+    option.iterate_upper_bound = &upper_bound_slice;
+    option.total_order_seek = true;
+    option.fill_cache = false;
+    std::unique_ptr<rocksdb::Iterator> iter(new_iterator(option, get_bin_log_handle()));
+    iter->Seek(start_key);
+    bool find = false;
+    for (; iter->Valid(); iter->Next()) {
+        int64_t tmp_ts = TableKey(iter->key()).extract_i64(0);
+        find = true;
+        DB_WARNING("oldest_ts_in_binlog_cf changed: [%ld => %ld] [%s => %s]", _oldest_ts_in_binlog_cf, tmp_ts, 
+            ts_to_datetime_str(_oldest_ts_in_binlog_cf).c_str(), ts_to_datetime_str(tmp_ts).c_str());
+        _oldest_ts_in_binlog_cf = tmp_ts;
+        break;
+    }
+
+    if (!find) {
+        DB_WARNING("has no data in binlog cf");
+    }
 }
 
 int32_t RocksWrapper::delete_column_family(std::string cf_name) {

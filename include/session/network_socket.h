@@ -128,6 +128,17 @@ struct NetworkSocket {
         // TODO: request meta_server for a txn id
         return (instance_part << 40 | (txn_id_part & 0xFFFFFFFFFFUL));
     }
+
+    void insert_subquery_sign(uint64_t sign) {
+        std::unique_lock<bthread::Mutex> lck(_subquery_signs_lock);
+        _subquery_signs.insert(sign);
+    }
+
+    std::set<uint64_t> get_subquery_signs() {
+        std::unique_lock<bthread::Mutex> lck(_subquery_signs_lock);
+        return _subquery_signs;
+    }
+
     // Socket basic infomation.
     bool                shutdown;
     int                 fd;           // Socket fd.
@@ -205,6 +216,11 @@ struct NetworkSocket {
     bool is_index_ddl = false;
 
     static std::atomic<uint64_t> txn_id_counter;
+
+    bool is_explain_sign = false;//标志位，表示命令是否为查询sql签名
+private:
+    std::set<uint64_t> _subquery_signs;
+    bthread::Mutex     _subquery_signs_lock;
 };
 
 class SocketFactory {

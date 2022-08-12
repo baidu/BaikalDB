@@ -31,7 +31,10 @@ public:
     RocksdbScanNode(pb::Engine engine): ScanNode(engine) {
     }
     virtual ~RocksdbScanNode() {
-        for (auto expr : _index_conjuncts) {
+        for (auto expr : _scan_conjuncts) {
+            ExprNode::destroy_tree(expr);
+        }
+        for (auto expr : _update_exprs) {
             ExprNode::destroy_tree(expr);
         }
         delete _index_iter;
@@ -56,19 +59,27 @@ public:
         } 
         return false;
     }
-    void set_related_manager_node(SelectManagerNode* manager_node) {
+    void set_related_manager_node(ExecNode* manager_node) {
         _related_manager_node = manager_node;
     }
-    SelectManagerNode* get_related_manager_node() const {
+    ExecNode* get_related_manager_node() const {
         return _related_manager_node;
     }
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
         ScanNode::find_place_holder(placeholders);
-        for (auto& expr : _index_conjuncts) {
+        for (auto& expr : _scan_conjuncts) {
             expr->find_place_holder(placeholders);
         }
     }
+    // todo: 编码到PossibleIndex的条件未处理
+    bool check_satisfy_condition(MemRow* row) override {
+        if (!need_copy(row, _scan_conjuncts)) {
+            return false;
+        }
+        return true;
+    }
+
 
     int32_t get_partition_field() {
         return _table_info->partition_info.partition_field();
@@ -88,6 +99,8 @@ private:
     int get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos);
     int lock_primary(RuntimeState* state, MemRow* row);
     int index_ddl_work(RuntimeState* state, MemRow* row);
+    int column_ddl_work(RuntimeState* state, MemRow* row);
+    int process_ddl_work(RuntimeState* state, MemRow* row);
     int choose_index(RuntimeState* state);
 
     int multi_get_next(pb::StorageType st, SmartRecord record) {
@@ -109,16 +122,18 @@ private:
 
 private:
     std::map<int32_t, FieldInfo*> _field_ids;
+    std::map<int32_t, FieldInfo*> _ddl_field_ids;
     std::vector<int32_t> _filt_field_ids;
     std::vector<int32_t> _trivial_field_ids;
     std::vector<int32_t> _field_slot;
     MemRowDescriptor* _mem_row_desc;
-    SelectManagerNode* _related_manager_node = NULL;
+    ExecNode* _related_manager_node = NULL;
     SchemaFactory* _factory = nullptr;
     int64_t _index_id = -1;
     int64_t _region_id;
     bool _use_get = false;
     bool _is_ddl_work = false;
+    pb::DDLType _ddl_work_type = pb::DDL_NONE;
     int64_t _ddl_index_id = -1;
 
     // 如果用了排序列做索引，就不需要排序了
@@ -135,12 +150,14 @@ private:
     std::vector<bool> _left_opens;
     std::vector<bool> _right_opens;
     std::vector<bool> _like_prefixs;
+    std::vector<pb::SlotDescriptor> _update_slots;
+    std::vector<ExprNode*> _update_exprs;
     bool _use_encoded_key = false;
     // trace使用
     int _scan_rows = 0;
     size_t _idx = 0;
     //后续做下推用
-    std::vector<ExprNode*> _index_conjuncts;
+    std::vector<ExprNode*> _scan_conjuncts;
     IndexIterator* _index_iter = nullptr;
     TableIterator* _table_iter = nullptr;
     ReverseIndexBase* _reverse_index = nullptr;

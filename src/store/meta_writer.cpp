@@ -47,6 +47,9 @@ const std::string MetaWriter::LEARNER_IDENTIFY(1, 0x0C);
 
 const std::string MetaWriter::LOCAL_STORAGE_IDENTIFY(1, 0x0D);
 
+//key: ROCKS_HANG_CHECK_IDENTIFY + -1, 反复写这个key，判断store是否卡住
+const std::string MetaWriter::ROCKS_HANG_CHECK_IDENTIFY(1, 0x02);
+
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
     std::vector<std::string> values;
@@ -861,6 +864,36 @@ int64_t MetaWriter::read_binlog_oldest_ts(int64_t region_id) {
         return -1;
     }
     return TableKey(rocksdb::Slice(value)).extract_i64(0);
+}
+
+int MetaWriter::rocks_hang_check() {
+    MutTableKey key;
+    key.append_char(MetaWriter::ROCKS_HANG_CHECK_IDENTIFY.c_str(), 1);
+    key.append_i64(-1);
+    
+    // write
+    MutTableKey value;
+    value.append_i64(butil::gettimeofday_us());
+    rocksdb::WriteOptions write_option;
+    write_option.sync = true;
+    auto status = _rocksdb->put(write_option, 
+                                _meta_cf, 
+                                rocksdb::Slice(key.data()), 
+                                rocksdb::Slice(value.data()));
+    if (!status.ok()) {
+        DB_FATAL("write rocks_hang_check_key fail, err_msg: %s", status.ToString().c_str());
+        return -1;
+    }
+
+    // read
+    std::string r_value;
+    rocksdb::ReadOptions options;
+    status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(key.data()), &r_value);
+    if (!status.ok()) {
+        DB_FATAL("Error while read rocks_hang_check_key, Error %s", status.ToString().c_str());
+        return -1;
+    }
+    return 0;
 }
 
 } // end of namespace

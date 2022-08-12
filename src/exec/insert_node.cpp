@@ -66,6 +66,7 @@ int InsertNode::init(const pb::PlanNode& node) {
         insert->clear_insert_values();
     }
     _on_dup_key_update = _update_slots.size() > 0;
+    _local_index_binlog = node.local_index_binlog();
     return 0;
 }
 
@@ -241,8 +242,8 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
                 DB_WARNING("expr open fail");
                 return -1;
             }
-            if (0 != row->set_value(row->get_field_by_idx(insert_fields[col_idx]->pb_idx), 
-                    expr->get_value(nullptr).cast_to(insert_fields[col_idx]->type))) {
+            if (0 != row->set_value(row->get_field_by_idx(insert_fields[col_idx]->pb_idx),
+                  expr->get_value(nullptr).cast_to(insert_fields[col_idx]->type))) {
                 DB_WARNING("fill insert value failed");
                 expr->close();
                 return -1;

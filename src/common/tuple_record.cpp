@@ -77,6 +77,10 @@ int TupleRecord::verification_fields(int32_t max_field_id) {
         }
     }
 
+    if (_offset > _size) {
+        return -1;
+    }
+
     return 0;
 }
 

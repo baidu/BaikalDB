@@ -16,6 +16,7 @@
 
 #include "exec_node.h"
 #include "fetcher_store.h"
+#include "rocksdb_scan_node.h"
 
 namespace baikaldb {
 class FullExportNode : public ExecNode {
@@ -31,19 +32,30 @@ public:
     virtual void close(RuntimeState* state) {
         ExecNode::close(state);
         _send_region_ids.clear();
-        _sent_region_ids.clear();
+        _last_router_key.clear();
         _start_key_sort.clear();
         _error = E_OK;
     }
     bool get_batch(RowBatch* batch);
+    // fullexport分批获取region
+    int get_next_region_infos();
+    // 达到limit后，记录最后一条数据，下次查询可以接着上次查询
+    // 用于inner join后数据变少，可以再次获取数据
+    int calc_last_key(RuntimeState* state, MemRow* mem_row);
+    // 达到limit后，重置_num_rows_returned可以做下一轮请求
+    void reset_num_rows_returned() {
+        _num_rows_returned = 0;
+    }
 
 private:
     FetcherStore _fetcher_store;
-    std::vector<int64_t> _send_region_ids;
-    std::vector<int64_t> _sent_region_ids;
+    std::deque<int64_t> _send_region_ids;
     std::map<std::string, int64_t> _start_key_sort;
+    RocksdbScanNode* _scan_node = nullptr;
+    std::string _last_router_key;
     ErrorType _error = E_OK;
     pb::OpType _op_type;
+    bool _no_regions = false;
 };
 
 } // namespace baikaldb

@@ -165,12 +165,18 @@ int AggNode::open(RuntimeState* state) {
 
     // 兼容mysql: select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        uint8_t null_flag = 0;
-        MutTableKey key;
-        key.append_u8(null_flag);
-        AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get());
-        _hash_map.insert(key.data(), row.release());
+        ExecNode* packet = get_parent_node(pb::PACKET_NODE);
+        // baikaldb才有packet_node;只在baikaldb上产生数据
+        // TODB:join和子查询后续如果要完全推到store运行得注意
+        if (packet != nullptr) {
+            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+            uint8_t null_flag = 0;
+            MutTableKey key;
+            key.append_u8(null_flag);
+            int64_t used_size= 0;
+            AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get(), used_size, true);
+            _hash_map.insert(key.data(), row.release());
+        }
     }
     _iter = _hash_map.begin();
     return 0;
@@ -211,16 +217,16 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& u
                 }
             }
             used_size += cur_row->used_size();
-            AggFnCall::initialize_all(_agg_fn_calls, key.data(), *agg_row);
+            AggFnCall::initialize_all(_agg_fn_calls, key.data(), *agg_row, used_size, false);
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);
         } else {
             release_size += cur_row->used_size();
         }
         if (_is_merger) {
-            AggFnCall::merge_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
+            AggFnCall::merge_all(_agg_fn_calls, key.data(), cur_row, *agg_row, used_size);
         } else {
-            AggFnCall::update_all(_agg_fn_calls, key.data(), cur_row, *agg_row);
+            AggFnCall::update_all(_agg_fn_calls, key.data(), cur_row, *agg_row, used_size);
         }
     }
 }

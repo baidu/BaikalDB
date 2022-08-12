@@ -349,6 +349,7 @@ STATS_PERSISTENT { un_reserved_keyword(yylval, yyscanner, parser); return STATS_
 STATUS { un_reserved_keyword(yylval, yyscanner, parser); return STATUS; }
 SUPER { un_reserved_keyword(yylval, yyscanner, parser); return SUPER; }
 SOME { un_reserved_keyword(yylval, yyscanner, parser); return SOME; }
+SWAP { un_reserved_keyword(yylval, yyscanner, parser); return SWAP; }
 GLOBAL { un_reserved_keyword(yylval, yyscanner, parser); return GLOBAL; }
 TABLES { un_reserved_keyword(yylval, yyscanner, parser); return TABLES; }
 TEMPORARY { un_reserved_keyword(yylval, yyscanner, parser); return TEMPORARY; }

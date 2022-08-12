@@ -75,63 +75,73 @@ int IndexDDLManagerNode::open(RuntimeState* state) {
     bool global_ddl_with_ttl = _fetcher_store.region_id_ttl_timestamp_batch.size() > 0 ? true : false;
     std::map<std::string, int64_t> record_ttl_map;
     for (auto& pair : _fetcher_store.start_key_sort) {
-        auto& batch = _fetcher_store.region_batch[pair.second];
+        auto iter = _fetcher_store.region_batch.find(pair.second);
+        if (iter == _fetcher_store.region_batch.end()) {
+            continue;
+        }
+        auto& batch = iter->second;
+        if (batch == NULL || batch->size() == 0) {
+            _fetcher_store.region_batch.erase(iter);
+            continue;
+        }
         auto& ttl_batch = _fetcher_store.region_id_ttl_timestamp_batch[pair.second];
         if (global_ddl_with_ttl && batch->size() != ttl_batch.size()) {
             DB_FATAL("region_id: %ld, batch size diff with ttl size %ld vs %ld", pair.second, batch->size(), ttl_batch.size());
             global_ddl_with_ttl = false;
         }
         int ttl_idx = 0;
-        if (batch != NULL && batch->size() != 0) {
-            for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
-                ddl_scan_size++;
-                std::unique_ptr<MemRow>& mem_row = batch->get_row();
-                SmartRecord record = record_template->clone(false);
-                auto construct_record = [state, &record, &mem_row, tuple_id, &insert_records](int64_t index_id) -> int {
-                    auto index_info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-                    if (index_info_ptr == nullptr) {
-                        DB_FATAL("index info ptr is nullptr");
-                        return -1;
-                    }
-
-                    for (auto& field : index_info_ptr->fields) {
-                        int32_t field_id = field.id;
-                        int32_t slot_id = state->get_slot_id(tuple_id, field_id);
-                        record->set_value(record->get_field_by_tag(field_id), mem_row->get_value(tuple_id, slot_id));
-                    }
+        for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
+            ddl_scan_size++;
+            std::unique_ptr<MemRow>& mem_row = batch->get_row();
+            SmartRecord record = record_template->clone(false);
+            auto construct_record = [state, &record, &mem_row, tuple_id, &insert_records](int64_t index_id) -> int {
+                // ddl column时index_id=0
+                if (index_id == 0) {
                     return 0;
-                };
-
-                if (construct_record(_table_id) == -1 || construct_record(_index_id) == -1) {
-                    DB_WARNING("task_%s construct record error", _task_id.c_str());
+                }
+                auto index_info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+                if (index_info_ptr == nullptr) {
+                    DB_FATAL("index info ptr is nullptr");
                     return -1;
                 }
-                insert_records.emplace_back(record);
-                DB_DEBUG("record %s", record->debug_string().c_str());
-                if (global_ddl_with_ttl) {
-                    std::string record_str;
-                    record->encode(record_str);
-                    record_ttl_map[record_str] = ttl_batch[ttl_idx++];
-                }
-                // 已排序，只 encode batch最后的record 或者 最后一个record。
-                if (batch->index() + 1 == batch->size() || ddl_scan_size == limit) {
-                    MutTableKey max_pk_key;
-                    int ret = record->encode_key(pk_info, max_pk_key, -1, false, false);
-                    if (ret != 0) {
-                        DB_WARNING("task_%s encode error.", _task_id.c_str());
-                        return ret;
-                    }
-                    DB_DEBUG("get pk key %s", str_to_hex(max_pk_key.data()).c_str());
-                    max_record = max_pk_key.data();
-                    if (max_pk_key.data() > max_pk_str) {
-                        DB_DEBUG("get max pk key %s", str_to_hex(max_pk_key.data()).c_str());
-                        max_pk_str = max_pk_key.data();
-                    }
-                    state->ddl_pk_key_is_full = max_pk_key.get_full();
-                }
 
+                for (auto& field : index_info_ptr->fields) {
+                    int32_t field_id = field.id;
+                    int32_t slot_id = state->get_slot_id(tuple_id, field_id);
+                    record->set_value(record->get_field_by_tag(field_id), mem_row->get_value(tuple_id, slot_id));
+                }
+                return 0;
+            };
+
+            if (construct_record(_table_id) == -1 || construct_record(_index_id) == -1) {
+                DB_WARNING("task_%s construct record error", _task_id.c_str());
+                return -1;
+            }
+            insert_records.emplace_back(record);
+            DB_DEBUG("record %s", record->debug_string().c_str());
+            if (global_ddl_with_ttl) {
+                std::string record_str;
+                record->encode(record_str);
+                record_ttl_map[record_str] = ttl_batch[ttl_idx++];
+            }
+            // 已排序，只 encode batch最后的record 或者 最后一个record。
+            if (batch->index() + 1 == batch->size() || ddl_scan_size == limit) {
+                MutTableKey max_pk_key;
+                int ret = record->encode_key(pk_info, max_pk_key, -1, false, false);
+                if (ret != 0) {
+                    DB_WARNING("task_%s encode error.", _task_id.c_str());
+                    return ret;
+                }
+                DB_DEBUG("get pk key %s", str_to_hex(max_pk_key.data()).c_str());
+                max_record = max_pk_key.data();
+                if (max_pk_key.data() > max_pk_str) {
+                    DB_DEBUG("get max pk key %s", str_to_hex(max_pk_key.data()).c_str());
+                    max_pk_str = max_pk_key.data();
+                }
+                state->ddl_pk_key_is_full = max_pk_key.get_full();
             }
         }
+        _fetcher_store.region_batch.erase(iter);
         if (insert_records.size() >= limit) {
             DB_DEBUG("get limit %ld", limit);
             break;

@@ -69,7 +69,7 @@ public:
     }
     virtual int expr_optimize(QueryContext* ctx);
     int init_insert_info(UpdateManagerNode* update_manager_node);
-    int init_insert_info(InsertNode* insert_node);
+    int init_insert_info(InsertNode* insert_node, bool is_local);
     bool need_ignore() {
         return _need_ignore;
     }
@@ -127,7 +127,7 @@ public:
     void set_selected_field_ids(std::vector<int32_t>& field_ids) {
         _selected_field_ids.insert(_selected_field_ids.begin(), field_ids.begin(), field_ids.end());
     }
-    void process_binlog(RuntimeState* state, bool save_data);
+    int process_binlog(RuntimeState* state, bool is_local);
 
     void set_row_ttl_duration(int64_t row_ttl_duration) { 
         _row_ttl_duration = row_ttl_duration; 

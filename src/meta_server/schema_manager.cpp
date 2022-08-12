@@ -101,6 +101,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     }
     case pb::OP_CREATE_TABLE:
     case pb::OP_RENAME_TABLE:
+    case pb::OP_SWAP_TABLE:
     case pb::OP_DROP_TABLE: 
     case pb::OP_DROP_TABLE_TOMBSTONE: 
     case pb::OP_RESTORE_TABLE: 
@@ -152,7 +153,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                     "no table comment", request->op_type(), log_id);
             return;
         }
-        if (request->op_type() == pb::OP_RENAME_TABLE
+        if ((request->op_type() == pb::OP_RENAME_TABLE || request->op_type() == pb::OP_SWAP_TABLE)
                 && !request->table_info().has_new_table_name()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no new table name", request->op_type(), log_id);
@@ -180,11 +181,12 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 return;
             } 
         }
-        if (request->op_type() == pb::OP_ADD_INDEX || request->op_type() == pb::OP_DROP_INDEX) {
-            auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
-            uint32_t timestamp = std::chrono::seconds(std::time(nullptr)).count();
-            mutable_request->mutable_ddlwork_info()->set_begin_timestamp(
-                timestamp); 
+        if (request->op_type() == pb::OP_ADD_INDEX || request->op_type() == pb::OP_DROP_INDEX
+            || request->op_type() == pb::OP_MODIFY_FIELD) {
+            if (request->has_ddlwork_info()) {
+                auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+                mutable_request->mutable_ddlwork_info()->set_begin_timestamp(butil::gettimeofday_s());
+            }
         }
         if (request->op_type() == pb::OP_UPDATE_TTL_DURATION 
                 && !request->table_info().has_ttl_duration()) {

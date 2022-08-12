@@ -47,6 +47,7 @@ enum OpType {
     OP_ROLLBACK_BINLOG                      = 63; //rollback binlog
     OP_FAKE_BINLOG                          = 64; //fake     binlog
     OP_RECOVER_BINLOG                       = 65; //recover  binlog
+    OP_QUERY_BINLOG                         = 66; //query region binlog info
 
     // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
@@ -126,4 +127,5 @@ enum OpType {
     OP_OPEN_NETWORK_SEGMENT_BALANCE         = 189; // 打开一个resource tag的按网段进行balance
     OP_CLOSE_NETWORK_SEGMENT_BALANCE        = 190; // 关闭一个resource tag的按网段进行balance
     OP_UPDATE_TABLE_COMMENT                 = 191; //修改表的comment
+    OP_SWAP_TABLE                           = 192; //原子交换两个表名
 };

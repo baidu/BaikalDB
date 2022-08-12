@@ -58,6 +58,21 @@ public:
     ExecNode* get_parent() {
         return _parent;
     }
+    ExecNode* get_parent_node(const pb::PlanNodeType node_type) {
+        if (_node_type == node_type) {
+            return this;
+        }
+
+        ExecNode* parent = _parent;
+        while (parent != nullptr && parent != this) {
+            if (parent->_node_type == node_type) {
+                return parent;
+            } else {
+                parent = parent->_parent;
+            }
+        }
+        return nullptr;
+    }
     void join_get_scan_nodes(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     bool need_seperate();
     virtual int open(RuntimeState* state);
@@ -102,6 +117,14 @@ public:
         }
     }
 
+    virtual bool check_satisfy_condition(MemRow* row) {
+        for (auto child : _children) {
+            if (!child->check_satisfy_condition(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
     ExecNode* get_specified_node(const pb::PlanNodeType node_type) {
         if (node_type == _node_type) {
             return this;
@@ -235,7 +258,13 @@ public:
     std::map<int64_t, std::vector<SmartRecord>>& get_return_records() {
         return _return_records;
     }
+    std::map<int64_t, std::vector<SmartRecord>>& get_return_old_records() {
+        return _return_old_records;
+    }
     virtual pb::LockCmdType lock_type() { return pb::LOCK_INVALID; }
+    bool local_index_binlog() const {
+        return _local_index_binlog;
+    }
 protected:
     int64_t _limit = -1;
     int64_t _num_rows_returned = 0;
@@ -247,8 +276,10 @@ protected:
     pb::PlanNode _pb_node;
     std::map<int64_t, pb::RegionInfo> _region_infos;
     pb::TraceNode* _trace = nullptr;
+    bool  _local_index_binlog = false;
     
     //返回给baikaldb的结果
+    std::map<int64_t, std::vector<SmartRecord>> _return_old_records;
     std::map<int64_t, std::vector<SmartRecord>> _return_records;
 private:
     static int create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, 

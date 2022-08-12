@@ -648,7 +648,15 @@ int hll_merge_agg(std::string& hll1, std::string& hll2) {
             if (hdr1->encoding != HLL_RAW) {
                 hll_dense_set(hdr1->registers,i,val);
             } else {
-                if (val > max[i]) max[i] = val;
+                if (val > max[i]) {
+                    max[i] = val;
+                }
+            }
+        }
+    } else if (hdr2->encoding == HLL_RAW) {
+        for (int i = 0; i < HLL_REGISTERS; i++) {
+            if (hdr2->registers[i] > max[i]) {
+                max[i] = hdr2->registers[i];
             }
         }
     } else {
@@ -669,19 +677,25 @@ int hll_merge_agg(std::string& hll1, std::string& hll2) {
             } else {
                 runlen = HLL_SPARSE_VAL_LEN(p);
                 regval = HLL_SPARSE_VAL_VALUE(p);
-                if ((runlen + i) > HLL_REGISTERS) break;
+                if ((runlen + i) > HLL_REGISTERS) {
+                    break;
+                }
                 while(runlen--) {
                     if (hdr1->encoding != HLL_RAW) {
                         hll_dense_set(hdr1->registers,i,regval);
                     } else {
-                        if (regval > max[i]) max[i] = regval;
+                        if (regval > max[i]) {
+                            max[i] = regval;
+                        }
                     }
                     i++;
                 }
                 p++;
             }
         }
-        if (i != HLL_REGISTERS) return -1;
+        if (i != HLL_REGISTERS) {
+            return -1;
+        }
     }
 
     HLL_INVALIDATE_CACHE(hdr1);
@@ -695,7 +709,9 @@ int hll_merge(uint8_t *max, std::string& hll) {
         uint8_t val = 0;
         for (i = 0; i < HLL_REGISTERS; i++) {
             HLL_DENSE_GET_REGISTER(val,hdr->registers,i);
-            if (val > max[i]) max[i] = val;
+            if (val > max[i]) {
+                max[i] = val;
+            }
         }
     } else if (hdr->encoding == HLL_RAW) {
         for (i = 0; i < HLL_REGISTERS; i++) {
@@ -722,15 +738,21 @@ int hll_merge(uint8_t *max, std::string& hll) {
             } else {
                 runlen = HLL_SPARSE_VAL_LEN(p);
                 regval = HLL_SPARSE_VAL_VALUE(p);
-                if ((runlen + i) > HLL_REGISTERS) break;
+                if ((runlen + i) > HLL_REGISTERS) {
+                    break;
+                }
                 while (runlen--) {
-                    if (regval > max[i]) max[i] = regval;
+                    if (regval > max[i]) {
+                        max[i] = regval;
+                    }
                     i++;
                 }
                 p++;
             }
         }
-        if (i != HLL_REGISTERS) return -1;
+        if (i != HLL_REGISTERS) {
+            return -1;
+        }
     }
     return 0;
 }
@@ -744,9 +766,13 @@ int hll_merge(std::string& hll1, std::string& hll2) {
     memset(max,0,sizeof(max));
     int use_dense = 0;
     struct hllhdr *hdr = (struct hllhdr *)hll1.data();
-    if (hdr->encoding == HLL_DENSE) use_dense = 1;
+    if (hdr->encoding == HLL_DENSE) {
+        use_dense = 1;
+    }
     hdr = (struct hllhdr *)hll2.data();
-    if (hdr->encoding == HLL_DENSE) use_dense = 1;
+    if (hdr->encoding == HLL_DENSE) {
+        use_dense = 1;
+    }
     if (hll_merge(max,hll1) < 0) {
         return -1;
     }
@@ -758,11 +784,19 @@ int hll_merge(std::string& hll1, std::string& hll2) {
     }
     hdr = (struct hllhdr *)hll1.data();
     for (int j = 0; j < HLL_REGISTERS; j++) {
-        if (max[j] == 0) continue;
+        if (max[j] == 0) {
+            continue;
+        }
         hdr = (struct hllhdr *)hll1.data();
         switch (hdr->encoding) {
-        case HLL_DENSE: hll_dense_set(hdr->registers,j,max[j]); break;
-        case HLL_SPARSE: hll_sparse_set(hll1,j,max[j]); break;
+        case HLL_DENSE: {
+            hll_dense_set(hdr->registers,j,max[j]);
+            break;
+        }
+        case HLL_SPARSE: {
+            hll_sparse_set(hll1,j,max[j]);
+            break;
+        }
         }
     }
     hdr = (struct hllhdr *)hll1.data();
@@ -782,7 +816,9 @@ extern void hll_sparse_init(std::string& val) {
     uint8_t *p = hdr->registers;
     while(aux) {
         int xzero = HLL_SPARSE_XZERO_MAX_LEN;
-        if (xzero > aux) xzero = aux;
+        if (xzero > aux) {
+            xzero = aux;
+        }
         HLL_SPARSE_XZERO_SET(p,xzero);
         p += 2;
         aux -= xzero;

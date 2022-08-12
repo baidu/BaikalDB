@@ -598,4 +598,8 @@ size_t date_format_internal(char* s, size_t maxsize, const char* format, const s
     return strftime(s, maxsize, f.c_str(), tp);
 }
 
+int64_t timestamp_to_ts(uint32_t  timestamp) {
+    return (((int64_t)timestamp) * 1000 - tso::base_timestamp_ms) << 18;
+}
+
 }  // baikaldb

@@ -98,6 +98,8 @@ ExprValue date_add(const std::vector<ExprValue>& input);
 ExprValue date_sub(const std::vector<ExprValue>& input);
 ExprValue weekday(const std::vector<ExprValue>& input);
 ExprValue extract(const std::vector<ExprValue>& input);
+ExprValue tso_to_timestamp(const std::vector<ExprValue>& input);
+ExprValue timestamp_to_tso(const std::vector<ExprValue>& input);
 // hll functions
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);

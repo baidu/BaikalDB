@@ -310,6 +310,7 @@ message InstanceInfo {
     optional int64 select_qps       = 14;
     optional string network_segment = 15;
     optional string container_id    = 16;
+    optional int64 rocks_hang_check_cost = 17;
 };
 
 message MovePhysicalRequest {
@@ -885,17 +886,19 @@ message DdlWorkInfo {
     optional int64 table_id                         = 1;
     optional OpType             op_type             = 2;         //操作类型：add_index,del_index
     optional IndexState         job_state           = 3;        //该ddlwork的工作阶段,meta收集store的工作状态
-    optional int64           index_id               = 4;
-    optional uint32              begin_timestamp    = 5; //开始时间
-    optional uint32  end_timestamp                  = 6; //结束时间
-    optional bool rollback                          = 7 [default=false];
-    optional ErrCode           errcode              = 8;
+    optional int64              index_id            = 4;
+    optional int64              begin_timestamp     = 5; //开始时间
+    optional int64              end_timestamp       = 6; //结束时间
+    optional bool               rollback            = 7 [default=false];
+    optional ErrCode            errcode             = 8;
     optional bool deleted                           = 9 [default=false]; 
     optional DdlWorkStatus status                   = 10;
     optional bool suspend                           = 11;
     optional int64 update_timestamp                 = 12;
     optional bool global                            = 13;
     optional bool drop_index                        = 14;
+    optional ColumnDdlInfo column_ddl_info          = 15;
+    optional string   opt_sql                       = 16;
 };
 
 enum DdlWorkStatus {
@@ -913,13 +916,14 @@ message RegionDdlWork {
     optional bytes start_key                        = 3;
     optional bytes end_key                          = 4;
     optional DdlWorkStatus status                   = 5;
-    optional OpType             op_type             = 6;
+    optional OpType  op_type                        = 6;
     optional int64 index_id                         = 7;
     optional string address                         = 8;
     optional uint32 retry_time                      = 9;
     optional int64 update_timestamp                 = 10;
     optional int64 partition                        = 11;
     optional bool  is_global                        = 12;
+    optional ColumnDdlInfo column_ddl_info          = 13;
 };
  
 message TableHeartBeat {

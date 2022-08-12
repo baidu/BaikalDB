@@ -30,6 +30,7 @@ int PlanRouter::analyze(QueryContext* ctx) {
     if (!plan->need_seperate()) {
         return 0;
     }
+    _is_full_export = ctx->is_full_export;
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     if (packet_node != nullptr && packet_node->op_type() == pb::OP_LOAD) {
         return 0;
@@ -96,10 +97,15 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
     if (ctx->debug_region_id != -1) {
         pb::RegionInfo info;
         int64_t table_id = scan_node->table_id();
+        if (scan_node->main_scan_index() == nullptr) {
+            DB_WARNING("main scan index is nullprt");
+            return -1;
+        }
         int ret = schema_factory->get_region_info(table_id, ctx->debug_region_id, info);
         if (ret == 0) {
             // scan_node->set_router_index_id(table_id);
             (scan_node->region_infos())[ctx->debug_region_id] = info;
+            scan_node->main_scan_index()->region_infos[ctx->debug_region_id] = info;
             return 0;
         }
         //对于索引表，也支持debug模式
@@ -112,6 +118,7 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
             if (ret == 0) {
                 (scan_node->region_infos())[ctx->debug_region_id] = info;
                 // scan_node->set_router_index_id(index_id);
+                scan_node->main_scan_index()->region_infos[ctx->debug_region_id] = info;
                 scan_node->set_covering_index(true);
                 return 0;
             }
@@ -137,6 +144,7 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     bool hit_global = false;
     bool covering_index = true;
     int idx = 0;
+    bool is_full_export = _is_full_export;
     for (auto& scan_index_info : scan_node->scan_indexs()) {
         if (!scan_index_info.covering_index) {
             covering_index = false;
@@ -169,7 +177,10 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
                 *index_ptr, scan_index_info.router_index,
                 scan_index_info.region_infos,
                 &scan_index_info.region_primary,
-                scan_node->get_partition());
+                scan_node->get_partition(),
+                _is_full_export);
+            // 只第一个scannode获取部分region
+            _is_full_export = false;
             scan_node->set_region_infos(scan_index_info.region_infos);
             break;
         }
@@ -193,18 +204,22 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
         }
     }
     //如果该表没有全局二级索引
-    if (!schema_factory->has_global_index(main_table_id)) {
+    //full_export+join也需要把主键放入slot
+    if (!schema_factory->has_global_index(main_table_id) && !is_full_export) {
         return 0;
     }
-    //或者命中的不是全局二级索引，并且不是join,直接结束 
-    if (!has_join && !hit_global) {
-        return 0;
-    }
-    // 如果是索引覆盖，则不需要进行后续的操作
-    // 如有涉及有全局二级索引的join表时，把主表的fields_id全部放到tuple里。
-    // 该步骤后续如有性能问题的话，可以优化为在join_node里做plan router的是按需放进去。
+    bool need_put_pk = false;
+    
+    // 如有涉及有全局二级索引/fullexport的join表时，把主表的fields_id全部放到tuple里。
+    // 该步骤后续如有性能问题的话，可以优化为在join_node里做plan router时候按需放进去。
     // 但按需放进去时， tuple已经在state->init时生成，要destory 掉，然后重新生成。这块处理一定要小心
-    if (covering_index && !has_join) { 
+    if (is_full_export || has_join) {
+        need_put_pk = true;
+    } else if (hit_global && !covering_index) {
+        // 如果只是索引覆盖，则不需要进行后续的操作
+        need_put_pk = true;
+    }
+    if (!need_put_pk) {
         return 0;
     }
     //如果不是覆盖索引，需要把主键的field_id全部加到slot_id

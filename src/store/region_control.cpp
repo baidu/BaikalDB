@@ -213,7 +213,7 @@ int RegionControl::ingest_meta_sst(const std::string& meta_sst_file, int64_t reg
     return MetaWriter::get_instance()->ingest_meta_sst(meta_sst_file, region_id);
 }
 
-void RegionControl::sync_do_snapshot() {
+int RegionControl::sync_do_snapshot() {
     DB_WARNING("region_id: %ld sync_do_snapshot start", _region_id);
     std::string address = Store::get_instance()->address();
     butil::EndPoint leader = _region->get_leader();
@@ -224,7 +224,8 @@ void RegionControl::sync_do_snapshot() {
                        _region_id,
                        _region->_region_info.version());
     if (ret < 0) {
-        DB_WARNING("send no op fail, region_id:%ld", _region_id);
+        DB_WARNING("send no op fail, region_id:%ld", _region_id);  
+        return -1; 
     }
     BthreadCond sync_sign;
     sync_sign.increase();
@@ -240,6 +241,7 @@ void RegionControl::sync_do_snapshot() {
     }
     sync_sign.wait(); 
     DB_WARNING("region_id: %ld sync_do_snapshot success", _region_id);
+    return 0;
 }
 
 void RegionControl::raft_control(google::protobuf::RpcController* controller,
@@ -514,8 +516,7 @@ int RegionControl::legal_for_add_peer(const pb::AddPeer& add_peer, pb::StoreRes*
         }
         return -1;
     }
-    if (!add_peer.is_split() && ((_region->_region_info.has_can_add_peer() && !_region->_region_info.can_add_peer())
-            || _region->_region_info.version() < 1)) {
+    if (!_region->_region_info.can_add_peer() || (!add_peer.is_split() && _region->_region_info.version() < 1)) {
         DB_WARNING("region_id: %ld can not add peer, can_add_peer:%d, region_version:%ld",
                   _region_id, _region->_region_info.can_add_peer(), _region->_region_info.version());
         if (response != NULL) {

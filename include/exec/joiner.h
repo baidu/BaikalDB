@@ -124,6 +124,9 @@ public:
                                   std::vector<ExprNode*>& in_exprs);
     int fetcher_full_table_data(RuntimeState* state, ExecNode* child_node,
                             std::vector<MemRow*>& tuple_data);
+    int fetcher_inner_table_data(RuntimeState* state,
+                            const std::vector<MemRow*>& outer_tuple_data,
+                            std::vector<MemRow*>& inner_tuple_data);
     void construct_hash_map(const std::vector<MemRow*>& tuple_data,
                              const std::vector<ExprNode*>& slot_refs);
     void encode_hash_key(MemRow* row,

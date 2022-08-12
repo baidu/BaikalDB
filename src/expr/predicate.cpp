@@ -14,6 +14,7 @@
 
 #include "predicate.h"
 #include "parser.h"
+#include <boost/algorithm/string.hpp>
 
 namespace baikaldb {
 int InPredicate::open() {
@@ -180,15 +181,8 @@ ExprValue InPredicate::get_value(MemRow* row) {
     return _has_null ? ExprValue::Null() : ExprValue::False();
 }
 
-void LikePredicate::reset_regex(MemRow* row) {
-    std::string like_pattern = children(1)->get_value(row).get_string();
-    if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
-        covent_exact_pattern(like_pattern);
-        _regex_ptr.reset(new re2::RE2(_regex_pattern, _option));
-    } else {
-        covent_pattern(like_pattern);
-        _regex_ptr.reset(new re2::RE2(_regex_pattern, _option));
-    }
+void LikePredicate::reset_pattern(MemRow* row) {
+    _pattern = children(1)->get_value(row).get_string();
 }
 
 int LikePredicate::open() {
@@ -204,71 +198,33 @@ int LikePredicate::open() {
     }
     std::unordered_set<int32_t> slot_ids;
     children(1)->get_all_slot_ids(slot_ids);
-    _option.set_utf8(false);
-    _option.set_dot_nl(true);
-    if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
-        _option.set_case_sensitive(false);
-    }
     if (slot_ids.size() == 0) {
-        reset_regex(nullptr);
+        reset_pattern(nullptr);
+        if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
+            std::vector<std::string> split_pattern;
+            boost::split(split_pattern, _pattern, boost::is_any_of("|"));
+            if (split_pattern.size() > 1) {
+                bool is_prefix = split_pattern.begin()->size() > 0 && split_pattern.begin()->front() == '%';
+                bool is_postfix = split_pattern.back().size() > 0 && split_pattern.back().back() == '%';
+                auto pattern_iter = split_pattern.begin();
+                for(; pattern_iter != split_pattern.end(); pattern_iter++) {
+                    if (pattern_iter->size() > 0) {
+                        if (is_prefix && pattern_iter->front() != '%') {
+                            pattern_iter->insert(0, 1, '%');
+                        }
+
+                        if (is_postfix && pattern_iter->back() != '%') {
+                            pattern_iter->push_back('%');
+                        }
+                    }
+                }
+                split_pattern.swap(_patterns);
+            }
+        }
     } else {
-        _const_regex = false;
+        _const_pattern = false;
     }
     return 0;
-}
-
-void LikePredicate::covent_pattern(const std::string& pattern) {
-    bool is_escaped = false;
-    static std::set<char> need_escape_set = {
-        '.', '*', '+', '?', 
-        '[', ']', '{', '}', 
-        '(', ')', '\\', '|',
-        '^', '$'};
-    for (uint32_t i = 0; i < pattern.size(); ++i) {
-        if (!is_escaped && pattern[i] == '%') {
-            _regex_pattern.append(".*");
-        } else if (!is_escaped && pattern[i] == '_') {
-            _regex_pattern.append(".");
-        } else if (!is_escaped && pattern[i] == _escape_char) {
-            is_escaped = true;
-        } else if (need_escape_set.count(pattern[i]) == 1) {
-            _regex_pattern.append("\\");
-            _regex_pattern.append(1, pattern[i]);
-            is_escaped = false;
-        } else {
-            _regex_pattern.append(1, pattern[i]);
-            is_escaped = false;
-        }
-    }
-}
-
-void LikePredicate::covent_exact_pattern(const std::string& pattern) {
-    bool is_escaped = false;
-    static std::set<char> need_escape_set = {
-        '.', '*', '+', '?', 
-        '[', ']', '{', '}', 
-        '(', ')', '\\',
-        '^', '$'};
-    for (uint32_t i = 0; i < pattern.size(); ++i) {
-        if (!is_escaped && pattern[i] == '%') {
-            _regex_pattern.append(".*");
-        } else if (!is_escaped && pattern[i] == '_') {
-            _regex_pattern.append(".");
-        } else if (!is_escaped && pattern[i] == '|') {
-            _regex_pattern.append(".*");
-            _regex_pattern.append("|");
-            _regex_pattern.append(".*");
-        } else if (!is_escaped && pattern[i] == _escape_char) {
-            is_escaped = true;
-        } else if (need_escape_set.count(pattern[i]) == 1) {
-            _regex_pattern.append("\\");
-            _regex_pattern.append(1, pattern[i]);
-            is_escaped = false;
-        } else {
-            _regex_pattern.append(1, pattern[i]);
-            is_escaped = false;
-        }
-    }
 }
 
 void LikePredicate::hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_value) {
@@ -295,26 +251,62 @@ void LikePredicate::hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_
     }
 }
 
-ExprValue LikePredicate::get_value(MemRow* row) {
-    if (!_const_regex) {
-        reset_regex(row);
-    }
-    ExprValue value = children(0)->get_value(row);
-    value.cast_to(pb::STRING);
-    ExprValue ret(pb::BOOL);
-    try {
-        ret._u.bool_val = RE2::FullMatch(value.str_val, *_regex_ptr);
-        if (_regex_ptr->error_code() != 0) {
-            DB_FATAL("regex error[%d]", _regex_ptr->error_code());
+bool LikePredicate::like_one(const std::string& target, const std::string& pattern, pb::Charset charset) {
+    bool ret = false;
+    switch (charset) {
+    case pb::GBK:
+        {
+            DB_DEBUG("GBK like target[%s], pattern[%s]", target.c_str(), pattern.c_str());
+            auto like_ret = like<GBKCharset>(target, pattern);
+            if (like_ret) {
+                ret = *like_ret;
+            } else {
+                DB_WARNING("GBK like failed target[%s], pattern[%s]", target.c_str(), _pattern.c_str());
+                like_ret = like<Binary>(target, pattern);
+                if (like_ret) {
+                    ret = *like_ret;
+                }
+            }
         }
-    } catch (std::exception& e) {
-        DB_FATAL("regex error:%s, _regex_pattern:%ss", 
-                e.what(), _regex_pattern.c_str());
-        ret._u.bool_val = false;
-    } catch (...) {
-        DB_FATAL("regex unknown error: _regex_pattern:%ss", 
-                 _regex_pattern.c_str());
-        ret._u.bool_val = false;
+        break;
+    case pb::UTF8:
+        {
+            DB_DEBUG("UTF8 like target[%s], pattern[%s]", target.c_str(), pattern.c_str());
+            auto like_ret = like<UTF8Charset>(target, pattern);
+            if (like_ret) {
+                ret = *like_ret;
+                break;
+            }
+        }
+        DB_WARNING("UTF8 like failed target[%s], pattern[%s]", target.c_str(), _pattern.c_str());
+    default:
+        {
+            auto like_ret = like<Binary>(target, pattern);
+            if (like_ret) {
+                ret = *like_ret;
+            }
+        }
+    }
+    return ret;
+}
+
+ExprValue LikePredicate::get_value(MemRow* row) {
+    if (!_const_pattern) {
+        reset_pattern(row);
+    }
+    ExprValue target = children(0)->get_value(row);
+    target.cast_to(pb::STRING);
+    ExprValue ret(pb::BOOL);
+    ret._u.bool_val = false;
+    if (!_const_pattern || _patterns.size() == 0) {
+        ret._u.bool_val = like_one(target.str_val, _pattern, charset());
+    } else {
+        for (auto& pattern : _patterns) {
+            if (like_one(target.str_val, pattern, charset())) {
+                ret._u.bool_val = true;
+                break;
+            }
+        }
     }
     return ret;
 }
@@ -371,6 +363,53 @@ ExprValue RegexpPredicate::get_value(MemRow* row) {
     return ret;
 }
 
+size_t LikePredicate::UTF8Charset::get_char_size(size_t idx) {
+    size_t num = 1;
+    while (++idx < str.size() && (str[idx] & 0xC0) == 0x80) {
+        num++;
+    }
+    return num;
+}
+
+rocksdb::Slice LikePredicate::UTF8Charset::next_code_point(size_t idx) {
+    if (idx >= str.size()) {
+        DB_FATAL("out of range.");
+        return rocksdb::Slice();
+    }
+    if (!(str[idx] & 0x80)) {
+        return rocksdb::Slice(&str[idx], 1);
+    } else if ((str[idx] & 0xE0) == 0xC0) {
+        if (get_char_size(idx) != 2) {
+            return rocksdb::Slice();
+        }
+        return rocksdb::Slice(&str[idx], 2);
+    } else if ((str[idx] & 0xF0) == 0xE0) {
+        if (get_char_size(idx) != 3) {
+            return rocksdb::Slice();
+        }
+        return rocksdb::Slice(&str[idx], 3);
+    } else if ((str[idx] & 0xF0) == 0xF0) {
+        if (get_char_size(idx) != 4) {
+            return rocksdb::Slice();
+        }
+        return rocksdb::Slice(&str[idx], 4);
+    }
+    return rocksdb::Slice();
+}
+
+rocksdb::Slice LikePredicate::GBKCharset::next_code_point(size_t idx) {
+    if (idx >= str.size()) {
+        DB_FATAL("out of range.");
+        return rocksdb::Slice();
+    }
+    if (!(str[idx] & 0x80)) {
+        return rocksdb::Slice(&str[idx], 1);
+    } else if (idx + 1 < str.size() && in_range(0x81, str[idx], 0xFE) && 
+        (in_range(0x40, str[idx + 1], 0x7E) || in_range(0x80, str[idx + 1], 0xFE))) {
+        return rocksdb::Slice(&str[idx], 2);
+    }
+    return rocksdb::Slice();
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -172,9 +172,15 @@ void FuncExpr::to_stream(std::ostream& os) const {
             if (distinct) {
                 os << "DISTINCT ";
             }
-            for (int i = 0; i < children.size(); i++) {
+            int children_size = children.size();
+            // hll/rolling bitmap/tdigest相关的函数归一化时避免过长
+            if (print_sample && children.size() > 2 && 
+                (fn_name.starts_with("hll_") || fn_name.starts_with("rb_") || fn_name.starts_with("tdigest_"))) {
+                children_size = 2;
+            }
+            for (int i = 0; i < children_size; i++) {
                 os << children[i];
-                if (i != children.size() - 1) {
+                if (i != children_size - 1) {
                     os << ",";
                 }
             }

@@ -179,7 +179,7 @@ public:
             const FieldInfo& field_info,
             MutTableKey& key, bool clear, bool like_prefix);
 
-    int field_to_string(const FieldInfo& field_info, std::string* out);
+    int field_to_string(const FieldInfo& field_info, std::string* out, bool* is_null);
 
     //TODO: secondary key
     int decode_field(const Reflection* _reflection,

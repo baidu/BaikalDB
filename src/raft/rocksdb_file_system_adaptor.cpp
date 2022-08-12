@@ -69,6 +69,10 @@ RocksdbReaderAdaptor::~RocksdbReaderAdaptor() {
     close();
 }
 
+bool RocksdbReaderAdaptor::region_shutdown() {
+    return _region_ptr == nullptr || _region_ptr->is_shutdown();
+}
+
 ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t size) {
     if (_closed) {
         DB_FATAL("rocksdb reader has been closed, region_id: %ld, offset: %ld",
@@ -77,6 +81,13 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     }
     if (offset < 0) {
         DB_FATAL("region_id: %ld read error. offset: %ld", _region_id, offset);
+        return -1;
+    }
+
+    if (region_shutdown()) {
+        DB_FATAL("region_id: %ld shutdown, "
+                "last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
+                _region_id, _last_offset, offset, _context->offset, size);
         return -1;
     }
 
@@ -221,6 +232,11 @@ bool RocksdbReaderAdaptor::sync() {
     return true;
 }
 
+
+bool SstWriterAdaptor::region_shutdown() {
+    return _region_ptr == nullptr || _region_ptr->is_shutdown();
+}
+
 SstWriterAdaptor::SstWriterAdaptor(int64_t region_id, const std::string& path, const rocksdb::Options& option)
         : _region_id(region_id)
         , _path(path)
@@ -254,6 +270,11 @@ ssize_t SstWriterAdaptor::write(const butil::IOBuf& data, off_t offset) {
     std::string path = _path;
     if (!_is_meta) {
         path += std::to_string(_sst_idx);
+    }
+    if (region_shutdown()) {
+        DB_FATAL("write sst file path: %s failed, region shutdown, data len: %lu, region_id: %ld",
+                path.c_str(), data.size(), _region_id);
+        return -1;
     }
     if (_closed) {
         DB_FATAL("write sst file path: %s failed, file closed: %d data len: %lu, region_id: %ld",
@@ -717,6 +738,7 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
             _snapshots.erase(iter);
             DB_WARNING("region_id: %ld snapshot path: %s is hang over 1 hour, erase", _region_id, path.c_str());
         } else {
+            // leaner拉取快照会保留raft_snapshot_reader_expire_time_s
             DB_WARNING("region_id: %ld snapshot path: %s is busy", _region_id, path.c_str());
             _snapshots[path].count++;
             return false;

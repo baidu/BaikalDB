@@ -72,7 +72,7 @@ OnRPCDone::~OnRPCDone() {
 // 检查状态，判断是否需要继续执行
 ErrorType OnRPCDone::check_status() {
     if (_fetcher_store->error != E_OK) {
-        DB_DONE(WARNING, "recieve error");
+        DB_DONE(WARNING, "recieve error, other region failed");
         return E_FATAL;
     }
 
@@ -278,6 +278,7 @@ void OnRPCDone::select_addr() {
                 _addr = _backup;
                 _backup.clear();
                 _state->need_statistics = false;
+                _access_learner = true;
             } else if (!backup_can_access) {
                 _backup.clear();
             }
@@ -304,6 +305,10 @@ ErrorType OnRPCDone::send_async() {
     _cntl.Reset();
     _cntl.set_log_id(_state->log_id());
     _response.Clear();
+    if (_region_id == 0) {
+        DB_DONE(FATAL, "region_id == 0");
+        return E_FATAL;
+    }
     brpc::ChannelOptions option;
     option.max_retry = 1;
     option.connect_timeout_ms = FLAGS_fetcher_connect_timeout;
@@ -377,7 +382,8 @@ void OnRPCDone::Run() {
         if (_cntl.ErrorCode() != ETIMEDOUT &&
                 _cntl.ErrorCode() != ECONNREFUSED &&
                 _cntl.ErrorCode() != EHOSTDOWN &&
-                _cntl.ErrorCode() != ECANCELED) {
+                _cntl.ErrorCode() != ECANCELED &&
+                _cntl.ErrorCode() != EHOSTUNREACH) {
             _fetcher_store->error = E_FATAL;
             _rpc_ctrl->task_finish(this);
             return;
@@ -468,9 +474,7 @@ ErrorType OnRPCDone::handle_version_old() {
                     r.set_leader(_response.leader());
                 }
                 BAIDU_SCOPED_LOCK(_client_conn->region_lock);
-                _client_conn->region_infos[_region_id].set_end_key(r.start_key());
-                _client_conn->region_infos[_region_id].set_end_key(r.end_key());
-                _client_conn->region_infos[_region_id].set_version(r.version());
+                _client_conn->region_infos[_region_id] = r;
                 if (r.leader() != "0.0.0.0:0") {
                     _client_conn->region_infos[_region_id].set_leader(r.leader());
                 }
@@ -508,15 +512,12 @@ ErrorType OnRPCDone::handle_version_old() {
         }
         int last_seq_id = _response.has_last_seq_id()? _response.last_seq_id() : _start_seq_id;
         for (auto& r : regions) {
-            auto r_copy = r;
             pb::RegionInfo* info = nullptr;
             {
                 BAIDU_SCOPED_LOCK(_client_conn->region_lock);
-                _client_conn->region_infos[_region_id].set_start_key(r_copy.start_key());
-                _client_conn->region_infos[_region_id].set_end_key(r_copy.end_key());
-                _client_conn->region_infos[_region_id].set_version(r_copy.version());
-                if (r_copy.leader() != "0.0.0.0:0") {
-                    _client_conn->region_infos[_region_id].set_leader(r_copy.leader());
+                _client_conn->region_infos[r.region_id()] = r;
+                if (r.leader() != "0.0.0.0:0") {
+                    _client_conn->region_infos[r.region_id()].set_leader(r.leader());
                 }
                 info = &(_client_conn->region_infos[r.region_id()]);
             }
@@ -540,6 +541,15 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
             //业务快速置状态
             schema_factory->update_instance(_addr, pb::BUSY, true, false);
             _state->need_statistics = false;
+            // backup为learner需要设置_access_learner为true
+            if (_info.learners_size() > 0) {
+                for (auto& peer : _info.learners()) {
+                    if (peer == remote_side) {
+                        _access_learner = true;
+                        break;
+                    }
+                }
+            }
         }
     } else {
         if (_response.errcode() != pb::SUCCESS) {
@@ -564,6 +574,9 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_response.errcode() == pb::NOT_LEADER) {
         // 兼容not leader报警，匹配规则 NOT_LEADER.*retry:4
         DB_DONE(WARNING, "NOT_LEADER, new_leader:%s, retry:%d", _response.leader().c_str(), _retry_times);
+        if (_retry_times > 0) {
+            schema_factory->update_instance(remote_side, pb::FAULTY, false, false);
+        }
         if (_response.leader() != "0.0.0.0:0") {
             // store返回了leader，则相信store，不判断normal
             _info.set_leader(_response.leader());
@@ -629,26 +642,42 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
             return E_FATAL;
         }
         std::map<int64_t, std::vector<SmartRecord>> result_records;
+        std::vector<std::string> return_str_records;
+        std::vector<std::string> return_str_old_records;
         SmartRecord record_template = schema_factory->new_record(main_table_id);
         for (auto& records_pair : _response.records()) {
             int64_t index_id = records_pair.index_id();
-            for (auto& str_record : records_pair.records()) {
-                SmartRecord record = record_template->clone(false);
-                auto ret = record->decode(str_record);
-                if (ret < 0) {
-                    DB_DONE(FATAL, "decode to record fail");
-                    return E_FATAL;
+            if (records_pair.local_index_binlog()) {
+                for (auto& str_record : records_pair.records()) {
+                    return_str_records.emplace_back(str_record);
                 }
-                //DB_WARNING("record: %s", record->debug_string().c_str());
-                result_records[index_id].push_back(record);
+                for (auto& str_record : records_pair.old_records()) {
+                    return_str_old_records.emplace_back(str_record);
+                }
+            } else {
+                for (auto& str_record : records_pair.records()) {
+                    SmartRecord record = record_template->clone(false);
+                    auto ret = record->decode(str_record);
+                    if (ret < 0) {
+                        DB_DONE(FATAL, "decode to record fail");
+                        return E_FATAL;
+                    }
+                    //DB_WARNING("record: %s", record->debug_string().c_str());
+                    result_records[index_id].emplace_back(record);
+                }
             }
         }
         {
             BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
             for (auto& result_record : result_records) {
                 int64_t index_id = result_record.first;
-                _fetcher_store->index_records[index_id].insert(_fetcher_store->index_records[index_id].end(), result_record.second.begin(), result_record.second.end());
+                _fetcher_store->index_records[index_id].insert(_fetcher_store->index_records[index_id].end(),
+                    result_record.second.begin(), result_record.second.end());
             }
+            _fetcher_store->return_str_records.insert(_fetcher_store->return_str_records.end(),
+                return_str_records.begin(), return_str_records.end());
+            _fetcher_store->return_str_old_records.insert(_fetcher_store->return_str_old_records.end(),
+                return_str_old_records.begin(), return_str_old_records.end());
         }
     }
     if (_response.has_scan_rows()) {
@@ -903,12 +932,15 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
         binlog->set_type(pb::BinlogType::PREWRITE);
         req.set_op_type(pb::OP_PREWRITE_BINLOG);
         binlog_desc->set_binlog_ts(binlog_ctx->start_ts());
+        binlog_ctx->calc_binlog_row_cnt();
+        binlog_desc->set_binlog_row_cnt(binlog_ctx->get_binlog_row_cnt());
         auto prewrite_value = binlog->mutable_prewrite_value();
         prewrite_value->CopyFrom(binlog_ctx->binlog_value());
     } else if (op_type == pb::OP_COMMIT) {
         binlog->set_type(pb::BinlogType::COMMIT);
         req.set_op_type(pb::OP_COMMIT_BINLOG);
         binlog_desc->set_binlog_ts(binlog_ctx->commit_ts());
+        binlog_desc->set_binlog_row_cnt(binlog_ctx->get_binlog_row_cnt());
         binlog->set_commit_ts(binlog_ctx->commit_ts());
     } else if (op_type == pb::OP_ROLLBACK) {
         binlog->set_type(pb::BinlogType::ROLLBACK);
@@ -1102,8 +1134,13 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
             }
         }
         if (error != E_OK) {
-            DB_WARNING("rpc error, primary_region_id:%ld, log_id:%lu op_type:%s",
-                            client_conn->primary_region_id.load(), log_id, pb::OpType_Name(op_type).c_str());
+            if (error == E_FATAL) {
+            DB_FATAL("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d op_type: %s",
+                    log_id, state->txn_id, current_seq_id, pb::OpType_Name(op_type).c_str());
+            } else {
+                DB_WARNING("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d op_type: %s",
+                        log_id, state->txn_id, current_seq_id, pb::OpType_Name(op_type).c_str());
+            }
             if (error != E_WARNING) {
                 client_conn->state = STATE_ERROR;
             }

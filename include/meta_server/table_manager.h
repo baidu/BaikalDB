@@ -143,6 +143,7 @@ public:
     void drop_table_tombstone_gc_check();
     void restore_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void rename_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void swap_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_byte_size(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_split_lines(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void set_main_logical_room(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -373,7 +374,7 @@ public:
             _table_tombstone_map.erase(table_id);
         }
     }
-    void swap_table_name(const std::string& old_table_name, const std::string new_table_name) {
+    void set_new_table_name(const std::string& old_table_name, const std::string& new_table_name) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_id_map.find(old_table_name) == _table_id_map.end()) {
             return;
@@ -389,6 +390,48 @@ public:
             _table_id_map[new_index_table_name] = index_info.index_id();
         }
         _table_id_map.erase(old_table_name);
+        _table_id_map[new_table_name] = table_id;
+    }
+    void swap_table_name(const std::string& old_table_name, const std::string& new_table_name) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_id_map.find(old_table_name) == _table_id_map.end()) {
+            return;
+        }
+        if (_table_id_map.find(new_table_name) == _table_id_map.end()) {
+            return;
+        }
+        int64_t table_id = _table_id_map[old_table_name];
+        int64_t new_table_id = _table_id_map[new_table_name];
+        // globalindex名称映射需要先删后加
+        for (auto& index_info : _table_info_map[table_id].schema_pb.indexs()) {
+            if (!is_global_index(index_info)) {
+                continue;
+            }
+            std::string old_index_table_name = old_table_name + "\001" + index_info.index_name();
+            _table_id_map.erase(old_index_table_name);
+        }
+        for (auto& index_info : _table_info_map[new_table_id].schema_pb.indexs()) {
+            if (!is_global_index(index_info)) {
+                continue;
+            }
+            std::string new_index_table_name = new_table_name + "\001" + index_info.index_name();
+            _table_id_map.erase(new_index_table_name);
+        }
+        for (auto& index_info : _table_info_map[table_id].schema_pb.indexs()) {
+            if (!is_global_index(index_info)) {
+                continue;
+            }
+            std::string new_index_table_name = new_table_name + "\001" + index_info.index_name();
+            _table_id_map[new_index_table_name] = index_info.index_id();
+        }
+        for (auto& index_info : _table_info_map[new_table_id].schema_pb.indexs()) {
+            if (!is_global_index(index_info)) {
+                continue;
+            }
+            std::string old_index_table_name = old_table_name + "\001" + index_info.index_name();
+            _table_id_map[old_index_table_name] = index_info.index_id();
+        }
+        _table_id_map[old_table_name] = new_table_id;
         _table_id_map[new_table_name] = table_id;
     }
     int whether_exist_table_id(int64_t table_id) {

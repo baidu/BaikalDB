@@ -62,6 +62,8 @@ void HandleHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_ADD_USER] = std::bind(&HandleHelper::_handle_add_user,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HANDLE_COPY_DB] = std::bind(&HandleHelper::_handle_copy_db,
+            this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_LINK_BINLOG] = std::bind(&HandleHelper::_handle_binlog,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_UNLINK_BINLOG] = std::bind(&HandleHelper::_handle_binlog,
@@ -81,6 +83,8 @@ void HandleHelper::init() {
     _calls[SQL_HANDLE_NETWORK_BALANCE] = std::bind(&HandleHelper::_handle_load_balance_switch,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_STORE_RM_TXN] = std::bind(&HandleHelper::_handle_store_rm_txn,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HANDLE_REGION_ADJUSTKEY] = std::bind(&HandleHelper::_handle_region_adjustkey,
             this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
@@ -970,6 +974,84 @@ bool HandleHelper::_handle_add_user(const SmartSocket& client, const std::vector
     return true;
 }
 
+bool HandleHelper::_handle_copy_db(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if(!client || !client->user_info || !client->query_ctx) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    if (split_vec.size() < 4) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::string orgin_db = split_vec[2];
+    std::string desc_db = split_vec[3];
+    std::string ns = client->user_info->namespace_;
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    int64_t db_id = 0;
+    if (factory->get_database_id(ns + "." + orgin_db, db_id) != 0) {
+        client->state = STATE_ERROR;
+        DB_WARNING("orgin db not exist : %s", orgin_db.c_str());
+        return false;
+    }
+    if (factory->get_database_id(ns + "." + desc_db, db_id) == 0) {
+        client->state = STATE_ERROR;
+        DB_WARNING("desc db exist : %s", desc_db.c_str());
+        return false;
+    }
+
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_CREATE_DATABASE);
+    pb::DataBaseInfo* database = request.mutable_database_info();
+    database->set_namespace_name(ns);
+    database->set_database(desc_db);
+    int ret = MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if (ret != 0 || response.errcode() != pb::SUCCESS) {
+        DB_WARNING("send_request fail");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    pb::QueryRequest query_request;
+    pb::QueryResponse query_response;
+    query_request.set_op_type(pb::QUERY_SCHEMA);
+    query_request.set_namespace_name(ns);
+    query_request.set_database(orgin_db);
+    ret = MetaServerInteract::get_instance()->send_request("query", query_request, query_response);
+    DB_WARNING("req:%s res:%s", query_request.ShortDebugString().c_str(), query_response.ShortDebugString().c_str());
+    if (ret != 0 || query_response.errcode() != pb::SUCCESS) {
+        DB_WARNING("send_request fail");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    for (auto& schema_info : query_response.schema_infos()) {
+        request.Clear();
+        response.Clear();
+        request.set_op_type(pb::OP_CREATE_TABLE);
+        *request.mutable_table_info() = schema_info;
+        request.mutable_table_info()->set_database(desc_db);
+        request.mutable_table_info()->clear_split_keys();
+        for (auto& index : *request.mutable_table_info()->mutable_indexs()) {
+            index.clear_field_ids();
+        }
+        ret = MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+        DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        if (ret != 0 || response.errcode() != pb::SUCCESS) {
+            DB_WARNING("send_request fail");
+            client->state = STATE_ERROR;
+            return false;
+        }
+    }
+    if (!_make_response_packet(client, response.ShortDebugString())) {
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
 bool HandleHelper::_handle_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (client == nullptr || client->user_info == nullptr || split_vec.size() < 6) {
         DB_FATAL("param invalid");
@@ -1064,6 +1146,24 @@ bool HandleHelper::_handle_instance_param(const SmartSocket& client, const std::
     return true;
 }
 
+void handle_signlist(bool is_add, std::set<uint64_t> origin_list, std::string sign, std::string& out_value) {
+    uint64_t sign_num = strtoull(sign.c_str(), nullptr, 10);
+    if (is_add) {
+        origin_list.insert(sign_num);
+    } else {
+        origin_list.erase(sign_num);
+    }
+
+    bool is_first = true;
+    for (auto s : origin_list) {
+        if (!is_first) {
+            out_value += ',';
+        }
+        out_value += std::to_string(s);
+        is_first = false;
+    }
+}
+
 bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (!client || !client->user_info) {
         DB_FATAL("param invalid");
@@ -1092,7 +1192,7 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         client->state = STATE_ERROR;
         return false;
     }
-
+    
     pb::MetaManagerRequest request;
     pb::MetaManagerResponse response;
     request.set_op_type(pb::OP_UPDATE_SCHEMA_CONF);
@@ -1118,6 +1218,27 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         schema_conf->set_backup_table(static_cast<pb::BackupTable>(number));
     } else if (key == "in_fast_import") {
         schema_conf->set_in_fast_import(is_open);
+        auto table_schema = factory->get_table_info(table_id);
+        table_info->set_resource_tag(table_schema.resource_tag);
+    } else if (key.find("blacklist") != key.npos || key.find("forcelearner") != key.npos) {
+        auto table = factory->get_table_info_ptr(table_id);
+        if (table == nullptr) {
+            DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
+            client->state = STATE_ERROR;
+            return false;
+        }
+
+        bool is_add = key.find("add") != key.npos ? true : false;
+        std::string value;
+        if (key.find("blacklist") != key.npos) {
+            handle_signlist(is_add, table->sign_blacklist, split_vec[4], value);
+            schema_conf->set_sign_blacklist(value);
+            DB_WARNING("blacklist table_name: %s, table_id: %ld, sings: %s", full_name.c_str(), table_id, value.c_str());
+        } else {
+            handle_signlist(is_add, table->sign_forcelearner, split_vec[4], value);
+            schema_conf->set_sign_forcelearner(value);
+            DB_WARNING("forcelearner table_name: %s, table_id: %ld, sings: %s", full_name.c_str(), table_id, value.c_str());
+        }
     } else {
         DB_FATAL("param invalid");
         client->state = STATE_ERROR;
@@ -1249,6 +1370,70 @@ bool HandleHelper::_handle_store_rm_txn(const SmartSocket& client, const std::ve
     StoreInteract interact(store_addr);
     interact.send_request("query", req, res);
     DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), req.ShortDebugString().c_str());
+    if(!_make_response_packet(client, res.ShortDebugString())) {
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool HandleHelper::_handle_region_adjustkey(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    // handle region_adjustkey tableID regionID start_key_region_id end_key_region_id
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if(!client || !factory || !client->query_ctx) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    if (split_vec.size() != 6) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    int64_t table_id = strtoll(split_vec[2].c_str(), NULL, 10);
+    int64_t region_id = strtoll(split_vec[3].c_str(), NULL, 10);
+    int64_t start_region_id = strtoll(split_vec[4].c_str(), NULL, 10);
+    int64_t end_region_id = strtoll(split_vec[5].c_str(), NULL, 10);
+
+    pb::RegionInfo info;
+    if (factory->get_region_info(table_id, region_id, info) != 0) {
+        DB_WARNING("param invalid, no region %ld in table %ld", region_id, table_id);
+        if(!_make_response_packet(client, "no such regionid")) {
+            return false;
+        }
+        client->state = STATE_READ_QUERY_RESULT;
+        return true;
+    }
+    pb::RegionInfo start_info;
+    if (factory->get_region_info(table_id, start_region_id, start_info) != 0) {
+        DB_WARNING("param invalid, no region %ld in table %ld", start_region_id, table_id);
+        if(!_make_response_packet(client, "no such regionid")) {
+            return false;
+        }
+        client->state = STATE_READ_QUERY_RESULT;
+        return true;
+    }
+    pb::RegionInfo end_info;
+    if (factory->get_region_info(table_id, end_region_id, end_info) != 0) {
+        DB_WARNING("param invalid, no region %ld in table %ld", end_region_id, table_id);
+        if(!_make_response_packet(client, "no such regionid")) {
+            return false;
+        }
+        client->state = STATE_READ_QUERY_RESULT;
+        return true;
+    }
+
+    pb::StoreRes res;
+    pb::StoreReq req;
+    req.set_op_type(pb::OP_ADJUSTKEY_AND_ADD_VERSION);
+    req.set_start_key(start_info.start_key());
+    req.set_end_key(end_info.end_key());
+    req.set_region_id(region_id);
+    req.set_region_version(info.version());
+    req.set_force(true);
+    StoreInteract interact(info.leader());
+    interact.send_request_for_leader("query", req, res);
+    DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
     if(!_make_response_packet(client, res.ShortDebugString())) {
         return false;
     }
