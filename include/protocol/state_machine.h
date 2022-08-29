@@ -44,6 +44,7 @@ const std::string SQL_ROLLBACK                   = "rollback";
 const std::string SQL_START_TRANSACTION          = "start";
 const std::string SQL_COMMIT                     = "commit";
 const std::string SQL_SELECT_DATABASE            = "select database()";
+const std::string SQL_SELECT_CONNECTION_ID       = "select connection_id()";
 
 
 enum QUERY_TYPE {
@@ -116,6 +117,7 @@ private:
     void _parse_comment(std::shared_ptr<QueryContext> ctx);
     bool _handle_client_query_use_database(SmartSocket client);
     bool _handle_client_query_select_database(SmartSocket client);
+    bool _handle_client_query_select_connection_id(SmartSocket client);
     bool _handle_client_query_common_query(SmartSocket client);
     bool _handle_client_query_desc_table(SmartSocket client);
     //int _make_common_resultset_packet(SmartSocket sock, SmartTable table);

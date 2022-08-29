@@ -22,6 +22,7 @@ namespace baikaldb {
 DEFINE_string(q2b_utf8_path, "./conf/q2b_utf8.dic", "q2b_utf8_path");
 DEFINE_string(q2b_gbk_path, "./conf/q2b_gbk.dic", "q2b_gbk_path");
 DEFINE_string(punctuation_path, "./conf/punctuation.dic", "punctuation_path");
+DEFINE_bool(reverse_print_log, false, "reverse_print_log");
 
 std::atomic_long g_statistic_insert_key_num = {0};
 std::atomic_long g_statistic_delete_key_num = {0};
@@ -91,13 +92,12 @@ int Tokenizer::wordweight(std::string word, std::map<std::string, float>& term_m
         return -1;
     }
     for (auto t : s_output->basic_result()) {
-        std::string term = t->word();
+        std::string term = string_trim(t->word());
         auto it = term_map.find(term);
         if (it == term_map.end()) {
             int32_t level = t->level();
             float weight = t->weight();
-            auto trim_term = string_trim(term);
-            if (trim_term == "") {
+            if (term == "") {
                 continue;
             }
             if (is_filter && level == 0 && !float_equal(weight, 1)) {
@@ -141,7 +141,10 @@ int Tokenizer::wordrank(std::string word, std::map<std::string, float>& term_map
     }
     for (uint32_t i = 0; i < s_output->nlpc_trunks_pb().size(); i++) {
         std::string term;
-        term = s_output->nlpc_trunks_pb()[i]->buffer();
+        term = string_trim(s_output->nlpc_trunks_pb()[i]->buffer());
+        if (term.empty()) {
+            continue;
+        }
         //DB_WARNING("term rank:%s", term.c_str());
         auto it = term_map.find(term);
         float weight = s_output->nlpc_trunks_pb()[i]->weight();
@@ -187,6 +190,7 @@ int Tokenizer::wordseg_basic(std::string word, std::map<std::string, float>& ter
         int offset = (scw->wsbtermpos().at(i)) & 0x00ffffff;
         int len = (scw->wsbtermpos().at(i)) >> 24;
         term.assign(buf, offset, len);
+        term = string_trim(term);
         if (_punctuation_blank.count(term) == 1) {
             continue;
         }

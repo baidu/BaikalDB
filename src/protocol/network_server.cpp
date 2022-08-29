@@ -276,7 +276,7 @@ int NetworkServer::insert_agg_sql(const std::string& values) {
     std::string sql = "REPLACE INTO BaikalStat.baikaldb_trace_info(`time`,`date`,`hour`,`min`,"
                       "`sum`,`count`,`avg`,`affected_rows`,`scan_rows`,`filter_rows`,`sign`, "
                       "`hostname`,`index_name`,`family`,`tbl`,`resource_tag`,`op_type`,`plat`, "
-                      "`op_version`,`op_desc`,`err_count`, `region_count`) VALUES ";
+                      "`op_version`,`op_desc`,`err_count`, `region_count`, `learner_read`) VALUES ";
     sql += values;
     int ret = 0;
     int retry = 0;
@@ -298,7 +298,7 @@ int NetworkServer::insert_agg_sql(const std::string& values) {
     return 0;
 }
 
-int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map) {
+int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map, std::set<std::string>& family_tbl_tag_set) {
     static TimeCost cost;
 
     // 新签名可能最长20分钟无法写入
@@ -324,8 +324,21 @@ int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_
         insert_agg_sql_by_sign(values);
     }
 
+    values_size = 0;
+    values.clear();
+    for (const auto& f : family_tbl_tag_set) {
+        values_size++;
+        values += f + ",";
+    }
+
+    if (values_size > 0) {
+        values.pop_back();
+        insert_family_table_tag(values);
+    }
+
     cost.reset();
     sign_sql_map.clear();
+    family_tbl_tag_set.clear();
     return 0;
 }
 
@@ -356,8 +369,35 @@ int NetworkServer::insert_agg_sql_by_sign(const std::string& values) {
     return 0;
 }
 
+int NetworkServer::insert_family_table_tag(const std::string& values) {
+    baikal::client::ResultSet result_set;
+    TimeCost cost;
+    // 构造sql
+    std::string sql = "REPLACE INTO BaikalStat.family_table_tag(`family`,`tbl`,`resource_tag`) VALUES ";
+    sql += values;
+    int ret = 0;
+    int retry = 0;
+    do {
+        ret = _baikaldb->query(0, sql, &result_set);
+        if (ret == 0) {
+            break;
+        }
+        bthread_usleep(1000000);
+    }while (++retry < 20);
+
+    if (ret != 0) {
+        DB_FATAL("sql_len:%lu query fail : %s", sql.size(), sql.c_str());
+        sql += ";\n";
+        return -1;
+    }
+    DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
+              result_set.get_affected_rows(), cost.get_time(), sql.size(), sql.c_str());
+    return 0;
+}
+
 void NetworkServer::print_agg_sql() {
     static std::map<uint64_t, std::string> sign_sql_map;
+    static std::set<std::string> family_tbl_tag_set;
     TimeCost cost;
     while (!_shutdown) {
         int64_t last_cost = cost.get_time();
@@ -403,13 +443,14 @@ void NetworkServer::print_agg_sql() {
                     }
                 }
                 uint64_t out[2];
-                int64_t version;
-                std::string op_description;
-                factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
+                int64_t version = 0;
+                std::string op_description = "-";
+                // factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
                 std::string recommend_index = "-";
                 std::string field_desc = "-";
                 //index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
                 butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
+                int learner_read = factory->sql_force_learner_read(pair2.second.table_id, out[0]);
                 std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(out[0]);
                 int64_t dynamic_timeout_ms = -1;
                 if (sql_info == nullptr) {
@@ -452,7 +493,7 @@ void NetworkServer::print_agg_sql() {
                         if (insert_agg_sql(sql_values) < 0) {
                             DB_WARNING("insert agg_sql: %s failed", sql_values.c_str());
                         }
-                        if (insert_agg_sql_by_sign(sign_sql_map) < 0) {
+                        if (insert_agg_sql_by_sign(sign_sql_map, family_tbl_tag_set) < 0) {
                             DB_WARNING("insert agg_sql_by_sign: %s failed", sql_values.c_str());
                         }
                         sql_values.clear();
@@ -515,7 +556,8 @@ void NetworkServer::print_agg_sql() {
                     sql_values += "'" + std::to_string(version) + "',";
                     sql_values += "'" + op_description + "',";
                     sql_values += "'" + std::to_string(pair2.second.err_count) + "',";
-                    sql_values += "'" + std::to_string(pair2.second.region_count) + "'),";
+                    sql_values += "'" + std::to_string(pair2.second.region_count) + "',";
+                    sql_values += "'" + std::to_string(learner_read) + "'),";
 
                     std::string sign_sql_value = "('" + std::to_string(out[0]) + "',";
                     sign_sql_value += "'" + family + "',";
@@ -523,7 +565,8 @@ void NetworkServer::print_agg_sql() {
                     sign_sql_value += "'" + resource_tag + "',";
                     sign_sql_value += "'" + op_type + "',";
                     sign_sql_value += "'" + sql_text + "')";
-                    sign_sql_map[out[0]] = sign_sql_value;
+                    sign_sql_map[out[0]] = std::move(sign_sql_value);
+                    family_tbl_tag_set.insert("('" + family + "','" + tbl + "','" + resource_tag + "')");
                     ++values_size;
                 }
             }
@@ -533,7 +576,7 @@ void NetworkServer::print_agg_sql() {
             if (insert_agg_sql(sql_values) < 0) {
                 DB_WARNING("insert agg_sql: %s failed", sql_values.c_str());
             }
-            if (insert_agg_sql_by_sign(sign_sql_map) < 0) {
+            if (insert_agg_sql_by_sign(sign_sql_map, family_tbl_tag_set) < 0) {
                 DB_WARNING("insert agg_sql_by_sign: %s failed", sql_values.c_str());
             }
         }
@@ -573,6 +616,9 @@ static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
     } else if (response->errcode() == pb::STORE_BUSY) {
         new_status = pb::BUSY;
         DB_WARNING("addr:%s is busy", addr.c_str());
+    } else if (response->errcode() == pb::STORE_ROCKS_HANG) {
+        new_status = pb::DEAD;
+        DB_WARNING("addr:%s is rocks hang", addr.c_str());
     }
 
     if (old_status != new_status) {

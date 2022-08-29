@@ -88,6 +88,7 @@ using google::protobuf::RepeatedPtrField;
 namespace baikaldb {
 DECLARE_int64(disable_write_wait_timeout_us);
 DECLARE_int32(prepare_slow_down_wait);
+DECLARE_int64(binlog_warn_timeout_minute);
 
 static const int32_t RECV_QUEUE_SIZE = 128;
 struct StatisticsInfo {
@@ -153,6 +154,85 @@ public:
 private:
     Region* _region;
 };
+
+class BinlogReadMgr {
+public:
+enum GetMode {
+    GET = 0,
+    MULTIGET,
+    SEEK
+};
+    BinlogReadMgr(int64_t region_id, int64_t begin_ts);
+    BinlogReadMgr(int64_t region_id, GetMode mode);
+    ~BinlogReadMgr() { }
+    int get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::StoreRes* response);
+    int get_binlog_finish(pb::StoreRes* response);
+    int binlog_add_to_response(int64_t commit_ts, const std::string& binlog_value, pb::StoreRes* response);
+    int multiget(std::map<int64_t, std::string>& start_binlog_map);
+    int seek(std::map<int64_t, std::string>& start_binlog_map);
+    void print_log();
+private:
+    int64_t _region_id = 0;
+    RocksWrapper* _rocksdb = nullptr;
+    int64_t _oldest_ts_in_binlog_cf = 0;
+    int64_t _total_binlog_size = 0;
+    int64_t _bacth_size = 0;
+    TimeCost _time;
+    GetMode _mode = GET;
+    bool _finish = false;
+    bool _is_first_binlog = true;
+    int _binlog_num = 0;
+    int64_t _first_commit_ts = -1;
+    int64_t _last_commit_ts = -1;
+    std::map<int64_t, int64_t> _commit_start_map;
+    std::map<int64_t, std::string> _start_binlog_map;
+};
+
+class BinlogAlarm {
+public:
+struct TsAccessTime {
+    int64_t ts = 0;
+    TimeCost time;
+};
+
+void check_read_ts(const std::string& ip, int64_t region_id, int64_t begin_ts) {
+    std::lock_guard<bthread::Mutex> l(_lock);
+    auto it = _ip_ts_map.find(ip);
+    if (it != _ip_ts_map.end()) {
+        if (it->second.ts == begin_ts) {
+            if (it->second.time.get_time() > FLAGS_binlog_warn_timeout_minute * 60 * 1000 * 1000LL) {
+                // 长时间一直访问一个ts需要报警
+                DB_WARNING("region_id: %ld, remote_side: %s, ts: %ld, read begin ts for a long time", region_id, ip.c_str(), begin_ts);
+            }
+        } else {
+            it->second.ts = begin_ts;
+            it->second.time.reset();
+        }
+    } else {
+        _ip_ts_map[ip].ts = begin_ts;
+    }
+
+    // gc
+    int64_t gc_interval = 5 * FLAGS_binlog_warn_timeout_minute * 60 * 1000 * 1000LL;
+    static TimeCost map_gc_time;
+    if (map_gc_time.get_time() > gc_interval) {
+        auto it = _ip_ts_map.begin();
+        while (it != _ip_ts_map.end()) {
+            if (it->second.time.get_time() > gc_interval) {
+                it = _ip_ts_map.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        map_gc_time.reset();
+    }
+}
+private:
+    bthread::Mutex _lock;
+    std::map<std::string, TsAccessTime> _ip_ts_map; 
+};
+
 class TransactionPool;
 typedef std::shared_ptr<Region> SmartRegion;
 class Region : public braft::StateMachine, public std::enable_shared_from_this<Region> {
@@ -192,6 +272,10 @@ public:
             _init_success = false;
             DB_WARNING("raft node was shutdown, region_id: %ld", _region_id);
         }
+    }
+
+    bool is_shutdown() {
+        return _shutdown.load();
     }
 
     void join() {
@@ -392,6 +476,8 @@ public:
     // other thread
     void reverse_merge();
     // other thread
+    void reverse_merge_doing_ddl();
+    // other thread
     void ttl_remove_expired_data();
 
     // dump the the tuples in this region in format {{k1:v1},{k2:v2},{k3,v3}...}
@@ -436,7 +522,8 @@ public:
             const std::unordered_map<uint64_t, pb::TransactionInfo>& applied_txn);
 
     void send_log_entry_to_new_region_for_split();
-    int split_region_add_peer(std::string& new_region_leader);
+    int split_region_add_peer(int64_t new_region_id, std::string instance, std::string& new_region_leader, 
+                              std::vector<std::string> add_peer_instances, bool async);
     void split_remove_new_region_peers() {
         start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
         for (auto& peer : _split_param.add_peer_instances) {
@@ -660,8 +747,8 @@ public:
     }
     bool is_binlog_region() const { return _is_binlog_region; }
     void set_removed(bool removed) {
-        _removed = removed;
         _removed_time_cost.reset();
+        _removed = removed;
     }
 
     int64_t removed_time_cost() const {
@@ -814,7 +901,7 @@ public:
 
     void remove_local_index_data();
     void delete_local_rocksdb_for_ddl(int64_t table_id, int64_t index_id);
-    int add_reverse_index(int64_t table_id, int64_t index_id);
+    int add_reverse_index(int64_t table_id, const std::set<int64_t>& index_ids);
 
     void process_download_sst(brpc::Controller* controller, 
         std::vector<std::string>& req_vec, SstBackupType type);
@@ -961,8 +1048,7 @@ private:
 
     struct BinlogParam {
         std::map<int64_t, BinlogDesc> ts_binlog_map; // 用于缓存prewrite binlog元数据，便于收到commit binlog时快速反查
-        int64_t min_ts_in_map  = -1; // ts_binlog_map中最小ts，每一轮扫描之后更新
-        int64_t max_ts_in_map  = -1; // ts_binlog_map中最大ts，如果收到比max ts还大的binlog，则直接写rocksdb不更新map，map靠之后定时线程更新
+        int64_t max_ts_applied  = -1; // map中prewrite会和commit抵消删除，索引map中最大的ts实际上并不是真实的最大ts，需要该字段记录
         int64_t check_point_ts = -1; // 检查点，检查点之前的binlog都已经commit，重启之后从检查点开始扫描
         int64_t oldest_ts      = -1; // rocksdb中最小ts，如果region 某个peer迁移，binlog数据不迁移则oldest_ts改为当前ts
         std::map<int64_t, bool> timeout_start_ts_done; // 标记超时反查的start_ts, 仅用来避免重复commit导致的报警，不用于严格一致性场景
@@ -970,11 +1056,13 @@ private:
 
         //binlog function
     void recover_binlog();
-    void read_binlog(const pb::StoreReq* request, pb::StoreRes* response);
+    void read_binlog(const pb::StoreReq* request, pb::StoreRes* response, const std::string& remote_side);
+    void query_binlog_ts(const pb::StoreReq* request, pb::StoreRes* response);
     void apply_binlog(const pb::StoreReq& request, braft::Closure* done);
     int write_binlog_record(SmartRecord record);
     int write_binlog_value(const std::map<std::string, ExprValue>& field_value_map);
     int64_t binlog_get_int64_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
+    int64_t read_data_cf_oldest_ts();
     
     std::string binlog_get_str_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     
@@ -1095,6 +1183,18 @@ private:
         _streaming_result.last_update_time.reset();
     }
 
+    void update_unsafe_reverse_index_map(std::map<int64_t, ReverseIndexBase*>& reverse_index_map) {
+        for (auto& pair : reverse_index_map) {
+            int64_t reverse_index_id = pair.first;
+            auto index_info = _factory->get_index_info(reverse_index_id);
+            if (index_info.state != pb::IS_PUBLIC) {
+                BAIDU_SCOPED_LOCK(_reverse_unsafe_index_map_lock);
+                if (_reverse_unsafe_index_map.count(reverse_index_id) == 0) {
+                    _reverse_unsafe_index_map[reverse_index_id] = pair.second;
+                }
+            }
+        }
+    }
 private:
     //Singleton
     RocksWrapper*       _rocksdb;
@@ -1121,7 +1221,7 @@ private:
     // 倒排索引需要
     // todo liguoqiang  如何初始化这个
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
-    
+    std::map<int64_t, ReverseIndexBase*> _reverse_unsafe_index_map;
     // todo 是否可以改成无锁的
     BthreadCond _disable_write_cond;
     BthreadCond _real_writing_cond;
@@ -1137,7 +1237,8 @@ private:
     bool                                _storage_compute_separate = false;
     bool                                _use_ttl = false; // online TTL会更新，只会false 变为true
     int64_t                             _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
-    bool                                _reverse_remove_range = false; //split的数据，把拉链过滤一遍  
+    std::atomic<bool>                   _reverse_remove_range{false}; //split的数据，把拉链过滤一遍, safe reverse index合并
+    std::atomic<bool>                   _reverse_unsafe_remove_range{false};//unsafe reverse index合并
     //raft node
     braft::Node                         _node;
     std::atomic<bool>                   _is_leader;
@@ -1184,6 +1285,7 @@ private:
     scoped_refptr<braft::FileSystemAdaptor>  _snapshot_adaptor = nullptr;
     bool                                     _is_global_index = false; //是否是全局索引的region
     std::mutex       _reverse_index_map_lock;
+    std::mutex       _reverse_unsafe_index_map_lock;
     std::mutex       _backup_lock;
     Backup          _backup;
     //binlog
@@ -1197,6 +1299,7 @@ private:
     std::string     _rocksdb_start;
     std::string     _rocksdb_end;
     pb::PeerStatus  _region_status = pb::STATUS_NORMAL;
+    BinlogAlarm     _binlog_alarm;
 
     //learner
     std::unique_ptr<braft::Learner> _learner;

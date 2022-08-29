@@ -268,9 +268,13 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
     } 
 
     for (auto& pair : fetcher_store->start_key_sort) {
-        auto& batch = fetcher_store->region_batch[pair.second];
-        if (batch != nullptr && batch->size() != 0) {
-            _sorter->add_batch(batch);
+        auto iter = fetcher_store->region_batch.find(pair.second);
+        if (iter != fetcher_store->region_batch.end()) {
+            auto& batch = iter->second;
+            if (batch != nullptr && batch->size() != 0) {
+                _sorter->add_batch(batch);
+            }
+            fetcher_store->region_batch.erase(iter);
         }
     }
     // 无sort节点时不会排序，按顺序输出
@@ -380,8 +384,13 @@ int SelectManagerNode::construct_primary_possible_index(
     pos_index.set_index_id(main_table_id);
     SmartRecord record_template = _factory->new_record(main_table_id);
     for (auto& pair : fetcher_store.start_key_sort) {
-        auto& batch = fetcher_store.region_batch[pair.second];
-        if (batch == nullptr) {
+        auto iter = fetcher_store.region_batch.find(pair.second);
+        if (iter == fetcher_store.region_batch.end()) {
+            continue;
+        }
+        auto& batch = iter->second;
+        if (batch == nullptr || batch->size() == 0) {
+            fetcher_store.region_batch.erase(iter);
             continue;
         }
         for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
@@ -411,6 +420,7 @@ int SelectManagerNode::construct_primary_possible_index(
             range->set_left_open(false);
             range->set_right_open(false);
         }
+        fetcher_store.region_batch.erase(iter);
     }
 
     pos_index.SerializeToString(&scan_index_info->raw_index);

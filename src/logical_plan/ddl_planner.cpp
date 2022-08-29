@@ -16,6 +16,7 @@
 #include "expr_value.h"
 #include "meta_server_interact.hpp"
 #include "proto/meta.interface.pb.h"
+#include "expr_node.h"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string.hpp>
 #include <rapidjson/reader.h>
@@ -1010,7 +1011,26 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         }
         table->set_new_table_name(spec->new_table_name->table.value);
         DB_DEBUG("DDL_LOG schema_info[%s]", table->DebugString().c_str());
-
+    } else if (spec->spec_type == parser::ALTER_SPEC_SWAP_TABLE) {
+        alter_request.set_op_type(pb::OP_SWAP_TABLE);
+        std::string new_db_name;
+        if (spec->new_table_name->db.empty()) {
+            if (_ctx->cur_db.empty()) {
+                _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+                _ctx->stat_info.error_msg << "No database selected";
+                return -1;
+            }
+            new_db_name = _ctx->cur_db;
+        } else {
+            new_db_name = spec->new_table_name->db.c_str();
+        }
+        if (new_db_name != table->database()) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "cannot swap table to another database";
+            return -1;
+        }
+        table->set_new_table_name(spec->new_table_name->table.value);
+        DB_DEBUG("DDL_LOG schema_info[%s]", table->DebugString().c_str());
     } else if (spec->spec_type == parser::ALTER_SPEC_ADD_INDEX) {
         alter_request.set_op_type(pb::OP_ADD_INDEX);
         int constraint_len = spec->new_constraints.size();
@@ -1089,12 +1109,131 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         alter_request.set_op_type(pb::OP_DROP_LEARNER);
         alter_request.add_resource_tags(spec->resource_tag.value);
         DB_NOTICE("drop learner schema_info[%s]", table->ShortDebugString().c_str());
+    } else if (spec->spec_type == parser::ALTER_SPEC_MODIFY_COLUMN) {
+        alter_request.set_op_type(pb::OP_MODIFY_FIELD);
+        return parse_modify_column(alter_request, stmt->table_name, spec);
     } else {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
         _ctx->stat_info.error_msg << "alter_specification type (" 
                                 << spec->spec_type << ") not supported in this version";
         return -1;
     }
+    return 0;
+}
+
+int DDLPlanner::parse_modify_column(pb::MetaManagerRequest& alter_request,
+                const parser::TableName* table_name,
+                const parser::AlterTableSpec* alter_spec) {
+    int ret = parse_db_tables(table_name);
+    if (ret < 0) {
+        return -1;
+    }
+    std::set<int> index_field_ids;
+    auto iter = _plan_table_ctx->table_info.begin();
+    if (iter == _plan_table_ctx->table_info.end()) {
+        DB_WARNING("no table found");
+        return -1;
+    }
+    auto table_ptr = iter->second;
+    int64_t table_id = table_ptr->id;
+    for (auto index_id : table_ptr->indices) {
+        auto info_ptr = _factory->get_index_info_ptr(index_id); 
+        if (info_ptr == nullptr) {
+            continue;
+        }
+        for (auto field : info_ptr->fields) {
+            index_field_ids.emplace(field.id);
+            if (index_id == table_id) {
+                get_scan_ref_slot(iter->first, table_ptr->id, field.id, field.type);
+            }
+        }
+    }
+    auto ddlwork_info = alter_request.mutable_ddlwork_info();
+    ddlwork_info->set_opt_sql(_ctx->sql);
+    ddlwork_info->set_table_id(table_id);
+    ddlwork_info->set_op_type(pb::OP_MODIFY_FIELD);
+    auto column_ddl_info = ddlwork_info->mutable_column_ddl_info();
+    parser::Vector<parser::Assignment*> set_list = alter_spec->set_list;
+    std::vector<ExprNode*> update_exprs;
+    update_exprs.reserve(2);
+    std::vector<pb::SlotDescriptor> update_slots;
+    update_slots.reserve(2);
+    for (int idx = 0; idx < set_list.size(); ++idx) {
+        if (set_list[idx] == nullptr) {
+            DB_WARNING("set item is nullptr");
+            return -1;
+        }
+        std::string alias_name = get_field_alias_name(set_list[idx]->name);
+        if (alias_name.empty()) {
+            DB_WARNING("get_field_alias_name failed: %s", set_list[idx]->name->to_string().c_str());
+            return -1;
+        }
+        std::string full_name = alias_name;
+        full_name += ".";
+        full_name += set_list[idx]->name->name.to_lower();
+        FieldInfo* field_info = nullptr;
+        if (nullptr == (field_info = get_field_info_ptr(full_name))) {
+            DB_WARNING("invalid field name in");
+            return -1;
+        }
+        if (index_field_ids.count(field_info->id) > 0) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "modify index column[" << full_name << "] is not supported in this version";
+            return -1;
+        }
+        auto slot = get_scan_ref_slot(alias_name, field_info->table_id, field_info->id, field_info->type);
+        update_slots.emplace_back(slot);
+        pb::Expr value_expr;
+        if (0 != create_expr_tree(set_list[idx]->expr, value_expr, CreateExprOptions())) {
+            DB_WARNING("create update value expr failed");
+            return -1;
+        }
+        DB_WARNING("value_expr:%s", value_expr.ShortDebugString().c_str());
+        ExprNode* value_node = nullptr;
+        ret = ExprNode::create_tree(value_expr, &value_node);
+        if (ret < 0) {
+            //如何释放资源
+            return ret;
+        }
+        update_exprs.emplace_back(value_node);
+    }
+    for (auto& expr : update_exprs) {
+        //类型推导
+        ret = expr->expr_optimize();
+    }
+    for (uint32_t idx = 0; idx < update_slots.size(); ++idx) {
+        ExprNode::create_pb_expr(column_ddl_info->add_update_exprs(), update_exprs[idx]);
+        column_ddl_info->add_update_slots()->CopyFrom(update_slots[idx]);
+    }
+
+    if (alter_spec->where != nullptr) {
+        std::vector<pb::Expr>  where_filters;
+        if (0 != flatten_filter(alter_spec->where, where_filters, CreateExprOptions())) {
+            DB_WARNING("flatten_filter failed");
+            return -1;
+        }
+        std::vector<ExprNode*> conjuncts;
+        conjuncts.reserve(2);
+        for (auto& expr : where_filters) {
+            DB_WARNING("where_expr:%s", expr.ShortDebugString().c_str());
+            ExprNode* conjunct = nullptr;
+            ret = ExprNode::create_tree(expr, &conjunct);
+            if (ret < 0) {
+                //如何释放资源
+                return ret;
+            }
+            conjunct->expr_optimize();
+            conjuncts.emplace_back(conjunct);
+        }
+        for (auto expr : conjuncts) {
+            ExprNode::create_pb_expr(column_ddl_info->add_scan_conjuncts(), expr);
+        }
+    }
+    create_scan_tuple_descs();
+    for (auto& tuple : _ctx->tuple_descs()) {
+        column_ddl_info->add_tuples()->CopyFrom(tuple);
+    }
+    DB_WARNING("alter_request:%s", alter_request.DebugString().c_str());
     return 0;
 }
 

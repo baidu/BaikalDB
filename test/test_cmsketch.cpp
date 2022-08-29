@@ -25,11 +25,13 @@
 #include "proto/meta.interface.pb.h"
 #include "cmsketch.h"
 #include "histogram.h"
+#include "tuple_record.h"
 #include <vector>
 DEFINE_int32(test_total , 10 * 10000, "num");
 DEFINE_int32(test_depth , 5, "num");
 DEFINE_int32(test_width , 2048, "num");
 DEFINE_int32(test_value , 1, "num");
+DEFINE_string(test_tuple , "8005F1611885C74E28023050385040504850509C03589C03609C03689C0370EC0378EC038001EC038801EC03900100980100A00100A80100B00100B80100C00100C80100D00100D80100E00100E80100F00100F80100800200880200900200980200A00200A80200B00200B80200C00200C80200D00200D80200E00200E80200F00200F80200800300880300900300980300A00300A80300B00300B80300C00300C80300D00300D80300E00300E803008804D48A399004D48A399804D48A39A004D48A39A80402E00402F004D48A39F804D48A398005D48A398805D48A3990055098059C03A005EC03C805D48A39D005D48A39B806A003C006A003C806A003D006A003D806A003E00606E80606F00606F80606800706880700900700980700A00700A80700B00700B80700C00700C80700D00700", "num");
 namespace baikaldb {
 // only for UT
 void TEST_insert_value(const ExprValue& value, bool new_bucket, HistogramMap& bucket_mapping) {
@@ -91,6 +93,29 @@ int main(int argc, char* argv[]) {
         value_o._u.int32_val = FLAGS_test_value;
         int cnt = column.get_value(value_o.hash());
         DB_WARNING("0 size:%d, depth:%d, width:%d, get_value:%d, cnt:%d", size,column.get_depth(), column.get_width(), value_o._u.int32_val, cnt);
+    }
+    {
+        std::string arg_value = FLAGS_test_tuple;
+        rocksdb::Slice tmp_slice(arg_value);
+        std::string value2;
+        tmp_slice.DecodeHex(&value2);
+        rocksdb::Slice slice1(value2);
+        baikaldb::TupleRecord tuple_record(slice1);
+        int ret = tuple_record.verification_fields(122);
+        if (ret != 0) {
+            DB_WARNING("decode fail slice1: %lu, %s", slice1.size(), slice1.ToString(true).c_str());
+        } else {  
+            DB_WARNING("decode succ slice1: %lu, %s", slice1.size(), slice1.ToString(true).c_str());
+        }
+        slice1.remove_prefix(sizeof(uint64_t));
+
+        baikaldb::TupleRecord tuple_record2(slice1);
+        ret = tuple_record2.verification_fields(122);
+        if (ret != 0) {
+            DB_WARNING("decode fail slice1: %lu, %s", slice1.size(), slice1.ToString(true).c_str());
+        } else {  
+            DB_WARNING("decode succ slice1: %lu, %s", slice1.size(), slice1.ToString(true).c_str());
+        }
     }
     // {
     //     int size = FLAGS_test_total;

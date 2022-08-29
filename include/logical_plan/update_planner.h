@@ -32,7 +32,7 @@ public:
 
 private:
 
-    int create_update_node();
+    int create_update_node(pb::PlanNode* update_node);
 
     // method to parse SQL parts
     int parse_kv_list();

@@ -14,29 +14,21 @@
 
 #pragma once
 
-#include <net/if.h>
-#include <sys/ioctl.h>
-#include <signal.h>
-#include <stdio.h>
 #include <limits>
-#include <atomic>
 #include <vector>
-#include <map>
+#include <queue>
 #include <string>
-#include <chrono>
 #include <unordered_set>
 #include <unordered_map>
 #include <boost/algorithm/string.hpp>
 #include <gflags/gflags.h>
-#include <boost/heap/priority_queue.hpp>
 #include "proto/event.pb.h"
 #include "common.h"
 #include "schema_factory.h"
-#include "meta_server_interact.hpp"
 #include "store_interact.hpp"
 #include "table_record.h"
 #include "expr_value.h"
-#ifdef BAIDU_INTERNAL
+#if BAIDU_INTERNAL
 #include <json/json.h>
 #endif
 #include "baikal_heartbeat.h"
@@ -59,15 +51,17 @@ struct StoreReqWithCommit {
     int64_t commit_ts;
     StoreReqPtr req_ptr;
     StoreReqWithCommit(int64_t ts, StoreReqPtr ptr) : commit_ts(ts), req_ptr(ptr) {}
-};
-
-struct StoreReqPtrBinLogCompare {
-    bool operator()(const StoreReqWithCommit& lhs, const StoreReqWithCommit& rhs) const {
-        return lhs.commit_ts >= rhs.commit_ts;
+    bool operator<(const StoreReqWithCommit& rhs) const {
+        return commit_ts >= rhs.commit_ts;
     }
 };
 
-using BinLogPriorityQueue = boost::heap::priority_queue<StoreReqWithCommit, boost::heap::compare<StoreReqPtrBinLogCompare>>;
+using BinLogPriorityQueue = std::priority_queue<StoreReqWithCommit>;
+
+struct TwoWaySync {
+    TwoWaySync(std::string name) : two_way_sync_table_name(name) {}
+    std::string two_way_sync_table_name;
+};
 
 class Capturer {
 public:
@@ -75,7 +69,7 @@ public:
         static Capturer capturer;
         return &capturer;
     }
-#ifdef BAIDU_INTERNAL
+#if BAIDU_INTERNAL
     int init(Json::Value& value);
 #endif
     int init();
@@ -84,6 +78,9 @@ public:
     CaptureStatus subscribe(std::vector<std::shared_ptr<mysub::Event>>& event_vec, 
         int64_t& commit_ts, int32_t fetch_num, int64_t wait_microsecs = 0);
 
+    TwoWaySync* get_two_way_sync() const {
+        return _two_way_sync.get();
+    }
 private:
     int init_binlog();
     std::vector<std::string> _table_infos;
@@ -92,6 +89,7 @@ private:
     std::unordered_set<int64_t> _origin_ids;
     baikaldb::SchemaFactory* _schema_factory {nullptr};
     std::string _namespace;
+    std::unique_ptr<TwoWaySync> _two_way_sync;
 };
 
 class FetchBinlog {
@@ -150,20 +148,20 @@ private:
     };
 public:
     BinLogTransfer(int64_t binlog_id, BinLogPriorityQueue& queue, 
-        std::vector<std::shared_ptr<mysub::Event>>& event_vec, const std::unordered_set<int64_t>& origin_ids, uint64_t logid) 
-            : _binlog_id(binlog_id), _event_vec(event_vec), _queue(queue), _origin_ids(origin_ids), _log_id(logid) {}
+        std::vector<std::shared_ptr<mysub::Event>>& event_vec, const std::unordered_set<int64_t>& origin_ids, uint64_t logid, TwoWaySync* two_way_sync) 
+            : _binlog_id(binlog_id), _event_vec(event_vec), _queue(queue), _origin_ids(origin_ids), _log_id(logid), _two_way_sync(two_way_sync) {}
 
     int init();
 
     int64_t run(int64_t& commit_ts);
 private:
 
-    int multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t table_id);
+    int multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t table_id, uint64_t partition_key);
 
-    int multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id);
+    int multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id, uint64_t partition_key);
 
     int single_record_to_event(mysub::Event* event, 
-        const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id);
+        const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id, uint64_t partition_key);
 
     template<typename Repeated>
     int deserialization(const Repeated& repeat, RecordMap& records_map, int64_t table_id) {
@@ -198,5 +196,6 @@ private:
     const std::unordered_set<int64_t>& _origin_ids;
     std::map<int64_t, CapInfo> _cap_infos;
     uint64_t _log_id;
+    TwoWaySync* _two_way_sync = nullptr;
 };
 }

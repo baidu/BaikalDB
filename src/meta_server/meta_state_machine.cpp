@@ -359,6 +359,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->rename_table(request, iter.index(), done);
             break;
         }
+        case pb::OP_SWAP_TABLE: {
+            TableManager::get_instance()->swap_table(request, iter.index(), done);
+            break;
+        }
         case pb::OP_ADD_FIELD: {
             TableManager::get_instance()->add_field(request, iter.index(), done);
             break;

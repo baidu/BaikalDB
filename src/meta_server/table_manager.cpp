@@ -605,9 +605,76 @@ void TableManager::rename_table(const pb::MetaManagerRequest& request,
     set_table_pb(mem_schema_pb);
     std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
     put_incremental_schemainfo(apply_index, schema_infos);
-    swap_table_name(old_table_name, new_table_name);
+    set_new_table_name(old_table_name, new_table_name);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("rename table success, request:%s", request.ShortDebugString().c_str());
+}
+
+void TableManager::swap_table(const pb::MetaManagerRequest& request, 
+                                const int64_t apply_index,
+                                braft::Closure* done) {
+    int64_t table_id;
+    if (check_table_exist(request.table_info(), table_id) != 0) {
+        DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
+        return;
+    }
+    // check new table
+    std::string namespace_name = request.table_info().namespace_name();
+    std::string database_name = namespace_name + "\001" + request.table_info().database();
+    std::string old_table_name = database_name + "\001" + request.table_info().table_name();
+    std::string new_table_name = database_name + "\001" + request.table_info().new_table_name();
+    int64_t new_table_id = get_table_id(new_table_name);
+    if (new_table_id == 0) {
+        DB_WARNING("check table exist fail, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
+        return;
+    }
+    
+    if (check_table_has_ddlwork(table_id) || check_table_is_linked(table_id) ||
+            check_table_has_ddlwork(new_table_id) || check_table_is_linked(new_table_id)) {
+        DB_WARNING("table is doing ddl, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
+        return;
+    }
+    pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
+    pb::SchemaInfo new_mem_schema_pb =  _table_info_map[new_table_id].schema_pb;
+    //更新数据
+    mem_schema_pb.set_table_name(request.table_info().new_table_name());
+    mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+    new_mem_schema_pb.set_table_name(request.table_info().table_name());
+    new_mem_schema_pb.set_version(new_mem_schema_pb.version() + 1);
+    std::string table_value;
+    if (!mem_schema_pb.SerializeToString(&table_value)) {
+        DB_WARNING("request serializeToArray fail, pb:%s", 
+                    mem_schema_pb.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+        return ;
+    }
+    std::string new_table_value;
+    if (!new_mem_schema_pb.SerializeToString(&new_table_value)) {
+        DB_WARNING("request serializeToArray fail, pb:%s", 
+                    new_mem_schema_pb.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+        return ;
+    }
+    std::vector<std::string> rocksdb_keys {construct_table_key(table_id), construct_table_key(new_table_id)};
+    std::vector<std::string> rocksdb_values {table_value, new_table_value};
+    
+    // write date to rocksdb
+    int ret = MetaRocksdb::get_instance()->put_meta_info(rocksdb_keys, rocksdb_values);
+    if (ret < 0) {                                                                        
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");                  
+        return ;                                                             
+    }
+    //更新内存
+    set_table_pb(mem_schema_pb);
+    set_table_pb(new_mem_schema_pb);
+    std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb, new_mem_schema_pb};
+    put_incremental_schemainfo(apply_index, schema_infos);
+    swap_table_name(old_table_name, new_table_name);
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("swap table success, request:%s", request.ShortDebugString().c_str());
 }
 
 bool TableManager::check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
@@ -1071,7 +1138,17 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is doing ddl");
         return;
     }
-    pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
+    auto& table_mem =  _table_info_map[table_id];
+    if (request.has_ddlwork_info() && request.ddlwork_info().op_type() == pb::OP_MODIFY_FIELD) {
+        int ret = DDLManager::get_instance()->init_column_ddlwork(table_id, request.ddlwork_info(), table_mem.partition_regions);
+        if (ret < 0) {
+            DB_WARNING("table_id[%ld] add index init ddlwork failed.", table_id);
+            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "init index ddlwork failed");
+        }
+        IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        return;
+    }
+    pb::SchemaInfo mem_schema_pb = table_mem.schema_pb;
     std::vector<std::string> drop_field_names;
     for (auto& field : request.table_info().fields()) {
         std::string field_name = field.field_name();

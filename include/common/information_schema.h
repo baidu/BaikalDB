@@ -54,6 +54,7 @@ private:
     void init_schemata();
     void init_tables();
     void init_virtual_index_influence_info();
+    void init_sign_list();
     void init_routines();
     void init_key_column_usage();
     void init_referential_constraints();

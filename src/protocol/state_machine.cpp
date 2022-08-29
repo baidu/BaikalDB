@@ -1015,8 +1015,7 @@ bool StateMachine::_query_process(SmartSocket client) {
             client->state = STATE_READ_QUERY_RESULT;
         } else if (type == SQL_SET_NAMES_NUM
                     || type == SQL_SET_CHARACTER_SET_CLIENT_NUM
-                    || type == SQL_SET_CHARACTER_SET_CONNECTION_NUM
-                    || type == SQL_SET_CHARACTER_SET_RESULTS_NUM) {
+                    || type == SQL_SET_CHARACTER_SET_CONNECTION_NUM) {
             re2::RE2::Options option;
             option.set_utf8(false);
             option.set_case_sensitive(false);
@@ -1033,8 +1032,15 @@ bool StateMachine::_query_process(SmartSocket client) {
             }
             _wrapper->make_simple_ok_packet(client);
             client->state = STATE_READ_QUERY_RESULT;
+        } else if (type == SQL_SET_CHARACTER_SET_RESULTS_NUM) {
+            // jdbc连接设置GBK，也会设置成character_set_results=null/utf8
+            // 先忽略character_set_results
+            _wrapper->make_simple_ok_packet(client);
+            client->state = STATE_READ_QUERY_RESULT;
         } else if (boost::iequals(client->query_ctx->sql, SQL_SELECT_DATABASE)) {
             ret = _handle_client_query_select_database(client);
+        } else if (boost::iequals(client->query_ctx->sql, SQL_SELECT_CONNECTION_ID)) {
+            ret = _handle_client_query_select_connection_id(client);
         } else if (boost::istarts_with(client->query_ctx->sql, SQL_HANDLE)) {
             size_t pos = 0;
             std::string sql = client->query_ctx->sql;
@@ -1221,6 +1227,11 @@ bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
 bool StateMachine::_handle_client_query_select_database(SmartSocket client) {
     return ShowHelper::get_instance()->_handle_client_query_template(client,
         "database()", MYSQL_TYPE_VARCHAR, {client->current_db});
+}
+
+bool StateMachine::_handle_client_query_select_connection_id(SmartSocket client) {
+    return ShowHelper::get_instance()->_handle_client_query_template(client,
+        "CONNECTION_ID()", MYSQL_TYPE_LONGLONG, { std::to_string(client->conn_id) });
 }
 
 bool StateMachine::_handle_client_query_desc_table(SmartSocket client) {
@@ -1723,6 +1734,33 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             ret = PhysicalPlanner::full_export_start(client->query_ctx.get(), client->send_buf);
             client->query_ctx->stat_info.query_exec_time += cost.get_time();
             client->query_ctx->stat_info.send_buf_size += client->send_buf->_size;
+        }
+        return true;
+    } else if (client->query_ctx->explain_type == SHOW_SIGN) {
+        //用户获取sql对应的签名，获取方式为explain format = 'sign'+ sql_format 返回给用户sql签名
+        std::vector<ResultField> fields;
+        ResultField field;
+        field.name = "sign";
+        field.type = MYSQL_TYPE_STRING;
+        field.length = 1024 * 1024;
+        fields.reserve(1);
+        fields.emplace_back(field);
+        uint64_t sign = client->query_ctx->stat_info.sign;
+        std::vector<std::vector<std::string>> rows;
+        rows.reserve(3);
+        std::vector<std::string> row = {std::to_string(sign)};
+        rows.emplace_back(row);
+
+        auto subquery_signs_set = client->get_subquery_signs();
+        for (auto& subquery_sign : subquery_signs_set) {
+            std::vector<std::string> row = {std::to_string(subquery_sign)};
+            rows.emplace_back(row);
+        }
+
+        if (_make_common_resultset_packet(client, fields, rows) != 0) {
+            DB_FATAL_CLIENT(client, "Failed to make sql sign result packet.");
+            _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+            return false;
         }
         return true;
     }

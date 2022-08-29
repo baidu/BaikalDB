@@ -17,6 +17,7 @@
 #include "select_planner.h"
 #include "expr_node.h"
 #include "network_socket.h"
+#include "hll_common.h"
 
 namespace baikaldb {
 int InsertPlanner::plan() {
@@ -75,7 +76,10 @@ int InsertPlanner::plan() {
     if (!_ctx->is_prepared) {
         set_dml_txn_state(_table_id);
     }
-    set_socket_txn_tid_set();
+    // 局部索引binlog处理标记
+    if (_ctx->open_binlog && !_factory->has_global_index(_table_id)) {
+        insert_node->set_local_index_binlog(true);
+    }
     return 0;
 }
 
@@ -320,6 +324,12 @@ int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartR
     // fill default
     if (value.is_null()) {
         return _factory->fill_default_value(record, field);
+    }
+    if (field.type == pb::HLL) {
+        if (hll::hll_raw_to_sparse(value.str_val) < 0) {
+            DB_WARNING("hll raw to sparse failed");
+            return -1;
+        }
     }
     if (0 != record->set_value(record->get_field_by_tag(field.id), value)) {
         DB_WARNING("fill insert value failed");

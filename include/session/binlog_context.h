@@ -93,6 +93,17 @@ public:
         return _partition_key;
     }
 
+    void calc_binlog_row_cnt() {
+         _binlog_row_cnt = 0;
+         for (const auto& mutation : _binlog_value.mutations()) {
+             _binlog_row_cnt += mutation.insert_rows_size();
+             _binlog_row_cnt += mutation.update_rows_size();
+             _binlog_row_cnt += mutation.deleted_rows_size();
+         }
+    }
+
+    int64_t get_binlog_row_cnt() const { return _binlog_row_cnt; }
+
 private:
     SmartTable            _table_info = nullptr;
     int64_t               _start_ts = -1;
@@ -102,6 +113,7 @@ private:
     pb::RegionInfo        _binlog_region;
     SchemaFactory*        _factory = nullptr;
     uint64_t              _partition_key = 0;
+    int64_t               _binlog_row_cnt = 0;
 };
 
 } // namespace baikaldb

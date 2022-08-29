@@ -36,13 +36,13 @@ public:
     virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third) = 0;
     //新加正排 创建倒排索引
     virtual int insert_reverse(
-                       myrocksdb::Transaction* txn,
+                       SmartTransaction& txn,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
     //删除正排 删除倒排索引
     virtual int delete_reverse(
-                       myrocksdb::Transaction* txn,
+                       SmartTransaction& txn,
                        const std::string& word, 
                        const std::string& pk,
                        SmartRecord record) = 0;
@@ -83,6 +83,11 @@ public:
     virtual void set_cached_list_length(int length) = 0;
     virtual void print_reverse_statistic_log() = 0;
     virtual void add_field(const std::string& name, int32_t field_id) = 0;
+    void add_write_count() {
+        ++_write_count;
+    }
+protected:
+    std::atomic<int64_t> _write_count {1};  //重启，分裂后可以merge一次
 };
 
 template<typename ReverseNode, typename ReverseList>
@@ -204,13 +209,13 @@ public:
     virtual int reverse_merge_func(pb::RegionInfo info, bool need_remove_third);
     //0:success    -1:fail
     virtual int insert_reverse(
-                        myrocksdb::Transaction* txn,
+                        SmartTransaction& txn,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
     //0:success    -1:fail
     virtual int delete_reverse(
-                        myrocksdb::Transaction* txn,
+                        SmartTransaction& txn,
                         const std::string& word, 
                         const std::string& pk,
                         SmartRecord record);
@@ -340,7 +345,7 @@ private:
 };
     //0:success    -1:fail
     int handle_reverse(
-                        myrocksdb::Transaction* txn,
+                        SmartTransaction& txn,
                         pb::ReverseNodeType flag,
                         const std::string& word, 
                         const std::string& pk,

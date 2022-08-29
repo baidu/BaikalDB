@@ -135,6 +135,7 @@ enum ExplainType {
     SHOW_TRACE              = 5,
     SHOW_TRACE2             = 6,
     EXPLAIN_SHOW_COST       = 7,
+    SHOW_SIGN               = 8
 };
 
 inline bool explain_is_trace(ExplainType& type) {
@@ -935,7 +936,11 @@ explicit LatencyOnly(time_t window_size) :
 
 int64_t qps(time_t window_size) const {
     bvar::detail::Sample<bvar::Stat> s;
-    _latency_window.get_span(window_size, &s);
+    if (window_size > 0) {
+        _latency_window.get_span(window_size, &s);
+    } else {
+        _latency_window.get_span(&s);
+    }
     // Use floating point to avoid overflow.
     if (s.time_us <= 0) {
         return 0;
@@ -943,7 +948,7 @@ int64_t qps(time_t window_size) const {
     return static_cast<int64_t>(round(s.data.num * 1000000.0 / s.time_us));
 }
 int64_t qps() const { 
-    return qps(1); 
+    return qps(-1); 
 }
 int64_t latency(time_t window_size) const { 
     return _latency_window.get_value(window_size).get_average_int(); 

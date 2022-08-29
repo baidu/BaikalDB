@@ -119,6 +119,9 @@ private:
         }
         return sizeof(size_t) + key.size_;
     }
+
+    bool region_shutdown();
+
 private:
 
     int64_t _region_id;
@@ -151,6 +154,8 @@ public:
 
 protected:
     SstWriterAdaptor(int64_t region_id, const std::string& path, const rocksdb::Options& option);
+
+    bool region_shutdown();
 
 private:
     bool finish_sst();

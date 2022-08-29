@@ -1277,6 +1277,27 @@ ExprValue extract(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue tso_to_timestamp(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue arg1 = input[0];
+    ExprValue tmp(pb::TIMESTAMP);
+    tmp._u.uint32_val = tso::get_timestamp_internal(arg1._u.int64_val);
+    return tmp;
+}
+
+ExprValue timestamp_to_tso(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue arg_timestamp= input[0];
+    ExprValue tmp(pb::INT64);
+    arg_timestamp.cast_to(pb::TIMESTAMP);
+    tmp._u.int64_val = timestamp_to_ts(arg_timestamp._u.uint32_val);
+    return tmp;
+}
+
 ExprValue hll_add(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {
         return ExprValue::Null();

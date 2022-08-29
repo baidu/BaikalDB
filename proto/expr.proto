@@ -65,6 +65,7 @@ message ExprNode {
     optional Function fn = 4;
     optional DeriveExprNode derive_node = 5;
     optional uint32 col_flag = 6;
+    optional Charset charset = 7;
 };
 
 message Expr {
@@ -76,3 +77,10 @@ message Expr {
     optional string table = 4;
 };
 
+message ColumnDdlInfo {
+    repeated Expr     update_exprs        = 1;
+    repeated SlotDescriptor update_slots  = 2;
+    repeated Expr     scan_conjuncts      = 3;
+    repeated TupleDescriptor tuples       = 4;
+    optional string   opt_sql             = 5;
+};

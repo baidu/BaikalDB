@@ -76,6 +76,13 @@ int DeletePlanner::plan() {
         return 0;
     }
 
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
+    int64_t table_id = info.table_id;
+    _ctx->prepared_table_id = table_id;
+    if (!_ctx->is_prepared) {
+        set_dml_txn_state(table_id);
+    }
+
     if (0 != parse_where()) {
         return -1;
     }
@@ -85,9 +92,9 @@ int DeletePlanner::plan() {
     if (0 != parse_limit()) {
         return -1;
     }
-    
     create_packet_node(pb::OP_DELETE);
-    if (0 != create_delete_node()) {
+    pb::PlanNode* delete_node = _ctx->add_plan_node();
+    if (0 != create_delete_node(delete_node)) {
         return -1;
     }
     if (0 != create_sort_node()) {
@@ -101,17 +108,14 @@ int DeletePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
-    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
-    int64_t table_id = info.table_id;
-    _ctx->prepared_table_id = table_id;
-    if (!_ctx->is_prepared) {
-        set_dml_txn_state(table_id);
+    // 局部索引binlog处理标记
+    if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
+        delete_node->set_local_index_binlog(true);
     }
-    set_socket_txn_tid_set();
     return 0;
 }
 
-int DeletePlanner::create_delete_node() {
+int DeletePlanner::create_delete_node(pb::PlanNode* delete_node) {
     if (_current_tables.size() != 1 || _plan_table_ctx->table_tuple_mapping.count(try_to_lower(_current_tables[0])) == 0) {
         DB_WARNING("invalid sql format: %s", _ctx->sql.c_str());
         return -1;
@@ -122,8 +126,12 @@ int DeletePlanner::create_delete_node() {
     }
     ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
     int64_t table_id = info.table_id;
+    auto table_info_ptr = _factory->get_table_info_ptr(table_id);
+    if (table_info_ptr == nullptr) {
+        DB_WARNING("table_id not found: %ld", table_id);
+        return 0;
+    }
 
-    pb::PlanNode* delete_node = _ctx->add_plan_node();
     delete_node->set_node_type(pb::DELETE_NODE);
     delete_node->set_limit(-1);
     delete_node->set_is_explain(_ctx->is_explain);
@@ -165,9 +173,7 @@ int DeletePlanner::create_truncate_node() {
 int DeletePlanner::reset_auto_incr_id() {
     auto iter = _plan_table_ctx->table_tuple_mapping.begin();
     int64_t table_id = iter->second.table_id;
-
-    SchemaFactory* schema_factory = SchemaFactory::get_instance();
-    auto table_info_ptr = schema_factory->get_table_info_ptr(table_id);
+    auto table_info_ptr = _factory->get_table_info_ptr(table_id);
     if (table_info_ptr == nullptr || table_info_ptr->auto_inc_field_id == -1) {
         return 0;
     }
@@ -195,6 +201,8 @@ int DeletePlanner::parse_where() {
     if (_delete_stmt->where == nullptr) {
         DB_WARNING("delete sql [%s] does not contain where conjunct", _ctx->sql.c_str());
         if (FLAGS_open_non_where_sql_forbid) {
+            _ctx->stat_info.error_code = ER_SQL_REFUSE;
+            _ctx->stat_info.error_msg << "delete sql no where conditions";
             return -1;
         }
         return 0;

@@ -207,6 +207,7 @@ public:
     void update_ctx_stat_info(RuntimeState* state, int64_t total_time);
     
     int64_t get_ctx_total_time();
+
 public:
     std::string         sql;
     std::vector<std::string> comments;
@@ -219,6 +220,7 @@ public:
     parser::NodeType    stmt_type;
     bool                is_explain = false;
     bool                is_full_export = false;
+    bool                is_straight_join = false;
     ExplainType         explain_type = EXPLAIN_NULL;
 
     uint8_t             mysql_cmd = COM_SLEEP;      // Command number in mysql protocal.
@@ -281,6 +283,8 @@ public:
     std::set<int64_t> index_ids;
     // 用于索引推荐
     std::map<int32_t, int> field_range_type;
+    std::set<uint64_t> sign_blacklist;
+    std::set<uint64_t> sign_forcelearner;
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

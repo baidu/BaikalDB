@@ -37,8 +37,9 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
 
     void convert_to_inner_join(std::vector<ExprNode*>& input_exprs);
-    int get_next_for_hash_other_join(RuntimeState* state, RowBatch* batch, bool* eos);
+    int get_next_for_hash_outer_join(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_for_hash_inner_join(RuntimeState* state, RowBatch* batch, bool* eos);
+    int get_next_for_loop_hash_inner_join(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_for_nested_loop_join(RuntimeState* state, RowBatch* batch, bool* eos);
     bool outer_contains_expr(ExprNode* expr) {
         return expr_in_tuple_ids(_outer_tuple_ids, expr);
@@ -65,6 +66,7 @@ public:
     }
 
     int hash_join(RuntimeState* state);
+    int loop_hash_join(RuntimeState* state);
 
     int nested_loop_join(RuntimeState* state);
 

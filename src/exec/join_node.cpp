@@ -14,6 +14,7 @@
 
 #include "join_node.h"
 #include "filter_node.h"
+#include "full_export_node.h"
 #include "expr_node.h"
 #include "rocksdb_scan_node.h"
 #include "scalar_fn_call.h"
@@ -207,6 +208,11 @@ int JoinNode::hash_join(RuntimeState* state) {
         _outer_table_is_null = true;
         return 0;
     }
+    // watt基准循环过滤
+    if (_outer_node->get_node(pb::FULL_EXPORT_NODE) != nullptr) {
+        _use_loop_hash_map = true;
+        return loop_hash_join(state);
+    }
     construct_equal_values(_outer_tuple_data, _outer_equal_slot);
     std::vector<ExprNode*> in_exprs;
     ret = construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
@@ -244,6 +250,17 @@ int JoinNode::hash_join(RuntimeState* state) {
     } else {
         construct_hash_map(_outer_tuple_data, _outer_equal_slot);
     }
+    return 0;
+}
+
+int JoinNode::loop_hash_join(RuntimeState* state) {
+    int ret = fetcher_inner_table_data(state, _outer_tuple_data, _inner_tuple_data);
+    if (ret < 0) {
+        DB_WARNING("fetcher inner node fail");
+        return ret;
+    }
+    construct_hash_map(_inner_tuple_data, _inner_equal_slot);
+    _outer_iter = _outer_tuple_data.begin();
     return 0;
 }
 
@@ -336,11 +353,14 @@ int JoinNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         *eos = true;
         return 0;
     }
+    if (_use_loop_hash_map) {
+        return get_next_for_loop_hash_inner_join(state, batch, eos);
+    }
     if (_use_hash_map) {
         if (_join_type == pb::INNER_JOIN) {
             return get_next_for_hash_inner_join(state, batch, eos);
         }
-        return get_next_for_hash_other_join(state, batch, eos);
+        return get_next_for_hash_outer_join(state, batch, eos);
     }
     return get_next_for_nested_loop_join(state, batch, eos);
 }
@@ -399,7 +419,7 @@ int JoinNode::get_next_for_nested_loop_join(RuntimeState* state, RowBatch* batch
     return 0;
 }
 
-int JoinNode::get_next_for_hash_other_join(RuntimeState* state, RowBatch* batch, bool* eos) {
+int JoinNode::get_next_for_hash_outer_join(RuntimeState* state, RowBatch* batch, bool* eos) {
     TimeCost get_next_time;
     while (1) {
         if (_outer_iter == _outer_tuple_data.end()) {
@@ -454,6 +474,7 @@ int JoinNode::get_next_for_hash_other_join(RuntimeState* state, RowBatch* batch,
     }
     return 0;
 }
+
 int JoinNode::get_next_for_hash_inner_join(RuntimeState* state, RowBatch* batch, bool* eos) {
     TimeCost get_next_time;
     while (1) {
@@ -499,6 +520,85 @@ int JoinNode::get_next_for_hash_inner_join(RuntimeState* state, RowBatch* batch,
         }
         _result_row_index = 0;
         _inner_row_batch.next();
+    }
+    return 0;
+}
+
+int JoinNode::get_next_for_loop_hash_inner_join(RuntimeState* state, RowBatch* batch, bool* eos) {
+    TimeCost get_next_time;
+    if (_outer_iter == _outer_tuple_data.end()) {
+        DB_WARNING("when join, outer iter is end, time_cost:%ld", get_next_time.get_time());
+        // clear previous
+        for (auto& mem_row : _outer_tuple_data) {
+            delete mem_row;
+        }
+        _outer_tuple_data.clear();
+        for (auto& mem_row : _inner_tuple_data) {
+            delete mem_row;
+        }
+        _inner_tuple_data.clear();
+        _hash_map.clear();
+
+        FullExportNode* full_export = static_cast<FullExportNode*>(_outer_node->get_node(pb::FULL_EXPORT_NODE));
+        if (full_export == nullptr) {
+            DB_WARNING("full_export is null");
+            return -1;
+        }
+        full_export->reset_num_rows_returned();
+
+        int ret = fetcher_full_table_data(state, _outer_node, _outer_tuple_data);
+        if (ret < 0) {
+            DB_WARNING("fetcher outer node fail");
+            return ret;
+        }
+        if (_outer_tuple_data.size() == 0) {
+            _outer_table_is_null = true;
+            *eos = true;
+            DB_WARNING("not data");
+            return 0;
+        }
+
+        ret = fetcher_inner_table_data(state, _outer_tuple_data, _inner_tuple_data);
+        if (ret < 0) {
+            DB_WARNING("fetcher inner node fail");
+            return ret;
+        }
+        construct_hash_map(_inner_tuple_data, _inner_equal_slot);
+        _outer_iter = _outer_tuple_data.begin();
+    }
+
+    while (1) {
+        if (_outer_iter == _outer_tuple_data.end()) {
+            DB_WARNING("when join, outer iter is end, time_cost:%ld", get_next_time.get_time());
+            *eos = true;
+            return 0;
+        }
+        MutTableKey outer_key;
+        encode_hash_key(*_outer_iter, _outer_equal_slot, outer_key);
+        auto inner_mem_rows = _hash_map.seek(outer_key.data());
+        if (inner_mem_rows != NULL) {
+            for (; _result_row_index < inner_mem_rows->size(); ++_result_row_index) {
+                if (reached_limit()) {
+                    DB_WARNING("when join, reach limit size:%lu, time_cost:%ld", 
+                                    batch->size(), get_next_time.get_time());
+                    *eos = true;
+                    return 0;
+                }
+                if (batch->is_full()) {
+                    //DB_WARNING("when join, batch is full, time_cost:%ld", get_next_time.get_time());
+                    return 0;
+                }
+                bool matched = false;
+                int ret = construct_result_batch(batch, *_outer_iter, (*inner_mem_rows)[_result_row_index], matched);
+                if (ret < 0) {
+                    DB_WARNING("construct result batch fail");
+                    return ret;
+                }
+                ++_num_rows_returned;
+            }
+        }
+        _result_row_index = 0;
+        ++_outer_iter;
     }
     return 0;
 }

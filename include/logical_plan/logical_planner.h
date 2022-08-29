@@ -129,8 +129,6 @@ public:
         return _select_alias_mapping;
     }
 
-    void set_socket_txn_tid_set();
-
 protected:
     int gen_subquery_plan(parser::DmlNode* subquery, const SmartPlanTableCtx& plan_state,
              const ExprParams& expr_params);
@@ -271,7 +269,7 @@ protected:
     void plan_commit_and_begin_txn();
     void plan_rollback_and_begin_txn();
 
-    int generate_sql_sign(const pb::Plan& plan, QueryStat* stat_info, parser::StmtNode* stmt, bool* need_learner_backup);
+    int generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt);
 
 private:
     int create_n_ary_predicate(const parser::FuncExpr* item, 

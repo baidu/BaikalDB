@@ -136,6 +136,7 @@ int ScanNode::open(RuntimeState* state) {
         return ret;
     }
     _tuple_desc = state->get_tuple_desc(_tuple_id);
+    state->tuple_id = _tuple_id;
     if (_tuple_desc == nullptr) {
         return -1;
     }
@@ -451,9 +452,9 @@ int64_t AccessPathMgr::pre_process_select_index() {
 
         if (outer_loop_iter->second->index_type == pb::I_PRIMARY || 
             outer_loop_iter->second->index_type == pb::I_UNIQ) {
-            if (outer_loop_iter->second->index_field_ids.size() 
-                == outer_loop_iter->second->hit_index_field_ids.size()) {
-                // 主键或唯一键全命中，直接选择
+            if (outer_loop_iter->second->index_field_ids.size() == outer_loop_iter->second->hit_index_field_ids.size()
+                && outer_loop_iter->second->is_eq_or_in()) {
+                // 主键或唯一键全命中，并且条件为eq或in，直接选择
                 if (!_use_force_index || outer_loop_iter->second->hint == AccessPath::FORCE_INDEX) {
                     return outer_loop_iter->second->index_id;
                 }
@@ -498,7 +499,6 @@ int64_t AccessPathMgr::select_index() {
 }
 
 int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
-    pb::ScanNode* pb_scan_node = mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     // 预处理，使用倒排索引的sql不进行预处理，如果select_idx大于0则已经选出索引
     int64_t select_idx = _main_path.select_index();
     auto path = _main_path.path(select_idx);

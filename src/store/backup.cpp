@@ -398,12 +398,14 @@ void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
         receiver->set_only_data_sst(data_sst_to_process_size);
     }
 
+    Concurrency::get_instance()->upload_sst_streaming_concurrency.increase_wait();
     brpc::StreamId sd;
     brpc::StreamOptions stream_options;
     stream_options.handler = receiver.get();
     stream_options.max_buf_size = FLAGS_streaming_max_buf_size;
     stream_options.idle_timeout_ms = FLAGS_streaming_idle_timeout_ms; 
     if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
+        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
         cntl->SetFailed("Fail to accept stream");
         DB_WARNING("fail to accept stream.");
         return;
@@ -436,6 +438,7 @@ int Backup::upload_sst_info_streaming(
     TimeCost time_cost;
     region_ptr->_multi_thread_cond.increase();
     ON_SCOPE_EXIT([region_ptr]() {
+        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
         region_ptr->_multi_thread_cond.decrease_signal();
     });
 
@@ -484,6 +487,23 @@ int Backup::upload_sst_info_streaming(
         }
     }
 
+    BackupInfo latest_backup_info;
+    latest_backup_info.meta_info.path = std::to_string(_region_id) + ".latest.meta.sst";
+    latest_backup_info.data_info.path = std::to_string(_region_id) + ".latest.data.sst";
+
+    ON_SCOPE_EXIT(([&latest_backup_info, ingest_store_latest_sst]() { 
+        if (ingest_store_latest_sst) {
+            std::remove(latest_backup_info.data_info.path.c_str());
+            std::remove(latest_backup_info.meta_info.path.c_str());
+        }
+    }));
+
+    // ingest_store_latest_sst流程，先dump sst，在ingest发来的sst，再把dump的sst ingest
+    if (ingest_store_latest_sst && dump_sst_file(latest_backup_info) != 0) {
+        DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
+        return -1;
+    }
+
     int ret = region_ptr->ingest_sst(backup_info.data_info.path, backup_info.meta_info.path);
     if (ret != 0) {
         DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
@@ -495,20 +515,6 @@ int Backup::upload_sst_info_streaming(
     if (!ingest_store_latest_sst) {
         DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
         return 0;
-    }
-
-    BackupInfo latest_backup_info;
-    latest_backup_info.meta_info.path = std::to_string(_region_id) + ".latest.meta.sst";
-    latest_backup_info.data_info.path = std::to_string(_region_id) + ".latest.data.sst";
-
-    ON_SCOPE_EXIT(([&latest_backup_info]() {
-        std::remove(latest_backup_info.data_info.path.c_str());
-        std::remove(latest_backup_info.meta_info.path.c_str());
-    }));
-
-    if (dump_sst_file(latest_backup_info) != 0) {
-        DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
-        return -1;
     }
 
     DB_NOTICE("region[%ld] ingest latest data.", _region_id);

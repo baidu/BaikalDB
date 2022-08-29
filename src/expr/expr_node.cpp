@@ -200,6 +200,7 @@ void ExprNode::transfer_pb(pb::ExprNode* pb_node) {
     pb_node->set_col_type(_col_type);
     pb_node->set_num_children(_children.size());
     pb_node->set_col_flag(_col_flag);
+    pb_node->set_charset(_charset);
 }
 
 void ExprNode::create_pb_expr(pb::Expr* expr, ExprNode* root) {

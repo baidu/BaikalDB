@@ -397,7 +397,7 @@ int ApplyNode::loop_hash_apply(RuntimeState* state) {
     }
     _loops = 0;
     _inner_node->get_node(pb::SCAN_NODE, _scan_nodes);
-    ret = fetcher_inner_table_data(state, outer_tuple_data, _scan_nodes, _inner_tuple_data);
+    ret = Joiner::fetcher_inner_table_data(state, outer_tuple_data, _inner_tuple_data);
     if (ret < 0) {
         return -1;
     }
@@ -475,54 +475,6 @@ int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
     
     _inner_node->remove_additional_predicate(in_exprs_back);
     _inner_node->close(state);
-    return 0;
-}
-
-int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
-                                        const std::vector<MemRow*>& outer_tuple_data,
-                                        std::vector<ExecNode*>& scan_nodes,
-                                        std::vector<MemRow*>& inner_tuple_data) {
-    TimeCost time_cost;
-    _outer_join_values.clear();
-    construct_equal_values(outer_tuple_data, _outer_equal_slot);
-    std::vector<ExprNode*> in_exprs;
-    int ret = construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
-    if (ret < 0) {
-        DB_WARNING("ExecNode::create in condition for right table fail");
-        return ret;
-    }
-    std::vector<ExprNode*> in_exprs_back = in_exprs;
-    //表达式下推，下推的那个节点重新做索引选择，路由选择
-    _inner_node->predicate_pushdown(in_exprs);
-    if (in_exprs.size() > 0) {
-        DB_WARNING("inner node add filter node");
-        _inner_node->add_filter_node(in_exprs);
-    }
-    do_plan_router(state, scan_nodes);
-    _inner_node->create_trace();
-    ret = _inner_node->open(state);
-    if (ret < 0) {
-        DB_WARNING("ExecNode::inner table open fail");
-        return -1;
-    }
-    ret = fetcher_full_table_data(state, _inner_node, inner_tuple_data);
-    if (ret < 0) {
-        DB_WARNING("fetcher inner node fail");
-        return ret;
-    }
-    if (_max_one_row && inner_tuple_data.size() > 1) {
-        state->error_code = ER_SUBQUERY_NO_1_ROW;
-        state->error_msg << "Subquery returns more than 1 row";
-        DB_WARNING("Subquery returns more than 1 row");
-        return -1;
-    }
-
-    _inner_node->remove_additional_predicate(in_exprs_back);
-    _inner_node->close(state);
-
-    _loops++;
-    DB_WARNING("fetcher_inner_table_data, loops:%lu, outer:%ld, inner:%ld, time_cost:%ld",
-               _loops,  outer_tuple_data.size(), inner_tuple_data.size(), time_cost.get_time());
     return 0;
 }
 
@@ -747,7 +699,7 @@ int ApplyNode::get_next_via_loop_outer_hash_map(RuntimeState* state, RowBatch* b
         construct_hash_map(outer_tuple_data, _outer_equal_slot);
 
         // fetcher inner
-        int ret = fetcher_inner_table_data(state, outer_tuple_data, _scan_nodes, _inner_tuple_data);
+        int ret = Joiner::fetcher_inner_table_data(state, outer_tuple_data, _inner_tuple_data);
         if (ret < 0) {
             return -1;
         }

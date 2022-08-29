@@ -190,6 +190,8 @@ void FunctionManager::register_operators() {
     register_object_ret("date_add", date_add, pb::DATETIME);
     register_object_ret("date_sub", date_sub, pb::DATETIME);
     register_object_ret("extract", extract, pb::UINT32);
+    register_object_ret("tso_to_timestamp", tso_to_timestamp, pb::DATETIME);
+    register_object_ret("timestamp_to_tso", timestamp_to_tso, pb::INT64);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);

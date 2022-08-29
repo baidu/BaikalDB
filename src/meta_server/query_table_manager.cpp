@@ -29,8 +29,17 @@ void QueryTableManager::get_schema_info(const pb::QueryRequest* request,
         BAIDU_SCOPED_LOCK(manager->_table_mutex);
         if (!request->has_table_name()) {
             for (auto& table_mem : manager->_table_info_map) {
-                 auto table_pb = response->add_schema_infos();
-                 *table_pb = table_mem.second.schema_pb;
+                if (request->has_namespace_name() && request->has_database()) {
+                    if (table_mem.second.schema_pb.namespace_name() == request->namespace_name() &&
+                            table_mem.second.schema_pb.database() == request->database() && 
+                            !table_mem.second.is_global_index) {
+                        auto table_pb = response->add_schema_infos();
+                        *table_pb = table_mem.second.schema_pb;
+                    }
+                } else {
+                    auto table_pb = response->add_schema_infos();
+                    *table_pb = table_mem.second.schema_pb;
+                }
             }
         } else {
             std::string namespace_name = request->namespace_name();

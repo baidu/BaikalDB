@@ -31,6 +31,8 @@ DEFINE_int32(min_network_segments_per_resource_tag, 10, "min network segments pe
 DEFINE_int32(network_segment_max_stores_precent, 20, "network segment max stores precent");
 
 DECLARE_int64(store_heart_beat_interval_us);
+DECLARE_int32(store_rocks_hang_check_timeout_s);
+DECLARE_bool(store_rocks_hang_check);
 DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(store_faulty_interval_times);
 DECLARE_string(default_logical_room);
@@ -1832,8 +1834,19 @@ int ClusterManager::update_instance_info(const pb::InstanceInfo& instance_info) 
     is.select_latency = instance_info.select_latency();
     is.select_qps = instance_info.select_qps();
     is.instance_status.timestamp = butil::gettimeofday_us();
+    int64_t store_rocks_check_cost = instance_info.rocks_hang_check_cost();
     auto& status = is.instance_status.state;
     if (status == pb::NORMAL) {
+        if (FLAGS_store_rocks_hang_check) {
+            // check store是否hang了
+            if (store_rocks_check_cost >= FLAGS_store_rocks_hang_check_timeout_s * 1000 * 1000LL) {
+                status = pb::SLOW;
+                _slow_instances.insert(instance);
+                DB_WARNING("instance:%s status SLOW, resource_tag: %s,  store_rocks_check_cost: %ld",
+                        instance.c_str(), is.resource_tag.c_str(), store_rocks_check_cost);
+                return 0;
+            }
+        }
         if (!FLAGS_need_check_slow || is.dml_latency == 0 || is.raft_total_latency / is.dml_latency <= 10) {
             return 0;
         }
@@ -1859,8 +1872,18 @@ int ClusterManager::update_instance_info(const pb::InstanceInfo& instance_info) 
             _slow_instances.insert(instance);
         }
     } else if (status == pb::SLOW) {
-        if (is.dml_latency > 0 &&
-                is.raft_total_latency / is.dml_latency > 10) {
+        if (FLAGS_store_rocks_hang_check 
+                && store_rocks_check_cost >= FLAGS_store_rocks_hang_check_timeout_s * 1000 * 1000LL) {
+            return 0;
+        }
+        if (!FLAGS_need_check_slow) {
+            _slow_instances.erase(instance);
+            status = pb::NORMAL;
+            DB_WARNING("instance:%s status NORMAL, resource_tag: %s, store_rocks_check_cost: %ld",
+                        instance.c_str(), is.resource_tag.c_str(), store_rocks_check_cost);
+            return 0;
+        }
+        if (is.dml_latency > 0 && is.raft_total_latency / is.dml_latency > 10) {
             return 0;
         }
         int64_t all_raft_total_latency = 0;

@@ -129,7 +129,13 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
 int UpdateManagerNode::open(RuntimeState* state) {
     int ret = 0;
     if (_children[0]->node_type() == pb::UPDATE_NODE) {
-        return DmlManagerNode::open(state);
+        ret =  DmlManagerNode::open(state);
+        if (ret >= 0) {
+            if (process_binlog(state, true) < 0) {
+                return -1;
+            }
+        }
+        return ret;
     }
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
@@ -192,19 +198,49 @@ int UpdateManagerNode::open(RuntimeState* state) {
     }
     if (open_binlog) {
         state->set_open_binlog(true);
-        if (ret >=0) {
-            auto client = state->client_conn();
-            auto binlog_ctx = client->get_binlog_ctx();
-            pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
-            auto mutation = binlog_value->add_mutations();
-            mutation->CopyFrom(_update_binlog);
-            mutation->add_sequence(pb::MutationType::UPDATE);
-            mutation->set_table_id(_table_id);
-            binlog_ctx->set_table_info(_table_info);
-            binlog_ctx->set_partition_record(_partition_record);
-        }
+        process_binlog(state, false);
     }
     return ret;
+}
+
+int UpdateManagerNode::process_binlog(RuntimeState* state, bool is_local) {
+    if (state->open_binlog() && _table_info->is_linked) {
+        // update没有数据删除跳过
+        if (is_local && _fetcher_store.return_str_old_records.size() == 0) {
+            return 0;
+        }
+        auto client = state->client_conn();
+        auto binlog_ctx = client->get_binlog_ctx();
+        pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
+        auto mutation = binlog_value->add_mutations();
+        binlog_ctx->set_table_info(_table_info);
+        if (is_local) {
+            for (auto& str_record : _fetcher_store.return_str_records) {
+                mutation->add_insert_rows(str_record);
+            }
+            SmartRecord record_template = _factory->new_record(_table_id);
+            bool need_set_partition_record = true;
+            for (auto& str_record : _fetcher_store.return_str_old_records) {
+                if (need_set_partition_record) {
+                    SmartRecord record = record_template->clone(false);
+                    auto ret = record->decode(str_record);
+                    if (ret < 0) {
+                        DB_FATAL("decode to record fail");
+                        return -1;
+                    }
+                    binlog_ctx->set_partition_record(record);
+                    need_set_partition_record = false;
+                }
+                mutation->add_deleted_rows(str_record);
+            }
+        } else {
+            mutation->CopyFrom(_update_binlog);
+            binlog_ctx->set_partition_record(_partition_record);
+        }
+        mutation->add_sequence(pb::MutationType::UPDATE);
+        mutation->set_table_id(_table_id);
+    }
+    return 0;
 }
 
 void UpdateManagerNode::update_record(RuntimeState* state, SmartRecord record) {

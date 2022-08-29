@@ -42,6 +42,19 @@ public:
     const std::vector<ExprNode*>& pruned_conjuncts() {
         return _pruned_conjuncts;
     }
+
+    bool check_satisfy_condition(MemRow* row) override {
+        if (!need_copy(row)) {
+            return false;
+        }
+        for (auto e : _children) {
+            if (!e->check_satisfy_condition(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);

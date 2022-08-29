@@ -82,7 +82,7 @@ void TaskManager::process_txn_ddl_work(pb::DdlWorkInfo work) {
 }
 
 void TaskManager::process_ddl_work(pb::RegionDdlWork work) {
-    DB_NOTICE("ddl work task_%ld_%ld : %s", work.table_id(), work.region_id(), work.ShortDebugString().c_str());
+    DB_NOTICE("begin ddl work task_%ld_%ld : %s", work.table_id(), work.region_id(), work.ShortDebugString().c_str());
     int ret = 0;
     SmartSocket client(new NetworkSocket);
     client->query_ctx->client_conn = client.get();
@@ -114,7 +114,7 @@ void TaskManager::process_ddl_work(pb::RegionDdlWork work) {
     if (TaskFactory<pb::RegionDdlWork>::get_instance()->finish_task(planner_ptr->get_ddlwork()) != 0) {
         DB_WARNING("finish work error");
     }
-    DB_NOTICE("ddl work %s finish ok!", work.ShortDebugString().c_str());
+    DB_NOTICE("ddl work task_%ld_%ld finish ok! %s", work.table_id(), work.region_id(), work.ShortDebugString().c_str());
 }
 
 } // namespace baikaldb

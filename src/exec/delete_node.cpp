@@ -37,6 +37,7 @@ int DeleteNode::init(const pb::PlanNode& node) {
         DB_WARNING("get record encoder failed");
         return -1;
     }
+    _local_index_binlog = node.local_index_binlog();
     return 0;
 }
 
@@ -101,6 +102,9 @@ int DeleteNode::open(RuntimeState* state) {
             if (ret < 0) {
                 DB_WARNING_STATE(state, "delete_row fail");
                 return -1;
+            }
+            if (ret == 1 && _local_index_binlog) {
+                _return_records[_pri_info->id].emplace_back(record->clone(true));
             }
             num_affected_rows += ret;
         }

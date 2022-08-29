@@ -325,6 +325,8 @@ struct TableInfo {
     std::unordered_map<int64_t, int64_t>    reverse_fields;
     std::unordered_map<int64_t, int64_t>    arrow_reverse_fields;
     std::vector<std::string> learner_resource_tags;
+    std::set<uint64_t> sign_blacklist;
+    std::set<uint64_t> sign_forcelearner;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {
@@ -463,7 +465,7 @@ struct SqlStatistics {
             return -1;
         }
         if (latency_us_9999 > 0 || latency_us > 0) {
-            return std::max(latency_us_9999 / 1000, latency_us * times_avg_and_9999 / 1000);
+            return latency_us_9999 / 1000;
         }
         return -1;
     }
@@ -669,9 +671,10 @@ public:
     bool is_in_fast_importer(int64_t table_id);
     void get_cost_switch_open(std::vector<std::string>& database_table);
     void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
-    void get_table_by_filter(std::vector<std::string>& database_table, 
+    void get_table_by_filter(std::vector<std::string>& database_table, std::vector<std::string>& link_table,
             const std::function<bool(const SmartTable&)>& select_table);
     void table_with_statistics_info(std::vector<std::string>& database_table);
+    int sql_force_learner_read(int64_t table_id, uint64_t sign);
     void get_schema_conf_op_info(const int64_t table_id, int64_t& op_version, std::string& op_desc);
     template <class T>
     int get_schema_conf_value(const int64_t table_id, const std::string& switch_name, T& value);
@@ -687,7 +690,8 @@ public:
             const pb::PossibleIndex* primary,
             std::map<int64_t, pb::RegionInfo>& region_infos,
             std::map<int64_t, std::string>* region_primary = nullptr,
-            const std::vector<int64_t>& partitions = std::vector<int64_t>{0});
+            const std::vector<int64_t>& partitions = std::vector<int64_t>{0},
+            bool is_full_export = false);
     // only used for pk (not null)
     int get_region_by_key(IndexInfo& index, 
             const pb::PossibleIndex* primary,
@@ -944,6 +948,9 @@ public:
     }
 
     int get_binlog_regions(int64_t binlog_id, int64_t partition_index, std::map<int64_t, pb::RegionInfo>& region_infos);
+
+    int get_partition_binlog_regions(const std::string& db_table_name, int64_t partition_input_value, 
+        std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& table_id_partition_binlogs);
 
     bool has_open_binlog(int64_t table_id) {
         DoubleBufferedTable::ScopedPtr table_ptr;

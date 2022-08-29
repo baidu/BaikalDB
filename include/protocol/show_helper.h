@@ -20,6 +20,7 @@
 #include "network_socket.h"
 #include "meta_server_interact.hpp"
 #include "mysql_wrapper.h"
+#include "proto/store.interface.pb.h"
 
 const std::string SQL_SHOW_ABNORMAL_REGIONS      = "abnormal";              // show abnormal regions;
 const std::string SQL_SHOW_CREATE_TABLE          = "create";                // show create table test;
@@ -51,6 +52,7 @@ const std::string SQL_SHOW_DIFF_REGION_SIZE      = "diff_region_size";      // s
 const std::string SQL_SHOW_NETWORK_SEGMENT       = "network_segment";       // show network_segment resourceTag;
 const std::string SQL_SHOW_SWITCH                = "switch";                // show switch
 const std::string SQL_SHOW_ALL_TABLES            = "all_tables";            // show all_tables [ttl/binlog/...]
+const std::string SQL_SHOW_BINLOGS_INFO          = "binlogs_info";          // show binlogs_info
 const std::string SQL_SHOW_INSTANCE_PARAM        = "instance_param";        // show instance_param [resource_tag/instance]
 
 namespace baikaldb {
@@ -104,6 +106,8 @@ private:
     bool _show_schema_conf(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show all_tables ttl/binlog; 
     bool _show_all_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show binlogs_info;
+    bool _show_binlogs_info(const SmartSocket& client, const std::vector<std::string>& split_params);
     // sql: show table status;
     bool _show_table_status(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show virtual index
@@ -136,6 +140,16 @@ private:
             std::vector<ResultField>& fields,
             const std::vector<std::vector<std::string>>& rows);
     void _parse_sample_sql(std::string sample_sql, std::string& database, std::string& table, std::string& sql);
+
+    void _query_regions_concurrent(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
+        std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos);
+
+    bool _process_partition_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+        std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
+
+    bool _process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
+        std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
+
     MysqlWrapper*   _wrapper = nullptr;
 
     // 由于show table status太重了，进行cache

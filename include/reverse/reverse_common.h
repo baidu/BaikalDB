@@ -35,6 +35,7 @@
 #include "my_rocksdb.h"
 
 namespace baikaldb {
+DECLARE_bool(reverse_print_log);
 typedef std::shared_ptr<google::protobuf::Message> MessageSP;
 typedef std::pair<std::string, std::string> KeyRange;
 extern std::atomic_long g_statistic_insert_key_num;
@@ -162,6 +163,7 @@ private:
     int internal_next(ReverseNode* node, bool& res);
     std::unique_ptr<myrocksdb::Iterator>& _iter;
     const std::string& _merge_term;
+    rocksdb::ColumnFamilyHandle* _column_family = nullptr;
     bool _first;
     ReverseNode _curr_node;
     uint8_t _prefix;
@@ -257,20 +259,22 @@ public:
     int64_t create_exe_time = 0;
     int64_t bool_engine_time = 0;
     void print_log() {
-        int64_t all_time = delete_time + segment_time + bool_engine_time;
-        DB_NOTICE("Reverse index search time : all_time[%ld]{"
-                  "delete_time[%ld], segment_time[%ld],"
-                  "create_exe_time[%ld], bool_engine_time[%ld]}", 
-                  all_time, delete_time, segment_time, create_exe_time, bool_engine_time);
-        for (auto& item : term_times) {
-            DB_NOTICE("Reverse index item : term[%s], get_list[%ld]{"
-                       "is_fast[%d]{get_new_fast[%ld] | seek_new[%ld],"
-                       "seek_old[%ld], merge_one_one[%ld], get_two[%ld, %d], merge_one_two[%ld]},"
-                       "is_cache[%d], get_three[%ld, %d]{parse_nocache[%ld]}",
-                       item.term.c_str(), item.get_list, item.is_fast, item.get_new, 
-                       item.seek_new, item.seek_old, item.merge_one_one, item.get_two, 
-                       item.second_length, item.merge_one_two, item.is_cache, item.get_three, 
-                       item.third_length, item.parse);
+        if (FLAGS_reverse_print_log) {
+            int64_t all_time = delete_time + segment_time + bool_engine_time;
+            DB_NOTICE("Reverse index search time : all_time[%ld]{"
+                    "delete_time[%ld], segment_time[%ld],"
+                    "create_exe_time[%ld], bool_engine_time[%ld]}", 
+                    all_time, delete_time, segment_time, create_exe_time, bool_engine_time);
+            for (auto& item : term_times) {
+                DB_NOTICE("Reverse index item : term[%s], get_list[%ld]{"
+                        "is_fast[%d]{get_new_fast[%ld] | seek_new[%ld],"
+                        "seek_old[%ld], merge_one_one[%ld], get_two[%ld, %d], merge_one_two[%ld]},"
+                        "is_cache[%d], get_three[%ld, %d]{parse_nocache[%ld]}",
+                        item.term.c_str(), item.get_list, item.is_fast, item.get_new, 
+                        item.seek_new, item.seek_old, item.merge_one_one, item.get_two, 
+                        item.second_length, item.merge_one_two, item.is_cache, item.get_three, 
+                        item.third_length, item.parse);
+            }
         }
     }
 };

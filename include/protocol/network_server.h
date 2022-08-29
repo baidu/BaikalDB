@@ -112,7 +112,8 @@ private:
     void store_health_check();
     int insert_agg_sql(const std::string &sql);
     int insert_agg_sql_by_sign(const std::string& values);
-    int insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map);
+    int insert_family_table_tag(const std::string& values);
+    int insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map, std::set<std::string>& family_tbl_tag_set);
 
 private:
     // Server info.

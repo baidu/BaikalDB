@@ -445,7 +445,7 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
         SmartTransaction txn(new Transaction(0, smart_transaction.get())); 
         txn->begin(Transaction::TxnOptions());
         std::string pk = std::to_string(i++);
-        arrow_index->insert_reverse(txn->get_txn(), line, pk, nullptr);
+        arrow_index->insert_reverse(txn, line, pk, nullptr);
         auto res = txn->commit();
         if (!res.ok()) {
             std::cout << "commit error\n";

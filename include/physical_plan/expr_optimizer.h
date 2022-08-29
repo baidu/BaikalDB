@@ -42,7 +42,12 @@ public:
                 return ret;
             }
         }
-        return plan->expr_optimize(ctx);
+        ret = plan->expr_optimize(ctx);
+        if (ret == NOT_BOOL_ERRCODE) {
+            ctx->stat_info.error_code = ER_SQL_REFUSE;
+            ctx->stat_info.error_msg << "expression with non bool type";
+        }
+        return ret;
     }
     static void analyze_union(QueryContext* ctx, PacketNode* packet_node);
     static int analyze_derived_table(QueryContext* ctx, PacketNode* packet_node);

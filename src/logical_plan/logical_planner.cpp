@@ -41,8 +41,6 @@ DECLARE_int32(bthread_concurrency); //bthread.cpp
 
 namespace baikaldb {
 DECLARE_string(log_plat_name);
-DEFINE_string(sign_blacklist,       "",     "sign blacklist");
-DEFINE_string(sign_forcelearner,    "",     "sign forcelearner");
 
 std::map<parser::JoinType, pb::JoinType> LogicalPlanner::join_type_mapping {
         { parser::JT_NONE, pb::NULL_JOIN},    
@@ -72,6 +70,9 @@ int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item,
         //add real predicate (OP_IS_NULL/OP_IN/OP_LIKE) node
         node = expr.add_nodes();
         node->set_col_type(pb::BOOL);
+    }
+    if (type == pb::LIKE_PREDICATE) {
+        node->set_charset(_ctx->charset == "gbk" ? pb::GBK : pb::UTF8);
     }
     node->set_node_type(type);
     pb::Function* func = node->mutable_fn();
@@ -338,6 +339,9 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
             ctx->is_explain = true;
         } else if (format == "show_cost") {
             ctx->explain_type = EXPLAIN_SHOW_COST;
+        } else if (format == "sign") {
+            ctx->client_conn->is_explain_sign = true;
+            ctx->explain_type = SHOW_SIGN;
         } else {
             ctx->is_explain = true;
         }
@@ -347,7 +351,10 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         ctx->is_complex = ctx->stmt->is_complex_node();
     }
     ctx->stmt_type = ctx->stmt->node_type;
-    if (ctx->stmt_type != parser::NT_SELECT && ctx->explain_type != EXPLAIN_NULL) {
+    if (ctx->stmt_type != parser::NT_SELECT && ctx->explain_type != EXPLAIN_NULL &&
+        ctx->explain_type != SHOW_PLAN) {
+        ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        ctx->stat_info.error_msg << "dml only support normal explain";
         DB_WARNING("dml only support normal explain");
         return -1;
     }
@@ -407,19 +414,20 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         DB_WARNING("gen plan failed, type:%d", ctx->stmt_type);
         return -1;
     }
-    int ret = planner->generate_sql_sign(ctx->plan, &(ctx->stat_info), ctx->stmt, &ctx->need_learner_backup);
+    int ret = planner->generate_sql_sign(ctx, ctx->stmt);
     if (ret < 0) {
         return -1;
     }
     return 0;
 }
 
-int LogicalPlanner::generate_sql_sign(const pb::Plan& plan, QueryStat* stat_info, parser::StmtNode* stmt, bool* need_learner_backup) {
+int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt) {
     pb::OpType op_type = pb::OP_NONE;
-    if (plan.nodes_size() > 0 && plan.nodes(0).node_type() == pb::PACKET_NODE) {
-        op_type = plan.nodes(0).derive_node().packet_node().op_type();
+    if (ctx->plan.nodes_size() > 0 && ctx->plan.nodes(0).node_type() == pb::PACKET_NODE) {
+        op_type = ctx->plan.nodes(0).derive_node().packet_node().op_type();
     }
     stmt->set_print_sample(true);
+    auto stat_info = &(ctx->stat_info);
     if (!stat_info->family.empty() && !stat_info->table.empty() ) {
         stat_info->sample_sql << "family_table_tag_optype_plat=[" << stat_info->family << "\t"
             << stat_info->table << "\t" << stat_info->resource_tag << "\t" << op_type << "\t"
@@ -427,30 +435,20 @@ int LogicalPlanner::generate_sql_sign(const pb::Plan& plan, QueryStat* stat_info
         uint64_t out[2];
         butil::MurmurHash3_x64_128(stat_info->sample_sql.str().c_str(), stat_info->sample_sql.str().size(), 0x1234, out);
         stat_info->sign = out[0];
-        if (!FLAGS_sign_blacklist.empty()) {
-            std::vector<std::string> vec;
-            boost::split(vec, FLAGS_sign_blacklist, boost::is_any_of(","));
-            for (auto& sign : vec) {
-                std::string sign_str = string_trim(sign);
-                if (std::to_string(stat_info->sign) == sign_str) {
-                    DB_WARNING("sql sign[%s] in blacklist[%s], sample_sql[%s]", sign_str.c_str(), 
-                        FLAGS_sign_blacklist.c_str(), stat_info->sample_sql.str().c_str());
-                    return -1;
-                }
+        if (!ctx->sign_blacklist.empty()) {
+            if (ctx->sign_blacklist.count(stat_info->sign) > 0) {
+                DB_WARNING("sql sign[%lu] in blacklist, sample_sql[%s]", stat_info->sign, 
+                    stat_info->sample_sql.str().c_str());
+                ctx->stat_info.error_code = ER_SQL_REFUSE;
+                ctx->stat_info.error_msg << "sql sign: " << stat_info->sign << " in blacklist";
+                return -1;
             }
-        } 
-
-        if (!(*need_learner_backup) && !FLAGS_sign_forcelearner.empty()) {
-            std::vector<std::string> vec;
-            boost::split(vec, FLAGS_sign_forcelearner, boost::is_any_of(","));
-            for (auto& sign : vec) {
-                std::string sign_str = string_trim(sign);
-                if (std::to_string(stat_info->sign) == sign_str) {
-                    *need_learner_backup = true;
-                    DB_WARNING("sql sign[%s] in forcelearner[%s], sample_sql[%s]", sign_str.c_str(), 
-                        FLAGS_sign_forcelearner.c_str(), stat_info->sample_sql.str().c_str());
-                    break;
-                }
+        }
+        if (!ctx->need_learner_backup && !ctx->sign_forcelearner.empty()) {
+            if (ctx->sign_forcelearner.count(stat_info->sign) > 0) {
+                ctx->need_learner_backup = true;
+                DB_WARNING("sql sign[%lu] in forcelearner, sample_sql[%s]", stat_info->sign, 
+                    stat_info->sample_sql.str().c_str());
             }
         }
     }
@@ -474,6 +472,7 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlan
     _cur_sub_ctx->get_runtime_state()->set_client_conn(client);
     _cur_sub_ctx->client_conn = client;
     _cur_sub_ctx->sql = subquery->to_string();
+    _cur_sub_ctx->charset = _ctx->charset;
     std::unique_ptr<LogicalPlanner> planner;
     if (_cur_sub_ctx->stmt_type == parser::NT_SELECT) {
         planner.reset(new SelectPlanner(_cur_sub_ctx.get(), plan_state));
@@ -508,9 +507,14 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlan
         return -1;
     }
     _ctx->set_kill_ctx(_cur_sub_ctx);
-    ret = generate_sql_sign(_cur_sub_ctx->plan, &(_cur_sub_ctx->stat_info), subquery, &_cur_sub_ctx->need_learner_backup);
+    auto stat_info = &(_cur_sub_ctx->stat_info);
+    ret = generate_sql_sign(_cur_sub_ctx.get(), subquery);
     if (ret < 0) {
         return -1;
+    }
+    auto& client_conn = _ctx->client_conn;
+    if (client_conn->is_explain_sign) {
+        client_conn->insert_subquery_sign(stat_info->sign);
     }
     return 0;
 }
@@ -637,6 +641,9 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         if (tbl_ptr->need_learner_backup) {
             _ctx->need_learner_backup = true;
         }
+
+        _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
+        _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
 
         // 通用降级路由
         // 复杂sql(join和子查询)不降级
@@ -2454,7 +2461,7 @@ void LogicalPlanner::create_scan_tuple_descs() {
             pb::SlotDescriptor* slot = tuple_desc.add_slots();
             slot->CopyFrom(desc);
         }
-        _scan_tuples.push_back(tuple_desc);
+        _scan_tuples.emplace_back(tuple_desc);
         _ctx->add_tuple(tuple_desc);
     }
 }
@@ -2667,13 +2674,6 @@ int LogicalPlanner::create_scan_nodes() {
     return 0;
 }
 
-void LogicalPlanner::set_socket_txn_tid_set() {
-    auto client = _ctx->client_conn;
-    if (client->txn_id != 0) {
-        client->insert_txn_tid(_ctx->stat_info.table_id);
-    }
-}
-
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
     auto client = _ctx->client_conn;
     if (client->txn_id == 0) {
@@ -2703,6 +2703,9 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
         }
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(false);
+    }
+    if (client->txn_id != 0) {
+        client->insert_txn_tid(table_id);
     }
 }
 

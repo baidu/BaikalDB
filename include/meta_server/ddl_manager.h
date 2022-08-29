@@ -132,9 +132,9 @@ public:
 
     std::vector<std::string> get_faulty_baikaldb();
 
-    bool round_robin_select(std::string* selected_address);
+    bool round_robin_select(std::string* selected_address, bool is_column_ddl);
 
-    bool select_instance(std::string* address);
+    bool select_instance(std::string* address, bool is_column_ddl);
 
     void init(); 
 
@@ -225,7 +225,10 @@ public:
     void set_meta_state_machine(MetaStateMachine* meta_state_machine) {
         _meta_state_machine = meta_state_machine;
     }
-    int init_index_ddlwork(int64_t table_id, pb::IndexInfo& index_info, 
+    int init_index_ddlwork(int64_t table_id, const pb::IndexInfo& index_info, 
+        std::unordered_map<int64_t, std::set<int64_t>>& partition_regions);
+    
+    int init_column_ddlwork(int64_t table_id, const pb::DdlWorkInfo& work_info, 
         std::unordered_map<int64_t, std::set<int64_t>>& partition_regions);
 
     int init_del_index_ddlwork(int64_t table_id, const pb::IndexInfo& index_info);
@@ -237,6 +240,7 @@ public:
 
     //处理单个ddl work
     int add_index_ddlwork(pb::DdlWorkInfo& val);
+    int add_column_ddlwork(pb::DdlWorkInfo& ddl_work);
 
     void join() {
         _work_thread.join();
@@ -262,7 +266,7 @@ public:
         }
     }
     int delete_index_ddlwork_region_info(int64_t table_id);
-    int delete_index_ddlwork_info(int64_t table_id);
+    int delete_index_ddlwork_info(int64_t table_id, const pb::DdlWorkInfo& work_info);
     int update_index_ddlwork_region_info(const pb::RegionDdlWork& work);
 
     int raft_update_info(const pb::MetaManagerRequest& request,
@@ -383,6 +387,7 @@ private:
     };
     //table_id -> table ddl info
     std::unordered_map<int64_t, MemDdlInfo> _table_ddl_mem;
+    std::unordered_map<int64_t, MemDdlInfo> _table_ddl_done_mem;
     bthread_mutex_t        _table_mutex;
 
     using MemRegionDdlWorkMapPtr = std::shared_ptr<ThreadSafeMap<int64_t, MemRegionDdlWork>>;

@@ -54,10 +54,6 @@ private:
                             MemRow* outer_tuple_data,
                             std::vector<ExecNode*>& scan_nodes,
                             std::vector<MemRow*>& inner_tuple_data);
-    int fetcher_inner_table_data(RuntimeState* state,
-                            const std::vector<MemRow*>& outer_tuple_data,
-                            std::vector<ExecNode*>& scan_nodes,
-                            std::vector<MemRow*>& inner_tuple_data);
     int get_next_via_inner_hash_map(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_via_outer_hash_map(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_via_loop_outer_hash_map(RuntimeState* state, RowBatch* batch, bool* eos);

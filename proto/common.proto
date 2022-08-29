@@ -37,6 +37,7 @@ enum ErrCode {
     IN_PROCESS   = 30;
     STORE_BUSY   = 31;
     LEARNER_NOT_READY = 32;
+    STORE_ROCKS_HANG  = 33;
 };
 
 enum PrimitiveType {
@@ -73,6 +74,7 @@ enum SchemaType {
 enum Charset {
     UTF8 = 0;
     GBK = 1;
+    CS_UNKNOWN = 2;
 };
 
 enum BackupTable {
@@ -100,6 +102,8 @@ message SchemaConf {
     optional BackupTable backup_table       = 7;
     optional int32 pk_prefix_balance        = 8;
     optional bool in_fast_import            = 9;  // 快速导入中，不调度，不分裂
+    optional string sign_blacklist          = 10;
+    optional string sign_forcelearner       = 11;
 };
 
 enum Engine {

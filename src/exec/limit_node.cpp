@@ -132,6 +132,7 @@ void LimitNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
 
 int LimitNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     if (reached_limit()) {
+        state->set_eos();
         *eos = true;
         return 0;
     }
@@ -162,6 +163,7 @@ int LimitNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     }
     _num_rows_returned += batch->size();
     if (reached_limit()) {
+        state->set_eos();
         *eos = true;
         int keep_nums = batch->size() - (_num_rows_returned - _limit);
         batch->keep_first_rows(keep_nums);

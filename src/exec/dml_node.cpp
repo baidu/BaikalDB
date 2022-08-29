@@ -33,6 +33,22 @@ int DMLNode::expr_optimize(QueryContext* ctx) {
     }
     return 0;
 }
+
+void DMLNode::add_delete_conditon_fields() {
+    if (_node_type == pb::DELETE_NODE) {
+        std::set<int32_t> cond_field_ids;
+        for (auto& slot : _tuple_desc->slots()) {
+            cond_field_ids.insert(slot.field_id());
+        }
+        for (auto& field_info : _table_info->fields) {
+            if (cond_field_ids.count(field_info.id) > 0
+                && _pri_field_ids.count(field_info.id) == 0) {
+                _field_ids[field_info.id] = &field_info;
+            }
+        }
+    }
+}
+
 int DMLNode::init_schema_info(RuntimeState* state) {
     _region_id = state->region_id();
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id); 
@@ -65,6 +81,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         _pri_field_ids.insert(field_info.id);
     }
     if (_all_indexes.empty()) {
+        bool ddl_index_id_synced = false;
         for (auto index_id : _table_info->indices) {
             auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
             if (index_info == nullptr) {
@@ -76,12 +93,22 @@ int DMLNode::init_schema_info(RuntimeState* state) {
             }
             if (!index_info->is_global && index_info->index_hint_status != pb::IHS_VIRTUAL) {
                 _all_indexes.push_back(index_info);
+                if (_ddl_need_write && _ddl_index_id == index_id) {
+                    ddl_index_id_synced = true;
+                }
             }
+        }
+        // db认为需要写入,store还未同步ddl信息,写失败处理
+        if (_ddl_need_write && !ddl_index_id_synced) {
+            DB_WARNING("table_id:%ld ddl index info not found index:%ld", _table_id, _ddl_index_id);
+            return -1;
         }
     }
     // update and on_dup_key_update need all fields
     // delete and insert/replace need get index fields
-    if (_node_type == pb::UPDATE_NODE || _on_dup_key_update) {
+    // replace/delete binlog need all old fields
+    if (_node_type == pb::UPDATE_NODE || _on_dup_key_update
+        || (_local_index_binlog && (_is_replace || _node_type == pb::DELETE_NODE))) {
         //保存所有字段，主键不在pb里，不需要传入
         for (auto& field_info : _table_info->fields) {
             if (_pri_field_ids.count(field_info.id) == 0) {
@@ -104,6 +131,16 @@ int DMLNode::init_schema_info(RuntimeState* state) {
     if (_txn == nullptr) {
         DB_WARNING_STATE(state, "txn is nullptr: region:%ld", _region_id);
         return -1;
+    }
+    if (_node_type == pb::UPDATE_NODE || _node_type == pb::DELETE_NODE) {
+        if (state->tuple_id >= 0) {
+            _tuple_desc = state->get_tuple_desc(state->tuple_id);
+            if (_tuple_desc == nullptr) {
+                DB_WARNING_STATE(state, "_tuple_desc nullptr: tuple_id:%d", state->tuple_id);
+                return -1;
+            }
+            add_delete_conditon_fields();
+        }
     }
     if (!_update_slots.empty()) {
         std::set<int32_t> affect_field_ids;
@@ -149,6 +186,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
                         }
                     }
                 }
+                add_delete_conditon_fields();
             }
         } else {
             _affected_indexes = _all_indexes;
@@ -252,6 +290,9 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                         DB_WARNING_STATE(state, "remove fail, table_id:%ld ,ret:%d", _table_id, ret);
                         return -1;
                     }
+                    if (_local_index_binlog) {
+                        _return_old_records[_pri_info->id].emplace_back(old_record);
+                    }
                     cstore_update_fields_partly = true;
                     ++affected_rows;
                 } else {
@@ -284,11 +325,6 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         if (!_ddl_need_write && (index_state != pb::IS_PUBLIC && index_state != pb::IS_WRITE_ONLY &&
             index_state != pb::IS_WRITE_LOCAL)) {
             DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
-                info.id, pb::IndexState_Name(index_state).c_str());
-            continue;
-        } else if (_ddl_need_write && info_ptr->id != _ddl_index_id && (index_state == pb::IS_WRITE_ONLY &&
-            index_state == pb::IS_WRITE_LOCAL)) {
-            DB_DEBUG("DDL_LOG skip stale index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
@@ -364,11 +400,11 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             DB_DEBUG("DDL_LOG skip index [%ld] state [%s] ", 
                 info.id, pb::IndexState_Name(index_state).c_str());
             continue;
-        } else if (_ddl_need_write && info_ptr->id != _ddl_index_id && (index_state == pb::IS_WRITE_ONLY &&
-            index_state == pb::IS_WRITE_LOCAL)) {
-            DB_DEBUG("DDL_LOG skip stale index [%ld] state [%s] ", 
-                info.id, pb::IndexState_Name(index_state).c_str());
-            continue;
+        }
+        // 全文索引信息未同步到store,写失败处理
+        if (_ddl_need_write && info.type == pb::I_FULLTEXT && reverse_index_map.count(info.id) == 0) {
+            DB_WARNING_STATE(state, "table_id:%ld full index info not found index:%ld", _table_id, info.id);
+            return -1;
         }
         if (reverse_index_map.count(info.id) == 1) {
             // inverted index only support single field
@@ -387,7 +423,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 return ret;
             }
             //DB_NOTICE("word:%s", str_to_hex(word).c_str());
-            ret = reverse_index_map[info.id]->insert_reverse(_txn->get_txn(), 
+            ret = reverse_index_map[info.id]->insert_reverse(_txn, 
                                                             word, pk_str, record);
             if (ret < 0) {
                 return ret;
@@ -399,6 +435,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             DB_WARNING_STATE(state, "put index:%ld fail:%d, table_id:%ld", info.id, ret, _table_id);
             return ret;
         }
+    }
+
+    if (_local_index_binlog && (_is_replace || _need_ignore || _on_dup_key_update || _node_type == pb::UPDATE_NODE)) {
+        _return_records[_pri_info->id].emplace_back(record->clone(true));
     }
     // 列存为节省空间, 插入默认值或空值时不会put
     // cstore_update_fields_partly为true时更新前旧值尚未被删除
@@ -479,7 +519,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
                 DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", info.id);
                 return ret;
             }
-            ret = reverse_index_map[info.id]->delete_reverse(_txn->get_txn(), 
+            ret = reverse_index_map[info.id]->delete_reverse(_txn,
                                                            word, pk_str, record);
             if (ret < 0) {
                 return ret;
@@ -501,6 +541,9 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
     return 1;
 }
 
+// return -1 :执行失败
+// retrun 0 : 数据已经删除或者不存在
+// retrun 1 : 数据真正删除
 int DMLNode::delete_row(RuntimeState* state, SmartRecord record) {
     int ret = 0;
     std::string pk_str;
@@ -515,7 +558,32 @@ int DMLNode::delete_row(RuntimeState* state, SmartRecord record) {
         DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
         return -1;
     }
+    if (!satisfy_condition_again(state, record)) {
+        DB_WARNING_STATE(state, "condition changed when delete record:%s", record->debug_string().c_str());
+        // UndoGetForUpdate(pk_str)?
+        return 0;
+    }
     return remove_row(state, record, pk_str, true);
+}
+
+// todo : 全局索引update/delete流程不同，重新判断条件待完善
+bool DMLNode::satisfy_condition_again(RuntimeState* state, SmartRecord record) {
+    if (!state->need_condition_again) {
+        return true;
+    }
+    if (_node_type != pb::DELETE_NODE &&  _node_type != pb::UPDATE_NODE) {
+        return true;
+    }
+    if (_tuple_desc != nullptr) {
+        std::unique_ptr<MemRow> new_row = state->mem_row_desc()->fetch_mem_row();
+        for (auto slot : _tuple_desc->slots()) {
+            auto field = record->get_field_by_tag(slot.field_id());
+            new_row->set_value(slot.tuple_id(), slot.slot_id(),
+                    record->get_value(field));
+        }
+        return check_satisfy_condition(new_row.get());
+    }
+    return true;
 }
 
 int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
@@ -532,6 +600,11 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
         return -1;
     }
+    if (!satisfy_condition_again(state, record)) {
+        DB_WARNING_STATE(state, "condition changed when update record:%s", record->debug_string().c_str());
+        // UndoGetForUpdate(pk_str)? 同一个txn GetForUpdate与UndoGetForUpdate之间不要写pk_str
+        return 0;
+    }
     _indexes_ptr = &_affected_indexes;
     // 影响了主键需要删除旧的行
     ret = remove_row(state, record, pk_str, _update_affect_primary);
@@ -541,6 +614,9 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     } else if (ret == 0) {
         // update null row
         return 0;
+    }
+    if (_local_index_binlog) {
+        _return_old_records[_pri_info->id].emplace_back(record->clone(true));
     }
     // if the updating field has no change, the update can be skipped.
     if (_on_dup_key_update) {

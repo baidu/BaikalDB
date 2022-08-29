@@ -36,7 +36,7 @@ public:
     RegionControl(Region* region, int64_t region_id): _region(region), _region_id(region_id) {}
     virtual ~RegionControl() {}
     
-    void sync_do_snapshot();
+    int sync_do_snapshot();
     
     void raft_control(google::protobuf::RpcController* controller,
                       const pb::RaftControlRequest* request,

@@ -32,6 +32,7 @@ public:
     int remove_row(RuntimeState* state, SmartRecord record, 
             const std::string& pk_str, bool delete_primary = true);
     int update_row(RuntimeState* state, SmartRecord record, MemRow* row);
+    bool satisfy_condition_again(RuntimeState* state, SmartRecord record);
     int64_t table_id() {
         return _table_id;
     }
@@ -79,6 +80,7 @@ public:
 
 protected:
     int init_schema_info(RuntimeState* state);
+    void add_delete_conditon_fields();
 
     int64_t _table_id = -1; //主表的table_id,不管是二级索引表还是主表
     int64_t _region_id = -1;
@@ -120,7 +122,7 @@ protected:
     int64_t _row_ttl_duration = 0; //insert语句可以带上ttl用来覆盖表的配置
     int64_t _ttl_timestamp_us = 0; //ttl写入时间，0表示无ttl
     bool  _ddl_need_write = false;
-    bool  _ddl_index_id= -1;
+    int64_t  _ddl_index_id = -1;
 };
 }
 

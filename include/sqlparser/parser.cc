@@ -14,12 +14,18 @@
 
 #include "parser.h"
 #ifdef BAIDU_INTERNAL
+#include <bthread.h>
 #include "uconv.h"
+#include "log.h"
+#include <gflags/gflags.h>
 #endif
 #include "sql_lex.flex.h"
 
 extern int sql_parse(yyscan_t scanner, parser::SqlParser* parser);
 namespace parser {
+#ifdef BAIDU_INTERNAL
+DEFINE_bool(use_is_utf8_strict, true, "is_utf8_strict");
+#endif
 void SqlParser::change_5c_to_7f(std::string& sql) {
     size_t i = 0;
     while (i < sql.size()) {
@@ -40,11 +46,31 @@ void SqlParser::parse(const std::string& sql_) {
 #ifdef BAIDU_INTERNAL
     // 内部编码设置不准，需要自动获取
     // todo: 整理后，去除这个逻辑
-    int len = is_utf8_strict(sql.c_str(), sql.size(), true);
-    if (len > 0) {
-        is_gbk = false;
+    if (FLAGS_use_is_utf8_strict) {
+        int len = is_utf8_strict(sql.c_str(), sql.size(), true);
+        if (len > 0) {
+            is_gbk = false;
+        } else {
+            is_gbk = true;
+        }
+        bool is_asc = true;
+        for (char c : sql) {
+            if (!IS_ASCII(c)) {
+                is_asc = false;
+                break;
+            }
+        }
+        if (!is_asc) {
+            if (is_gbk != (charset == "gbk")) {
+                DB_FATAL("is_utf8_strict fail, sql:%s", sql_.c_str());
+            }
+        }
     } else {
-        is_gbk = true;
+        if (charset == "gbk") {
+            is_gbk = true;
+        } else {
+            is_gbk = false;
+        }
     }
 #else
     if (charset == "gbk") {

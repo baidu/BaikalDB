@@ -197,6 +197,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_DROP_TABLE_TOMBSTONE
             || request->op_type() == pb::OP_RESTORE_TABLE 
             || request->op_type() == pb::OP_RENAME_TABLE
+            || request->op_type() == pb::OP_SWAP_TABLE
             || request->op_type() == pb::OP_ADD_FIELD
             || request->op_type() == pb::OP_DROP_FIELD
             || request->op_type() == pb::OP_RENAME_FIELD

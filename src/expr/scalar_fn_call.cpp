@@ -92,7 +92,7 @@ int ScalarFnCall::type_inferer() {
                     pb::ExprNodeType_Name(c->node_type()).c_str());
                     ExprNode::_s_non_boolean_sql_cnts << 1;
                 if (FLAGS_open_nonboolean_sql_forbid) {
-                    return -1;
+                    return NOT_BOOL_ERRCODE;
                 }
             }
         }

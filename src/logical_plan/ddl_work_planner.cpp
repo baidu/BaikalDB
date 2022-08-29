@@ -78,9 +78,7 @@ int create_single_txn(std::unique_ptr<IndexDDLManagerNode> dml_root,
     return 0;
 }
 
-int DDLWorkPlanner::plan() {
-    //初始化
-    int ret = 0;
+int DDLWorkPlanner::create_index_ddl_plan() {
     auto table_ptr = _factory->get_table_info_ptr(_table_id);
     auto table_name = table_ptr->name;
     auto pk_index_ptr = _factory->get_index_info_ptr(_table_id);
@@ -108,6 +106,27 @@ int DDLWorkPlanner::plan() {
     create_scan_tuple(pk_index_ptr.get());
     create_scan_tuple(index_ptr.get());
     create_scan_tuple_descs();
+    return 0;
+}
+
+int DDLWorkPlanner::create_column_ddl_plan() {
+    for (auto& tuple_desc : _work.column_ddl_info().tuples()) {
+        _scan_tuples.emplace_back(tuple_desc);
+        _ctx->add_tuple(tuple_desc);
+    }
+    return 0;
+}
+
+
+int DDLWorkPlanner::plan() {
+    if (_is_column_ddl) {
+        create_column_ddl_plan();
+    } else {
+        if (create_index_ddl_plan() != 0) {
+            return -1;
+        }
+    }
+    
     create_scan_nodes();
 
     // 分配 RuntimeState
@@ -168,7 +187,7 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     }
     scan_node->init(_ctx->plan.nodes(0));
     _ctx->client_conn->txn_id = 0;
-    set_dml_txn_state(_table_id);
+    _ctx->client_conn->on_begin();
     _ctx->open_binlog = false;
     _ctx->client_conn->open_binlog = false;
 
@@ -192,8 +211,15 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     //     range_index->set_right_open(true);
     // }
     if (!_is_global_index) {
-        pb_scan_node->set_is_ddl_work(true);
-        pb_scan_node->set_ddl_index_id(_index_id);
+        if (_is_column_ddl) {
+            pb_scan_node->set_ddl_work_type(pb::DDL_COLUMN);
+            pb_scan_node->mutable_column_ddl_info()->CopyFrom(_work.column_ddl_info());
+        } else {
+            pb_scan_node->set_ddl_work_type(pb::DDL_LOCAL_INDEX);
+            pb_scan_node->set_ddl_index_id(_index_id);
+        }
+    } else {
+        pb_scan_node->set_ddl_work_type(pb::DDL_GLOBAL_INDEX);
     }
     
     google::protobuf::RepeatedPtrField<pb::RegionInfo> old_region_infos;
@@ -230,7 +256,10 @@ int DDLWorkPlanner::execute() {
 
         if (!first_flag) {
             //计算是否需继续请求。
-            if (state.ddl_scan_size < _limit) {
+            if (!_is_global_index && (state.ddl_scan_size == 0 || _start_key == state.ddl_max_pk_key)) {
+                DB_NOTICE("task_%s scan end, break", _task_id.c_str());
+                break;
+            } else if (_is_global_index && state.ddl_scan_size < _limit) {
                 DB_NOTICE("task_%s num < limit , break", _task_id.c_str());
                 break;
             } else {
@@ -257,14 +286,15 @@ int DDLWorkPlanner::execute() {
                 retry_times++;
                 continue;
             }
-
-            auto index_info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
-            if (index_info_ptr == nullptr ||
-                (index_info_ptr->state != pb::IS_WRITE_LOCAL && index_info_ptr->state != pb::IS_WRITE_ONLY)) {
-                //说明任务已经完成，或者任务失败，该索引正在被删除。
-                DB_FATAL("index info ptr is nullptr or index state is not pb::IS_WRITE_LOCAL/pb::IS_WRITE_ONLY");
-                _work.set_status(pb::DdlWorkFail);
-                return -1;
+            if (!_is_column_ddl) {
+                auto index_info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
+                if (index_info_ptr == nullptr ||
+                    (index_info_ptr->state != pb::IS_WRITE_LOCAL && index_info_ptr->state != pb::IS_WRITE_ONLY)) {
+                    //说明任务已经完成，或者任务失败，该索引正在被删除。
+                    DB_FATAL("index info ptr is nullptr or index state is not pb::IS_WRITE_LOCAL/pb::IS_WRITE_ONLY");
+                    _work.set_status(pb::DdlWorkFail);
+                    return -1;
+                }
             }
             state.txn_id = client_conn->txn_id;
             std::unique_ptr<SingleTxnManagerNode> txn_manager_node;

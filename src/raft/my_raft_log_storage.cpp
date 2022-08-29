@@ -258,14 +258,11 @@ int MyRaftLogStorage::get_binlog_entry(rocksdb::Slice& raftlog_value_slice, std:
         DB_FATAL("binlog region_id: %ld has not binlog ts", _region_id);
         return -1;
     }
-    ts = raftlog_pb.binlog_desc().binlog_ts( );
-    char buf[sizeof(int64_t)];
-    memcpy(buf, (void*)&ts, sizeof(int64_t));
-    rocksdb::Status status = _db->get(rocksdb::ReadOptions(), _binlog_handle, 
-        rocksdb::Slice(buf, sizeof(int64_t)), &binlog_value);
-    if (!status.ok()) {
-        DB_FATAL("get ts:%ld from rocksdb binlog cf fail:%s, region_id: %ld",
-                ts, status.ToString().c_str(), _region_id);
+
+    ts = raftlog_pb.binlog_desc().binlog_ts();
+    int ret = _db->get_binlog_value(ts, binlog_value);
+    if (ret != 0) {
+        DB_FATAL("get ts:%ld from rocksdb binlog cf fail, region_id: %ld", ts, _region_id);
         return -1;
     }
 
@@ -657,7 +654,9 @@ int MyRaftLogStorage::_construct_slice_array(void* head_buf, const butil::IOBuf&
         DB_FATAL("Fail to allocate mem, region_id: %ld", _region_id);
         return -1;
     }
-    memcpy(key_buf, (void*)&ts, sizeof(int64_t));
+    uint64_t ts_tmp = KeyEncoder::to_endian_u64(
+                            KeyEncoder::encode_i64(ts));
+    memcpy(key_buf, (void*)&ts_tmp, sizeof(int64_t));
     auto key_slices = (rocksdb::Slice*)arena.allocate(sizeof(rocksdb::Slice));
     if (key_slices == NULL) {
         DB_FATAL("Fail to allocate mem, region_id: %ld", _region_id);

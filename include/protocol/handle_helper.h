@@ -65,6 +65,8 @@ const std::string SQL_HANDLE_STORE_SET_PEER             = "store_set_peer";
 const std::string SQL_HANDLE_STORE_TRANS_LEADER         = "store_trans_leader";
 // handle add_user namespace username password json
 const std::string SQL_HANDLE_ADD_USER                   = "add_user";
+// handle copy_db db1 db2 
+const std::string SQL_HANDLE_COPY_DB                    = "copy_db";
 // handle link_binlog json
 const std::string SQL_HANDLE_LINK_BINLOG                = "link_binlog";
 // handle unlink_binlog json
@@ -85,6 +87,8 @@ const std::string SQL_HANDLE_CREATE_NAMESPACE           = "create_namespace";
 const std::string SQL_HANDLE_NETWORK_BALANCE            = "network_balance";
 // handle store_rm_txn storeAddress regionID regionVersion txnID
 const std::string SQL_HANDLE_STORE_RM_TXN               = "store_rm_txn";
+// handle region_adjustkey tableID regionID start_key_region_id end_key_region_id 
+const std::string SQL_HANDLE_REGION_ADJUSTKEY           = "region_adjustkey";
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -145,6 +149,8 @@ private:
     bool _handle_store_trans_leader(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle add_user namespace username password json
     bool _handle_add_user(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle copy_db db1 db2 
+    bool _handle_copy_db(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle link_binlog/unlink_binlog db table binlog_db binlog_table
     bool _handle_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle link_binlog/unlink_binlog db table binlog_db binlog_table
@@ -159,6 +165,7 @@ private:
     bool _handle_store_compact_region(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle store_rm_txn storeAddress regionID regionVersion txnID
     bool _handle_store_rm_txn(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _handle_region_adjustkey(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle create_namespace NamespaceName
     bool _handle_create_namespace(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _send_store_raft_control_request(const SmartSocket& client, pb::RaftControlRequest& req, pb::RegionInfo& info);

@@ -155,6 +155,7 @@ public:
     void start_db_statistics();
 
     void reverse_merge_thread();
+    void unsafe_reverse_merge_thread();
     void ttl_remove_thread();
     void delay_remove_data_thread();
 
@@ -267,6 +268,8 @@ public:
         _shutdown = true;
         _heart_beat_bth.join();
         DB_WARNING("heart beat bth join");
+        _db_statistic_bth.join();
+        DB_WARNING("db statistic bth join");
         _add_peer_queue.join();
         DB_WARNING("_add_peer_queue join");
         _remove_region_queue.join();
@@ -279,6 +282,8 @@ public:
         DB_WARNING("split check bth join");
         _merge_bth.join();
         DB_WARNING("merge bth check bth join");
+        _merge_unsafe_bth.join();
+        DB_WARNING("merge unsafe bth check bth join");
         _ttl_bth.join();
         DB_WARNING("ttl bth check bth join");
         _delay_remove_data_bth.join();
@@ -314,7 +319,7 @@ private:
     
     int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
-    void update_schema_info(const pb::SchemaInfo& table, std::map<int64_t, int64_t>* reverse_index_map);
+    void update_schema_info(const pb::SchemaInfo& table, std::map<int64_t, std::set<int64_t>>* reverse_index_map);
 
     //判断分裂在3600S内是否完成，不完成，则自动删除该region
     void check_region_legal_complete(int64_t region_id);
@@ -351,6 +356,8 @@ private:
     Bthread _split_check_bth;
     //全文索引定时merge线程
     Bthread _merge_bth;
+    //全文索引(unsafe)定时线程
+    Bthread _merge_unsafe_bth;
     //TTL定期删除过期数据
     Bthread _ttl_bth;
     //延迟删除region
@@ -366,6 +373,8 @@ private:
     Bthread _binlog_timeout_check_bth;
     // 定时fake binlog线程
     Bthread _binlog_fake_bth;
+    // 定时检测rocksdb是否hang，并且打印rocksdb properties
+    Bthread _db_statistic_bth;
 
     std::atomic<int32_t> _split_num;    
     bool _shutdown = false;
@@ -409,5 +418,10 @@ public:
     int64_t  tso_physical = 0;
     int64_t  tso_logical  = 0;
     int64_t  tso_count    = 0;
+
+    // for store rocksdb hang check
+    TimeCost last_rocks_hang_check_ok;
+    int64_t  last_rocks_hang_check_cost = 0;
+    int rocks_hang_continues_cnt = 0;
 };
 }

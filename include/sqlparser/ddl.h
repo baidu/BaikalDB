@@ -160,7 +160,10 @@ enum AlterSpecType : unsigned char {
     ALTER_SPEC_TABLE_OPTION,
     ALTER_SPEC_RESTORE_INDEX,
     ALTER_SPEC_ADD_LEARNER,
-    ALTER_SPEC_DROP_LEARNER
+    ALTER_SPEC_DROP_LEARNER,
+    ALTER_SPEC_MODIFY_COLUMN,
+    ALTER_SPEC_SWAP_TABLE
+
 };
 
 enum PartitionType : unsigned char {
@@ -348,6 +351,8 @@ struct AlterTableSpec : public Node {
     Vector<TableOption*>    table_options;
     TableName*              new_table_name = nullptr;
     Vector<ColumnDef*>      new_columns;
+    Vector<Assignment*>     set_list;
+    ExprNode*               where = nullptr;
     //add constraint
     Vector<Constraint*>     new_constraints;
     String                  index_name;

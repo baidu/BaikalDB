@@ -76,12 +76,14 @@ public:
             int64_t commit_tso = decode_first_8bytes2int64(pure_key);
             int64_t expire_ts_ms = (commit_tso >> tso::logical_bits) + ttl_ms;
             int64_t current_ts_ms = tso::clock_realtime_ms();
+            int64_t oldest_ts = RocksWrapper::get_instance()->get_oldest_ts_in_binlog_cf();
+            if (oldest_ts > 0) {
+                return commit_tso < oldest_ts;
+            } else {
+                return current_ts_ms > expire_ts_ms;
+            }
 //            DB_WARNING("binglog compaction filter, region_id: %ld, ttl_tso: %ld, commit_tso: %ld, expire_tso: %ld, current_tso: %ld",
 //                       region_id, ttl_ms, commit_tso, expire_ts_ms, current_ts_ms);
-            if (current_ts_ms > expire_ts_ms) {
-                return true;
-            }
-            return false;
         }
         int64_t index_id = table_key.extract_i64(sizeof(int64_t));
         // cstore, primary column key format: index_id = table_id(32byte) + field_id(32byte)

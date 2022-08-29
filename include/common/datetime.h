@@ -37,7 +37,7 @@ struct DateTime;
 extern uint64_t bin_date_to_datetime(DateTime time_struct);
 extern int32_t bin_time_to_datetime(DateTime time_struct);
 extern void datetime_to_time_struct(uint64_t datetime, DateTime& time_struct, uint8_t type);
-
+extern int64_t timestamp_to_ts(uint32_t timestamp);
 // inline functions
 // DATE: 17 bits year*13+month  (year 0-9999, month 1-12)
 //        5 bits day            (1-31)
@@ -55,6 +55,13 @@ inline std::string date_to_str(uint32_t date) {
     char buf[30] = {0};
     snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
     return std::string(buf);
+}
+
+inline std::string ts_to_datetime_str(int64_t ts) {
+    if (ts <= 0) {
+        return "0000-00-00 00:00:00";
+    }
+    return timestamp_to_str(tso::get_timestamp_internal(ts));
 }
 
 extern bool tz_to_second(const char *time_zone, int32_t& result);

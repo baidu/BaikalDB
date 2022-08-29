@@ -161,7 +161,7 @@ struct String {
         return strcmp(value, rhs.value) == 0;
     }
 
-    bool starts_with(const char* prefix) {
+    bool starts_with(const char* prefix) const {
         if (prefix == nullptr) {
             return true;
         }

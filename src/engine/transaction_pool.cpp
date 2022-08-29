@@ -510,11 +510,19 @@ void TransactionPool::clear_transactions(Region* region) {
         auto cur_time = butil::gettimeofday_us();
         // 事务存在时间过长报警
         if (cur_time - txn->begin_time > FLAGS_long_live_txn_interval_ms * 1000LL) {
-            DB_FATAL("TransactionWarning: txn %s seq_id: %d is alive for %d ms, %ld, %ld, %lds",
-                 txn->get_txn()->GetName().c_str(), txn->seq_id(), FLAGS_long_live_txn_interval_ms,
-                 cur_time,
-                 txn->begin_time,
-                 (cur_time - txn->begin_time) / 1000000);
+            if (txn->has_write()) {
+                DB_FATAL("TransactionWarning: txn %s seq_id: %d is alive for %d ms, %ld, %ld, %lds",
+                    txn->get_txn()->GetName().c_str(), txn->seq_id(), FLAGS_long_live_txn_interval_ms,
+                    cur_time,
+                    txn->begin_time,
+                    (cur_time - txn->begin_time) / 1000000);
+            } else {
+                DB_WARNING("TransactionWarning: read only txn %s seq_id: %d alive %d ms, %ld, %ld, %lds",
+                    txn->get_txn()->GetName().c_str(), txn->seq_id(), FLAGS_long_live_txn_interval_ms,
+                    cur_time,
+                    txn->begin_time,
+                    (cur_time - txn->begin_time) / 1000000);
+            }
         }
         if (txn->in_process()) {
             if (cur_time - txn->begin_time > FLAGS_transaction_query_primary_region_interval_ms * 1000LL) {

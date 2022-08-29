@@ -53,8 +53,8 @@ int UpdatePlanner::plan() {
         return -1;
     }
     create_packet_node(pb::OP_UPDATE);
-
-    if (0 != create_update_node()) {
+    pb::PlanNode* update_node = _ctx->add_plan_node();
+    if (0 != create_update_node(update_node)) {
         return -1;
     }
     if (0 != create_sort_node()) {
@@ -74,7 +74,10 @@ int UpdatePlanner::plan() {
     if (!_ctx->is_prepared) {
         set_dml_txn_state(table_id);
     }
-    set_socket_txn_tid_set();
+    // 局部索引binlog处理标记
+    if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
+        update_node->set_local_index_binlog(true);
+    }
     return 0;
 }
 
@@ -87,7 +90,7 @@ int UpdatePlanner::parse_limit() {
     return 0;
 }
 
-int UpdatePlanner::create_update_node() {
+int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
     if (_plan_table_ctx->table_tuple_mapping.size() != 1) {
         DB_WARNING("no database name, specify database by USE cmd");
         return -1;
@@ -95,7 +98,6 @@ int UpdatePlanner::create_update_node() {
     auto iter = _plan_table_ctx->table_tuple_mapping.begin();
     int64_t table_id = iter->second.table_id;
 
-    pb::PlanNode* update_node = _ctx->add_plan_node();
     update_node->set_node_type(pb::UPDATE_NODE);
     update_node->set_limit(_limit_count);
     update_node->set_is_explain(_ctx->is_explain);
@@ -103,7 +105,6 @@ int UpdatePlanner::create_update_node() {
     pb::DerivePlanNode* derive = update_node->mutable_derive_node();
     pb::UpdateNode* update = derive->mutable_update_node();
     update->set_table_id(table_id);
-
     // add slots and exprs
     for (uint32_t idx = 0; idx < _update_slots.size(); ++idx) {
         update->add_update_slots()->CopyFrom(_update_slots[idx]);
@@ -194,6 +195,8 @@ int UpdatePlanner::parse_where() {
     if (_update->where == nullptr) {
         DB_WARNING("update sql [%s] does not contain where conjunct", _ctx->sql.c_str());
         if (FLAGS_open_non_where_sql_forbid) {
+            _ctx->stat_info.error_code = ER_SQL_REFUSE;
+            _ctx->stat_info.error_msg << "update sql no where conditions";
             return -1;
         }
         return 0;

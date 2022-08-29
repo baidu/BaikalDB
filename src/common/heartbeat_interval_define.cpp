@@ -23,5 +23,9 @@ DEFINE_int32(store_faulty_interval_times, 3, "store faulty interval times of hea
 DEFINE_int32(store_dead_interval_times, 60, "store dead interval times of heart beat");
 DEFINE_int32(healthy_check_interval_times, 1, "meta state machine healthy check interval times of heart beat");
 DEFINE_int64(transfer_leader_catchup_time_threshold, 1 * 1000 * 1000LL, "transfer leader catchup time threshold");
+DEFINE_int32(store_rocks_hang_check_timeout_s, 5, "store rocks hang check timeout");
+DEFINE_int32(store_rocks_hang_cnt_limit, 3, "store rocks hang check cnt limit for slow");
+DEFINE_bool(store_rocks_hang_check, false, "store rocks hang check");
+DEFINE_int32(upload_sst_streaming_concurrency, 10, "upload_sst_streaming_concurrency");
 }
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

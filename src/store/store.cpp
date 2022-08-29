@@ -57,8 +57,10 @@ DEFINE_int64(transaction_clear_interval_ms, 5000LL,
             "transaction clear interval, default(5s)");
 DEFINE_int64(binlog_timeout_check_ms, 10 * 1000LL,
             "binlog timeout check interval, default(10s)");
-DEFINE_int64(binlog_fake_ms, 30 * 1000LL,
-            "fake binlog interval, default(30s)");
+DEFINE_int64(binlog_fake_ms, 1 * 1000LL,
+            "fake binlog interval, default(1s)");
+DEFINE_int64(oldest_binlog_ts_interval_s, 3600LL,
+            "oldest_binlog_ts_interval_s, default(1h)");
 DECLARE_int64(flush_memtable_interval_us);
 DEFINE_int32(max_split_concurrency, 2, "max split region concurrency, default:2");
 DEFINE_int64(none_region_merge_interval_us, 5 * 60 * 1000 * 1000LL, 
@@ -77,6 +79,9 @@ DEFINE_string(network_segment, "", "network segment of store set by user");
 DEFINE_string(container_id, "", "container_id for zoombie instance");
 DEFINE_int32(rocksdb_perf_level, rocksdb::kDisable, "rocksdb_perf_level");
 DEFINE_bool(stop_ttl_data, false, "stop ttl data");
+DECLARE_bool(store_rocks_hang_check);
+DECLARE_int32(store_rocks_hang_check_timeout_s);
+DECLARE_int32(store_rocks_hang_cnt_limit);
 
 BRPC_VALIDATE_GFLAG(rocksdb_perf_level, brpc::NonNegativeInteger);
 
@@ -231,7 +236,7 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         }
     }
 
-    start_db_statistics();
+    _db_statistic_bth.run([this]() {start_db_statistics();});
     DB_WARNING("store init_before_listen success, region_size:%lu, doing_snapshot_regions_size:%lu"
             "heartbeat_process_time:%ld new_region_process_time:%ld",
            init_region_ids.size(), doing_snapshot_regions.size(), heartbeat_process_time, new_region_process_time);
@@ -265,6 +270,7 @@ int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
     
     _split_check_bth.run([this]() {whether_split_thread();});
     _merge_bth.run([this]() {reverse_merge_thread();});
+    _merge_unsafe_bth.run([this]() {unsafe_reverse_merge_thread();});
     _ttl_bth.run([this]() {ttl_remove_thread();});
     _delay_remove_data_bth.run([this]() {delay_remove_data_thread();});
     _flush_bth.run([this]() {flush_memtable_thread();});
@@ -475,6 +481,14 @@ void Store::health_check(google::protobuf::RpcController* controller,
             last_print_time.reset();
         }
         response->set_errcode(pb::STORE_BUSY);
+    }
+
+    if (FLAGS_store_rocks_hang_check) {
+        if (last_rocks_hang_check_ok.get_time() > 30 * 1000 * 1000LL 
+             || (last_rocks_hang_check_cost >= FLAGS_store_rocks_hang_check_timeout_s * 1000 * 1000LL 
+                    && rocks_hang_continues_cnt >= FLAGS_store_rocks_hang_cnt_limit)) {
+            response->set_errcode(pb::STORE_ROCKS_HANG);
+        }
     }
 }
 
@@ -938,6 +952,20 @@ void Store::reverse_merge_thread() {
     }
 }
 
+void Store::unsafe_reverse_merge_thread() {
+    while (!_shutdown) {
+        TimeCost cost;
+        static bvar::LatencyRecorder unsafe_reverse_merge_time_cost("unsafe_reverse_merge_time_cost");
+        traverse_copy_region_map([](const SmartRegion& region) {
+            if (!region->is_binlog_region()) {
+                region->reverse_merge_doing_ddl();
+            }
+        });
+        unsafe_reverse_merge_time_cost << cost.get_time();
+        bthread_usleep_fast_shutdown(FLAGS_reverse_merge_interval_us, _shutdown);
+    }  
+}
+
 void Store::ttl_remove_thread() {
     TimeCost time;
     while (!_shutdown) {
@@ -968,10 +996,19 @@ void Store::delay_remove_data_thread() {
             return;
         }
         traverse_copy_region_map([this](const SmartRegion& region) {
+            //加个随机数，删除均匀些
+            int64_t random_remove_data_timeout = (FLAGS_region_delay_remove_timeout_s + 
+                    (int64_t)(butil::fast_rand() % FLAGS_region_delay_remove_timeout_s)) * 1000 * 1000LL;
             if (region->removed() && 
-                //加个随机数，删除均匀些
-                region->removed_time_cost() > (FLAGS_region_delay_remove_timeout_s + 
-                    (int64_t)(butil::fast_rand() % FLAGS_region_delay_remove_timeout_s)) * 1000 * 1000LL) {
+                region->removed_time_cost() > random_remove_data_timeout) {
+                DB_WARNING("remove data now, region_id: %ld, removed_time_cost: %ld, random_remove_data_timeout: %ld", 
+                        region->get_region_id(), region->removed_time_cost(), random_remove_data_timeout);
+                auto region_now = get_region(region->get_region_id());
+                if (region_now != nullptr && region_now != region) {
+                    // 删了之后又收到init_region rpc
+                    DB_WARNING("region_id: %ld, receive init region again, do not remove data", region->get_region_id());
+                    return;
+                }
                 region->shutdown();
                 region->join();
                 int64_t drop_region_id = region->get_region_id();
@@ -1094,6 +1131,7 @@ void Store::binlog_timeout_check_thread() {
 }
 
 void Store::binlog_fake_thread() {
+    TimeCost time;
     while (!_shutdown) {
         BthreadCond cond(-40);
         traverse_copy_region_map([this, &cond](const SmartRegion& region) {
@@ -1107,6 +1145,11 @@ void Store::binlog_fake_thread() {
         });
 
         cond.wait(-40);
+        if (time.get_time() > FLAGS_oldest_binlog_ts_interval_s * 1000 * 1000LL) {
+            // 更新oldest ts
+            RocksWrapper::get_instance()->update_oldest_ts_in_binlog_cf();
+            time.reset();
+        }
         bthread_usleep_fast_shutdown(FLAGS_binlog_fake_ms * 1000, _shutdown);
     }
 }
@@ -1443,48 +1486,77 @@ void Store::whether_split_thread() {
 }
 
 void Store::start_db_statistics() {
-    Bthread bth(&BTHREAD_ATTR_SMALL);
-    std::function<void()> dump_options = [this] () {
-        while (!_shutdown) {
+    int64_t idx = 0;
+    while (!_shutdown) {
+        bthread_usleep(10 * 1000 * 1000);
+        if (FLAGS_store_rocks_hang_check) {
+            // 每10s向meta cf写固定key，检测store是否hang了
             TimeCost cost;
-            auto db_options = get_db()->get_db_options();
-            std::string str = db_options.statistics->ToString();
-            std::vector<std::string> items;
-            boost::split(items, str, boost::is_any_of("\n"));
-            for (auto& item : items) {
-                (void)item;
-                DB_WARNING("statistics: %s", item.c_str());
+            int ret = _meta_writer->rocks_hang_check();
+            if (ret == 0) {
+                last_rocks_hang_check_ok.reset();
+                last_rocks_hang_check_cost = cost.get_time();
             }
-            db_options.statistics->Reset();
-            monitor_memory();
-            print_properties("rocksdb.num-immutable-mem-table");
-            print_properties("rocksdb.mem-table-flush-pending");
-            print_properties("rocksdb.compaction-pending");
-            print_properties("rocksdb.estimate-pending-compaction-bytes");
-            print_properties("rocksdb.num-running-compactions");
-            print_properties("rocksdb.num-running-flushes");
-            print_properties("rocksdb.cur-size-active-mem-table");
-            print_properties("rocksdb.cur-size-all-mem-tables");
-            print_properties("rocksdb.size-all-mem-tables");
-            print_properties("rocksdb.estimate-table-readers-mem");
-            print_properties("rocksdb.actual-delayed-write-rate");
-            print_properties("rocksdb.is-write-stopped");
-            print_properties("rocksdb.num-snapshots");
-            print_properties("rocksdb.oldest-snapshot-time");
-            print_properties("rocksdb.is-write-stopped");
-            print_properties("rocksdb.num-live-versions");
-            print_properties("rocksdb.block-cache-usage");
-            print_properties("rocksdb.block-cache-pinned-usage");
-            auto& con = *Concurrency::get_instance();
-            DB_WARNING("get properties cost: %ld, concurrency:"
-                    "snapshot:%d, recieve_add_peer:%d, add_peer:%d, service_write:%d", 
-                    cost.get_time(), con.snapshot_load_concurrency.count(),
-                    con.recieve_add_peer_concurrency.count(), con.add_peer_concurrency.count(),
-                    con.service_write_concurrency.count());
-            bthread_usleep(60 * 1000 * 1000);
+            if (ret == 0 && last_rocks_hang_check_cost < FLAGS_store_rocks_hang_check_timeout_s * 1000 * 1000LL) {
+                // 恢复正常
+                rocks_hang_continues_cnt = 0;
+            } else {
+                // 连续不正常次数++
+                rocks_hang_continues_cnt += 1;
+            }
+            DB_WARNING("store hang check: last_rocks_hang_check_cost: %ld, ret: %d, rocks_hang_continues_cnt: %d", 
+                last_rocks_hang_check_cost, ret, rocks_hang_continues_cnt);
         }
-     };
-    bth.run(dump_options);
+        if (++idx < 6) {
+            continue;
+        }
+        idx = 0;
+        // 每60s进行print_properties
+        TimeCost cost;
+        auto db_options = get_db()->get_db_options();
+        std::string str = db_options.statistics->ToString();
+        std::vector<std::string> items;
+        boost::split(items, str, boost::is_any_of("\n"));
+        for (auto& item : items) {
+            (void)item;
+            DB_WARNING("statistics: %s", item.c_str());
+        }
+        db_options.statistics->Reset();
+        monitor_memory();
+        print_properties("rocksdb.num-immutable-mem-table");
+        print_properties("rocksdb.mem-table-flush-pending");
+        print_properties("rocksdb.compaction-pending");
+        print_properties("rocksdb.estimate-pending-compaction-bytes");
+        print_properties("rocksdb.num-running-compactions");
+        print_properties("rocksdb.num-running-flushes");
+        print_properties("rocksdb.cur-size-active-mem-table");
+        print_properties("rocksdb.cur-size-all-mem-tables");
+        print_properties("rocksdb.size-all-mem-tables");
+        print_properties("rocksdb.estimate-table-readers-mem");
+        print_properties("rocksdb.actual-delayed-write-rate");
+        print_properties("rocksdb.is-write-stopped");
+        print_properties("rocksdb.num-snapshots");
+        print_properties("rocksdb.oldest-snapshot-time");
+        print_properties("rocksdb.is-write-stopped");
+        print_properties("rocksdb.num-live-versions");
+        print_properties("rocksdb.block-cache-usage");
+        print_properties("rocksdb.block-cache-pinned-usage");
+        auto& con = *Concurrency::get_instance();
+        DB_WARNING("get properties cost: %ld, concurrency:"
+                "snapshot:%d, recieve_add_peer:%d, add_peer:%d, service_write:%d", 
+                cost.get_time(), con.snapshot_load_concurrency.count(),
+                con.recieve_add_peer_concurrency.count(), con.add_peer_concurrency.count(),
+                con.service_write_concurrency.count());
+
+        // 获取和打印level0数量
+        uint64_t level0_ssts = 0;
+        uint64_t pending_compaction_size = 0;
+        int ret = RocksWrapper::get_instance()->get_rocks_statistic(level0_ssts, pending_compaction_size);
+        if (ret < 0) {
+            DB_WARNING("get_rocks_statistic failed");
+        }
+        DB_WARNING("level0: %lu, compaction: %lu", level0_ssts, pending_compaction_size);
+    }
 }
 
 int Store::get_used_size_per_region(const std::vector<int64_t>& region_ids, uint64_t* region_sizes) {
@@ -1535,7 +1607,7 @@ int Store::get_used_size_per_region(const std::vector<int64_t>& region_ids, uint
     return 0;
 }
 
-void Store::update_schema_info(const pb::SchemaInfo& table, std::map<int64_t, int64_t>* reverse_index_map) {
+void Store::update_schema_info(const pb::SchemaInfo& table, std::map<int64_t, std::set<int64_t>>* reverse_index_map) {
     //锁住的是update_table和table_info_mapping, table_info锁的位置不能改
     _factory->update_table(table);
     if (table.has_deleted() && table.deleted()) {
@@ -1543,9 +1615,9 @@ void Store::update_schema_info(const pb::SchemaInfo& table, std::map<int64_t, in
     }
     for (size_t idx = 0; idx < table.indexs_size(); ++idx) {
         const pb::IndexInfo& index_info = table.indexs(idx);
-        if (index_info.index_type() == pb::I_FULLTEXT && index_info.state() == pb::IS_NONE) {
+        if (index_info.index_type() == pb::I_FULLTEXT && index_info.state() != pb::IS_PUBLIC) {
             if (reverse_index_map != nullptr) {
-                reverse_index_map->emplace(table.table_id(), index_info.index_id());
+                (*reverse_index_map)[table.table_id()].emplace(index_info.index_id());
             }
         }
     }
@@ -1603,6 +1675,25 @@ void Store::construct_heart_beat_request(pb::StoreHeartBeatRequest& request) {
     instance_info->set_select_qps(select_time_cost.qps(60));
     instance_info->set_network_segment(FLAGS_network_segment);
     instance_info->set_container_id(FLAGS_container_id);
+    int64_t rocks_hang_check_cost = 0;
+    if (FLAGS_store_rocks_hang_check && count > 2) {
+        if (last_rocks_hang_check_ok.get_time() > 30 * 1000 * 1000LL) {
+            // hang check卡住了, 状态置为slow
+            rocks_hang_check_cost = FLAGS_store_rocks_hang_check_timeout_s * 1000 * 1000LL;
+        } else {
+            // hang check调度正常，连续三次测试读写都超时，才认为是slow
+            if (last_rocks_hang_check_cost >= FLAGS_store_rocks_hang_check_timeout_s * 1000 * 1000LL 
+                && rocks_hang_continues_cnt >= FLAGS_store_rocks_hang_cnt_limit) {
+                rocks_hang_check_cost = last_rocks_hang_check_cost;
+            }
+        }
+        if (rocks_hang_check_cost >= FLAGS_store_rocks_hang_check_timeout_s * 1000 * 1000LL) {
+            // 报警
+            DB_WARNING("store rocks hang, last_check_ok_time: %ld, last_check_ok_cost: %ld", 
+                last_rocks_hang_check_ok.get_time(), last_rocks_hang_check_cost);
+        }
+    }
+    instance_info->set_rocks_hang_check_cost(rocks_hang_check_cost);
     // 读取硬盘参数
     struct statfs sfs;
     statfs(FLAGS_db_path.c_str(), &sfs);
@@ -1649,7 +1740,7 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
         }
         RocksWrapper::get_instance()->adjust_option(_param_map);
     }
-    std::map<int64_t, int64_t> reverse_index_map;
+    std::map<int64_t, std::set<int64_t>> reverse_index_map;
     for (auto& schema_info : response.schema_change_info()) {
         update_schema_info(schema_info, &reverse_index_map);
     }
