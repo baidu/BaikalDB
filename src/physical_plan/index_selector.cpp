@@ -25,6 +25,7 @@ namespace baikaldb {
 using namespace range;
 int IndexSelector::analyze(QueryContext* ctx) {
     ExecNode* root = ctx->root;
+    _ctx = ctx;
     std::vector<ExecNode*> scan_nodes;
     root->get_node(pb::SCAN_NODE, scan_nodes);
     if (scan_nodes.size() == 0) {
@@ -600,7 +601,17 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
             sort_property = sort_node->sort_property();
         }
         access_path->calc_index_match(sort_property);
-        access_path->calc_is_covering_index(tuple_descs[tuple_id]);
+        if (_ctx != nullptr) {
+            auto& required_slot_map = _ctx->ref_slot_id_mapping[tuple_id];
+            std::set<int32_t> slot_ids;
+            for (auto& iter : required_slot_map) {
+                slot_ids.insert(iter.second);
+            }
+            access_path->calc_is_covering_index(tuple_descs[tuple_id], &slot_ids);
+        } else {
+            access_path->calc_is_covering_index(tuple_descs[tuple_id]);
+        }
+
         scan_node->add_access_path(access_path);
     }
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));

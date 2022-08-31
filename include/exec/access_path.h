@@ -108,14 +108,16 @@ enum IndexHint {
             }
         }
     }
-
-    void calc_is_covering_index(const pb::TupleDescriptor& desc) {
+    void calc_is_covering_index(const pb::TupleDescriptor& desc, std::set<int32_t>* slot_ids = nullptr) {
         for (auto& slot : desc.slots()) {
+            if ((slot_ids != nullptr) && (slot_ids->count(slot.slot_id()) == 0)) {
+                continue;
+            }
             if (cover_field_ids.count(slot.field_id()) == 0) {
                 // I_FULLTEXT; 获取不到索引的field信息
                 // 但是select count(*) from full like '%a%';是能够索引覆盖的
-                if (slot.ref_cnt() == 1 && 
-                        !need_cut_index_range_condition.empty() && 
+                if (slot.ref_cnt() == 1 &&
+                        !need_cut_index_range_condition.empty() &&
                         slot.field_id() == index_info_ptr->fields[0].id) {
                     continue;
                 } else {
