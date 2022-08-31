@@ -414,9 +414,11 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         DB_WARNING("gen plan failed, type:%d", ctx->stmt_type);
         return -1;
     }
-    int ret = planner->generate_sql_sign(ctx, ctx->stmt);
-    if (ret < 0) {
-        return -1;
+    if (ctx->stat_info.sign == 0) {
+        int ret = planner->generate_sql_sign(ctx, ctx->stmt);
+        if (ret < 0) {
+            return -1;
+        }
     }
     return 0;
 }
