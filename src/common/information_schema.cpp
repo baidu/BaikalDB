@@ -389,7 +389,9 @@ void InformationSchema::init_columns() {
                     record->set_string(record->get_field_by_name("TABLE_NAME"), table_info->short_name);
                     record->set_string(record->get_field_by_name("COLUMN_NAME"), field.short_name);
                     record->set_int64(record->get_field_by_name("ORDINAL_POSITION"), ++i);
-                    record->set_string(record->get_field_by_name("COLUMN_DEFAULT"), field.default_value);
+                    if (field.default_expr_value.type != pb::NULL_TYPE) {
+                        record->set_string(record->get_field_by_name("COLUMN_DEFAULT"), field.default_value);
+                    }
                     record->set_string(record->get_field_by_name("IS_NULLABLE"), field.can_null ? "YES" : "NO");
                     record->set_string(record->get_field_by_name("DATA_TYPE"), to_mysql_type_string(field.type));
                     switch (field.type) {
