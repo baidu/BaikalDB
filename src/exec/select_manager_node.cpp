@@ -347,6 +347,7 @@ int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* sta
                 state->txn_id, state->log_id());
         return ret;
     }
+    scan_node->add_global_condition_again();
     ExecNode* parent = get_parent();
     while (parent != nullptr && parent->node_type() != pb::LIMIT_NODE) {
         if (parent->node_type() != pb::SORT_NODE) {
