@@ -599,12 +599,12 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         if (sort_node != nullptr) {
             sort_property = sort_node->sort_property();
         }
-        access_path->calc_index_range(sort_property);
-        access_path->insert_no_cut_condition(expr_field_map);
+        access_path->calc_index_match(sort_property);
         access_path->calc_is_covering_index(tuple_descs[tuple_id]);
         scan_node->add_access_path(access_path);
     }
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
+    scan_node->set_expr_field_map(&expr_field_map);
     return scan_node->select_index_in_baikaldb(sample_sql); 
 }
 

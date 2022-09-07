@@ -357,7 +357,21 @@ public:
     bool current_use_global_backup() const {
         return _current_global_backup;
     }
-    
+
+    void set_expr_field_map(std::map<ExprNode*, std::unordered_set<int32_t>> * expr_field_map) {
+        _expr_field_map = expr_field_map;
+    }
+    void calc_index_range() {
+        if (_select_idx != -1) {
+            _main_path.path(_select_idx)->calc_index_range();
+            if (_expr_field_map != nullptr) {
+                _main_path.path(_select_idx)->insert_no_cut_condition(*_expr_field_map);
+            }
+        }
+        if (_main_path.path(_select_idx)->index_info_ptr->is_global) {
+            _main_path.path(_table_id)->calc_index_range();
+        }
+    }
 protected:
     pb::Engine _engine = pb::ROCKSDB;
     int32_t _tuple_id = 0;
@@ -373,9 +387,12 @@ protected:
     google::protobuf::RepeatedPtrField<pb::RegionInfo> _old_region_infos;
     FulltextInfoTree _fulltext_index_tree; //目前只有两层，第一层为and，第二层为or。
     std::unique_ptr<pb::FulltextIndex> _fulltext_index_pb;
+    int64_t _select_idx = -1;
+
     std::vector<ScanIndexInfo> _scan_indexs;
     bthread::Mutex _current_index_mutex;
     bool _current_global_backup = false;
+    std::map<ExprNode*, std::unordered_set<int32_t>>* _expr_field_map = nullptr;
 };
 }
 

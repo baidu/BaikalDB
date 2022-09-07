@@ -179,7 +179,8 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
             explain_info["possible_keys"].pop_back();
         }
         std::string tmp;
-        int64_t index_id = select_index_in_baikaldb(tmp);
+        //int64_t index_id = select_index_in_baikaldb(tmp);
+        int64_t index_id = _select_idx;
         auto index_info = factory->get_index_info(index_id);
         auto pri_info = factory->get_index_info(_table_id);
         explain_info["key"] = index_info.short_name;
@@ -516,6 +517,8 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
     }
 
     std::vector<ExprNode*> filter_condition;
+    _select_idx = select_idx;
+    calc_index_range();
     std::vector<int64_t> multi_reverse_index = _main_path.multi_reverse_index();
     if (multi_reverse_index.size() > 0) {
         _scan_indexs.clear();

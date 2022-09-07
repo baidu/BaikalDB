@@ -44,7 +44,9 @@ enum IndexHint {
         return true;
     }
 
-    void calc_index_range(Property& sort_property) {
+    void calc_index_range();
+
+    void calc_index_match(Property& sort_property) {
         fetch_field_ids();
         switch (index_type) {
             case pb::I_FULLTEXT:
@@ -60,7 +62,7 @@ enum IndexHint {
     bool need_select_learner_index();
     
     void calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
-            std::vector<ExprValue>& values, SmartRecord record, size_t field_idx, bool* out_open, int* out_field_cnt);
+            std::vector<ExprValue>& values, SmartRecord record, size_t field_idx);
 
     bool check_sort_use_index(Property& sort_property);
 
@@ -193,6 +195,13 @@ public:
     SmartTable table_info_ptr;
     SmartIndex index_info_ptr;
     SmartIndex pri_info_ptr;
+    int _left_field_cnt = 0;
+    int _right_field_cnt = 0;
+    bool _left_open = false;
+    bool _right_open = false;
+    bool _like_prefix = false;
+    bool _in_pred = false;
+    bool _is_eq_or_in = true;
 };
 typedef std::shared_ptr<AccessPath> SmartPath;
 }

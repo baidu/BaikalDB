@@ -63,7 +63,7 @@ bool AccessPath::need_select_learner_index() {
 }
 
 void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
-        std::vector<ExprValue>& values, SmartRecord record, size_t field_idx, bool* out_open, int* out_field_cnt) {
+        std::vector<ExprValue>& values, SmartRecord record, size_t field_idx) {
     if (expr == nullptr) {
         return;
     }
@@ -80,12 +80,8 @@ void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNod
             break;
         }
     }
-    *out_field_cnt = field_idx;
     if (row_idx == range_fields.size()) {
-        *out_open = in_open;
         need_cut_index_range_condition.insert(expr);
-    } else {
-        *out_open = false;
     }
 }
 
@@ -131,20 +127,6 @@ struct RecordRange {
 // 条件裁剪，对于普通条件，除了LIKE_PREFIX都裁剪
 // 对于row_expr，满足全命中索引range后裁剪
 void AccessPath::calc_normal(Property& sort_property) {
-    int left_field_cnt = 0;
-    int right_field_cnt = 0;
-    bool left_open = false;
-    bool right_open = false;
-    bool like_prefix = false;
-    bool in_pred = false;
-    ExprNode* in_row_expr = nullptr;
-    SmartRecord record_template = SchemaFactory::get_instance()->new_record(table_id);
-    SmartRecord left_record = record_template->clone(false);
-    SmartRecord right_record = record_template->clone(false);
-    std::vector<RecordRange> in_records;
-    // offset: in条件组合展开后的步长,用于非首字段的对应
-    // hit_fields_cnt: in_row_expr谓词匹配的字段个数,用于判断是否可以剪切
-    std::map< ExprNode*, std::pair<uint32_t, uint32_t>> in_row_expr_map; // <in_row_expr,<offset, hit_fields_cnt>
     int field_cnt = 0;
     for (auto& field : index_info_ptr->fields) {
         bool field_break = false;
@@ -157,31 +139,147 @@ void AccessPath::calc_normal(Property& sort_property) {
             case RANGE: {
                 field_break = true;
                 ++field_cnt;
+                _is_eq_or_in = false;
                 hit_index_field_ids.insert(field.id);
-                auto range_func = [&left_open, &left_field_cnt, &right_open, &right_field_cnt, 
-                     &range, this, field_cnt, field](
+                auto range_func = [&range, this, field_cnt, field]() {
+                    size_t field_idx = field_cnt - 1;
+                    if (range.left.size() == 1) {
+                        _left_open = range.left_open;
+                        _left_field_cnt = field_cnt;
+                    } else if (range.left.size() > 1) {
+                        size_t row_idx = 0;
+                        while (row_idx < range.left_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
+                            if (index_info_ptr->fields[field_idx].id == range.left_row_field_ids[row_idx]) {
+                                hit_index_field_ids.insert(range.left_row_field_ids[row_idx]);
+                            } else {
+                                break;
+                            }
+                            row_idx++, field_idx++;
+                        }
+                        _left_field_cnt = field_idx;
+                        if (row_idx == range.left_row_field_ids.size()) {
+                            _left_open = range.left_open;
+                        } else {
+                            _left_open = false;
+                        }
+                    }
+                    if (range.right.size() == 1) {
+                        _right_open = range.right_open;
+                        _right_field_cnt = field_cnt;
+                    } else if (range.right.size() > 1) {
+                        size_t row_idx = 0;
+                        while (row_idx < range.right_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
+                            if (index_info_ptr->fields[field_idx].id == range.right_row_field_ids[row_idx]) {
+                                hit_index_field_ids.insert(range.right_row_field_ids[row_idx]);
+                            } else {
+                                break;
+                            }
+                            row_idx++, field_idx++;
+                        }
+                        _right_field_cnt = field_idx;
+                        if (row_idx == range.right_row_field_ids.size()) {
+                            _right_open = range.right_open;
+                        } else {
+                            _right_open = false;
+                        }
+                    }
+                };
+                range_func();
+                break;
+            }
+            case EQ:
+            case LIKE_EQ:
+                ++eq_count;
+            case LIKE_PREFIX:
+                ++field_cnt;
+                hit_index_field_ids.insert(field.id);
+                _left_field_cnt = field_cnt;
+                _right_field_cnt = field_cnt;
+                _left_open = false;
+                _right_open = false;
+                if (range.type == LIKE_PREFIX) {
+                    _like_prefix = true;
+                    field_break = true;
+                    _is_eq_or_in = false;
+                }
+                break;
+            case LIKE:
+                field_break = true;
+                break;
+            case IN:
+                ++eq_count;
+                ++field_cnt;
+                hit_index_field_ids.insert(field.id);
+                _left_field_cnt = field_cnt;
+                _right_field_cnt = field_cnt;
+                _left_open = false;
+                _right_open = false;
+                _in_pred = true;
+                break;
+            default:
+                break;
+        }
+        if (field_break) {
+            break;
+        }
+    }
+    is_sort_index = check_sort_use_index(sort_property);
+    DB_DEBUG("is_sort_index:%d, eq_count:%d, sort_property:%lu", 
+        is_sort_index, eq_count, sort_property.slot_order_exprs.size());
+    pos_index.set_index_id(index_id);
+    if (is_sort_index) {
+        is_possible = true;
+        auto sort_index = pos_index.mutable_sort_index();
+        sort_index->set_is_asc(sort_property.is_asc[0]);
+        sort_index->set_sort_limit(sort_property.expected_cnt);
+    }
+    if (_left_field_cnt != 0 || _right_field_cnt != 0) {
+        is_possible = true;
+    }
+}
+
+// 填充索引的range
+void AccessPath::calc_index_range() {
+    ExprNode* in_row_expr = nullptr;
+    SmartRecord record_template = SchemaFactory::get_instance()->new_record(table_id);
+    SmartRecord left_record = record_template->clone(false);
+    SmartRecord right_record = record_template->clone(false);
+    std::vector<RecordRange> in_records;
+    // offset: in条件组合展开后的步长,用于非首字段的对应
+    // hit_fields_cnt: in_row_expr谓词匹配的字段个数,用于判断是否可以剪切
+    std::map< ExprNode*, std::pair<uint32_t, uint32_t>> in_row_expr_map; // <in_row_expr,<offset, hit_fields_cnt>
+    int field_cnt = 0;
+    for (auto& field : index_info_ptr->fields) {
+        auto iter = field_range_map.find(field.id);
+        field_cnt ++;
+        if (field_cnt > hit_index_field_ids.size()) {
+            break;
+        }
+        if (iter == field_range_map.end()) {
+            break;
+        }
+        FieldRange& range = iter->second;
+        switch (range.type) {
+            case RANGE: {
+                auto range_func = [&range, this, field_cnt, field](
                         SmartRecord& left_record, SmartRecord& right_record) {
                     size_t field_idx = field_cnt - 1;
                     if (range.left.size() == 1) {
                         left_record->set_value(left_record->get_field_by_tag(field.id), range.left[0]);
-                        left_open = range.left_open;
-                        left_field_cnt = field_cnt;
                         need_cut_index_range_condition.insert(range.left_expr);
                     } else if (range.left.size() > 1) {
                         calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
-                            range.left_open, range.left, left_record, field_idx, &left_open, &left_field_cnt);
+                            range.left_open, range.left, left_record, field_idx);
                     }
                     if (range.right.size() == 1) {
                         right_record->set_value(right_record->get_field_by_tag(field.id), range.right[0]);
-                        right_open = range.right_open;
-                        right_field_cnt = field_cnt;
                         need_cut_index_range_condition.insert(range.right_expr);
                     } else if (range.right.size() > 1) {
                         calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
-                            range.right_open, range.right, right_record, field_idx, &right_open, &right_field_cnt);
+                            range.right_open, range.right, right_record, field_idx);
                     }
                 };
-                if (in_pred) {
+                if (in_records.size() > 0) {
                     for (auto& rg : in_records) {
                         rg.right_record = rg.left_record->clone(true);
                         range_func(rg.left_record, rg.right_record);
@@ -193,14 +291,7 @@ void AccessPath::calc_normal(Property& sort_property) {
             }
             case EQ:
             case LIKE_EQ:
-                ++eq_count;
             case LIKE_PREFIX:
-                ++field_cnt;
-                hit_index_field_ids.insert(field.id);
-                left_field_cnt = field_cnt;
-                right_field_cnt = field_cnt;
-                left_open = false;
-                right_open = false;
                 if (in_records.empty()) {
                     left_record->set_value(left_record->get_field_by_tag(field.id), range.eq_in_values[0]);
                     right_record->set_value(right_record->get_field_by_tag(field.id), range.eq_in_values[0]);
@@ -210,8 +301,6 @@ void AccessPath::calc_normal(Property& sort_property) {
                     }
                 }
                 if (range.type == LIKE_PREFIX) {
-                    like_prefix = true;
-                    field_break = true;
                 } else if (range.is_row_expr) {
                     if (all_in_index(range.left_row_field_ids, hit_index_field_ids)) {
                         need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
@@ -219,9 +308,6 @@ void AccessPath::calc_normal(Property& sort_property) {
                 } else {
                     need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                 }
-                break;
-            case LIKE:
-                field_break = true;
                 break;
             case IN:
                 if (range.is_row_expr && in_row_expr_map.count(*range.conditions.begin()) == 1) {
@@ -243,16 +329,11 @@ void AccessPath::calc_normal(Property& sort_property) {
                     } else {
                         DB_FATAL("inx:%ld in_records.size() %lu != values.size()'s multiples %lu ",
                                 index_id, in_records.size(), range.eq_in_values.size());
-                        field_break = true;
-                        break;
+                        return;
                     }
                     in_row_expr_map[*range.conditions.begin()].second++;
                 } else {
                     // 第一次in_records size为0,不受限制
-                    if (in_records.size() * range.eq_in_values.size() > FLAGS_max_in_records_num) {
-                        field_break = true;
-                        break;
-                    }
                     if (in_records.empty()) {
                         RecordRange rg;
                         rg.left_record = left_record->clone(true);
@@ -278,14 +359,6 @@ void AccessPath::calc_normal(Property& sort_property) {
                     in_records.swap(comb_in_records);
                     comb_in_records.clear();
                 }
-                ++eq_count;
-                ++field_cnt;
-                hit_index_field_ids.insert(field.id);
-                left_field_cnt = field_cnt;
-                right_field_cnt = field_cnt;
-                left_open = false;
-                right_open = false;
-                in_pred = true;
                 if (range.is_row_expr) {
                     in_row_expr = *range.conditions.begin();
                     if (all_in_index(range.left_row_field_ids, hit_index_field_ids) &&
@@ -301,23 +374,10 @@ void AccessPath::calc_normal(Property& sort_property) {
             default:
                 break;
         }
-        if (field_break) {
-            break;
-        }
     }
-    is_sort_index = check_sort_use_index(sort_property);
-    DB_DEBUG("is_sort_index:%d, eq_count:%d, sort_property:%lu", 
-        is_sort_index, eq_count, sort_property.slot_order_exprs.size());
-    pos_index.set_index_id(index_id);
-    if (is_sort_index) {
-        is_possible = true;
-        auto sort_index = pos_index.mutable_sort_index();
-        sort_index->set_is_asc(sort_property.is_asc[0]);
-        sort_index->set_sort_limit(sort_property.expected_cnt);
-    }
-    if (left_field_cnt == 0 && right_field_cnt == 0) {
+    if (_left_field_cnt == 0 && _right_field_cnt == 0) {
         pos_index.add_ranges();
-    } else if (in_pred) {
+    } else if (in_records.size() > 0) {
         is_possible = true;
         butil::FlatSet<std::string> filter;
         filter.init(12301);
@@ -331,14 +391,14 @@ void AccessPath::calc_normal(Property& sort_property) {
             auto range = pos_index.add_ranges();
             MutTableKey  left;
             MutTableKey  right;
-            if (rg.left_record->encode_key(*index_info_ptr.get(), left, left_field_cnt, false, like_prefix) != 0) {
+            if (rg.left_record->encode_key(*index_info_ptr.get(), left, _left_field_cnt, false, _like_prefix) != 0) {
                 DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
                 continue;
             }
             range->set_left_key(left.data());
             range->set_left_full(left.get_full());
             if (rg.right_record != nullptr) {
-                if (rg.right_record->encode_key(*index_info_ptr.get(), right, right_field_cnt, false, like_prefix) != 0) {
+                if (rg.right_record->encode_key(*index_info_ptr.get(), right, _right_field_cnt, false, _like_prefix) != 0) {
                     DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
                     continue;
                 }
@@ -348,22 +408,22 @@ void AccessPath::calc_normal(Property& sort_property) {
                 range->set_right_key(left.data());
                 range->set_right_full(left.get_full());
             }
-            range->set_left_field_cnt(left_field_cnt);
-            range->set_right_field_cnt(right_field_cnt);
-            range->set_left_open(left_open);
-            range->set_right_open(right_open);
-            range->set_like_prefix(like_prefix);
+            range->set_left_field_cnt(_left_field_cnt);
+            range->set_right_field_cnt(_right_field_cnt);
+            range->set_left_open(_left_open);
+            range->set_right_open(_right_open);
+            range->set_like_prefix(_like_prefix);
         }
     } else {
         is_possible = true;
         auto range = pos_index.add_ranges();
         MutTableKey  left;
         MutTableKey  right;
-        if (left_record->encode_key(*index_info_ptr.get(), left, left_field_cnt, false, like_prefix) != 0) {
+        if (left_record->encode_key(*index_info_ptr.get(), left, _left_field_cnt, false, _like_prefix) != 0) {
             DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
             return;
         }
-        if (right_record->encode_key(*index_info_ptr.get(), right, right_field_cnt, false, like_prefix) != 0) {
+        if (right_record->encode_key(*index_info_ptr.get(), right, _right_field_cnt, false, _like_prefix) != 0) {
             DB_FATAL("Fail to encode_key left, table:%ld", index_info_ptr->id);
             return;
         }
@@ -371,11 +431,11 @@ void AccessPath::calc_normal(Property& sort_property) {
         range->set_left_full(left.get_full());
         range->set_right_key(right.data());
         range->set_right_full(right.get_full());
-        range->set_left_field_cnt(left_field_cnt);
-        range->set_right_field_cnt(right_field_cnt);
-        range->set_left_open(left_open);
-        range->set_right_open(right_open);
-        range->set_like_prefix(like_prefix);
+        range->set_left_field_cnt(_left_field_cnt);
+        range->set_right_field_cnt(_right_field_cnt);
+        range->set_left_open(_left_open);
+        range->set_right_open(_right_open);
+        range->set_like_prefix(_like_prefix);
     }
 }
 
