@@ -1622,6 +1622,14 @@ void LogicalPlanner::construct_literal_expr(const ExprValue& value, pb::ExprNode
             break;
         case pb::NULL_LITERAL:
             break;
+        case pb::TIMESTAMP_LITERAL:
+        case pb::TIME_LITERAL:
+        case pb::DATE_LITERAL:
+                node->mutable_derive_node()->set_int_val(value.get_numberic<int32_t>());
+                break;
+        case pb::DATETIME_LITERAL:
+                node->mutable_derive_node()->set_int_val(value.get_numberic<int64_t>());
+                break;
         default:
             DB_WARNING("expr:%s", value.get_string().c_str());
             break;
