@@ -23,7 +23,9 @@
 
 extern int sql_parse(yyscan_t scanner, parser::SqlParser* parser);
 namespace parser {
+#ifdef BAIDU_INTERNAL
 DEFINE_bool(use_is_utf8_strict, true, "is_utf8_strict");
+#endif
 void SqlParser::change_5c_to_7f(std::string& sql) {
     size_t i = 0;
     while (i < sql.size()) {
