@@ -754,6 +754,15 @@ public:
     int64_t removed_time_cost() const {
         return _removed_time_cost.get_time();
     }
+    void adjust_split_slow_down_cost(int64_t now_cost, int64_t pre_cost) {
+        if (now_cost > pre_cost) {
+            _split_param.split_slow_down_cost *= 2;
+        } else {
+            _split_param.split_slow_down_cost += 100 * 1000;
+        }
+        _split_param.split_slow_down_cost = std::min(
+            _split_param.split_slow_down_cost, (int64_t)5 * 1000 * 1000);
+    }
 
     int64_t get_split_wait_time() {
         int64_t wait_time = FLAGS_disable_write_wait_timeout_us;
