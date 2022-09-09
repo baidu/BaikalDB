@@ -448,7 +448,6 @@ TEST(gflags_test, case_all) {
 
 TEST(bns_to_meta_bns_test, case_all) {
      static std::map<std::string, std::string> mapping = {
-        {"0.opera-adp-baikalStore-000-ct.FENGCHAO.dbl",            "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
         {"31.opera-adp-baikalStore-000-nj.FENGCHAO.njjs",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
         {"28.opera-atomkv-baikalStore-000-bj.FENGCHAO.bjhw",       "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},
         {"2.opera-bigtree-baikalStore-000-bj.FENGCHAO.bjyz",       "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},

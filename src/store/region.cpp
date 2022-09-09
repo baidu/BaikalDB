@@ -75,6 +75,7 @@ DEFINE_int64(snapshot_log_exec_time_s, 60, "save_snapshot when log entries apply
 DEFINE_int64(split_duration_us, 3600 * 1000 * 1000LL, "split duration time : 3600s");
 DEFINE_int64(compact_delete_lines, 200000, "compact when _num_delete_lines > compact_delete_lines");
 DEFINE_int64(throttle_throughput_bytes, 50 * 1024 * 1024LL, "throttle throughput bytes");
+DEFINE_int64(tail_split_wait_threshold, 600 * 1000 * 1000LL, "tail split wait threshold(10min)");
 DEFINE_int64(split_send_first_log_entry_threshold, 3600 * 1000 * 1000LL, "split send log entry threshold(1h)");
 DEFINE_int64(split_send_log_batch_size, 20, "split send log batch size");
 DEFINE_int64(no_write_log_entry_threshold, 1000, "max left logEntry to be exec before no write");
@@ -5028,7 +5029,7 @@ int Region::split_region_add_peer(int64_t new_region_id, std::string instance, s
         StoreReqOptions req_options;
         req_options.request_timeout = 3600000;
         bool add_peer_success = false;
-        for(int j = 0; j < 3; ++j) {
+        for(int j = 0; j < 5; ++j) {
             StoreInteract store_interact(new_region_leader, req_options);
             DB_WARNING("split region_id: %ld is going to add peer to instance: %s, req: %s",
                        new_region_id, add_peer_instances[i].c_str(),
@@ -5037,6 +5038,10 @@ int Region::split_region_add_peer(int64_t new_region_id, std::string instance, s
             if (ret == 0) {
                 add_peer_success = true;
                 _new_region_info.add_peers(add_peer_instances[i]);
+            } else if (add_peer_response.errcode() == pb::CANNOT_ADD_PEER) {
+                DB_WARNING("region_id %ld: can not add peer", new_region_id);
+                bthread_usleep(1 * 1000 * 1000);
+                continue;
             }
             else if (add_peer_response.errcode() == pb::NOT_LEADER
                         && add_peer_response.has_leader()
@@ -5045,6 +5050,7 @@ int Region::split_region_add_peer(int64_t new_region_id, std::string instance, s
                 DB_WARNING("region_id %ld: leader change to %s when add peer",
                            new_region_id, add_peer_response.leader().c_str());
                 new_region_leader = add_peer_response.leader();
+                bthread_usleep(1 * 1000 * 1000);
                 continue;
             }
             break;
@@ -5086,14 +5092,34 @@ void Region::get_split_key_for_tail_split() {
     if (ret < 0) {
         return;
     }
+    TimeCost total_wait_time;
+    TimeCost add_slow_down_ticker;
     int64_t average_cost = _dml_time_cost.latency();
+    int64_t pre_digest_time = 0;
     int64_t digest_time = _real_writing_cond.count() * average_cost;
     int64_t disable_write_wait = std::max(FLAGS_disable_write_wait_timeout_us, _split_param.split_slow_down_cost);
     while (digest_time > disable_write_wait / 2) {
-        _split_param.split_slow_down_cost += 50 * 1000;
-        DB_WARNING("tail split wait, region_id: %lu, average_cost: %lu, digest_time: %lu, disable_write_wait: %lu", 
-                    _region_id, average_cost, digest_time, disable_write_wait);
-        bthread_usleep(digest_time);
+        if (!is_leader()) {
+            DB_WARNING("leader stop, region_id: %ld, new_region_id:%ld, instance:%s",
+                        _region_id, _split_param.new_region_id, _split_param.instance.c_str());
+            split_remove_new_region_peers();
+            return;
+        }
+        if (total_wait_time.get_time() > FLAGS_tail_split_wait_threshold) {
+            // 10分钟强制分裂
+            disable_write_wait = 3600 * 1000 * 1000LL;
+            break;
+        }
+        if (add_slow_down_ticker.get_time() > 30 * 1000 * 1000LL) {
+            adjust_split_slow_down_cost(digest_time, pre_digest_time);
+            add_slow_down_ticker.reset();
+        }
+        DB_WARNING("tail split wait, region_id: %lu, average_cost: %lu, digest_time: %lu,"
+                   "disable_write_wait: %lu, slow_down: %lu", 
+                    _region_id, average_cost, digest_time, disable_write_wait, 
+                    _split_param.split_slow_down_cost);
+        bthread_usleep(std::min(digest_time, (int64_t)1 * 1000 * 1000));
+        pre_digest_time = digest_time;
         average_cost = _dml_time_cost.latency();
         digest_time = _real_writing_cond.count() * average_cost;
         disable_write_wait = std::max(FLAGS_disable_write_wait_timeout_us, _split_param.split_slow_down_cost);
@@ -5630,6 +5656,10 @@ void Region::send_log_entry_to_new_region_for_split() {
     if (FLAGS_split_add_peer_asyc) {
         Bthread bth;
         bth.run([this, new_region_leader](){
+            _multi_thread_cond.increase();
+            ON_SCOPE_EXIT([this]() {
+                _multi_thread_cond.decrease_signal();
+            });
             std::string region_leader = new_region_leader;
             split_region_add_peer(_split_param.new_region_id, _split_param.instance, 
                                     region_leader, _split_param.add_peer_instances, true);
@@ -5727,6 +5757,7 @@ void Region::send_log_entry_to_new_region_for_split() {
                         }
                         DB_WARNING("leader transferd when send log entry, region_id: %ld, new_region_id:%ld",
                                    _region_id, _split_param.new_region_id);
+                        bthread_usleep(1 * 1000 * 1000);
                     } else {
                         DB_FATAL("new region request fail, send log entry fail before not allow write,"
                             " region_id: %ld, new_region_id:%ld, instance:%s",
@@ -5745,7 +5776,7 @@ void Region::send_log_entry_to_new_region_for_split() {
                     }
                     break;
                 }
-            } while (retry_time < 3);
+            } while (retry_time < 10);
             if (!send_success) {
                 DB_FATAL("new region request fail, send log entry fail before not allow write,"
                          " region_id: %ld, new_region_id:%ld, instance:%s",
@@ -5775,13 +5806,7 @@ void Region::send_log_entry_to_new_region_for_split() {
         average_cost = _dml_time_cost.latency();
         if (every_minute.get_time() > 60 * 1000 * 1000) {
             queued_logs_now = new_region_braft_index - new_region_apply_index;
-            if (queued_logs_now > queued_logs_pre_min) {
-                _split_param.split_slow_down_cost *= 2;
-            } else {
-                _split_param.split_slow_down_cost += 100 * 1000;
-            }
-            _split_param.split_slow_down_cost = std::min(
-                    _split_param.split_slow_down_cost, (int64_t)5000000);
+            adjust_split_slow_down_cost(queued_logs_now, queued_logs_pre_min);
             every_minute.reset();
             queued_logs_pre_min = queued_logs_now;
         }
@@ -5992,7 +6017,7 @@ void Region::send_complete_to_new_region_for_split() {
     do {
         brpc::Channel channel;
         brpc::ChannelOptions channel_opt;
-        channel_opt.timeout_ms = FLAGS_store_request_timeout * 10;
+        channel_opt.timeout_ms = FLAGS_store_request_timeout * 10 * 2;
         channel_opt.connect_timeout_ms = FLAGS_store_connect_timeout;
         if (channel.Init(_split_param.instance.c_str(), &channel_opt)) {
             DB_WARNING("send complete signal to new region fail when split,"
@@ -6021,7 +6046,8 @@ void Region::send_complete_to_new_region_for_split() {
         response.Clear();
         pb::StoreService_Stub(&channel).query(&cntl, &request, &response, NULL);
         if (cntl.Failed()) {
-            DB_WARNING("region split fail when add version for split, err:%s",  cntl.ErrorText().c_str());
+            DB_WARNING("region split fail when add version for split, region_id: %ld, err:%s", 
+                        _region_id, cntl.ErrorText().c_str());
             ++retry_times;
             continue;
         }

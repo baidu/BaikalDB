@@ -187,7 +187,7 @@ public:
             uint64_t level0_sst = 0;
             uint64_t pending_compaction_size = 0;
             get_rocks_statistic(level0_sst, pending_compaction_size);
-            if (level0_sst > _data_cf_option.level0_slowdown_writes_trigger) {
+            if (level0_sst > _data_cf_option.level0_slowdown_writes_trigger * 0.8) {
                 return true;
             }
             if (pending_compaction_size > _data_cf_option.soft_pending_compaction_bytes_limit / 2) {
