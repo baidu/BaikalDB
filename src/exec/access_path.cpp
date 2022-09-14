@@ -223,6 +223,10 @@ void AccessPath::calc_normal(Property& sort_property) {
             break;
         }
     }
+    if (hit_index_field_ids.size() < field_range_map.size()) {
+	//除cut contition外有过滤条件
+	_need_filter = true;
+    }
     is_sort_index = check_sort_use_index(sort_property);
     DB_DEBUG("is_sort_index:%d, eq_count:%d, sort_property:%lu", 
         is_sort_index, eq_count, sort_property.slot_order_exprs.size());

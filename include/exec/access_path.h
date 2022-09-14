@@ -162,6 +162,10 @@ enum IndexHint {
 
         return false;
     }
+    bool need_filter() {
+        return _need_filter;
+    }
+
     
 public:
     //TODO 先mock一个，后面从schema读取
@@ -206,6 +210,7 @@ public:
     bool _like_prefix = false;
     bool _in_pred = false;
     bool _is_eq_or_in = true;
+    bool _need_filter = false;
 };
 typedef std::shared_ptr<AccessPath> SmartPath;
 }

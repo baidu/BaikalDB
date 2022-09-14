@@ -376,6 +376,12 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
             return 0;
         }
 
+        if (!inner_path->need_filter() && outer_path->is_sort_index <= inner_path->is_sort_index) {
+	    outer_path->is_possible = false;
+            return -1;
+	}
+
+
         if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
             outer_path->is_possible = false;
             return -1;
@@ -390,6 +396,11 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
         if (!full_coverage(inner_path->hit_index_field_ids, outer_path->hit_index_field_ids)) {
             return 0;
         }
+
+        if (!outer_path->need_filter() && inner_path->is_sort_index <= outer_path->is_sort_index) {
+	    inner_path->is_possible = false;
+            return -2;
+	}
 
         if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
             inner_path->is_possible = false;
