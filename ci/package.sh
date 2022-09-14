@@ -17,7 +17,7 @@ do
     mkdir -p $module/bin $module/conf $module/log $module/script
     cp $BAZEL_BIN/$module $module/bin
     cp $PROJ_DIR/conf/$module/* $module/conf
-    cp $PROJ_DIR/src/tools/script/* $module/script
+    cp -r $PROJ_DIR/src/tools/script/* $module/script
     
 done
 
