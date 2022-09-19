@@ -368,7 +368,7 @@ public:
                 _main_path.path(_select_idx)->insert_no_cut_condition(*_expr_field_map);
             }
         }
-        if (_main_path.path(_select_idx)->index_info_ptr->is_global) {
+        if (!_main_path.path(_select_idx)->index_info_ptr->is_global && _select_idx != _table_id) {
             _main_path.path(_table_id)->calc_index_range();
         }
     }

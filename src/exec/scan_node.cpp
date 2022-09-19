@@ -322,12 +322,12 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
 
         if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
-            if (outer_path->index_other_condition.size() > 
-                inner_path->index_other_condition.size()) {
+            if (outer_path->index_other_condition_count > 
+                inner_path->index_other_condition_count) {
                 inner_path->is_possible = false;
                 return -2;
-            } else if (outer_path->index_other_condition.size() < 
-                    inner_path->index_other_condition.size()) {
+            } else if (outer_path->index_other_condition_count < 
+                    inner_path->index_other_condition_count) {
                 outer_path->is_possible = false;
                 return -1;
             } else {

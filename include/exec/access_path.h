@@ -135,6 +135,7 @@ enum IndexHint {
 
     // 参考choose_index函数
     bool is_eq_or_in() {
+        return _is_eq_or_in;
         if (pos_index.ranges_size() > 0) {
             const auto& range = pos_index.ranges(0);
             bool is_eq = true;
@@ -194,6 +195,7 @@ public:
     bool is_possible = false;
     bool is_sort_index = false;
     bool is_virtual = false;
+    int index_other_condition_count = 0;
     SmartTable table_info_ptr;
     SmartIndex index_info_ptr;
     SmartIndex pri_info_ptr;

@@ -236,6 +236,7 @@ void AccessPath::calc_normal(Property& sort_property) {
     if (_left_field_cnt != 0 || _right_field_cnt != 0) {
         is_possible = true;
     }
+    index_other_condition_count = field_range_map.size() - hit_index_field_ids.size();
 }
 
 // 填充索引的range
