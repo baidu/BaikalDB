@@ -637,21 +637,21 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
 }
 
 void ScanNode::add_global_condition_again() {
-    int64_t index_id = _paths[_select_idx]->index_id;
+    int64_t index_id = _main_path.path(_select_idx)->index_id;
     if (!SchemaFactory::get_instance()->is_global_index(index_id)) {
         return;
     }
     std::vector<ExprNode*> other_condition;
     other_condition.insert(other_condition.end(),
-                           _paths[_select_idx]->other_condition.begin(),
-                           _paths[_select_idx]->other_condition.end());
+                           _main_path.path(_select_idx)->other_condition.begin(),
+                           _main_path.path(_select_idx)->other_condition.end());
     // global可能与primary数据不一致，数据以primary为主返回，global条件需保留，拿primary进行二次校验
     other_condition.insert(other_condition.end(),
-                           _paths[_select_idx]->need_cut_index_range_condition.begin(),
-                           _paths[_select_idx]->need_cut_index_range_condition.end());
+                           _main_path.path(_select_idx)->need_cut_index_range_condition.begin(),
+                           _main_path.path(_select_idx)->need_cut_index_range_condition.end());
     other_condition.insert(other_condition.end(),
-                           _paths[_select_idx]->index_other_condition.begin(),
-                           _paths[_select_idx]->index_other_condition.end());
+                           _main_path.path(_select_idx)->index_other_condition.begin(),
+                           _main_path.path(_select_idx)->index_other_condition.end());
     // modify filter conjuncts
     if (get_parent()->node_type() != pb::TABLE_FILTER_NODE &&
        get_parent()->node_type() != pb::WHERE_FILTER_NODE) {
