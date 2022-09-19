@@ -120,6 +120,14 @@ private:
         return false;
     }
 
+    bool range_reach_limit() {
+        if (_sort_use_index_by_range) {
+            return _sort_limit_by_range != -1 &&
+                    _num_rows_returned_by_range >= _sort_limit_by_range;
+        }
+        return false;
+    }
+
 private:
     std::map<int32_t, FieldInfo*> _field_ids;
     std::map<int32_t, FieldInfo*> _ddl_field_ids;
@@ -139,6 +147,9 @@ private:
     // 如果用了排序列做索引，就不需要排序了
     bool _sort_use_index = false;
     bool _scan_forward = true; //scan的方向
+    bool _sort_use_index_by_range = false;
+    int64_t _sort_limit_by_range = 0;
+    int64_t _num_rows_returned_by_range = 0;
     
     //被选择的索引
     std::vector<SmartRecord> _left_records;
