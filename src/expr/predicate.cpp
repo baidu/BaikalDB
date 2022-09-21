@@ -17,6 +17,9 @@
 #include <boost/algorithm/string.hpp>
 
 namespace baikaldb {
+
+DEFINE_bool(like_predicate_use_re2, true, "LikePredicate use re2");
+
 int InPredicate::open() {
     int ret = 0;
     ret = ExprNode::open();
@@ -186,6 +189,14 @@ void LikePredicate::reset_pattern(MemRow* row) {
 }
 
 int LikePredicate::open() {
+    if (FLAGS_like_predicate_use_re2) {
+        return open_by_re2();
+    } else {
+        return open_by_pattern();
+    }
+}
+
+int LikePredicate::open_by_pattern() {
     int ret = 0;
     ret = ExprNode::open();
     if (ret < 0) {
@@ -226,6 +237,130 @@ int LikePredicate::open() {
     }
     return 0;
 }
+
+void LikePredicate::reset_regex(MemRow* row) {
+    std::string like_pattern = children(1)->get_value(row).get_string();
+    if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
+        covent_exact_pattern(like_pattern);
+        _regex_ptr.reset(new re2::RE2(_regex_pattern, _option));
+    } else {
+        covent_pattern(like_pattern);
+        _regex_ptr.reset(new re2::RE2(_regex_pattern, _option));
+    }
+}
+
+int LikePredicate::open_by_re2() {
+    int ret = 0;
+    ret = ExprNode::open();
+    if (ret < 0) {
+        DB_WARNING("ExprNode::open fail:%d", ret);
+        return ret;
+    }
+    if (children_size() < 2) {
+        DB_WARNING("LikePredicate _children.size:%lu", _children.size());
+        return -1;
+    }
+    std::unordered_set<int32_t> slot_ids;
+    children(1)->get_all_slot_ids(slot_ids);
+    _option.set_utf8(false);
+    _option.set_dot_nl(true);
+    if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
+        _option.set_case_sensitive(false);
+    }
+    if (slot_ids.size() == 0) {
+        reset_regex(nullptr);
+    } else {
+        _const_regex = false;
+    }
+    return 0;
+}
+
+void LikePredicate::covent_pattern(const std::string& pattern) {
+    bool is_escaped = false;
+    static std::set<char> need_escape_set = {
+        '.', '*', '+', '?',
+        '[', ']', '{', '}',
+        '(', ')', '\\', '|',
+        '^', '$'};
+    for (uint32_t i = 0; i < pattern.size(); ++i) {
+        if (!is_escaped && pattern[i] == '%') {
+            _regex_pattern.append(".*");
+        } else if (!is_escaped && pattern[i] == '_') {
+            _regex_pattern.append(".");
+        } else if (!is_escaped && pattern[i] == _escape_char) {
+            is_escaped = true;
+        } else if (need_escape_set.count(pattern[i]) == 1) {
+            _regex_pattern.append("\\");
+            _regex_pattern.append(1, pattern[i]);
+            is_escaped = false;
+        } else {
+            _regex_pattern.append(1, pattern[i]);
+            is_escaped = false;
+        }
+    }
+}
+
+void LikePredicate::covent_exact_pattern(const std::string& pattern) {
+    bool is_escaped = false;
+    static std::set<char> need_escape_set = {
+        '.', '*', '+', '?',
+        '[', ']', '{', '}',
+        '(', ')', '\\',
+        '^', '$'};
+    for (uint32_t i = 0; i < pattern.size(); ++i) {
+        if (!is_escaped && pattern[i] == '%') {
+            _regex_pattern.append(".*");
+        } else if (!is_escaped && pattern[i] == '_') {
+            _regex_pattern.append(".");
+        } else if (!is_escaped && pattern[i] == '|') {
+            _regex_pattern.append(".*");
+            _regex_pattern.append("|");
+            _regex_pattern.append(".*");
+        } else if (!is_escaped && pattern[i] == _escape_char) {
+            is_escaped = true;
+        } else if (need_escape_set.count(pattern[i]) == 1) {
+            _regex_pattern.append("\\");
+            _regex_pattern.append(1, pattern[i]);
+            is_escaped = false;
+        } else {
+            _regex_pattern.append(1, pattern[i]);
+            is_escaped = false;
+        }
+    }
+}
+
+ExprValue LikePredicate::get_value(MemRow* row) {
+    if (FLAGS_like_predicate_use_re2) {
+        return get_value_by_re2(row);
+    } else {
+        return get_value_by_pattern(row);
+    }
+}
+
+ExprValue LikePredicate::get_value_by_re2(MemRow* row) {
+    if (!_const_regex) {
+        reset_regex(row);
+    }
+    ExprValue value = children(0)->get_value(row);
+    value.cast_to(pb::STRING);
+    ExprValue ret(pb::BOOL);
+    try {
+        ret._u.bool_val = RE2::FullMatch(value.str_val, *_regex_ptr);
+        if (_regex_ptr->error_code() != 0) {
+            DB_FATAL("regex error[%d]", _regex_ptr->error_code());
+        }
+    } catch (std::exception& e) {
+        DB_FATAL("regex error:%s, _regex_pattern:%ss",
+                e.what(), _regex_pattern.c_str());
+        ret._u.bool_val = false;
+    } catch (...) {
+        DB_FATAL("regex unknown error: _regex_pattern:%ss",
+                 _regex_pattern.c_str());
+        ret._u.bool_val = false;
+    }
+    return ret;
+}
+
 
 void LikePredicate::hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_value) {
     std::string pattern = children(1)->get_value(nullptr).get_string();
@@ -290,7 +425,7 @@ bool LikePredicate::like_one(const std::string& target, const std::string& patte
     return ret;
 }
 
-ExprValue LikePredicate::get_value(MemRow* row) {
+ExprValue LikePredicate::get_value_by_pattern(MemRow* row) {
     if (!_const_pattern) {
         reset_pattern(row);
     }
