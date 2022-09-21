@@ -807,6 +807,7 @@ void InformationSchema::init_sign_list() {
 
     int64_t blacklist_table_id = construct_table("SIGN_BLACKLIST", fields);
     int64_t forcelearner_table_id = construct_table("SIGN_FORCELEARNER", fields);
+    int64_t forceindex_table_id = construct_table("SIGN_FORCEINDEX", fields);
     //定义操作
     _calls[blacklist_table_id] = [blacklist_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) -> 
             std::vector <SmartRecord> {
@@ -854,6 +855,34 @@ void InformationSchema::init_sign_list() {
                 record->set_string(record->get_field_by_name("database_name"), db_name);
                 record->set_string(record->get_field_by_name("table_name"),table->short_name);
                 record->set_string(record->get_field_by_name("sign"), std::to_string(sign));
+                records.emplace_back(record);
+            }
+            return false;
+        };
+        std::vector<std::string> database_table;
+        std::vector<std::string> binlog_table;
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, binlog_table, func);
+        return records;
+    };
+
+    _calls[forceindex_table_id] = [forceindex_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) ->
+            std::vector <SmartRecord> {
+        std::vector <SmartRecord> records;
+        records.reserve(10);
+        auto forceindex_table = SchemaFactory::get_instance()->get_table_info_ptr(forceindex_table_id);
+        auto func = [&records, &forceindex_table](const SmartTable& table) -> bool {
+            for (auto sign_index : table->sign_forceindex) {
+                auto record = SchemaFactory::get_instance()->new_record(*forceindex_table);
+                record->set_string(record->get_field_by_name("namespace"), table->namespace_);
+                std::string db_name;
+                std::vector<std::string> vec;
+                boost::split(vec, table->name, boost::is_any_of("."));
+                if (!vec.empty()) {
+                    db_name = vec[0];
+                }
+                record->set_string(record->get_field_by_name("database_name"), db_name);
+                record->set_string(record->get_field_by_name("table_name"),table->short_name);
+                record->set_string(record->get_field_by_name("sign"), sign_index);
                 records.emplace_back(record);
             }
             return false;

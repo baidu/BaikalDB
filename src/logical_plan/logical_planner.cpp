@@ -453,8 +453,33 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
                     stat_info->sample_sql.str().c_str());
             }
         }
+        if (!ctx->sign_forceindex.empty()) {
+            if (ctx->sign_forceindex.count(stat_info->sign) > 0) {
+                auto& table_index_map = ctx->sign_forceindex[stat_info->sign];
+                for (int i = 0; i < ctx->plan.nodes_size(); i++) {
+                    auto node = ctx->plan.mutable_nodes(i);
+                    if (node->node_type() != pb::SCAN_NODE) {
+                        continue;
+                    }
+                    pb::DerivePlanNode* derive = node->mutable_derive_node();
+                    pb::ScanNode* scan = derive->mutable_scan_node();
+                    int64_t table_id = scan->table_id();
+                    if (table_index_map.count(table_id) > 0) {
+                       for (auto& index_name: table_index_map[table_id]) {
+                           int64_t index_id = 0;
+                           auto ret = _factory->get_index_id(table_id, index_name, index_id);
+                           if (ret != 0) {
+                               DB_WARNING("index_name: %s in table:%s not exist", index_name.c_str(),
+                                          _factory->get_table_info_ptr(table_id)->name.c_str());
+                               continue;
+                           }
+                           scan->add_force_indexes(index_id);
+                       }
+                    }
+                }
+            }
+        }
     }
-
     return 0;
 }
 
@@ -646,7 +671,17 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
 
         _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
         _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
-
+        for (auto& sign_index : tbl_ptr->sign_forceindex) {
+            std::vector<std::string> vec;
+            boost::split(vec, sign_index, boost::is_any_of(":"));
+            if (vec.size() != 2) {
+                continue;
+            }
+            uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
+            auto& table_index_map = _ctx->sign_forceindex[sign_num];
+            auto& force_index_set = table_index_map[tableid];
+            force_index_set.insert(vec[1]);
+        }
         // 通用降级路由
         // 复杂sql(join和子查询)不降级
         if (MetaServerInteract::get_backup_instance()->is_inited() && tbl_ptr->have_backup && !_ctx->is_complex &&

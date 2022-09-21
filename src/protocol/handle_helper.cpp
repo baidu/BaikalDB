@@ -1164,6 +1164,23 @@ void handle_signlist(bool is_add, std::set<uint64_t> origin_list, std::string si
     }
 }
 
+void handle_signlist(bool is_add, std::set<std::string> origin_list, std::string sign, std::string& out_value) {
+    if (is_add) {
+        origin_list.insert(sign);
+    } else {
+        origin_list.erase(sign);
+    }
+
+    bool is_first = true;
+    for (auto s : origin_list) {
+        if (!is_first) {
+            out_value += ',';
+        }
+        out_value += s;
+        is_first = false;
+    }
+}
+
 bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (!client || !client->user_info) {
         DB_FATAL("param invalid");
@@ -1220,7 +1237,8 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         schema_conf->set_in_fast_import(is_open);
         auto table_schema = factory->get_table_info(table_id);
         table_info->set_resource_tag(table_schema.resource_tag);
-    } else if (key.find("blacklist") != key.npos || key.find("forcelearner") != key.npos) {
+    } else if (key.find("blacklist") != key.npos || key.find("forcelearner") != key.npos
+            || key.find("forceindex") != key.npos) {
         auto table = factory->get_table_info_ptr(table_id);
         if (table == nullptr) {
             DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
@@ -1233,11 +1251,15 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         if (key.find("blacklist") != key.npos) {
             handle_signlist(is_add, table->sign_blacklist, split_vec[4], value);
             schema_conf->set_sign_blacklist(value);
-            DB_WARNING("blacklist table_name: %s, table_id: %ld, sings: %s", full_name.c_str(), table_id, value.c_str());
-        } else {
+            DB_WARNING("blacklist table_name: %s, table_id: %ld, signs: %s", full_name.c_str(), table_id, value.c_str());
+        } else if (key.find("forcelearner") != key.npos) {
             handle_signlist(is_add, table->sign_forcelearner, split_vec[4], value);
             schema_conf->set_sign_forcelearner(value);
-            DB_WARNING("forcelearner table_name: %s, table_id: %ld, sings: %s", full_name.c_str(), table_id, value.c_str());
+            DB_WARNING("forcelearner table_name: %s, table_id: %ld, signs: %s", full_name.c_str(), table_id, value.c_str());
+        } else {
+            handle_signlist(is_add, table->sign_forceindex, split_vec[4], value);
+            schema_conf->set_sign_forceindex(value);
+            DB_WARNING("forceindex table_name: %s, table_id: %ld, signs: %s", full_name.c_str(), table_id, value.c_str());
         }
     } else {
         DB_FATAL("param invalid");

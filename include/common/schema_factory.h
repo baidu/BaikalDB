@@ -327,6 +327,7 @@ struct TableInfo {
     std::vector<std::string> learner_resource_tags;
     std::set<uint64_t> sign_blacklist;
     std::set<uint64_t> sign_forcelearner;
+    std::set<std::string> sign_forceindex;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {
