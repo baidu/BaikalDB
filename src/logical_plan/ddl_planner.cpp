@@ -130,7 +130,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             index->add_field_names(col_name);
         } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL && col_option->expr != nullptr) {
             if (col_option->expr->to_string() == "(current_timestamp())") {
-                if (is_datetime_specic(data_type)) {
+                if (is_current_timestamp_specic(data_type)) {
                     field->set_default_literal(ExprValue::Now().get_string());
                     field->set_default_value("(current_timestamp())");
                     continue;
