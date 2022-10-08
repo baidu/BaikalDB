@@ -3309,6 +3309,13 @@ ColumnOption:
         option->expr = $2;
         $$ = option;
     }
+    | COLLATE StringName
+    {
+        ColumnOption* option = new_node(ColumnOption);
+        option->type = COLUMN_OPT_COLLATE;
+        option->expr = LiteralExpr::make_string($2, parser->arena);
+        $$ = option;
+    }
     ;
     
 SignedLiteral:

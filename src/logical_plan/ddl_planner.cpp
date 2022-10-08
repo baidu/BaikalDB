@@ -181,6 +181,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
             field->set_comment(col_option->expr->to_string());
         } else if (col_option->type == parser::COLUMN_OPT_ON_UPDATE) {
             field->set_on_update_value(col_option->expr->to_string());
+        }  else if (col_option->type == parser::COLUMN_OPT_COLLATE) {
         } else {
             DB_WARNING("unsupported column option type: %d", col_option->type);
             return -1;
