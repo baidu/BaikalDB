@@ -65,6 +65,7 @@ ExprValue substring_index(const std::vector<ExprValue>& input);
 ExprValue lpad(const std::vector<ExprValue>& input);
 ExprValue rpad(const std::vector<ExprValue>& input);
 ExprValue instr(const std::vector<ExprValue>& input);
+ExprValue json_extract(const std::vector<ExprValue>& input);
 
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);

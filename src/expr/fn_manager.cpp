@@ -152,6 +152,7 @@ void FunctionManager::register_operators() {
     register_object_ret("lpad", lpad, pb::STRING);
     register_object_ret("rpad", rpad, pb::STRING);
     register_object_ret("instr", instr, pb::INT32);
+    register_object_ret("json_extract", json_extract, pb::STRING);
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);

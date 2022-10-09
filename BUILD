@@ -246,6 +246,7 @@ cc_library(
         "//external:rocksdb",
         "//external:re2",
         "//external:croaring",
+        "//external:rapidjson",
     ],
     visibility = ["//visibility:public"],
 )
