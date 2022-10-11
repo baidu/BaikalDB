@@ -724,6 +724,7 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
         DB_WARNING("TransactionWarning: txn has exec before, remote_side:%s "
                 "region_id: %ld, txn_id: %lu, op_type: %s, last_seq:%d, seq_id:%d log_id:%lu",
             remote_side, _region_id, txn_id, pb::OpType_Name(op_type).c_str(), last_seq, seq_id, log_id);
+        txn->swap_last_response(*response);
         response->set_affected_rows(txn->dml_num_affected_rows);
         response->set_errcode(txn->err_code);
         return;
@@ -1806,6 +1807,12 @@ void Region::dml_2pc(const pb::StoreReq& request,
     if (txn != nullptr) {
         txn->err_code = pb::SUCCESS;
     }
+    response.set_affected_rows(affected_rows);
+    if (state.last_insert_id != INT64_MIN) {
+        response.set_last_insert_id(state.last_insert_id);
+    }
+    response.set_scan_rows(state.num_scan_rows());
+    response.set_errcode(pb::SUCCESS);
 
     txn = _txn_pool.get_txn(txn_id);
     if (txn != nullptr) {
@@ -1832,6 +1839,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
             }
             txn->push_cmd_to_cache(seq_id, plan_item);
             //DB_WARNING("put txn cmd to cache: region_id: %ld, txn_id: %lu:%d", _region_id, txn_id, seq_id);
+            txn->save_last_response(response);
         }
     } else if (op_type != pb::OP_COMMIT && op_type != pb::OP_ROLLBACK) {
         // after commit or rollback, txn will be deleted
@@ -1846,14 +1854,9 @@ void Region::dml_2pc(const pb::StoreReq& request,
     if (/*txn_info.autocommit() && */(op_type == pb::OP_UPDATE || op_type == pb::OP_INSERT || op_type == pb::OP_DELETE)) {
         txn->dml_num_affected_rows = affected_rows;
     }
-    response.set_affected_rows(affected_rows);
-    if (state.last_insert_id != INT64_MIN) {
-        response.set_last_insert_id(state.last_insert_id);
-    }
-    response.set_scan_rows(state.num_scan_rows());
+
     root->close(&state);
     ExecNode::destroy_tree(root);
-    response.set_errcode(pb::SUCCESS);
 
     if (op_type == pb::OP_TRUNCATE_TABLE) {
         ret = _num_table_lines;
@@ -2459,23 +2462,6 @@ int Region::select(const pb::StoreReq& request,
         DB_FATAL("plan exec fail, region_id: %ld", _region_id);
         return -1;
     }
-
-    if (!is_new_txn && txn != nullptr && request.op_type() == pb::OP_SELECT_FOR_UPDATE) {
-            auto seq_id = txn_info.seq_id();
-            pb::CachePlan plan_item;
-            plan_item.set_op_type(request.op_type());
-            plan_item.set_seq_id(seq_id);
-            plan_item.mutable_plan()->CopyFrom(plan);
-            for (auto& tuple : tuples) {
-                plan_item.add_tuples()->CopyFrom(tuple);
-            }
-            txn->push_cmd_to_cache(seq_id, plan_item);
-            //DB_WARNING("put txn cmd to cache: region_id: %ld, txn_id: %lu:%d", _region_id, txn_info.txn_id(), seq_id);
-        }
-
-    //DB_NOTICE("select rows:%d", rows);
-    root->close(&state);
-    ExecNode::destroy_tree(root);
     response.set_errcode(pb::SUCCESS);
     // 非事务select，不用commit。
     //if (is_new_txn) {
@@ -2485,6 +2471,23 @@ int Region::select(const pb::StoreReq& request,
     response.set_affected_rows(rows);
     response.set_scan_rows(state.num_scan_rows());
     response.set_filter_rows(state.num_filter_rows());
+    if (!is_new_txn && txn != nullptr && request.op_type() == pb::OP_SELECT_FOR_UPDATE) {
+        auto seq_id = txn_info.seq_id();
+        pb::CachePlan plan_item;
+        plan_item.set_op_type(request.op_type());
+        plan_item.set_seq_id(seq_id);
+        plan_item.mutable_plan()->CopyFrom(plan);
+        for (auto& tuple : tuples) {
+            plan_item.add_tuples()->CopyFrom(tuple);
+        }
+        txn->push_cmd_to_cache(seq_id, plan_item);
+        //DB_WARNING("put txn cmd to cache: region_id: %ld, txn_id: %lu:%d", _region_id, txn_info.txn_id(), seq_id);
+        txn->save_last_response(response);
+    }
+
+    //DB_NOTICE("select rows:%d", rows);
+    root->close(&state);
+    ExecNode::destroy_tree(root);
     desc += " rows:" + std::to_string(rows);    
     return 0;
 }
