@@ -1276,6 +1276,22 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
         } else {
             _agg_funcs.push_back(agg_expr);
         }
+        if (func->name() == "group_concat") {
+            // ref: https://dev.mysql.com/doc/refman/5.6/en/aggregate-functions.html#function_group-concat
+            // children 0: required RowExpr expr_list, 1: required LiteralExpr separator
+            // children 2: optional RowExpr order_by_expr, 3: optional RowExpr order_by_is_desc
+            if (expr_item->children.size() == 4) {
+                int expr_idx = 1;
+                ExprNode::get_pb_expr(agg_expr, &expr_idx, nullptr); // expr_list
+                ExprNode::get_pb_expr(agg_expr, &expr_idx, nullptr); // separator
+                int num_children = agg_expr.nodes(expr_idx++).num_children(); // order_by_expr_row.num_children
+                for (int i = 0; i < num_children; i++) {
+                    pb::Expr orderby_expr;
+                    ExprNode::get_pb_expr(agg_expr, &expr_idx, &orderby_expr); // order_by_expr
+                    _orderby_agg_exprs.push_back(orderby_expr);
+                }
+            }
+        }
     }
     return 0;
 }

@@ -257,6 +257,20 @@ int ExprNode::create_tree(const pb::Expr& expr, int* idx, ExprNode* parent, Expr
     return 0;
 }
 
+void ExprNode::get_pb_expr(const pb::Expr& from, int* idx, pb::Expr* to) {
+    if (*idx >= from.nodes_size()) {
+        DB_WARNING("idx: %d is out of range: %d", *idx, from.nodes_size());
+        return;
+    }
+    const pb::ExprNode& node = from.nodes((*idx)++);
+    if (to != nullptr) {
+        to->add_nodes()->CopyFrom(node);
+    }
+    for (int i = 0; i < node.num_children(); i++) {
+        get_pb_expr(from, idx, to);
+    }
+}
+
 int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
     switch (node.node_type()) {
         case pb::SLOT_REF:

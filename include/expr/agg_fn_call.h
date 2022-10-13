@@ -14,6 +14,8 @@
 
 #pragma once
 #include "expr_node.h"
+#include "sorter.h"
+#include "mem_row_descriptor.h"
 
 namespace baikaldb {
 class AggFnCall : public ExprNode {
@@ -42,6 +44,9 @@ public:
     AggFnCall() {
     }
     ~AggFnCall() {
+        for (auto expr : _slot_order_exprs) {
+            ExprNode::destroy_tree(expr);
+        }
     }
     virtual int type_inferer();
     int type_inferer(pb::TupleDescriptor* tuple_desc);
@@ -147,6 +152,19 @@ private:
     bool _is_distinct = false;
     bool _is_merge = false;
     std::map<std::string, InterVal> _intermediate_val_map;
+    // for group_concat
+    std::string _sep = ",";
+    std::shared_ptr<MemRowDescriptor> _mem_row_desc = nullptr;
+    std::shared_ptr<Sorter> _sorter = nullptr;
+    std::shared_ptr<MemRowCompare> _mem_row_compare = nullptr;
+    int32_t _order_tuple_id = -1;
+    std::vector<ExprNode*> _order_exprs; // not own it
+    std::vector<ExprNode*> _slot_order_exprs; // own it
+    std::vector<bool> _is_asc;
+    std::vector<bool> _is_null_first;
+    std::map<std::string, std::shared_ptr<RowBatch>> _intermediate_row_batch_map;
+    // for group_concat end
+
     //聚合函数参数列表，count(*)参数为空
     //merge的时候，类型是slotref，size=1
     //std::vector<ExprNode*> _arg_exprs;

@@ -526,6 +526,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     FulltextSearchModifierOpt
     SubSelect
     IsolationLevel
+    SeparatorOpt
 
 %type <item> 
     ColumnNameListOpt 
@@ -2472,11 +2473,29 @@ SumExpr:
         fun->children.push_back($4, parser->arena);
         $$ = fun;
     }
-    | GROUP_CONCAT '(' Expr ')' {
+    | GROUP_CONCAT '(' BuggyDefaultFalseDistinctOpt ExprList OrderByOptional SeparatorOpt ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->func_type = FT_AGG;
         fun->fn_name = $1;
-        fun->children.push_back($3, parser->arena);
+        fun->distinct = $3;
+        fun->children.push_back((RowExpr*)$4, parser->arena);
+        fun->children.push_back($6, parser->arena);
+        if ($5 != nullptr && $5->items.size() > 0) {
+            RowExpr* by_expr_row = new_node(RowExpr);
+            RowExpr* is_desc_row = new_node(RowExpr);
+            for (int i = 0; i < $5->items.size(); i++) {
+                by_expr_row->children.push_back($5->items[i]->expr, parser->arena);
+                LiteralExpr* is_desc = nullptr;
+                if ($5->items[i]->is_desc) {
+                    is_desc = LiteralExpr::make_true(parser->arena);
+                } else {
+                    is_desc = LiteralExpr::make_false(parser->arena);
+                }
+                is_desc_row->children.push_back(is_desc, parser->arena);
+            }
+            fun->children.push_back(by_expr_row, parser->arena);
+            fun->children.push_back(is_desc_row, parser->arena);
+        }
         $$ = fun;
     }
     | USER_AGG '(' Expr ')' {
@@ -2485,6 +2504,15 @@ SumExpr:
         fun->fn_name = $1;
         fun->children.push_back($3, parser->arena);
         $$ = fun;
+    }
+    ;
+
+SeparatorOpt:
+    {
+        $$ = LiteralExpr::make_string(",", parser->arena);
+    }
+    | SEPARATOR STRING_LIT {
+        $$ = $2;
     }
     ;
 

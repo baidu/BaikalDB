@@ -237,6 +237,8 @@ public:
     static void destroy_tree(ExprNode* root) {
         delete root;
     }
+    static void get_pb_expr(const pb::Expr& from, int* idx, pb::Expr* to);
+
     void get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids);
     void get_all_slot_ids(std::unordered_set<int32_t>& slot_ids);
     void get_all_field_ids(std::unordered_set<int32_t>& field_ids);
