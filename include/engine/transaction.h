@@ -424,6 +424,14 @@ public:
         return &_store_req;
     }
 
+    void save_last_response(pb::StoreRes& response) {
+        _store_res.Clear();
+        _store_res.CopyFrom(response);
+    }
+    void swap_last_response(pb::StoreRes& response) {
+        response.Swap(&_store_res);
+    }
+
     void set_primary_region_id(int64_t region_id) {
         _primary_region_id = region_id;
     }
@@ -553,6 +561,7 @@ private:
     std::stack<int>                 _save_point_seq;
     std::stack<int64_t>             _save_point_increase_rows;
     pb::StoreReq                    _store_req;
+    pb::StoreRes                    _store_res;
     int64_t                         _primary_region_id = -1;
     std::set<int>                   _current_req_point_seq;
     std::set<int>                   _need_rollback_seq;
