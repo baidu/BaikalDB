@@ -731,6 +731,7 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
     // 判断返回的二级索引数据是否主键已返回
     _insert_scan_records.clear();
     std::map<int64_t, std::set<std::string>> reversed_idx_keys_map;
+    std::set<std::string> pk_key_set;
     for (auto& pair : _store_records) {
         int64_t index_id = pair.first;
         if (index_id == _pri_info->id) {
@@ -744,20 +745,24 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
                 return ret;
             }
             std::string pk_key = mt_key.data();
+            auto pk_key_iter = pk_key_set.find(pk_key);
             auto pk_record_iter = _primary_record_key_record_map.find(pk_key);
             if (pk_record_iter == _primary_record_key_record_map.end()) {
-                // 二级索引的主键主表没有返回，需要反查主表
-                _insert_scan_records.push_back(record);
-                if (_on_dup_key_update) {
-                    MutTableKey mt_key;
-                    auto info = _index_info_map[index_id];
-                    ret = record->encode_key(*info, mt_key, -1, false);
-                    if (ret < 0) {
-                        DB_WARNING("encode key failed, log_id:%lu record:%s", state->log_id(), record->debug_string().c_str());
-                        return ret;
+                if (pk_key_iter == pk_key_set.end()) {
+                    // 二级索引的主键主表没有返回，需要反查主表
+                    _insert_scan_records.push_back(record);
+                    pk_key_set.insert(pk_key);
+                    if (_on_dup_key_update) {
+                        MutTableKey mt_key;
+                        auto info = _index_info_map[index_id];
+                        ret = record->encode_key(*info, mt_key, -1, false);
+                        if (ret < 0) {
+                            DB_WARNING("encode key failed, log_id:%lu record:%s", state->log_id(), record->debug_string().c_str());
+                            return ret;
+                        }
+                        std::string key = mt_key.data();
+                        reversed_idx_keys_map[index_id].insert(key);
                     }
-                    std::string key = mt_key.data();
-                    reversed_idx_keys_map[index_id].insert(key);
                 }
             } else {
                 if (_on_dup_key_update) {

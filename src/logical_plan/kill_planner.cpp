@@ -50,8 +50,8 @@ int KillPlanner::plan() {
             // 但是kill指令用的很少，后续再考虑优化
             // kill query xx没问题
             if (!k->is_query) {
-                client->state = STATE_ERROR;
-                // StateMachine::get_instance()->client_free(sock, epoll_info);
+//                client->state = STATE_ERROR;
+                StateMachine::get_instance()->client_free(sock, epoll_info);
             }
             break;
         }
