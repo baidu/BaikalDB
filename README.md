@@ -1,5 +1,7 @@
 ## BaikalDB：A Distributed HTAP Database
-[![Build Status](https://travis-ci.org/baidu/BaikalDB.svg?branch=master)](https://travis-ci.org/baidu/BaikalDB)
+[![GitHub license](https://img.shields.io/github/license/baidu/BaikalDB?style=social)](https://github.com/baidu/BaikalDB/blob/master/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/baidu/BaikalDB?style=social)](https://github.com/baidu/BaikalDB/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/baidu/BaikalDB?style=social)](https://github.com/baidu/BaikalDB/issues)
 
 BaikalDB supports sequential and randomised realtime read/write of structural data in petabytes-scale.
 BaikalDB is compatible with MySQL protocol and it supports MySQL style SQL dialect, by which users can migrate their data storage from MySQL to BaikalDB seamlessly.
