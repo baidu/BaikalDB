@@ -83,7 +83,7 @@ struct String {
             ++i;
         }
     }
-    void stripslashes() {
+    void stripslashes(char c) {
         size_t slow = 0;
         size_t fast = 0;
         bool has_slash = false;
@@ -109,6 +109,11 @@ struct String {
                 }
                 has_slash = false;
             } else {
+	        if (value[fast] == c && fast + 1 < length && value[fast + 1] == c) {
+                    value[slow++] = c;
+                    fast += 2;
+                    continue;
+                }
                 if (value[fast] == '\\') {
                     has_slash = true;
                     fast++;
