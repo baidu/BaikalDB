@@ -24,7 +24,11 @@
 #include <algorithm>
 
 namespace baikaldb {
-DEFINE_string(db_version, "5.7.16-BaikalDB-v1.1.5", "db version");
+#ifdef BAIKALDB_REVISION
+    DEFINE_string(db_version, "5.7.16-BaikalDB-v"BAIKALDB_REVISION, "db version");
+#else
+    DEFINE_string(db_version, "5.7.16-BaikalDB", "db version");
+#endif
 static const int32_t DATE_FORMAT_LENGTH = 128;
 static const std::vector<std::string> day_names = {
         "Sunday", "Monday", "Tuesday", "Wednesday",
