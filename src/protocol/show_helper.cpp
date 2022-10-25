@@ -489,9 +489,6 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
             table = remove_quote(db_table.substr(position + 1,
                     db_table.length() - position - 1).c_str(), '`');
         }
-    } else if (split_vec.size() == 5) {
-        db = remove_quote(split_vec[3].c_str(), '`');
-        table = remove_quote(split_vec[4].c_str(), '`');
     } else {
         client->state = STATE_ERROR;
         return false;

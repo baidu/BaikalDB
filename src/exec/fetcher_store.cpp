@@ -290,10 +290,6 @@ void OnRPCDone::select_addr() {
                     sorted_peers.emplace_back(_info.leader());
                     SchemaFactory* schema_factory = SchemaFactory::get_instance();
                     for (auto& peer: _info.peers()) {
-                        auto status = schema_factory->get_instance_status(peer);
-                        if (status.status != pb::NORMAL) {
-                            continue;
-                        }
                         if (_info.leader() != peer) {
                             sorted_peers.emplace_back(peer);
                         }
