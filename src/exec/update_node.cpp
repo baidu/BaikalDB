@@ -29,12 +29,18 @@ int UpdateNode::init(const pb::PlanNode& node) {
     }
     _table_id =  node.derive_node().update_node().table_id();
     _global_index_id = _table_id;
+    _primary_slots.clear();
+    _primary_slots.reserve(node.derive_node().update_node().primary_slots_size());
     for (auto& slot : node.derive_node().update_node().primary_slots()) {
         _primary_slots.push_back(slot);
     }
+    _update_slots.clear();
+    _update_slots.reserve(node.derive_node().update_node().update_slots_size());
     for (auto& slot : node.derive_node().update_node().update_slots()) {
         _update_slots.push_back(slot);
     }
+    _update_exprs.clear();
+    _update_exprs.reserve(node.derive_node().update_node().update_exprs_size());
     for (auto& expr : node.derive_node().update_node().update_exprs()) {
         ExprNode* up_expr = nullptr;
         ret = ExprNode::create_tree(expr, &up_expr);
