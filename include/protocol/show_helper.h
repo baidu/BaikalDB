@@ -43,6 +43,7 @@ const std::string SQL_DISABLE_INDEXS             = "disable";               // s
 const std::string SQL_SHOW_REGION                = "region";                // show region tableID regionID
 const std::string SQL_SHOW_STORE_REGION          = "store";                 // show store region storeAddress regionID
 const std::string SQL_SHOW_VARIABLES             = "variables";             // show variables;
+const std::string SQL_SHOW_STATUS                = "status";                // show status; same as `show variables`
 const std::string SQL_SHOW_USER                  = "user";                  // show user username;
 const std::string SQL_SHOW_STORE_TXN             = "store_txn";             // show store_txn storeAddress regionID;
 const std::string SQL_SHOW_DDL_WORK              = "ddlwork";               // show ddlwork tableID;
@@ -54,6 +55,12 @@ const std::string SQL_SHOW_SWITCH                = "switch";                // s
 const std::string SQL_SHOW_ALL_TABLES            = "all_tables";            // show all_tables [ttl/binlog/...]
 const std::string SQL_SHOW_BINLOGS_INFO          = "binlogs_info";          // show binlogs_info
 const std::string SQL_SHOW_INSTANCE_PARAM        = "instance_param";        // show instance_param [resource_tag/instance]
+const std::string SQL_SHOW_ENGINES               = "engines";               // show engines
+const std::string SQL_SHOW_CHARSET               = "charset";               // show charset
+const std::string SQL_SHOW_CHARACTER_SET         = "character";             // show character set; same as `show charset`
+const std::string SQL_SHOW_INDEX                 = "index";                 // show index
+const std::string SQL_SHOW_INDEXES               = "indexes";               // show indexes; same as `show index`
+const std::string SQL_SHOW_KEYS                  = "keys";                  // show keys; same as `show index`
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -135,6 +142,9 @@ private:
     bool _show_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show instance_param ResourceTag / Instance
     bool _show_instance_param(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_engines(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_charset(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_index(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 
             std::vector<ResultField>& fields,
@@ -150,6 +160,13 @@ private:
     bool _process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
         std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
 
+    inline ResultField make_result_field(const std::string& name, const uint8_t& type, const uint32_t& length) const {
+        ResultField field;
+        field.name = name;
+        field.type = type;
+        field.length = length;
+        return field;
+    }
     MysqlWrapper*   _wrapper = nullptr;
 
     // 由于show table status太重了，进行cache

@@ -1164,6 +1164,11 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd() && json_iter->value.IsString()) {
                 ctx->stat_info.trace_id = json_iter->value.GetString();
             }
+            json_iter = root.FindMember("peer_index");
+            if (json_iter != root.MemberEnd()) {
+                ctx->peer_index = json_iter->value.GetInt64();
+                DB_WARNING("peer_index: %ld", ctx->peer_index);
+            }
         } catch (...) {
             DB_WARNING("parse extra file error [%s]", json_str.c_str());
             continue;

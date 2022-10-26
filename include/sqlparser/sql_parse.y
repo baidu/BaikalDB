@@ -2939,6 +2939,12 @@ Operators:
     | Expr XOR Expr {
         $$ = FuncExpr::new_binary_op_node(FT_LOGIC_XOR, $1, $3, parser->arena);
     }
+    | BINARY Expr {
+        $$ = $2;
+    }
+    | Expr COLLATE Expr {
+        $$ = $1;
+    }
     ;
 
 CompareOp:

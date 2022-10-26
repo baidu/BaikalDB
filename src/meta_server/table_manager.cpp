@@ -2801,7 +2801,8 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
     auto index_req = request.table_info().indexs(0);
     auto index_to_del = std::find_if(std::begin(schema_info.indexs()), std::end(schema_info.indexs()), 
         [&index_req](const pb::IndexInfo& info) {
-            return info.index_name() == index_req.index_name() &&
+            // 忽略大小写
+            return boost::algorithm::iequals(info.index_name(), index_req.index_name()) &&
                 (info.index_type() == pb::I_UNIQ || info.index_type() == pb::I_KEY || 
                 info.index_type() == pb::I_FULLTEXT);
         });
