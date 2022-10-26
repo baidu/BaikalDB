@@ -27,8 +27,7 @@ public:
     ExprNode() {}
     virtual ~ExprNode() {
         for (auto& e : _children) {
-            delete e;
-            e = nullptr;
+            SAFE_DELETE(e);
         }
     }
 

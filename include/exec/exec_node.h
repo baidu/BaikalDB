@@ -33,8 +33,7 @@ public:
     }
     virtual ~ExecNode() {
         for (auto& e : _children) {
-            delete e;
-            e = nullptr;
+            SAFE_DELETE(e);
         }
     }
     virtual int init(const pb::PlanNode& node);
