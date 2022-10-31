@@ -4349,6 +4349,10 @@ StartTransactionStmt:
     {
         $$ = new_node(StartTxnStmt);
     }
+    | START TRANSACTION READ ONLY
+    {
+        $$ = new_node(StartTxnStmt);
+    }
     | BEGINX WorkOpt
     {
         $$ = new_node(StartTxnStmt);;
