@@ -675,6 +675,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LocalOpt
     ForceOrNot
     GlobalOrLocal
+    GlobalOrLocalOpt
 
 %type <string_list> IndexNameList VarList
 %type <index_hint> IndexHint
@@ -3464,13 +3465,23 @@ ConstraintElem:
     ;
 
 GlobalOrLocal:
-    GLOBAL 
+    GLOBAL
     {
         $$ = INDEX_DIST_GLOBAL;
     }
-    | LOCAL 
+    | LOCAL
     {
         $$ = INDEX_DIST_LOCAL;
+    }
+    ;
+
+GlobalOrLocalOpt:
+    {
+        $$ = INDEX_DIST_DEFAULT;
+    }
+    | GlobalOrLocal
+    {
+        $$ = $1;
     }
     ;
 
@@ -4706,6 +4717,42 @@ AlterTableStmt:
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             stmt->alter_specs.push_back((AlterTableSpec*)($5->children[idx]), parser->arena);
         }
+        $$ = stmt;
+    }
+    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->table_name = (TableName*)$6;
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_INDEX;
+        item->index_dist = static_cast<IndexDistibuteType>($3);
+        item->name = $4;
+        for (int idx = 0; idx < $8->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($8->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$10;
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->new_constraints.push_back((Constraint*)item, parser->arena);
+        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
+        $$ = stmt;
+    }
+    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->table_name = (TableName*)$7;
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_UNIQ;
+        item->index_dist = static_cast<IndexDistibuteType>($4);
+        item->name = $5;
+        for (int idx = 0; idx < $9->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($9->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$11;
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->new_constraints.push_back((Constraint*)item, parser->arena);
+        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
         $$ = stmt;
     }
     ;

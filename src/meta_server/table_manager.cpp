@@ -2922,6 +2922,11 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
     }
     DB_DEBUG("DDL_LOG[add_index] check index info success.");
 
+    if (index_ret == 2) {
+        IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        return;
+    }
+
     pb::IndexInfo index_info;
     index_info.CopyFrom(request.table_info().indexs(0));
     index_info.set_state(pb::IS_NONE); 
@@ -3166,7 +3171,7 @@ int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
     };
 
     for (const auto& index_info : schema_info.indexs()) {
-        if (index_info.index_name() == index_info_to_check.index_name()) {
+        if (try_to_lower(index_info.index_name()) == try_to_lower(index_info_to_check.index_name())) {
             //索引状态为NONE、IS_DELETE_ONLY并且索引的field一致，可以重建。
             if (index_info.state() == pb::IS_NONE || index_info.state() == pb::IS_DELETE_ONLY) {
                 if (same_index(index_info, index_info_to_check)) {
@@ -3178,6 +3183,10 @@ int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
                     return -1;
                 }
             } else {
+                if (same_index(index_info, index_info_to_check)) {
+                    DB_WARNING("DDL_LOG same index name, same fields.");
+                    return 2;
+                }
                 DB_WARNING("DDL_LOG rebuild index failed, index state not satisfy.");
                 return -1;
             }
