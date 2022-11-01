@@ -1192,7 +1192,7 @@ void InformationSchema::init_tables() {
                 record->set_string(record->get_field_by_name("TABLE_SCHEMA"), db);
                 record->set_string(record->get_field_by_name("TABLE_NAME"), table_info->short_name);
                 record->set_string(record->get_field_by_name("TABLE_TYPE"), "BASE TABLE");
-                record->set_string(record->get_field_by_name("ENGINE"), "Innodb");
+                record->set_string(record->get_field_by_name("ENGINE"), "InnoDB");
                 record->set_int64(record->get_field_by_name("VERSION"), table_info->version);
                 record->set_string(record->get_field_by_name("ROW_FORMAT"), "Compact");
                 record->set_int64(record->get_field_by_name("TABLE_ROWS"), 0);
