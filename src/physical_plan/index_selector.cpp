@@ -601,17 +601,22 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
             sort_property = sort_node->sort_property();
         }
         access_path->calc_index_match(sort_property);
-        if (_ctx != nullptr) {
+        std::set<int32_t>* calc_covering_user_slots = nullptr;
+        std::set<int32_t> slot_ids;
+        // 非相关子查询时，内层SQL使用的tuple_descs包含了外层SQL的字段，导致计算covering_index错误。
+        // 当使用的是全局索引时，会导致无效的回表。
+        // 解决：select语句使用ref_slot_id_mapping计算是否为covering index
+        // TODO: 当外层为UPDATE或DELETE时，计算covering_index可能错误
+        if (_ctx != nullptr && (_ctx->is_select || _ctx->expr_params.is_expr_subquery)) {
             auto& required_slot_map = _ctx->ref_slot_id_mapping[tuple_id];
-            std::set<int32_t> slot_ids;
             for (auto& iter : required_slot_map) {
                 slot_ids.insert(iter.second);
             }
-            access_path->calc_is_covering_index(tuple_descs[tuple_id], &slot_ids);
-        } else {
-            access_path->calc_is_covering_index(tuple_descs[tuple_id]);
+            if (!slot_ids.empty()) {
+                calc_covering_user_slots = &slot_ids;
+            }
         }
-
+        access_path->calc_is_covering_index(tuple_descs[tuple_id], calc_covering_user_slots);
         scan_node->add_access_path(access_path);
     }
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));

@@ -94,7 +94,8 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         }
     }
     // 以baikaldb的判断为准
-    if (pos_index.is_covering_index()) {
+    if (pos_index.is_covering_index() && _is_covering_index == false) {
+	DB_WARNING("covering_index conflict, index_id = [%d]", _index_id);
         _is_covering_index = true;
     }
 
