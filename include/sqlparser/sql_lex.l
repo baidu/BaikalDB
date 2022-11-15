@@ -126,8 +126,8 @@ EXACT_LIKE { return EXACT_LIKE; }
 LIMIT { return LIMIT; }
 LINES { return LINES; }
 LOAD { return LOAD; }
-LOCALTIME { return LOCALTIME; }
-LOCALTIMESTAMP { return LOCALTIMESTAMP; }
+LOCALTIME { un_reserved_keyword(yylval, yyscanner, parser); return LOCALTIME; }
+LOCALTIMESTAMP { un_reserved_keyword(yylval, yyscanner, parser); return LOCALTIMESTAMP; }
 LOCK { return LOCK; }
 LONGBLOB { return LONGBLOB; }
 LONGTEXT { return LONGTEXT; }

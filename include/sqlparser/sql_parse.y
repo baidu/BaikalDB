@@ -159,8 +159,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LIMIT
     LINES
     LOAD
-    LOCALTIME
-    LOCALTIMESTAMP
     LOCK
     LONGBLOB
     LONGTEXT
@@ -241,9 +239,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ZEROFILL
     NATURAL
 %token<string>
-    /* The following tokens belong to ReservedKeywork. */
-    CURRENT_DATE
+    /* The following tokens belong to ReservedKeyword. */
     BOTH
+    CURRENT_DATE
     CURRENT_TIME
     DAY_HOUR
     DAY_MICROSECOND
@@ -255,10 +253,10 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LEADING
     MINUTE_MICROSECOND
     MINUTE_SECOND
+    PRIMARY
     SECOND_MICROSECOND
     TRAILING
     YEAR_MONTH
-    PRIMARY
 
 %token<string>
     /* The following tokens belong to UnReservedKeyword. */
@@ -439,6 +437,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DATE_SUB
     EXTRACT
     GROUP_CONCAT
+    LOCALTIME
+    LOCALTIMESTAMP
     MAX
     MID
     MIN
@@ -687,10 +687,15 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 
 %nonassoc empty
 %nonassoc lowerThanSetKeyword
+%nonassoc SET
 %nonassoc lowerThanKey
 %nonassoc KEY
+%nonassoc SQL_CACHE SQL_NO_CACHE
 
 %left tableRefPriority
+%left JOIN STRAIGHT_JOIN INNER CROSS LEFT RIGHT FULL NATURAL
+%precedence ON USING
+
 %left XOR OR
 %left AND
 %left EQ_OP NE_OP GE_OP GT_OP LE_OP LT_OP IS LIKE IN 
@@ -700,10 +705,13 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %left '+' '-'
 %left '*' '/' MOD_OP  MOD
 %left '^'
+%left COLLATE BINARY
 %right '~' NEG NOT NOT_OP
 %right '.'
 %nonassoc '('
 %nonassoc QUICK
+%precedence lowerThanComma
+%precedence ','
 
 %%
 
@@ -1183,10 +1191,7 @@ TableAsNameOpt:
     ;
 
 TableAsName:
-    {
-        $$ = nullptr;                
-    }
-    | AllIdent {
+    AllIdent {
         $$ = $1;
     }
     | AS AllIdent {
@@ -1557,7 +1562,7 @@ Order:
     }
     ;
 SelectStmtOpts:
-    DefaultFalseDistinctOpt PriorityOpt SelectStmtStraightJoin  SelectStmtSQLCache SelectStmtCalcFoundRows {
+    DefaultFalseDistinctOpt PriorityOpt SelectStmtStraightJoin SelectStmtSQLCache SelectStmtCalcFoundRows {
         $$ = new_node(SelectStmtOpts);
         $$->distinct = $1;
         $$->priority = (PriorityEnum)$2;
@@ -1640,7 +1645,7 @@ SelectStmtCalcFoundRows: {
     }
     ;
 SelectStmtSQLCache:
-    {
+    %prec empty {
         $$ = false;
     }
     | SQL_CACHE {
@@ -2042,22 +2047,6 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | FunctionNameCurTimestamp {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "current_timestamp"; 
-        $$ = fun; 
-    }
-    | FunctionNameCurTimestamp '(' ')' {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "current_timestamp"; 
-        $$ = fun; 
-    }
-    | FunctionNameCurTimestamp '(' INTEGER_LIT ')' {
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "current_timestamp"; 
-        fun->children.push_back($3, parser->arena);
-        $$ = fun;
-    }
     | UTC_TIMESTAMP '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
@@ -2356,6 +2345,22 @@ FunctionCallKeyword:
     | DEFAULT '(' ColumnName ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "default";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | FunctionNameCurTimestamp {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "current_timestamp";
+        $$ = fun;
+    }
+    | FunctionNameCurTimestamp '(' ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "current_timestamp";
+        $$ = fun;
+    }
+    | FunctionNameCurTimestamp '(' INTEGER_LIT ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "current_timestamp";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
@@ -2727,7 +2732,6 @@ AllIdent:
     | MID
     | MIN
     | NOW
-    | CURRENT_TIMESTAMP
     | UTC_TIMESTAMP
     | POSITION
     | SESSION_USER
@@ -2782,7 +2786,7 @@ SimpleExpr:
     }
     | ColumnName {
     }
-    | RowExpr {
+    | RowExpr %prec empty {
     }
     | FunctionCall {
     }
@@ -2942,7 +2946,7 @@ Operators:
     | BINARY Expr {
         $$ = $2;
     }
-    | Expr COLLATE Expr {
+    | Expr COLLATE StringName {
         $$ = $1;
     }
     ;
@@ -3009,12 +3013,12 @@ PredicateOp:
         fun->is_not = $2;
         $$ = fun;
     }
-    | RowExpr InOrNot SubSelect {
+    | RowExpr InOrNot SubSelect %prec IN {
         FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
         fun->is_not = $2;
         $$ = fun;
     }
-    | SimpleExpr InOrNot SubSelect {
+    | SimpleExpr InOrNot SubSelect %prec IN {
         FuncExpr* fun = FuncExpr::new_binary_op_node(FT_IN, $1, $3, parser->arena);
         fun->is_not = $2;
         $$ = fun;
@@ -3452,10 +3456,7 @@ GlobalOrLocal:
     ;
 
 IndexName:
-    {
-        $$ = nullptr;
-    }
-    | AllIdent
+    AllIdent
     {
         $$ = $1;
     }
@@ -4721,7 +4722,7 @@ ColumnPosOpt:
     ;
 
 AlterSpec:
-    TableOptionList
+    TableOptionList %prec lowerThanComma
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_TABLE_OPTION;
