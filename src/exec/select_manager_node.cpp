@@ -427,6 +427,10 @@ int SelectManagerNode::construct_primary_possible_index_use_limit(
         for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
             std::unique_ptr<MemRow>& mem_row = batch->get_row();
             SmartRecord record = record_template->clone(false);
+            if (limit->get_num_rows_skipped() < limit->get_offset()) {
+		limit->add_num_rows_skipped(1);
+		continue;
+            }
             for (auto& pri_field : pri_info->fields) {
                 int32_t field_id = pri_field.id;
                 int32_t slot_id = state->get_slot_id(tuple_id, field_id);
