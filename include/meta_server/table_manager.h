@@ -843,6 +843,19 @@ public:
     }
 
     bool check_field_is_compatible_type(pb::PrimitiveType src_type, pb::PrimitiveType target_type) {
+        switch (src_type) {
+            case pb::DATETIME:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+            case pb::TIME:
+            case pb::HLL:
+            case pb::BOOL:
+            case pb::TDIGEST:
+            case pb::NULL_TYPE:
+                return false;
+            default:
+                break;
+        }
         int s = primitive_to_proto_type(src_type);
         int t = primitive_to_proto_type(target_type);
         if (s == t) return true;
