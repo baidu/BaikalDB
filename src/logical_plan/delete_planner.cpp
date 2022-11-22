@@ -76,13 +76,6 @@ int DeletePlanner::plan() {
         return 0;
     }
 
-    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
-    int64_t table_id = info.table_id;
-    _ctx->prepared_table_id = table_id;
-    if (!_ctx->is_prepared) {
-        set_dml_txn_state(table_id);
-    }
-
     if (0 != parse_where()) {
         return -1;
     }
@@ -108,6 +101,10 @@ int DeletePlanner::plan() {
     if (0 != create_scan_nodes()) {
         return -1;
     }
+    ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
+    int64_t table_id = info.table_id;
+    _ctx->prepared_table_id = table_id;
+    set_dml_txn_state(table_id);
     // 局部索引binlog处理标记
     if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
         delete_node->set_local_index_binlog(true);
