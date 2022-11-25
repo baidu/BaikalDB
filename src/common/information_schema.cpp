@@ -464,6 +464,9 @@ void InformationSchema::init_columns() {
                     } else {
                         //extra_vec.push_back(" ");
                     }
+                    if (field.on_update_value == "(current_timestamp())") {
+			extra_vec.push_back("on update CURRENT_TIMESTAMP");
+		    }
                     record->set_string(record->get_field_by_name("EXTRA"), boost::algorithm::join(extra_vec, "|"));
                     record->set_string(record->get_field_by_name("PRIVILEGES"), "select,insert,update,references");
                     record->set_string(record->get_field_by_name("COLUMN_COMMENT"), field.comment);
