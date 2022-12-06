@@ -39,6 +39,7 @@ public:
     
     void create_user(const pb::MetaManagerRequest& request, braft::Closure* done);
     void drop_user(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void modify_user(const pb::MetaManagerRequest& request, braft::Closure* done);
     void add_privilege(const pb::MetaManagerRequest& request, braft::Closure* done);
     void drop_privilege(const pb::MetaManagerRequest& request, braft::Closure* done);
 

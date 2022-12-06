@@ -429,6 +429,14 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     case parser::NT_RESTORE_TABLE:
     case parser::NT_DROP_DATABASE:
     case parser::NT_ALTER_TABLE:
+    case parser::NT_CREATE_NAMESPACE:
+    case parser::NT_DROP_NAMESPACE:
+    case parser::NT_ALTER_NAMESPACE:
+    case parser::NT_CREATE_USER:
+    case parser::NT_DROP_USER:
+    case parser::NT_ALTER_USER:
+    case parser::NT_GRANT:
+    case parser::NT_REVOKE:
         planner.reset(new DDLPlanner(ctx));
         ctx->succ_after_logical_plan = true;
         break;
@@ -811,9 +819,33 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         }
         auto& tbl = *tbl_ptr;
         // validate user permission
-        pb::OpType op_type = pb::OP_INSERT;
-        if (_ctx->stmt_type == parser::NT_SELECT) {
+//        pb::OpType op_type = pb::OP_INSERT;
+//        if (_ctx->stmt_type == parser::NT_SELECT) {
+//            op_type = pb::OP_SELECT;
+//        }
+        pb::OpType op_type = pb::OP_NONE;
+        switch (_ctx->stmt_type) {
+        case parser::NT_SELECT:
             op_type = pb::OP_SELECT;
+            break;
+        case parser::NT_UNION:
+            op_type = pb::OP_UNION;
+            break;
+        case parser::NT_INSERT:
+            op_type = pb::OP_INSERT;
+            break;
+        case parser::NT_UPDATE:
+            op_type = pb::OP_UPDATE;
+            break;
+        case parser::NT_DELETE:
+        case parser::NT_TRUNCATE:
+            op_type = pb::OP_DELETE;
+            break;
+        case parser::NT_LOAD_DATA:
+            op_type = pb::OP_LOAD;
+            break;
+        default:
+            break;
         }
         if (!_ctx->user_info->allow_op(op_type, db.id, tbl.id, table)) {
             DB_WARNING("user %s has no permission to access: %s.%s, db.id:%ld, tbl.id:%ld", 

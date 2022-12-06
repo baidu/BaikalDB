@@ -178,6 +178,7 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
     }
     if (request->op_type() == pb::OP_CREATE_USER
             || request->op_type() == pb::OP_DROP_USER
+            || request->op_type() == pb::OP_MODIFY_USER
             || request->op_type() == pb::OP_ADD_PRIVILEGE
             || request->op_type() == pb::OP_DROP_PRIVILEGE) {
         PrivilegeManager::get_instance()->process_user_privilege(controller,

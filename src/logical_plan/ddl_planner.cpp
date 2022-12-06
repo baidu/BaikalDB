@@ -78,10 +78,127 @@ int DDLPlanner::plan() {
             return -1;
         } 
         error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
+    } else if (_ctx->stmt_type == parser::NT_CREATE_NAMESPACE) {
+        request.set_op_type(pb::OP_CREATE_NAMESPACE);
+        pb::NameSpaceInfo *namespace_info = request.mutable_namespace_info();
+        if (0 != parse_create_namespace(*namespace_info)) {
+            DB_WARNING("parser create database command failed");
+            return -1;
+        }
+        error_code = ER_CANT_CREATE_DB;
+    } else if (_ctx->stmt_type == parser::NT_DROP_NAMESPACE) {
+        request.set_op_type(pb::OP_DROP_NAMESPACE);
+        pb::NameSpaceInfo *namespace_info = request.mutable_namespace_info();
+        if (0 != parse_drop_namespace(*namespace_info)) {
+            DB_WARNING("parser create database command failed");
+            return -1;
+        }
+        error_code = ER_CANT_CREATE_DB;
+    } else if (_ctx->stmt_type == parser::NT_ALTER_NAMESPACE) {
+        request.set_op_type(pb::OP_MODIFY_NAMESPACE);
+        pb::NameSpaceInfo *namespace_info = request.mutable_namespace_info();
+        if (0 != parse_alter_namespace(*namespace_info)) {
+            DB_WARNING("parser create database command failed");
+            return -1;
+        }
+        error_code = ER_CANT_CREATE_DB;
+    } else if (_ctx->stmt_type == parser::NT_CREATE_USER) {
+        request.set_op_type(pb::OP_CREATE_USER);
+        pb::UserPrivilege *user_privilege = request.mutable_user_privilege();
+        if (0 != parse_create_user(*user_privilege)) {
+            DB_WARNING("parser create user command failed");
+            return -1;
+        }
+        error_code = ER_CANNOT_USER;
+    } else if (_ctx->stmt_type == parser::NT_DROP_USER) {
+        request.set_op_type(pb::OP_DROP_USER);
+        pb::UserPrivilege *user_privilege = request.mutable_user_privilege();
+        if (0 != parse_drop_user(*user_privilege)) {
+            DB_WARNING("parser drop user command failed");
+            return -1;
+        }
+        error_code = ER_CANNOT_USER;
+    } else if (_ctx->stmt_type == parser::NT_ALTER_USER) {
+        request.set_op_type(pb::OP_MODIFY_USER);
+        pb::UserPrivilege *user_privilege = request.mutable_user_privilege();
+        if (0 != parse_alter_user(*user_privilege)) {
+            DB_WARNING("parser alter user command failed");
+            return -1;
+        }
+        error_code = ER_CANNOT_USER;
+    } else if (_ctx->stmt_type == parser::NT_GRANT) {
+        request.set_op_type(pb::OP_ADD_PRIVILEGE);
+        pb::UserPrivilege *user_privilege = request.mutable_user_privilege();
+        if (0 != parse_priv(*user_privilege)) {
+            DB_WARNING("parser create user command failed");
+            return -1;
+        }
+        error_code = ER_CANNOT_USER;
+    } else if (_ctx->stmt_type == parser::NT_REVOKE) {
+        request.set_op_type(pb::OP_DROP_PRIVILEGE);
+        pb::UserPrivilege *user_privilege = request.mutable_user_privilege();
+        if (0 != parse_priv(*user_privilege)) {
+            DB_WARNING("parser drop user command failed");
+            return -1;
+        }
+        error_code = ER_CANNOT_USER;
     } else {
         DB_WARNING("unsupported DDL command: %d", _ctx->stmt_type);
         return -1;
     }
+    // validate user permission for ddl
+    bool need_check = _ctx->user_info->acl_v2_is_valid();
+    if (need_check) {
+        pb::OpType op_type = request.op_type();
+        int64_t db_id = -1;
+        int64_t table_id = -1;
+        std::string database = "";
+        std::string table = "";
+        if (request.has_database_info() && op_type != pb::OP_CREATE_DATABASE) {
+            // OP_CREATE_DATABASE 需要拥有全局 CREATE 权限
+            std::string db_full_name = request.database_info().namespace_name()
+                    + "." + request.database_info().database();
+            if (0 != _factory->get_show_database_id(db_full_name, db_id)) {
+                _ctx->stat_info.error_code = ER_BAD_DB_ERROR;
+                _ctx->stat_info.error_msg << "database " << db_full_name << " not exist";
+                return -1;
+            }
+            database = request.database_info().database();
+        } else if (request.has_table_info()) {
+            std::string db_full_name = request.table_info().namespace_name()
+                        + "." + request.table_info().database();
+            if (0 != _factory->get_show_database_id(db_full_name, db_id)) {
+                _ctx->stat_info.error_code = ER_BAD_DB_ERROR;
+                _ctx->stat_info.error_msg << "database " << db_full_name << " not exist";
+                return -1;
+            }
+            database = request.database_info().database();
+
+            if (op_type != pb::OP_CREATE_TABLE) {
+                // OP_CREATE_TABLE 需要对要创建的表所在的数据库拥有 CREATE 权限
+                std::string table_full_name = request.table_info().namespace_name()
+                        + "." + request.table_info().database()
+                        + "." + request.table_info().table_name();
+                if (0 != _factory->get_table_id(table_full_name, table_id)) {
+                    _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+                    _ctx->stat_info.error_msg << "table: " << request.table_info().database()
+                            << "." << request.table_info().table_name() << " not exist";
+                    return -1;
+                }
+            }
+            table = request.table_info().table_name();
+        }
+        if (!_ctx->user_info->allow_op(op_type, db_id, table_id, table)) {
+            DB_WARNING("user %s has no permission to access: %s.%s, db.id:%ld, tbl.id:%ld",
+                       _ctx->user_info->username.c_str(), database.c_str(), table.c_str(), db_id, table_id);
+            _ctx->stat_info.error_code = ER_TABLEACCESS_DENIED_ERROR;
+            _ctx->stat_info.error_msg << "user " << _ctx->user_info->username.c_str()
+                                      << " has no permission to access "
+                                      << database << "." << table;
+            return -1;
+        }
+    }
+
     pb::MetaManagerResponse response;
     if (MetaServerInteract::get_instance()->send_request("meta_manager", request, response) != 0) {
         if (response.errcode() != pb::SUCCESS && _ctx->stat_info.error_code == ER_ERROR_FIRST) {
@@ -2096,6 +2213,193 @@ int DDLPlanner::parse_alter_partition(
         return -1;
     }
     DB_NOTICE("alter partition schema_info[%s]", p_table_info->ShortDebugString().c_str());
+    return 0;
+}
+
+int DDLPlanner::parse_create_namespace(pb::NameSpaceInfo& namespace_info) {
+    parser::CreateNamespaceStmt* stmt = (parser::CreateNamespaceStmt*)(_ctx->stmt);
+    if (stmt->ns_name.empty()) {
+        _ctx->stat_info.error_code = ER_NO_NAMESPACE_ERROR;
+        _ctx->stat_info.error_msg << "No namespace selected";
+        return -1;
+    }
+    namespace_info.set_namespace_name(stmt->ns_name.value);
+    namespace_info.set_if_exist(!stmt->if_not_exists);
+    for (int idx = 0; idx < stmt->options.size(); ++idx) {
+        parser::NamespaceOption* option = stmt->options[idx];
+        if (option->type == parser::NAMESPACE_OPT_QUOTA) {
+            namespace_info.set_quota(option->uint_value);
+        } else if (option->type == parser::NAMESPACE_OPT_RESOURCE_TAG) {
+            namespace_info.set_resource_tag(option->str_value.value);
+        }
+    }
+    return 0;
+}
+int DDLPlanner::parse_drop_namespace(pb::NameSpaceInfo& namespace_info) {
+    parser::DropNamespaceStmt* stmt = (parser::DropNamespaceStmt*)(_ctx->stmt);
+    if (stmt->ns_name.empty()) {
+        _ctx->stat_info.error_code = ER_NO_NAMESPACE_ERROR;
+        _ctx->stat_info.error_msg << "No namespace selected";
+        return -1;
+    }
+    namespace_info.set_namespace_name(stmt->ns_name.value);
+    namespace_info.set_if_exist(stmt->if_exists);
+    return 0;
+}
+int DDLPlanner::parse_alter_namespace(pb::NameSpaceInfo& namespace_info) {
+    parser::AlterNamespaceStmt* stmt = (parser::AlterNamespaceStmt*)(_ctx->stmt);
+    if (stmt->ns_name.empty()) {
+        _ctx->stat_info.error_code = ER_NO_NAMESPACE_ERROR;
+        _ctx->stat_info.error_msg << "No namespace selected";
+        return -1;
+    }
+    namespace_info.set_namespace_name(stmt->ns_name.value);
+    namespace_info.set_if_exist(stmt->if_exists);
+    for (int idx = 0; idx < stmt->options.size(); ++idx) {
+        parser::NamespaceOption* option = stmt->options[idx];
+        if (option->type == parser::NAMESPACE_OPT_QUOTA) {
+            namespace_info.set_quota(option->uint_value);
+        } else if (option->type == parser::NAMESPACE_OPT_RESOURCE_TAG) {
+            namespace_info.set_resource_tag(option->str_value.value);
+        }
+    }
+    return 0;
+}
+
+int DDLPlanner::parse_create_user(pb::UserPrivilege& user_privilege) {
+    parser::CreateUserStmt* stmt = (parser::CreateUserStmt*)(_ctx->stmt);
+    int ret = add_user_specs(user_privilege, stmt->specs);
+    if (ret != 0) { return -1; }
+    user_privilege.set_if_exist(!stmt->if_not_exists);
+    if (!stmt->namespace_name.empty()) {
+        user_privilege.set_namespace_name(stmt->namespace_name.value);
+    } else {
+        user_privilege.set_namespace_name(_ctx->user_info->namespace_);
+    }
+    return 0;
+}
+int DDLPlanner::parse_drop_user(pb::UserPrivilege& user_privilege) {
+    parser::DropUserStmt* stmt = (parser::DropUserStmt*)(_ctx->stmt);
+    int ret = add_user_specs(user_privilege, stmt->specs);
+    if (ret != 0) { return -1; }
+    user_privilege.set_if_exist(stmt->if_exists);
+    user_privilege.set_namespace_name(_ctx->user_info->namespace_);
+    return 0;
+}
+int DDLPlanner::parse_alter_user(pb::UserPrivilege& user_privilege) {
+    parser::AlterUserStmt* stmt = (parser::AlterUserStmt*)(_ctx->stmt);
+    int ret = add_user_specs(user_privilege, stmt->specs);
+    if (ret != 0) { return -1; }
+    user_privilege.set_if_exist(!stmt->if_exists);
+    if (!stmt->namespace_name.empty()) {
+        user_privilege.set_namespace_name(stmt->namespace_name.value);
+    } else {
+        user_privilege.set_namespace_name(_ctx->user_info->namespace_);
+    }
+    return 0;
+}
+
+int DDLPlanner::parse_priv(pb::UserPrivilege& user_privilege) {
+    parser::PrivStmt* stmt = (parser::PrivStmt*)(_ctx->stmt);
+    if (!stmt->namespace_name.empty()) {
+        user_privilege.set_namespace_name(stmt->namespace_name.value);
+    } else {
+        user_privilege.set_namespace_name(_ctx->user_info->namespace_);
+    }
+
+    uint32_t acl = stmt->get_acl();
+
+    // 如果没有被赋予acl_v2权限的用户，默认按老版本不做权限限制
+    bool need_check = _ctx->user_info->acl_v2_is_valid();
+    int64_t db_id = -1;
+    int64_t table_id = -1;
+
+    if (stmt->priv_level->level == GRANT_LEVEL_GLOBAL) {
+        user_privilege.set_acl(acl);
+    } else {
+        std::string db;
+        if (stmt->priv_level->db_name.empty()) {
+            if (_ctx->cur_db.empty()) {
+                _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+                _ctx->stat_info.error_msg << "No database selected";
+                return -1;
+            }
+            db = _ctx->cur_db;
+        } else {
+            db = stmt->priv_level->db_name.to_string();
+        }
+        if (need_check) {
+            std::string db_full_name = user_privilege.namespace_name()  + "." + db;
+            if (0 != _factory->get_show_database_id(db_full_name, db_id)) {
+                _ctx->stat_info.error_code = ER_BAD_DB_ERROR;
+                _ctx->stat_info.error_msg << "database " << db_full_name << " not exist";
+                return -1;
+            }
+        }
+        if (stmt->priv_level->level == GRANT_LEVEL_DB) {
+            auto add_db = user_privilege.add_privilege_database();
+            add_db->set_database(db);
+            add_db->set_acl(acl);
+        } else if (stmt->priv_level->level == GRANT_LEVEL_TABLE) {
+            auto add_table = user_privilege.add_privilege_table();
+            add_table->set_database(db);
+            add_table->set_acl(acl);
+            if (stmt->priv_level->table_name.empty()) {
+                _ctx->stat_info.error_code = ER_UNKNOWN_TABLE;
+                _ctx->stat_info.error_msg << "No table name specified";
+                return -1;
+            }
+            add_table->set_table_name(stmt->priv_level->table_name.value);
+
+            if (need_check) {
+                std::string table_full_name = user_privilege.namespace_name()
+                        + "." + add_table->database() + "." + add_table->table_name();
+                if (0 != _factory->get_table_id(table_full_name, table_id)) {
+                    _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+                    _ctx->stat_info.error_msg << "table: " << add_table->database()
+                            << "." << add_table->table_name() << " not exist";
+                    return -1;
+                }
+            }
+        }
+    }
+    if (need_check) {
+        if (!_ctx->user_info->contain_privs(acl | GRANT_ACL, db_id, table_id)) {
+            _ctx->stat_info.error_code = ER_NO_PERMISSION_TO_CREATE_USER;
+            _ctx->stat_info.error_msg << "user must have the privileges "
+                    "that you are granting and with GRANT OPTION";
+            return -1;
+        }
+    }
+    int ret = add_user_specs(user_privilege, stmt->specs);
+    if (ret != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int DDLPlanner::add_user_specs(pb::UserPrivilege& user_privilege, Vector<UserSpec*>& specs) {
+    if (specs.size() > 1 || specs.size() == 0) {
+        _ctx->stat_info.error_code = ER_CANNOT_USER;;
+        _ctx->stat_info.error_msg << "multiple user_specifications is not supported";
+        return -1;
+    }
+    parser::UserSpec* spec = specs[0];
+    if (spec == nullptr) {
+        _ctx->stat_info.error_code = ER_CANNOT_USER;;
+        _ctx->stat_info.error_msg << "empty user_specification";
+        return -1;
+    }
+    if (spec->auth_opt != nullptr) {
+        user_privilege.set_password(spec->auth_opt->auth_string.value);
+    }
+    if (spec->user->current_user) {
+        user_privilege.set_username(_ctx->user_info->username);
+        user_privilege.add_ip("%");
+    } else {
+        user_privilege.set_username(spec->user->username.value);
+        user_privilege.add_ip(spec->user->hostname.value);
+    }
     return 0;
 }
 

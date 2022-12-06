@@ -43,6 +43,17 @@ private:
     int check_partition_key_constraint(pb::SchemaInfo& table, const std::string& field_name);
 
     int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column, bool is_unique_indicator);
+    int parse_create_namespace(pb::NameSpaceInfo& namespace_info);
+    int parse_drop_namespace(pb::NameSpaceInfo& namespace_info);
+    int parse_alter_namespace(pb::NameSpaceInfo& namespace_info);
+    int parse_create_user(pb::UserPrivilege& user_privilege);
+    int parse_drop_user(pb::UserPrivilege& user_privilege);
+    int parse_alter_user(pb::UserPrivilege& user_privilege);
+    int parse_rename_user(pb::UserPrivilege& user_privilege);
+    int parse_priv(pb::UserPrivilege& user_privilege);
+    int parse_set_password(pb::UserPrivilege& user_privilege);
+    int add_user_specs(pb::UserPrivilege& user_privilege, Vector<UserSpec*>& specs);
+
     int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec);
     bool is_fulltext_type_constraint(pb::StorageType pb_storage_type, bool& has_arrow_type, bool& has_pb_type) const;
     pb::PrimitiveType to_baikal_type(parser::FieldType* field_type);

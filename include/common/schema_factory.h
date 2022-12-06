@@ -899,6 +899,8 @@ public:
 
     // db_name is full name (namespace.database)
     int get_database_id(const std::string& db_name, int64_t& db_id);
+    // contains all databases both have privileges and no privileges
+    int get_show_database_id(const std::string& db_name, int64_t& db_id);
 
     //int get_column_id(const std::string& col_name, int32_t col_id) const;
 
@@ -1383,6 +1385,7 @@ private:
 
     // use for show databases
     std::map<int64_t, DatabaseInfo> _show_db_info;
+    std::unordered_map<std::string, int64_t> _show_db_name_id_mapping;
 
     // username => UserPrivilege
     DoubleBufferedUser _user_info_mapping;
