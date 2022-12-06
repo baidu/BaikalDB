@@ -852,6 +852,7 @@ public:
             case pb::BOOL:
             case pb::TDIGEST:
             case pb::NULL_TYPE:
+            case pb::BITMAP:
                 return false;
             default:
                 break;
