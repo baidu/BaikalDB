@@ -18,7 +18,7 @@
 
 namespace baikaldb {
 
-DEFINE_bool(like_predicate_use_re2, true, "LikePredicate use re2");
+DEFINE_bool(like_predicate_use_re2, false, "LikePredicate use re2");
 
 int InPredicate::open() {
     int ret = 0;
