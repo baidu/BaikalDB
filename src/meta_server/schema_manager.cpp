@@ -73,12 +73,12 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                     "no namespace_info", request->op_type(), log_id);
             return;
         } 
-        if (request->op_type() == pb::OP_MODIFY_NAMESPACE
-                && !request->namespace_info().has_quota()) {
-            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
-                    "no namespace_quota", request->op_type(), log_id);
-            return;
-        }
+        // if (request->op_type() == pb::OP_MODIFY_NAMESPACE
+        //         && !request->namespace_info().has_quota()) {
+        //     ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
+        //             "no namespace_quota", request->op_type(), log_id);
+        //     return;
+        // }
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
@@ -90,12 +90,12 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                     "no database_info", request->op_type(), log_id);
             return;
         } 
-        if (request->op_type() == pb::OP_MODIFY_DATABASE
-                && !request->database_info().has_quota()) {
-            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
-                    "no databasepace quota", request->op_type(), log_id);
-            return;
-        }
+        // if (request->op_type() == pb::OP_MODIFY_DATABASE
+        //         && !request->database_info().has_quota()) {
+        //     ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
+        //             "no databasepace quota", request->op_type(), log_id);
+        //     return;
+        // }
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }

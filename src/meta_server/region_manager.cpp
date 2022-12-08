@@ -2069,7 +2069,7 @@ void RegionManager::check_peer_count(int64_t region_id,
     std::unordered_map<std::string, int64_t> schema_logical_room_count_map = table_replica_dists_maps[table_id];
     std::unordered_map<std::string, int64_t> current_logical_room_count_map;
     //如果用户修个了resource_tag, 先加后删
-    if (resource_tag_count[table_resource_tag] < replica_num) {
+    if (resource_tag_count[table_resource_tag] < replica_num ) {
         DB_WARNING("resource_tag %s count:%d < replica_num:%ld", 
                 table_resource_tag.c_str(), resource_tag_count[table_resource_tag], replica_num);
         need_add_peer = true;
@@ -2109,22 +2109,25 @@ void RegionManager::check_peer_count(int64_t region_id,
                 candicate_logical_room,
                 new_instance);
         if (ret < 0) {
-            DB_FATAL("select store from cluster fail, region_id:%ld, table_resource_tag: %s, "
-                        "peer_size:%d, replica_num:%ld candicate_logical_room: %s", 
-                        region_id, table_resource_tag.c_str(), 
-                        leader_region_info.peers_size(), 
-                        replica_num, candicate_logical_room.c_str());
+            if (leader_region_info.peers_size() <= replica_num) {
+                DB_FATAL("select store from cluster fail, region_id:%ld, table_resource_tag: %s, "
+                            "peer_size:%d, replica_num:%ld candicate_logical_room: %s", 
+                            region_id, table_resource_tag.c_str(), 
+                            leader_region_info.peers_size(), 
+                            replica_num, candicate_logical_room.c_str());
+                return;
+            }
+        } else {
+            pb::AddPeer* add_peer = response->add_add_peers();
+            add_peer->set_region_id(region_id);
+            for (auto& peer : leader_region_info.peers()) {
+                add_peer->add_old_peers(peer);
+                add_peer->add_new_peers(peer);
+            }
+            add_peer->add_new_peers(new_instance);
+            DB_WARNING("add_peer request:%s", add_peer->ShortDebugString().c_str());
             return;
         }
-        pb::AddPeer* add_peer = response->add_add_peers();
-        add_peer->set_region_id(region_id);
-        for (auto& peer : leader_region_info.peers()) {
-            add_peer->add_old_peers(peer);
-            add_peer->add_new_peers(peer);
-        }
-        add_peer->add_new_peers(new_instance);
-        DB_WARNING("add_peer request:%s", add_peer->ShortDebugString().c_str());
-        return;
     }
     //选择一个peer被remove
     if (leader_region_info.peers_size() > replica_num) {

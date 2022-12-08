@@ -163,7 +163,6 @@ enum AlterSpecType : unsigned char {
     ALTER_SPEC_DROP_LEARNER,
     ALTER_SPEC_MODIFY_COLUMN,
     ALTER_SPEC_SWAP_TABLE
-
 };
 
 enum PartitionType : unsigned char {
@@ -345,6 +344,7 @@ struct DropDatabaseStmt : public DdlNode {
 // ALTER_SPEC_RENAME_COLUMN
 // ALTER_SPEC_RENAME_TABLE
 // ALTER_SPEC_TABLE_OPTION (only AVG_ROW_LENGTH)
+// ALTER_SPEC_MODIFY_COLUMN (only support meta-only change, not support changes of lossy data types)
 struct AlterTableSpec : public Node {
     AlterSpecType           spec_type;
     String                  column_name;
