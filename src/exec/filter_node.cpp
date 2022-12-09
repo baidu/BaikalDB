@@ -589,12 +589,24 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
             filter_node.SerializeToString(&filter_string);
             pb_node->mutable_derive_node()->set_filter_node(filter_string);
         } else {
+#ifdef BAIDU_INTERNAL
 #ifndef NDEBUG
             // 调试日志
             pb::FilterNode filter_node;
             std::string str = _filter_node;
             filter_node.ParseFromString(str);
             DB_DEBUG("filter_node: %s", filter_node.ShortDebugString().c_str());
+#endif
+#else //BAIDU_INTERNAL
+#ifndef NDEBUG
+            if (FLAGS_enable_debug) {
+                // 调试日志
+                pb::FilterNode filter_node;
+                std::string str = _filter_node;
+                filter_node.ParseFromString(str);
+                DB_DEBUG("filter_node: %s", filter_node.ShortDebugString().c_str());
+            }
+#endif
 #endif
             pb_node->mutable_derive_node()->set_filter_node(_filter_node);
         }

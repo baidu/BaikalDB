@@ -28,6 +28,7 @@ DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second")
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
 DECLARE_int64(print_time_us);
 DECLARE_string(meta_server_bns);
+DECLARE_int32(baikal_port);
 void StateMachine::run_machine(SmartSocket client,
         EpollInfo* epoll_info,
         bool shutdown) {
@@ -450,7 +451,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%ld] scan_row=[%ld] bufsize=[%zu] "
                     "key=[%d] changeid=[%lu] logid=[%lu] traceid=[%s] family_ip=[%s] cache=[%d] stmt_name=[%s] "
                     "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%lu] region_count=[%d] sqllen=[%lu] "
-                    "sql=[%s] id=[%ld] bkup=[%d]",
+                    "sql=[%s] id=[%ld] bkup=[%d] server_addr=[%s:%d]",
                     stat_info->family.c_str(),
                     stat_info->table.c_str(),
                     op_type,
@@ -490,7 +491,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     sql.length(),
                     sql.c_str(),
                     client->last_insert_id,
-                    ctx->use_backup);
+                    ctx->use_backup, butil::my_ip_cstr(), FLAGS_baikal_port);
         }
     } else {
         if ('\x0e' == ctx->mysql_cmd) {

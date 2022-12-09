@@ -308,6 +308,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.has_index_write_only_or_write_local = false;
         tbl_info.sign_blacklist.clear();
         tbl_info.sign_forcelearner.clear();
+        tbl_info.sign_forceindex.clear();
     }
     TableInfo& tbl_info = *tbl_info_ptr;
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
@@ -355,7 +356,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             for (auto& sign_str : vec) {
                 uint64_t sign_num = strtoull(sign_str.c_str(), nullptr, 10);
                 tbl_info.sign_blacklist.emplace(sign_num);
-                DB_DEBUG("sing_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
+                DB_DEBUG("sign_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
             }
         }
         if (tbl_info.schema_conf.has_sign_forcelearner() && tbl_info.schema_conf.sign_forcelearner() != "") {
@@ -365,7 +366,16 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             for (auto& sign_str : vec) {
                 uint64_t sign_num = strtoull(sign_str.c_str(), nullptr, 10);
                 tbl_info.sign_forcelearner.emplace(sign_num);
-                DB_DEBUG("sing_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
+                DB_DEBUG("sign_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
+            }
+        }
+        if (tbl_info.schema_conf.has_sign_forceindex() && tbl_info.schema_conf.sign_forceindex() != "") {
+            DB_DEBUG("sign_forceindex: %s", tbl_info.schema_conf.sign_forceindex().c_str());
+            std::vector<std::string> vec;
+            boost::split(vec, tbl_info.schema_conf.sign_forceindex(), boost::is_any_of(","));
+            for (auto& sign_str : vec) {
+                tbl_info.sign_forceindex.emplace(sign_str);
+                DB_DEBUG("sign_str: %s", sign_str.c_str());
             }
         }
     }

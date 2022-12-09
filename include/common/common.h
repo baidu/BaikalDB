@@ -442,6 +442,9 @@ private:
 #define SCOPEGUARD_LINENAME_CAT(name, line) name##line
 #define SCOPEGUARD_LINENAME(name, line) SCOPEGUARD_LINENAME_CAT(name, line)
 #define ON_SCOPE_EXIT(callback) ScopeGuard SCOPEGUARD_LINENAME(scope_guard, __LINE__)(callback)
+#ifndef SAFE_DELETE
+#define SAFE_DELETE(p) { if(p){delete(p);  (p)=NULL;} }
+#endif
 
 template <typename KEY, typename VALUE, uint32_t MAP_COUNT = 23>
 class ThreadSafeMap {

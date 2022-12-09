@@ -301,7 +301,6 @@ private:
             const CreateExprOptions& options);
     void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
     int construct_in_predicate_node(const parser::FuncExpr* func_item, pb::Expr& expr, pb::ExprNode** node);
-
 protected:
     QueryContext*       _ctx = nullptr;
     std::shared_ptr<QueryContext> _cur_sub_ctx = nullptr;

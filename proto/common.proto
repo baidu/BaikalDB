@@ -104,6 +104,7 @@ message SchemaConf {
     optional bool in_fast_import            = 9;  // 快速导入中，不调度，不分裂
     optional string sign_blacklist          = 10;
     optional string sign_forcelearner       = 11;
+    optional string sign_forceindex         = 12;
 };
 
 enum Engine {

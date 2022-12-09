@@ -14,6 +14,8 @@
 
 #include "internal_functions.h"
 #include <openssl/md5.h>
+#include <rapidjson/pointer.h>
+#include <rapidjson/stringbuffer.h>
 #include "hll_common.h"
 #include "datetime.h"
 #include <boost/date_time/gregorian/gregorian.hpp>
@@ -22,7 +24,11 @@
 #include <algorithm>
 
 namespace baikaldb {
-DEFINE_string(db_version, "5.7.16-BaikalDB-v1.1.5", "db version");
+#ifdef BAIKALDB_REVISION
+    DEFINE_string(db_version, "5.7.16-BaikalDB-v"BAIKALDB_REVISION, "db version");
+#else
+    DEFINE_string(db_version, "5.7.16-BaikalDB", "db version");
+#endif
 static const int32_t DATE_FORMAT_LENGTH = 128;
 static const std::vector<std::string> day_names = {
         "Sunday", "Monday", "Tuesday", "Wednesday",
@@ -744,6 +750,75 @@ ExprValue instr(const std::vector<ExprValue>& input) {
         tmp._u.int32_val = 0;
     }
 
+    return tmp;
+}
+
+// @ref: https://dev.mysql.com/doc/refman/8.0/en/json-search-functions.html#function_json-extract
+// @ref: https://rapidjson.org/md_doc_pointer.html#JsonPointer
+ExprValue json_extract(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+
+    for (auto s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    std::string json_str = input[0].get_string();
+    std::string path = input[1].get_string();
+    if (path.length() > 0 && path[0] == '$') {
+        path.erase(path.begin());
+    } else {
+        return ExprValue::Null();
+    }
+    std::replace(path.begin(), path.end(), '.', '/');
+    std::replace(path.begin(), path.end(), '[', '/');
+    path.erase(std::remove(path.begin(), path.end(), ']'), path.end());
+
+    rapidjson::Document doc;
+    try {
+        doc.Parse<0>(json_str.c_str());
+        if (doc.HasParseError()) {
+            rapidjson::ParseErrorCode code = doc.GetParseError();
+            DB_WARNING("parse json_str error [code:%d][%s]", code, json_str.c_str());
+            return ExprValue::Null();
+        }
+
+    } catch (...) {
+        DB_WARNING("parse json_str error [%s]", json_str.c_str());
+        return ExprValue::Null();
+    }
+    rapidjson::Pointer pointer(path.c_str());
+    if (!pointer.IsValid()) {
+        DB_WARNING("invalid path: [%s]", path.c_str());
+        return ExprValue::Null();
+    }
+
+    const rapidjson::Value *pValue = rapidjson::GetValueByPointer(doc, pointer);
+    if (pValue == nullptr) {
+        DB_WARNING("the path: [%s] does not exist in doc [%s]", path.c_str(), json_str.c_str());
+        return ExprValue::Null();
+    }
+    // TODO type on fly
+    ExprValue tmp(pb::STRING);
+    if (pValue->IsString()) {
+        tmp.str_val = pValue->GetString();
+    } else if (pValue->IsInt()) {
+        tmp.str_val = std::to_string(pValue->GetInt());
+    } else if (pValue->IsInt64()) {
+        tmp.str_val = std::to_string(pValue->GetInt64());
+    } else if (pValue->IsUint()) {
+        tmp.str_val = std::to_string(pValue->GetUint());
+    } else if (pValue->IsUint64()) {
+        tmp.str_val = std::to_string(pValue->GetUint64());
+    } else if (pValue->IsDouble()) {
+        tmp.str_val = std::to_string(pValue->GetDouble());
+    } else if (pValue->IsFloat()) {
+        tmp.str_val = std::to_string(pValue->GetFloat());
+    } else if (pValue->IsBool()) {
+        tmp.str_val = std::to_string(pValue->GetBool());
+    }
     return tmp;
 }
 
@@ -1980,6 +2055,14 @@ ExprValue cast_to_unsigned(const std::vector<ExprValue>& input) {
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::UINT64);
+}
+
+ExprValue cast_to_double(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DOUBLE);
 }
 
 }

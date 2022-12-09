@@ -1,4 +1,5 @@
 build --copt -DHAVE_ZLIB=1
+# build --copt -DBAIKALDB_REVISION=\"2.1.1\"
 # bazel build with glog
 build --define=with_glog=true
 build -c opt

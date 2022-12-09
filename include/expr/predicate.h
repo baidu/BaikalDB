@@ -139,6 +139,9 @@ public:
 
     //todo liguoqiang
     virtual int open();
+    void covent_pattern(const std::string& pattern);
+    void covent_exact_pattern(const std::string& pattern);
+
     void hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_value);
     virtual ExprValue get_value(MemRow* row);
     
@@ -147,11 +150,21 @@ public:
     bool like_one(const std::string& target, const std::string& pattern, pb::Charset charset);
 
 private:
+    ExprValue get_value_by_re2(MemRow* row);
+    ExprValue get_value_by_pattern(MemRow* row);
     void reset_pattern(MemRow* row);
     std::string _pattern;
     std::vector<std::string> _patterns;
     char _escape_char = '\\';
     bool _const_pattern = true;
+
+    int open_by_re2();
+    int open_by_pattern();
+    void reset_regex(MemRow* row);
+    std::unique_ptr<re2::RE2> _regex_ptr;
+    std::string _regex_pattern;
+    bool _const_regex = true;
+    re2::RE2::Options _option;
 };
 
 class RegexpPredicate : public ScalarFnCall {

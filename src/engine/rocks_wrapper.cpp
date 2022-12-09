@@ -1,11 +1,11 @@
 // Copyright (c) 2018-present Baidu, Inc. All Rights Reserved.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -44,11 +44,11 @@ DEFINE_int32(rocks_max_background_compactions, 20, "max_background_compactions")
 DEFINE_bool(rocks_optimize_filters_for_hits, false, "rocks_optimize_filters_for_hits");
 DEFINE_int32(slowdown_write_sst_cnt, 10, "level0_slowdown_writes_trigger");
 DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
-DEFINE_bool(rocks_kSkipAnyCorruptedRecords, false, 
+DEFINE_bool(rocks_kSkipAnyCorruptedRecords, false,
         "We ignore any corruption in the WAL and try to salvage as much data as possible");
-DEFINE_bool(rocks_data_dynamic_level_bytes, true, 
+DEFINE_bool(rocks_data_dynamic_level_bytes, true,
         "rocksdb level_compaction_dynamic_level_bytes for data column_family, default true");
-DEFINE_int64(flush_memtable_interval_us, 10 * 60 * 1000 * 1000LL, 
+DEFINE_int64(flush_memtable_interval_us, 10 * 60 * 1000 * 1000LL,
             "flush memtable interval, default(10 min)");
 DEFINE_int32(max_background_jobs, 24, "max_background_jobs");
 DEFINE_int32(max_write_buffer_number, 6, "max_write_buffer_number");
@@ -97,7 +97,7 @@ int32_t RocksWrapper::init(const std::string& path) {
         table_options.pin_top_level_index_and_filter = true;
         table_options.cache_index_and_filter_blocks_with_high_priority = true;
         table_options.pin_l0_filter_and_index_blocks_in_cache= true;
-        table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 
+        table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL,
             8, false, FLAGS_rocks_high_pri_pool_ratio);
         // 通过cache控制内存，不需要控制max_open_files
         FLAGS_rocks_max_open_files = -1;
@@ -106,7 +106,7 @@ int32_t RocksWrapper::init(const std::string& path) {
         table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 8);
     }
     table_options.format_version = 4;
-    
+
     table_options.block_size = FLAGS_rocks_block_size;
     table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
     _cache = table_options.block_cache.get();
@@ -136,7 +136,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     txn_db_options.custom_mutex_factory = std::shared_ptr<rocksdb::TransactionDBMutexFactory>(
                           new TransactionDBBthreadFactory());
 
-    //todo 
+    //todo
     _log_cf_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(sizeof(int64_t) + 1));
     _log_cf_option.OptimizeLevelStyleCompaction();
@@ -169,7 +169,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     rocksdb::CompactionOptionsFIFO fifo_option;
     //如果观察到TTL无法让文件总数量少于配置的大小，RocksDB会暂时下降到基于大小的FIFO删除
     //https://rocksdb.org.cn/doc/FIFO-compaction-style.html
-    fifo_option.max_table_files_size = FLAGS_rocks_binlog_max_files_size_gb * 1024 * 1024 * 1024LL; 
+    fifo_option.max_table_files_size = FLAGS_rocks_binlog_max_files_size_gb * 1024 * 1024 * 1024LL;
     fifo_option.allow_compaction = FLAGS_rocksdb_fifo_allow_compaction;
     _binlog_cf_option.ttl = 0;
     _binlog_cf_option.periodic_compaction_seconds = 0;
@@ -223,7 +223,7 @@ int32_t RocksWrapper::init(const std::string& path) {
 
     //todo
     //prefix: 0x01-0xFF,分别用来存储不同的meta信息
-    _meta_info_option.prefix_extractor.reset( 
+    _meta_info_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(1));
     _meta_info_option.OptimizeLevelStyleCompaction();
     _meta_info_option.compaction_pri = rocksdb::kOldestSmallestSeqFirst;
@@ -252,7 +252,7 @@ int32_t RocksWrapper::init(const std::string& path) {
                 column_family_desc.push_back(rocksdb::ColumnFamilyDescriptor(METAINFO_CF, _meta_info_option));
             } else {
                 column_family_desc.push_back(
-                        rocksdb::ColumnFamilyDescriptor(column_family_name, 
+                        rocksdb::ColumnFamilyDescriptor(column_family_name,
                             rocksdb::ColumnFamilyOptions()));
             }
         }
@@ -304,7 +304,7 @@ int32_t RocksWrapper::init(const std::string& path) {
                 } else {
                     res = _txn_db->DestroyColumnFamilyHandle(handle);
                     if (!res.ok()) {
-                        DB_FATAL("destroy old binlog column_family failed, err_message:%s", 
+                        DB_FATAL("destroy old binlog column_family failed, err_message:%s",
                                 res.ToString().c_str());
                     }
                 }
@@ -389,8 +389,8 @@ void RocksWrapper::collect_rocks_options() {
 }
 
 rocksdb::Status RocksWrapper::remove_range(const rocksdb::WriteOptions& options,
-        rocksdb::ColumnFamilyHandle* column_family, 
-        const rocksdb::Slice& begin, 
+        rocksdb::ColumnFamilyHandle* column_family,
+        const rocksdb::Slice& begin,
         const rocksdb::Slice& end,
         bool delete_files_in_range) {
     auto raft_cf = get_raft_log_handle();
@@ -431,7 +431,7 @@ int32_t RocksWrapper::get_binlog_value(int64_t ts, std::string& binlog_value) {
         DB_WARNING("no binlog handle: ts: %ld", ts);
         return -1;
     }
-    
+
     rocksdb::ReadOptions option;
     auto status = _txn_db->Get(option, binlog_handle, rocksdb::Slice(key), &binlog_value);
     if (status.IsNotFound()) {
@@ -477,7 +477,7 @@ void RocksWrapper::update_oldest_ts_in_binlog_cf() {
     for (; iter->Valid(); iter->Next()) {
         int64_t tmp_ts = TableKey(iter->key()).extract_i64(0);
         find = true;
-        DB_WARNING("oldest_ts_in_binlog_cf changed: [%ld => %ld] [%s => %s]", _oldest_ts_in_binlog_cf, tmp_ts, 
+        DB_WARNING("oldest_ts_in_binlog_cf changed: [%ld => %ld] [%s => %s]", _oldest_ts_in_binlog_cf, tmp_ts,
             ts_to_datetime_str(_oldest_ts_in_binlog_cf).c_str(), ts_to_datetime_str(tmp_ts).c_str());
         _oldest_ts_in_binlog_cf = tmp_ts;
         break;
@@ -496,13 +496,13 @@ int32_t RocksWrapper::delete_column_family(std::string cf_name) {
     rocksdb::ColumnFamilyHandle* cf_handler = _column_families[cf_name];
     auto res = _txn_db->DropColumnFamily(cf_handler);
     if (!res.ok()) {
-        DB_FATAL("drop column_family %s failed, err_message:%s", 
+        DB_FATAL("drop column_family %s failed, err_message:%s",
                 cf_name.c_str(), res.ToString().c_str());
         return -1;
     }
     res = _txn_db->DestroyColumnFamilyHandle(cf_handler);
     if (!res.ok()) {
-        DB_FATAL("destroy column_family %s failed, err_message:%s", 
+        DB_FATAL("destroy column_family %s failed, err_message:%s",
                 cf_name.c_str(), res.ToString().c_str());
         return -1;
     }
@@ -649,8 +649,8 @@ void RocksWrapper::adjust_option(std::map<std::string, std::string> new_options)
                 || _defined_options[flag] != pair.second) {
             options_changed = true;
             // 需要是SetDBOptions
-            if (flag == "rocks_max_background_compactions" 
-                    || flag == "rocks_max_subcompactions" 
+            if (flag == "rocks_max_background_compactions"
+                    || flag == "rocks_max_subcompactions"
                     || flag == "max_background_jobs") {
                 db_new_options[option_name] = pair.second;
                 continue;
