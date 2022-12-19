@@ -35,7 +35,7 @@ int DMLNode::expr_optimize(QueryContext* ctx) {
 }
 
 void DMLNode::add_delete_conditon_fields() {
-    if (_node_type == pb::DELETE_NODE) {
+    if (_node_type == pb::UPDATE_NODE || _node_type == pb::DELETE_NODE || _node_type == pb::LOCK_PRIMARY_NODE) {
         std::set<int32_t> cond_field_ids;
         for (auto& slot : _tuple_desc->slots()) {
             cond_field_ids.insert(slot.field_id());
