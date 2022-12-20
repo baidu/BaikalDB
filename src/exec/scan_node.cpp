@@ -235,7 +235,7 @@ void AccessPathMgr::show_cost(std::vector<std::map<std::string, std::string>>& p
 }
 
 int64_t AccessPathMgr::select_index_by_cost() {
-    double min_cost = DBL_MAX;
+    double min_cost = std::numeric_limits<double>::max();
     int64_t min_idx = 0;
     bool multi_0_0 = false;
     bool multi_1_0 = false;
