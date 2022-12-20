@@ -620,7 +620,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         scan_node->add_access_path(access_path);
     }
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
-    scan_node->set_expr_field_map(&expr_field_map);
+    scan_node->set_expr_field_map(std::move(expr_field_map));
     return scan_node->select_index_in_baikaldb(sample_sql); 
 }
 

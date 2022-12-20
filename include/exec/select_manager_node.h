@@ -79,20 +79,14 @@ public:
                           ExecNode* exec_node,
                           int64_t global_index_id,
                           int64_t main_table_id);
+
     int construct_primary_possible_index(
                           FetcherStore& fetcher_store,
                           ScanIndexInfo* scan_index_info,
                           RuntimeState* state,
                           ExecNode* exec_node,
-                          int64_t main_table_id);
-
-    int construct_primary_possible_index_use_limit(
-                          FetcherStore& fetcher_store,
-                          ScanIndexInfo* scan_index_info,
-                          RuntimeState* state,
-                          ExecNode* exec_node,
                           int64_t main_table_id,
-                          LimitNode* limit);
+                          LimitNode* limit = nullptr);
 
     void set_sub_query_runtime_state(RuntimeState* state) {
         _sub_query_runtime_state = state;
