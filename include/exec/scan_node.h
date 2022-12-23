@@ -388,7 +388,7 @@ protected:
     std::vector<ScanIndexInfo> _scan_indexs;
     bthread::Mutex _current_index_mutex;
     bool _current_global_backup = false;
-    std::map<ExprNode*, std::unordered_set<int32_t>>_expr_field_map;
+    std::map<ExprNode*, std::unordered_set<int32_t>> _expr_field_map;
 };
 }
 
