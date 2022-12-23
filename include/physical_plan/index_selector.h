@@ -67,6 +67,7 @@ private:
     }
 
     SchemaFactory* _factory = SchemaFactory::get_instance();
+    QueryContext*  _ctx = nullptr;
 
 };
 }

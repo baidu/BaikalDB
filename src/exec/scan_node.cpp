@@ -179,7 +179,8 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
             explain_info["possible_keys"].pop_back();
         }
         std::string tmp;
-        int64_t index_id = select_index_in_baikaldb(tmp);
+        //int64_t index_id = select_index_in_baikaldb(tmp);
+        int64_t index_id = _select_idx;
         auto index_info = factory->get_index_info(index_id);
         auto pri_info = factory->get_index_info(_table_id);
         explain_info["key"] = index_info.short_name;
@@ -321,12 +322,12 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
 
         if (outer_path->is_cover_index() == inner_path->is_cover_index() &&
             outer_path->is_sort_index == inner_path->is_sort_index) {
-            if (outer_path->index_other_condition.size() > 
-                inner_path->index_other_condition.size()) {
+            if (outer_path->index_other_condition_count > 
+                inner_path->index_other_condition_count) {
                 inner_path->is_possible = false;
                 return -2;
-            } else if (outer_path->index_other_condition.size() < 
-                    inner_path->index_other_condition.size()) {
+            } else if (outer_path->index_other_condition_count < 
+                    inner_path->index_other_condition_count) {
                 outer_path->is_possible = false;
                 return -1;
             } else {
@@ -375,6 +376,12 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
             return 0;
         }
 
+        if (!inner_path->need_filter() && outer_path->is_sort_index <= inner_path->is_sort_index) {
+	    outer_path->is_possible = false;
+            return -1;
+	}
+
+
         if (!outer_path->is_cover_index() && !outer_path->is_sort_index) {
             outer_path->is_possible = false;
             return -1;
@@ -389,6 +396,11 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
         if (!full_coverage(inner_path->hit_index_field_ids, outer_path->hit_index_field_ids)) {
             return 0;
         }
+
+        if (!outer_path->need_filter() && inner_path->is_sort_index <= outer_path->is_sort_index) {
+	    inner_path->is_possible = false;
+            return -2;
+	}
 
         if (!inner_path->is_cover_index() && !inner_path->is_sort_index) {
             inner_path->is_possible = false;
@@ -516,6 +528,8 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
     }
 
     std::vector<ExprNode*> filter_condition;
+    _select_idx = select_idx;
+    calc_index_range();
     std::vector<int64_t> multi_reverse_index = _main_path.multi_reverse_index();
     if (multi_reverse_index.size() > 0) {
         _scan_indexs.clear();

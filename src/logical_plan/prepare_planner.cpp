@@ -253,6 +253,8 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
     _ctx->is_complex = prepare_ctx->is_complex;
     _ctx->mutable_tuple_descs()->assign(tuple_descs.begin(), tuple_descs.end());
+    _ctx->ref_slot_id_mapping.insert(prepare_ctx->ref_slot_id_mapping.begin(),
+                                     prepare_ctx->ref_slot_id_mapping.end());
     // TODO dml的plan复用
     if (!prepare_ctx->is_select) {
         // enable_2pc=true or table has global index need generate txn_id
