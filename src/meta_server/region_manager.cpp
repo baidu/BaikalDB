@@ -1533,7 +1533,6 @@ void RegionManager::learner_load_balance(const std::unordered_map<int64_t, int64
                     master_region_info->learners(), resource_tag, current_instances);
 
             if (current_instances.size() != learner_replica_num) {
-                DB_DEBUG("learner size %ld replica %ld", resource_learner_count, current_instances.size());
                 continue;
             }
             pb::Status status = pb::NORMAL;
