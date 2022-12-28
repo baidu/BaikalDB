@@ -14,6 +14,8 @@
 
 #include "internal_functions.h"
 #include <openssl/md5.h>
+#include <rapidjson/pointer.h>
+#include <rapidjson/stringbuffer.h>
 #include "hll_common.h"
 #include "datetime.h"
 #include <boost/date_time/gregorian/gregorian.hpp>
@@ -22,7 +24,11 @@
 #include <algorithm>
 
 namespace baikaldb {
-DEFINE_string(db_version, "5.7.16-BaikalDB-v1.1.5", "db version");
+#ifdef BAIKALDB_REVISION
+    DEFINE_string(db_version, "5.7.16-BaikalDB-v"BAIKALDB_REVISION, "db version");
+#else
+    DEFINE_string(db_version, "5.7.16-BaikalDB", "db version");
+#endif
 static const int32_t DATE_FORMAT_LENGTH = 128;
 static const std::vector<std::string> day_names = {
         "Sunday", "Monday", "Tuesday", "Wednesday",
@@ -747,6 +753,75 @@ ExprValue instr(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+// @ref: https://dev.mysql.com/doc/refman/8.0/en/json-search-functions.html#function_json-extract
+// @ref: https://rapidjson.org/md_doc_pointer.html#JsonPointer
+ExprValue json_extract(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+
+    for (auto s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    std::string json_str = input[0].get_string();
+    std::string path = input[1].get_string();
+    if (path.length() > 0 && path[0] == '$') {
+        path.erase(path.begin());
+    } else {
+        return ExprValue::Null();
+    }
+    std::replace(path.begin(), path.end(), '.', '/');
+    std::replace(path.begin(), path.end(), '[', '/');
+    path.erase(std::remove(path.begin(), path.end(), ']'), path.end());
+
+    rapidjson::Document doc;
+    try {
+        doc.Parse<0>(json_str.c_str());
+        if (doc.HasParseError()) {
+            rapidjson::ParseErrorCode code = doc.GetParseError();
+            DB_WARNING("parse json_str error [code:%d][%s]", code, json_str.c_str());
+            return ExprValue::Null();
+        }
+
+    } catch (...) {
+        DB_WARNING("parse json_str error [%s]", json_str.c_str());
+        return ExprValue::Null();
+    }
+    rapidjson::Pointer pointer(path.c_str());
+    if (!pointer.IsValid()) {
+        DB_WARNING("invalid path: [%s]", path.c_str());
+        return ExprValue::Null();
+    }
+
+    const rapidjson::Value *pValue = rapidjson::GetValueByPointer(doc, pointer);
+    if (pValue == nullptr) {
+        DB_WARNING("the path: [%s] does not exist in doc [%s]", path.c_str(), json_str.c_str());
+        return ExprValue::Null();
+    }
+    // TODO type on fly
+    ExprValue tmp(pb::STRING);
+    if (pValue->IsString()) {
+        tmp.str_val = pValue->GetString();
+    } else if (pValue->IsInt()) {
+        tmp.str_val = std::to_string(pValue->GetInt());
+    } else if (pValue->IsInt64()) {
+        tmp.str_val = std::to_string(pValue->GetInt64());
+    } else if (pValue->IsUint()) {
+        tmp.str_val = std::to_string(pValue->GetUint());
+    } else if (pValue->IsUint64()) {
+        tmp.str_val = std::to_string(pValue->GetUint64());
+    } else if (pValue->IsDouble()) {
+        tmp.str_val = std::to_string(pValue->GetDouble());
+    } else if (pValue->IsFloat()) {
+        tmp.str_val = std::to_string(pValue->GetFloat());
+    } else if (pValue->IsBool()) {
+        tmp.str_val = std::to_string(pValue->GetBool());
+    }
+    return tmp;
+}
+
 ExprValue substring_index(const std::vector<ExprValue>& input) {
     if (input.size() != 3) {
         return ExprValue::Null();
@@ -768,6 +843,9 @@ ExprValue substring_index(const std::vector<ExprValue>& input) {
     size_t last_pos = 0;
     const std::string& str = input[0].get_string();
     const std::string& sub = input[1].get_string();
+    if (sub.size() == 0) {
+        return tmp;
+    }
     while (true) {
         size_t find_pos = str.find(sub, last_pos);
         if (find_pos != std::string::npos) {
@@ -1004,10 +1082,8 @@ ExprValue day(const std::vector<ExprValue>& input) {
         in.cast_to(pb::STRING);
     }
     ExprValue tmp(pb::UINT32);
-    time_t t = in.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    struct tm tm;
-    localtime_r(&t, &tm);
-    tmp._u.uint32_val = tm.tm_mday;
+    uint64_t dt = in.cast_to(pb::DATETIME)._u.uint64_val;
+    tmp._u.uint32_val = datetime_to_day(dt);
     return tmp;
 }
 ExprValue dayname(const std::vector<ExprValue>& input) {
@@ -1016,8 +1092,10 @@ ExprValue dayname(const std::vector<ExprValue>& input) {
     }
     ExprValue tmp(pb::STRING);
     uint32_t week_num = dayofweek(input)._u.uint32_val;
-    if (week_num <= day_names.size()) {
+    if (week_num <= day_names.size() && week_num > 0) {
         tmp.str_val = day_names[week_num - 1];
+    } else {
+        return ExprValue::Null();
     }
     return tmp;
 }
@@ -1027,8 +1105,10 @@ ExprValue monthname(const std::vector<ExprValue>& input) {
     }
     uint32_t month_num = month(input)._u.uint32_val;
     ExprValue tmp(pb::STRING);
-    if (month_num <= month_names.size()) {
+    if (month_num <= month_names.size() && month_num > 0) {
         tmp.str_val = month_names[month_num - 1];
+    } else {
+        return ExprValue::Null();
     }
     return tmp;
 }
@@ -1040,16 +1120,25 @@ ExprValue dayofweek(const std::vector<ExprValue>& input) {
     if (in.type == pb::INT64) {
         in.cast_to(pb::STRING);
     }
-    ExprValue tmp(pb::UINT32);
-    time_t t = in.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    struct tm tm;
-    localtime_r(&t, &tm);
-    boost::gregorian::date today(tm.tm_year + 1900, ++tm.tm_mon, tm.tm_mday);
-    /*
-      DAYOFWEEK(d) 函数返回 d 对应的一周中的索引（位置）。1 表示周日，2 表示周一，……，7 表示周六
-    */ 
-    tmp._u.uint32_val = today.day_of_week() + 1;
-    return tmp;
+    uint64_t dt = in.cast_to(pb::DATETIME)._u.uint64_val;
+    uint32_t year = datetime_to_year(dt);
+    uint32_t month = datetime_to_month(dt);
+    uint32_t day = datetime_to_day(dt);
+    if (month == 0 || day == 0) {
+        return ExprValue::Null();
+    }
+    try {
+        boost::gregorian::date today(year, month, day);
+        ExprValue tmp(pb::UINT32);
+        /*
+          DAYOFWEEK(d) 函数返回 d 对应的一周中的索引（位置）。1 表示周日，2 表示周一，……，7 表示周六
+        */ 
+        tmp._u.uint32_val = today.day_of_week() + 1;
+        return tmp;
+    } catch (std::exception& e) {
+        DB_WARNING("date error:%s", e.what());
+        return ExprValue::Null();
+    }
 }
 ExprValue dayofmonth(const std::vector<ExprValue>& input) {
     return day(input);
@@ -1063,10 +1152,8 @@ ExprValue month(const std::vector<ExprValue>& input) {
         in.cast_to(pb::STRING);
     }
     ExprValue tmp(pb::UINT32);
-    time_t t = in.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    struct tm tm;
-    localtime_r(&t, &tm);
-    tmp._u.uint32_val = ++tm.tm_mon;
+    uint64_t dt = in.cast_to(pb::DATETIME)._u.uint64_val;
+    tmp._u.uint32_val = datetime_to_month(dt);
     return tmp;
 }
 ExprValue year(const std::vector<ExprValue>& input) {
@@ -1078,10 +1165,8 @@ ExprValue year(const std::vector<ExprValue>& input) {
         in.cast_to(pb::STRING);
     }
     ExprValue tmp(pb::UINT32);
-    time_t t = in.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    struct tm tm;
-    localtime_r(&t, &tm);
-    tmp._u.uint32_val = tm.tm_year + 1900;
+    uint64_t dt = in.cast_to(pb::DATETIME)._u.uint64_val;
+    tmp._u.uint32_val = datetime_to_year(dt);
     return tmp;    
 }
 ExprValue time_to_sec(const std::vector<ExprValue>& input) {
@@ -1144,13 +1229,22 @@ ExprValue dayofyear(const std::vector<ExprValue>& input) {
     if (in.type == pb::INT64) {
         in.cast_to(pb::STRING);
     }
-    ExprValue tmp(pb::UINT32);
-    time_t t = in.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    struct tm tm;
-    localtime_r(&t, &tm);
-    boost::gregorian::date today(tm.tm_year += 1900, ++tm.tm_mon, tm.tm_mday);
-    tmp._u.uint32_val = today.day_of_year();
-    return tmp;
+    uint64_t dt = in.cast_to(pb::DATETIME)._u.uint64_val;
+    uint32_t year = datetime_to_year(dt);
+    uint32_t month = datetime_to_month(dt);
+    uint32_t day = datetime_to_day(dt);
+    if (month == 0 || day == 0) {
+        return ExprValue::Null();
+    }
+    try {
+        boost::gregorian::date today(year, month, day);
+        ExprValue tmp(pb::UINT32);
+        tmp._u.uint32_val = today.day_of_year();
+        return tmp;
+    } catch (std::exception& e) {
+        DB_WARNING("date error:%s", e.what());
+        return ExprValue::Null();
+    }
 }
 ExprValue weekday(const std::vector<ExprValue>& input) {
     if (input.size() == 0 || input[0].is_null()) {
@@ -1160,40 +1254,201 @@ ExprValue weekday(const std::vector<ExprValue>& input) {
     if (in.type == pb::INT64) {
         in.cast_to(pb::STRING);
     }
-    ExprValue one = input[0];
-    time_t t = one.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    struct tm tm;
-    localtime_r(&t, &tm);
-    boost::gregorian::date today(tm.tm_year + 1900, ++tm.tm_mon, tm.tm_mday);
-    ExprValue tmp(pb::UINT32);
-    uint32_t day_of_week = today.day_of_week();
-    if (day_of_week >= 1) {
-        tmp._u.uint32_val = day_of_week - 1;
-    } else {
-        tmp._u.uint32_val = 6;
+    uint64_t dt = in.cast_to(pb::DATETIME)._u.uint64_val;
+    uint32_t year = datetime_to_year(dt);
+    uint32_t month = datetime_to_month(dt);
+    uint32_t day = datetime_to_day(dt);
+    if (month == 0 || day == 0) {
+        return ExprValue::Null();
     }
+    try {
+        boost::gregorian::date today(year, month, day);
+        ExprValue tmp(pb::UINT32);
+        uint32_t day_of_week = today.day_of_week();
+        if (day_of_week >= 1) {
+            tmp._u.uint32_val = day_of_week - 1;
+        } else {
+            tmp._u.uint32_val = 6;
+        }
+        return tmp;
+    } catch (std::exception& e) {
+        DB_WARNING("date error:%s", e.what());
+        return ExprValue::Null();
+    }
+}
+inline void calc_mode(uint32_t mode, bool& is_monday_first, bool& zero_range, bool& with_4_days) {
+    switch (mode) {
+        case 0:
+            is_monday_first = false;
+            zero_range = true;
+            with_4_days = false;
+            break;
+        case 1:
+            is_monday_first = true;
+            zero_range = true;
+            with_4_days = true;
+            break;
+        case 2:
+            is_monday_first = false;
+            zero_range = false;
+            with_4_days = false;
+            break;
+        case 3:
+            is_monday_first = true;
+            zero_range = false;
+            with_4_days = true;
+            break;
+        case 4:
+            is_monday_first = false;
+            zero_range = true;
+            with_4_days = true;
+            break;
+        case 5:
+            is_monday_first = true;
+            zero_range = true;
+            with_4_days = false;
+            break;
+        case 6:
+            is_monday_first = false;
+            zero_range = false;
+            with_4_days = true;
+            break;
+        case 7:
+            is_monday_first = true;
+            zero_range = false;
+            with_4_days = false;
+            break;
+        default:
+            break;
+    }
+}
+
+inline int days_in_year(int year) {
+    if (year % 4 == 0 && (year % 100 != 0 || year%400 == 0)) {
+        return 366;
+    }
+    return 365;
+}
+int calc_week(const std::vector<ExprValue>& input, bool is_yearweek, int& year, int& weeks) {
+    if (input.size() == 0 || input[0].is_null()) {
+        return -1;
+    }
+    ExprValue one = input[0];
+    uint64_t dt = one.cast_to(pb::DATETIME)._u.uint64_val;
+    year = datetime_to_year(dt);
+    int32_t month = datetime_to_month(dt);
+    int32_t day = datetime_to_day(dt);
+    if (month == 0 || day == 0) {
+        return -1;
+    }
+    boost::gregorian::date first_day;
+    boost::gregorian::date today;
+    try {
+        first_day = boost::gregorian::date(year, 1, 1);
+        today = boost::gregorian::date(year, month, day);
+    } catch (std::exception& e) {
+        DB_WARNING("date error:%s", e.what());
+        return -1;
+    }
+    int day_of_year = today.day_of_year();
+    // 第一天是星期几
+    int first_weekday = first_day.day_of_week();
+    bool is_monday_first = false;
+    // 0-53 or 1-53
+    bool zero_range = true;
+    bool with_4_days = false;
+    if (input.size() > 1) {
+        ExprValue two = input[1];
+        uint32_t mode = input[1].get_numberic<uint32_t>() % 8;
+        calc_mode(mode, is_monday_first, zero_range, with_4_days); 
+    }
+    if (is_monday_first) {
+        if (first_weekday == 0) {
+            first_weekday = 6;
+        } else {
+            first_weekday--;
+        }
+    }
+    if (is_yearweek) {
+        zero_range = false;
+    }
+    int contain_days = 7 - first_weekday;
+    if (month == 1 && day <= contain_days) {
+        if ((with_4_days && contain_days < 4) || (!with_4_days && first_weekday != 0)) {
+            if (zero_range) {
+                weeks = 0;
+                return 0;
+            } else {
+                // 第一天非第一周则放到上一年最后一周
+                year--;
+                day_of_year += days_in_year(year);
+                first_weekday = (first_weekday + 53 * 7 - days_in_year(year)) % 7;
+                contain_days = 7 - first_weekday;
+            }
+        }
+    }
+    int days = 0;
+    if ((with_4_days && contain_days < 4) || (!with_4_days && first_weekday != 0)) {
+        days = day_of_year - contain_days - 1;
+    } else {
+        days = day_of_year - contain_days - 1 + 7;
+    }
+    weeks = days / 7 + 1;
+    if (!zero_range && days >= 52 * 7) {
+        // 下一年第一天是星期几
+        first_weekday = (first_weekday + days_in_year(year)) % 7;
+        if ((with_4_days && contain_days >=4) || (!with_4_days && first_weekday == 0)) {
+            year++;
+            weeks = 1;
+            return 0;
+        }
+    }
+    return 0;
+}
+ExprValue yearweek(const std::vector<ExprValue>& input) {
+    int year = 0;
+    int weeks = 0;
+    int ret = calc_week(input, true, year, weeks);
+    if (ret != 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::UINT32);
+    tmp._u.uint32_val = year * 100 + weeks;
     return tmp;
 }
 ExprValue week(const std::vector<ExprValue>& input) {
+    int year = 0;
+    int weeks = 0;
+    int ret = calc_week(input, false, year, weeks);
+    if (ret != 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::UINT32);
+    tmp._u.uint32_val = weeks;
+    return tmp;
+}
+ExprValue weekofyear(const std::vector<ExprValue>& input) {
     if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
     }
     ExprValue one = input[0];
-    time_t t = one.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    struct tm tm;
-    localtime_r(&t, &tm);
-    boost::gregorian::date today(tm.tm_year += 1900, ++tm.tm_mon, tm.tm_mday);
-    uint32_t week_number = today.week_number() - 1;
-    ExprValue tmp(pb::UINT32);
-    if (input.size() > 1) {
-        ExprValue two = input[1];
-        uint32_t mode = two.cast_to(pb::UINT32)._u.uint32_val;
-        if (mode > 0) {
-            week_number += 1;
-        }
+    uint64_t dt = one.cast_to(pb::DATETIME)._u.uint64_val;
+    uint32_t year = datetime_to_year(dt);
+    uint32_t month = datetime_to_month(dt);
+    uint32_t day = datetime_to_day(dt);
+    if (month == 0 || day == 0) {
+        return ExprValue::Null();
     }
-    tmp._u.uint32_val = week_number;
-    return tmp;
+    try {
+        boost::gregorian::date today(year, month, day);
+        uint32_t week_number = today.week_number();
+        ExprValue tmp(pb::UINT32);
+        tmp._u.uint32_val = week_number;
+        return tmp;
+    } catch (std::exception& e) {
+        DB_WARNING("date error:%s", e.what());
+        return ExprValue::Null();
+    }
 }
 
 ExprValue datediff(const std::vector<ExprValue>& input) {
@@ -1227,7 +1482,12 @@ ExprValue date_add(const std::vector<ExprValue>& input) {
     ExprValue arg1 = input[0];
     ExprValue arg2 = input[1];
     int32_t interval = arg2.cast_to(pb::INT32)._u.int32_val;
-    ExprValue ret = arg1.cast_to(pb::TIMESTAMP);
+    ExprValue ret;
+    if (!arg1.is_numberic()) {
+        ret = arg1.cast_to(pb::TIMESTAMP);
+    } else {
+        ret = arg1.cast_to(pb::STRING).cast_to(pb::TIMESTAMP);
+    }
     if (input[2].str_val == "second") {
         ret._u.uint32_val += interval;
     } else if (input[2].str_val == "minute") {
@@ -1255,7 +1515,12 @@ ExprValue date_sub(const std::vector<ExprValue>& input) {
     ExprValue arg1 = input[0];
     ExprValue arg2 = input[1];
     int32_t interval = arg2.cast_to(pb::INT32)._u.int32_val;
-    ExprValue ret = arg1.cast_to(pb::TIMESTAMP);
+    ExprValue ret;
+    if (!arg1.is_numberic()) {
+        ret = arg1.cast_to(pb::TIMESTAMP);
+    } else {
+        ret = arg1.cast_to(pb::STRING).cast_to(pb::TIMESTAMP);
+    }
     if (input[2].str_val == "second") {
         ret._u.uint32_val -= interval;
     } else if (input[2].str_val == "minute") {
@@ -1980,6 +2245,14 @@ ExprValue cast_to_unsigned(const std::vector<ExprValue>& input) {
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::UINT64);
+}
+
+ExprValue cast_to_double(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::DOUBLE);
 }
 
 }

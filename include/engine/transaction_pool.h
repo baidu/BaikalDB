@@ -38,7 +38,8 @@ public:
     int init(int64_t region_id, bool use_ttl, int64_t online_ttl_base_expire_time_us);
 
     // -1 means insert error (already exists)
-    int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id, int64_t txn_timeout = 0);
+    int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id,
+             int64_t txn_timeout, int64_t txn_lock_timeout);
 
     void remove_txn(uint64_t txn_id, bool mark_finished);
 

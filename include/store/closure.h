@@ -89,6 +89,7 @@ struct SplitClosure : public braft::Closure {
     pb::OpType op_type;
     int ret = 0;
     TimeCost cost;
+    std::vector<MultiSplitRegion> multi_new_regions; // 尾分裂多region
 };
 
 struct ConvertToSyncClosure : public braft::Closure {

@@ -70,10 +70,40 @@ public:
         return _trace_node;
     }
 
+    template<typename Repeated>
+    void select_valid_peers(const std::string& resource_tag, 
+                            Repeated&& peers, 
+                            std::vector<std::string>& valid_peers);
+
+    bool rpc_need_retry(int32_t errcode) {
+        switch (errcode) {
+            case ENETDOWN:     // 100, Network is down
+            case ENETUNREACH:  // 101, Network is unreachable
+            case ENETRESET:    // 102, Network dropped connection because of reset
+            case ECONNABORTED: // 103, Software caused connection abort
+            case ECONNRESET:   // 104, Connection reset by peer
+            case ENOBUFS:      // 105, No buffer space available
+            case EISCONN:      // 106, Transport endpoint is already connected
+            case ENOTCONN:     // 107, Transport endpoint is not connected
+            case ESHUTDOWN:    // 108, Cannot send after transport endpoint shutdown
+            case ETOOMANYREFS: // 109, Too many references: cannot splice 
+            case ETIMEDOUT:    // 110, Connection timed out
+            case ECONNREFUSED: // 111, Connection refused
+            case EHOSTDOWN:    // 112, Host is down
+            case EHOSTUNREACH: // 113, No route to host
+            case ECANCELED:    // 125, Operation Cancelled
+            case brpc::EBACKUPREQUEST: // 1007, Sending backup request
+                return true;
+            default:
+                return false;
+        }
+        return false;
+    }
     ErrorType check_status();
     ErrorType send_async();
     ErrorType fill_request();
     void select_addr();
+    void select_resource_insulate_read_addr(const std::string& insulate_resource_tag);
     void send_request();
     ErrorType handle_version_old();
     ErrorType handle_response(const std::string& remote_side);
@@ -92,7 +122,8 @@ private:
 
     TimeCost _total_cost;
     TimeCost _query_time;
-    bool _access_learner = false;
+    // _resource_insulate_read包括: 访问learner / 指定isolate_resource_tag 资源隔离读从
+    bool _resource_insulate_read = false; 
     std::string _addr;
     std::string _backup;
     NetworkSocket* _client_conn = nullptr;
@@ -255,20 +286,29 @@ enum GlobalBackupType {
     GBT_LEARNER,  // 降级backup请求强制访问learner
 };
 
-class LearnerStatus {
+class PeerStatus {
 public:
-    void set_learner_cannot_access(int64_t region_id, const std::string& peer) {
+    void set_cannot_access(int64_t region_id, const std::string& peer) {
         BAIDU_SCOPED_LOCK(_lock);
-        _region_id_dead_learner_peers[region_id].insert(peer);
+        _region_id_dead_peers[region_id].insert(peer);
     }
 
-    bool can_learner_access(int64_t region_id, const std::string& peer) {
+    bool can_access(int64_t region_id, const std::string& peer) {
         BAIDU_SCOPED_LOCK(_lock);
-        return _region_id_dead_learner_peers[region_id].count(peer) <= 0;
+        return _region_id_dead_peers[region_id].count(peer) <= 0;
+    }
+
+    void get_cannot_access_peer(int64_t region_id, std::set<std::string>& cannot_access_peers) {
+        BAIDU_SCOPED_LOCK(_lock);
+        if (_region_id_dead_peers.count(region_id) <= 0) {
+            return;
+        }
+        cannot_access_peers = _region_id_dead_peers[region_id];
+        return;
     }
 private:
     bthread::Mutex  _lock;
-    std::map<int64_t, std::set<std::string>> _region_id_dead_learner_peers;
+    std::map<int64_t, std::set<std::string>> _region_id_dead_peers;
 };
 
 class FetcherStore {
@@ -328,7 +368,7 @@ public:
                            int current_seq_id,
                            pb::OpType op_type) {
         int64_t limit_single_store_concurrency_cnts = 0;
-        limit_single_store_concurrency_cnts = state->get_single_store_concurrency();
+        limit_single_store_concurrency_cnts = state->calc_single_store_concurrency(op_type);
         std::set<std::shared_ptr<pb::TraceNode>> traces;
 
         RPCCtrl rpc_ctrl(limit_single_store_concurrency_cnts);
@@ -381,8 +421,35 @@ public:
         state->set_num_filter_rows(state->num_filter_rows() + filter_rows.load());
     }
 
+    static bool rpc_need_retry(int32_t errcode) {
+        switch (errcode) {
+            case ENETDOWN:     // 100, Network is down
+            case ENETUNREACH:  // 101, Network is unreachable
+            case ENETRESET:    // 102, Network dropped connection because of reset
+            case ECONNABORTED: // 103, Software caused connection abort
+            case ECONNRESET:   // 104, Connection reset by peer
+            case ENOBUFS:      // 105, No buffer space available
+            case EISCONN:      // 106, Transport endpoint is already connected
+            case ENOTCONN:     // 107, Transport endpoint is not connected
+            case ESHUTDOWN:    // 108, Cannot send after transport endpoint shutdown
+            case ETOOMANYREFS: // 109, Too many references: cannot splice 
+            case ETIMEDOUT:    // 110, Connection timed out
+            case ECONNREFUSED: // 111, Connection refused
+            case EHOSTDOWN:    // 112, Host is down
+            case EHOSTUNREACH: // 113, No route to host
+            case ECANCELED:    // 125, Operation Cancelled
+            case brpc::EBACKUPREQUEST: // 1007, Sending backup request
+                return true;
+            default:
+                return false;
+        }
+        return false;
+    } 
+
     template<typename Repeated>
-    static void choose_opt_instance(int64_t region_id, Repeated&& peers, std::string& addr, pb::Status& addr_status, std::string* backup) {
+    static void choose_opt_instance(int64_t region_id, Repeated&& peers, std::string& addr, 
+                                    pb::Status& addr_status, std::string* backup,
+                                    const std::set<std::string>& cannot_access_peers = {}) {
         SchemaFactory* schema_factory = SchemaFactory::get_instance();
         addr_status = pb::NORMAL;
         std::string baikaldb_logical_room = schema_factory->get_logical_room();
@@ -396,6 +463,8 @@ public:
         for (auto& peer: peers) {
             auto status = schema_factory->get_instance_status(peer);
             if (status.status != pb::NORMAL) {
+                continue;
+            } else if (cannot_access_peers.find(peer) != cannot_access_peers.end()) {
                 continue;
             } else if (!status.logical_room.empty() && status.logical_room == baikaldb_logical_room) {
                 if (addr == peer) {
@@ -503,13 +572,35 @@ public:
     std::set<int64_t> no_copy_cache_plan_set;
     int64_t dynamic_timeout_ms = -1;
     TimeCost binlog_prewrite_time;
-    LearnerStatus learner_status;
+    PeerStatus peer_status; // 包括follower和learner
     MysqlErrCode      error_code = ER_ERROR_FIRST;
     std::ostringstream error_msg;
     int32_t region_count = 0;
     std::set<brpc::CallId> callids;
     GlobalBackupType global_backup_type = GBT_INIT;
 };
+
+template<typename Repeated>
+void OnRPCDone::select_valid_peers(const std::string& resource_tag, 
+                        Repeated&& peers, 
+                        std::vector<std::string>& valid_peers) {
+    valid_peers.clear();
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+    for (auto& peer : peers) {
+        if (!resource_tag.empty()) {
+            auto status = schema_factory->get_instance_status(peer);
+            if (status.resource_tag != resource_tag) {
+                continue;
+            }
+        } 
+        if (!_fetcher_store->peer_status.can_access(_info.region_id(), peer)) {
+            // learner/peer异常时报警
+            DB_DONE(WARNING, "has abnormal peer/learner: %s", peer.c_str());
+            continue;
+        }
+        valid_peers.emplace_back(peer);
+    }
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

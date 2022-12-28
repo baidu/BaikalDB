@@ -283,12 +283,17 @@ void RegionManager::drop_region(const pb::MetaManagerRequest& request,
 void RegionManager::split_region(const pb::MetaManagerRequest& request, braft::Closure* done) {
     auto& region_split_info = request.region_split();
     int64_t region_id = region_split_info.region_id();
-    int64_t new_region_id = _max_region_id + 1; //新分配的region_id
+    int new_region_num = region_split_info.new_region_num();
+    if (new_region_num < 1) {
+        new_region_num = 1;
+    }
+    int64_t new_region_start_id = _max_region_id + 1;            //新分配的第一个region_id
+    int64_t new_region_end_id = _max_region_id + new_region_num; //新分配的最后一个region_id
     std::string instance = region_split_info.new_instance();
 
     //更新max_region_id
     std::string max_region_id_value;
-    max_region_id_value.append((char*)&new_region_id, sizeof(int64_t));
+    max_region_id_value.append((char*)&new_region_end_id, sizeof(int64_t));
     
     // write date to rocksdb
     auto ret = MetaRocksdb::get_instance()->put_meta_info(construct_max_region_id_key(), max_region_id_value);
@@ -298,17 +303,28 @@ void RegionManager::split_region(const pb::MetaManagerRequest& request, braft::C
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
+    DB_WARNING("generate %d region_id: [%ld, %ld]", new_region_num, new_region_start_id, new_region_end_id);
     //更新内存
-    set_max_region_id(new_region_id);
+    set_max_region_id(new_region_end_id);
     if (done && ((MetaServerClosure*)done)->response) {
         ((MetaServerClosure*)done)->response->set_errcode(pb::SUCCESS);
         ((MetaServerClosure*)done)->response->set_op_type(request.op_type());
         ((MetaServerClosure*)done)->response->mutable_split_response()->set_old_region_id(region_id);
-        ((MetaServerClosure*)done)->response->mutable_split_response()->set_new_region_id(new_region_id);
+        if (new_region_num == 1) {
+            ((MetaServerClosure*)done)->response->mutable_split_response()->set_new_region_id(new_region_start_id);
+        } else {
+            for (int64_t i = new_region_start_id; i <= new_region_end_id; ++i) {
+                int pos = i - new_region_start_id;
+                if (pos >= ((MetaServerClosure*)done)->response->mutable_split_response()->multi_new_regions_size()) {
+                    break;
+                }
+                ((MetaServerClosure*)done)->response->mutable_split_response()->mutable_multi_new_regions(pos)->set_new_region_id(i);
+            }
+        }
         ((MetaServerClosure*)done)->response->set_errmsg("SUCCESS");
     } 
-    DB_NOTICE("split region success, _max_region_id:%ld, new_region_id: %ld, request:%s", 
-                _max_region_id, new_region_id, request.ShortDebugString().c_str());
+    DB_NOTICE("split region success, _max_region_id:%ld, new_region_start_id: %ld, new_region_end_id: %ld, request:%s", 
+                _max_region_id, new_region_start_id, new_region_end_id, request.ShortDebugString().c_str());
 }
 
 void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_region_ids) {
@@ -359,15 +375,21 @@ void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_
 // default for MIGRATE
 void RegionManager::add_peer_for_store(const std::string& instance, 
         InstanceStateInfo status) {
-    DB_WARNING("add peer all region for migrate store start, store:%s", instance.c_str());
-    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
-    std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
+    IdcInfo instance_idc;
+    if (ClusterManager::get_instance()->get_instance_idc(instance, instance_idc) < 0) {
+        DB_FATAL("instance: %s get idc fail", instance.c_str());
+        return;
+    }
+    DB_WARNING("add peer all region for migrate store start, store:%s, idc: %s", 
+               instance.c_str(), instance_idc.to_string().c_str());
+    const std::string& resource_tag = instance_idc.resource_tag;
+    const std::string& logical_room = instance_idc.logical_room;
     int64_t instance_count = ClusterManager::get_instance()->get_instance_count(resource_tag, logical_room);
     int64_t leader_count = get_leader_count(instance);
     std::vector<int64_t> learner_ids;
     get_learner_ids(instance, learner_ids);
     if (learner_ids.size() > 0) {
-        add_all_learner_for_store(instance, learner_ids);
+        add_all_learner_for_store(instance, instance_idc, learner_ids);
     }
     //实例上已经没有reigon了，直接删除该实例即可
     std::vector<int64_t> region_ids;
@@ -388,7 +410,9 @@ void RegionManager::add_peer_for_store(const std::string& instance,
     }
     // 希望leader迁移到region_ids.size() / instance_count，留一些buf应对一些leader迁移不走的case
     // leader_count太少就不判断，解决少量leader可能计算出来0这种case
-    if (instance_count > 3 && 
+    // 10min后learder还是迁移不走，可能遇到某些异常，仍然做migrate
+    if (status.state_duration.get_time() < 10 * 60 * 1000 * 1000LL &&
+            instance_count > 3 && 
             leader_count > 10 &&
             leader_count > 2 * (int64_t)region_ids.size() / instance_count) {
         DB_WARNING("instance migrate wait, instance:%s, instance_count:%ld, leader_count:%ld, region_size:%lu",
@@ -404,9 +428,9 @@ void RegionManager::add_peer_for_store(const std::string& instance,
             _doing_migrate.insert(instance);
         }
     }
-    auto asyn_add_peer = [this, instance, status] () {
+    auto asyn_add_peer = [this, instance, instance_idc, status] () {
         std::unordered_map<std::string, std::vector<pb::AddPeer>> add_peer_requests;
-        pre_process_add_peer_for_store(instance, status.state, add_peer_requests);
+        pre_process_add_peer_for_store(instance, instance_idc, status.state, add_peer_requests);
         ConcurrencyBthread concur_bth(add_peer_requests.size());
         for (auto& add_peer_per_instance : add_peer_requests) {
             auto add_peer_fun_per_instance = [this, add_peer_per_instance] ()  {
@@ -438,10 +462,11 @@ void RegionManager::add_peer_for_store(const std::string& instance,
     bth.run(asyn_add_peer);
 }
 
-void RegionManager::add_all_learner_for_store(const std::string& instance, const std::vector<int64_t>& learner_ids) {
-    DB_WARNING("add all learner for store instance %s", instance.c_str());
-    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
-    std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
+void RegionManager::add_all_learner_for_store(const std::string& instance, 
+                                              const IdcInfo &idc, 
+                                              const std::vector<int64_t>& learner_ids) {
+    DB_WARNING("add all learner for store instance %s, idc: %s", instance.c_str(), idc.to_string().c_str());
+    const std::string resource_tag = idc.resource_tag;
     std::vector<std::pair<std::string, pb::InitRegion>> add_learner_requests;
     for (auto& region_id : learner_ids) {
         DB_WARNING("process instance %s region_id %ld", instance.c_str(), region_id);
@@ -451,12 +476,17 @@ void RegionManager::add_all_learner_for_store(const std::string& instance, const
             continue;
         }
         const static int64_t learner_replica_num = 1;
-        std::vector<std::string> current_resource_learners;
-        current_resource_learners.reserve(3);
-        int64_t resource_learner_count = ClusterManager::get_instance()->get_resource_tag_count(
+        std::set<std::string> current_resource_learners;
+        ClusterManager::get_instance()->get_resource_tag_count(
                 ptr_region->learners(), resource_tag, current_resource_learners);
-        if (resource_learner_count <= learner_replica_num) {
-            add_learner_peer(region_id, add_learner_requests, ptr_region.get(), resource_tag);
+        if (current_resource_learners.size() <= learner_replica_num) {
+            if (ptr_region->peers_size() > 1) {
+                // region只有一个peer的时候暂缓加learner
+                add_learner_peer(region_id, add_learner_requests, ptr_region.get(), resource_tag);
+            } else {
+                DB_WARNING("region_id %ld can`t add learner peer_size: %d", region_id, ptr_region->peers_size());
+            }
+            
         }
     }
     ConcurrencyBthread add_learner_bth(FLAGS_concurrency_num, &BTHREAD_ATTR_SMALL);
@@ -481,12 +511,17 @@ void RegionManager::add_all_learner_for_store(const std::string& instance, const
 // default for DEAD
 void RegionManager::delete_all_region_for_store(const std::string& instance, 
         InstanceStateInfo status) {
-    DB_WARNING("delete all region for dead store start, dead_store:%s", instance.c_str());
-    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
+    IdcInfo instance_idc;
+    if (ClusterManager::get_instance()->get_instance_idc(instance, instance_idc) < 0) {
+        DB_FATAL("instance: %s get idc fail", instance.c_str());
+        return;
+    }
+    DB_WARNING("delete all region for dead store start, dead_store:%s, idc:%s", 
+                instance.c_str(), instance_idc.to_string().c_str());
     std::vector<int64_t> learner_ids;
     get_learner_ids(instance, learner_ids);
     if (learner_ids.size() > 0) {
-        add_all_learner_for_store(instance, learner_ids);
+        add_all_learner_for_store(instance, instance_idc, learner_ids);
     }
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
@@ -505,7 +540,7 @@ void RegionManager::delete_all_region_for_store(const std::string& instance,
         return;
     }
     std::vector<pb::RaftControlRequest> requests;
-    pre_process_remove_peer_for_store(instance, status.state, requests);
+    pre_process_remove_peer_for_store(instance, instance_idc, status.state, requests);
 
     ConcurrencyBthread remove_peer_bth(FLAGS_concurrency_num, &BTHREAD_ATTR_SMALL);
     for (auto request : requests) {
@@ -525,11 +560,10 @@ void RegionManager::delete_all_region_for_store(const std::string& instance,
 }
 
 void RegionManager::pre_process_remove_peer_for_store(const std::string& instance, 
-        pb::Status status, std::vector<pb::RaftControlRequest>& requests) {
+        const IdcInfo& instance_idc, pb::Status status, 
+        std::vector<pb::RaftControlRequest>& requests) {
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
-    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
-    std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
     for (auto& region_id : region_ids) {
         auto ptr_region = get_region_info(region_id);
         if (ptr_region == nullptr) {
@@ -564,18 +598,17 @@ void RegionManager::pre_process_remove_peer_for_store(const std::string& instanc
             for (auto& peer : ptr_region->peers()) {
                 peers.insert(peer);
             }
-            std::string candicate_logical_room;
-            if (TableManager::get_instance()->whether_replica_dists(table_id)) {
-                candicate_logical_room = logical_room;
+            IdcInfo new_peer_idc;
+            if (TableManager::get_instance()->get_table_dist_belonged(table_id, instance_idc, new_peer_idc) < 0) {
+                new_peer_idc = {instance_idc.resource_tag, "", ""};
             }
             // 故障需要尽快恢复，轮询最均匀
             auto ret = ClusterManager::get_instance()->select_instance_rolling(
-                    resource_tag,
+                    new_peer_idc,
                     peers,
-                    candicate_logical_room,
                     new_instance);
             if (ret < 0) {
-                DB_FATAL("select store from cluster fail, region_id:%ld", region_id);
+                DB_FATAL("select store from cluster fail, region_id:%ld, idc: %s", region_id, new_peer_idc.to_string().c_str());
                 return;
             }
             pb::AddPeer add_peer;
@@ -619,12 +652,11 @@ void RegionManager::pre_process_remove_peer_for_store(const std::string& instanc
         requests.push_back(request);
     }
 }
-void RegionManager::pre_process_add_peer_for_store(const std::string& instance, pb::Status status, 
+void RegionManager::pre_process_add_peer_for_store(const std::string& instance, 
+                const IdcInfo& instance_idc, pb::Status status, 
                 std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests) {
     std::vector<int64_t> region_ids;
     get_region_ids(instance, region_ids);
-    std::string resource_tag = ClusterManager::get_instance()->get_instance(instance).resource_tag;
-    std::string logical_room = ClusterManager::get_instance()->get_logical_room(instance);
     for (auto& region_id : region_ids) {
         auto ptr_region = get_region_info(region_id);
         if (ptr_region == nullptr) {
@@ -661,18 +693,17 @@ void RegionManager::pre_process_add_peer_for_store(const std::string& instance, 
         for (auto& peer : ptr_region->peers()) {
             peers.insert(peer);
         }
-        std::string candicate_logical_room;
-        if (TableManager::get_instance()->whether_replica_dists(table_id)) {
-            candicate_logical_room = logical_room;
+        IdcInfo new_peer_idc;
+        if (TableManager::get_instance()->get_table_dist_belonged(table_id, instance_idc, new_peer_idc) < 0) {
+            new_peer_idc = {instance_idc.resource_tag, "", ""};
         }
         // 故障需要尽快恢复，轮询最均匀
         ret = ClusterManager::get_instance()->select_instance_rolling(
-                resource_tag,
+                new_peer_idc,
                 peers,
-                candicate_logical_room,
                 new_instance);
         if (ret < 0) {
-            DB_FATAL("select store from cluster fail, region_id:%ld", region_id);
+            DB_FATAL("select store from cluster fail, region_id:%ld, idc: %s", region_id, new_peer_idc.to_string().c_str());
             continue;
         }
         pb::AddPeer add_peer;
@@ -721,11 +752,17 @@ void RegionManager::add_region_info(const std::vector<int64_t>& new_add_region_i
 
 void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatRequest* request,
                     pb::StoreHeartBeatResponse* response,
+                    IdcInfo& leader_idc,
+                    std::unordered_map<int64_t, int64_t>& table_replica,
+                    std::unordered_map<int64_t, IdcInfo>& table_main_idc,
                     std::set<int64_t>& trans_leader_region_ids) {
     std::string instance = request->instance_info().address();
-    // reduce _table_mutex race
-    std::unordered_map<int64_t, int64_t> table_replica;
-    std::unordered_map<int64_t, std::string> table_main_logical_room;
+    auto instance_status = ClusterManager::get_instance()->get_instance_status(instance);
+    if (instance_status == pb::MIGRATE || instance_status == pb::SLOW) {
+        DB_WARNING("instance: %s status: %s skip main_logical_room check", instance.c_str(),
+            pb::Status_Name(instance_status).c_str());
+        return;
+    }
     for (auto& leader_region : request->leader_regions()) {
         int64_t table_id = leader_region.region().table_id();
         int64_t region_id = leader_region.region().region_id();
@@ -740,6 +777,16 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
         } else {
             replica_num = table_replica[table_id];
         }
+        // 获取表主机房设置
+        if (table_main_idc.find(table_id) == table_main_idc.end()) {
+            IdcInfo idc;
+            int ret = TableManager::get_instance()->get_main_logical_room(table_id, idc);
+            if (ret < 0) {
+                DB_WARNING("table_id: %ld region_id: %ld, get main_logical_room fail", table_id, region_id);
+                continue;
+            }
+            table_main_idc[table_id] = idc;
+        } 
 
         if (leader_region.status() != pb::IDLE) {
             continue;
@@ -747,24 +794,16 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
         if (leader_region.region().peers_size() != replica_num) {
             continue;
         }
-
-        std::string main_logical_room;
-        if (table_main_logical_room.find(table_id) == table_main_logical_room.end()) {
-            TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
-            table_main_logical_room[table_id] = main_logical_room;
-        } else {
-            main_logical_room = table_main_logical_room[table_id];
-        }
+        IdcInfo& main_idc = table_main_idc[table_id];
         // 未设置main_logical_room的直接跳过
-        if (main_logical_room.empty()) {
+        if (main_idc.logical_room.empty()) {
             continue;
         }
 
-        std::string leader_logical_room = ClusterManager::get_instance()->get_logical_room(instance);
         // leader在主机房直接跳过
         //DB_WARNING("instance: %s region_id:%ld do main_logical_room check leader_logical_room:%s main_logical_room:%s",
         //    instance.c_str(), region_id, leader_logical_room.c_str(), main_logical_room.c_str());
-        if (leader_logical_room == main_logical_room) {
+        if (leader_idc.match(main_idc)) {
             continue;
         }
         // 选择主机房进行transfer
@@ -774,7 +813,11 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
             if (peer == instance) {
                 continue;
             }
-            std::string logical_room = ClusterManager::get_instance()->get_logical_room(peer);
+            IdcInfo peer_idc;
+            if (ClusterManager::get_instance()->get_instance_idc(peer, peer_idc) < 0) {
+                DB_WARNING("instance: %s get idc fail", peer.c_str());
+                continue;
+            }
             pb::Status st = ClusterManager::get_instance()->get_instance_status(peer);
             if (st != pb::NORMAL) {
                 candicate_instances.clear();
@@ -782,7 +825,7 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
                     region_id, instance.c_str(), peer.c_str());
                 break;
             }
-            if (logical_room == main_logical_room) {
+            if (peer_idc.match(main_idc)) {
                 candicate_instances.emplace_back(peer);
             }
         }
@@ -798,9 +841,11 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
             add_leader_count(selected_instance, table_id);
             trans_leader_region_ids.emplace(region_id);
             *(response->add_trans_leader()) = transfer_request;
-            DB_WARNING("instance: %s region_id:%ld do leader transfer leader_logical_room:%s "
-                " main_logical_room:%s transfer_request:%s", instance.c_str(), region_id, leader_logical_room.c_str(),
-                main_logical_room.c_str(), transfer_request.ShortDebugString().c_str());
+            DB_WARNING("instance: %s region_id:%ld do leader transfer leader_idc: %s, main_idc:%s "
+                "transfer_request:%s", instance.c_str(), region_id, 
+                leader_idc.to_string().c_str(),
+                main_idc.to_string().c_str(),
+                transfer_request.ShortDebugString().c_str());
         }
     }
 }
@@ -818,6 +863,8 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
          const std::set<int64_t>& trans_leader_region_ids,
          std::unordered_map<int64_t, int64_t>& table_transfer_leader_count,
          std::unordered_map<std::string, int64_t>& pk_prefix_leader_count,
+         std::unordered_map<int64_t, int64_t>& table_replica,
+         std::unordered_map<int64_t, IdcInfo>& table_main_idc,
          pb::StoreHeartBeatResponse* response) {
     // 按照pk_prefix维度决定要trans leader的region_id -> pk_prefix_ke
     std::unordered_map<int64_t, std::unordered_map<int64_t, std::string>> trans_region_pk_prefix_map;
@@ -825,26 +872,25 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
     std::unordered_map<std::string, int64_t> pk_prefix_average_leader_counts;
     //  table_id -> transfer leader count
     std::unordered_map<int64_t, int64_t> table_trans_leader_count_on_pk;
-    std::unordered_map<int64_t, int64_t> table_replica;
     for(auto& table_pk_prefix_pair : pk_prefix_leader_region_map) {
         int64_t table_id = table_pk_prefix_pair.first;
-        int64_t replica_num;
-        int64_t instance_count = table_total_instance_counts[table_id];
-        if (instance_count <= 0) {
+        if (table_total_instance_counts.find(table_id) == table_total_instance_counts.end()
+                || table_replica.find(table_id) == table_replica.end()
+                || table_main_idc.find(table_id) == table_main_idc.end()) {
             DB_WARNING("get_instance_count fail for table_id: %ld", table_id);
             continue; 
         }
-        auto ret = TableManager::get_instance()->get_replica_num(table_id, replica_num);
-        if (ret < 0 || replica_num <= 0) {
-            DB_WARNING("get_replica_num fail for table_id: %ld", table_id);
+        int64_t replica_num = table_replica[table_id];
+        int64_t instance_count = table_total_instance_counts[table_id];
+        if (replica_num <= 0 || instance_count <= 0) {
+            DB_WARNING("get table_replica/total_intance fail for table_id: %ld", table_id);
             continue;
         }
-        table_replica[table_id] = replica_num;
         for(auto& pk_prefix_region_pair : table_pk_prefix_pair.second) {
             int64_t average_leader_count = INT_FAST64_MAX;
             int64_t pk_prefix_trans_leader_count = 0;
             int64_t leader_count = pk_prefix_region_pair.second.size();
-            int64_t peer_count = ClusterManager::get_instance()->get_pk_prefix_peer_count(pk_prefix_region_pair.first, "");
+            int64_t peer_count = ClusterManager::get_instance()->get_pk_prefix_peer_count(pk_prefix_region_pair.first, IdcInfo());
             int64_t region_count = peer_count / replica_num;
             if (peer_count % replica_num != 0) {
                 region_count += 1;
@@ -907,8 +953,7 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
         if (leader_region.region().peers_size() < replica_num) {
             continue;
         }
-        std::string main_logical_room;
-        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
+        IdcInfo& main_idc = table_main_idc[table_id];
         int64_t leader_count_for_transfer_peer = INT_FAST64_MAX;
         std::string pk_prefix_key = trans_region_pk_prefix_map[table_id][region_id];
         std::string transfer_to_peer;
@@ -920,15 +965,16 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
             if (st != pb::NORMAL) {
                 continue;
             }
-            if (!main_logical_room.empty()) {
-                std::string logical_room = ClusterManager::get_instance()->get_logical_room(peer);
-                if (logical_room != main_logical_room) {
-                    continue;
-                }
+            IdcInfo peer_idc;
+            if (ClusterManager::get_instance()->get_instance_idc(peer, peer_idc) < 0) {
+                continue;
+            } 
+            if (!peer_idc.match(main_idc)) {
+                continue;
             }
             int64_t peer_leader_count_on_pk_prefix = get_pk_prefix_leader_count(peer, pk_prefix_key);
             if (peer_leader_count_on_pk_prefix < leader_count_for_transfer_peer) {
-                if (peer_leader_count_on_pk_prefix < pk_prefix_average_leader_counts[pk_prefix_key] * 110 / 100
+                if (peer_leader_count_on_pk_prefix < pk_prefix_average_leader_counts[pk_prefix_key] * 105 / 100
                         && peer_leader_count_on_pk_prefix < pk_prefix_leader_count[pk_prefix_key]) {
                     // 候选peer要求在pk_prefix维度上：leader数小于平均值，且小于原leader store(即当前store)上的leader数
                     transfer_to_peer = peer;
@@ -973,8 +1019,19 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
     std::unordered_map<int64_t, std::unordered_map<std::string, std::vector<int64_t>>> pk_prefix_leader_regions;
     // 拿到所有开启了pk_prefix balance的表及其维度
     std::unordered_map<int64_t, int32_t> table_pk_prefix_dimension;
+    std::unordered_map<int64_t, int64_t> table_replica;
+    // table_id -> {resource_tag:main_logical_room:}
+    std::unordered_map<int64_t, IdcInfo> table_main_idc;
     TableManager::get_instance()->get_pk_prefix_dimensions(table_pk_prefix_dimension);
     bool can_do_pk_prefix_balance = TableManager::get_instance()->can_do_pk_prefix_balance();
+
+    // leader机房信息
+    IdcInfo leader_idc;
+    if (ClusterManager::get_instance()->get_instance_idc(instance, leader_idc) < 0) {
+        DB_WARNING("instance: %s can not find idc", instance.c_str());
+        return;
+    }
+
     for (auto& leader_region : request->leader_regions()) {
         int64_t table_id = leader_region.region().table_id();
         table_leader_counts[table_id]++;
@@ -996,7 +1053,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
 
     std::set<int64_t> trans_leader_region_ids;
     
-    leader_main_logical_room_check(request, response, trans_leader_region_ids);
+    leader_main_logical_room_check(request, response, leader_idc, table_replica, table_main_idc, trans_leader_region_ids);
 
     if (!request->need_leader_balance() && 
             instance_status != pb::MIGRATE && instance_status != pb::SLOW) {
@@ -1025,17 +1082,24 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
     std::map<std::string, int64_t> room_count;
     // 计算平均数时，表对应的store数量
     std::unordered_map<int64_t, int64_t> table_total_instance_counts;
+    // 本集群所有逻辑机房的实例数
     int64_t total_instance_count = ClusterManager::get_instance()->
         get_instance_count(resource_tag, &room_count);
     for (auto& table_leader_count : table_leader_counts) {
-        int64_t average_leader_count = INT_FAST64_MAX;
         int64_t table_id = table_leader_count.first;
+        if (table_main_idc.find(table_id) == table_main_idc.end()) {
+            continue;
+        } 
+        IdcInfo& main_idc = table_main_idc[table_id];
+        if (!leader_idc.match(main_idc)) {
+            // 当前实例不在表的主机房内，通过main_loagical_room进行leader调整
+            continue;
+        }
+        int64_t average_leader_count = INT_FAST64_MAX;
         int64_t region_count = TableManager::get_instance()->get_region_count(table_id);
-        std::string main_logical_room;
-        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
         int64_t instance_count = total_instance_count;
-        if (!main_logical_room.empty()) {
-            instance_count = room_count[main_logical_room];
+        if (!main_idc.logical_room.empty()) {
+            instance_count = room_count[main_idc.logical_room];
         }
         if (table_pk_prefix_dimension.find(table_id) != table_pk_prefix_dimension.end()) {
             // for后面进行pk_prefix维度进行load balance
@@ -1080,6 +1144,8 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
                                          trans_leader_region_ids,
                                          transfer_leader_count,
                                          pk_prefix_leader_count,
+                                         table_replica,
+                                         table_main_idc,
                                          response);
     }
     // 继续进行table维度的leader load balance
@@ -1102,10 +1168,12 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
         if (trans_leader_region_ids.count(region_id) > 0) {
             continue;
         }
-        int64_t replica_num = 0;
-        auto ret = TableManager::get_instance()->get_replica_num(table_id, replica_num);
-        if (ret < 0) {
-            DB_WARNING("table_id: %ld region_id: %ld", table_id, region_id);
+        if (table_replica.find(table_id) == table_replica.end()
+                || table_main_idc.find(table_id) == table_main_idc.end()) {
+            continue; 
+        }
+        int64_t replica_num = table_replica[table_id];
+        if (replica_num <= 0) {
             continue;
         }
 
@@ -1120,20 +1188,22 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
                 || transfer_leader_count[table_id] == 0) {
             continue;
         }
-        std::string main_logical_room;
-        TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
+        IdcInfo& main_idc = table_main_idc[table_id];
         int64_t leader_count_for_transfer_peer = INT_FAST64_MAX;
         std::string transfer_to_peer;
         for (auto& peer : leader_region.region().peers()) {
             if (peer == instance) {
                 continue;
             }
-            std::string logical_room = ClusterManager::get_instance()->get_logical_room(peer);
             auto st = ClusterManager::get_instance()->get_instance_status(peer);
             if (st != pb::NORMAL) {
                 continue;
             }
-            if (!main_logical_room.empty() && logical_room != main_logical_room) {
+            IdcInfo peer_idc;
+            if (ClusterManager::get_instance()->get_instance_idc(peer, peer_idc) < 0) {
+                continue;
+            }
+            if (!peer_idc.match(main_idc) && instance_status != pb::MIGRATE) {
                 continue;
             }
             int64_t peer_leader_count_on_table = get_leader_count(peer, table_id);
@@ -1141,9 +1211,9 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
             if (peer_leader_count_on_table < leader_count_for_transfer_peer) {
                 // MIGRATE和SLOW需要迁移
                 // leader数小于平均数的110%并且peer机器leader数少于这个机器的leader数
-                if (instance_status == pb::MIGRATE 
+                if (instance_status == pb::MIGRATE
                         || instance_status == pb::SLOW
-                        || (peer_leader_count_on_table < average_leader_counts[table_id] * 110 / 100
+                        || (peer_leader_count_on_table < average_leader_counts[table_id] * 105 / 100
                             && peer_leader_count_on_table < table_leader_counts[table_id])) {
                     transfer_to_peer = peer;
                     leader_count_for_transfer_peer = peer_leader_count_on_table;
@@ -1178,13 +1248,12 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
 void RegionManager::pk_prefix_load_balance(const std::unordered_map<std::string, int64_t>& pk_prefix_add_peer_counts,
                                       std::unordered_map<std::string, std::vector<int64_t>>& pk_prefix_regions,
                                       const std::string& instance,
-                                      const std::string& resource_tag,
-                                      std::unordered_map<int64_t, std::string>& logical_rooms,
+                                      std::unordered_map<int64_t, IdcInfo>& table_balance_idc,
                                       std::unordered_map<std::string, int64_t>& pk_prefix_average_counts,
                                       std::unordered_map<int64_t, int64_t>& table_average_counts) {
     std::unordered_map<int64_t, int64_t> table_replica_nums;
     std::vector<std::pair<std::string, pb::AddPeer>> add_peer_requests;
-    std::unordered_map<int64_t, std::string> region_logical_room;
+    std::unordered_map<int64_t, IdcInfo> region_idc;
     std::unordered_map<int64_t, int64_t> table_add_peer_count;
     add_peer_requests.reserve(10);
     for (auto& add_peer_count : pk_prefix_add_peer_counts) {
@@ -1215,6 +1284,9 @@ void RegionManager::pk_prefix_load_balance(const std::unordered_map<std::string,
         if (total_region_count == 0) {
             continue;
         }
+        if (table_balance_idc.find(table_id) == table_balance_idc.end()) {
+            continue;
+        }
         size_t index = butil::fast_rand() % total_region_count;
         for (size_t i = 0; i < total_region_count; ++i, ++index) {
             int64_t candidate_region = pk_prefix_regions[table_pk_prefix_key][index % total_region_count];
@@ -1242,11 +1314,10 @@ void RegionManager::pk_prefix_load_balance(const std::unordered_map<std::string,
                 continue;
             }
             std::string new_instance;
-            ret = ClusterManager::get_instance()->select_instance_min_on_pk_prefix(resource_tag,
+            ret = ClusterManager::get_instance()->select_instance_min_on_pk_prefix(table_balance_idc[table_id],
                     exclude_stores,
                     table_id,
                     table_pk_prefix_key,
-                    logical_rooms[table_id],
                     new_instance,
                     pk_prefix_average_counts[table_pk_prefix_key],
                     table_average_counts[table_id]);
@@ -1261,7 +1332,7 @@ void RegionManager::pk_prefix_load_balance(const std::unordered_map<std::string,
             }
             add_peer.add_new_peers(new_instance);
             add_peer_requests.push_back(std::pair<std::string, pb::AddPeer>(master_region_info->leader(), add_peer));
-            region_logical_room[candidate_region] = logical_rooms[table_id];
+            region_idc[candidate_region] = table_balance_idc[candidate_region];
             --count;
             table_add_peer_count[table_id]++;
             if (count <= 0) {
@@ -1277,7 +1348,7 @@ void RegionManager::pk_prefix_load_balance(const std::unordered_map<std::string,
     }
     Bthread bth(&BTHREAD_ATTR_SMALL);
     auto add_peer_fun =
-            [this, add_peer_requests, instance, region_logical_room]() {
+            [this, add_peer_requests, instance, region_idc]() {
                 for (auto request : add_peer_requests) {
                     StoreInteract store_interact(request.first.c_str());
                     pb::StoreRes response;
@@ -1289,8 +1360,8 @@ void RegionManager::pk_prefix_load_balance(const std::unordered_map<std::string,
                                request.second.ShortDebugString().c_str(),
                                response.ShortDebugString().c_str(), ret);
                     if (ret == 0) {
-                        auto iter = region_logical_room.find(request.second.region_id());
-                        if (iter != region_logical_room.end()) {
+                        auto iter = region_idc.find(request.second.region_id());
+                        if (iter != region_idc.end()) {
                             add_remove_peer_on_pk_prefix(request.second.region_id(), iter->second);
                         }
                     }
@@ -1304,8 +1375,7 @@ void RegionManager::pk_prefix_load_balance(const std::unordered_map<std::string,
 void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>& add_peer_counts,
         std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
         const std::string& instance,
-        const std::string& resource_tag,
-        std::unordered_map<int64_t, std::string>& logical_rooms,
+        std::unordered_map<int64_t, IdcInfo>& table_balance_idc,
         std::unordered_map<int64_t, int64_t>& table_average_counts,
         std::unordered_map<int64_t, int32_t>& table_pk_prefix_dimension,
         std::unordered_map<std::string, int64_t>& pk_prefix_average_counts) {
@@ -1319,6 +1389,10 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
             DB_WARNING("table_id: %ld not exist", table_id);
             continue;
         }
+        if (table_balance_idc.find(table_id) == table_balance_idc.end()) {
+            continue;
+        }
+        const auto& balance_idc = table_balance_idc[table_id];
         int64_t count = add_peer_count.second;
         int32_t add_peer_num = 0;
         if (instance_regions.find(table_id) == instance_regions.end()) {
@@ -1335,9 +1409,13 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
             if (master_region_info == nullptr) {
                 continue;
             }
+            /*
+            三副本指定在三个不同的机房, 表不断进行中间分裂, 可能leader都在主机房的一台机器上
+            这里peer balance失效, 同时leader balance也会无效
             if (master_region_info->leader() == instance) {
                 continue;
             }
+            */
             if (master_region_info->peers_size() != replica_num) {
                 continue;
             }
@@ -1369,20 +1447,18 @@ void RegionManager::peer_load_balance(const std::unordered_map<int64_t, int64_t>
                                table_id, master_region_info->region_id());
                     continue;
                 }
-                ret = ClusterManager::get_instance()->select_instance_min_on_pk_prefix(resource_tag,
+                ret = ClusterManager::get_instance()->select_instance_min_on_pk_prefix(balance_idc,
                            exclude_stores,
                            table_id,
                            key,
-                           logical_rooms[table_id],
                            new_instance,
                            pk_prefix_average_counts[key],
                            table_average_counts[table_id],
                            true);
             } else {
-                ret = ClusterManager::get_instance()->select_instance_min(resource_tag,
+                ret = ClusterManager::get_instance()->select_instance_min(balance_idc,
                            exclude_stores,
                            table_id,
-                           logical_rooms[table_id],
                            new_instance,
                            table_average_counts[table_id]);
             }
@@ -1431,7 +1507,6 @@ void RegionManager::learner_load_balance(const std::unordered_map<int64_t, int64
     std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
     const std::string& instance,
     const std::string& resource_tag,
-    std::unordered_map<int64_t, std::string>& logical_rooms,
     std::unordered_map<int64_t, int64_t>& table_average_counts) {
 
     std::vector<std::pair<std::string, pb::InitRegion>> add_learner_requests;
@@ -1453,12 +1528,12 @@ void RegionManager::learner_load_balance(const std::unordered_map<int64_t, int64
             if (master_region_info == nullptr) {
                 continue;
             }
-            std::vector<std::string> current_instances;
-            int64_t resource_learner_count = ClusterManager::get_instance()->get_resource_tag_count(
+            std::set<std::string> current_instances;
+            ClusterManager::get_instance()->get_resource_tag_count(
                     master_region_info->learners(), resource_tag, current_instances);
 
-            if (resource_learner_count != learner_replica_num) {
-                DB_DEBUG("learner size %ld replica %ld", resource_learner_count, learner_replica_num);
+            if (current_instances.size() != learner_replica_num) {
+                DB_DEBUG("learner size %ld replica %ld", resource_learner_count, current_instances.size());
                 continue;
             }
             pb::Status status = pb::NORMAL;
@@ -1470,10 +1545,9 @@ void RegionManager::learner_load_balance(const std::unordered_map<int64_t, int64
             std::set<std::string> exclude_stores;
             exclude_stores.insert(instance);
             std::string new_instance;
-            ret = ClusterManager::get_instance()->select_instance_min(resource_tag, 
+            ret = ClusterManager::get_instance()->select_instance_min({resource_tag, "", ""},
                                                                       exclude_stores, 
                                                                       table_id, 
-                                                                      logical_rooms[table_id],
                                                                       new_instance,
                                                                       table_average_counts[table_id]); 
             if (ret < 0) {
@@ -1515,7 +1589,6 @@ void RegionManager::learner_load_balance(const std::unordered_map<int64_t, int64
 void RegionManager::update_leader_status(const pb::StoreHeartBeatRequest* request, int64_t timestamp) {
     for (auto& leader_region : request->leader_regions()) {
         int64_t region_id = leader_region.region().region_id();
-        int64_t table_id = leader_region.region().table_id();
         RegionStateInfo region_state;
         region_state.timestamp = timestamp;
         region_state.status = pb::NORMAL;
@@ -1580,11 +1653,19 @@ void RegionManager::put_incremental_regioninfo(const int64_t apply_index, std::v
     _incremental_region_info.put_incremental_info(apply_index, region_infos);
 }
 
-bool RegionManager::check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
-                         pb::BaikalHeartBeatResponse* response, int64_t applied_index) {
+bool RegionManager::check_and_update_incremental(
+        const pb::BaikalHeartBeatRequest* request, pb::BaikalHeartBeatResponse* response, 
+        int64_t applied_index, const std::unordered_set<int64_t>& heartbeat_table_ids) {
     int64_t last_updated_index = request->last_updated_index();
-    auto update_func = [response](const std::vector<pb::RegionInfo>& region_infos) {
+    bool need_heartbeat_table = request->has_need_heartbeat_table() && request->need_heartbeat_table();
+    auto update_func = [response, need_heartbeat_table, &heartbeat_table_ids](const std::vector<pb::RegionInfo>& region_infos) {
         for (auto info : region_infos) {
+            if (need_heartbeat_table) {
+                const int64_t table_id = info.table_id();
+                if (heartbeat_table_ids.find(table_id) == heartbeat_table_ids.end()) {
+                    continue;
+                }
+            }
             *(response->add_region_change_info()) = info;
         }
     };
@@ -1605,7 +1686,7 @@ bool RegionManager::add_region_is_exist(int64_t table_id, const std::string& sta
                                        const std::string& end_key, int64_t partition_id) {
     if (start_key.empty()) {
         int64_t cur_regionid = TableManager::get_instance()->get_startkey_regionid(table_id, start_key, partition_id);
-        if (cur_regionid < 0) {
+        if (cur_regionid == -1) {
             //startkey为空且不在map中，说明已经存在
             return true;
         }
@@ -1635,13 +1716,11 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         related_table_ids.insert(leader_region_info.table_id());
     }
     std::unordered_map<int64_t, int64_t> table_replica_nums;
-    std::unordered_map<int64_t, std::string> table_resource_tags;
-    std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>> table_replica_dists_maps;
-    std::unordered_map<int64_t, std::vector<std::string>> table_learner_resource_tags;
+    std::unordered_map<int64_t, std::unordered_map<std::string, int>> table_replica_dists_maps;
+    std::unordered_map<int64_t, std::set<std::string>> table_learner_resource_tags;
     std::unordered_map<int64_t, int32_t> table_pk_prefix_dimensions;
     TableManager::get_instance()->get_table_info(related_table_ids, 
                 table_replica_nums, 
-                table_resource_tags,
                 table_replica_dists_maps,
                 table_learner_resource_tags);
     // 获取所有的pk_prefix dimension
@@ -1653,6 +1732,7 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         auto master_region_info = get_region_info(region_id);
         if (master_region_info == nullptr) {
             DB_WARNING("master region info is nullptr when update learner region %ld.", region_id);
+            remove_learner_peer(region_id, remove_learner_requests, instance);
             continue;
         }
         auto addr = request->instance_info().address();
@@ -1661,9 +1741,8 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
             if (learner == addr) {
                 should_update = false;
                 if (learner_region.state() == pb::STATUS_ERROR) {
-                    std::vector<std::string> candicate_remove_peers;
-                    candicate_remove_peers.reserve(1);
-                    candicate_remove_peers.emplace_back(addr);
+                    std::set<std::string> candicate_remove_peers;
+                    candicate_remove_peers.insert(addr);
                     if (master_region_info->learners_size() > 0) {
                         DB_WARNING("region_id %ld remove learner, STATUS_ERROR", region_id);
                         remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), candicate_remove_peers);
@@ -1727,7 +1806,6 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
             check_peer_count(region_id,
                              leader_region,
                              table_replica_nums,
-                             table_resource_tags,
                              table_replica_dists_maps,
                              remove_peer_requests,
                              table_pk_prefix_dimensions[leader_region_info.table_id()],
@@ -1736,16 +1814,33 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         //learner
         auto resource_tag_iter = table_learner_resource_tags.find(leader_region_info.table_id());
         const static int64_t learner_replica_num = 1;
+        // learner address -> local idc
+        std::unordered_map<std::string, IdcInfo> learner_local_idc;
+        // resource_tag -> learners addresses
+        std::unordered_map<std::string, std::set<std::string>> learners_by_resource_tag;
+        if (master_region_info->learners_size() > 0) {
+            int ret = ClusterManager::get_instance()->get_instances_idc_info(master_region_info->learners(), learner_local_idc);
+            if (ret <= -2) {
+                continue; 
+            }
+            if (ret < 0) {
+                DB_WARNING("get learners idc fail: %s, region: %ld", request->instance_info().address().c_str(), region_id);
+            }
+            for (const auto& idc : learner_local_idc) {
+                learners_by_resource_tag[idc.second.resource_tag].insert(idc.first);
+            }
+        }
         if (resource_tag_iter != table_learner_resource_tags.end()) {
             for (auto& learner_resource : resource_tag_iter->second) {
-                std::vector<std::string> current_resource_learners;
-                current_resource_learners.reserve(3);
-                int64_t resource_learner_count = ClusterManager::get_instance()->get_resource_tag_count(
-                    master_region_info->learners(), learner_resource, current_resource_learners);
-
-                if (resource_learner_count < learner_replica_num) {
-                    add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
-                } else if (resource_learner_count > learner_replica_num) {
+                const std::set<std::string>& current_resource_learners = learners_by_resource_tag[learner_resource];
+                if (current_resource_learners.size() < learner_replica_num) {
+                    if (master_region_info->peers_size() > 1) {
+                        // region只有一个peer的时候暂缓加learner
+                        add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
+                    } else {
+                        DB_WARNING("region_id %ld can`t add learner peer_size: %d", region_id, master_region_info->peers_size());
+                    }
+                } else if (current_resource_learners.size() > learner_replica_num) {
                     DB_WARNING("region_id %ld remove learner", region_id);
                     remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), current_resource_learners);
                 } else {
@@ -1757,18 +1852,27 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
                             if (instance_status == pb::FAULTY || instance_status == pb::DEAD || instance_status == pb::MIGRATE) {
                                 continue;
                             } else {
-                                add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
+                                if (master_region_info->peers_size() > 1) {
+                                    // region只有一个peer的时候暂缓加learner
+                                    add_learner_peer(region_id, add_learner_requests, master_region_info.get(), learner_resource);
+                                } else {
+                                    DB_WARNING("region_id %ld can`t add learner peer_size: %d", region_id, master_region_info->peers_size());
+                                }
                             }
                         }
                     }
                 }
             }
-            
+            for (const auto& learner_resource_tag : learners_by_resource_tag) {
+                if (resource_tag_iter->second.find(learner_resource_tag.first) == resource_tag_iter->second.end()) {
+                    // learner不在配置的learner resource tag里
+                    remove_learner_peer(region_id, remove_learner_requests, master_region_info.get(), learner_resource_tag.second);
+                }
+            }
         } else {
-            std::vector<std::string> candicate_remove_peers;
-            candicate_remove_peers.reserve(3);
+            std::set<std::string> candicate_remove_peers;
             for (auto& learner_peer : master_region_info->learners()) {
-                candicate_remove_peers.emplace_back(learner_peer);
+                candicate_remove_peers.insert(learner_peer);
             }
     
             if (master_region_info->learners_size() > 0) {
@@ -1940,7 +2044,7 @@ void RegionManager::check_whether_update_region(int64_t region_id,
 void RegionManager::remove_learner_peer(int64_t region_id,
         std::vector<std::pair<std::string, pb::RemoveRegion>>& remove_learner_requests,
         pb::RegionInfo* master_region_info,
-        const std::vector<std::string>& candicate_remove_learners) {
+        const std::set<std::string>& candicate_remove_learners) {
     if (!can_modify_learner(region_id)) {
         DB_WARNING("region_id: %ld can't modify learner", region_id);
         return;
@@ -1998,6 +2102,17 @@ void RegionManager::remove_learner_peer(int64_t region_id,
     }
 }
 
+void RegionManager::remove_learner_peer(int64_t region_id,
+        std::vector<std::pair<std::string, pb::RemoveRegion>>& remove_learner_requests,
+        const std::string& remove_learner) {
+    pb::RemoveRegion remove_region_request;
+    remove_region_request.set_need_delay_drop(false);
+    remove_region_request.set_force(true);
+    remove_region_request.set_region_id(region_id);
+    DB_WARNING("remove learner peer %s instance %s", remove_region_request.ShortDebugString().c_str(), remove_learner.c_str());
+    remove_learner_requests.emplace_back(remove_learner, remove_region_request);
+}
+
 void RegionManager::add_learner_peer(int64_t region_id,
         std::vector<std::pair<std::string, pb::InitRegion>>& add_learner_requests,
         pb::RegionInfo* master_region_info,
@@ -2008,9 +2123,8 @@ void RegionManager::add_learner_peer(int64_t region_id,
     }
     std::string new_instance;
     auto ret = ClusterManager::get_instance()->select_instance_rolling(
-            learner_resource_tag,
+            {learner_resource_tag, "", ""},
             std::set<std::string>(),
-            std::string(),
             new_instance);
     if (ret < 0) {
         DB_FATAL("select store from cluster fail, region_id:%ld, learner_resource_tag: %s, "
@@ -2032,8 +2146,7 @@ void RegionManager::add_learner_peer(int64_t region_id,
 void RegionManager::check_peer_count(int64_t region_id,
         const pb::LeaderHeartBeat& leader_region,
         std::unordered_map<int64_t, int64_t>& table_replica_nums,
-        std::unordered_map<int64_t, std::string>& table_resource_tags,
-        std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>>& table_replica_dists_maps,
+        std::unordered_map<int64_t, std::unordered_map<std::string, int>>& table_replica_dists_maps,
         std::vector<std::pair<std::string, pb::RaftControlRequest>>& remove_peer_requests,
         int32_t table_pk_prefix_dimension,
         pb::StoreHeartBeatResponse* response) {
@@ -2042,60 +2155,61 @@ void RegionManager::check_peer_count(int64_t region_id,
     }
     const pb::RegionInfo& leader_region_info = leader_region.region(); 
     int64_t table_id = leader_region_info.table_id();
-    if (table_replica_nums.find(table_id) == table_replica_nums.end()) {
+    if (table_replica_nums.find(table_id) == table_replica_nums.end()
+         || table_replica_dists_maps.find(table_id) == table_replica_dists_maps.end()) {
         DB_WARNING("table_id: %ld not exist, may be delete", table_id);
         return;
     }
     int64_t replica_num = table_replica_nums[table_id];
-    
     // add_peer
     bool need_add_peer = false;
-    std::string table_resource_tag = table_resource_tags[table_id];
-    std::unordered_map<std::string, int> resource_tag_count;
-    std::unordered_map<std::string, std::string> peer_resource_tags;
-    for (auto& peer : leader_region_info.peers()) {
-        std::string peer_resource_tag;
-        if (!ClusterManager::get_instance()->get_resource_tag(peer, peer_resource_tag)) {
-            // meta找不到peer，可以等下一轮上报
-            // 否则会导致resource_tag_count[table_resource_tag]不足
-            return;
+    // {resource_tag:logical_room:physical_room} -> count
+    const auto& table_replica_dist = table_replica_dists_maps[table_id];
+    // peer address -> ReplicaDistInfo
+    std::unordered_map<std::string, IdcInfo> peers_local_idc;
+    // {resource_tag:logical_room:physical_room} -> peer list
+    std::unordered_map<std::string, std::set<std::string>> table_replica_idc_2_peers;
+    std::vector<std::string> peer_not_in_replica_dist;
+    std::string candidate_idc;
+    int ret = ClusterManager::get_instance()->get_instances_idc_info(leader_region_info.peers(), peers_local_idc);
+    if (ret < 0) {
+        // meta找不到peer，可以等下一轮上报
+        // 否则会导致resource_tag_count[table_resource_tag]不足
+        DB_WARNING("get peers idc fail, region: %ld", region_id);
+        return;
+    }
+    for (const auto& peer : peers_local_idc) {
+        if (table_replica_dist.find(peer.second.resource_tag_level()) != table_replica_dist.end()) {
+            table_replica_idc_2_peers[peer.second.resource_tag_level()].insert(peer.first);
+            continue;
         }
-        // std::string peer_resource_tag = iter->second;
-        peer_resource_tags[peer] = peer_resource_tag;
-        resource_tag_count[peer_resource_tag]++;
-    }
-    std::string candicate_logical_room;
-    //选出逻辑机房
-    std::unordered_map<std::string, int64_t> schema_logical_room_count_map = table_replica_dists_maps[table_id];
-    std::unordered_map<std::string, int64_t> current_logical_room_count_map;
-    //如果用户修个了resource_tag, 先加后删
-    if (resource_tag_count[table_resource_tag] < replica_num) {
-        DB_WARNING("resource_tag %s count:%d < replica_num:%ld", 
-                table_resource_tag.c_str(), resource_tag_count[table_resource_tag], replica_num);
-        need_add_peer = true;
-    }
-    //没有指定机房分布的表，只按照replica_num计算
-    if (schema_logical_room_count_map.size() == 0 && leader_region_info.peers_size() < replica_num) {
-        need_add_peer = true;
-    }
-    //指定机房信息的表特殊处理
-    if (schema_logical_room_count_map.size() > 0) {
-        for (auto& peer : leader_region_info.peers()) {
-            std::string logical_room = ClusterManager::get_instance()->get_logical_room(peer);
-            if (peer_resource_tags[peer] == table_resource_tag && logical_room.size() > 0) {
-                current_logical_room_count_map[logical_room]++; 
-            }
+        if (table_replica_dist.find(peer.second.logical_room_level()) != table_replica_dist.end()) {
+            table_replica_idc_2_peers[peer.second.logical_room_level()].insert(peer.first);
+            continue;
         }
-        for (auto& schema_count : schema_logical_room_count_map) {
-            std::string logical_room = schema_count.first;
-            if (schema_logical_room_count_map[logical_room] > current_logical_room_count_map[logical_room]) {
-                candicate_logical_room = logical_room;
-                DB_WARNING("candicate_logical_room:%s", candicate_logical_room.c_str());
-                need_add_peer = true;
-                break;
-            }
+        if (table_replica_dist.find(peer.second.to_string()) != table_replica_dist.end()) {
+            table_replica_idc_2_peers[peer.second.to_string()].insert(peer.first);
+            continue;
+        }
+        // 不在机房分布拓扑里的，可以直接被删掉
+        peer_not_in_replica_dist.emplace_back(peer.first);
+        DB_WARNING("table_id: %ld, region_id: %lu, peer: %s, idc: %s not in replicaDist", 
+            table_id, region_id, peer.first.c_str(), peer.second.to_string().c_str());
+    }
+    for (const auto& replica_idc : table_replica_dist) {
+        if (table_replica_idc_2_peers[replica_idc.first].size() < replica_idc.second) {
+            need_add_peer = true;
+            candidate_idc = replica_idc.first;
+            DB_WARNING("table_id: %ld, region_id: %lu, need add peer, candidate_idc: %s, need_count: %d, peer count: %lu", 
+                table_id, 
+                region_id, 
+                candidate_idc.c_str(), 
+                replica_idc.second, 
+                table_replica_idc_2_peers[replica_idc.first].size());
+            break;
         }
     }
+    
     if (need_add_peer) {
         std::set<std::string> peers_in_heart;
         for(auto& peer : leader_region_info.peers()) {
@@ -2103,45 +2217,48 @@ void RegionManager::check_peer_count(int64_t region_id,
         }
         std::string new_instance;
         // 故障需要尽快恢复，轮询最均匀
+        IdcInfo idc(candidate_idc);
         auto ret = ClusterManager::get_instance()->select_instance_rolling(
-                table_resource_tag,
+                idc,
                 peers_in_heart,
-                candicate_logical_room,
                 new_instance);
         if (ret < 0) {
-            DB_FATAL("select store from cluster fail, region_id:%ld, table_resource_tag: %s, "
-                        "peer_size:%d, replica_num:%ld candicate_logical_room: %s", 
-                        region_id, table_resource_tag.c_str(), 
+            if (leader_region_info.peers_size() <= replica_num) {
+                DB_FATAL("select store from cluster fail, region_id:%ld, "
+                        "peer_size:%d, replica_num:%ld candidate_idc: %s", 
+                        region_id, 
                         leader_region_info.peers_size(), 
-                        replica_num, candicate_logical_room.c_str());
+                        replica_num,
+                        candidate_idc.c_str());
+                return;
+            }
+        } else {
+            pb::AddPeer* add_peer = response->add_add_peers();
+            add_peer->set_region_id(region_id);
+            for (auto& peer : leader_region_info.peers()) {
+                add_peer->add_old_peers(peer);
+                add_peer->add_new_peers(peer);
+            }
+            add_peer->add_new_peers(new_instance);
+            DB_WARNING("add_peer request:%s", add_peer->ShortDebugString().c_str());
             return;
         }
-        pb::AddPeer* add_peer = response->add_add_peers();
-        add_peer->set_region_id(region_id);
-        for (auto& peer : leader_region_info.peers()) {
-            add_peer->add_old_peers(peer);
-            add_peer->add_new_peers(peer);
-        }
-        add_peer->add_new_peers(new_instance);
-        DB_WARNING("add_peer request:%s", add_peer->ShortDebugString().c_str());
-        return;
     }
     //选择一个peer被remove
     if (leader_region_info.peers_size() > replica_num) {
         pb::RaftControlRequest remove_peer_request;
-        int64_t max_peer_count = 0;
         remove_peer_request.set_op_type(pb::SetPeer);
         remove_peer_request.set_region_id(region_id);
         std::string remove_peer;
-        std::set<std::string> candicate_remove_peers;
+        std::set<std::string> candidate_remove_peers;
         bool removed_by_pk_prefix = false;
         std::string pk_prefix_key;
-        for(auto& peer : leader_region_info.peers()) {
-            candicate_remove_peers.insert(peer);
+        for (auto& peer : leader_region_info.peers()) {
+            candidate_remove_peers.insert(peer);
         }
         std::vector<std::string> abnormal_remove_peers;
         abnormal_remove_peers.reserve(3);
-        for (auto& candicate_remove_peer : candicate_remove_peers) {
+        for (auto& candicate_remove_peer : candidate_remove_peers) {
             pb::Status status = ClusterManager::get_instance()->get_instance_status(candicate_remove_peer);
             //先判断这些peer中是否有peer所在的实例状态不是NORMAL
             if (status != pb::NORMAL) {
@@ -2159,61 +2276,38 @@ void RegionManager::check_peer_count(int64_t region_id,
             int64_t rand = butil::fast_rand() % abnormal_remove_peers.size();
             remove_peer = abnormal_remove_peers[rand];
         }
+        // 选不在副本分布的实例
+        if (remove_peer.empty() && !peer_not_in_replica_dist.empty()) {
+            int64_t rand = butil::fast_rand() % peer_not_in_replica_dist.size();
+            remove_peer = peer_not_in_replica_dist[rand];
+            DB_WARNING("table_id: %ld, region_id: %ld, remove peer: %s, because of not in replicaDist.",
+                       table_id, region_id, remove_peer.c_str());
+        }
+        // 按照用户指定的副本分布来做remove_peer
+        int64_t max_peer_count = 0;
         if (remove_peer.empty()) {
-            for (auto& candicate_remove_peer : candicate_remove_peers) {
-                if (peer_resource_tags[candicate_remove_peer] != table_resource_tag) {
-                    remove_peer = candicate_remove_peer;
-                    DB_WARNING("remove peer: %s because of peers_size:%d resource tag is: %s, table_resource_tag: %s",
-                            remove_peer.c_str(), 
-                            leader_region_info.peers_size(),
-                            peer_resource_tags[candicate_remove_peer].c_str(),
-                            table_resource_tag.c_str());
+            for (const auto& replica_idc : table_replica_dist) {
+                if (table_replica_idc_2_peers[replica_idc.first].size() > replica_idc.second) {
+                    candidate_idc = replica_idc.first;
+                    candidate_remove_peers = table_replica_idc_2_peers[replica_idc.first];
+                    DB_WARNING("table_id: %ld, region_id: %ld, candicate remove idc: %s, peer count: %ld", 
+                        table_id, region_id, replica_idc.first.c_str(),
+                        table_replica_idc_2_peers[replica_idc.first].size());
                     break;
                 }
             }
-        }
-        if (remove_peer.empty()) {
-            //得到region 副本分布情况 
-            std::unordered_map<std::string, int64_t> schema_replica_dists;
-            auto ret = TableManager::get_instance()->get_replica_dists(table_id, schema_replica_dists);
-            if (ret < 0) {
-                DB_WARNING("get replica dists fail, region_id: %ld, table_id: %ld", region_id, table_id);
-                return;
-            }
-            //需要按照用户指定的副本分布来做remove_peer
-            std::unordered_map<std::string, std::string> peer_logical_room;
-            std::unordered_map<std::string, std::set<std::string>> current_replica_dists;
-            if (schema_replica_dists.size() > 0) { 
-                //计算当前的副本分布情况
-                for (auto& peer: leader_region_info.peers()) {
-                    std::string logical_room = ClusterManager::get_instance()->get_logical_room(peer);
-                    if (logical_room.size() > 0) {
-                        current_replica_dists[logical_room].insert(peer);
-                        peer_logical_room[peer] = logical_room;
-                    }
-                }
-                
-                //选择逻辑机房副本数量大于table 副本分布作为待删除peer
-                for (auto& current_replica_dist : current_replica_dists) {
-                    std::string logical_room = current_replica_dist.first;
-                    if (current_replica_dist.second.size() > (size_t)schema_replica_dists[logical_room]) {
-                        DB_WARNING("candicate remove peer logical room is : %s, region_id: %ld, table_id: %ld", 
-                                    logical_room.c_str(), region_id, table_id);
-                        candicate_remove_peers = current_replica_dist.second;
-                        break;
-                    }
-                } 
-            }
+            
             // 如果表开启了pk_prefix balance，判断是否是pk_prefix发起的迁移，有就从pk_prefix维度remove peer数最多的，否则走table的维度
-            std::string pk_prefix_logical_room;
-            if (table_pk_prefix_dimension > 0 && need_remove_peer_on_pk_prefix(region_id, pk_prefix_logical_room)) {
+            // 避免pk_prefix维度，和table维度反复peer迁移
+            IdcInfo pk_prefix_idc;
+            if (table_pk_prefix_dimension > 0 && need_remove_peer_on_pk_prefix(region_id, pk_prefix_idc)) {                 
                 bool get_pk_prefix_success = TableManager::get_instance()->get_pk_prefix_key(table_id,
                                              table_pk_prefix_dimension,
                                              leader_region_info.start_key(),
                                              pk_prefix_key);
                 if (get_pk_prefix_success) {
-                    for (auto& peer : candicate_remove_peers) {
-                        if (!pk_prefix_logical_room.empty() && peer_logical_room[peer] != pk_prefix_logical_room) {
+                    for (auto& peer : candidate_remove_peers) {
+                        if (!peers_local_idc[peer].match(pk_prefix_idc)) {
                             continue;
                         }
                         int64_t peer_pk_prefix_region_count = ClusterManager::get_instance()->
@@ -2231,7 +2325,8 @@ void RegionManager::check_peer_count(int64_t region_id,
                 // 在table维度上选择一个store进行remove peer，两种情况：
                 // 1. table没开pk_prefix
                 // 2. table开了pk_prefix balance，但是在pk_prefix维度上是均衡的
-                for (auto& peer : candicate_remove_peers) {
+                max_peer_count = 0;
+                for (auto& peer : candidate_remove_peers) {
                     /*
                     if (peer == leader_region_info.leader()) {
                         continue;
@@ -2872,7 +2967,7 @@ void RegionManager::recovery_single_region_by_set_peer(const int64_t region_id,
             peer_status.set_table_id(region_ptr->table_id());
             peer_status.set_peer_status(pb::STATUS_SET_PEER);
             BAIDU_SCOPED_LOCK(_doing_mutex);
-            recover_region_way.push_back(peer_status);
+            recover_region_way.emplace_back(peer_status);
         } else {
             DB_FATAL("send SetPeer failed, request:%s, response:%s",
                     request.ShortDebugString().c_str(),
@@ -2906,7 +3001,7 @@ void RegionManager::recovery_single_region_by_init_region(const std::set<int64_t
     // 1. 查询所有store确认region没有
     // 2. restore_region
     std::map<int64_t, std::map<std::string, pb::RegionInfo>> exist_regions;
-    ConcurrencyBthread query_bth(5, &BTHREAD_ATTR_SMALL);
+    ConcurrencyBthread query_bth(30, &BTHREAD_ATTR_SMALL);
     for (auto& instance : instances) {
         auto query_region_func = [&query_region_request, &instance, &exist_regions]() {
             StoreInteract store_interact(instance.address);
@@ -2915,6 +3010,7 @@ void RegionManager::recovery_single_region_by_init_region(const std::set<int64_t
             DB_WARNING("send query_region to %s request:%s", instance.address.c_str(), 
                 query_region_request.ShortDebugString().c_str());
             for (auto region : res.regions()) {
+                DB_WARNING("region_id: %ld exist in instance: %s", region.region_id(), instance.address.c_str());
                 exist_regions[region.region_id()][instance.address] = region;
             }
         };
@@ -2923,6 +3019,11 @@ void RegionManager::recovery_single_region_by_init_region(const std::set<int64_t
     query_bth.join();
     int choose_index = 0;
     for (int64_t region_id : region_ids) {
+        SmartRegionInfo region_ptr = _region_info_map.get(region_id);
+        if (region_ptr == nullptr) {
+            DB_WARNING("region_id: %ld not found in meta", region_id);
+            continue;
+        }
         pb::RegionInfo select_info;
         auto iter = exist_regions.find(region_id);
         if (iter != exist_regions.end()) {
@@ -2944,38 +3045,39 @@ void RegionManager::recovery_single_region_by_init_region(const std::set<int64_t
             if (has_leader) {
                 continue;
             }
-            pb::RaftControlRequest request;
-            request.set_op_type(pb::SetPeer);
-            request.set_region_id(region_id);
-            request.add_new_peers(select_info.leader());
-            request.set_force(true);
-            StoreInteract store_interact(select_info.leader());
-            pb::RaftControlResponse response; 
-            int ret = store_interact.send_request_for_leader("region_raft_control", request, response);
-            DB_WARNING("send SetPeer request:%s, response:%s",
-                        request.ShortDebugString().c_str(),
-                        response.ShortDebugString().c_str());
-            if (ret == 0) {
-                _region_peer_state_map.erase(region_id);
-                pb::PeerStateInfo peer_status;
-                peer_status.set_region_id(region_id);
-                peer_status.set_peer_id(select_info.leader());
-                peer_status.set_table_id(select_info.table_id());
-                peer_status.set_peer_status(pb::STATUS_SET_PEER);
-                BAIDU_SCOPED_LOCK(_doing_mutex);
-                recover_region_way.push_back(peer_status);
-            } else {
-                DB_FATAL("send SetPeer failed, request:%s, response:%s",
-                        request.ShortDebugString().c_str(),
-                        response.ShortDebugString().c_str());
-            }
-            continue;
+            auto send_set_peer_func = [this,region_id, select_info, max_log_index,
+                        region_ptr, &recover_region_way]() {
+                pb::RaftControlRequest request;
+                request.set_op_type(pb::SetPeer);
+                request.set_region_id(region_id);
+                request.add_new_peers(select_info.leader());
+                request.set_force(true);
+                StoreInteract store_interact(select_info.leader());
+                pb::RaftControlResponse response; 
+                int ret = store_interact.send_request_for_leader("region_raft_control", request, response);
+                DB_WARNING("send SetPeer request:%s, response:%s max_log_index:%ld",
+                            request.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str(),
+                            max_log_index);
+                if (ret == 0) {
+                    region_ptr->set_log_index(max_log_index);
+                    _region_peer_state_map.erase(region_id);
+                    pb::PeerStateInfo peer_status;
+                    peer_status.set_region_id(region_id);
+                    peer_status.set_peer_id(select_info.leader());
+                    peer_status.set_table_id(select_info.table_id());
+                    peer_status.set_peer_status(pb::STATUS_SET_PEER);
+                    BAIDU_SCOPED_LOCK(_doing_mutex);
+                    recover_region_way.emplace_back(peer_status);
+                } else {
+                    DB_FATAL("send SetPeer failed, request:%s, response:%s",
+                            request.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str());
+                }
+            };
+            query_bth.run(send_set_peer_func);
         } else {
-            SmartRegionInfo region_ptr = _region_info_map.get(region_id);
-            if (region_ptr == nullptr) {
-                DB_WARNING("region_id: %ld not found in meta", region_id);
-                continue;
-            } else {
+            auto send_init_region_func = [this, region_id, region_ptr, health_instances, &choose_index, &recover_region_way]() {    
                 region_ptr->set_log_index(0);
                 pb::RegionInfo region_info = *region_ptr;
                 pb::InitRegion init_region_request;
@@ -3014,10 +3116,12 @@ void RegionManager::recovery_single_region_by_init_region(const std::set<int64_t
                         recover_region_way.emplace_back(peer_status);
                         break;
                     }
-                } while (retry_time < 5);
-            }
+                } while (retry_time < 3);
+            };
+            query_bth.run(send_init_region_func);
         }
     }
+    query_bth.join();
 }
 
 void RegionManager::recovery_all_region(const pb::MetaManagerRequest& request,

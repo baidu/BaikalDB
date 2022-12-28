@@ -210,7 +210,7 @@ ExprValue ScalarFnCall::get_value(MemRow* row) {
     }
     std::vector<ExprValue> args;
     for (auto c : _children) {
-        args.push_back(c->get_value(row));
+        args.emplace_back(c->get_value(row));
     }
     //类型转化
     for (int i = 0; i < _fn.arg_types_size(); i++) {
@@ -218,5 +218,24 @@ ExprValue ScalarFnCall::get_value(MemRow* row) {
     }
     return _fn_call(args).cast_to(_col_type);
 }
+
+ExprValue ScalarFnCall::get_value(const ExprValue& value) {
+    if (_is_row_expr) {
+        return ExprValue::Null();
+    }
+    if (_fn_call == NULL) {
+        return ExprValue::Null();
+    }
+    std::vector<ExprValue> args;
+    for (auto c : _children) {
+        args.emplace_back(c->get_value(value));
+    }
+    //类型转化
+    for (int i = 0; i < _fn.arg_types_size(); i++) {
+        args[i].cast_to(_fn.arg_types(i));
+    }
+    return _fn_call(args).cast_to(_col_type);
+}
+
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

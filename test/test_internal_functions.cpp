@@ -236,4 +236,71 @@ TEST(substring_index, substring_index) {
     }
 }
 
+TEST(week, week) {
+    std::vector<uint32_t> result {52, 53, 52, 1, 53, 53, 1, 53};
+    for (int i = 0; i <=7; i++) {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "2007-12-31";
+        ExprValue v2(pb::UINT32);
+        v2._u.uint32_val = i;
+        input.push_back(v1);
+        input.push_back(v2);
+        ExprValue ret = week(input);
+        EXPECT_EQ(ret.get_numberic<uint32_t>(), result[i]);
+    }
+    std::vector<uint32_t> result2 {0, 1, 52, 1, 1, 0, 1, 53};
+    for (int i = 0; i <=7; i++) {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "2008-01-01";
+        ExprValue v2(pb::UINT32);
+        v2._u.uint32_val = i;
+        input.push_back(v1);
+        input.push_back(v2);
+        ExprValue ret = week(input);
+        EXPECT_EQ(ret.get_numberic<uint32_t>(), result2[i]);
+    }
+    std::vector<uint32_t> result3 {200752, 200801, 200752, 200801, 200801, 200753, 200801, 200753};
+    for (int i = 0; i <=7; i++) {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "2007-12-31";
+        ExprValue v2(pb::UINT32);
+        v2._u.uint32_val = i;
+        input.push_back(v1);
+        input.push_back(v2);
+        ExprValue ret = yearweek(input);
+        EXPECT_EQ(ret.get_numberic<uint32_t>(), result3[i]);
+    }
+    std::vector<uint32_t> result4 {200752, 200801, 200752, 200801, 200801, 200753, 200801, 200753};
+    for (int i = 0; i <=7; i++) {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "2008-01-01";
+        ExprValue v2(pb::UINT32);
+        v2._u.uint32_val = i;
+        input.push_back(v1);
+        input.push_back(v2);
+        ExprValue ret = yearweek(input);
+        EXPECT_EQ(ret.get_numberic<uint32_t>(), result4[i]);
+    }
+    {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "2007-12-31";
+        input.push_back(v1);
+        ExprValue ret = weekofyear(input);
+        EXPECT_EQ(ret.get_numberic<uint32_t>(), 1);
+    }
+    {
+        std::vector<ExprValue> input;
+        ExprValue v1(pb::STRING);
+        v1.str_val = "2008-01-01";
+        input.push_back(v1);
+        ExprValue ret = weekofyear(input);
+        EXPECT_EQ(ret.get_numberic<uint32_t>(), 1);
+    }
+}
+
 }  // namespace baikal

@@ -124,6 +124,7 @@ public:
     int decode_field(int32_t tuple_id, int32_t slot_id, pb::PrimitiveType field_type, const rocksdb::Slice& in) {
         auto tuple = get_tuple(tuple_id);
         if (tuple == nullptr) {
+            DB_WARNING("invalid tuple_id: %d", tuple_id);
             return -1;
         }
         auto descriptor = tuple->GetDescriptor();

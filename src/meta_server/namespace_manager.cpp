@@ -105,9 +105,26 @@ void NamespaceManager::modify_namespace(const pb::MetaManagerRequest& request, b
     //目前支持改quota
     int64_t namespace_id = _namespace_id_map[namespace_name];
     pb::NameSpaceInfo tmp_info = _namespace_info_map[namespace_id];
-    tmp_info.set_quota(namespace_info.quota());
+    if (namespace_info.has_quota()) {
+        tmp_info.set_quota(namespace_info.quota());
+    }
     if (namespace_info.has_resource_tag()) {
         tmp_info.set_resource_tag(namespace_info.resource_tag());
+    }
+    if (namespace_info.has_engine()) {
+        tmp_info.set_engine(namespace_info.engine());
+    }
+    if (namespace_info.has_charset()) {
+        tmp_info.set_charset(namespace_info.charset());
+    }
+    if (namespace_info.has_byte_size_per_record()) {
+        tmp_info.set_byte_size_per_record(namespace_info.byte_size_per_record());
+    }
+    if (namespace_info.has_replica_num()) {
+        tmp_info.set_replica_num(namespace_info.replica_num());
+    }
+    if (namespace_info.has_region_split_lines()) {
+        tmp_info.set_region_split_lines(namespace_info.region_split_lines());
     }
     tmp_info.set_version(tmp_info.version() + 1);
 

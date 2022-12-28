@@ -27,6 +27,9 @@ int TransactionNode::init(const pb::PlanNode& node) {
     }
     _txn_cmd = node.derive_node().transaction_node().txn_cmd();
     _txn_timeout = node.derive_node().transaction_node().txn_timeout();
+    if (node.derive_node().transaction_node().has_txn_lock_timeout()) {
+        _txn_lock_timeout = node.derive_node().transaction_node().txn_lock_timeout();
+    }
     return 0;
 }
 
@@ -69,7 +72,7 @@ int TransactionNode::open(RuntimeState* state) {
         return ret;
     } else if (_txn_cmd == pb::TXN_BEGIN_STORE) {
         SmartTransaction txn;
-        ret = txn_pool->begin_txn(state->txn_id, txn, state->primary_region_id(), _txn_timeout);
+        ret = txn_pool->begin_txn(state->txn_id, txn, state->primary_region_id(), _txn_timeout, _txn_lock_timeout);
         if (ret != 0) {
             DB_WARNING_STATE(state, "create txn failed: %lu:%d", state->txn_id, state->seq_id);
             return -1;
@@ -132,6 +135,9 @@ void TransactionNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     txn_node->set_txn_cmd(_txn_cmd);
     if (_txn_timeout != 0) {
         txn_node->set_txn_timeout(_txn_timeout);
+    }
+    if (_txn_lock_timeout > 0) {
+        txn_node->set_txn_lock_timeout(_txn_lock_timeout);
     }
 }
 }

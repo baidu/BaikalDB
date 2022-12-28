@@ -24,15 +24,17 @@ namespace baikaldb {
 class AndPredicate : public ScalarFnCall {
 public:
     virtual ExprValue get_value(MemRow* row) {
-        ExprValue val1 = _children[0]->get_value(row);
-        if (!val1.is_null() && val1.get_numberic<bool>() == false) { // short-circuit
-            return ExprValue::False();
+        bool has_null_val = false;
+        for (int i = 0; i < children_size(); i++) {
+            ExprValue val = _children[i]->get_value(row);
+            if (!val.is_null() && val.get_numberic<bool>() == false) {
+                return ExprValue::False(); 
+            }
+            if (val.is_null()) {
+                has_null_val = true;
+            }
         }
-        ExprValue val2 = _children[1]->get_value(row);
-        if (!val2.is_null() && val2.get_numberic<bool>() == false) {
-            return ExprValue::False();
-        }
-        if (val1.is_null() || val2.is_null()) {
+        if (has_null_val) {
             return ExprValue::Null();
         }
         return ExprValue::True();
@@ -42,17 +44,20 @@ public:
 class OrPredicate : public ScalarFnCall {
 public:
     virtual ExprValue get_value(MemRow* row) {
-        ExprValue val1 = _children[0]->get_value(row);
-        if (!val1.is_null() && val1.get_numberic<bool>() == true) { // short-circuit
-            return ExprValue::True(); 
+        bool has_null_val = false;
+        for (int i = 0; i < children_size(); i++) {
+            ExprValue val = _children[i]->get_value(row);
+            if (!val.is_null() && val.get_numberic<bool>() == true) { // short-circuit
+                return ExprValue::True(); 
+            }
+            if (val.is_null()) {
+                has_null_val = true;
+            }
         }
-        ExprValue val2 = _children[1]->get_value(row);
-        if (!val2.is_null() && val2.get_numberic<bool>() == true) {
-            return ExprValue::True();
-        }
-        if (val1.is_null() || val2.is_null()) {
+        if (has_null_val) {
             return ExprValue::Null();
         }
+        
         return ExprValue::False();
     }
 };
@@ -139,6 +144,9 @@ public:
 
     //todo liguoqiang
     virtual int open();
+    void covent_pattern(const std::string& pattern);
+    void covent_exact_pattern(const std::string& pattern);
+
     void hit_index(bool* is_eq, bool* is_prefix, std::string* prefix_value);
     virtual ExprValue get_value(MemRow* row);
     
@@ -147,11 +155,21 @@ public:
     bool like_one(const std::string& target, const std::string& pattern, pb::Charset charset);
 
 private:
+    ExprValue get_value_by_re2(MemRow* row);
+    ExprValue get_value_by_pattern(MemRow* row);
     void reset_pattern(MemRow* row);
     std::string _pattern;
     std::vector<std::string> _patterns;
     char _escape_char = '\\';
     bool _const_pattern = true;
+
+    int open_by_re2();
+    int open_by_pattern();
+    void reset_regex(MemRow* row);
+    std::unique_ptr<re2::RE2> _regex_ptr;
+    std::string _regex_pattern;
+    bool _const_regex = true;
+    re2::RE2::Options _option;
 };
 
 class RegexpPredicate : public ScalarFnCall {

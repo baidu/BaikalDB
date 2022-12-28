@@ -426,6 +426,7 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
         1,
         5000,
         rocksdb,
+        pb::GBK,
         pb::S_UNIGRAMS,
         false, // common need not cache
         true);

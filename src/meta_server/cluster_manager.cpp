@@ -394,8 +394,7 @@ void ClusterManager::add_instance(const pb::MetaManagerRequest& request, braft::
     }
     // 更新调度相关的内存值
     auto call_func = [](std::unordered_map<std::string, InstanceSchedulingInfo>& scheduling_info, const Instance& instance_mem) -> int {
-        scheduling_info[instance_mem.address].resource_tag = instance_mem.resource_tag;
-        scheduling_info[instance_mem.address].logical_room = instance_mem.logical_room;
+        scheduling_info[instance_mem.address].idc = {instance_mem.resource_tag, instance_mem.logical_room, instance_mem.physical_room};
         scheduling_info[instance_mem.address].pk_prefix_region_count = std::unordered_map<std::string, int64_t >{};
         scheduling_info[instance_mem.address].regions_count_map = std::unordered_map<int64_t, int64_t>{};
         scheduling_info[instance_mem.address].regions_map = std::unordered_map<int64_t, std::vector<int64_t>>{};
@@ -508,13 +507,14 @@ void ClusterManager::update_instance(const pb::MetaManagerRequest& request, braf
     }
     // 更新调度相关的内存值
     if (resource_tag_changed) {
+        IdcInfo new_idc(instance_info.resource_tag(), instance_info.logical_room(), instance_info.physical_room());
         auto call_func = [](std::unordered_map<std::string, InstanceSchedulingInfo>& scheduling_info,
                             const std::string& address,
-                            const std::string& new_resource_tag) -> int {
-            scheduling_info[address].resource_tag = new_resource_tag;
+                            const IdcInfo& new_idc) -> int {
+            scheduling_info[address].idc = new_idc;
             return 1;
         };
-        _scheduling_info.Modify(call_func, address, instance_info.resource_tag());
+        _scheduling_info.Modify(call_func, address, new_idc);
     }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("modify tag success, request:%s", request.ShortDebugString().c_str());
@@ -751,6 +751,10 @@ void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* 
             auto instance = idc_info_ptr->add_instance_infos();
             instance->set_address(instance_physical_pair.first);
             instance->set_physical_room(instance_physical_pair.second);
+            auto iter = _instance_info.find(instance_physical_pair.first);
+            if (iter != _instance_info.end()) {
+                instance->set_resource_tag(iter->second.resource_tag);
+            }           
         }
     }  
 }
@@ -833,12 +837,11 @@ void ClusterManager::get_switch(const pb::QueryRequest* request, pb::QueryRespon
 }
 
 void ClusterManager::process_pk_prefix_load_balance(std::unordered_map<std::string, int64_t>& pk_prefix_region_counts,
-                                                std::unordered_map<int64_t, int64_t>& table_add_peer_counts,
-                                                std::unordered_map<int64_t, std::string>& logical_rooms,
-                                                std::unordered_map<std::string, int64_t>& pk_prefix_add_peer_counts,
-                                                std::unordered_map<std::string, int64_t>& pk_prefix_average_counts,
-                                                int64_t instance_count_for_logical,
-                                                int64_t instance_count) {
+            std::unordered_map<int64_t, IdcInfo>& table_balance_idc,
+            std::unordered_map<std::string, int64_t>& idc_instance_count,
+            std::unordered_map<int64_t, int64_t>& table_add_peer_counts,
+            std::unordered_map<std::string, int64_t>& pk_prefix_add_peer_counts,
+            std::unordered_map<std::string, int64_t>& pk_prefix_average_counts) {
     std::set<int64_t> do_not_peer_balance_table;
     for(auto& pk_prefix_region : pk_prefix_region_counts) {
         int64_t table_id;
@@ -847,13 +850,14 @@ void ClusterManager::process_pk_prefix_load_balance(std::unordered_map<std::stri
             continue;
         }
         table_id = strtoll(pk_prefix_region.first.substr(0, table_id_end).c_str(), NULL, 10);
+        if (table_balance_idc.find(table_id) == table_balance_idc.end()) {
+            continue;
+        }
+        const auto& balance_idc = table_balance_idc[table_id];
         // 按照pk_prefix的维度进行计算average和差值
         int64_t average_peer_count = INT_FAST64_MAX;
-        int64_t pk_prefix_total_count = get_pk_prefix_peer_count(pk_prefix_region.first, logical_rooms[table_id]);
-        int64_t total_instance_count = instance_count;
-        if (!logical_rooms[table_id].empty()) {
-            total_instance_count = instance_count_for_logical;
-        }
+        int64_t pk_prefix_total_count = get_pk_prefix_peer_count(pk_prefix_region.first, balance_idc);
+        int64_t total_instance_count = idc_instance_count[balance_idc.to_string()];
         if (total_instance_count <= 0) {
             continue;
         }
@@ -861,13 +865,15 @@ void ClusterManager::process_pk_prefix_load_balance(std::unordered_map<std::stri
         if (pk_prefix_total_count % total_instance_count != 0) {
             average_peer_count++;
         }
-        DB_DEBUG("handle table_id: %s, key: %s, total_peer: %lu, instance: %lu, average_peer_count: %lu, heartbeat report: %lu",
+        DB_DEBUG("handle table_id: %s, key: %s, total_peer: %lu, total_instance_count: %lu, "
+                  "average_peer_count: %lu, heartbeat report: %lu, idc: %s",
                   pk_prefix_region.first.substr(0, table_id_end).c_str(),
                   pk_prefix_region.first.c_str(),
                   pk_prefix_total_count,
-                  instance_count,
+                  total_instance_count,
                   average_peer_count,
-                  pk_prefix_region.second);
+                  pk_prefix_region.second,
+                  balance_idc.to_string().c_str());
         // 当大户维度已经均衡，进行表维度的load balance，需要pk_prefix_average_counts信息。
         pk_prefix_average_counts[pk_prefix_region.first] = average_peer_count;
         if (pk_prefix_region.second > (size_t)(average_peer_count + average_peer_count * 5 / 100)) {
@@ -890,7 +896,6 @@ void ClusterManager::process_pk_prefix_load_balance(std::unordered_map<std::stri
 void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRequest* request,
         pb::StoreHeartBeatResponse* response) {
     std::string instance = request->instance_info().address();
-    std::string logical_room = get_logical_room(instance);
     std::string resource_tag = request->instance_info().resource_tag();
     std::unordered_map<int64_t, std::vector<int64_t>> table_regions;
     std::unordered_map<int64_t, int64_t> table_region_counts;
@@ -942,34 +947,45 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
         DB_WARNING("resource_tag: %s in fast importer, stop peer load balance", resource_tag.c_str());
         return;
     }
-    DB_WARNING("peer load balance, instance_info: %s, resource_tag: %s", 
-                instance.c_str(), resource_tag.c_str());
-    int64_t instance_count_for_logical = get_instance_count(resource_tag, logical_room);
-    int64_t instance_count = get_instance_count(resource_tag);
+    IdcInfo instance_idc;
+    if (get_instance_idc(instance, instance_idc) < 0) {
+        DB_FATAL("resource_tag: %s, instance: %s get idc fail", resource_tag.c_str(), instance.c_str());
+        return;
+    }
+    DB_WARNING("peer load balance, instance_info: %s, idc: %s", 
+                instance.c_str(), instance_idc.to_string().c_str());
+
+    // 现在不同表可能在三个维度进行balance，同集群balance，同逻辑机房balance，同物理机房balance。
+    // 获取同集群、同逻辑机房、同物理机房的store实例数
+    std::unordered_map<std::string, int64_t> idc_instance_count;
+    get_instance_count_for_all_level(instance_idc, idc_instance_count);
     //peer均衡是先增加后减少, 代表这个表需要有多少个region先add_peer
     std::unordered_map<int64_t, int64_t> add_peer_counts;
     std::unordered_map<int64_t, int64_t> add_learner_counts;
-    std::unordered_map<int64_t, std::string> logical_rooms;
+    // region_id -> banlance粒度 : {resource_tag:logiacl_room:physical_room}
+    std::unordered_map<int64_t, IdcInfo> table_balance_idc;
     std::unordered_map<int64_t, int64_t> table_average_counts;
     // pk_prefix维度
     std::unordered_map<std::string, int64_t> pk_prefix_add_peer_counts;
     std::unordered_map<std::string, int64_t> pk_prefix_average_counts;
     for (auto& table_region : table_regions) {
+        // 计算表维度的peer平均值和每个表需要balance调度的peer数
         int64_t average_peer_count = INT_FAST64_MAX;
         int64_t table_id = table_region.first;
-        int64_t total_peer_count;
-        bool replica_dists = TableManager::get_instance()->whether_replica_dists(table_id);
-        if (replica_dists) {
-            total_peer_count = get_peer_count(table_id, logical_room);
+        int64_t total_peer_count = 0;
+        IdcInfo balance_idc;
+        if (is_learner_tables[table_id]) {
+            // learner目前是在整个集群balance
+            balance_idc.resource_tag = resource_tag;
         } else {
-            total_peer_count = get_peer_count(table_id);
+            if (TableManager::get_instance()->get_table_dist_belonged(table_id, instance_idc, balance_idc) < 0) {
+                // instance不在表副本分布里，跳过，后续会自动删掉
+                continue;
+            }
         }
-        int64_t total_instance_count = 0;
-        if (replica_dists) {
-            total_instance_count = instance_count_for_logical; 
-        } else {
-            total_instance_count = instance_count;
-        }
+        table_balance_idc[table_id] = balance_idc;
+        total_peer_count = get_peer_count(table_id, balance_idc);
+        int64_t total_instance_count = idc_instance_count[balance_idc.to_string()];
         if (total_instance_count != 0) {
             average_peer_count = total_peer_count / total_instance_count;
         }
@@ -977,37 +993,33 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
              average_peer_count++;
         }
         table_average_counts[table_id] = average_peer_count;
-        DB_DEBUG("process tableid %ld region size %zu average cout %zu", table_id, table_region.second.size(),
-            (size_t)(average_peer_count + average_peer_count * 5 / 100));
+        DB_DEBUG("process tableid %ld region size %zu average cout %zu, idc: %s, total_count: %ld", 
+            table_id, table_region.second.size(),
+            (size_t)(average_peer_count + average_peer_count * 5 / 100), 
+            balance_idc.to_string().c_str(), total_instance_count);
+        
         if (table_region.second.size() > (size_t)(average_peer_count + average_peer_count * 5 / 100)) {
-
             if (!is_learner_tables[table_id]) {
                 add_peer_counts[table_id] = table_region.second.size() - average_peer_count;
             } else {
                 add_learner_counts[table_id] = table_region.second.size() - average_peer_count;
             }
-            if (replica_dists) {
-                logical_rooms[table_id] = logical_room;
-            } else {
-                logical_rooms[table_id] = "";
-            }
         }
     }
     if (!pk_prefix_region_counts.empty() && TableManager::get_instance()->can_do_pk_prefix_balance()) {
+        // 计算pk_prefix维度peer平均值和需要balance调度的peer数
         process_pk_prefix_load_balance(pk_prefix_region_counts,
+                                    table_balance_idc,
+                                    idc_instance_count,
                                     add_peer_counts, 
-                                    logical_rooms,
                                     pk_prefix_add_peer_counts,
-                                    pk_prefix_average_counts,
-                                    instance_count_for_logical,
-                                    instance_count);
+                                    pk_prefix_average_counts);
     }
     if (!pk_prefix_add_peer_counts.empty()) {
         RegionManager::get_instance()->pk_prefix_load_balance(pk_prefix_add_peer_counts,
                                                         pk_prefix_regions,
                                                         instance,
-                                                        resource_tag,
-                                                        logical_rooms,
+                                                        table_balance_idc,
                                                         pk_prefix_average_counts,
                                                         table_average_counts);
     } else {
@@ -1015,16 +1027,17 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
     }
     for (auto& add_peer_count : add_peer_counts) {
         DB_WARNING("instance: %s should add peer count for peer_load_balance, "
-                    "table_id: %ld, add_peer_count: %ld, logical_room: %s",
+                    "table_id: %ld, add_peer_count: %ld, balance_idc: %s",
                     instance.c_str(), 
-                    add_peer_count.first, add_peer_count.second, logical_rooms[add_peer_count.first].c_str());
+                    add_peer_count.first, 
+                    add_peer_count.second, 
+                    table_balance_idc[add_peer_count.first].to_string().c_str());
     }
     if (add_peer_counts.size() > 0) {
         RegionManager::get_instance()->peer_load_balance(add_peer_counts, 
                                                          table_regions, 
                                                          instance, 
-                                                         resource_tag, 
-                                                         logical_rooms, 
+                                                         table_balance_idc, 
                                                          table_average_counts,
                                                          table_pk_prefix_dimension,
                                                          pk_prefix_average_counts);
@@ -1034,16 +1047,15 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
 
     for (auto& add_learner_count : add_learner_counts) {
         DB_WARNING("instance: %s should add learner count for learner_load_balance, "
-                    "table_id: %ld, add_peer_count: %ld, logical_room: %s",
-                    instance.c_str(), 
-                    add_learner_count.first, add_learner_count.second, logical_rooms[add_learner_count.first].c_str());
+                    "table_id: %ld, add_peer_count: %ld, resource_tag: %s",
+                    instance.c_str(), add_learner_count.first, add_learner_count.second,
+                    resource_tag.c_str());
     }
     if (add_learner_counts.size() > 0) {
         RegionManager::get_instance()->learner_load_balance(add_learner_counts, 
                                                          table_regions, 
                                                          instance, 
                                                          resource_tag, 
-                                                         logical_rooms, 
                                                          table_average_counts);
     } else {
         DB_WARNING("instance: %s has been learner_load_balance, no need migrate", instance.c_str());
@@ -1229,16 +1241,15 @@ void ClusterManager::auto_network_segments_division(std::string resource_tag) {
             resource_tag.c_str(), prefix);
 }
     
-int ClusterManager::select_instance_min_on_pk_prefix(const std::string& resource_tag,
+int ClusterManager::select_instance_min_on_pk_prefix(const IdcInfo& idc,
                                                   const std::set<std::string>& exclude_stores,
-                                                  const int64_t table_id,
+                                                  const int64_t& table_id,
                                                   const std::string& pk_prefix_key,
-                                                  const std::string& logical_room,
                                                   std::string& selected_instance,
-                                                  const int64_t pk_prefix_average_count,
-                                                  const int64_t table_average_count,
+                                                  const int64_t& pk_prefix_average_count,
+                                                  const int64_t& table_average_count,
                                                   bool need_both_below_average) {
-    auto pick_candidate_instances = [this, resource_tag, exclude_stores, table_id, logical_room,
+    auto pick_candidate_instances = [this, idc, exclude_stores, table_id,
                                      pk_prefix_key, pk_prefix_average_count, table_average_count] (
             std::vector<std::string>& instances,
             std::vector<std::string>& candidate_instances,
@@ -1249,7 +1260,7 @@ int ClusterManager::select_instance_min_on_pk_prefix(const std::string& resource
             return;
         }
         for (auto& instance : instances) {
-            if (!is_legal_for_select_instance(instance, resource_tag, exclude_stores, logical_room)) {
+            if (!is_legal_for_select_instance(idc, instance, exclude_stores)) {
                 continue;
             }
             auto instance_iter = info_iter->find(instance);
@@ -1275,10 +1286,11 @@ int ClusterManager::select_instance_min_on_pk_prefix(const std::string& resource
         }
     };
     selected_instance.clear();
+    const std::string& resource_tag = idc.resource_tag;
     BAIDU_SCOPED_LOCK(_instance_mutex);
     if (_resource_tag_instance_map.count(resource_tag) == 0 ||
         _resource_tag_instance_map[resource_tag].empty()) {
-        DB_FATAL("there is no instance, resource_tag: %s", resource_tag.c_str());
+        DB_FATAL("there is no instance, idc: %s", idc.to_string().c_str());
         return -1;
     }
     // 同时满足table和pk_prefix两个维度region数小于平均值的候选instance, 如果有候选，优先pick
@@ -1286,7 +1298,7 @@ int ClusterManager::select_instance_min_on_pk_prefix(const std::string& resource
     // 只满足pk_prefix维度region数小于平均值的候选instance
     std::vector<std::string> candidate_instances_pk_prefix_dimension;
     if(_resource_tag_instances_by_network.find(resource_tag) == _resource_tag_instances_by_network.end()) {
-        DB_FATAL("no instance in _resource_tag_instances_by_network: %s", resource_tag.c_str());
+        DB_FATAL("no instance in _resource_tag_instances_by_network: %s", idc.to_string().c_str());
         return -1;
     }
     min_count << 1;
@@ -1308,7 +1320,7 @@ int ClusterManager::select_instance_min_on_pk_prefix(const std::string& resource
                                      candidate_instances_pk_prefix_dimension);
         }
         if (candidate_instances.empty()) {
-            DB_WARNING("min fallback: resource_tag: %s", resource_tag.c_str());
+            DB_WARNING("min fallback: idc: %s", idc.to_string().c_str());
             min_fallback_count << 1;
             for (auto& network_segment : exclude_network_segment) {
                 pick_candidate_instances(instances_by_network[network_segment],
@@ -1336,10 +1348,10 @@ int ClusterManager::select_instance_min_on_pk_prefix(const std::string& resource
         return -1;
     }
     add_peer_count_on_pk_prefix(selected_instance, table_id, pk_prefix_key);
-    DB_WARNING("select instance min on pk_prefix dimension, resource_tag: %s, table_id: %ld, logical_room: %s, "
+    DB_WARNING("select instance min on pk_prefix dimension, table_id: %ld, idc: %s, "
                "pk_prefix_average_count: %ld, table_average_count: %ld, candidate_instance_size: %lu %lu, "
                "selected_instance: %s",
-               resource_tag.c_str(), table_id, logical_room.c_str(), 
+               table_id, idc.to_string().c_str(), 
                pk_prefix_average_count, table_average_count,
                candidate_instances.size(), candidate_instances_pk_prefix_dimension.size(),
                selected_instance.c_str());
@@ -1350,13 +1362,12 @@ int ClusterManager::select_instance_min_on_pk_prefix(const std::string& resource
 // 如果average_count == 0, 则选择最少数量peer的实例返回
 // 1. peer load_balance, exclude_stores是region三个peer的store address
 // 2. learner load_balance, exclude_stores是心跳上报的store address
-int ClusterManager::select_instance_min(const std::string& resource_tag,
+int ClusterManager::select_instance_min(const IdcInfo& idc,
                                         const std::set<std::string>& exclude_stores,
-                                        int64_t table_id,
-                                        const std::string& logical_room,
+                                        const int64_t& table_id,
                                         std::string& selected_instance,
-                                        int64_t average_count) {
-    auto pick_candidate_instances = [this, resource_tag, exclude_stores, table_id, logical_room, average_count](
+                                        const int64_t& average_count) {
+    auto pick_candidate_instances = [this, idc, exclude_stores, table_id, average_count](
             std::vector<std::string>& instances, std::vector<std::string>& candidate_instances,
             std::string &selected_instance, int64_t& max_region_count) -> bool {
         DoubleBufferedSchedulingInfo::ScopedPtr info_iter;
@@ -1365,7 +1376,7 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
             return false;
         }
         for (auto& instance : instances) {
-            if (!is_legal_for_select_instance(instance, resource_tag, exclude_stores, logical_room)) {
+            if (!is_legal_for_select_instance(idc, instance, exclude_stores)) {
                 continue;
             }
             auto instance_iter = info_iter->find(instance);
@@ -1398,16 +1409,17 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
         return false;
     };
     selected_instance.clear();
+    const std::string& resource_tag = idc.resource_tag;
     BAIDU_SCOPED_LOCK(_instance_mutex);
     if (_resource_tag_instance_map.count(resource_tag) == 0 ||
         _resource_tag_instance_map[resource_tag].empty()) {
-        DB_FATAL("there is no instance, resource_tag: %s", resource_tag.c_str());
+        DB_FATAL("there is no instance, idc: %s", idc.to_string().c_str());
         return -1;
     }
     std::vector<std::string> candidate_instances;
     int64_t max_region_count = INT_FAST64_MAX;
     if(_resource_tag_instances_by_network.find(resource_tag) == _resource_tag_instances_by_network.end()) {
-        DB_FATAL("no instance in _resource_tag_instances_by_network, resource_tag: %s", resource_tag.c_str());
+        DB_FATAL("no instance in _resource_tag_instances_by_network, idc: %s", idc.to_string().c_str());
         return -1;
     }
     min_count << 1;
@@ -1435,7 +1447,7 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
         } 
         if (selected_instance.empty() && candidate_instances.empty()) {
             // fallback, find in overlap network segment
-            DB_WARNING("min fallback: resource_tag: %s", resource_tag.c_str());
+            DB_WARNING("min fallback: idc: %s", idc.to_string().c_str());
             min_fallback_count << 1;
             for (auto& network_segment : exclude_network_segment) {
                 if (instances_by_network.find(network_segment) != instances_by_network.end()) {
@@ -1465,9 +1477,9 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
         return -1;
     }
     add_peer_count(selected_instance, table_id);
-    DB_WARNING("select instance min, resource_tag: %s, table_id: %ld, logical_room: %s,"
+    DB_WARNING("select instance min, table_id: %ld, idc: %s,"
                 " average_count: %ld, candidate_instance_size: %lu, selected_instance: %s",
-               resource_tag.c_str(), table_id, logical_room.c_str(), average_count,
+               table_id, idc.to_string().c_str(), average_count,
                candidate_instances.size(), selected_instance.c_str());
     return 0;
 }
@@ -1485,19 +1497,19 @@ int ClusterManager::select_instance_min(const std::string& resource_tag,
 //     5.1 尾分裂选一个instance，exclude_stores是原region leader's store address
 //     5.2 中间分裂选replica-1个instance，exclude_stores是peer's store address 
 // 6. 添加全局索引, exclude_store是null
-int ClusterManager::select_instance_rolling(const std::string& resource_tag, 
+int ClusterManager::select_instance_rolling(const IdcInfo& idc, 
                                     const std::set<std::string>& exclude_stores,
-                                    const std::string& logical_room,
                                     std::string& selected_instance) {
     selected_instance.clear();
+    const std::string& resource_tag = idc.resource_tag;
     BAIDU_SCOPED_LOCK(_instance_mutex);
     if (_resource_tag_instance_map.count(resource_tag) == 0 ||
             _resource_tag_instance_map[resource_tag].empty()) {
-        DB_WARNING("there is no instance: resource_tag: %s", resource_tag.c_str());
+        DB_WARNING("there is no instance: idc: %s", idc.to_string().c_str());
         return -1;
     }
     if (_resource_tag_instances_by_network.find(resource_tag) == _resource_tag_instances_by_network.end()) {
-        DB_WARNING("no instance in _resource_tag_instances_by_network: resource_tag: %s", resource_tag.c_str());
+        DB_WARNING("no instance in _resource_tag_instances_by_network: idc: %s", idc.to_string().c_str());
         return -1;
     }
     rolling_count << 1;
@@ -1548,7 +1560,7 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
         ++rolling_times;
         has_any_instance_on_tier = true; 
         auto& instance_address = instances[last_rolling_position]; 
-        if (!is_legal_for_select_instance(instance_address, resource_tag, exclude_stores, logical_room)) {
+        if (!is_legal_for_select_instance(idc, instance_address, exclude_stores)) {
             continue;
         }
         if (filter_by_network) {
@@ -1569,7 +1581,7 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
     }
     if (selected_instance.empty()) {
         if (fallback_network_segment.empty()) {
-            DB_WARNING("select instance fail, has no legal store, resource_tag:%s", resource_tag.c_str());
+            DB_WARNING("select instance fail, has no legal store, idc:%s", idc.to_string().c_str());
             return -1;
         }
         // fallback
@@ -1577,10 +1589,10 @@ int ClusterManager::select_instance_rolling(const std::string& resource_tag,
         last_rolling_network = fallback_network_segment;
         last_rolling_position = fallback_position;
         selected_instance = fallback_instance;
-        DB_WARNING("rolling fallback: resource_tag: %s", resource_tag.c_str());
+        DB_WARNING("rolling fallback: idc: %s", idc.to_string().c_str());
     }
-    DB_WARNING("select instance rolling, resource_tag: %s, logical_room: %s, selected_instance: %s",
-               resource_tag.c_str(), logical_room.c_str(), selected_instance.c_str());
+    DB_WARNING("select instance rolling, idc: %s, selected_instance: %s",
+               idc.to_string().c_str(), selected_instance.c_str());
     return 0;
 }
 int ClusterManager::load_snapshot() {
@@ -1652,18 +1664,22 @@ int ClusterManager::load_snapshot() {
     return 0;
 }
 bool ClusterManager::is_legal_for_select_instance(
+            const IdcInfo& idc,
             const std::string& candicate_instance,
-            const std::string& resource_tag,
-            const std::set<std::string>& exclude_stores,
-            const std::string& logical_room) {
+            const std::set<std::string>& exclude_stores) {
     if (_instance_info.find(candicate_instance) == _instance_info.end()) {
         return false;
     }
-    if (!logical_room.empty() && _instance_info[candicate_instance].logical_room != logical_room) {
+    if (!idc.logical_room.empty() 
+            && _instance_info[candicate_instance].logical_room != idc.logical_room) {
+        return false;
+    }
+    if (!idc.physical_room.empty() 
+            && _instance_info[candicate_instance].physical_room != idc.physical_room) {
         return false;
     }
     if (_instance_info[candicate_instance].instance_status.state != pb::NORMAL
-            || _instance_info[candicate_instance].resource_tag != resource_tag
+            || _instance_info[candicate_instance].resource_tag != idc.resource_tag
             || _instance_info[candicate_instance].capacity == 0) {
         return false;
     }
@@ -1721,8 +1737,7 @@ int ClusterManager::load_instance_snapshot(const std::string& instance_prefix,
     }
     auto call_func = [](std::unordered_map<std::string, InstanceSchedulingInfo>& scheduling_info,
                         const pb::InstanceInfo& instance_pb) -> int {
-        scheduling_info[instance_pb.address()].logical_room = instance_pb.logical_room();
-        scheduling_info[instance_pb.address()].resource_tag = instance_pb.resource_tag();
+        scheduling_info[instance_pb.address()].idc = {instance_pb.resource_tag(), instance_pb.logical_room(), instance_pb.physical_room()};
         scheduling_info[instance_pb.address()].pk_prefix_region_count = std::unordered_map<std::string, int64_t >{};
         scheduling_info[instance_pb.address()].regions_count_map = std::unordered_map<int64_t, int64_t>{};
         scheduling_info[instance_pb.address()].regions_map = std::unordered_map<int64_t, std::vector<int64_t>>{};

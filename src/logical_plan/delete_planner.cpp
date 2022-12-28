@@ -32,6 +32,11 @@ int DeletePlanner::plan() {
             return -1;
         }
         _truncate_stmt = (parser::TruncateStmt*)(_ctx->stmt);
+        for (int i = 0; i < _truncate_stmt->partition_names.size(); ++i) {
+            std::string lower_name = _truncate_stmt->partition_names[i].value;
+            std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+            _partition_names.emplace_back(lower_name);
+        }
         if (0 != parse_db_tables(_truncate_stmt->table_name)) {
             DB_WARNING("get truncate_table plan failed");
             return -1;
@@ -57,6 +62,11 @@ int DeletePlanner::plan() {
     if (_delete_stmt->from_table->node_type != parser::NT_TABLE) {
         DB_WARNING("unsupport multi table delete");
         return -1;
+    }
+    for (int i = 0; i < _delete_stmt->partition_names.size(); ++i) {
+        std::string lower_name = _delete_stmt->partition_names[i].value;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+        _partition_names.emplace_back(lower_name);
     }
     if (0 != parse_db_tables(_delete_stmt->from_table, &_join_root)) {
         return -1;

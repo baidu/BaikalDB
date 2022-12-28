@@ -75,6 +75,7 @@ struct CreateExprOptions {
     bool is_values = false;
     bool max_one_row = false;
     bool is_not = false;
+    bool partition_expr = false;
     int row_expr_size = 1;
     pb::CompareType compare_type = pb::CMP_NULL;
 };
@@ -117,7 +118,7 @@ public:
     virtual int plan() = 0;
 
     static int analyze(QueryContext* ctx);
-   
+    
     static std::map<parser::JoinType, pb::JoinType> join_type_mapping;
     std::vector<std::string>& select_names() {
         return _select_names;
@@ -301,7 +302,6 @@ private:
             const CreateExprOptions& options);
     void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
     int construct_in_predicate_node(const parser::FuncExpr* func_item, pb::Expr& expr, pb::ExprNode** node);
-
 protected:
     QueryContext*       _ctx = nullptr;
     std::shared_ptr<QueryContext> _cur_sub_ctx = nullptr;
@@ -342,5 +342,6 @@ protected:
     int32_t                     _column_id = 0;
     // 同一层级的操作表集合，e.g:join的左右表
     std::vector<std::string>       _current_tables;
+    std::vector<std::string>       _partition_names;
 };
 } //namespace baikal

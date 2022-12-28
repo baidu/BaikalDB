@@ -77,6 +77,10 @@ private:
     bool check_conjuncts(std::vector<ExprNode*>& conjuncts);
     bool is_pk_consistency(const std::vector<FieldInfo>& pk_fields_in_factory, const std::vector<int32_t>& select_pk_fields);
     void get_conjuncts_condition(std::vector<ExprNode*>& conjuncts);
+
+    // for base subscribe
+    int get_base_subscribe_scan_ref_slot();
+    
 private:
     parser::SelectStmt*                 _select;
 

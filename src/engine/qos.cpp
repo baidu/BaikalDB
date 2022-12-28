@@ -185,6 +185,13 @@ bool QosBthreadLocal::need_reject() {
     return false;
 }
 
+bool QosBthreadLocal::is_new_sign() {
+    if (_sqlqos_ptr != nullptr) {
+        return _sqlqos_ptr->is_new_sign();
+    }
+    return false;
+}
+
 void SqlQos::get_statistics_adder(int64_t count, int64_t statistics_count) {
     _get_real.adder(count);
     _get_statistics.adder(statistics_count);

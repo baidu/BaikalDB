@@ -17,6 +17,8 @@
 #include "task_fetcher.h"
 namespace baikaldb {
 
+DECLARE_int32(baikal_heartbeat_interval_us);
+
 void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup) {
     SchemaFactory* factory = nullptr;
     if (is_backup) {
@@ -144,6 +146,71 @@ void BaikalHeartBeat::process_heart_beat_response_sync(const pb::BaikalHeartBeat
     DB_NOTICE("sync time:%ld", cost.get_time());
 }
 
+// BaseBaikalHeartBeat
+int BaseBaikalHeartBeat::init() {
+    if (_is_inited) {
+        return 0;
+    }
+
+    if (heartbeat(true) != 0) {
+        DB_WARNING("heartbeat sync failed");
+        return -1;
+    }
+    
+    _heartbeat_bth.run([this](){ report_heartbeat(); });
+
+    _is_inited = true;
+    DB_NOTICE("Succ to init BaseBaikalHeartBeat");
+    
+    return 0;
+}
+
+int BaseBaikalHeartBeat::heartbeat(bool is_sync) {
+    TimeCost cost;
+    pb::BaikalHeartBeatRequest request;
+    pb::BaikalHeartBeatResponse response;
+
+    BaikalHeartBeat::construct_heart_beat_request(request);
+    request.set_can_do_ddlwork(false);
+    request.set_need_heartbeat_table(true);
+    for (const auto& full_table_table : _table_names) {
+        auto* heartbeat_table = request.add_heartbeat_tables();
+        if (heartbeat_table == nullptr) {
+            DB_WARNING("baikal_heartbeat_table is nullptr");
+            return -1;
+        }
+        heartbeat_table->set_namespace_name(full_table_table.namespace_name);
+        heartbeat_table->set_database(full_table_table.database);
+        heartbeat_table->set_table_name(full_table_table.table_name);
+    }
+
+    int64_t construct_req_cost = cost.get_time();
+    
+    if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
+        if (is_sync) {
+            BaikalHeartBeat::process_heart_beat_response_sync(response);
+            DB_WARNING("sync report_heartbeat, construct_req_cost:%ld, process_res_cost:%ld",
+                        construct_req_cost, cost.get_time());
+        } else {
+            BaikalHeartBeat::process_heart_beat_response(response);
+            DB_WARNING("async report_heartbeat, construct_req_cost:%ld, process_res_cost:%ld",
+                        construct_req_cost, cost.get_time());
+        }
+    } else {
+        DB_WARNING("Send heart beat request to meta server fail");
+        return -1;
+    }
+
+    return 0;
+}
+
+void BaseBaikalHeartBeat::report_heartbeat() {
+    while (!_shutdown) {
+        heartbeat(false);
+        bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
+    }
+}
+
 //binlog network
 bool BinlogNetworkServer::init() {
     // init val 
@@ -152,8 +219,31 @@ bool BinlogNetworkServer::init() {
     pb::BaikalHeartBeatRequest request;
     pb::BaikalHeartBeatResponse response;
     //1、构造心跳请求
-   BaikalHeartBeat::construct_heart_beat_request(request);
-   request.set_can_do_ddlwork(false);
+    BaikalHeartBeat::construct_heart_beat_request(request);
+    request.set_can_do_ddlwork(false);
+    request.set_need_heartbeat_table(true);
+    request.set_need_binlog_heartbeat(true);
+    for (const auto& info : _table_infos) {
+        std::string db_table_name = info.second.table_name;
+        std::vector<std::string> split_vec;
+        boost::split(split_vec, db_table_name, boost::is_any_of("."));
+        if (split_vec.size() != 2) {
+            DB_FATAL("get table_name[%s] fail", db_table_name.c_str());
+            continue;
+        }
+        const std::string& database = split_vec[0];
+        const std::string& table_name = split_vec[1];
+
+        auto* heartbeat_table = request.add_heartbeat_tables();
+        if (heartbeat_table == nullptr) {
+            DB_WARNING("baikal_heartbeat_table is nullptr");
+            return -1;
+        }
+        heartbeat_table->set_namespace_name(_namespace);
+        heartbeat_table->set_database(database);
+        heartbeat_table->set_table_name(table_name);
+    }
+
     //2、发送请求
     if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
         //处理心跳
@@ -174,6 +264,30 @@ void BinlogNetworkServer::report_heart_beat() {
         pb::BaikalHeartBeatResponse response;
         //1、construct heartbeat request
         BaikalHeartBeat::construct_heart_beat_request(request);
+        request.set_can_do_ddlwork(false);
+        request.set_need_heartbeat_table(true);
+        request.set_need_binlog_heartbeat(true);
+        for (const auto& info : _table_infos) {
+            std::string db_table_name = info.second.table_name;
+            std::vector<std::string> split_vec;
+            boost::split(split_vec, db_table_name, boost::is_any_of("."));
+            if (split_vec.size() != 2) {
+                DB_FATAL("get table_name[%s] fail", db_table_name.c_str());
+                continue;
+            }
+            const std::string& database = split_vec[0];
+            const std::string& table_name = split_vec[1];
+
+            auto* heartbeat_table = request.add_heartbeat_tables();
+            if (heartbeat_table == nullptr) {
+                DB_WARNING("baikal_heartbeat_table is nullptr");
+                return;
+            }
+            heartbeat_table->set_namespace_name(_namespace);
+            heartbeat_table->set_database(database);
+            heartbeat_table->set_table_name(table_name);
+        }
+
         int64_t construct_req_cost = cost.get_time();
         cost.reset();
         //2、send heartbeat request to meta server
@@ -185,7 +299,7 @@ void BinlogNetworkServer::report_heart_beat() {
         } else {
             DB_WARNING("send heart beat request to meta server fail");
         }
-        bthread_usleep_fast_shutdown(1000 * 1000 * 10, _shutdown);
+        bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
     }
 }
 
@@ -196,6 +310,9 @@ void BinlogNetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatR
     for (auto& info : response.schema_change_info()) {
         factory->update_table(info);
     }
+
+    update_table_infos();
+
     RegionVec rv;
     auto& region_change_info = response.region_change_info();
     for (auto& region_info : region_change_info) {
@@ -222,6 +339,100 @@ void BinlogNetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatR
     }
 }
 
+int BinlogNetworkServer::update_table_infos() {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    std::vector<SmartTable> table_ptrs;
+    std::map<int64_t, SubTableNames> table_id_names_map;
+    for (const auto& info : _table_infos) {
+        std::string db_table_name = info.second.table_name;
+        if (db_table_name.find("*") != db_table_name.npos) {
+            std::vector<std::string> vec;
+            boost::split(vec, db_table_name, boost::is_any_of("."));
+            if (vec.size() != 2 || vec[1] != "*") {
+                DB_FATAL("get star table[%s.%s] fail", _namespace.c_str(), db_table_name.c_str());
+                continue;
+            }
+            std::vector<SmartTable> tmp_table_ptrs;
+            factory->get_all_table_by_db(_namespace, vec[0], tmp_table_ptrs);
+            for (SmartTable t : tmp_table_ptrs) {
+                SubTableNames& names = table_id_names_map[t->id];
+                names.table_name = t->name;
+                names.fields = info.second.fields;
+                // FC_Word.*模式下monitor_fields清掉，任何列变更都下发
+                names.monitor_fields.clear();
+                table_ptrs.emplace_back(t);
+                DB_NOTICE("get table_name[%s.%s] table_id[%ld]", _namespace.c_str(), t->name.c_str(), t->id);
+            }
+        } else {
+            SmartTable t = factory->get_table_info_ptr_by_name(_namespace + "." + db_table_name);
+            if (t == nullptr) {
+                DB_FATAL("get table[%s.%s] fail", _namespace.c_str(), db_table_name.c_str());
+                continue;
+            }
+            table_id_names_map[t->id] = info.second;
+            table_ptrs.emplace_back(t);
+            DB_NOTICE("get table_name[%s.%s] table_id[%ld]", _namespace.c_str(), db_table_name.c_str(), t->id);
+        }
+    }
+    std::map<int64_t, SubTableIds> tmp_table_ids;
+    for (SmartTable table : table_ptrs) {
+        if (!table->is_linked) {
+            if (table->name != "baidu_dba.heartbeat") {
+                DB_FATAL("table[%s.%s] not linked", table->namespace_.c_str(), table->name.c_str());
+            }
+            continue;
+        }
+
+        if (_binlog_id != -1) {
+            if (table->binlog_id != _binlog_id) {
+                DB_FATAL("table[%s.%s] has different binlog id %ld", table->namespace_.c_str(), table->name.c_str(), table->binlog_id);
+                continue;
+            }
+        } else {
+            DB_NOTICE("insert table[%s.%s] table_id: %ld, binlog table id %ld", 
+                table->namespace_.c_str(), table->name.c_str(), table->id, table->binlog_id);
+            _binlog_id = table->binlog_id;
+        }
+
+        SubTableNames& names = table_id_names_map[table->id];
+        SubTableIds table_ids;
+        bool find_all_fields = true;
+        for (const std::string& field_name : names.fields) {
+            int id = table->get_field_id_by_short_name(field_name);
+            if (id < 0) {
+                DB_FATAL("table[%s] cant find field[%s]", table->name.c_str(), field_name.c_str());
+                find_all_fields = false;
+                break;
+            }
+            table_ids.fields.insert(id);
+        }
+
+        for (const std::string& field_name : names.monitor_fields) {
+            int id = table->get_field_id_by_short_name(field_name);
+            if (id < 0) {
+                DB_FATAL("table[%s] cant find field[%s]", table->name.c_str(), field_name.c_str());
+                find_all_fields = false;
+                break;
+            }
+            table_ids.monitor_fields.insert(id);
+        }  
+        if (find_all_fields) {
+            tmp_table_ids[table->id] = table_ids;
+        }
+
+    }
+
+    if (_binlog_id == -1) {
+        DB_FATAL("get binlog id error.");
+        return -1;
+    }
+
+    std::lock_guard<bthread::Mutex> l(_lock);
+    _table_ids = tmp_table_ids;
+
+    return 0;
+}
+
 bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response) {
     DB_DEBUG("response %s", response.ShortDebugString().c_str());
     TimeCost cost;
@@ -231,35 +442,9 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
     tmp_tids.reserve(10);
     factory->update_tables_double_buffer_sync(response.schema_change_info());
 
-    for (const auto& table_name : _table_names) {
-        int64_t tid;
-        if (factory->get_table_id(table_name, tid) != 0) {
-            DB_FATAL("get table[%s] id error", table_name.c_str());
-        }
-        DB_NOTICE("get table_name[%s] table_id[%ld]", table_name.c_str(), tid);
-        _binlog_table_ids.insert(tid);
-    }
-    //获取binlog table_id
-    int64_t binlog_id = 0;
-    for (auto tid : _binlog_table_ids) {
-        if (factory->get_binlog_id(tid, binlog_id) != 0) {
-            DB_FATAL("config binlog error. %ld", tid);
-            continue;
-        }
-        DB_NOTICE("insert binlog table id %ld", binlog_id);
-        if (_binlog_id != -1) {
-            if (binlog_id != _binlog_id) {
-                DB_FATAL("tables has different binlog id %ld", tid);
-                continue;
-            }
-        } else {
-            _binlog_id = binlog_id;
-        }
-    }
-    if (_binlog_id == -1) {
-        DB_FATAL("get binlog id error.");
+    if (update_table_infos() != 0) {
         return false;
-    }
+    } 
 
     if (response.has_idc_info()) {
         factory->update_idc(response.idc_info());
@@ -271,7 +456,7 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
     auto& region_change_info = response.region_change_info();
     for (auto& region_info : region_change_info) {
         if (_binlog_id != region_info.table_id()) {
-            DB_NOTICE("skip region info table_id %ld", region_info.table_id());
+            DB_DEBUG("skip region info table_id %ld", region_info.table_id());
             continue;
         }
         *rv.Add() = region_info;

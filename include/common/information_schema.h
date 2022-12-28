@@ -15,6 +15,7 @@
 #pragma once
 #include "common.h"
 #include "proto/meta.interface.pb.h"
+#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
 class TableRecord;
@@ -49,6 +50,8 @@ private:
     int64_t construct_table(const std::string& table_name, FieldVec& fields);
     void init_partition_split_info();
     void init_region_status();
+    void init_learner_region_status();
+    void init_invalid_learner_region();
     void init_columns();
     void init_statistics();
     void init_schemata();
@@ -60,6 +63,61 @@ private:
     void init_referential_constraints();
     void init_triggers();
     void init_views();
+    void init_character_sets();
+    void init_collation_character_set_applicability();
+    void init_collations();
+    void init_column_privileges();
+    void init_engines();
+    void init_events();
+    void init_files();
+    void init_global_status();
+    void init_global_variables();
+    void init_innodb_buffer_page();
+    void init_innodb_buffer_page_lru();
+    void init_innodb_buffer_pool_stats();
+    void init_innodb_cmp();
+    void init_innodb_cmpmem();
+    void init_innodb_cmpmem_reset();
+    void init_innodb_cmp_per_index();
+    void init_innodb_cmp_per_index_reset();
+    void init_innodb_cmp_reset();
+    void init_innodb_ft_being_deleted();
+    void init_innodb_ft_config();
+    void init_innodb_ft_default_stopword();
+    void init_innodb_ft_deleted();
+    void init_innodb_ft_index_cache();
+    void init_innodb_ft_index_table();
+    void init_innodb_locks();
+    void init_innodb_lock_waits();
+    void init_innodb_metrics();
+    void init_innodb_sys_columns();
+    void init_innodb_sys_datafiles();
+    void init_innodb_sys_fields();
+    void init_innodb_sys_foreign();
+    void init_innodb_sys_foreign_cols();
+    void init_innodb_sys_indexes();
+    void init_innodb_sys_tables();
+    void init_innodb_sys_tablespaces();
+    void init_innodb_sys_tablestats();
+    void init_innodb_trx();
+    void init_optimizer_trace();
+    void init_parameters();
+    void init_partitions();
+    void init_plugins();
+    void init_processlist();
+    void init_profiling();
+    void init_schema_privileges();
+    void init_session_status();
+    void init_session_variables();
+    void init_table_constraints();
+    void init_table_privileges();
+    void init_tablespaces();
+    void init_user_privileges();
+    void init_binlog_region_infos();
+    void query_regions_concurrency(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
+    std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos);
+    void process_binlogs_region_info(std::vector<std::vector<std::string>>& result_rows, std::unordered_map<int64_t, 
+    std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
 
     std::unordered_map<std::string, pb::SchemaInfo> _tables;
     //InformationSchema在baikaldb端运行

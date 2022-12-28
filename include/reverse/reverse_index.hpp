@@ -115,15 +115,15 @@ int ReverseIndex<Schema>::handle_reverse(
         std::make_shared<std::map<std::string, ReverseNode>>();
     if (_is_seg_cache) {
         if (_seg_cache.find(word, &cache_seg_res) != 0) {
-            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res);
+            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
             _seg_cache.add(word, seg_res);
         } else {
             *seg_res = *cache_seg_res;
             // 填充pk，flag信息
-            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res);
+            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
         }
     } else {
-        Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res);
+        Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
     }
     auto map_it = seg_res->begin();
     while (map_it != seg_res->end()) {
@@ -267,14 +267,17 @@ int ReverseIndex<Schema>::create_executor(
         return -1;
     }
     
-    schema_info->schema = new Schema();
+    schema_info->schema = new (std::nothrow) Schema();
+    if (schema_info->schema == nullptr) {
+        return -1;
+    }
     schema_info->schema_ptrs.emplace_back(schema_info->schema);
     schema_info->schema->init(this, txn, _key_range, conjuncts, is_fast);
     timer.reset();
     schema_info->schema->set_index_info(index_info);
     schema_info->schema->set_table_info(table_info);
     schema_info->schema->set_index_search(this);
-    int ret = schema_info->schema->create_executor(search_data, mode, _segment_type);
+    int ret = schema_info->schema->create_executor(search_data, mode, _segment_type, _charset);
     schema_info->schema->statistic().bool_engine_time += timer.get_time();
     if (ret < 0) {
         DB_WARNING("create_executor fail, region:%ld, index:%ld", _region_id, _index_id);

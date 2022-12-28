@@ -55,6 +55,7 @@ public:
 #endif
 
 namespace baikaldb {
+DECLARE_int32(limit_slow_sql_size);
 class NetworkServer {
 public:
     virtual ~NetworkServer();
@@ -97,6 +98,8 @@ private:
 
     std::string state2str(SmartSocket client);
 
+    int32_t set_keep_tcp_alive(int socket_fd);
+
     int fetch_instance_info();
     int make_worker_process();
     void connection_timeout_check();
@@ -113,7 +116,15 @@ private:
     int insert_agg_sql(const std::string &sql);
     int insert_agg_sql_by_sign(const std::string& values);
     int insert_family_table_tag(const std::string& values);
-    int insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map, std::set<std::string>& family_tbl_tag_set);
+    int insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map, 
+        std::set<std::string>& family_tbl_tag_set, 
+        std::set<uint64_t>& sign_to_counts);
+    void insert_subquery_signs_info(std::map<uint64_t, std::set<uint64_t>>& parent_sign_to_subquery_signs, bool is_insert_success);
+    int insert_subquery_values(const std::string& values);
+
+    // 收集慢查询涉及的相关函数
+    int insert_slow_query_infos(const std::string& slow_query_info_values);
+    void process_slow_query_map();
 
 private:
     // Server info.
@@ -136,5 +147,8 @@ private:
     // for print_agg_sql
     baikal::client::Manager _manager;
     baikal::client::Service* _baikaldb;
+public:
+    // bvar保存慢查询信息
+    bvar::Adder<BvarSlowQueryMap> slow_query_map;
 };
 } // namespace baikal

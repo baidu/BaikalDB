@@ -16,6 +16,11 @@ message NameSpaceInfo {
     optional int64 version                 = 4;
     optional bool deleted                  = 5;
     optional string resource_tag           = 6;
+    optional Engine engine                 = 7;
+    optional Charset charset               = 8;
+    optional int64 byte_size_per_record    = 9;
+    optional int64 replica_num             = 10;
+    optional int64 region_split_lines      = 11; //region分裂行数阈值
 };
 
 message DataBaseInfo {
@@ -27,6 +32,11 @@ message DataBaseInfo {
     optional int64 version                 = 6;
     optional bool   deleted                = 7;
     optional string resource_tag           = 8;
+    optional Engine engine                 = 9;
+    optional Charset charset               = 10;
+    optional int64 byte_size_per_record    = 11;
+    optional int64 replica_num             = 12;
+    optional int64 region_split_lines      = 13; //region分裂行数阈值
 };
 
 enum Status {
@@ -61,8 +71,10 @@ enum IndexHintStatus {
 
 //每个逻辑机房的副本数量。第一个逻辑机房为主机房. 目前leader均衡不考虑机房分布。
 message ReplicaDist {
-    required string logical_room = 1;
-    required int64 count        = 2;
+    optional string logical_room  = 1;
+    required int64  count         = 2;
+    optional string resource_tag  = 3;
+    optional string physical_room = 4;
 };
 // user MUST ensure that field_id in fields are continuous and sorted, 
 // even if a field is deleted
@@ -80,6 +92,19 @@ enum PartitionType {
     PT_HASH = 1;
     PT_RANGE = 2;
 };
+
+message PartitionMethod {
+    required PartitionType type = 1;
+    repeated FieldInfo field_infos = 2;
+    repeated int32 partition_fields = 3;
+    optional Expr range_partition_field = 4;
+    repeated Expr range_partition_values = 5;
+    repeated string partition_names = 6;
+    optional Expr hash_expr_value = 7;
+    optional string expr_string = 8;
+    optional int64 partition_num = 9;
+};
+
 message PartitionInfo {
     required PartitionType type = 1;
     optional FieldInfo field_info = 2;
@@ -87,6 +112,8 @@ message PartitionInfo {
     optional Expr range_partition_field = 4;
     repeated Expr range_partition_values = 5;
     repeated string partition_names = 6;
+    optional Expr hash_expr_value = 7;
+    optional string expr_string = 8;
 };
 
 message SchemaInfo {
@@ -277,6 +304,10 @@ message UserPrivilege {
     optional int64 version                        = 9;
     optional bool encrypt                         = 10; //加密用户才能访问加密列
     optional bool need_auth_addr                  = 11;
+    optional string resource_tag                  = 12; // 优先访问的store resource_tag
+    optional bool ddl_permission                  = 13; // ddl权限，空则认为没有权限，默认无权限
+    optional int64 txn_lock_timeout               = 14; // 事务等锁超时时间，对优先级低的账号减少锁占用时间
+    optional bool use_read_index                  = 15; // 读是否走folloewr read use read idx
 };
 
 //集群信息
@@ -353,13 +384,21 @@ message RegionSplitRequest {
     optional bool  tail_split    = 4; //是否是尾分裂 尾分裂不是本机分裂 需要分配实例
     optional int64 table_id      = 5;
     optional string resource_tag = 6;
+    optional int64 new_region_num= 7; // 尾分裂多region
 };
 
+// 尾分裂多region，不用new_region_id, new_instance, add_peer_instance
+message MultiSplitRegion {
+    optional int64 new_region_id      = 1; 
+    optional string new_instance      = 2;
+    repeated string add_peer_instance = 3;    
+}
 message RegionSplitResponse {
     required int64 old_region_id = 1;
-    required int64 new_region_id = 2;
-    required string new_instance = 3;
+    optional int64 new_region_id = 2;
+    optional string new_instance = 3;
     repeated string add_peer_instance = 4;
+    repeated MultiSplitRegion multi_new_regions = 5;  
 };
 
 /*
@@ -457,16 +496,22 @@ message MetaManagerRequest {
     optional int64               learner_replica_num    = 27;
 };
 
+message CreateTableResponse {
+    optional SchemaInfo schema_info = 1;
+    repeated RegionInfo region_infos = 2;
+};
+
 message MetaManagerResponse {
-    required ErrCode errcode                    = 1;
-    optional string errmsg                      = 2;
-    optional string leader                      = 3;
-    optional RegionSplitResponse split_response = 4;
-    optional OpType op_type                     = 5;
-    optional uint64 start_id                    = 6;
-    optional uint64 end_id                      = 7;
-    optional RegionMergeResponse merge_response = 8;
-    optional RegionRecoverResponse recover_response = 9;
+    required ErrCode errcode                            = 1;
+    optional string errmsg                              = 2;
+    optional string leader                              = 3;
+    optional RegionSplitResponse split_response         = 4;
+    optional OpType op_type                             = 5;
+    optional uint64 start_id                            = 6;
+    optional uint64 end_id                              = 7;
+    optional RegionMergeResponse merge_response         = 8;
+    optional RegionRecoverResponse recover_response     = 9;
+    optional CreateTableResponse create_table_response  = 10; // 新增
 };
 
 message RegionRecoverResponse {
@@ -582,6 +627,12 @@ message RegionHeartBeat {
     optional int64  used_size            = 7;
 };
 
+message BaikalHeartBeatTable {
+    required string namespace_name = 1;
+    required string database       = 2;
+    required string table_name     = 3;
+};
+
 message BaikalSchemaHeartBeat {
     required int64 table_id             = 1;
     required int64 version              = 2;
@@ -597,7 +648,10 @@ message BaikalHeartBeatRequest {
     repeated DdlWorkInfo  ddl_works                = 5;
     optional bool can_do_ddlwork                   = 6;
     optional string physical_room                  = 7;
-    repeated VirtualIndexInfluence info_affect     = 8;//影响面信息 
+    repeated VirtualIndexInfluence info_affect     = 8;  // 影响面信息 
+    optional bool need_heartbeat_table             = 9;  // 指定是否心跳按需返回
+    optional bool need_binlog_heartbeat            = 10; // 指定是否binlog capturer的心跳 
+    repeated BaikalHeartBeatTable heartbeat_tables = 11; // 指定需要进行同步的表全名
 };
 
 message BaikalOtherHeartBeat {
@@ -666,6 +720,7 @@ enum QueryOpType {
     QUERY_RESOURCE_TAG_SWITCH                     = 308;
     QUERY_SHOW_VIRINDX_INFO_SQL                   = 309;//展示虚拟索引的影响   
     QUERY_REGION_LEARNER_STATUS                   = 310;
+    QUERY_FAST_IMPORTER_TABLES                    = 311;
 };
 
 message PhysicalInstance {
@@ -817,6 +872,8 @@ message QueryTable {
     optional int64              row_count           = 18;
     optional int64              main_table_id       = 19;
     optional int64              region_split_lines  = 20;
+    optional int64              partition_num       = 21;
+    optional int64              fast_importer_ts    = 22;
 };
 
 message QuerySchema {

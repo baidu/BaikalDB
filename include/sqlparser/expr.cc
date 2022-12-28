@@ -318,7 +318,7 @@ void LiteralExpr::to_stream(std::ostream& os) const {
             os << "'" << _u.str_val.value << "'";
             break;
         case LT_HEX:
-            os << "'" << _u.str_val.value << "'";
+            os << "0x" << row_str.value;
             break;
         case LT_BOOL:
             os << true_str[_u.bool_val];
@@ -333,7 +333,7 @@ void LiteralExpr::to_stream(std::ostream& os) const {
             break;
     }
 }
-
+// select字段时获取表达式名字
 std::string LiteralExpr::to_string() const {
     std::ostringstream os;        
     if (print_sample) {
@@ -352,7 +352,7 @@ std::string LiteralExpr::to_string() const {
             os << _u.str_val.value;
             break;
         case LT_HEX:
-            os << _u.str_val.value;
+            os << "0x" << row_str.value;
             break;
         case LT_BOOL:
             os << true_str[_u.bool_val];

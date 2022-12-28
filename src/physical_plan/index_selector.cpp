@@ -25,6 +25,7 @@ namespace baikaldb {
 using namespace range;
 int IndexSelector::analyze(QueryContext* ctx) {
     ExecNode* root = ctx->root;
+    _ctx = ctx;
     std::vector<ExecNode*> scan_nodes;
     root->get_node(pb::SCAN_NODE, scan_nodes);
     if (scan_nodes.size() == 0) {
@@ -599,13 +600,74 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         if (sort_node != nullptr) {
             sort_property = sort_node->sort_property();
         }
-        access_path->calc_index_range(sort_property);
-        access_path->insert_no_cut_condition(expr_field_map);
-        access_path->calc_is_covering_index(tuple_descs[tuple_id]);
+        access_path->calc_index_match(sort_property);
+        std::set<int32_t>* calc_covering_user_slots = nullptr;
+        std::set<int32_t> slot_ids;
+        // 非相关子查询时，内层SQL使用的tuple_descs包含了外层SQL的字段，导致计算covering_index错误。
+        // 当使用的是全局索引时，会导致无效的回表。
+        // 解决：select语句使用ref_slot_id_mapping计算是否为covering index
+        // TODO: 当外层为UPDATE或DELETE时，计算covering_index可能错误
+        if (_ctx != nullptr && (_ctx->is_select || _ctx->expr_params.is_expr_subquery)) {
+            auto& required_slot_map = _ctx->ref_slot_id_mapping[tuple_id];
+            for (auto& iter : required_slot_map) {
+                slot_ids.insert(iter.second);
+            }
+            if (!slot_ids.empty()) {
+                calc_covering_user_slots = &slot_ids;
+            }
+        }
+        access_path->calc_is_covering_index(tuple_descs[tuple_id], calc_covering_user_slots);
         scan_node->add_access_path(access_path);
     }
+    // 分区表解析分区信息
+    select_partition(table_info, scan_node, field_range_map);
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
+    scan_node->set_expr_field_map(std::move(expr_field_map));
     return scan_node->select_index_in_baikaldb(sample_sql); 
+}
+
+int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
+    std::map<int32_t, range::FieldRange>& field_range_map) {
+    if (table_info->partition_ptr != nullptr) {
+        std::set<int64_t> partition_ids;
+        int64_t table_id = table_info->id;
+        if (_ctx != nullptr) {
+            auto name_iter = _ctx->table_partition_names.find(table_id);
+            if (name_iter != _ctx->table_partition_names.end()) {
+                if (0 != _factory->get_partition_ids_by_name(table_id, name_iter->second, partition_ids)) {
+                    DB_WARNING("get partition failed.");
+                    return -1;
+                }
+                scan_node->replace_partition(partition_ids);
+                return 0;
+            }
+        }
+        auto partition_type = table_info->partition_ptr->partition_type();
+        auto field_iter = field_range_map.find(table_info->partition_ptr->partition_field_id());
+        if (partition_type == pb::PT_HASH) {
+            if (field_iter != field_range_map.end() && !field_iter->second.eq_in_values.empty()) {
+                for (auto& value : field_iter->second.eq_in_values) {
+                    int64_t partition_index = 0;
+                    if (_factory->get_partition_index(table_id, value, partition_index) == 0) {
+                        partition_ids.emplace(partition_index);
+                    } else {
+                        DB_WARNING("get table %ld partition number error.", table_id);
+                        return -1;
+                    }
+                }
+                scan_node->replace_partition(partition_ids);
+            } else {
+                DB_WARNING("table_id:%ld pattern not supported.", table_id);
+                for (int64_t i = 0; i < table_info->partition_num; ++i) {
+                    partition_ids.emplace(i);
+                }
+                scan_node->replace_partition(partition_ids);
+            }
+        } else if (partition_type == pb::PT_RANGE) {
+            // todo
+        }
+    }
+    return 0;
 }
 
 }

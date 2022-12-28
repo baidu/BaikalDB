@@ -68,9 +68,11 @@ public:
             client_conn->on_commit_rollback();
             return -1;
         }
+        int result = 0;
         if (state->optimize_1pc() == false) {
             client_conn->seq_id++;
             ret = exec_commit_node(state, commit_node);
+            result = ret;  // 给业务返回commit结果
             if (ret < 0) {
                 ret = exec_rollback_node(state, rollback_node);
             }
@@ -78,7 +80,6 @@ public:
             //DB_WARNING("TransactionNote: optimize_1pc, no commit: txn_id: %lu log_id:%lu", state->txn_id, state->log_id());
         }
         client_conn->on_commit_rollback();
-        int result = ret;
         if (_txn_cmd == pb::TXN_COMMIT_BEGIN) {
             if (result < 0) {
                 DB_WARNING("TransactionWarn: cannot start new txn since the old commit failed, "
@@ -99,7 +100,7 @@ public:
                 result = -1;
             }
         }
-        return 0;
+        return result;
     }
     pb::TxnCmdType txn_cmd() {
         return _txn_cmd;

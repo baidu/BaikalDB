@@ -31,6 +31,7 @@ DEFINE_int32(learner_region_replica_num, 1, "learner region replica num, default
 DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M");
 DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 2, "time interval to clear table_tombstone. default(2d)");
 DEFINE_uint64(statistics_heart_beat_bytesize, 256 * 1024 * 1024, "default(256M)");
+DEFINE_int32(pre_split_threashold, 300, "pre_split_threashold for sync create table");
 
 void TableTimer::run() {
     DB_NOTICE("Table Timer run.");
@@ -203,7 +204,11 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
 
     if (_table_id_map.find(table_name) != _table_id_map.end()) {
         DB_WARNING("request table_name:%s already exist", table_name.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table already exist");
+        if (table_info.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table already exist");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
         return;
     }
 
@@ -264,26 +269,88 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
     // partition分区表，设置分区field信息。
     if (table_info.partition_num() > 1) {
         table_mem.is_partition = true;
-        if (table_info.partition_info().type() == pb::PT_RANGE) {
-            for (const auto& rinfo : table_info.partition_info().range_partition_values()) {
-                table_mem.range_infos.push_back(rinfo);
-            }
+        if (!table_info.has_partition_info()) {
+            DB_WARNING("paritition info not found");
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "paritition info not found");
+            return;
         }
-        bool get_field_info = false;
+        std::map<std::string, pb::FieldInfo> field_map;
         for (const auto& field_info : table_info.fields()) {
-            if (field_info.field_name() == table_info.partition_info().field_info().field_name()) {
-                table_info.mutable_partition_info()->mutable_field_info()->CopyFrom(field_info);
-                table_info.mutable_partition_info()->set_partition_field(field_info.field_id());
-                get_field_info = true;
-                break;
+            field_map[field_info.field_name()] = field_info;
+        }
+        std::string field_name;
+        if (table_info.partition_info().has_field_info()) {
+            field_name = table_info.partition_info().field_info().field_name();
+            auto iter = field_map.find(field_name);
+            if (iter != field_map.end()) {
+                table_info.mutable_partition_info()->mutable_field_info()->CopyFrom(iter->second);
+                table_info.mutable_partition_info()->set_partition_field(iter->second.field_id());
+            } else {
+                DB_WARNING("paritition field_name:%s not found.", field_name.c_str());
+                IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "partition field not found.");
+                return;
             }
         }
-        if (!get_field_info) {
-            DB_WARNING("paritition table field info error.");
-            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "partition table field info error.");
+        std::set<int32_t> expr_field_ids;
+        auto set_expr_type_func = [&field_map, &expr_field_ids, &field_name](pb::Expr& expr) -> int {
+            for (size_t i = 0; i < expr.nodes_size(); i++) {
+                auto node = expr.mutable_nodes(i);
+                if (node->has_derive_node() && node->derive_node().has_field_name()) {
+                    field_name = node->derive_node().field_name();
+                    auto iter = field_map.find(field_name);
+                    if (iter != field_map.end()) {
+                        auto& field_info = iter->second;
+                        node->set_col_type(field_info.mysql_type());
+                        node->mutable_derive_node()->set_field_id(field_info.field_id());
+                        node->set_col_flag(field_info.flag());
+                        expr_field_ids.insert(field_info.field_id());
+                    } else {
+                        return -1;
+                    }
+                }
+            }
+            return 0;
+        };
+
+        if (table_info.partition_info().type() == pb::PT_RANGE) {
+            if (table_info.partition_info().has_range_partition_field()) {
+                pb::Expr tmp_expr = table_info.partition_info().range_partition_field();
+                if (0 != set_expr_type_func(tmp_expr)) {
+                    DB_WARNING("paritition init range expr failed.");
+                    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "partition init range expr failed.");
+                    return;
+                }
+                auto partition_info_ptr =  table_info.mutable_partition_info();
+                partition_info_ptr->clear_range_partition_field();
+                partition_info_ptr->mutable_range_partition_field()->CopyFrom(tmp_expr);
+            }
+            for (const auto& rinfo : table_info.partition_info().range_partition_values()) {
+                table_mem.range_infos.emplace_back(rinfo);
+            }
+            table_info.mutable_partition_info()->clear_range_partition_values();
+            for (auto& expr : table_mem.range_infos) {
+                auto expr_ptr = table_info.mutable_partition_info()->add_range_partition_values();
+                *expr_ptr = expr;
+            }
+        } else if (table_info.partition_info().type() == pb::PT_HASH) {
+            if (table_info.partition_info().has_hash_expr_value()) {
+                pb::Expr tmp_expr = table_info.partition_info().hash_expr_value();
+                if (0 != set_expr_type_func(tmp_expr)) {
+                    DB_WARNING("paritition init hash expr failed.");
+                    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "partition init hash expr failed.");
+                    return;
+                }
+                table_info.mutable_partition_info()->clear_hash_expr_value();
+                table_info.mutable_partition_info()->mutable_hash_expr_value()->CopyFrom(tmp_expr);
+            }
+        }
+        if (expr_field_ids.size() > 1) {
+            DB_WARNING("paritition multiple fields not support.");
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "partition multiple fields not support.");
             return;
         }
     }
+    DB_WARNING("paritition %s.", table_info.partition_info().ShortDebugString().c_str());
     for (auto& learner_resource : *table_info.mutable_learner_resource_tags()) {
         table_mem.learner_resource_tag.emplace_back(learner_resource);
     }
@@ -300,6 +367,7 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
+
     set_max_table_id(max_table_id_tmp);
     table_mem.schema_pb.clear_init_store();
     table_mem.schema_pb.clear_split_keys();
@@ -308,7 +376,72 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
     put_incremental_schemainfo(apply_index, schema_infos);
     DatabaseManager::get_instance()->add_table_id(database_id, table_info.table_id());
     table_mem.print();
-    DB_NOTICE("create table completely, _max_table_id:%ld, table_name:%s", _max_table_id, table_name.c_str());
+    if (table_mem.whether_level_table) {
+        DB_NOTICE("create table completely, _max_table_id:%ld, table_name:%s", _max_table_id, table_name.c_str());
+    }
+    if (done) {
+        ((MetaServerClosure*)done)->whether_level_table = table_mem.whether_level_table;
+        ((MetaServerClosure*)done)->create_table_ret = ret;
+    }
+}
+
+int TableManager::do_create_table_sync_req(pb::SchemaInfo& schema_pb, 
+                            std::shared_ptr<std::vector<pb::InitRegion>> init_regions,
+                            bool has_auto_increment,
+                            int64_t start_region_id,
+                            pb::MetaManagerResponse* response) {
+    if (schema_pb.engine() == pb::ROCKSDB
+        || schema_pb.engine() == pb::ROCKSDB_CSTORE || 
+        schema_pb.engine() == pb::BINLOG) {
+        std::string namespace_name = schema_pb.namespace_name();
+        std::string database = schema_pb.database();
+        std::string table_name = schema_pb.table_name();
+        int64_t table_id = schema_pb.table_id();
+        uint64_t init_value = 1;
+        if (schema_pb.has_auto_increment_increment()) {
+            init_value = schema_pb.auto_increment_increment();
+        }
+
+        int ret = 0;
+        if (has_auto_increment) {
+            pb::MetaManagerRequest request;
+            request.set_op_type(pb::OP_ADD_ID_FOR_AUTO_INCREMENT);
+            pb::AutoIncrementRequest* auto_incr = request.mutable_auto_increment();
+            auto_incr->set_table_id(table_id);
+            auto_incr->set_start_id(init_value);
+            ret = send_auto_increment_request(request);
+        }
+        if (ret == 0) {
+            if (send_create_table_request(namespace_name, database, table_name, init_regions) != 0) {
+                send_drop_table_request(namespace_name, database, table_name);
+                DB_FATAL("send create_table request fail, table_name: %s", table_name.c_str());
+                SET_RESPONSE(response, pb::INTERNAL_ERROR, "create table fail");
+                return -1;
+            }
+
+            pb::CreateTableResponse create_table_response_tmp;
+            auto* schema_info = create_table_response_tmp.mutable_schema_info();
+            schema_info->Swap(&schema_pb);
+            for (auto& init_region: *init_regions) {
+                auto* region_info = create_table_response_tmp.add_region_infos();
+                region_info->Swap(init_region.mutable_region_info());
+            }
+            auto* create_table_response = response->mutable_create_table_response();
+            create_table_response->Swap(&create_table_response_tmp);
+        } else {
+            send_drop_table_request(namespace_name, database, table_name);
+            DB_FATAL("send add auto incrment request fail, table_name: %s", table_name.c_str());
+            SET_RESPONSE(response, pb::INTERNAL_ERROR, "create table fail");
+            return -1;
+        }
+    }
+    SET_RESPONSE(response, pb::SUCCESS, "success");
+    DB_WARNING("create table, table_id: %ld, table_name:%s, alloc start_region_id: %ld, end_region_id: %ld", 
+                schema_pb.table_id(),
+                schema_pb.table_name().c_str(),
+                start_region_id, 
+                RegionManager::get_instance()->get_max_region_id());
+    return 0;
 }
 
 void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
@@ -416,6 +549,11 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
     schema_infos.push_back(schema_info);
     put_incremental_schemainfo(apply_index, schema_infos);
     DatabaseManager::get_instance()->delete_table_id(database_id, drop_table_id);
+    if (is_table_in_fast_importer(drop_table_id)) {
+        // 正在快速导入，删表把快速导入标志清掉，报警，可能需要人工恢复store rocksdb标志
+        DB_FATAL("drop table: %ld, drop table is in_fast_import", drop_table_id);
+        cancel_in_fast_importer(drop_table_id);
+    }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop table success, request:%s", request.ShortDebugString().c_str());
     if (done) {
@@ -680,8 +818,8 @@ void TableManager::swap_table(const pb::MetaManagerRequest& request,
 bool TableManager::check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
                          pb::BaikalHeartBeatResponse* response, int64_t applied_index) {
     int64_t last_updated_index = request->last_updated_index();
-    auto update_schema_func = [response](const std::vector<pb::SchemaInfo>& schema_infos) {
-        for (auto info : schema_infos) {
+    auto update_schema_func = [response](const std::vector<pb::SchemaInfo>& schema_infos) { 
+        for (auto info : schema_infos) {            
             *(response->add_schema_change_info()) = info;
         }
     };
@@ -719,6 +857,20 @@ void TableManager::update_split_lines(const pb::MetaManagerRequest& request,
         [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
                 mem_schema_pb.set_region_split_lines(request.table_info().region_split_lines());
                 mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+        });
+}
+
+void TableManager::modify_partition(const pb::MetaManagerRequest& request,
+                                      const int64_t apply_index,
+                                      braft::Closure* done) {
+    update_table_internal(request, apply_index, done, 
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
+                // todo 临时代码，只修改expr_string
+                if (mem_schema_pb.has_partition_info() && mem_schema_pb.database() == "FC_Word"
+                && mem_schema_pb.partition_num() == 32) {
+                    mem_schema_pb.mutable_partition_info()->set_expr_string(request.table_info().partition_info().expr_string());
+                    mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+                }
         });
 }
 
@@ -926,6 +1078,16 @@ void TableManager::update_table_comment(const pb::MetaManagerRequest& request,
         });
 }
 
+void TableManager::update_charset(const pb::MetaManagerRequest& request,
+                                    const int64_t apply_index, 
+                                    braft::Closure* done) {
+    update_table_internal(request, apply_index, done, 
+        [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
+            mem_schema_pb.set_charset(request.table_info().charset());
+            mem_schema_pb.set_version(mem_schema_pb.version() + 1);
+        });
+}
+
 void TableManager::add_field(const pb::MetaManagerRequest& request,
                              const int64_t apply_index,
                              braft::Closure* done) {
@@ -1007,6 +1169,14 @@ void TableManager::drop_field(const pb::MetaManagerRequest& request,
                         field.field_name().c_str(), request.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
             return;
+        }
+        if (mem_schema_pb.has_partition_info()) {
+            if (mem_schema_pb.partition_info().field_info().field_name() == field.field_name()) {
+                DB_WARNING("field name:%s is partitiion field, request:%s",
+                        field.field_name().c_str(), request.ShortDebugString().c_str());
+                IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is partitiion field");
+                return;
+            }
         }
         drop_field_names.push_back(field.field_name());
     }
@@ -1168,11 +1338,46 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
             if (mem_field.field_name() == field_name) {
                 if (field.has_mysql_type()) {
+                    if (!check_field_is_compatible_type(mem_field.mysql_type(), field.mysql_type())) {
+                        // TODO 数据类型变更仅支持meta-only, 有损变更待支持
+                        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
+                                             "modify field data type unsupported lossy changes");
+                        return;
+                    }
                     mem_field.set_mysql_type(field.mysql_type());
+                }
+                if (field.has_can_null()) {
+                    // TODO NULL VALUE CHECK
+                    mem_field.set_can_null(field.can_null());
+                }
+                if (field.auto_increment() != mem_field.auto_increment()) {
+                    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
+                                         "modify field auto_increment unsupported");
+                    return;
+                }
+                if (field.has_default_value()) {
+                    mem_field.set_default_value(field.default_value());
+                    if (field.has_default_literal()) {
+                        mem_field.set_default_literal(field.default_literal());
+                    }
                 }
                 if (field.has_comment()) {
                     mem_field.set_comment(field.comment());
                 }
+                if (field.has_on_update_value()) {
+                    mem_field.set_on_update_value(field.on_update_value());
+                }
+                if (field.has_can_null()) {
+                    mem_field.set_can_null(field.can_null());
+                }
+                if (field.has_default_value()) {
+                    if (field.default_value() == "__NULL__") {
+                        mem_field.clear_default_value();
+                    } else {
+                        //修改default value需谨慎，会导致存储null数据的值变成新默认值
+                        mem_field.set_default_value(field.default_value());
+                    }
+                } 
             }
         }
     }
@@ -1318,10 +1523,14 @@ int TableManager::get_statistics(const int64_t table_id, pb::Statistics& stat_pb
     return 0;
 }
 
-void TableManager::check_add_table(std::set<int64_t>& report_table_ids, 
-            std::vector<int64_t>& new_add_region_ids,
-            pb::BaikalHeartBeatResponse* response) {
+void TableManager::check_add_table(
+        std::set<int64_t>& report_table_ids, 
+        std::vector<int64_t>& new_add_region_ids, 
+        const pb::BaikalHeartBeatRequest* request,
+        pb::BaikalHeartBeatResponse* response, 
+        const std::unordered_set<int64_t>& heartbeat_table_ids) {
     BAIDU_SCOPED_LOCK(_table_mutex);
+    bool need_heartbeat_table = request->has_need_heartbeat_table() && request->need_heartbeat_table();
     for (auto& table_info_pair : _table_info_map) {
         if (report_table_ids.find(table_info_pair.first) != report_table_ids.end()) {
             continue;
@@ -1331,6 +1540,12 @@ void TableManager::check_add_table(std::set<int64_t>& report_table_ids,
             auto schema_info = response->add_schema_change_info();
             *schema_info = table_info_pair.second.schema_pb;
         }
+        if (need_heartbeat_table) {
+            const int64_t table_id = table_info_pair.first;
+            if (heartbeat_table_ids.find(table_id) == heartbeat_table_ids.end()) {
+                continue;
+            }
+        }
         for (auto& partition_region : table_info_pair.second.partition_regions) {
             for (auto& region_id : partition_region.second) {
                 //DB_WARNING("new add region id: %ld", region_id);
@@ -1339,16 +1554,25 @@ void TableManager::check_add_table(std::set<int64_t>& report_table_ids,
         }
     }
 }
-void TableManager::check_add_region(const std::set<std::int64_t>& report_table_ids,
+void TableManager::check_add_region(
+                const std::set<std::int64_t>& report_table_ids,
                 std::unordered_map<int64_t, std::set<std::int64_t>>& report_region_ids,
-                pb::BaikalHeartBeatResponse* response) {
+                const pb::BaikalHeartBeatRequest* request,
+                pb::BaikalHeartBeatResponse* response,
+                const std::unordered_set<int64_t>& heartbeat_table_ids) {
     //获得每个表的regincount
     std::unordered_map<int64_t, int64_t> table_region_count;
     get_region_count(report_table_ids, table_region_count);
     
+    bool need_heartbeat_table = request->has_need_heartbeat_table() && request->need_heartbeat_table();
     std::vector<int64_t> table_for_add_region; //需要add_region的table_id
     for (auto& region_ids_pair : report_region_ids) {
         int64_t table_id = region_ids_pair.first;
+        if (need_heartbeat_table) {
+            if (heartbeat_table_ids.find(table_id) == heartbeat_table_ids.end()) {
+                continue;
+            }
+        }
         if (table_region_count[table_id] <= (int64_t)region_ids_pair.second.size()) {
             continue;
         }
@@ -1604,47 +1828,56 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
         return -1;
     }
     RegionManager::get_instance()->set_max_region_id(tmp_max_region_id);
-    uint64_t init_value = 1;
-    if (table_mem.schema_pb.has_auto_increment_increment()) {
-        init_value = table_mem.schema_pb.auto_increment_increment();
+    if (done) {
+        ((MetaServerClosure*)done)->create_table_schema_pb.CopyFrom(table_mem.schema_pb);
+        ((MetaServerClosure*)done)->init_regions = init_regions;
+        ((MetaServerClosure*)done)->has_auto_increment = has_auto_increment;
+        ((MetaServerClosure*)done)->start_region_id = start_region_id;
     }
-    
-    //leader发送请求
-    if (done && (table_mem.schema_pb.engine() == pb::ROCKSDB
-        || table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE || 
-        table_mem.schema_pb.engine() == pb::BINLOG)) {
-        std::string namespace_name = table_mem.schema_pb.namespace_name();
-        std::string database = table_mem.schema_pb.database();
-        std::string table_name = table_mem.schema_pb.table_name();
-        Bthread bth(&BTHREAD_ATTR_SMALL);
-        auto create_table_fun = 
-            [this, namespace_name, database, table_name, init_regions, 
-                table_id, init_value, has_auto_increment]() {
-                int ret = 0;
-                if (has_auto_increment) {
-                    pb::MetaManagerRequest request;
-                    request.set_op_type(pb::OP_ADD_ID_FOR_AUTO_INCREMENT);
-                    pb::AutoIncrementRequest* auto_incr = request.mutable_auto_increment();
-                    auto_incr->set_table_id(table_id);
-                    auto_incr->set_start_id(init_value);
-                    ret = send_auto_increment_request(request);
-                }
-                if (ret == 0) {
-                    send_create_table_request(namespace_name, database, table_name, init_regions);
-                } else {
-                    send_drop_table_request(namespace_name, database, table_name);
-                    DB_FATAL("send add auto incrment request fail, table_name: %s", table_name.c_str());
-                }
-            };
-        bth.run(create_table_fun);
+
+    if (init_regions->size() > FLAGS_pre_split_threashold) {
+        uint64_t init_value = 1;
+        if (table_mem.schema_pb.has_auto_increment_increment()) {
+            init_value = table_mem.schema_pb.auto_increment_increment();
+        }
+        
+        //leader发送请求
+        if (done && (table_mem.schema_pb.engine() == pb::ROCKSDB
+            || table_mem.schema_pb.engine() == pb::ROCKSDB_CSTORE || 
+            table_mem.schema_pb.engine() == pb::BINLOG)) {
+            std::string namespace_name = table_mem.schema_pb.namespace_name();
+            std::string database = table_mem.schema_pb.database();
+            std::string table_name = table_mem.schema_pb.table_name();
+            Bthread bth(&BTHREAD_ATTR_SMALL);
+            auto create_table_fun = 
+                [this, namespace_name, database, table_name, init_regions, 
+                    table_id, init_value, has_auto_increment]() {
+                    int ret = 0;
+                    if (has_auto_increment) {
+                        pb::MetaManagerRequest request;
+                        request.set_op_type(pb::OP_ADD_ID_FOR_AUTO_INCREMENT);
+                        pb::AutoIncrementRequest* auto_incr = request.mutable_auto_increment();
+                        auto_incr->set_table_id(table_id);
+                        auto_incr->set_start_id(init_value);
+                        ret = send_auto_increment_request(request);
+                    }
+                    if (ret == 0) {
+                        send_create_table_request(namespace_name, database, table_name, init_regions);
+                    } else {
+                        send_drop_table_request(namespace_name, database, table_name);
+                        DB_FATAL("send add auto incrment request fail, table_name: %s", table_name.c_str());
+                    }
+                };
+            bth.run(create_table_fun);
+        }
+        IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        DB_WARNING("create table, table_id:%ld, table_name:%s, max_table_id: %ld"
+                    " alloc start_region_id:%ld, end_region_id :%ld", 
+                    table_mem.schema_pb.table_id(), table_mem.schema_pb.table_name().c_str(), 
+                    max_table_id_tmp,
+                    start_region_id, 
+                    RegionManager::get_instance()->get_max_region_id());
     }
-    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
-    DB_WARNING("create table, table_id:%ld, table_name:%s, max_table_id: %ld"
-                " alloc start_region_id:%ld, end_region_id :%ld", 
-                table_mem.schema_pb.table_id(), table_mem.schema_pb.table_name().c_str(), 
-                max_table_id_tmp,
-                start_region_id, 
-                RegionManager::get_instance()->get_max_region_id());
     return 0;
 }
 int TableManager::send_auto_increment_request(const pb::MetaManagerRequest& request) {
@@ -1662,7 +1895,7 @@ int TableManager::send_auto_increment_request(const pb::MetaManagerRequest& requ
     }
     return 0;
 }
-void TableManager::send_create_table_request(const std::string& namespace_name,
+int TableManager::send_create_table_request(const std::string& namespace_name,
                                const std::string& database,
                                const std::string& table_name,
                                std::shared_ptr<std::vector<pb::InitRegion>> init_regions) {
@@ -1701,10 +1934,11 @@ void TableManager::send_create_table_request(const std::string& namespace_name,
         DB_FATAL("create table:%s fail",
                     (namespace_name + "." + database + "." + table_name).c_str());
         send_drop_table_request(namespace_name, database, table_name);
-    } else {
-        DB_NOTICE("create table:%s success", 
-                    (namespace_name + "." + database + "." + table_name).c_str());
+        return -1;
     }
+    DB_NOTICE("create table:%s success", 
+                    (namespace_name + "." + database + "." + table_name).c_str());
+    return 0;
 }
 
 int TableManager::write_schema_for_level(const TableMem& table_mem, 
@@ -1776,6 +2010,11 @@ int TableManager::write_schema_for_level(const TableMem& table_mem,
     std::vector<pb::SchemaInfo> schema_infos{top_table};
     put_incremental_schemainfo(apply_index, schema_infos);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    if (done) {
+        auto* response_ptr = ((MetaServerClosure*)done)->response;
+        auto* create_table_response = response_ptr->mutable_create_table_response();
+        create_table_response->mutable_schema_info()->CopyFrom(top_table);
+    }
     return 0;
 }
 
@@ -2050,12 +2289,12 @@ int64_t TableManager::get_startkey_regionid(int64_t table_id,
     BAIDU_SCOPED_LOCK(_table_mutex);
     if (_table_info_map.find(table_id) == _table_info_map.end()) {
         DB_WARNING("table_id: %ld not exist", table_id);
-        return -1;
+        return -2;
     }
     auto& startkey_regiondesc_map = _table_info_map[table_id].startkey_regiondesc_map[partition];
     if (startkey_regiondesc_map.size() <= 0) {
         DB_WARNING("table_id:%ld map empty", table_id);
-        return -1;
+        return -2;
     }
     auto iter = startkey_regiondesc_map.find(start_key);
     if (iter == startkey_regiondesc_map.end()) {
@@ -2571,26 +2810,29 @@ int TableManager::get_split_regions(int64_t table_id,
 }
 
 int TableManager::get_presplit_regions(int64_t table_id, 
-                      std::map<int64_t, std::map<std::string, SmartRegionInfo>>& key_newregion_map,
+                      std::map<std::string, SmartRegionInfo>& key_newregion_map,
                                     pb::MetaManagerRequest& request) {
-    for (auto& partition_key_newregion_map : key_newregion_map) {
-        std::string key = "";
-        auto& partition_region_map = partition_key_newregion_map.second;
-        for (auto region_iter = partition_region_map.find("");
-                region_iter != partition_region_map.end(); region_iter++) {
-            SmartRegionInfo ptr_region = region_iter->second;
-            if (key != ptr_region->start_key()) {
-                DB_WARNING("table_id:%ld can`t find start_key:%s, in key_region_map", 
-                           table_id, str_to_hex(key).c_str());
-                return -1;
-            }
-            pb::RegionInfo* region_info = request.add_region_infos();
-            *region_info = *ptr_region;
-            if (ptr_region->end_key() == "") {
-                continue;
-            }
-            key = ptr_region->end_key();
+    std::string key = "";
+    int region_cnt = 0;
+    for (auto region_iter = key_newregion_map.find("");
+            region_iter != key_newregion_map.end(); region_iter++) {
+        SmartRegionInfo ptr_region = region_iter->second;
+        if (key != ptr_region->start_key()) {
+            DB_WARNING("table_id:%ld can`t find start_key:%s, in key_region_map", 
+                        table_id, str_to_hex(key).c_str());
+            return -1;
         }
+        region_cnt++;
+        pb::RegionInfo* region_info = request.add_region_infos();
+        *region_info = *ptr_region;
+        if (ptr_region->end_key() == "") {
+            break;
+        }
+        key = ptr_region->end_key();
+    }
+    DB_WARNING("table_id: %ld, region_cnt: %d", table_id, region_cnt);
+    if (region_cnt == 0) {
+        return -1;
     }
     return 0;
 }
@@ -2637,6 +2879,7 @@ void TableManager::get_update_region_requests(int64_t table_id, TableMem& table_
             continue;
         }
         // 使用leader region schema替换master region schema时，保留master schema中的learner信息。
+        ptr_region->clear_learners();
         for (auto& learner : master_region->learners()) {
             ptr_region->add_learners(learner);
         }
@@ -2684,12 +2927,12 @@ void TableManager::recycle_update_region() {
                 auto ptr_region = cur_iter->second;
                 auto master_region = RegionManager::get_instance()->get_region_info(region_id); 
                 if (master_region == nullptr) {
-                    DB_WARNING("can`t find region_id:%ld in region info map", region_id);
+                    DB_WARNING("can`t find region_id: %ld in region info map", region_id);
                     continue;
                 }
                 if (ptr_region->version() <= master_region->version()) {
                     id_keyregion_map.erase(cur_iter);
-                    DB_WARNING("table_id:%ld, region_id:%ld key has changed "
+                    DB_WARNING("table_id: %ld, region_id:%ld key has changed "
                                "(version, start_key, end_key),(%ld, %s, %s)->(%ld, %s, %s)",
                                table_info.first, region_id, master_region->version(),
                                str_to_hex(master_region->start_key()).c_str(), 
@@ -2700,26 +2943,31 @@ void TableManager::recycle_update_region() {
                     continue;
                 }
             }
-            
-            if (startkey_regiondesc_map.size() == 0 && id_keyregion_map.size() == 0 
-                    && key_newregion_map.size() != 0 && id_noneregion_map.size() == 0) {
-                //如果该table没有region，但是存在store上报的新region，为预分裂region，特殊处理
-                pb::MetaManagerRequest request;
-                request.set_op_type(pb::OP_UPDATE_REGION);
-                auto ret = get_presplit_regions(table_info.first, key_newregion_map, request);
-                if (ret < 0) {
+
+            for (auto& iter : startkey_regiondesc_map) {
+                int64_t partition_key = iter.first;
+                if (startkey_regiondesc_map[partition_key].size() == 0 && id_keyregion_map.size() == 0 
+                        && key_newregion_map[partition_key].size() != 0 && id_noneregion_map.size() == 0) {
+                    //如果该table没有region，但是存在store上报的新region，为预分裂region，特殊处理
+                    pb::MetaManagerRequest request;
+                    request.set_op_type(pb::OP_UPDATE_REGION);
+                    auto ret = get_presplit_regions(table_info.first, key_newregion_map[partition_key], request);
+                    if (ret < 0) {
+                        continue;
+                    }
+                    requests.push_back(request);
                     continue;
                 }
-                requests.push_back(request);
-                continue;
-            }
-            if (id_keyregion_map.size() == 0) {
-                if (key_newregion_map.size() != 0 || id_noneregion_map.size() != 0) {
-                    key_newregion_map.clear();
-                    id_noneregion_map.clear();
-                    DB_WARNING("table_id:%ld tmp map clear", table_info.first);
+         
+                if (id_keyregion_map.size() == 0) {
+                    if (key_newregion_map.size() != 0 || id_noneregion_map.size() != 0) {
+                        key_newregion_map[partition_key].clear();
+                        id_noneregion_map.clear();
+                        DB_WARNING("table_id: %ld partition_key: %ld tmp map clear", table_info.first, partition_key);
+                    }
                 }
             }
+            
         }
     }
     
@@ -2894,6 +3142,11 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
     }
     DB_DEBUG("DDL_LOG[add_index] check index info success.");
 
+    if (index_ret == 2) {
+        IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        return;
+    }
+
     pb::IndexInfo index_info;
     index_info.CopyFrom(request.table_info().indexs(0));
     index_info.set_state(pb::IS_NONE); 
@@ -2986,9 +3239,8 @@ int TableManager::init_global_index_region(TableMem& table_mem, braft::Closure* 
     for (auto i = 0; i < table_mem.schema_pb.partition_num(); ++i) { 
         std::string instance;
         int ret = ClusterManager::get_instance()->select_instance_rolling(
-                    resource_tag,
+                    {resource_tag, table_mem.schema_pb.main_logical_room(), ""},
                     {},
-                    table_mem.schema_pb.main_logical_room(),    
                     instance);
         if (ret < 0) {
             IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "select instance fail");
@@ -3138,7 +3390,7 @@ int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
     };
 
     for (const auto& index_info : schema_info.indexs()) {
-        if (index_info.index_name() == index_info_to_check.index_name()) {
+        if (try_to_lower(index_info.index_name()) == try_to_lower(index_info_to_check.index_name())) {
             //索引状态为NONE、IS_DELETE_ONLY并且索引的field一致，可以重建。
             if (index_info.state() == pb::IS_NONE || index_info.state() == pb::IS_DELETE_ONLY) {
                 if (same_index(index_info, index_info_to_check)) {
@@ -3150,6 +3402,10 @@ int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
                     return -1;
                 }
             } else {
+                if (same_index(index_info, index_info_to_check)) {
+                    DB_WARNING("DDL_LOG same index name, same fields.");
+                    return 2;
+                }
                 DB_WARNING("DDL_LOG rebuild index failed, index state not satisfy.");
                 return -1;
             }

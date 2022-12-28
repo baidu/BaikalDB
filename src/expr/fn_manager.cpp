@@ -152,6 +152,7 @@ void FunctionManager::register_operators() {
     register_object_ret("lpad", lpad, pb::STRING);
     register_object_ret("rpad", rpad, pb::STRING);
     register_object_ret("instr", instr, pb::INT32);
+    register_object_ret("json_extract", json_extract, pb::STRING);
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);
@@ -180,7 +181,9 @@ void FunctionManager::register_operators() {
     register_object_ret("dayofweek", dayofweek, pb::UINT32);
     register_object_ret("dayofmonth", dayofmonth, pb::UINT32);
     register_object_ret("dayofyear", dayofyear, pb::UINT32);
+    register_object_ret("yearweek", yearweek, pb::UINT32);
     register_object_ret("week", week, pb::UINT32);
+    register_object_ret("weekofyear", weekofyear, pb::UINT32);
     register_object_ret("month", month, pb::UINT32);
     register_object_ret("monthname", monthname, pb::STRING);
     register_object_ret("year", year, pb::UINT32);
@@ -256,6 +259,7 @@ void FunctionManager::register_operators() {
     register_object_ret("cast_to_string", cast_to_string, pb::STRING);
     register_object_ret("cast_to_signed", cast_to_signed, pb::INT64);
     register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::INT64);
+    register_object_ret("cast_to_double", cast_to_double, pb::DOUBLE);
 }
 
 int FunctionManager::init() {

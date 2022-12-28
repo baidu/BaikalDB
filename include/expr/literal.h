@@ -202,6 +202,9 @@ public:
     virtual ExprValue get_value(MemRow* row) {
         return _value.cast_to(_col_type);
     }
+    virtual ExprValue get_value(const ExprValue& value) {
+        return _value.cast_to(_col_type);
+    }
 
 private:
     void value_to_node_type() {

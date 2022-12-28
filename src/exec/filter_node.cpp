@@ -39,6 +39,7 @@ int FilterNode::init(const pb::PlanNode& node) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
+
     pb::FilterNode filter_node;
     filter_node.ParseFromString(node.derive_node().filter_node());
     for (auto& expr : filter_node.conjuncts()) {
@@ -350,6 +351,8 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
+        ExprNode::or_node_optimize(&expr);
+
         //非bool型表达式判断
         if (expr->col_type() != pb::BOOL) {
             ExprNode::_s_non_boolean_sql_cnts << 1;
@@ -589,12 +592,24 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
             filter_node.SerializeToString(&filter_string);
             pb_node->mutable_derive_node()->set_filter_node(filter_string);
         } else {
+#ifdef BAIDU_INTERNAL
 #ifndef NDEBUG
             // 调试日志
             pb::FilterNode filter_node;
             std::string str = _filter_node;
             filter_node.ParseFromString(str);
             DB_DEBUG("filter_node: %s", filter_node.ShortDebugString().c_str());
+#endif
+#else //BAIDU_INTERNAL
+#ifndef NDEBUG
+            if (FLAGS_enable_debug) {
+                // 调试日志
+                pb::FilterNode filter_node;
+                std::string str = _filter_node;
+                filter_node.ParseFromString(str);
+                DB_DEBUG("filter_node: %s", filter_node.ShortDebugString().c_str());
+            }
+#endif
 #endif
             pb_node->mutable_derive_node()->set_filter_node(_filter_node);
         }
@@ -713,7 +728,7 @@ void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& o
     if (output.empty()) {
         return;
     }
-    if (!_pruned_conjuncts.empty()) {
+    if (_raw_filter_node.conjuncts_size() != 0) {
         output.back()["Extra"] += "Using where; ";
     }
 }

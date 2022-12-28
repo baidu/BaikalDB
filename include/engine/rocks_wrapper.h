@@ -31,6 +31,7 @@
 namespace baikaldb {
 DECLARE_int32(rocks_max_background_compactions);
 DECLARE_int32(addpeer_rate_limit_level);
+DECLARE_int32(level0_max_sst_num);
 
 enum KVMode {
     KEY_ONLY,
@@ -187,7 +188,7 @@ public:
             uint64_t level0_sst = 0;
             uint64_t pending_compaction_size = 0;
             get_rocks_statistic(level0_sst, pending_compaction_size);
-            if (level0_sst > _data_cf_option.level0_slowdown_writes_trigger * 0.8) {
+            if (level0_sst > _data_cf_option.level0_slowdown_writes_trigger * 0.6) {
                 return true;
             }
             if (pending_compaction_size > _data_cf_option.soft_pending_compaction_bytes_limit / 2) {
@@ -203,6 +204,15 @@ public:
             if (value > 0) {
                 return true;
             }
+        }
+        return false;
+    }
+    bool is_ingest_stall() {
+        uint64_t level0_sst = 0;
+        uint64_t pending_compaction_size = 0;
+        get_rocks_statistic(level0_sst, pending_compaction_size);
+        if (level0_sst > FLAGS_level0_max_sst_num) {
+            return true;
         }
         return false;
     }

@@ -356,10 +356,12 @@ TEST(ThreadSafeMap, count) {
 TEST(BvarMap, bvarmap) {
     bvar::Adder<BvarMap> bm;
     std::map<int32_t, int> field_range_type;
+    uint64_t parent_sign = 2385825078143366794;
+    std::set<uint64_t> subquery_signs = {8394144613061275097, 8919421716185942419};
     //bm << BvarMap(std::make_pair("abc", 1));
-    bm << BvarMap("abc", 1, 101, 101, 10, 1, 5, 3, 1, field_range_type, 1);
-    bm << BvarMap("abc", 4, 102, 102, 20, 2, 6, 2, 1, field_range_type, 1);
-    bm << BvarMap("bcd", 5, 103, 103, 30, 3, 7, 1, 1, field_range_type, 1);
+    bm << BvarMap("abc", 1, 101, 101, 10, 1, 5, 3, 1, field_range_type, 1, parent_sign, subquery_signs);
+    bm << BvarMap("abc", 4, 102, 102, 20, 2, 6, 2, 1, field_range_type, 1, parent_sign, subquery_signs);
+    bm << BvarMap("bcd", 5, 103, 103, 30, 3, 7, 1, 1, field_range_type, 1, parent_sign, subquery_signs);
     std::cout << bm.get_value();
 }
 

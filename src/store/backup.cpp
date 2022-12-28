@@ -391,21 +391,36 @@ void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
         DB_WARNING("region_%ld set backup info error.", _region_id);
         return;
     }
-
+    brpc::StreamId id = request->streaming_id();
     int64_t row_size = request->row_size(); // 需要调整的num_table_lines
     int64_t data_sst_to_process_size = request->data_sst_to_process_size();
     if (data_sst_to_process_size > 0) {
         receiver->set_only_data_sst(data_sst_to_process_size);
     }
 
-    Concurrency::get_instance()->upload_sst_streaming_concurrency.increase_wait();
+    ScopeGuard auto_decrease([]() {
+        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
+    });
+    int ret = Concurrency::get_instance()->upload_sst_streaming_concurrency.increase_timed_wait(1000 * 1000 * 5); 
+    if (ret < 0) {
+        response->set_errcode(pb::RETRY_LATER);
+        DB_WARNING("upload sst fail, concurrency limit wait timeout, region_id: %lu, streaming_id: %lu",
+                  _region_id, id);
+        return;
+    }
+    bool ingest_stall = RocksWrapper::get_instance()->is_ingest_stall();
+    if (ingest_stall) {
+        response->set_errcode(pb::RETRY_LATER);
+        DB_WARNING("upload sst fail, level0 sst num limit, region_id: %lu, streaming_id: %lu",
+                   _region_id, id);
+        return;
+    }
     brpc::StreamId sd;
     brpc::StreamOptions stream_options;
     stream_options.handler = receiver.get();
     stream_options.max_buf_size = FLAGS_streaming_max_buf_size;
     stream_options.idle_timeout_ms = FLAGS_streaming_idle_timeout_ms; 
     if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
-        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
         cntl->SetFailed("Fail to accept stream");
         DB_WARNING("fail to accept stream.");
         return;
@@ -416,7 +431,7 @@ void Backup::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
                butil::endpoint2str(cntl->remote_side()).c_str(), sd);
     //async
     if (auto region_ptr = _region.lock()) {
-        brpc::StreamId id = request->streaming_id();
+        auto_decrease.release();
         Bthread streaming_work{&BTHREAD_ATTR_NORMAL};
         streaming_work.run(
             [this, region_ptr, ingest_store_latest_sst, data_sst_to_process_size, sd, receiver, backup_info, row_size, id]() {
@@ -435,10 +450,12 @@ int Backup::upload_sst_info_streaming(
     brpc::StreamId sd, std::shared_ptr<StreamReceiver> receiver, 
     bool ingest_store_latest_sst, int64_t data_sst_to_process_size, const BackupInfo& backup_info,
     SmartRegion region_ptr, brpc::StreamId client_sd) {
+    ScopeGuard auto_decrease([]() {
+        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
+    });
     TimeCost time_cost;
     region_ptr->_multi_thread_cond.increase();
     ON_SCOPE_EXIT([region_ptr]() {
-        Concurrency::get_instance()->upload_sst_streaming_concurrency.decrease_signal();
         region_ptr->_multi_thread_cond.decrease_signal();
     });
 

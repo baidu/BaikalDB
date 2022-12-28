@@ -45,8 +45,8 @@ int create_single_txn(std::unique_ptr<IndexDDLManagerNode> dml_root,
         return -1;
     }
     store_begin_node->mutable_pb_node()->set_num_children(0);
-    //ms
-    store_begin_node->set_txn_timeout(40 * 1000);
+    store_begin_node->set_txn_timeout(40 * 1000);      // 整个事务超时时间40s
+    store_begin_node->set_txn_lock_timeout(5 * 1000);  // 等锁时间5s
     // create store prepare node
     std::unique_ptr<TransactionNode> store_prepare_node(Separate().create_txn_node(pb::TXN_PREPARE));
     if (store_prepare_node == nullptr) {
@@ -234,7 +234,7 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     scan_node->serialize_index_and_set_router_index(_pos_index, &_pos_index, true);
 
     // scan 路由
-    ret = PlanRouter().scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node.get()), _ctx, false);
+    ret = PlanRouter().scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node.get()), _ctx, false, {});
     if (ret < 0) {
         DB_FATAL("router plan error.");
         return nullptr;

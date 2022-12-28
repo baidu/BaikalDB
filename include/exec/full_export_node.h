@@ -50,7 +50,8 @@ public:
 private:
     FetcherStore _fetcher_store;
     std::deque<int64_t> _send_region_ids;
-    std::map<std::string, int64_t> _start_key_sort;
+    // <partition_id, <start_key,region_id>>
+    std::map<int64_t, std::map<std::string, int64_t>> _start_key_sort;
     RocksdbScanNode* _scan_node = nullptr;
     std::string _last_router_key;
     ErrorType _error = E_OK;

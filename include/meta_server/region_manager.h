@@ -20,6 +20,7 @@
 #include "proto/meta.interface.pb.h"
 #include "proto/store.interface.pb.h"
 #include "meta_server.h"
+#include "meta_util.h"
 #include "schema_manager.h"
 #include "cluster_manager.h"
 #include "table_manager.h"
@@ -69,10 +70,14 @@ public:
     // default for DEAD
     void delete_all_region_for_store(const std::string& instance, InstanceStateInfo status);
 
-    void add_all_learner_for_store(const std::string& instance, const std::vector<int64_t>& learner_ids);
+    void add_all_learner_for_store(const std::string& instance, 
+                                   const IdcInfo& instance_idc, 
+                                   const std::vector<int64_t>& learner_ids);
     void pre_process_remove_peer_for_store(const std::string& instance,
-                                                pb::Status status, std::vector<pb::RaftControlRequest>& requests); 
-    void pre_process_add_peer_for_store(const std::string& instance, pb::Status status,
+            const IdcInfo& instance_idc, pb::Status status, 
+            std::vector<pb::RaftControlRequest>& requests); 
+    void pre_process_add_peer_for_store(const std::string& instance, 
+            const IdcInfo& instance_idc, pb::Status status,
             std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests);
     bool add_region_is_exist(int64_t table_id, const std::string& start_key, 
                                             const std::string& end_key, int64_t partition_id);
@@ -96,8 +101,7 @@ public:
     void check_peer_count(int64_t region_id,
                         const pb::LeaderHeartBeat& leader_region,
                         std::unordered_map<int64_t, int64_t>& table_replica_nums,
-                        std::unordered_map<int64_t, std::string>& table_resource_tags,
-                        std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>>& table_replica_dists_maps,
+                        std::unordered_map<int64_t, std::unordered_map<std::string, int>>& table_replica_dists_maps,
                         std::vector<std::pair<std::string, pb::RaftControlRequest>>& remove_peer_requests,
                         int32_t table_pk_prefix_dimension,
                         pb::StoreHeartBeatResponse* response);
@@ -111,7 +115,11 @@ public:
     void remove_learner_peer(int64_t region_id,
         std::vector<std::pair<std::string, pb::RemoveRegion>>& modify_learner_requests,
         pb::RegionInfo* master_region_info,
-        const std::vector<std::string>& candicate_remove_learners
+        const std::set<std::string>& candicate_remove_learners
+    );
+    void remove_learner_peer(int64_t region_id,
+        std::vector<std::pair<std::string, pb::RemoveRegion>>& modify_learner_requests,
+        const std::string& remove_learner
     );
     void check_whether_illegal_peer(const pb::StoreHeartBeatRequest* request,
                 pb::StoreHeartBeatResponse* response);
@@ -123,6 +131,9 @@ public:
     
     void leader_main_logical_room_check(const pb::StoreHeartBeatRequest* request,
                     pb::StoreHeartBeatResponse* response,
+                    IdcInfo& leader_idc,
+                    std::unordered_map<int64_t, int64_t>& table_replica,
+                    std::unordered_map<int64_t, IdcInfo>& table_main_idc,
                     std::set<int64_t>& trans_leader_region_ids);
     
     void leader_load_balance_on_pk_prefix(const std::string& instance,
@@ -132,21 +143,21 @@ public:
                                           const std::set<int64_t>& trans_leader_region_ids,
                                           std::unordered_map<int64_t, int64_t>& table_transfer_leader_count,
                                           std::unordered_map<std::string, int64_t>& pk_prefix_leader_count,
+                                          std::unordered_map<int64_t, int64_t>& table_replica,
+                                          std::unordered_map<int64_t, IdcInfo>& table_main_idc,
                                           pb::StoreHeartBeatResponse* response);
     
     void pk_prefix_load_balance(const std::unordered_map<std::string, int64_t>& add_peer_counts,
                            std::unordered_map<std::string, std::vector<int64_t>>& instance_regions,
                            const std::string& instance,
-                           const std::string& resource_tag,
-                           std::unordered_map<int64_t, std::string>& logical_rooms,
+                           std::unordered_map<int64_t, IdcInfo>& table_balance_idc,
                            std::unordered_map<std::string, int64_t>& pk_prefix_average_counts,
                            std::unordered_map<int64_t, int64_t>& table_average_counts);
     
     void peer_load_balance(const std::unordered_map<int64_t, int64_t>& add_peer_counts,
                 std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
                 const std::string& instance,
-                const std::string& resouce_tag,
-                std::unordered_map<int64_t, std::string>& logical_rooms,
+                std::unordered_map<int64_t, IdcInfo>& table_balance_idc,
                 std::unordered_map<int64_t, int64_t>& table_average_counts,
                 std::unordered_map<int64_t, int32_t>& table_pk_prefix_dimension,
                 std::unordered_map<std::string, int64_t>& pk_prefix_average_counts);
@@ -154,8 +165,7 @@ public:
     void learner_load_balance(const std::unordered_map<int64_t, int64_t>& add_peer_counts,
                 std::unordered_map<int64_t, std::vector<int64_t>>& instance_regions,
                 const std::string& instance,
-                const std::string& resouce_tag,
-                std::unordered_map<int64_t, std::string>& logical_rooms,
+                const std::string& resource_tag,
                 std::unordered_map<int64_t, int64_t>& table_average_counts);
  
     int load_region_snapshot(const std::string& value);
@@ -404,16 +414,16 @@ public:
         }
         return _instance_pk_prefix_leader_count[instance][pk_prefix_key];
     }
-    void add_remove_peer_on_pk_prefix(const int64_t region_id, const std::string& logical_room) {
+    void add_remove_peer_on_pk_prefix(const int64_t& region_id, const IdcInfo& idc) {
         BAIDU_SCOPED_LOCK(_count_mutex);
-        _remove_region_peer_on_pk_prefix[region_id] = logical_room;
+        _remove_region_peer_on_pk_prefix[region_id] = idc;
     }
-    bool need_remove_peer_on_pk_prefix(const int64_t region_id, std::string& logical_room) {
+    bool need_remove_peer_on_pk_prefix(const int64_t& region_id, IdcInfo& idc) {
         BAIDU_SCOPED_LOCK(_count_mutex);
         if (_remove_region_peer_on_pk_prefix.count(region_id) <= 0) {
             return false;
         }
-        logical_room = _remove_region_peer_on_pk_prefix[region_id];
+        idc = _remove_region_peer_on_pk_prefix[region_id];
         return true;
     }
     void clear_remove_peer_on_pk_prefix(const int64_t region_id) {
@@ -491,8 +501,9 @@ public:
         return status;
     }
     void put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos);
-    bool check_and_update_incremental(const pb::BaikalHeartBeatRequest* request,
-                         pb::BaikalHeartBeatResponse* response, int64_t applied_index); 
+    bool check_and_update_incremental(
+            const pb::BaikalHeartBeatRequest* request, pb::BaikalHeartBeatResponse* response, 
+            int64_t applied_index, const std::unordered_set<int64_t>& heartbeat_table_ids); 
 
     bool check_table_in_resource_tags(int64_t table_id, const std::set<std::string>& resource_tags);
     
@@ -528,7 +539,7 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, int64_t>> _instance_pk_prefix_leader_count;
     // region_id -> logical_room，处理store心跳发现大户不均，标记需要迁移的region_id及其候选store需要在的logical room
     // check_peer_count发现region_id在map里，直接按照大户的维度删除peer数最多的candidate，否则按照table维度删除peer
-    std::unordered_map<int64_t, std::string>            _remove_region_peer_on_pk_prefix;
+    std::unordered_map<int64_t, IdcInfo>            _remove_region_peer_on_pk_prefix;
 
     bthread_mutex_t                                     _doing_mutex;
     std::set<std::string>                               _doing_migrate; 

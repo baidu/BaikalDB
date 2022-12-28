@@ -78,8 +78,8 @@ struct IndexRange {
         right_open(_r_open),
         like_prefix(_like_prefix) {}
     
-    IndexRange(MutTableKey& _left, 
-        MutTableKey& _right,
+    IndexRange(const MutTableKey& _left,
+        const MutTableKey& _right,
         IndexInfo*  _index_info,
         IndexInfo*  _pri_info,
         pb::RegionInfo* _region_info,

@@ -182,6 +182,7 @@ public:
     uint64_t bthread_id() { return _bthread_id; }
 
     bool need_reject();
+    bool is_new_sign();
 
     void update_statistics();
 
@@ -356,6 +357,10 @@ public:
         return false; 
     }
 
+    bool is_new_sign() {
+        return butil::gettimeofday_us() - _start_time <= FLAGS_qps_statistics_minutes_ago * 60LL * 1000000LL;
+    }
+
     void reset_committed_rate(const int64_t rate) {
         _committed_bucket.reset_rate(rate);
     }
@@ -389,7 +394,7 @@ private:
     int64_t _sql_qps  = 0;
     bthread::Mutex _mutex; // 是否有不加锁的办法 TODO
     std::map<uint64_t, IndexCounter> _indexid_count;
-    
+
     DISALLOW_COPY_AND_ASSIGN(SqlQos);
 };
 
@@ -603,6 +608,25 @@ public:
             return nullptr;
         }
         return local;
+    }
+
+    bool is_new_sign() {
+        if (_start_time.get_time() <= FLAGS_qps_statistics_minutes_ago * 2 * 60LL * 1000000LL) {
+//            DB_NOTICE("StoreQos start time(s): %ld", _start_time.get_time() / 1000000LL);
+            return false;
+        }
+        void* data = bthread_getspecific(_bthread_local_key);
+        if (data == nullptr) {
+            return false;
+        }
+
+        QosBthreadLocal* local = static_cast<QosBthreadLocal*>(data);
+        if (local->bthread_id() != bthread_self()) {
+            DB_FATAL("diff bthread");
+            return false;
+        }
+
+        return local->is_new_sign();
     }
 
     bool need_reject() {

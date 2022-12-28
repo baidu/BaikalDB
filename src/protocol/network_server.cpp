@@ -49,7 +49,11 @@ DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
 DEFINE_bool(insert_agg_sql, false, "whether insert agg_sql");
 DEFINE_int32(batch_insert_agg_sql_size, 50, "batch size for insert");
 DEFINE_int32(batch_insert_sign_sql_interval_us, 10 * 60 * 1000 * 1000, "batch_insert_sign_sql_interval_us default 10min");
+DEFINE_bool(enable_tcp_keep_alive, false, "enable tcp keepalive flag");
 DECLARE_int32(baikal_heartbeat_interval_us);
+DEFINE_bool(open_to_collect_slow_query_infos, false, "open to collect slow_query_infos, default: false");
+DEFINE_int32(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
+DEFINE_int32(slow_query_batch_size, 100, "slow query sql batch size, default: 100");
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 
@@ -298,14 +302,9 @@ int NetworkServer::insert_agg_sql(const std::string& values) {
     return 0;
 }
 
-int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map, std::set<std::string>& family_tbl_tag_set) {
-    static TimeCost cost;
-
-    // 新签名可能最长20分钟无法写入
-    if (cost.get_time() < (FLAGS_batch_insert_sign_sql_interval_us + butil::fast_rand() % FLAGS_batch_insert_sign_sql_interval_us)) {
-        return 0;
-    } 
-
+int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map, 
+    std::set<std::string>& family_tbl_tag_set,
+    std::set<uint64_t>& sign_to_counts) {
     std::string values;
     int values_size = 0;
     for (const auto& it : sign_sql_map) {
@@ -313,7 +312,10 @@ int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_
         values += it.second + ",";
         if (values_size >= FLAGS_batch_insert_agg_sql_size) {
             values.pop_back();
-            insert_agg_sql_by_sign(values);
+            int ret  = insert_agg_sql_by_sign(values);
+            if (ret < 0) {
+                sign_to_counts.clear();
+            }
             values_size = 0;
             values.clear();
         } 
@@ -321,7 +323,10 @@ int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_
 
     if (values_size > 0) {
         values.pop_back();
-        insert_agg_sql_by_sign(values);
+        int ret = insert_agg_sql_by_sign(values);
+        if (ret < 0) {
+            sign_to_counts.clear();
+        }
     }
 
     values_size = 0;
@@ -333,10 +338,12 @@ int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_
 
     if (values_size > 0) {
         values.pop_back();
-        insert_family_table_tag(values);
+        int ret = insert_family_table_tag(values);
+        if (ret < 0) {
+            sign_to_counts.clear();
+        }
     }
 
-    cost.reset();
     sign_sql_map.clear();
     family_tbl_tag_set.clear();
     return 0;
@@ -398,11 +405,47 @@ int NetworkServer::insert_family_table_tag(const std::string& values) {
 void NetworkServer::print_agg_sql() {
     static std::map<uint64_t, std::string> sign_sql_map;
     static std::set<std::string> family_tbl_tag_set;
+    static std::map<uint64_t, std::set<std::uint64_t>> parent_sign_to_subquery_signs;
+    static std::set<uint64_t> sign_to_counts;
+    static std::set<uint64_t> parent_sign_to_counts;
     TimeCost cost;
+    TimeCost reset_counter_cost;
     while (!_shutdown) {
+        bool need_reset_counter = false;
+        if (reset_counter_cost.get_time() > 24 * 3600 * 1000 * 1000LL) {
+            need_reset_counter = true;
+            reset_counter_cost.reset();
+        }
         int64_t last_cost = cost.get_time();
         cost.reset();
+
+        //更新子查询签名信息
         BvarMap sample = StateMachine::get_instance()->sql_agg_cost.reset();
+        for (const auto& pair : sample.internal_map) {
+            auto& index_id_sumcount_mp = pair.second;
+            auto iter_begin = index_id_sumcount_mp.begin();
+            if (iter_begin != index_id_sumcount_mp.end()) {
+                auto& set_subquery_signs = iter_begin->second.subquery_signs;
+                uint64_t parent_sign = iter_begin->second.parent_sign;
+                if (set_subquery_signs.size() > 0 && parent_sign_to_counts.count(parent_sign) == 0) {
+                    DB_NOTICE("parent_sign is [%lu] and subquery_sign size is [%ld]", parent_sign, set_subquery_signs.size());
+                    parent_sign_to_subquery_signs[parent_sign] = set_subquery_signs;
+                    parent_sign_to_counts.insert(parent_sign);
+                }
+            }
+        }
+        //写入失败直接清除set, 这样可以保证下次还能写入库表
+        if (FLAGS_insert_agg_sql) {
+            bool is_insert_success = true;
+            insert_subquery_signs_info(parent_sign_to_subquery_signs, is_insert_success);
+            if (!is_insert_success) {
+                parent_sign_to_counts.clear();
+            }
+        }
+
+        // 更新慢查询信息 到底层库表内
+        process_slow_query_map();
+
         SchemaFactory* factory = SchemaFactory::get_instance();
         time_t timep;
         struct tm tm;
@@ -442,21 +485,27 @@ void NetworkServer::print_agg_sql() {
                         DB_WARNING("get hostname failed");
                     }
                 }
-                uint64_t out[2];
+
+                uint64_t out_sign = pair2.second.parent_sign;
                 int64_t version = 0;
                 std::string op_description = "-";
                 // factory->get_schema_conf_op_info(pair2.second.table_id, version, op_description);
                 std::string recommend_index = "-";
                 std::string field_desc = "-";
                 //index_recommend(pair.first, pair2.second.table_id, pair2.first, recommend_index, field_desc);
-                butil::MurmurHash3_x64_128(pair.first.c_str(), pair.first.size(), 0x1234, out);
-                int learner_read = factory->sql_force_learner_read(pair2.second.table_id, out[0]);
-                std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(out[0]);
+                int learner_read = factory->sql_force_learner_read(pair2.second.table_id, out_sign);
+                std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(out_sign);
                 int64_t dynamic_timeout_ms = -1;
                 if (sql_info == nullptr) {
-                    sql_info = factory->create_sql_stat(out[0]);
+                    sql_info = factory->create_sql_stat(out_sign);
                 }
                 if (sql_info != nullptr) {
+                    // 24小时，把小于SQL_COUNTS_RANGE的sql重置，维持天级定时任务单并发
+                    if (need_reset_counter) {
+                        if (sql_info->counter < SqlStatistics::SQL_COUNTS_RANGE) {
+                            sql_info->counter = 0;
+                        }
+                    }
                     int64_t last_cost_s = last_cost / 1000 / 1000;
                     if (last_cost_s > 0) {
                         sql_info->qps = pair2.second.count * 1.0 / last_cost_s;
@@ -472,7 +521,7 @@ void NetworkServer::print_agg_sql() {
                     dynamic_timeout_ms = sql_info->dynamic_timeout_ms();
                     SQL_TRACE("sign:%lu qps:%f avg_scan_rows:%ld scan_rows_9999:%ld "
                             "latency_us:%ld latency_us_9999:%ld times:%ld dynamic_timeout_ms:%ld",
-                            out[0], sql_info->qps, sql_info->avg_scan_rows, sql_info->scan_rows_9999, sql_info->latency_us,
+                            out_sign, sql_info->qps, sql_info->avg_scan_rows, sql_info->scan_rows_9999, sql_info->latency_us,
                             sql_info->latency_us_9999, sql_info->times_avg_and_9999, dynamic_timeout_ms);
                 }
                 SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_rgcnt_err="
@@ -483,7 +532,7 @@ void NetworkServer::print_agg_sql() {
                     pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
                     pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
                     pair2.second.region_count, pair2.second.err_count,
-                    out[0], hostname.c_str(), factory->get_index_name(pair2.first).c_str(), dynamic_timeout_ms, 
+                    out_sign, hostname.c_str(), factory->get_index_name(pair2.first).c_str(), dynamic_timeout_ms, 
                     pair.first.c_str(), version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str());
                 table_count_err[pair2.second.table_id] += CountErr(pair2.second.count, pair2.second.err_count);
 
@@ -493,7 +542,7 @@ void NetworkServer::print_agg_sql() {
                         if (insert_agg_sql(sql_values) < 0) {
                             DB_WARNING("insert agg_sql: %s failed", sql_values.c_str());
                         }
-                        if (insert_agg_sql_by_sign(sign_sql_map, family_tbl_tag_set) < 0) {
+                        if (insert_agg_sql_by_sign(sign_sql_map, family_tbl_tag_set, sign_to_counts) < 0) {
                             DB_WARNING("insert agg_sql_by_sign: %s failed", sql_values.c_str());
                         }
                         sql_values.clear();
@@ -545,7 +594,7 @@ void NetworkServer::print_agg_sql() {
                     sql_values += "'" + std::to_string(pair2.second.affected_rows) + "',";
                     sql_values += "'" + std::to_string(pair2.second.scan_rows) + "',";
                     sql_values += "'" + std::to_string(pair2.second.filter_rows) + "',";
-                    sql_values += "'" + std::to_string(out[0]) + "',";
+                    sql_values += "'" + std::to_string(out_sign) + "',";
                     sql_values += "'" + hostname + "',";
                     sql_values += "'" + factory->get_index_name(pair2.first) + "',";
                     sql_values += "'" + family + "',";
@@ -559,14 +608,17 @@ void NetworkServer::print_agg_sql() {
                     sql_values += "'" + std::to_string(pair2.second.region_count) + "',";
                     sql_values += "'" + std::to_string(learner_read) + "'),";
 
-                    std::string sign_sql_value = "('" + std::to_string(out[0]) + "',";
-                    sign_sql_value += "'" + family + "',";
-                    sign_sql_value += "'" + tbl + "',";
-                    sign_sql_value += "'" + resource_tag + "',";
-                    sign_sql_value += "'" + op_type + "',";
-                    sign_sql_value += "'" + sql_text + "')";
-                    sign_sql_map[out[0]] = std::move(sign_sql_value);
-                    family_tbl_tag_set.insert("('" + family + "','" + tbl + "','" + resource_tag + "')");
+                    if (sign_to_counts.count(out_sign) == 0) {
+                        std::string sign_sql_value = "('" + std::to_string(out_sign) + "',";
+                        sign_sql_value += "'" + family + "',";
+                        sign_sql_value += "'" + tbl + "',";
+                        sign_sql_value += "'" + resource_tag + "',";
+                        sign_sql_value += "'" + op_type + "',";
+                        sign_sql_value += "'" + sql_text + "')";
+                        sign_sql_map[out_sign] = std::move(sign_sql_value);
+                        family_tbl_tag_set.insert("('" + family + "','" + tbl + "','" + resource_tag + "')");
+                        sign_to_counts.insert(out_sign);
+                    }
                     ++values_size;
                 }
             }
@@ -576,7 +628,7 @@ void NetworkServer::print_agg_sql() {
             if (insert_agg_sql(sql_values) < 0) {
                 DB_WARNING("insert agg_sql: %s failed", sql_values.c_str());
             }
-            if (insert_agg_sql_by_sign(sign_sql_map, family_tbl_tag_set) < 0) {
+            if (insert_agg_sql_by_sign(sign_sql_map, family_tbl_tag_set, sign_to_counts) < 0) {
                 DB_WARNING("insert agg_sql_by_sign: %s failed", sql_values.c_str());
             }
         }
@@ -595,6 +647,72 @@ void NetworkServer::print_agg_sql() {
         }
         bthread_usleep_fast_shutdown(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL, _shutdown);
     }
+}
+
+void NetworkServer::insert_subquery_signs_info(std::map<uint64_t, std::set<uint64_t>>& parent_sign_to_subquery_signs, bool is_insert_success) {
+    int64_t limit_write_rows = 5000, accumulate_counts = 0;
+    if (parent_sign_to_subquery_signs.size() == 0) {
+        return;
+    }
+
+    std::string values = "";
+    for (const auto& pair : parent_sign_to_subquery_signs) {
+        // 构造sql
+        uint64_t parent_sign = pair.first;
+        for (const auto& subquery_sign : pair.second) {
+            values += "('" + std::to_string(parent_sign) + "', '" + std::to_string(subquery_sign) + "'),";
+            accumulate_counts++;
+            if (accumulate_counts > limit_write_rows) {
+                accumulate_counts = 0;
+                if (values.size() > 0) {
+                    values.pop_back();
+                }
+                int ret = insert_subquery_values(values);
+                if (ret < 0) {
+                    is_insert_success = false;
+                }
+                values.clear();
+            }
+        }
+    }
+    
+    if (accumulate_counts > 0) {
+        values.pop_back();
+        int ret = insert_subquery_values(values);
+        if (ret < 0) {
+            is_insert_success = false;
+        }
+        accumulate_counts = 0;
+        values.clear();
+    }
+    parent_sign_to_subquery_signs.clear();
+}
+
+
+int NetworkServer::insert_subquery_values(const std::string& values) {
+    std::string sql = "REPLACE INTO BaikalStat.baikaldb_subquery_sign_info("
+                        "`parent_sign`,`subquery_signs`) VALUES ";
+    sql += values;
+    int ret = 0;
+    int retry = 0;
+    baikal::client::ResultSet result_set;
+    TimeCost cost;
+    do {
+        ret = _baikaldb->query(0, sql, &result_set);
+        if (ret == 0) {
+            break;
+        }
+        bthread_usleep(1000000);
+    }while (++retry < 10);
+
+    if (ret != 0) {
+        DB_FATAL("sql_len:%lu query fail : %s", sql.size(), sql.c_str());
+        sql += ";\n";
+    }
+    DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
+            result_set.get_affected_rows(), cost.get_time(), sql.size(), sql.c_str());
+    bthread_usleep(1000000);//sleep 1s 
+    return ret;
 }
 
 static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
@@ -785,6 +903,25 @@ void NetworkServer::connection_timeout_check() {
                             sock->user_info->username.c_str(),
                             ctx->stat_info.log_id,
                             ctx->sql.c_str());
+                    if (FLAGS_open_to_collect_slow_query_infos) {
+                        SlowQueryInfo slow_query_info(ctx->stat_info.log_id, 
+                            ctx->stat_info.sign,
+                            ctx->stat_info.start_stamp.tv_sec,
+                            ctx->stat_info.end_stamp.tv_sec,
+                            query_time_diff,
+                            ctx->stat_info.num_filter_rows,
+                            ctx->stat_info.num_affected_rows,
+                            ctx->stat_info.num_scan_rows,
+                            ctx->stat_info.num_returned_rows,
+                            sock->ip,
+                            ctx->stat_info.resource_tag,
+                            sock->username,
+                            ctx->stat_info.family,
+                            ctx->stat_info.table,
+                            ctx->sql,
+                            false);
+                        slow_query_map << BvarSlowQueryMap(slow_query_info);
+                    }
                     continue;
                 }
             }
@@ -820,6 +957,100 @@ void NetworkServer::connection_timeout_check() {
 // Gracefully shutdown.
 void NetworkServer::graceful_shutdown() {
     _shutdown = true;
+}
+
+void NetworkServer::process_slow_query_map() {
+    int64_t values_size = 0;
+    BvarSlowQueryMap bvar_slow_query_map = slow_query_map.reset();
+    std::string slow_query_info_values = ""; 
+    for (const auto& sign_to_slow_query : bvar_slow_query_map.internal_slow_query_map) {
+        const std::vector<SlowQueryInfo>& slow_query_infos = sign_to_slow_query.second;
+        for (const auto& slow_query_info : slow_query_infos) {
+            //timestamp => localtime
+            struct tm local_start_time;
+            struct tm local_end_time;
+            time_t start_time = slow_query_info.start_time;
+            time_t end_time = slow_query_info.end_time;
+            localtime_r(&start_time, &local_start_time);
+            localtime_r(&end_time, &local_end_time);
+            //localtime => format("%Y-%m-%d %H:%M:%S")
+            char start_time_str[40], end_time_str[40];
+            snprintf(start_time_str, 40, "%04d-%02d-%02d %02d:%02d:%02d:%03d",
+                         local_start_time.tm_year + 1900, local_start_time.tm_mon + 1, local_start_time.tm_mday, 
+                         local_start_time.tm_hour, local_start_time.tm_min, local_start_time.tm_sec, 0);
+            snprintf(end_time_str, 40, "%04d-%02d-%02d %02d:%02d:%02d:%03d",
+                         local_end_time.tm_year + 1900, local_end_time.tm_mon + 1, local_end_time.tm_mday, 
+                         local_end_time.tm_hour, local_end_time.tm_min, local_end_time.tm_sec, 0);
+            //combine sql values
+            std::string status_ = slow_query_info.status ? "completed" : "doing";
+            slow_query_info_values += "('" + std::string(start_time_str) + "', '" +
+                                        std::string(end_time_str) + "', '" +
+                                        std::to_string(slow_query_info.log_id) + "', '" +
+                                        std::to_string(slow_query_info.sign) + "', '" +
+                                        slow_query_info.ip + "', '" +
+                                        slow_query_info.user_name + "', '" +
+                                        slow_query_info.family+ "', '" +
+                                        slow_query_info.table_name + "', '" +
+                                        status_ + "', '" +
+                                        std::to_string(slow_query_info.exec_time) + "', '" +
+                                        std::to_string(slow_query_info.affected_rows) + "', '" +
+                                        std::to_string(slow_query_info.scan_rows) + "', '" +
+                                        std::to_string(slow_query_info.filtered_rows) + "', '" +
+                                        std::to_string(slow_query_info.return_rows) + "', '" +
+                                        slow_query_info.sql + "'),";
+            values_size++;
+        }
+        
+        if (values_size >= FLAGS_slow_query_batch_size) {
+            slow_query_info_values.pop_back();
+            int ret = insert_slow_query_infos(slow_query_info_values);
+            if (ret < 0) {
+                DB_WARNING("insert slow query infos failed, values_size is [%ld] values_info [%s]", 
+                    values_size, slow_query_info_values.c_str());
+            }
+            values_size = 0;
+            slow_query_info_values.clear();
+        }
+    }
+
+    if (values_size > 0) {
+        slow_query_info_values.pop_back();
+        int ret = insert_slow_query_infos(slow_query_info_values);
+        if (ret < 0) {
+            DB_WARNING("insert slow query infos failed, values_size is [%ld] values_info [%s]", 
+                values_size, slow_query_info_values.c_str());
+        }
+        values_size = 0;
+        slow_query_info_values.clear();
+    }
+}
+
+int NetworkServer::insert_slow_query_infos(const std::string& slow_query_info_values) {
+    baikal::client::ResultSet result_set;
+    TimeCost cost;
+    // 构造sql
+    std::string insert_slow_query_info_sql = "REPLACE INTO BaikalStat.slow_query_sql_info (`start_time`,"
+            "`end_time`, `log_id`, `sign`, `ip`, `user_name`, `family`, `table_name`, `status`, `exec_time`,"
+            "`affected_rows`, `scan_rows`, `filter_rows`, `return_rows`, `sql`) values";
+    insert_slow_query_info_sql += slow_query_info_values;
+    int ret = 0;
+    int retry = 0;
+    do {
+        ret = _baikaldb->query(0, insert_slow_query_info_sql, &result_set);
+        if (ret == 0) {
+            break;
+        }
+        bthread_usleep(1000000);
+    }while (++retry < 20);
+
+    if (ret != 0) {
+        DB_FATAL("sql_len:%lu query fail : %s", insert_slow_query_info_sql.size(), insert_slow_query_info_sql.c_str());
+        insert_slow_query_info_sql += ";\n";
+        return -1;
+    }
+    DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
+              result_set.get_affected_rows(), cost.get_time(), insert_slow_query_info_sql.size(), insert_slow_query_info_sql.c_str());
+    return 0; 
 }
 
 NetworkServer::NetworkServer():
@@ -980,6 +1211,11 @@ SmartSocket NetworkServer::create_listen_socket() {
         DB_FATAL("setsockopt fail");
         return SmartSocket();
     }
+    
+    if (FLAGS_enable_tcp_keep_alive && set_keep_tcp_alive(sock->fd) != 0) {
+        DB_FATAL("setsockopt fail");
+        return SmartSocket();
+    }
     struct sockaddr_in listen_addr;
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_addr.s_addr = INADDR_ANY;
@@ -1002,6 +1238,52 @@ SmartSocket NetworkServer::create_listen_socket() {
         return SmartSocket();
     }
     return sock;
+}
+
+int32_t NetworkServer::set_keep_tcp_alive(int socket_fd) {
+  if (socket_fd < 0) {
+    return -1;
+  }
+  // 打开keepalive功能
+  int32_t alive = 1;
+  if (setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE, (void *)&alive, sizeof(alive)) < 0) {
+    DB_WARNING("fd:%d setsockopt SO_KEEPALIVE failed: %d (%s)", socket_fd, errno, strerror(errno));
+    return -1;
+  }
+  // 关闭一个非活跃连接之前的最大重试次数
+  int32_t probes = 3;
+  if (setsockopt(socket_fd, SOL_TCP, TCP_KEEPCNT, (void *)&probes, sizeof(probes)) < 0) {
+    DB_WARNING("fd:%d setsockopt SO_KEEPCNT failed: %d (%s)", socket_fd, errno, strerror(errno));
+    return -1;
+  }
+  // 发送 keepalive 报文的时间间隔
+  int32_t alivetime = 30;
+  if (setsockopt(socket_fd, SOL_TCP, TCP_KEEPIDLE, (void *)&alivetime, sizeof(alivetime)) < 0) {
+    DB_WARNING("fd:%d setsockopt SO_KEEPIDLE failed: %d (%s)", socket_fd, errno, strerror(errno));
+    return -1;
+  }
+  // 重试间隔
+  int32_t interval = 10;
+  if (setsockopt(socket_fd, SOL_TCP, TCP_KEEPINTVL, (void *)&interval, sizeof(interval)) < 0) {
+    DB_WARNING("fd:%d setsockopt SO_KEEPINTVL failed: %d (%s)", socket_fd, errno, strerror(errno));
+    return -1;
+  }
+
+  int32_t nodelay = 1;
+  if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, (void *)&nodelay, sizeof(nodelay)) < 0) {
+    DB_WARNING("fd:%d setsockopt TCP_NODELAY failed %d (%s)", socket_fd, errno, strerror(errno));
+    return -1;
+  }
+
+  struct linger linger = {0};
+  linger.l_onoff = 1;
+  linger.l_linger = 3;
+  if (setsockopt(socket_fd, SOL_SOCKET, SO_LINGER, (void *)&linger, sizeof(linger)) < 0) {
+    DB_WARNING("fd:%d setsockopt SO_LINGER failed: %d (%s)", socket_fd, errno, strerror(errno));
+    return -1;
+  }
+
+  return 0;
 }
 
 int NetworkServer::make_worker_process() {

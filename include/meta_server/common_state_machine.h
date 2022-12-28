@@ -22,12 +22,13 @@
 #include "common.h"
 #include "raft_control.h"
 #include "proto/meta.interface.pb.h"
+#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
 class CommonStateMachine;
 struct MetaServerClosure : public braft::Closure {
     virtual void Run();
-    
+
     brpc::Controller* cntl;
     CommonStateMachine* common_state_machine;
     google::protobuf::Closure* done;
@@ -36,6 +37,13 @@ struct MetaServerClosure : public braft::Closure {
     int64_t raft_time_cost;
     int64_t total_time_cost;
     TimeCost time_cost;
+
+    pb::SchemaInfo create_table_schema_pb;
+    bool whether_level_table;
+    std::shared_ptr<std::vector<pb::InitRegion>> init_regions;
+    bool has_auto_increment = false;
+    int64_t start_region_id;
+    int create_table_ret = -1;
 };
 
 struct TsoClosure : public braft::Closure {

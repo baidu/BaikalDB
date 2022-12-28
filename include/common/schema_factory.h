@@ -53,6 +53,8 @@ static const std::string TABLE_OP_DESC         = "op_desc";                   //
 static const std::string TABLE_FILTER_RATIO    = "filter_ratio";              //过滤率
 static const std::string VIRTUAL_DATABASE_NAME = "__virtual_db";              // 临时表数据库名
 static const std::string TABLE_IN_FAST_IMPORTER= "in_fast_import";
+static const std::string TABLE_TAIL_SPLIT_NUM  = "tail_split_num";            //尾分裂数量
+static const std::string TABLE_TAIL_SPLIT_STEP = "tail_split_step";           //尾分裂步长
 struct UserInfo;
 class TableRecord;
 typedef std::shared_ptr<TableRecord> SmartRecord;
@@ -149,119 +151,8 @@ struct FieldInfo {
 struct DistInfo {
     std::string logical_room;
     int64_t count;
-};
-
-// short name
-inline int32_t get_field_id_by_name(
-        const std::vector<FieldInfo>& fields, const std::string& name) {
-    for (auto& field : fields) {
-        if (field.short_name == name) {
-            return field.id;
-        }
-    }
-    return 0;
-}
-class Partition {
-public:
-    virtual int init(const pb::PartitionInfo& partition_info, int64_t table_id, int64_t partition_num) = 0;
-    virtual int64_t calc_partition(SmartRecord record) = 0;
-    virtual int64_t calc_partition(const ExprValue& field_value) = 0;
-    virtual std::string to_str() = 0;
-};
-
-class HashPartition : public Partition {
-public: 
-    int init(const pb::PartitionInfo& partition_info, int64_t table_id, 
-        int64_t partition_num) {
-        _table_id = table_id;
-        _partition_num = partition_num;
-        _partition_info.CopyFrom(partition_info);
-        if (_partition_num == 0) {
-            DB_FATAL("table_id[%ld] partition_num is zero", _table_id);
-            return -1;
-        }
-        return 0;
-    };
-    int64_t calc_partition(SmartRecord record);
-    int64_t calc_partition(const ExprValue& field_value) {
-        if (field_value.is_numberic()) {
-            return field_value.get_numberic<int64_t>() % _partition_num; 
-        } else {
-            return field_value.hash() % _partition_num;
-        }
-    }
-
-    std::string to_str() {
-        return ""; 
-    }
-private:
-    pb::PartitionInfo _partition_info;
-    int64_t _table_id;
-    int64_t _partition_num;
-};
-
-class RangePartition : public Partition {
-public: 
-    int init(const pb::PartitionInfo& partition_info, int64_t table_id, int64_t partition_num) {
-        std::lock_guard<std::mutex> lock(_mutex);
-        _table_id = table_id;
-        _partition_num = partition_num;
-        _range_expr.clear();
-        _partition_info.CopyFrom(partition_info);
-        for (const auto& range : partition_info.range_partition_values()) {
-            ExprNode* node_ptr = nullptr;
-            if (0 != ExprNode::create_expr_node(range.nodes(0), &node_ptr)) {
-                DB_WARNING("create expr node error.");
-                return -1;
-            }
-            _range_expr.push_back(node_ptr->get_value(nullptr));
-        }
-        if (_partition_num == 0 || _range_expr.size() == 0) {
-            DB_WARNING("partition_num [%ld] or range_expr size is zero", _partition_num);
-            return -1;
-        }
-        if (_partition_info.partition_names_size() != _range_expr.size()) {
-            _partition_info.clear_partition_names();
-            for (uint32_t i = 0; i < _range_expr.size(); i++) {
-                _partition_info.add_partition_names("p" + std::to_string(i));
-            }
-        }
-        return 0;
-    };
-    int64_t calc_partition(SmartRecord record);
-    int64_t calc_partition(const ExprValue& field_value) {
-        size_t range_index = 0;
-        for (; range_index < _range_expr.size(); ++range_index) {
-            if (field_value.compare(_range_expr[range_index]) < 0) {
-                return range_index;
-            }
-        }
-        return range_index;
-    }
-
-    std::string to_str() {
-        std::lock_guard<std::mutex> lock(_mutex);
-        std::vector<std::string> exprs;
-        exprs.reserve(5);
-        std::string ret;
-        for (uint32_t i = 0; i < _range_expr.size(); i++) {
-            ret += "\nPARTITION ";
-            ret += _partition_info.partition_names(i);
-            ret += " VALUES LESS THAN (";
-            ret += _range_expr[i].get_string();
-            ret += "),";
-        }
-        if (!ret.empty()) {
-            ret.pop_back();
-        }
-        return ret;
-    }
-private:
-    std::vector<ExprValue> _range_expr;
-    pb::PartitionInfo _partition_info;
-    int64_t _table_id;
-    int64_t _partition_num;
-    std::mutex _mutex;
+    std::string resource_tag;
+    std::string physical_room;
 };
 
 struct TTLInfo {
@@ -270,6 +161,7 @@ struct TTLInfo {
     int64_t online_ttl_expire_time_us = 0; // online ttl 过期时间
 };
 
+class Partition;
 struct TableInfo {
     int64_t                 id = -1;
     int64_t                 db_id = -1;
@@ -314,6 +206,7 @@ struct TableInfo {
     bool                    has_fulltext = false;
     // 该表是否已和 binlog 表关联
     bool is_linked = false;
+    bool is_binlog = false;
     pb::PartitionInfo partition_info;
     // 该binlog表关联的普通表集合
     std::set<uint64_t> binlog_target_ids;
@@ -327,6 +220,7 @@ struct TableInfo {
     std::vector<std::string> learner_resource_tags;
     std::set<uint64_t> sign_blacklist;
     std::set<uint64_t> sign_forcelearner;
+    std::set<std::string> sign_forceindex;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {
@@ -379,6 +273,7 @@ struct IndexInfo {
     std::string             comments;
     pb::IndexState          state;
     bool                    is_global = false;
+    bool                    is_partitioned = false;
     pb::StorageType storage_type = pb::ST_PROTOBUF_OR_FORMAT1;
     pb::IndexHintStatus     index_hint_status = pb::IHS_NORMAL;
     int64_t                 write_only_time = -1;
@@ -424,6 +319,7 @@ struct InstanceDBStatus {
     // 只cancel一次，cancel操作后设置false
     bool need_cancel = true;
     std::string logical_room;
+    std::string resource_tag;
     // 正常探测CHECK_COUNT次后才置NORMAL
     int64_t normal_count = 0;
     // 业务请求探测CHECK_COUNT次后才置FAULTY
@@ -436,6 +332,162 @@ struct IdcMapping {
     std::unordered_map<std::string, InstanceDBStatus> instance_info_mapping;
     // physical_room => logical_room
     std::unordered_map<std::string, std::string> physical_logical_mapping;
+};
+
+// short name
+inline int32_t get_field_id_by_name(
+        const std::vector<FieldInfo>& fields, const std::string& name) {
+    for (auto& field : fields) {
+        if (field.short_name == name) {
+            return field.id;
+        }
+    }
+    return 0;
+}
+
+class Partition {
+public:
+    virtual int init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr, int64_t partition_num) = 0;
+    virtual int64_t calc_partition(SmartRecord record) = 0;
+    virtual int64_t calc_partition(const ExprValue& field_value) = 0;
+    virtual std::string to_str() = 0;
+    virtual int64_t partition_field_id() const = 0;
+    virtual pb::PartitionType partition_type() const = 0;
+    virtual bool get_partition_id_by_name(const std::string& partition_name, int64_t& partition_id) = 0;
+    virtual ~Partition() {}
+};
+
+class HashPartition : public Partition {
+public:
+    ~HashPartition() {
+        if (_hash_expr != nullptr) {
+            _hash_expr->close();
+            delete _hash_expr;
+            _hash_expr = nullptr;
+        }
+    }
+    int init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr,
+        int64_t partition_num);
+    int64_t calc_partition(SmartRecord record);
+    int64_t calc_partition(const ExprValue& field_value);
+
+    bool get_partition_id_by_name(const std::string& partition_name, int64_t& partition_id) {
+        auto iter = _partition_name_map.find(partition_name);
+        if (iter != _partition_name_map.end()) {
+            partition_id = iter->second;
+            return true;
+        }
+        return false;
+    }
+
+    int64_t partition_field_id() const {
+        return _partition_field_id;
+    }
+    
+    pb::PartitionType partition_type() const {
+        return _partition_info.type();
+    }
+
+    std::string to_str() {
+        std::string partition_s = "\nPARTITION BY HASH (";
+        if (_partition_info.has_expr_string()) {
+            partition_s += _partition_info.expr_string();
+        } else {
+            partition_s += _partition_info.field_info().field_name();
+        }
+        partition_s += ") \nPARTITIONS ";
+        partition_s += std::to_string(_partition_num);
+        return partition_s;
+    }
+private:
+    int64_t _table_id;
+    int64_t _partition_num;
+    int32_t _partition_field_id;
+    ExprNode* _hash_expr = nullptr;
+    SmartTable _table_ptr;
+    FieldInfo* _field_info = nullptr;
+    pb::PartitionInfo _partition_info;
+    std::map<std::string, int64_t> _partition_name_map;
+};
+
+class RangePartition : public Partition {
+public: 
+    ~RangePartition() {
+        if (_range_expr != nullptr) {
+            _range_expr->close();
+            delete _range_expr;
+            _range_expr = nullptr;
+        }
+    }
+    int init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr, int64_t partition_num);
+    int64_t calc_partition(SmartRecord record);
+    int64_t calc_partition(const ExprValue& value) {
+        size_t range_index = 0;
+        if (_range_expr == nullptr) {
+            for (; range_index < _range_values.size(); ++range_index) {
+                if (value.compare(_range_values[range_index]) < 0) {
+                    return range_index;
+                }
+            }
+        }
+        auto field_value = _range_expr->get_value(value);
+        for (; range_index < _range_values.size(); ++range_index) {
+            if (field_value.compare(_range_values[range_index]) < 0) {
+                return range_index;
+            }
+        }
+        return range_index;
+    }
+
+    int64_t partition_field_id() const {
+        return _partition_field_id;
+    }
+
+    pb::PartitionType partition_type() const {
+        return _partition_info.type();
+    }
+
+    bool get_partition_id_by_name(const std::string& partition_name, int64_t& partition_id) {
+        auto iter = _partition_name_map.find(partition_name);
+        if (iter != _partition_name_map.end()) {
+            partition_id = iter->second;
+            return true;
+        }
+        return false;
+    }
+
+    std::string to_str() {
+        std::vector<std::string> exprs;
+        exprs.reserve(5);
+        std::string partition_s = "\nPARTITION BY RANGE (";
+        if (_partition_info.has_expr_string()) {
+            partition_s += _partition_info.expr_string();
+        } else {
+            partition_s += _partition_info.field_info().field_name();
+        }
+        partition_s += ")\n";
+        for (uint32_t i = 0; i < _range_values.size(); i++) {
+            partition_s += "\nPARTITION ";
+            partition_s += _partition_info.partition_names(i);
+            partition_s += " VALUES LESS THAN (";
+            partition_s += _range_values[i].get_string();
+            partition_s += "),";
+        }
+        if (!partition_s.empty()) {
+            partition_s.pop_back();
+        }
+        return partition_s;
+    }
+private:
+    int64_t _table_id;
+    int64_t _partition_num;
+    int32_t _partition_field_id;
+    pb::PartitionInfo _partition_info;
+    ExprNode* _range_expr = nullptr;
+    SmartTable _table_ptr;
+    FieldInfo* _field_info = nullptr;
+    std::vector<ExprValue> _range_values;
+    std::map<std::string, int64_t> _partition_name_map;
 };
 
 using DoubleBufferedIdc = butil::DoublyBufferedData<IdcMapping>;
@@ -626,7 +678,7 @@ public:
     // 复制的函数适合长期占用的，ptr适合很短使用情况
     TableInfo get_table_info(int64_t tableid);
     SmartTable get_table_info_ptr(int64_t tableid);
-
+    SmartTable get_table_info_ptr_by_name(const std::string& table_name/*namespace.db.table*/);
     IndexInfo get_index_info(int64_t indexid);
     SmartIndex get_index_info_ptr(int64_t indexid);
     // split使用的index_info，只加不删
@@ -669,9 +721,11 @@ public:
     bool get_separate_switch(int64_t table_id);
     bool is_switch_open(const int64_t table_id, const std::string& switch_name);
     bool is_in_fast_importer(int64_t table_id);
+    int get_tail_split_nums(int64_t table_id);
+    int get_tail_split_step(int64_t table_id);
     void get_cost_switch_open(std::vector<std::string>& database_table);
     void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
-    void get_table_by_filter(std::vector<std::string>& database_table, std::vector<std::string>& link_table,
+    void get_table_by_filter(std::vector<std::string>& database_table,
             const std::function<bool(const SmartTable&)>& select_table);
     void table_with_statistics_info(std::vector<std::string>& database_table);
     int sql_force_learner_read(int64_t table_id, uint64_t sign);
@@ -684,6 +738,8 @@ public:
     int get_all_region_by_table_id(int64_t table_id, 
             std::map<std::string, pb::RegionInfo>* region_infos,
             const std::vector<int64_t>& partitions = std::vector<int64_t>{0});
+    int get_all_partition_regions(int64_t table_id, 
+            std::map<int64_t, pb::RegionInfo>* region_infos);
     int check_region_ranges_consecutive(int64_t table_id);
     int get_region_by_key(int64_t main_table_id, 
             IndexInfo& index,
@@ -705,7 +761,8 @@ public:
     int get_region_by_key(IndexInfo& index,
             const std::vector<SmartRecord>& records,
             std::map<int64_t, std::vector<SmartRecord>>& region_ids,
-            std::map<int64_t, pb::RegionInfo>& region_infos);
+            std::map<int64_t, pb::RegionInfo>& region_infos,
+            std::set<int64_t>& record_partition_ids);
 
     int get_region_by_key(IndexInfo& index,
             const std::vector<SmartRecord>& insert_records,
@@ -719,8 +776,10 @@ public:
                               std::vector<int64_t>& region_ids);
 
     bool exist_tableid(int64_t table_id);
-    
+    void get_all_table_by_db(const std::string& namespace_, const std::string& db_name, std::vector<SmartTable>& table_ptrs);
     void get_all_table_version(std::unordered_map<int64_t, int64_t>& table_id_version);
+    void get_all_table_split_lines(std::unordered_map<int64_t, int64_t>& table_id_split_lines_map, 
+                                   int64_t max_split_line);
     std::string physical_room() {
         return _physical_room;
     }
@@ -775,6 +834,20 @@ public:
         }
         return false;
     }
+    bool get_main_table_id(const int64_t global_index_id, int64_t& main_table_id) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        auto& global_index_id_mapping = table_ptr->global_index_id_mapping;
+        if (global_index_id_mapping.find(global_index_id) != global_index_id_mapping.end()) {
+            main_table_id = global_index_id_mapping.at(global_index_id);
+            return true;
+        }
+        return false;
+    }
+
     bool has_global_index(const int64_t& main_table_id) {
         DoubleBufferedTable::ScopedPtr table_ptr;
         if (_double_buffer_table.Read(&table_ptr) != 0) {
@@ -883,20 +956,62 @@ public:
         return 0;
     }
 
-    bool is_table_partitioned(int64_t table_id) {
+    int get_partition_ids_by_name(int64_t table_id, const std::vector<std::string>& partition_names,
+        std::set<int64_t>& partition_ids) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return -1;
+        }
+        auto& table_info_mapping = table_ptr->table_info_mapping;
+        auto iter = table_info_mapping.find(table_id);
+        if (iter == table_info_mapping.end()) {
+            DB_WARNING("table_id: %ld not exist", table_id);
+            return -1;
+        }
+        auto table_info = iter->second;
+        if (table_info == nullptr) {
+            DB_WARNING("table_id: %ld not exist", table_id);
+            return -1;
+        }
+        if (table_info->partition_num == 1) {
+            DB_WARNING("non partition table :%ld", table_id);
+            return -1;
+        }
+        if (table_info->partition_ptr != nullptr) {
+            for (auto& name : partition_names) {
+                int64_t partition_id;
+                if (!table_info->partition_ptr->get_partition_id_by_name(name, partition_id)) {
+                    DB_WARNING("get partition number error, partition name:%s", name.c_str());
+                    return -1;
+                }
+                partition_ids.emplace(partition_id);
+            }
+        } else {
+            DB_WARNING("non partition table :%ld", table_id);
+            return -1;
+        }
+        return 0;
+    }
+
+    bool is_binlog_table(int64_t table_id) {
         DoubleBufferedTable::ScopedPtr table_ptr;
         if (_double_buffer_table.Read(&table_ptr) != 0) {
             DB_WARNING("read double_buffer_table error.");
             return false;
         }
         auto& table_info_mapping = table_ptr->table_info_mapping;
-        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
-            //DB_WARNING("table_id: %ld not exist", table_id);
+        auto iter = table_info_mapping.find(table_id);
+        if (iter == table_info_mapping.end()) {
+            DB_WARNING("table_id: %ld not exist", table_id);
             return false;
         }
-        auto table_info = table_info_mapping.at(table_id);
-        return table_info->partition_num > 1;
-    }
+        auto& table_info = iter->second;
+        if (table_info->is_binlog) {
+            return true;
+        }
+        return false;
+    }    
 
     int get_partition_index(int64_t table_id, const ExprValue& value, int64_t& partition_index) {
         DoubleBufferedTable::ScopedPtr table_ptr;
@@ -905,11 +1020,12 @@ public:
             return -1;
         }
         auto& table_info_mapping = table_ptr->table_info_mapping;
-        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
+        auto iter = table_info_mapping.find(table_id);
+        if (iter == table_info_mapping.end()) {
             DB_WARNING("table_id: %ld not exist", table_id);
             return -1;
         }
-        auto table_info = table_info_mapping.at(table_id);
+        auto& table_info = iter->second;
         if (table_info->partition_num == 1) {
             //非分区表，返回0分区
             partition_index = 0;
@@ -922,7 +1038,7 @@ public:
                 return -1;
             }
         } else {
-            DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
+            DB_WARNING("partition info error, value:%s", value.get_string().c_str());
             return -1;
         }
         return 0;
@@ -935,11 +1051,12 @@ public:
             return -1;
         }
         auto& table_info_mapping = table_ptr->table_info_mapping;
-        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
+        auto iter = table_info_mapping.find(table_id);
+        if (iter == table_info_mapping.end()) {
             DB_WARNING("table_id: %ld not exist", table_id);
             return -1;
         }
-        auto table_info = table_info_mapping.at(table_id);
+        auto& table_info = iter->second;
         if (table_info->is_linked) {
             binlog_id = table_info->binlog_id;
             return 0;
@@ -959,11 +1076,12 @@ public:
             return false;
         }
         auto& table_info_mapping = table_ptr->table_info_mapping;
-        if (table_info_mapping.find(table_id) == table_info_mapping.end()) {
+        auto iter = table_info_mapping.find(table_id);
+        if (iter == table_info_mapping.end()) {
             DB_WARNING("table_id: %ld not exist", table_id);
             return false;
         }
-        auto table_info = table_info_mapping.at(table_id);
+        auto& table_info = iter->second;
         if (table_info->is_linked) {
             return true;
         }

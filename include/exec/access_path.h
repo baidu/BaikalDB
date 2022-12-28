@@ -44,7 +44,9 @@ enum IndexHint {
         return true;
     }
 
-    void calc_index_range(Property& sort_property) {
+    void calc_index_range();
+
+    void calc_index_match(Property& sort_property) {
         fetch_field_ids();
         switch (index_type) {
             case pb::I_FULLTEXT:
@@ -60,7 +62,7 @@ enum IndexHint {
     bool need_select_learner_index();
     
     void calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
-            std::vector<ExprValue>& values, SmartRecord record, size_t field_idx, bool* out_open, int* out_field_cnt);
+            std::vector<ExprValue>& values, MutTableKey& key, size_t field_idx);
 
     bool check_sort_use_index(Property& sort_property);
 
@@ -80,6 +82,7 @@ enum IndexHint {
         }
         if (index_type == pb::I_FULLTEXT) {
             cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__weight"));
+            cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__querywords"));
         }
     }
     
@@ -106,14 +109,16 @@ enum IndexHint {
             }
         }
     }
-
-    void calc_is_covering_index(const pb::TupleDescriptor& desc) {
+    void calc_is_covering_index(const pb::TupleDescriptor& desc, std::set<int32_t>* slot_ids = nullptr) {
         for (auto& slot : desc.slots()) {
+            if ((slot_ids != nullptr) && (slot_ids->count(slot.slot_id()) == 0)) {
+                continue;
+            }
             if (cover_field_ids.count(slot.field_id()) == 0) {
                 // I_FULLTEXT; 获取不到索引的field信息
                 // 但是select count(*) from full like '%a%';是能够索引覆盖的
-                if (slot.ref_cnt() == 1 && 
-                        !need_cut_index_range_condition.empty() && 
+                if (slot.ref_cnt() == 1 &&
+                        !need_cut_index_range_condition.empty() &&
                         slot.field_id() == index_info_ptr->fields[0].id) {
                     continue;
                 } else {
@@ -131,31 +136,10 @@ enum IndexHint {
 
     // 参考choose_index函数
     bool is_eq_or_in() {
-        if (pos_index.ranges_size() > 0) {
-            const auto& range = pos_index.ranges(0);
-            bool is_eq = true;
-            if (range.has_left_key()) {
-                if (range.left_key() != range.right_key()) {
-                    is_eq = false;
-                }
-            } else {
-                if (range.left_pb_record() != range.right_pb_record()) {
-                    is_eq = false;
-                }
-            }
-
-            if (range.left_field_cnt() != range.right_field_cnt()) {
-                is_eq = false;
-            }
-
-            if (range.left_open() || range.right_open()) {
-                is_eq = false;
-            }
-
-            return is_eq && !range.like_prefix();
-        }
-
-        return false;
+        return _is_eq_or_in;
+    }
+    bool need_filter() {
+        return _need_filter;
     }
     
 public:
@@ -190,9 +174,18 @@ public:
     bool is_possible = false;
     bool is_sort_index = false;
     bool is_virtual = false;
+    int index_other_condition_count = 0;
     SmartTable table_info_ptr;
     SmartIndex index_info_ptr;
     SmartIndex pri_info_ptr;
+    int _left_field_cnt = 0;
+    int _right_field_cnt = 0;
+    bool _left_open = false;
+    bool _right_open = false;
+    bool _like_prefix = false;
+    bool _in_pred = false;
+    bool _is_eq_or_in = true;
+    bool _need_filter = false;
 };
 typedef std::shared_ptr<AccessPath> SmartPath;
 }

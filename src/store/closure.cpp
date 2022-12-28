@@ -115,9 +115,7 @@ void AddPeerClosure::Run() {
                     region->get_region_id(),
                     cost.get_time());
     }
-    if (!is_split) {
-        region->reset_region_status();
-    }
+    region->reset_region_status();
     DB_WARNING("region status was reset, region_id: %ld", region->get_region_id());
     if (done) {
         done->Run();
@@ -182,16 +180,27 @@ void SplitClosure::Run() {
                     region->get_region_id(),
                     cost.get_time());
     }
+    auto remove_region = [](int64_t old_region_id, int64_t region_id, std::string leader, std::vector<std::string> peers) {
+        DB_WARNING("split fail, start remove region, old_region_id: %ld, split_region_id: %ld, peer:%s",
+                old_region_id, region_id, leader.c_str());
+        RpcSender::send_remove_region_method(region_id, leader);
+        for (auto& instance : peers) {
+            DB_WARNING("split fail, start remove region, old_region_id: %ld, split_region_id: %ld, peer:%s",
+                old_region_id, region_id, instance.c_str());
+            RpcSender::send_remove_region_method(region_id, instance);
+        }
+    };
     // OP_VALIDATE_AND_ADD_VERSION 这步失败了也不能自动删除new region
     // 防止出现false negative，raft返回失败，实际成功
     // 如果真实失败，需要手工drop new region
     // todo 增加自动删除步骤，删除与分裂解耦
     if (split_fail && op_type != pb::OP_VALIDATE_AND_ADD_VERSION) {
-        DB_WARNING("split fail, start remove region, old_region_id: %ld, split_region_id: %ld, new_instance:%s",
-                    region->get_region_id(), split_region_id, new_instance.c_str());
-        RpcSender::send_remove_region_method(split_region_id, new_instance);
-        for (auto& instance : add_peer_instance) {
-            RpcSender::send_remove_region_method(split_region_id, instance);
+        if (multi_new_regions.empty()) {
+            remove_region(region->get_region_id(), split_region_id, new_instance, add_peer_instance);
+        } else {
+            for (auto& r : multi_new_regions) {
+                remove_region(region->get_region_id(), r.new_region_id, r.new_instance, r.add_peer_instances);
+            }
         }
     }
     delete this;

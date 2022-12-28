@@ -675,8 +675,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LocalOpt
     ForceOrNot
     GlobalOrLocal
+    GlobalOrLocalOpt
 
-%type <string_list> IndexNameList VarList
+%type <string_list> IndexNameList VarList PartitionNameListOpt PartitionNameList
 %type <index_hint> IndexHint
 %type <select_opts> SelectStmtOpts
 %type <select_field> SelectField
@@ -756,14 +757,19 @@ Statement:
     ;
 
 InsertStmt:
-    INSERT PriorityOpt IgnoreOptional IntoOpt TableName InsertValues OnDuplicateKeyUpdate {
-        InsertStmt* insert = (InsertStmt*)$6;
+    INSERT PriorityOpt IgnoreOptional IntoOpt TableName PartitionNameListOpt InsertValues OnDuplicateKeyUpdate {
+        InsertStmt* insert = (InsertStmt*)$7;
         insert->priority = (PriorityEnum)$2;
         insert->is_ignore = (bool)$3;
         insert->table_name = (TableName*)$5;
-        if ($7 != nullptr) {
-            for (int i = 0; i < $7->children.size(); ++i) {
-                (insert->on_duplicate).push_back((Assignment*)$7->children[i], parser->arena);
+        if ($6 != nullptr) {
+            for (int i = 0; i < $6->size(); ++i) {
+                insert->partition_names.push_back((*$6)[i], parser->arena);
+            }
+        }
+        if ($8 != nullptr) {
+            for (int i = 0; i < $8->children.size(); ++i) {
+                (insert->on_duplicate).push_back((Assignment*)$8->children[i], parser->arena);
             }
         }
         $$ = insert;
@@ -771,11 +777,16 @@ InsertStmt:
     ;
 
 ReplaceStmt:
-    REPLACE PriorityOpt IntoOpt TableName InsertValues {
-        InsertStmt* insert = (InsertStmt*)$5;
+    REPLACE PriorityOpt IntoOpt TableName PartitionNameListOpt InsertValues {
+        InsertStmt* insert = (InsertStmt*)$6;
         insert->priority = (PriorityEnum)$2;
         insert->is_replace = true;
         insert->table_name = (TableName*)$4;
+        if ($5 != nullptr) {
+            for (int i = 0; i < $5->size(); ++i) {
+                insert->partition_names.push_back((*$5)[i], parser->arena);
+            }
+        }
         $$ = insert;
     }
     ;
@@ -1083,27 +1094,43 @@ UpdateStmt:
     }
     ;
 TruncateStmt:
-    TRUNCATE TABLE TableName {
+    TRUNCATE TABLE TableName PartitionNameListOpt {
         TruncateStmt* truncate_stmt = new_node(TruncateStmt);
         truncate_stmt->table_name = (TableName*)$3;
+        if ($4 != nullptr) {
+            for (int i = 0; i < $4->size(); ++i) {
+                truncate_stmt->partition_names.push_back((*$4)[i], parser->arena);
+            }
+        }
         $$ = truncate_stmt;
     }
-    | TRUNCATE TableName {
+    | TRUNCATE TableName PartitionNameListOpt {
         TruncateStmt* truncate_stmt = new_node(TruncateStmt);
         truncate_stmt->table_name = (TableName*)$2;
+        if ($3 != nullptr) {
+            for (int i = 0; i < $3->size(); ++i) {
+                truncate_stmt->partition_names.push_back((*$3)[i], parser->arena);
+            }
+        }
         $$ = truncate_stmt;
     }
     ;
+
 DeleteStmt:
-    DELETE PriorityOpt QuickOptional IgnoreOptional FROM TableName WhereClauseOptional OrderByOptional LimitClause {
+    DELETE PriorityOpt QuickOptional IgnoreOptional FROM TableName PartitionNameListOpt WhereClauseOptional OrderByOptional LimitClause {
         DeleteStmt* delete_stmt = new_node(DeleteStmt);
         delete_stmt->priority = (PriorityEnum)$2;
         delete_stmt->is_quick = $3;
         delete_stmt->is_ignore = (bool)$4;
         delete_stmt->from_table = $6;
-        delete_stmt->where = $7;
-        delete_stmt->order = $8;
-        delete_stmt->limit = $9;
+        if ($7 != nullptr) {
+            for (int i = 0; i < $7->size(); ++i) {
+                delete_stmt->partition_names.push_back((*$7)[i], parser->arena);
+            }
+        }
+        delete_stmt->where = $8;
+        delete_stmt->order = $9;
+        delete_stmt->limit = $10;
         $$ = delete_stmt;
     }
     | DELETE PriorityOpt QuickOptional IgnoreOptional TableNameList FROM TableRefs WhereClauseOptional {
@@ -1149,13 +1176,18 @@ TableRef:
     ;
 
 TableFactor:
-    TableName TableAsNameOpt IndexHintListOpt {
+    TableName PartitionNameListOpt TableAsNameOpt IndexHintListOpt {
         TableSource* table_source = new_node(TableSource);
         table_source->table_name = (TableName*)$1;
-        table_source->as_name = $2;
-        if ($3 != nullptr) {
-            for (int i = 0; i < $3->children.size(); i++) {
-                table_source->index_hints.push_back((IndexHint*)($3->children[i]), parser->arena);
+        if ($2 != nullptr) {
+            for (int i = 0; i < $2->size(); ++i) {
+                table_source->partition_names.push_back((*$2)[i], parser->arena);
+            }
+        }
+        table_source->as_name = $3;
+        if ($4 != nullptr) {
+            for (int i = 0; i < $4->children.size(); i++) {
+                table_source->index_hints.push_back((IndexHint*)($4->children[i]), parser->arena);
             }
         }
         $$ = table_source;
@@ -1178,6 +1210,27 @@ TableFactor:
     }
     | '(' TableRefs ')' {
         $$ = $2; 
+    }
+    ;
+
+PartitionNameListOpt:
+	{
+		$$ = nullptr;
+	}
+    | PARTITION '(' PartitionNameList ')' {
+		$$ = $3;
+	}
+    ;
+PartitionNameList:
+    AllIdent {
+        Vector<String>* string_list = new_node(Vector<String>);
+        string_list->reserve(2, parser->arena);
+        string_list->push_back($1, parser->arena);
+        $$ = string_list;
+    }
+    | PartitionNameList ',' AllIdent {
+        $1->push_back($3, parser->arena);
+        $$ = $1;
     }
     ;
 
@@ -1297,7 +1350,7 @@ IndexNameList: {
     ;
 
 AllIdentOrPrimary: 
-    AllIdent{
+    AllIdent {
         $$ = $1;
     }
     | PRIMARY {
@@ -2119,13 +2172,13 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | CONVERT '(' Expr ',' CHAR ')' {
+    | CONVERT '(' Expr ',' StringType ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
-    | CAST '(' Expr AS CHAR ')' {
+    | CAST '(' Expr AS StringType ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
         fun->children.push_back($3, parser->arena);
@@ -2188,6 +2241,18 @@ FunctionCallNonKeyword:
     | CAST '(' Expr AS BINARY ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = "cast_to_string";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CONVERT '(' Expr ',' DECIMAL ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_double";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CAST '(' Expr AS DECIMAL ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "cast_to_double";
         fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
@@ -3297,6 +3362,13 @@ ColumnOption:
         option->expr = $2;
         $$ = option;
     }
+    | COLLATE StringName
+    {
+        ColumnOption* option = new_node(ColumnOption);
+        option->type = COLUMN_OPT_COLLATE;
+        option->expr = LiteralExpr::make_string($2, parser->arena);
+        $$ = option;
+    }
     ;
     
 SignedLiteral:
@@ -3445,13 +3517,23 @@ ConstraintElem:
     ;
 
 GlobalOrLocal:
-    GLOBAL 
+    GLOBAL
     {
         $$ = INDEX_DIST_GLOBAL;
     }
-    | LOCAL 
+    | LOCAL
     {
         $$ = INDEX_DIST_LOCAL;
+    }
+    ;
+
+GlobalOrLocalOpt:
+    {
+        $$ = INDEX_DIST_DEFAULT;
+    }
+    | GlobalOrLocal
+    {
+        $$ = $1;
     }
     ;
 
@@ -4053,8 +4135,7 @@ StringList:
     }
     | StringList ',' STRING_LIT
     {
-        $1->children.push_back($3, parser->arena
-        );
+        $1->children.push_back($3, parser->arena);
         $$ = $1;
     }
     ;
@@ -4327,6 +4408,10 @@ WorkOpt:
 
 StartTransactionStmt:
     START TRANSACTION
+    {
+        $$ = new_node(StartTxnStmt);
+    }
+    | START TRANSACTION READ ONLY
     {
         $$ = new_node(StartTxnStmt);
     }
@@ -4685,6 +4770,42 @@ AlterTableStmt:
         }
         $$ = stmt;
     }
+    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->table_name = (TableName*)$6;
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_INDEX;
+        item->index_dist = static_cast<IndexDistibuteType>($3);
+        item->name = $4;
+        for (int idx = 0; idx < $8->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($8->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$10;
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->new_constraints.push_back((Constraint*)item, parser->arena);
+        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
+        $$ = stmt;
+    }
+    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->table_name = (TableName*)$7;
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_UNIQ;
+        item->index_dist = static_cast<IndexDistibuteType>($4);
+        item->name = $5;
+        for (int idx = 0; idx < $9->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($9->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$11;
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->new_constraints.push_back((Constraint*)item, parser->arena);
+        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
+        $$ = stmt;
+    }
     ;
 
 AlterSpecList:
@@ -4715,7 +4836,7 @@ AsOrToOpt:
 
 ColumnPosOpt:
     {}
-    | FIRST ColumnName
+    | FIRST
     {}
     | AFTER ColumnName
     {}
@@ -4841,6 +4962,12 @@ AlterSpec:
             spec->set_list.push_back(assign, parser->arena);
         }
         spec->where = $5;
+    }
+    | MODIFY ColumnKwdOpt ColumnDef ColumnPosOpt
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_MODIFY_COLUMN;
+        spec->new_columns.push_back((ColumnDef*)$3, parser->arena);
         $$ = spec;
     }
     ;
@@ -5237,8 +5364,8 @@ ExplainableStmt:
 int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser *parser, const char *s) {    
     parser->error = parser::SYNTAX_ERROR;
     std::ostringstream os;
-    os << s << ", near " << std::string(yylloc->start, yylloc->end - yylloc->start);
-    os << "] key:" << sql_get_text(yyscanner);
+    os << s << ", near '" << std::string(yylloc->start, yylloc->end - yylloc->start);
+    os << "' key:" << sql_get_text(yyscanner);
     parser->syntax_err_str = os.str();
     return 1;
     //printf("sql_error");

@@ -39,6 +39,7 @@ enum OpType {
     OP_UNION                                = 51;
     OP_LOAD                                 = 52;
     OP_UPDATE_PRIMARY_TIMESTAMP             = 53; // 大事务更新primary reigon时间戳，防止超时回滚
+    OP_PARTIAL_ROLLBACK                     = 54;
     
     // for binlog
     OP_READ_BINLOG                          = 60; //read     binlog
@@ -128,4 +129,6 @@ enum OpType {
     OP_CLOSE_NETWORK_SEGMENT_BALANCE        = 190; // 关闭一个resource tag的按网段进行balance
     OP_UPDATE_TABLE_COMMENT                 = 191; //修改表的comment
     OP_SWAP_TABLE                           = 192; //原子交换两个表名
+    OP_MODIFY_PARTITION                     = 193;
+    OP_UPDATE_CHARSET                       = 194;
 };

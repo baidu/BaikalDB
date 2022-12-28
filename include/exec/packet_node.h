@@ -56,6 +56,9 @@ public:
     std::vector<ExprNode*>& mutable_projections() {
         return _projections;
     }
+    std::vector<ResultField>& mutable_fields() {
+        return _fields;
+    }
 
 private:
     int open_histogram(RuntimeState* state);

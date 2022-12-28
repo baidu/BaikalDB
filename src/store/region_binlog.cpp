@@ -175,10 +175,14 @@ void Region::binlog_query_primary_region(const int64_t& start_ts, const int64_t&
 }
 
 // 没有commit或rollback的prewrite binlog超时检查
-void Region::binlog_timeout_check(int64_t rollback_ts) {
-    int64_t start_ts = 0;
-    int64_t txn_id   = 0;
-    int64_t primary_region_id = 0;
+void Region::binlog_timeout_check() {
+    std::vector<int64_t> start_ts;
+    std::vector<int64_t> txn_id;
+    std::vector<int64_t> primary_region_id;
+
+    start_ts.reserve(3);
+    txn_id.reserve(3);
+    primary_region_id.reserve(3);
 
     {
         std::unique_lock<bthread::Mutex> lck(_binlog_param_mutex);
@@ -187,42 +191,47 @@ void Region::binlog_timeout_check(int64_t rollback_ts) {
             return;
         }
 
-        auto iter = _binlog_param.ts_binlog_map.begin();
-        if (iter->second.time.get_time() > FLAGS_binlog_timeout_us) {
-            RocksdbVars::get_instance()->binlog_not_commit_max_cost << iter->second.time.get_time();
-            //告警
-            DB_WARNING("region_id: %ld, start_ts: %ld, txn_id:%ld, primary_region_id: %ld timeout", 
-                _region_id, iter->first, iter->second.txn_id, iter->second.primary_region_id);
-            if (iter->second.time.get_time() > FLAGS_binlog_warn_timeout_minute * 60 * 1000 * 1000LL) {
-                DB_FATAL("region_id: %ld not commited for a long time", _region_id);
-            }
+        for (const auto& iter : _binlog_param.ts_binlog_map) {
+            if (iter.second.time.get_time() > FLAGS_binlog_timeout_us) {
+                RocksdbVars::get_instance()->binlog_not_commit_max_cost << iter.second.time.get_time();
+                //告警
+                DB_WARNING("region_id: %ld, start_ts: %ld, txn_id:%ld, primary_region_id: %ld timeout", 
+                    _region_id, iter.first, iter.second.txn_id, iter.second.primary_region_id);
+                if (iter.second.time.get_time() > FLAGS_binlog_warn_timeout_minute * 60 * 1000 * 1000LL) {
+                    DB_FATAL("region_id: %ld not commited for a long time", _region_id);
+                }
 
-            // 避免过长
-            if (_binlog_param.timeout_start_ts_done.size() > 1000) {
-                _binlog_param.timeout_start_ts_done.erase(_binlog_param.timeout_start_ts_done.begin());
-            }
-
-            _binlog_param.timeout_start_ts_done[iter->first] = false;
-            if (is_leader() && iter->second.binlog_type == PREWRITE_BINLOG) {
-                start_ts = iter->first;
-                txn_id = iter->second.txn_id;
-                primary_region_id = iter->second.primary_region_id;
+                // 避免过长
+                if (_binlog_param.timeout_start_ts_done.size() > 1000) {
+                    _binlog_param.timeout_start_ts_done.erase(_binlog_param.timeout_start_ts_done.begin());
+                }
+                _binlog_param.timeout_start_ts_done[iter.first] = false;
+                if (is_leader() && iter.second.binlog_type == PREWRITE_BINLOG) {
+                    start_ts.emplace_back(iter.first);
+                    txn_id.emplace_back(iter.second.txn_id);
+                    primary_region_id.emplace_back(iter.second.primary_region_id);
+                }
             } else {
-                return;
+                break;
             }
-        } else {
-            return;
         }
     }
 
     //  反查primary region，确认prewrite binlog是否已经commit 或 rollback
-    pb::RegionInfo region_info;
-    int ret = get_primary_region_info(primary_region_id, region_info);
-    if (ret < 0) {
-        return;
-    }
+    for (size_t i = 0; i < start_ts.size(); ++i) {
+        pb::RegionInfo region_info;
+        int ret = get_primary_region_info(primary_region_id[i], region_info);
+        if (ret < 0) {
+            continue;
+        }
 
-    binlog_query_primary_region(start_ts, txn_id, region_info, rollback_ts);
+        int64_t rollback_ts = Store::get_instance()->get_tso();
+        if (rollback_ts < 0) {
+            continue;
+        }
+
+        binlog_query_primary_region(start_ts[i], txn_id[i], region_info, rollback_ts);
+    }
 
 }
 
@@ -341,17 +350,14 @@ std::string Region::binlog_get_str_val(const std::string& name, const std::map<s
 }
 
 void Region::binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, std::vector<int32_t>& field_slot) {
-    SmartTable  table_ptr = _factory->get_table_info_ptr(get_table_id());
-    SmartIndex  pri_info  = _factory->get_index_info_ptr(get_table_id());
-
-    field_slot.resize(table_ptr->fields.back().id + 1);
+    field_slot.resize(_binlog_table->fields.back().id + 1);
 
     std::set<int32_t> pri_field_ids;
-    for (auto& field_info : pri_info->fields) {
+    for (auto& field_info : _binlog_pri->fields) {
         pri_field_ids.insert(field_info.id);
     }
 
-    for (auto& field : table_ptr->fields) {
+    for (auto& field : _binlog_table->fields) {
         field_slot[field.id] = field.id;
         if (pri_field_ids.count(field.id) == 0) {
             field_ids[field.id] = &field;
@@ -360,9 +366,7 @@ void Region::binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, st
 }
 
 void Region::binlog_get_field_values(std::map<std::string, ExprValue>& field_value_map, SmartRecord record) {
-    SmartTable  table_ptr = _factory->get_table_info_ptr(get_table_id());
-
-    for (auto& field : table_ptr->fields) {
+    for (auto& field : _binlog_table->fields) {
         auto f = record->get_field_by_tag(field.id);
         field_value_map[field.short_name] = record->get_value(f);
     }
@@ -431,10 +435,9 @@ int Region::binlog_scan_when_restart() {
     int64_t begin_ts = _binlog_param.check_point_ts;
     int64_t scan_rows = 0;
 
-    SmartRecord left_record  = _factory->new_record(get_table_id());
-    SmartRecord right_record = _factory->new_record(get_table_id());
-    SmartIndex  pri_info     = _factory->get_index_info_ptr(get_table_id());
-    if (left_record == nullptr || right_record == nullptr || pri_info == nullptr) {
+    SmartRecord left_record  = _factory->new_record(*_binlog_table);
+    SmartRecord right_record = _factory->new_record(*_binlog_table);
+    if (left_record == nullptr || right_record == nullptr) {
         return -1;
     }
 
@@ -444,7 +447,7 @@ int Region::binlog_scan_when_restart() {
     left_record->set_value(left_record->get_field_by_tag(1), value);
     right_record->decode("");
 
-    IndexRange range(left_record.get(), right_record.get(), pri_info.get(), pri_info.get(),
+    IndexRange range(left_record.get(), right_record.get(), _binlog_pri.get(), _binlog_pri.get(),
                         &_region_info, 1, 0, false, false, false);
 
     std::map<int32_t, FieldInfo*> field_ids;
@@ -465,7 +468,7 @@ int Region::binlog_scan_when_restart() {
     bool is_first_ts = true;
     int64_t first_ts = 0;
     int64_t last_ts = 0;
-    SmartRecord record = _factory->new_record(get_table_id());
+    SmartRecord record = _factory->new_record(*_binlog_table);
     while (1) {
         record->clear();
         if (!table_iter->valid()) {
@@ -600,12 +603,12 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
         if (tso::get_timestamp_internal(_binlog_param.check_point_ts) - tso::get_timestamp_internal(ts)
              > FLAGS_check_point_rollback_interval_s) {
             DB_FATAL("region_id: %ld, new ts: %ld, %s, < old check point ts: %ld, %s, "
-                "check point rollback interval too long", _region_id, ts, ts_to_datetime_str(ts).c_str(), 
-                _binlog_param.check_point_ts, ts_to_datetime_str(_binlog_param.check_point_ts).c_str());
+                "check point rollback interval too long, remote_side: %s", _region_id, ts, ts_to_datetime_str(ts).c_str(), 
+                _binlog_param.check_point_ts, ts_to_datetime_str(_binlog_param.check_point_ts).c_str(), remote_side.c_str());
         } else {
-            DB_WARNING("region_id: %ld, new ts: %ld, %s, < old check point ts: %ld, %s", 
+            DB_WARNING("region_id: %ld, new ts: %ld, %s, < old check point ts: %ld, %s, remote_side: %s", 
                 _region_id, ts, ts_to_datetime_str(ts).c_str(), 
-                _binlog_param.check_point_ts, ts_to_datetime_str(_binlog_param.check_point_ts).c_str());
+                _binlog_param.check_point_ts, ts_to_datetime_str(_binlog_param.check_point_ts).c_str(), remote_side.c_str());
         }
     } 
 
@@ -616,13 +619,13 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
         }
         binlog_desc.binlog_type = type;
         _binlog_param.ts_binlog_map[ts] = binlog_desc;
-        DB_WARNING("region_id: %ld, ts: %ld, %s, FAKE BINLOG", _region_id, ts, ts_to_datetime_str(ts).c_str());
+        DB_DEBUG("region_id: %ld, ts: %ld, %s, FAKE BINLOG", _region_id, ts, ts_to_datetime_str(ts).c_str());
     } else if (type == PREWRITE_BINLOG) {
         binlog_desc.binlog_type = type;
         binlog_desc.txn_id = txn_id;
         binlog_desc.primary_region_id = binlog_get_int64_val("primary_region_id", field_value_map);
         _binlog_param.ts_binlog_map[ts] = binlog_desc;
-        DB_WARNING("region_id: %ld, ts: %ld, %s, txn_id: %ld, PREWRITE BINLOG, remote_side: %s", 
+        DB_DEBUG("region_id: %ld, ts: %ld, %s, txn_id: %ld, PREWRITE BINLOG, remote_side: %s", 
             _region_id, ts, ts_to_datetime_str(ts).c_str(), txn_id, remote_side.c_str());
     } else if (type == COMMIT_BINLOG || type == ROLLBACK_BINLOG) {
         if (start_ts < _binlog_param.check_point_ts) {
@@ -651,8 +654,9 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
 
         auto iter = _binlog_param.ts_binlog_map.find(start_ts);
         if (iter == _binlog_param.ts_binlog_map.end()) {
-            DB_FATAL("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s can not find in map", 
-                _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime_str(ts).c_str(), start_ts, ts_to_datetime_str(start_ts).c_str());
+            DB_FATAL("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s can not find in map, remote_side: %s", 
+                _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime_str(ts).c_str(), start_ts, ts_to_datetime_str(start_ts).c_str(),
+                remote_side.c_str());
             return 0;
         } else {
             bool repeated_commit = false;
@@ -667,7 +671,7 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
                 } 
             }
 
-            DB_WARNING("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s start_ts: %ld, %s remote_side: %s repeated_commit: %d, erase", 
+            DB_DEBUG("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s start_ts: %ld, %s remote_side: %s repeated_commit: %d, erase", 
                 _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime_str(ts).c_str(), start_ts, 
                 ts_to_datetime_str(start_ts).c_str(), remote_side.c_str(), repeated_commit);
         }
@@ -720,26 +724,28 @@ int Region::binlog_update_check_point() {
 }
 
 int Region::write_binlog_record(SmartRecord record) {
-
-    IndexInfo pk_index = _factory->get_index_info(get_table_id());
-
     MutTableKey key;
     // DB_WARNING("region_id: %ld, pk_id: %ld", _region_id, pk_index.id);
-    key.append_i64(_region_id).append_i64(pk_index.id);
-    if (0 != key.append_index(pk_index, record.get(), -1, true)) {
-        DB_FATAL("Fail to append_index, reg=%ld, tab=%ld", _region_id, pk_index.id);
+    key.append_i64(_region_id).append_i64(_binlog_pri->id);
+    if (0 != key.append_index(*_binlog_pri, record.get(), -1, true)) {
+        DB_FATAL("Fail to append_index, reg=%ld, tab=%ld", _region_id, _binlog_pri->id);
         return -1;
     }
 
     std::string value;
     int ret = record->encode(value);
     if (ret != 0) {
-        DB_FATAL("encode record failed: reg=%ld, tab=%ld", _region_id, pk_index.id);
+        DB_FATAL("encode record failed: reg=%ld, tab=%ld", _region_id, _binlog_pri->id);
         return -1;
     }
 
     rocksdb::WriteOptions write_options;
-    auto s = _rocksdb->put(write_options, _data_cf, key.data(), value);
+    rocksdb::WriteBatch batch;
+    batch.Put(_meta_writer->get_handle(), 
+                _meta_writer->applied_index_key(_region_id), 
+                _meta_writer->encode_applied_index(_applied_index, _data_index));
+    batch.Put(_data_cf, key.data(), value);
+    auto s = _rocksdb->write(write_options, &batch);
     if (!s.ok()) {
         DB_FATAL("write binlog failed, region_id: %ld, status: %s", _region_id, s.ToString().c_str());
         return -1;
@@ -755,14 +761,13 @@ int Region::write_binlog_record(SmartRecord record) {
 //start_ts,          default -1
 //primary_region_id, default -1
 int Region::write_binlog_value(const std::map<std::string, ExprValue>& field_value_map) {
-    SmartTable  table_ptr = _factory->get_table_info_ptr(get_table_id());
-    SmartRecord record    = _factory->new_record(get_table_id());
-    if (table_ptr == nullptr || record == nullptr) {
+    SmartRecord record    = _factory->new_record(*_binlog_table);
+    if (record == nullptr) {
         DB_WARNING("table_id: %ld nullptr", get_table_id());
         return -1;
     }
 
-    for (auto& field : table_ptr->fields) {
+    for (auto& field : _binlog_table->fields) {
         if (field.short_name == "partition_key") {
             ExprValue value(pb::INT64);
             value._u.int64_val = _region_info.partition_id();
@@ -852,7 +857,8 @@ void Region::apply_binlog(const pb::StoreReq& request, braft::Closure* done) {
 
 }
 
-BinlogReadMgr::BinlogReadMgr(int64_t region_id, int64_t begin_ts) : _region_id(region_id) {
+BinlogReadMgr::BinlogReadMgr(int64_t region_id, int64_t begin_ts, const std::string& capture_ip, uint64_t log_id, int64_t need_read_cnt) : 
+    _region_id(region_id), _begin_ts(begin_ts), _capture_ip(capture_ip), _log_id(log_id), _need_read_cnt(need_read_cnt) {
     _rocksdb = RocksWrapper::get_instance();
     _oldest_ts_in_binlog_cf = _rocksdb->get_oldest_ts_in_binlog_cf();
     // 暂时不用seek
@@ -917,7 +923,10 @@ int BinlogReadMgr::multiget(std::map<int64_t, std::string>& start_binlog_map) {
     std::vector<rocksdb::Status> statuses(num_keys);
     rocksdb::ReadOptions option;
     option.fill_cache = true;
+    TimeCost time;
     _rocksdb->get_db()->MultiGet(option, _rocksdb->get_bin_log_handle(), num_keys, keys.data(), values.data(), statuses.data(), true);
+    RocksdbVars::get_instance()->rocksdb_multiget_time << time.get_time();
+    RocksdbVars::get_instance()->rocksdb_multiget_count << keys.size();
     bool failed = false;
     for (int i = 0; i < num_keys; i++) {
         int64_t start_ts = TableKey(keys[i]).extract_i64(0);
@@ -995,15 +1004,29 @@ int BinlogReadMgr::seek(std::map<int64_t, std::string>& start_binlog_map) {
     }
 }
 
-int BinlogReadMgr::get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::StoreRes* response) {
+int BinlogReadMgr::get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::StoreRes* response, int64_t binlog_row_cnt) {
     int ret = 0;
+    if (commit_ts == start_ts) {
+        _fake_binlog_cnt++;
+    }
+     
+    _binlog_total_row_cnts += binlog_row_cnt;
     if (_mode == GET) {
         // 兼容模式，bin_log_new cf刚创建，从新老两个cf中查找，上线一个小时后此分支不会再走到
         std::string binlog_value;
-        ret = _rocksdb->get_binlog_value(start_ts, binlog_value);
-        if (ret != 0) {
-            DB_WARNING("get ts:%ld from rocksdb binlog cf fail, region_id: %ld", start_ts, _region_id);         
-            return -1;
+        if (commit_ts == start_ts) {
+            // fake binlog
+            ret = fill_fake_binlog(commit_ts, binlog_value);
+            if (ret != 0) {
+                DB_WARNING("fill fake binlog fail, ts:%ld, region_id: %ld", start_ts, _region_id); 
+                return -1;
+            }
+        } else {
+            ret = _rocksdb->get_binlog_value(start_ts, binlog_value);
+            if (ret != 0) {
+                DB_WARNING("get ts:%ld from rocksdb binlog cf fail, region_id: %ld", start_ts, _region_id);         
+                return -1;
+            }
         }
 
         if (0 != binlog_add_to_response(commit_ts, binlog_value, response)) {
@@ -1015,9 +1038,19 @@ int BinlogReadMgr::get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::Sto
 
     } else {
         // 获取近一个小时内的的binlog使用multiget
-        if (_commit_start_map.size() < _bacth_size) {
-            _commit_start_map[commit_ts] = start_ts;
+        _commit_start_map[commit_ts] = start_ts;
+        if (commit_ts == start_ts) {
+            // fake binlog
+            std::string binlog_value;
+            ret = fill_fake_binlog(commit_ts, binlog_value);
+            if (ret != 0) {
+                return -1;
+            }
+            _fake_binlog_map[start_ts] = binlog_value;
+        } else {
             _start_binlog_map[start_ts] = "";
+        }
+        if (_commit_start_map.size() < _bacth_size) {
             return 0;
         }
 
@@ -1032,31 +1065,61 @@ int BinlogReadMgr::get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::Sto
         }
 
         for (const auto& iter : _commit_start_map) {
-            if (0 != binlog_add_to_response(iter.first, _start_binlog_map[iter.second], response)) {
-                _finish = true;
-                return 1;
+            if (iter.first == iter.second) {
+                // fake binlog
+                if (0 != binlog_add_to_response(iter.first, _fake_binlog_map[iter.second], response)) {
+                    _finish = true;
+                    return 1;
+                }
+            } else {
+                if (0 != binlog_add_to_response(iter.first, _start_binlog_map[iter.second], response)) {
+                    _finish = true;
+                    return 1;
+                }
             }
         }
 
         _commit_start_map.clear();
         _start_binlog_map.clear();
+        _fake_binlog_map.clear();
     } 
 
     return 0;
 }
 
+int BinlogReadMgr::fill_fake_binlog(int64_t fake_ts, std::string& binlog) {
+    pb::StoreReq fake_binlog;
+    fake_binlog.set_op_type(pb::OP_FAKE_BINLOG);
+    fake_binlog.set_region_id(_region_id);
+    fake_binlog.set_region_version(1); // 对端不需要这个字段
+    fake_binlog.mutable_binlog_desc()->set_binlog_ts(fake_ts);
+    fake_binlog.mutable_binlog()->set_type(pb::FAKE);
+    fake_binlog.mutable_binlog()->set_start_ts(fake_ts);
+    fake_binlog.mutable_binlog()->set_commit_ts(fake_ts);
+
+    binlog.clear();
+    if (!fake_binlog.SerializeToString(&binlog)) {
+        DB_FATAL("region_id: %ld serialize failed", _region_id);
+        return -1;
+    }
+
+    return 0;
+}
+
 void BinlogReadMgr::print_log() {
-    if (_binlog_num > 0) {
-        DB_WARNING("region_id[%ld], total_binlog_size[%ld], mode[%d], binlog_num[%d], "             
-                "first_commit_ts[%ld, %s], last_commit_ts[%ld, %s], time[%ld], get binlog finish.",          
-                _region_id, _total_binlog_size, _mode, _binlog_num, _first_commit_ts,                   
+    if (_binlog_total_row_cnts > 0) {
+        DB_WARNING("region_id[%ld], begin_ts[%ld, %s], total_binlog_size[%ld], mode[%d], need_read_cnt[%ld], fake_cnt[%ld], binlog_num[%d], binlog_row_cnt[%ld]"             
+                "first_commit_ts[%ld, %s], last_commit_ts[%ld, %s], time[%ld], remote_capture_ip[%s], log_id[%lu] get binlog finish.",          
+                _region_id, _begin_ts, ts_to_datetime_str(_begin_ts).c_str(), _total_binlog_size, _mode, _need_read_cnt, _fake_binlog_cnt,
+                _binlog_num, _binlog_total_row_cnts, _first_commit_ts,                   
                 ts_to_datetime_str(_first_commit_ts).c_str(), _last_commit_ts,                              
-                ts_to_datetime_str(_last_commit_ts).c_str(), _time.get_time());                     
+                ts_to_datetime_str(_last_commit_ts).c_str(), _time.get_time(), 
+                _capture_ip.c_str(), _log_id);                     
     }
 }
 
 int BinlogReadMgr::get_binlog_finish(pb::StoreRes* response) {
-    if (_finish || _mode == GET || _start_binlog_map.empty()) {
+    if (_finish || _mode == GET || (_start_binlog_map.empty() && _fake_binlog_map.empty())) {
         print_log();
         return 0;
     }
@@ -1073,8 +1136,15 @@ int BinlogReadMgr::get_binlog_finish(pb::StoreRes* response) {
     }
 
     for (const auto& iter : _commit_start_map) {
-        if (0 != binlog_add_to_response(iter.first, _start_binlog_map[iter.second], response)) {
-            break;
+        if (iter.first == iter.second) {
+            // fake binlog
+            if (0 != binlog_add_to_response(iter.first, _fake_binlog_map[iter.second], response)) {
+                break;
+            }
+        } else {
+            if (0 != binlog_add_to_response(iter.first, _start_binlog_map[iter.second], response)) {
+                break;
+            }
         }
     }
 
@@ -1084,10 +1154,9 @@ int BinlogReadMgr::get_binlog_finish(pb::StoreRes* response) {
 
 int64_t Region::read_data_cf_oldest_ts() {
     int64_t begin_ts = 0;
-    SmartRecord left_record  = _factory->new_record(get_table_id());
-    SmartRecord right_record = _factory->new_record(get_table_id());
-    SmartIndex  pri_info     = _factory->get_index_info_ptr(get_table_id());
-    if (left_record == nullptr || right_record == nullptr || pri_info == nullptr) {
+    SmartRecord left_record  = _factory->new_record(*_binlog_table);
+    SmartRecord right_record = _factory->new_record(*_binlog_table);
+    if (left_record == nullptr || right_record == nullptr) {
         return -1;
     }
 
@@ -1097,7 +1166,7 @@ int64_t Region::read_data_cf_oldest_ts() {
     left_record->set_value(left_record->get_field_by_tag(1), value);
     right_record->decode("");
 
-    IndexRange range(left_record.get(), right_record.get(), pri_info.get(), pri_info.get(),
+    IndexRange range(left_record.get(), right_record.get(), _binlog_pri.get(), _binlog_pri.get(),
                         &_region_info, 1, 0, false, false, false);
 
     std::map<int32_t, FieldInfo*> field_ids;
@@ -1114,7 +1183,7 @@ int64_t Region::read_data_cf_oldest_ts() {
         delete table_iter;
     }));
 
-    SmartRecord record = _factory->new_record(get_table_id());
+    SmartRecord record = _factory->new_record(*_binlog_table);
     int ret = 0;
     record->clear();
     if (!table_iter->valid()) {
@@ -1135,7 +1204,8 @@ int64_t Region::read_data_cf_oldest_ts() {
 }
 
 void Region::read_binlog(const pb::StoreReq* request,
-                   pb::StoreRes* response, const std::string& remote_side) {
+                   pb::StoreRes* response, const std::string& remote_side, 
+                   uint64_t log_id) {
     TimeCost timecost;
     int64_t binlog_cnt = request->binlog_desc().read_binlog_cnt();
     int64_t begin_ts = request->binlog_desc().binlog_ts();
@@ -1166,8 +1236,10 @@ void Region::read_binlog(const pb::StoreReq* request,
     }
 
     if (begin_ts == 0) {
-        begin_ts = oldest_ts;
-        DB_WARNING("region_id: %ld, begin_ts is 0, chg to: %ld", _region_id, oldest_ts);
+        DB_FATAL("region_id: %ld, begin_ts is 0", _region_id);
+        response->set_errcode(pb::GET_VALUE_FAIL); 
+        response->set_errmsg("get binlog check point ts");
+        return;
     }
 
     if (begin_ts < oldest_ts) {
@@ -1177,10 +1249,16 @@ void Region::read_binlog(const pb::StoreReq* request,
         return;
     }
 
-    SmartRecord left_record  = _factory->new_record(get_table_id());
-    SmartRecord right_record = _factory->new_record(get_table_id());
-    SmartIndex  pri_info     = _factory->get_index_info_ptr(get_table_id());
-    if (left_record == nullptr || right_record == nullptr || pri_info == nullptr) {
+    if (begin_ts >= check_point_ts) {
+        // 返回空
+        response->set_errcode(pb::SUCCESS); 
+        response->set_errmsg("begin_ts >= check_point_ts");
+        return;
+    }
+
+    SmartRecord left_record  = _factory->new_record(*_binlog_table);
+    SmartRecord right_record = _factory->new_record(*_binlog_table);
+    if (left_record == nullptr || right_record == nullptr) {
         response->set_errcode(pb::GET_VALUE_FAIL); 
         response->set_errmsg("get index info failed");
         return;
@@ -1192,7 +1270,7 @@ void Region::read_binlog(const pb::StoreReq* request,
     left_record->set_value(left_record->get_field_by_tag(1), value);
     right_record->decode("");
 
-    IndexRange range(left_record.get(), right_record.get(), pri_info.get(), pri_info.get(),
+    IndexRange range(left_record.get(), right_record.get(), _binlog_pri.get(), _binlog_pri.get(),
                         &_region_info, 1, 0, false, false, false);
 
     std::map<int32_t, FieldInfo*> field_ids;
@@ -1212,8 +1290,8 @@ void Region::read_binlog(const pb::StoreReq* request,
 
     int64_t max_fake_binlog = 0;
     std::map<std::string, ExprValue> field_value_map;
-    SmartRecord record = _factory->new_record(get_table_id());
-    BinlogReadMgr binlog_reader(_region_id, begin_ts);
+    SmartRecord record = _factory->new_record(*_binlog_table);
+    BinlogReadMgr binlog_reader(_region_id, begin_ts, remote_side, log_id, binlog_cnt);
     int ret = 0;
     while (1) {
         record->clear();
@@ -1241,10 +1319,15 @@ void Region::read_binlog(const pb::StoreReq* request,
             break;
         }
 
-        if (binlog_type == FAKE_BINLOG) {
-            if (ts > max_fake_binlog) {
-                max_fake_binlog = ts;
+        if (binlog_type == FAKE_BINLOG && ts > begin_ts) {
+            ret = binlog_reader.get_binlog_value(ts, ts, response, 1);
+            if (ret < 0) {
+                DB_WARNING("get fake binlog ts:%ld fail, region_id: %ld", ts, _region_id);
+                response->set_errcode(pb::GET_VALUE_FAIL); 
+                response->set_errmsg("read fake binlog failed");  
+                return;
             }
+            continue;
         }
 
         if (binlog_type != COMMIT_BINLOG || ts == begin_ts) {
@@ -1263,7 +1346,7 @@ void Region::read_binlog(const pb::StoreReq* request,
             break;
         }
         binlog_cnt -= binlog_row_cnt;
-        ret = binlog_reader.get_binlog_value(ts, start_ts, response);
+        ret = binlog_reader.get_binlog_value(ts, start_ts, response, binlog_row_cnt);
         if (ret < 0) {
             DB_WARNING("get ts:%ld from rocksdb binlog cf fail, region_id: %ld", start_ts, _region_id);
             response->set_errcode(pb::GET_VALUE_FAIL); 
@@ -1280,30 +1363,6 @@ void Region::read_binlog(const pb::StoreReq* request,
         response->set_errcode(pb::GET_VALUE_FAIL); 
         response->set_errmsg("read binlog failed");  
         return;
-    }
-
-    if (response->binlogs_size() == 0 && max_fake_binlog != 0 && begin_ts < max_fake_binlog) {
-        pb::StoreReq fake_binlog;
-        DB_WARNING("region_id: %ld, fake binlog ts: %ld, %s", _region_id, max_fake_binlog, ts_to_datetime_str(max_fake_binlog).c_str());
-        fake_binlog.set_op_type(pb::OP_FAKE_BINLOG);
-        fake_binlog.set_region_id(_region_id);
-        fake_binlog.set_region_version(get_version());
-        fake_binlog.mutable_binlog_desc()->set_binlog_ts(max_fake_binlog);
-        fake_binlog.mutable_binlog()->set_type(pb::FAKE);
-        fake_binlog.mutable_binlog()->set_start_ts(max_fake_binlog);
-        fake_binlog.mutable_binlog()->set_commit_ts(max_fake_binlog);
-
-        std::string binlog_value;
-        if (!fake_binlog.SerializeToString(&binlog_value)) {
-            DB_FATAL("region_id: %ld serialize failed", _region_id);
-            response->set_errcode(pb::GET_VALUE_FAIL); 
-            response->set_errmsg("serialize fake binlog failed"); 
-            return;
-        }
-        (*response->add_binlogs()) = binlog_value;
-        response->add_commit_ts(max_fake_binlog);
-    } else if (response->binlogs_size() == 0) {
-        DB_WARNING("empty binlog region_id: %ld", _region_id);
     }
 
     response->set_errcode(pb::SUCCESS); 
@@ -1405,7 +1464,7 @@ void Region::query_binlog(google::protobuf::RpcController* controller,
 
     switch (request->op_type()) {
         case pb::OP_READ_BINLOG: {
-            read_binlog(request, response, std::string(remote_side));
+            read_binlog(request, response, std::string(remote_side), log_id);
             break;
         }
         case pb::OP_QUERY_BINLOG: {

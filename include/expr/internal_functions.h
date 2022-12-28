@@ -65,6 +65,7 @@ ExprValue substring_index(const std::vector<ExprValue>& input);
 ExprValue lpad(const std::vector<ExprValue>& input);
 ExprValue rpad(const std::vector<ExprValue>& input);
 ExprValue instr(const std::vector<ExprValue>& input);
+ExprValue json_extract(const std::vector<ExprValue>& input);
 
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);
@@ -91,7 +92,9 @@ ExprValue dayofyear(const std::vector<ExprValue>& input);
 ExprValue month(const std::vector<ExprValue>& input);
 ExprValue monthname(const std::vector<ExprValue>& input);
 ExprValue year(const std::vector<ExprValue>& input);
+ExprValue yearweek(const std::vector<ExprValue>& input);
 ExprValue week(const std::vector<ExprValue>& input);
+ExprValue weekofyear(const std::vector<ExprValue>& input);
 ExprValue time_to_sec(const std::vector<ExprValue>& input);
 ExprValue sec_to_time(const std::vector<ExprValue>& input);
 ExprValue datediff(const std::vector<ExprValue>& input);
@@ -164,6 +167,7 @@ ExprValue cast_to_datetime(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_signed(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_unsigned(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_string(const std::vector<ExprValue>& inpt);
+ExprValue cast_to_double(const std::vector<ExprValue>& inpt);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

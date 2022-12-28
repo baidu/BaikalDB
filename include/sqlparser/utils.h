@@ -96,6 +96,7 @@ struct String {
             {'n', '\n'},
             {'b', '\b'},
             {'Z', '\x1A'},
+            {'0', '\0'},
         };
         while (fast < length) {
             if (has_slash) {

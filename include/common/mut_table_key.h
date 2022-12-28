@@ -213,5 +213,22 @@ private:
     std::string    _data;
 
 };
+
+class TableKeyPair {
+public:
+    TableKeyPair(const std::string& left_key, bool left_full,
+        const std::string& right_key, bool right_full) :
+        _left_key(left_key, left_full), _right_key(right_key, right_full) {}
+    const MutTableKey& left_key() const {
+        return _left_key;
+    }
+    const MutTableKey& right_key() const {
+        return _right_key;
+    }
+private:
+    MutTableKey _left_key;
+    MutTableKey _right_key;
+};
+
 }
 

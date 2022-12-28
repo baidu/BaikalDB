@@ -75,6 +75,7 @@ public:
                     service_desc->FindMethodByName(service_name);
         if (method == NULL) {
             DB_FATAL("service name not exist, service:%s", service_name.c_str());
+            response.set_errcode(pb::CONNECT_FAIL);
             return -1;
         }
         brpc::Controller cntl;

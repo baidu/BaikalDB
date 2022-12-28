@@ -82,13 +82,25 @@ public:
         }
         return 0;
     }
-    const std::string get_resource_tag(const int64_t& database_id) {
-         BAIDU_SCOPED_LOCK(_database_mutex);
-         if (_database_info_map.find(database_id) == _database_info_map.end()) {
-             return "";
-         }
-         return _database_info_map[database_id].resource_tag();
-     }
+
+    int get_database_info(const int64_t& database_id, pb::DataBaseInfo& database_info) {
+        BAIDU_SCOPED_LOCK(_database_mutex);
+        if (_database_info_map.find(database_id) == _database_info_map.end()) {
+            return -1;
+        }
+        database_info = _database_info_map[database_id];
+        return 0;
+    }
+
+    int get_table_ids(const int64_t& database_id, std::set<int64_t>& table_ids) {
+        BAIDU_SCOPED_LOCK(_database_mutex);
+        if (_table_ids.find(database_id) == _table_ids.end()) {
+            return -1;
+        }
+        table_ids = _table_ids[database_id];
+        return 0;
+    }
+
     void clear() {
         _database_id_map.clear();
         _database_info_map.clear();

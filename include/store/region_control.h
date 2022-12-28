@@ -58,14 +58,56 @@ public:
     pb::RegionStatus get_status() const {
         return _status.load();
     }
+    // doing -> idle
     void reset_region_status() {
-        pb::RegionStatus expected_status = pb::DOING;
-        if (!_status.compare_exchange_strong(expected_status, pb::IDLE)) {
-            DB_WARNING("region status is not doing, region_id: %ld", _region_id);
+        BAIDU_SCOPED_LOCK(_mutex);
+        if (_doing_cnt > 0) {
+            _doing_cnt--;
+        } else {
+            pb::RegionStatus expected_status = pb::DOING;
+            if (!_status.compare_exchange_strong(expected_status, pb::IDLE)) {
+                DB_WARNING("region status is not doing, region_id: %ld", _region_id);
+            }
         }
+        DB_WARNING("region %ld doing cnt: %d", _region_id, _doing_cnt);
     }
-    bool compare_exchange_strong(pb::RegionStatus& expected, pb::RegionStatus desire) {
-        return _status.compare_exchange_strong(expected, desire);
+    // idle -> doing
+    int make_region_status_doing() {
+        BAIDU_SCOPED_LOCK(_mutex);
+        if (_doing_cnt > 0) {
+            DB_WARNING("region doing is not 0, region_id: %ld, doing cnt: %d", _region_id, _doing_cnt);
+            return -1;
+        }
+        pb::RegionStatus expected_status = pb::IDLE;
+        if (!_status.compare_exchange_strong(expected_status, pb::DOING)) {
+            DB_WARNING("region status is not idle, region_id: %ld", _region_id);
+            return -1;
+        }
+        return 0;
+    }
+    // 目前只有分裂add peer会调用
+    int add_doing_cnt() {
+        BAIDU_SCOPED_LOCK(_mutex);
+        if (_status.load() == pb::DOING) {
+            // doing状态下，doing cnt++
+            // 分裂同步add peer一定是这种情况
+            // 分裂异步add peer可能是这种情况
+            _doing_cnt++;
+        } else {
+            // idle -> doing
+            // 分裂异步add peer可能是这种情况
+            if (_doing_cnt > 0) {
+                DB_FATAL("region doing is not 0, region_id: %ld, doing cnt: %d", _region_id, _doing_cnt);
+                return -1;
+            }
+            pb::RegionStatus expected_status = pb::IDLE;
+            if (!_status.compare_exchange_strong(expected_status, pb::DOING)) {
+                DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
+                return -1;
+            }
+        }
+        DB_WARNING("region %ld doing cnt: %d", _region_id, _doing_cnt);
+        return 0;
     }
 private:
     void construct_init_region_request(pb::InitRegion& init_region_request);
@@ -81,5 +123,7 @@ private:
     //保证操作串行
     //只有leader有状态 ddl?
     std::atomic<pb::RegionStatus> _status;
+    bthread::Mutex _mutex;
+    int _doing_cnt = 0;
 };
 } // end of namespace

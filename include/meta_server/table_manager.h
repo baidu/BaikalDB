@@ -16,10 +16,12 @@
 
 #include <functional>
 #include <unordered_set>
+#include <google/protobuf/descriptor.pb.h>
 #include <set>
 
 #include "schema_manager.h"
 #include "meta_server.h"
+#include "meta_util.h"
 #include "table_key.h"
 #include "ddl_manager.h"
 #ifdef BAIDU_INTERNAL
@@ -31,6 +33,8 @@
 namespace baikaldb {
 DECLARE_int64(table_tombstone_gc_time_s);
 DECLARE_int64(store_heart_beat_interval_us);
+DECLARE_int32(pre_split_threashold);
+
 
 enum MergeStatus {
     MERGE_IDLE   = 0, //空闲
@@ -98,7 +102,8 @@ struct TableMem {
 
 struct TableSchedulingInfo {
     // 快速导入
-    std::unordered_map<int64_t, std::string> table_in_fast_importer; // table_id -> resource_tag
+    std::unordered_map<int64_t, std::string> table_in_fast_importer;  // table_id -> resource_tag
+    std::unordered_map<int64_t, TimeCost> table_start_fast_import_ts; // table_id -> start_time, 持续太长报警
     // pk prefix balance
     std::unordered_map<int64_t, std::vector<pb::PrimitiveType>> table_pk_types;
     std::unordered_map<int64_t, int32_t> table_pk_prefix_dimension;
@@ -138,6 +143,11 @@ public:
     void update_table_internal(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done,
     std::function<void(const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done)> update_callback);
     void create_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    int do_create_table_sync_req(pb::SchemaInfo& schema_pb, 
+                            std::shared_ptr<std::vector<pb::InitRegion>> init_regions,
+                            bool has_auto_increment,
+                            int64_t start_region_id,
+                            pb::MetaManagerResponse* response);
     void drop_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_table_tombstone(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_table_tombstone_gc_check();
@@ -146,6 +156,8 @@ public:
     void swap_table(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_byte_size(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_split_lines(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void update_charset(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void modify_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void set_main_logical_room(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_schema_conf(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_statistics(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -183,14 +195,20 @@ public:
     void check_table_exist_for_peer(
                     const pb::StoreHeartBeatRequest* request,
                     pb::StoreHeartBeatResponse* response);
-    void check_add_table(std::set<int64_t>& report_table_ids,
-            std::vector<int64_t>& new_add_region_ids,
-            pb::BaikalHeartBeatResponse* response);
+    void check_add_table(
+            std::set<int64_t>& report_table_ids, 
+            std::vector<int64_t>& new_add_region_ids, 
+            const pb::BaikalHeartBeatRequest* request,
+            pb::BaikalHeartBeatResponse* response, 
+            const std::unordered_set<int64_t>& heartbeat_table_ids);
 
-    void check_add_region(const std::set<std::int64_t>& report_table_ids,
-                        std::unordered_map<int64_t, std::set<std::int64_t>>& report_region_ids, 
-                        pb::BaikalHeartBeatResponse* response);
-
+    void check_add_region(
+            const std::set<std::int64_t>& report_table_ids,
+            std::unordered_map<int64_t, std::set<std::int64_t>>& report_region_ids,
+            const pb::BaikalHeartBeatRequest* request,
+            pb::BaikalHeartBeatResponse* response,
+            const std::unordered_set<int64_t>& heartbeat_table_ids);
+                        
     int load_table_snapshot(const std::string& value);
     int load_statistics_snapshot(const std::string& value);
     int erase_region(int64_t table_id, int64_t region_id, std::string start_key, int64_t partition);
@@ -223,7 +241,7 @@ public:
                           std::map<std::string, SmartRegionInfo>& key_newregion_map,
                           std::vector<SmartRegionInfo>& regions);
     int get_presplit_regions(int64_t table_id, 
-                                           std::map<int64_t, std::map<std::string, SmartRegionInfo>>& key_newregion_map,
+                                           std::map<std::string, SmartRegionInfo>& key_newregion_map,
                                            pb::MetaManagerRequest& request);
                                           
     void get_update_region_requests(int64_t table_id, TableMem& table_info,
@@ -529,49 +547,93 @@ public:
         }
     }
 
+    // table_replica_dists_maps: table_id -> 表副本分布{resource_tag:logical_room:phyiscal_room} -> count
     void get_table_info(const std::set<int64_t> table_ids, 
             std::unordered_map<int64_t, int64_t>& table_replica_nums,
-            std::unordered_map<int64_t, std::string>& table_resource_tags,
-            std::unordered_map<int64_t, std::unordered_map<std::string, int64_t>>& table_replica_dists_maps,
-            std::unordered_map<int64_t, std::vector<std::string>>& table_learner_resource_tags) {
+            std::unordered_map<int64_t, std::unordered_map<std::string, int>>& table_replica_dists_maps,
+            std::unordered_map<int64_t, std::set<std::string>>& table_learner_resource_tags) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         for (auto& table_id : table_ids) {
             if (_table_info_map.find(table_id) != _table_info_map.end()) {
                 table_replica_nums[table_id] = _table_info_map[table_id].schema_pb.replica_num();
-                table_resource_tags[table_id] = _table_info_map[table_id].schema_pb.resource_tag();
                 for (auto& learner_resource : _table_info_map[table_id].schema_pb.learner_resource_tags()) {
-                    table_learner_resource_tags[table_id].emplace_back(learner_resource);
+                    table_learner_resource_tags[table_id].insert(learner_resource);
                 }
-                //没有指定机房分布的表，也在map中有key
-                table_replica_dists_maps[table_id];
-                for (auto& replica_dist : _table_info_map[table_id].schema_pb.dists()) {
-                    if (replica_dist.count() != 0) {
-                        table_replica_dists_maps[table_id][replica_dist.logical_room()] = replica_dist.count();
+                if (_table_info_map[table_id].schema_pb.dists_size() > 0) {
+                    for (const auto& idc : _table_info_map[table_id].schema_pb.dists()) {
+                        std::string key = idc.resource_tag();
+                        if (key.empty()) {
+                            // 兼容性，dist里resource_tag可能为空
+                            key = _table_info_map[table_id].schema_pb.resource_tag();
+                        }
+                        key += ":" + idc.logical_room() + ":"  + idc.physical_room(); 
+                        table_replica_dists_maps[table_id][key] = idc.count();
                     }
+                } else {
+                    // 没有指定副本分布
+                    std::string key = _table_info_map[table_id].schema_pb.resource_tag() + "::"; 
+                    table_replica_dists_maps[table_id][key] = _table_info_map[table_id].schema_pb.replica_num();
                 }
             }
         }
     }
-    int get_main_logical_room(int64_t table_id, std::string& main_logical_room) {
+    int get_main_logical_room(int64_t table_id, IdcInfo& idc) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
             return -1;
         }
-        main_logical_room = _table_info_map[table_id].schema_pb.main_logical_room();
+        idc = {_table_info_map[table_id].schema_pb.resource_tag(), _table_info_map[table_id].schema_pb.main_logical_room(), ""};
         return 0;
     }
-    int64_t get_replica_dists(int64_t table_id, std::unordered_map<std::string, int64_t>& replica_dists_map) {
+    // 获取表副本分布，表副本分布{resource_tag:logical_room:phyiscal_room} -> count
+    int64_t get_replica_dist_idcs(int64_t table_id, std::unordered_map<std::string, int64_t>& replica_dists_map) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
             return -1;
         }
-        for (auto& replica_dist : _table_info_map[table_id].schema_pb.dists()) {
-            if (replica_dist.count() != 0) {
-                replica_dists_map[replica_dist.logical_room()] = replica_dist.count();
+        if (_table_info_map[table_id].schema_pb.dists_size() > 0) {
+            for (const auto& idc : _table_info_map[table_id].schema_pb.dists()) {
+                std::string key = idc.resource_tag();
+                if (key.empty()) {
+                    // 兼容性，dist里resource_tag可能为空
+                    key = _table_info_map[table_id].schema_pb.resource_tag();
+                }
+                key += ":" + idc.logical_room() + ":"  + idc.physical_room(); 
+                replica_dists_map[key] = idc.count();
+            }
+        } else {
+            // 没指定副本分布
+            std::string key = _table_info_map[table_id].schema_pb.resource_tag() + "::";
+            replica_dists_map[key] = _table_info_map[table_id].schema_pb.replica_num();
+        }
+        return 0;
+    }
+    // 获取instance在table dists所属的调度粒度, peer balance/migreat/dead/split用
+    int get_table_dist_belonged(int64_t table_id, const IdcInfo& instance_idc, IdcInfo& balance_idc) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return -1;
+        }
+        if (_table_info_map[table_id].schema_pb.dists_size() == 0) {
+            if (instance_idc.resource_tag != _table_info_map[table_id].schema_pb.resource_tag()) {
+                return -1;
+            }
+            balance_idc = {_table_info_map[table_id].schema_pb.resource_tag(), "", ""};
+            return 0;
+        }
+        for (const auto& dist : _table_info_map[table_id].schema_pb.dists()) {
+            IdcInfo dist_idc(dist.resource_tag(), dist.logical_room(), dist.physical_room());
+            if (dist_idc.resource_tag.empty()) {
+                dist_idc.resource_tag = _table_info_map[table_id].schema_pb.resource_tag();
+            }
+            if (instance_idc.match(dist_idc)) {
+                balance_idc = dist_idc;
+                return 0;
             }
         }
-        return 0;
+        return -1;
     }
+
     bool whether_replica_dists(int64_t table_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
@@ -605,6 +667,37 @@ public:
         }
         return false;
     }
+    bool cancel_in_fast_importer(const int64_t& table_id) {
+        auto call_func = [table_id](TableSchedulingInfo& infos) -> int {
+            infos.table_in_fast_importer.erase(table_id);
+            infos.table_start_fast_import_ts.erase(table_id);
+            return 1;
+        };
+        _table_scheduling_infos.Modify(call_func);
+        return true;
+    }
+    bool is_table_in_fast_importer(const int64_t table_id) {
+        DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+        if (_table_scheduling_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        if (info->table_in_fast_importer.find(table_id) == info->table_in_fast_importer.end()) {
+            return false;
+        }
+        return true;
+    }
+    void get_table_fast_importer_ts(std::unordered_map<int64_t, int64_t>& tables_ts) {
+        DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+        if (_table_scheduling_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        for (auto& pair : info->table_start_fast_import_ts) {
+            tables_ts[pair.first] = pair.second.get_time();
+        }
+        return;
+    }
     bool update_tables_in_fast_importer(const pb::MetaManagerRequest& request, bool in_fast_importer) {
         auto call_func = [request, in_fast_importer](TableSchedulingInfo& infos) -> int {
             int64_t  table_id = request.table_info().table_id();
@@ -621,6 +714,8 @@ public:
                         ClusterManager::get_instance()->update_instance_param(request, nullptr);
                     }
                     infos.table_in_fast_importer[table_id] = resource_tag;
+                    TimeCost now;
+                    infos.table_start_fast_import_ts[table_id] = now;
                 }
             } else {
                 if (infos.table_in_fast_importer.find(table_id) != infos.table_in_fast_importer.end()) {
@@ -628,6 +723,7 @@ public:
                         ClusterManager::get_instance()->update_instance_param(request, nullptr);
                     }
                     infos.table_in_fast_importer.erase(table_id);
+                    infos.table_start_fast_import_ts.erase(table_id);
                 }
             }
             return 1;
@@ -800,6 +896,7 @@ public:
             }
         }
     }
+
     void clear() {
         _table_id_map.clear();
         _table_info_map.clear();
@@ -841,6 +938,30 @@ public:
         return false;
     }
 
+    bool check_field_is_compatible_type(pb::PrimitiveType src_type, pb::PrimitiveType target_type) {
+        switch (src_type) {
+            case pb::DATETIME:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+            case pb::TIME:
+            case pb::HLL:
+            case pb::BOOL:
+            case pb::TDIGEST:
+            case pb::NULL_TYPE:
+            case pb::BITMAP:
+                return false;
+            default:
+                break;
+        }
+        int s = primitive_to_proto_type(src_type);
+        int t = primitive_to_proto_type(target_type);
+        if (s == t) return true;
+        if (s == FieldDescriptorProto::TYPE_SINT32 && t == FieldDescriptorProto::TYPE_SINT64) return true;
+        if (s == FieldDescriptorProto::TYPE_SINT64 && t == FieldDescriptorProto::TYPE_SINT32) return true;
+        if (s == FieldDescriptorProto::TYPE_UINT32 && t == FieldDescriptorProto::TYPE_UINT64) return true;
+        if (s == FieldDescriptorProto::TYPE_UINT64 && t == FieldDescriptorProto::TYPE_UINT32) return true;
+        return false;
+    }
     int get_index_state(int64_t table_id, int64_t index_id, pb::IndexState& index_state) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
@@ -913,7 +1034,7 @@ private:
     TableManager(): _max_table_id(0) {
         bthread_mutex_init(&_table_mutex, NULL);
         bthread_mutex_init(&_load_virtual_to_memory_mutex, NULL);
-        _table_timer.init(FLAGS_table_tombstone_gc_time_s * 1000);
+        _table_timer.init(3600 * 1000); // 1h
     }
     int write_schema_for_not_level(TableMem& table_mem,
                                     braft::Closure* done,
@@ -921,7 +1042,7 @@ private:
                                      bool has_auto_increment);
 
     int send_auto_increment_request(const pb::MetaManagerRequest& request);
-    void send_create_table_request(const std::string& namespace_name,
+    int send_create_table_request(const std::string& namespace_name,
                                     const std::string& database,
                                     const std::string& table_name,
                                     std::shared_ptr<std::vector<pb::InitRegion>> init_regions);

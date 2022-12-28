@@ -62,7 +62,7 @@ void SqlParser::parse(const std::string& sql_) {
         }
         if (!is_asc) {
             if (is_gbk != (charset == "gbk")) {
-                DB_FATAL("is_utf8_strict fail, sql:%s", sql_.c_str());
+                DB_WARNING("is_utf8_strict fail, sql:%s", sql_.c_str());
             }
         }
     } else {

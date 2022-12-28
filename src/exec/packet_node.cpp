@@ -29,35 +29,21 @@ int PacketNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _op_type = node.derive_node().packet_node().op_type();
-    std::vector<std::string> database_names;
-    std::vector<std::string> table_names;
-    database_names.reserve(5);
-    table_names.reserve(5);
-    for (auto& expr : node.derive_node().packet_node().projections()) {
+    for (int i = 0; i < node.derive_node().packet_node().projections_size(); i++) {
         ExprNode* projection = nullptr;
+        auto& expr = node.derive_node().packet_node().projections(i);
+        auto& name = node.derive_node().packet_node().col_names(i);
         ret = ExprNode::create_tree(expr, &projection);
         if (ret < 0) {
             //如何释放资源
             return ret;
         }
         _projections.push_back(projection);
-        database_names.push_back(expr.database());
-        table_names.push_back(expr.table());
-    }
-    auto db_iter = database_names.begin();
-    auto table_iter = table_names.begin();
-    for (auto& name : node.derive_node().packet_node().col_names()) {
         ResultField field;
         field.name = name;
         field.org_name = name;
-        if (db_iter != database_names.end()) {
-            field.db = *db_iter;
-            db_iter++;
-        }
-        if (table_iter != table_names.end()) {
-            field.table = *table_iter;
-            table_iter++;
-        }
+        field.db = expr.database();
+        field.table = expr.table();
         _fields.push_back(field);
     }
     return 0;
@@ -98,7 +84,7 @@ int PacketNode::expr_optimize(QueryContext* ctx) {
 int PacketNode::handle_explain(RuntimeState* state) {
     _fields.clear();
     std::vector<std::string> names = {
-        "id", "select_type", "table", "type", "possible_keys",
+        "id", "select_type", "table", "partitions", "type", "possible_keys",
         "key", "key_len", "ref", "rows", "Extra"
     };
     for (auto& name : names) {
@@ -197,6 +183,9 @@ void PacketNode::pack_trace2(std::vector<std::map<std::string, std::string>>& in
         if (trace_node.has_total_time()) {
             sub_info["total_cost"] = std::to_string(trace_node.total_time());
         }
+        if (trace_node.has_partition_id()) {
+            sub_info["partition_id"] = std::to_string(trace_node.partition_id());
+        }
         info.push_back(sub_info);
     } else if (trace_node.has_node_type() && trace_node.has_open_trace() && trace_node.has_get_next_trace()) {
         if (info.size() > 0) {
@@ -233,7 +222,7 @@ void PacketNode::pack_trace2(std::vector<std::map<std::string, std::string>>& in
 int PacketNode::handle_trace2(RuntimeState* state) {
     _fields.clear();
     std::vector<std::string> names = {
-        "region_id", "instance", "index", "scan_rows", "index_filter", "get_primary",
+        "region_id", "partition_id", "instance", "index", "scan_rows", "index_filter", "get_primary",
         "where_filter", "scan_cost", "total_cost"
     };
     for (auto& name : names) {

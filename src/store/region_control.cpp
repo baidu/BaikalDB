@@ -265,8 +265,7 @@ void RegionControl::raft_control(google::protobuf::RpcController* controller,
         return;
     }
     //每个region同时只能进行一个动作
-    pb::RegionStatus expected_status = pb::IDLE;
-    if (compare_exchange_strong(expected_status, pb::DOING)) {
+    if (make_region_status_doing() == 0) {
         DB_WARNING("region status to doing becase of raft control, region_id: %ld, request:%s",
                     _region_id, pb2json(*request).c_str());
         common_raft_control(controller, request, response, done_guard.release(), &_region->_node);
@@ -287,9 +286,8 @@ void RegionControl::add_peer(const pb::AddPeer& add_peer, SmartRegion region, Ex
         return;
     }
     //在leader_send_init_region将状态置为doing, 在add_peer结束时将region状态置回来
-    pb::RegionStatus expected_status = pb::IDLE;
-    if (!compare_exchange_strong(expected_status, pb::DOING)) {
-        DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
+    if (make_region_status_doing() != 0) {
+        DB_WARNING("make region status doing fail, region_id: %ld", _region_id);
         return;
     }
     TimeCost cost;
@@ -336,11 +334,6 @@ void RegionControl::add_peer(const pb::AddPeer& add_peer, SmartRegion region, Ex
 void RegionControl::add_peer(const pb::AddPeer* request,
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done) {
-    auto reset_status_if_not_spit = [this, &request]() {
-        if (!request->is_split()) {
-            reset_region_status(); 
-        }
-    };
     brpc::ClosureGuard done_guard(done);
     std::set<std::string> old_peers;
     for (auto& old_peer : request->old_peers()) {
@@ -363,9 +356,12 @@ void RegionControl::add_peer(const pb::AddPeer* request,
     if (legal_for_add_peer(*request, response) != 0) {
         return;
     }
-    pb::RegionStatus expected_status = pb::IDLE;
-    if (!request->is_split() && !compare_exchange_strong(expected_status, pb::DOING)) {
-        DB_WARNING("region status is not idle when add peer, region_id: %ld", _region_id);
+    if (!request->is_split() && make_region_status_doing() != 0) {
+        response->set_errcode(pb::INTERNAL_ERROR);
+        response->set_errmsg("new region fail");
+        return;
+    } 
+    if (request->is_split() && add_doing_cnt() != 0) {
         response->set_errcode(pb::INTERNAL_ERROR);
         response->set_errmsg("new region fail");
         return;
@@ -373,7 +369,7 @@ void RegionControl::add_peer(const pb::AddPeer* request,
     DB_WARNING("region status to doing because of add peer of request, region_id: %ld",
                 _region_id);
     if (legal_for_add_peer(*request, response) != 0) {
-        reset_status_if_not_spit();
+        reset_region_status();
         return;
     }
     pb::InitRegion init_request;
@@ -383,11 +379,11 @@ void RegionControl::add_peer(const pb::AddPeer* request,
         init_request.mutable_region_info()->set_can_add_peer(false);
     }
     if (init_region_to_store(new_instance, init_request, response) != 0) {
-        reset_status_if_not_spit();
+        reset_region_status();
         return;
     }
     if (legal_for_add_peer(*request, response) != 0) {
-        reset_status_if_not_spit();
+        reset_region_status();
         _region->start_thread_to_remove_region(_region_id, new_instance);
         return;
     }
@@ -419,8 +415,7 @@ int RegionControl::transfer_leader(const pb::TransLeaderRequest& trans_leader_re
             reset_region_status();
             return;
         }
-        pb::RegionStatus expected_status = pb::IDLE;
-        if (!compare_exchange_strong(expected_status, pb::DOING)) {
+        if (make_region_status_doing() != 0) {
             DB_FATAL("region status is not idle when transfer leader, region_id: %ld", _region_id);
             return;
         } else {

@@ -33,8 +33,7 @@ public:
     }
     virtual ~ExecNode() {
         for (auto& e : _children) {
-            delete e;
-            e = nullptr;
+            SAFE_DELETE(e);
         }
     }
     virtual int init(const pb::PlanNode& node);
@@ -209,6 +208,9 @@ public:
     bool reached_limit() {
         return _limit != -1 && _num_rows_returned >= _limit;
     }
+    bool will_reach_limit(int64_t add_size) {
+        return _limit != -1 && _num_rows_returned + add_size >= _limit;
+    }
     void set_limit(int64_t limit) {
         _limit = limit;
     }
@@ -265,6 +267,17 @@ public:
     bool local_index_binlog() const {
         return _local_index_binlog;
     }
+    const std::vector<int64_t>& get_partition() const {
+        return _partitions;
+    }
+    void replace_partition(const std::set<int64_t>& partition_ids) {
+        // 如果之前已经计算过更优的partition，或者指定过partition(p20)，则不再计算
+        if (!_is_set_partition || partition_ids.size() <= _partitions.size()) {
+            _partitions.clear();
+            _partitions.assign(partition_ids.begin(), partition_ids.end());
+            _is_set_partition = true;
+        }
+    }
 protected:
     int64_t _limit = -1;
     int64_t _num_rows_returned = 0;
@@ -277,6 +290,8 @@ protected:
     std::map<int64_t, pb::RegionInfo> _region_infos;
     pb::TraceNode* _trace = nullptr;
     bool  _local_index_binlog = false;
+    bool  _is_set_partition = false;
+    std::vector<int64_t> _partitions {0};
     
     //返回给baikaldb的结果
     std::map<int64_t, std::vector<SmartRecord>> _return_old_records;

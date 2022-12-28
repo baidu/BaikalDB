@@ -155,6 +155,16 @@ inline bool has_timestamp(std::vector<pb::PrimitiveType> types) {
     return false;
 }
 
+inline bool is_current_timestamp_specic(pb::PrimitiveType type) {
+    switch (type) {
+        case pb::DATETIME:
+        case pb::TIMESTAMP:
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline bool has_datetime(std::vector<pb::PrimitiveType> types) {
     for (auto type : types) {
         if (type == pb::DATETIME) {

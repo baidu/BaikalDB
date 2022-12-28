@@ -36,6 +36,7 @@ private:
     int parse_create_database(pb::DataBaseInfo& database);
     int parse_drop_database(pb::DataBaseInfo& database);
     int parse_alter_table(pb::MetaManagerRequest& alter_request);
+    int check_partition_key_constraint(pb::SchemaInfo& table, const std::string& field_name);
 
     int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column);
     int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec);

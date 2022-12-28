@@ -37,6 +37,7 @@ public:
 
     void get_ddlwork_info(const pb::QueryRequest* request, pb::QueryResponse* response);    
     void get_virtual_index_influence_info(const pb::QueryRequest* request, pb::QueryResponse* response);
+    void get_table_in_fast_importer(const pb::QueryRequest* request, pb::QueryResponse* response);
     void clean_cache() {
         BAIDU_SCOPED_LOCK(_mutex);
         _table_info_cache_time.clear();

@@ -870,6 +870,10 @@ int AggFnCall::finalize(const std::string& key, MemRow* dst) {
     switch (_agg_type) {
         case AVG: {
             ExprValue value = dst->get_value(_tuple_id, _intermediate_slot_id);
+            if (value.is_null()) {
+                dst->set_value(_tuple_id, _final_slot_id, ExprValue::Null());
+                return 0;
+            }
             const AvgIntermediate* avg = (const AvgIntermediate*)value.str_val.c_str();
             if (avg->count != 0) {
                 ExprValue result(pb::DOUBLE);

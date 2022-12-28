@@ -20,6 +20,7 @@
 #include <atomic>
 #include <memory>
 #include <boost/lexical_cast.hpp>
+#include "concurrency.h"
 #ifdef BAIDU_INTERNAL
 #include <base/iobuf.h>
 #include <base/containers/bounded_queue.h>
@@ -71,7 +72,7 @@ public:
         const pb::BackupRequest* request, pb::BackupResponse* response);
 private:
     struct ProgressiveAttachmentWritePolicy {
-        ProgressiveAttachmentWritePolicy(brpc::ProgressiveAttachment* attach) : attachment(attach) {}
+        ProgressiveAttachmentWritePolicy(butil::intrusive_ptr<brpc::ProgressiveAttachment> attach) : attachment(attach) {}
         int Write(const void* data, size_t n) {
             return attachment->Write(data, n);
         }
@@ -79,7 +80,7 @@ private:
         int WriteStreamingSize(int64_t) {
             return 0;
         }
-        brpc::ProgressiveAttachment* attachment;
+        butil::intrusive_ptr<brpc::ProgressiveAttachment> attachment;
     };
 
     struct StreamingWritePolicy {

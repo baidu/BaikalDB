@@ -128,7 +128,7 @@ public:
         }
         return MessageHelper::set_value(field, _message, value);
     }
-
+/*
     // by_tag default true
     int set_default_value(const FieldInfo& field_info) {
         auto field = get_field_by_idx(field_info.pb_idx);
@@ -138,7 +138,7 @@ public:
         }
         return MessageHelper::set_value(field, _message, field_info.default_expr_value);
     }
-
+*/
     void clear_field(const FieldDescriptor* field);
 
     int get_reverse_word(IndexInfo& index_info, std::string& word);
@@ -269,4 +269,39 @@ private:
     Message* _message = nullptr;
     int64_t  _used_size = 0;
 };
+
+class BatchRecord {
+public:
+    BatchRecord() {
+        _batch.reserve(_capacity);
+    }
+    size_t size() {
+        return _batch.size();
+    }
+    void emplace_back(const SmartRecord& record) {
+        _batch.emplace_back(record);
+    }
+    SmartRecord& get_next() {
+        return _batch[_idx++];
+    }
+    bool is_full() {
+        return size() >= _capacity;
+    }
+    bool is_traverse_over() {
+        return _idx >= size();
+    }
+    void set_capacity(size_t capacity) {
+        _capacity = capacity;
+    }
+    void clear() {
+        _batch.clear();
+        _idx = 0;
+    }
+private:
+    size_t _idx = 0;
+    size_t _capacity = ROW_BATCH_CAPACITY;
+    std::vector<SmartRecord> _batch;
+    DISALLOW_COPY_AND_ASSIGN(BatchRecord);
+};
+
 }

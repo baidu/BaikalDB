@@ -25,6 +25,8 @@
 #include "common.h"
 
 namespace baikaldb {
+DECLARE_bool(need_verify_ddl_permission);
+DECLARE_bool(use_read_index);
 struct UserInfo {
 public:
     UserInfo() : query_count(0) {
@@ -99,6 +101,19 @@ public:
         return true;
     }
 
+    bool allow_ddl() {
+        if (!FLAGS_need_verify_ddl_permission) {
+            return true;
+        }
+        return ddl_permission;
+    }
+
+    bool need_use_read_index() {
+        if (!FLAGS_use_read_index) {
+            return false;
+        }
+        return use_read_index;
+    }
 public:
     std::string     username;
     std::string     password;
@@ -106,6 +121,7 @@ public:
 
     int64_t         namespace_id = 0;
     int64_t         version = 0;
+    int64_t         txn_lock_timeout = -1;
     uint8_t         scramble_password[20];
 
     TimeCost        query_cost;
@@ -114,6 +130,8 @@ public:
     uint32_t        cur_connection = 0;
     uint32_t        query_quota = 0;
     bool            need_auth_addr = false;
+    bool            ddl_permission = false;
+    bool            use_read_index = true; // 上线先默认true
 
     std::atomic<uint32_t>    query_count;
     std::map<int64_t, pb::RW> database;
@@ -121,5 +139,6 @@ public:
     // show databases使用
     std::set<int64_t> all_database;
     std::unordered_set<std::string> auth_ip_set;
+    std::string resource_tag;
 };
 } // namespace baikaldb

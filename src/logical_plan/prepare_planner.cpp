@@ -25,6 +25,7 @@
 #include "expr_optimizer.h"
 
 namespace baikaldb {
+DECLARE_string(log_plat_name);
 
 int PreparePlanner::plan() {
     auto client = _ctx->client_conn;
@@ -197,6 +198,12 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
         DB_WARNING("gen plan failed, type:%d", prepare_ctx->stmt_type);
         return -1;
     }
+    if (prepare_ctx->stat_info.sign == 0) {
+        int generate_sql_sign_ret = generate_sql_sign(prepare_ctx.get(), prepare_ctx->stmt);
+        if (generate_sql_sign_ret < 0) {
+            return -1;
+        }
+    }
     int ret = prepare_ctx->create_plan_tree();
     if (ret < 0) {
         DB_WARNING("Failed to pb_plan to execnode");
@@ -229,6 +236,10 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     }
 
     std::shared_ptr<QueryContext> prepare_ctx = iter->second;
+    _ctx->stat_info.family = prepare_ctx->stat_info.family;
+    _ctx->stat_info.table = prepare_ctx->stat_info.table;
+    _ctx->stat_info.sample_sql << prepare_ctx->stat_info.sample_sql.str();
+    _ctx->stat_info.sign = prepare_ctx->stat_info.sign;
     if (params.size() != prepare_ctx->placeholders.size()) {
         _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
         _ctx->stat_info.error_msg << "Incorrect arguments to EXECUTE: " 
@@ -242,6 +253,8 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
     _ctx->is_complex = prepare_ctx->is_complex;
     _ctx->mutable_tuple_descs()->assign(tuple_descs.begin(), tuple_descs.end());
+    _ctx->ref_slot_id_mapping.insert(prepare_ctx->ref_slot_id_mapping.begin(),
+                                     prepare_ctx->ref_slot_id_mapping.end());
     // TODO dml的plan复用
     if (!prepare_ctx->is_select) {
         // enable_2pc=true or table has global index need generate txn_id

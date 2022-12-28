@@ -275,6 +275,7 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
         auto task_id = std::to_string(region_ddl_info.table_id()) + "_" + std::to_string(region_ddl_info.region_id());
         auto retry_time = region_ddl_info.retry_time();
         region_ddl_info.set_retry_time(++retry_time);
+        region_ddl_info.set_address(address);
         CommonTaskMap map;
         map.to_do_task_map[task_id] = work;
         _common_task_map.init_if_not_exist_else_update(address, false, [&work, &task_id](CommonTaskMap& db_task_map){
