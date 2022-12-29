@@ -1665,8 +1665,13 @@ int Store::get_used_size_per_region(const std::vector<int64_t>& region_ids, uint
         return -1;
     }
     if (!ranges.empty() && approx_sizes.size() == ranges.size()) {
+#if ROCKSDB_MAJOR == 7
         _rocksdb->get_db()->GetApproximateSizes(data_cf, &ranges[0], ranges.size(), &approx_sizes[0], 
                 rocksdb::DB::SizeApproximationFlags::INCLUDE_MEMTABLES | rocksdb::DB::SizeApproximationFlags::INCLUDE_FILES);
+#else
+        _rocksdb->get_db()->GetApproximateSizes(data_cf, &ranges[0], ranges.size(), &approx_sizes[0], 
+                uint8_t(3));
+#endif
         size_t idx = 0;
         for (size_t i = 0; i < region_ids.size(); ++i) {
             if (region_sizes[i] == UINT64_MAX && idx < approx_sizes.size()) {
