@@ -18,6 +18,8 @@ namespace baikaldb {
 DEFINE_string(capture_namespace, "TEST_NAMESPACE", "capture_namespace");
 DEFINE_int64(capture_partition_id, 0, "capture_partition_id");
 DEFINE_string(capture_tables, "db.tb1;tb.tb2", "capture_tables");
+DEFINE_int64(max_cache_txn_num_per_region, 1000, "max_cache_txn_num_per_region");
+DEFINE_bool(capture_print_event, false, "capture_print_event");
 
 CaptureStatus FetchBinlog::run(int32_t fetch_num) {
     //TODO 退出机制
@@ -30,104 +32,74 @@ CaptureStatus FetchBinlog::run(int32_t fetch_num) {
             bthread_usleep(100 * 1000);
         }
         std::map<int64_t, pb::RegionInfo> region_map;
-        if (baikaldb::SchemaFactory::get_instance()->get_binlog_regions(_binlog_id, _partition_id, region_map) != 0 ||
-            region_map.size() == 0) {
-            DB_FATAL("table_id %ld partition %ld, get binlog regions error.", _binlog_id, _partition_id);
+        std::map<int64_t, int64_t> region_id_ts_map;
+        if (Capturer::get_instance()->get_binlog_regions(_binlog_id, region_map, region_id_ts_map, _commit_ts) != 0) {
+            DB_FATAL("table_id %ld partition %ld log_id %lu get binlog regions error.", _binlog_id, _partition_id, _log_id);
             return CS_FAIL;
         }
-
-        int32_t fetch_num_per_region = fetch_num / region_map.size();
 
         if (_wait_microsecs != 0 && tc.get_time() > _wait_microsecs) {
             DB_WARNING("timeout %lu", _log_id);
             return CS_EMPTY;
         }
-        DB_DEBUG("get table_id %ld partition %ld region size %lu log_id: %lu", 
-            _binlog_id, _partition_id, region_map.size(), _log_id);
         
         ConcurrencyBthread req_threads {(int)region_map.size(), &BTHREAD_ATTR_NORMAL};
         for (auto& region_info : region_map) {
-            DB_DEBUG("request region %ld for binlog data log_id[%lu].", 
-                region_info.second.region_id(), _log_id);
             if (_region_res.find(region_info.first) != _region_res.end()) {
-                DB_DEBUG("get region %ld result", region_info.second.region_id());
-            } else {
-                auto request_binlog_proc = [this, region_info, fetch_num_per_region, &ret]() -> int {
-                    int8_t less_then_oldest_ts_num = 0;
-                    pb::StoreReq request; 
-                    request.set_op_type(pb::OP_READ_BINLOG);
-                    request.set_region_id(region_info.second.region_id());
-                    request.set_region_version(region_info.second.version());
-                    auto binlog_ptr = request.mutable_binlog_desc();
-                    binlog_ptr->set_start_ts(_commit_ts);
-                    binlog_ptr->set_binlog_ts(_commit_ts);
-                    binlog_ptr->set_read_binlog_cnt(std::max(fetch_num_per_region, 1));
-                    DB_DEBUG("request %s logid %lu", request.ShortDebugString().c_str(), _log_id);
-                    auto request_binlog = [&request, &less_then_oldest_ts_num, this, &region_info](const std::string& peer) -> int{
-                        std::shared_ptr<pb::StoreRes> response(new pb::StoreRes);
-                        StoreInteract store_interact(peer);
-                        auto ret = store_interact.send_request_for_leader(_log_id, "query_binlog", request, *response.get());
-                        if (ret != 0) {
-                            if (response->errcode() == pb::LESS_THAN_OLDEST_TS) {
-                                DB_WARNING("less_then_oldest_ts %lu", _log_id);
-                                less_then_oldest_ts_num++;
-                            }
-                            DB_WARNING("region %ld get binlog error store %s log_id %lu.", 
-                                region_info.second.region_id(), peer.c_str(), _log_id);
-                            return -1;
-                        } else {
-                            //没有数据，继续请求
-                            if (response->binlogs_size() == 0) {
-                                DB_WARNING("region %ld no binlog data store %s log_id %lu.", 
-                                    region_info.second.region_id(), peer.c_str(), _log_id);
-                                return -2;
-                            } else {
-                                if (response->binlogs_size() != response->commit_ts_size()) {
-                                    DB_FATAL("binlog size != commit_ts size. log_id %lu", _log_id);
-                                    return -1;
-                                }
-                                DB_NOTICE("region %ld binlog data store %s log_id %lu size %d.", 
-                                    region_info.second.region_id(), peer.c_str(), _log_id, response->binlogs_size());
-                                DB_DEBUG("fetcher store data %s", response->DebugString().c_str());
-                                std::lock_guard<std::mutex> guard(_region_res_mutex);
-                                _region_res.emplace(region_info.first, response);
-                            }
-                        }
-                        return 0;
-                    };
-                    int no_data_num = 0;
-                    int rc = request_binlog(region_info.second.leader());
-                    if (rc == 0) {
-                        DB_NOTICE("request leader[%s] success %lu", region_info.second.leader().c_str(), _log_id);
-                        return 0;
-                    } else if (rc == -2) {
-                        ++no_data_num;
-                    }
-                    for (const auto& peer : region_info.second.peers()) {
-                        if (peer == region_info.second.leader()) {
-                            continue;
-                        }
-                        int rc = request_binlog(peer);
-                        if (rc == 0) {
-                            DB_DEBUG("request peer[%s] success %lu", peer.c_str(), _log_id);
-                            return 0;
-                        } else if (rc == -2) {
-                            ++no_data_num;
-                        }
-                    }
-
-                    if (less_then_oldest_ts_num == region_info.second.peers_size()) {
-                        DB_FATAL("all peer less then oldest ts logid %lu", _log_id);
-                        ret = CS_LESS_THEN_OLDEST;
-                    } else if (no_data_num == 0) {
-                        // 如果没有peer返回no data则说明全部失败
-                        DB_FATAL("all peer failed, logid %lu", _log_id);
-                        ret = CS_FAIL;
-                    }
+                continue;
+            } 
+            int64_t commit_ts = region_id_ts_map[region_info.first];
+            auto request_binlog_proc = [this, region_info, commit_ts, fetch_num, &ret]() -> int {
+                int less_then_oldest_ts_num = 0;
+                int no_data_num = 0;
+                std::shared_ptr<pb::StoreRes> response(new pb::StoreRes);
+                auto s = read_binlog(region_info.second, commit_ts, fetch_num, *response, region_info.second.leader());
+                if (s == CS_SUCCESS) {
+                    std::lock_guard<std::mutex> guard(_region_res_mutex);
+                    result << "[" << region_info.first << ", " << region_info.second.leader() << ", " << response->binlogs_size() << "]";
+                    _region_res.emplace(region_info.first, response);
                     return 0;
-                };
-                req_threads.run(request_binlog_proc);
-            }
+                } else if (s == CS_EMPTY) {
+                    // leader没数据，存在延迟的情况下读follower，否则follower也可能没数据
+                    time_t now = time(nullptr);
+                    uint32_t delay = std::max(0, (int)(now - tso::get_timestamp_internal(_commit_ts)));
+                    if (delay < 10) {
+                        return 0;
+                    }
+                    ++no_data_num;
+                } else if (s == CS_LESS_THEN_OLDEST) {
+                    ++less_then_oldest_ts_num;
+                }
+
+                for (const auto& peer : region_info.second.peers()) {
+                    if (peer == region_info.second.leader()) {
+                        continue;
+                    }
+                    response->Clear();
+                    s = read_binlog(region_info.second, commit_ts, fetch_num, *response, peer);
+                    if (s == CS_SUCCESS) {
+                        std::lock_guard<std::mutex> guard(_region_res_mutex);
+                        result << "[" << region_info.first << ", " << peer << ", " << response->binlogs_size() << "]";
+                        _region_res.emplace(region_info.first, response);
+                        return 0;
+                    } else if (s == CS_EMPTY) {
+                        ++no_data_num;
+                    } else if (s == CS_LESS_THEN_OLDEST) {
+                        ++less_then_oldest_ts_num;
+                    }
+                }
+
+                if (less_then_oldest_ts_num == region_info.second.peers_size()) {
+                    DB_FATAL("all peer less then oldest ts logid %lu", _log_id);
+                    ret = CS_LESS_THEN_OLDEST;
+                } else if (no_data_num == 0) {
+                    // 如果没有peer返回no data则说明全部失败
+                    DB_FATAL("all peer failed, logid %lu", _log_id);
+                    ret = CS_FAIL;
+                }
+                return 0;
+            };
+            req_threads.run(request_binlog_proc);
         }
         req_threads.join();
         if (ret == CS_LESS_THEN_OLDEST || ret == CS_FAIL) {
@@ -136,15 +108,49 @@ CaptureStatus FetchBinlog::run(int32_t fetch_num) {
         _is_finish = (_region_res.size() == region_map.size());
         first_request_flag = false;
     }
+    DB_DEBUG("fetch binlog %s log[%lu] time[%ld]", result.str().c_str(), _log_id, tc.get_time());
     return CS_SUCCESS;
 }
 
-CaptureStatus MergeBinlog::run(int64_t& commit_ts) {
+CaptureStatus FetchBinlog::read_binlog(const pb::RegionInfo& region_info, int64_t commit_ts, int fetch_num_per_region, pb::StoreRes& response, const std::string& peer) {
+    pb::StoreReq request; 
+    request.set_op_type(pb::OP_READ_BINLOG);
+    request.set_region_id(region_info.region_id());
+    request.set_region_version(region_info.version());
+    auto binlog_ptr = request.mutable_binlog_desc();
+    binlog_ptr->set_start_ts(commit_ts);
+    binlog_ptr->set_binlog_ts(commit_ts);
+    binlog_ptr->set_read_binlog_cnt(std::max(fetch_num_per_region, 1));
+    StoreInteract store_interact(peer);
+    auto ret = store_interact.send_request_for_leader(_log_id, "query_binlog", request, response);
+    if (ret != 0) {
+        if (response.errcode() == pb::LESS_THAN_OLDEST_TS) {
+            DB_WARNING("region %ld store %s less_then_oldest_ts log_id %lu", 
+                region_info.region_id(), peer.c_str(), _log_id);
+            return CS_LESS_THEN_OLDEST;
+        }
+        DB_WARNING("region %ld get binlog error store %s log_id %lu.", 
+            request.region_id(), peer.c_str(), _log_id);
+        return CS_FAIL;
+    } else {
+        if (response.binlogs_size() == 0) {
+            DB_WARNING("region %ld no binlog data store %s log_id %lu.", 
+                request.region_id(), peer.c_str(), _log_id);
+            return CS_EMPTY;
+        } else {
+            if (response.binlogs_size() != response.commit_ts_size()) {
+                DB_FATAL("binlog size != commit_ts size. log_id %lu", _log_id);
+                return CS_FAIL;
+            }
+        }
+    }
+    return CS_SUCCESS;
+}
+
+CaptureStatus MergeBinlog::run() {
     //获取所有region中的最小commit_ts
-    int64_t all_min_commit_ts = std::numeric_limits<long long>::max();
-    DB_DEBUG("merge size %lu", _fetcher_result.size());
+    baikaldb::TimeCost tc;
     for (auto& res_info : _fetcher_result) {
-        int64_t current_max_commit_ts = -1;
         auto region_id = res_info.first;
         size_t commit_ts_index = 0; 
         for (const auto& binlog : res_info.second->binlogs()) {
@@ -155,7 +161,6 @@ CaptureStatus MergeBinlog::run(int64_t& commit_ts) {
                 DB_FATAL("StoreReq ParseFromString error log_id %lu.", _log_id);
                 return CS_FAIL;
             }
-            DB_DEBUG("binlog str %s log_id %lu", store_req_ptr->ShortDebugString().c_str(), _log_id);
             if (store_req_ptr->has_binlog()) {
                 DB_DEBUG("get binlog type %d", int(store_req_ptr->binlog().type()));
                 if (store_req_ptr->binlog().has_prewrite_value()) {
@@ -164,56 +169,36 @@ CaptureStatus MergeBinlog::run(int64_t& commit_ts) {
                 } else {
                     DB_DEBUG("no mutations log_id %lu.", _log_id);
                 }
-                if (commit_ts > current_max_commit_ts) {
-                    current_max_commit_ts = commit_ts;
-                }
 
-                _binlogs_map[region_id].emplace_back(commit_ts, std::move(store_req_ptr));
+                Capturer::get_instance()->insert_binlog(region_id, commit_ts, store_req_ptr);
             }
         }
-        if (current_max_commit_ts < all_min_commit_ts) {
-            all_min_commit_ts = current_max_commit_ts;
-        }
     }
-    DB_NOTICE("after merge min_commit_ts[%lu] log_id[%lu]", all_min_commit_ts, _log_id);
+    
     //merge排序
-    for (auto binlog : _binlogs_map) {
-        auto& req_vector = binlog.second;
+    int64_t all_min_commit_ts = Capturer::get_instance()->merge_binlog(_queue);
+    consume_cnt = _queue.size();
+    DB_DEBUG("after merge min_commit_ts[%lu, %s] consume_cnt[%d] log_id[%lu] time[%ld]", 
+        all_min_commit_ts, ts_to_datetime_str(all_min_commit_ts).c_str(), consume_cnt, _log_id, tc.get_time());
 
-        for (const auto& req : req_vector) {
-            if (req.commit_ts <= all_min_commit_ts) {
-                DB_DEBUG("insert to queue commit_ts %ld", req.commit_ts);
-                _queue.push(req);
-            }
-        }
-    }
-    DB_NOTICE("after merge queue size %lu log_id %lu", _queue.size(), _log_id);
-
-    if (_queue.size() == 1) {
-        const auto store_req_ptr_commit = _queue.top();
-        auto& binlog = store_req_ptr_commit.req_ptr->binlog();
-        if (binlog.type() == pb::FAKE) {
-            commit_ts = store_req_ptr_commit.commit_ts;
-            DB_NOTICE("queue size[1], commit_ts[%ld] log_id[%lu] binlog type[FAKE]", commit_ts, _log_id);
-            return CS_EMPTY;
-        }
-    }
     return CS_SUCCESS;
 }
 
-int BinLogTransfer::init() {
+int BinLogTransfer::init(const std::map<int64_t, SubTableIds>& sub_table_ids) {
     //获取主键index_info
-    for (auto table_id : _origin_ids) {
-        //DB_NOTICE("config table id [%ld]", table_id);
-        auto& cap_info = _cap_infos[table_id];
+    for (const auto& ids : sub_table_ids) {
+        int64_t table_id = ids.first;
+        CapInfo& cap_info = _cap_infos[table_id];
 
+        cap_info.fields = ids.second.fields;
+        cap_info.monitor_fields = ids.second.monitor_fields;
         cap_info.table_info = baikaldb::SchemaFactory::get_instance()->get_table_info_ptr(table_id);
         if (cap_info.table_info == nullptr) {
             DB_FATAL("get table info error table_id %ld", table_id);
             return -1;
         }
-        for (const auto index_id : cap_info.table_info->indices) {
-            auto info_ptr = baikaldb::SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        for (int64_t index_id : cap_info.table_info->indices) {
+            SmartIndex info_ptr = baikaldb::SchemaFactory::get_instance()->get_index_info_ptr(index_id);
             if (info_ptr == nullptr) {
                 DB_FATAL("no index info found with index_id: %ld", index_id);
                 return -1;
@@ -222,7 +207,7 @@ int BinLogTransfer::init() {
                 cap_info.pri_info = *info_ptr;
             }
         }
-        const auto& db_info = baikaldb::SchemaFactory::get_instance()->get_database_info(cap_info.table_info->db_id);
+        const DatabaseInfo& db_info = baikaldb::SchemaFactory::get_instance()->get_database_info(cap_info.table_info->db_id);
         if (db_info.id == -1) {
             DB_FATAL("get database info error.");
             return -1;
@@ -244,30 +229,41 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
     int64_t insert_size = 0;
     int64_t delete_size = 0;
     int64_t update_size = 0;
+    baikaldb::TimeCost tc;
     while (!_queue.empty()) {
         const auto store_req_ptr_commit = _queue.top();
         auto& binlog = store_req_ptr_commit.req_ptr->binlog();
         commit_ts = store_req_ptr_commit.commit_ts;
         DB_DEBUG("get binlog commit_ts[%ld] logid[%lu]", commit_ts, _log_id);
+        if (binlog.type() == pb::FAKE) {
+            make_heartbeat_message(binlog.commit_ts());
+            _queue.pop();
+            fake_cnt++;
+            continue;
+        }
         auto partition_key = binlog.partition_key();
         for (const auto& mutation : binlog.prewrite_value().mutations()) {
             RecordCollection records;
             int64_t table_id = mutation.table_id();
-
             if (_cap_infos.count(table_id) == 0) {
+                table_filter_cnt++;
                 DB_DEBUG("table_id[%ld] is filter.", table_id);
                 continue;
             }
             if (_two_way_sync != nullptr) {
-                auto& cap_info = _cap_infos[table_id];
+                CapInfo& cap_info = _cap_infos[table_id];
                 if (_two_way_sync->two_way_sync_table_name == cap_info.db_name + "." + cap_info.table_info->short_name) {
                     //DB_NOTICE("table %s filter", _two_way_sync->two_way_sync_table_name.c_str());
+                    two_way_sync_filter_txn_cnt++;
                     break;
                 }
             }
             if (transfer_mutation(mutation, records) != 0) {
                 DB_FATAL("transfer mutation error.");
                 return -1;
+            }
+            if (FLAGS_capture_print_event) {
+                DB_NOTICE("commit_ts: %ld, insert_cnt: %d, delete_cnt: %d", commit_ts, mutation.insert_rows_size(), mutation.deleted_rows_size());
             }
             DB_DEBUG("after trans insert %lu delete %lu", 
                 records.insert_records.size(), records.delete_records.size());
@@ -292,45 +288,149 @@ int64_t BinLogTransfer::run(int64_t& commit_ts) {
         }
         _queue.pop();
     }
-    DB_NOTICE("binlog result insert[%ld] delete[%ld] update[%ld] log[%lu]", 
-        insert_size, delete_size, update_size, _log_id);
+
+    DB_DEBUG("binlog transfer result table_filter_cnt[%ld] two_way_sync_filter_txn_cnt[%ld] fake_cnt[%ld] "
+        "insert[%ld] delete[%ld] update[%ld] log[%lu] time[%ld]", 
+        table_filter_cnt, two_way_sync_filter_txn_cnt, fake_cnt, insert_size, delete_size, update_size, 
+        _log_id, tc.get_time());
     return 0;
 }
+
+void BinLogTransfer::make_heartbeat_message(int64_t fake_ts) {
+    uint32_t now_timestamp = tso::get_timestamp_internal(fake_ts);
+    std::string timestamp_str = std::to_string(now_timestamp);
+
+    std::shared_ptr<mysub::Event> event = std::make_shared<mysub::Event>();
+    event->set_db("baidu_dba");
+    event->set_table("heartbeat");
+    event->set_host("");
+    event->set_port(0);
+    event->set_timestamp(now_timestamp);
+    event->set_event_type(mysub::EventType(0));
+    event->set_shard(_partition_id);
+
+    mysub::Row* row = event->mutable_row();
+    if (row == NULL) {
+        return;
+    }
+    mysub::Field* field1 = row->add_field();
+    if (field1 == NULL) {
+        return;
+    }
+    field1->set_name("id");
+    field1->set_mysql_type(mysub::MYSQL_TYPE_VARCHAR);
+    field1->set_is_signed(false);
+    field1->set_is_pk(true);
+    field1->set_new_value(std::to_string(_partition_id));
+    field1->set_old_value(std::to_string(_partition_id));
+
+    mysub::Field* field2 = row->add_field();
+    if (field2 == NULL) {
+        return;
+    }
+    field2->set_name("value");
+    field2->set_mysql_type(mysub::MYSQL_TYPE_VARCHAR);
+    field2->set_is_signed(false);
+    field2->set_is_pk(false);
+    field2->set_new_value(timestamp_str);
+    field2->set_old_value(timestamp_str);
+
+    _event_vec.push_back(std::move(event));
+    return;
+}
+
 int BinLogTransfer::multi_records_update_to_event(const UpdatePairVec& update_records, int64_t commit_ts, int64_t table_id, uint64_t partition_key) {
     for (const auto& record : update_records) {
-        std::shared_ptr<mysub::Event> event(new mysub::Event);
         auto delete_insert_records = std::make_pair(
             record.first.get(),
             record.second.get()
             );
-        if (single_record_to_event(event.get(), delete_insert_records, mysub::UPDATE_EVENT, commit_ts, table_id, partition_key) !=0) {
+        if (single_record_to_event(delete_insert_records, mysub::UPDATE_EVENT, commit_ts, table_id, partition_key) !=0) {
             DB_WARNING("insert update record error.");
             return -1;
         }
-        _event_vec.push_back(std::move(event));
     }
     return 0;
 }
 
 int BinLogTransfer::multi_records_to_event(const RecordMap& records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id, uint64_t partition_key) {
     for (const auto& record : records) {
-        std::shared_ptr<mysub::Event> event(new mysub::Event);
         auto delete_insert_records = std::make_pair(
             event_type == mysub::DELETE_EVENT ? record.second.get() : nullptr,
             event_type == mysub::INSERT_EVENT ? record.second.get() : nullptr
             );
-        if (single_record_to_event(event.get(), delete_insert_records, event_type, commit_ts, table_id, partition_key) != 0) {
+        if (single_record_to_event(delete_insert_records, event_type, commit_ts, table_id, partition_key) != 0) {
             DB_WARNING("insert/delete  record error.");
             return -1;
         }
-        _event_vec.push_back(std::move(event));
     }
     return 0;
 }
 
-int BinLogTransfer::single_record_to_event(mysub::Event* event, 
-    const std::pair<TableRecord*, TableRecord*>& delete_insert_records, mysub::EventType event_type, int64_t commit_ts, int64_t table_id, uint64_t partition_key) {
-    auto& cap_info = _cap_infos[table_id];
+void print_event(int64_t commit_ts, const std::shared_ptr<mysub::Event>& event) {
+    bool has_diff = false;
+    std::string fields = "(";
+    std::string diff_fields = "(";
+    std::string values = "(";
+    std::string diff_new_values = "(";
+    std::string old_values = "(";
+    std::string diff_old_values = "(";
+    for (auto& field : event->row().field()) {
+        fields += field.name() + ",";
+        values += field.new_value() + ",";
+        old_values += field.old_value() + ",";
+        if (field.is_new_null() != field.is_old_null() || field.new_value() != field.old_value()) {
+            diff_fields += field.name() + ",";
+            diff_new_values += field.new_value() + ",";
+            diff_old_values += field.old_value() + ",";
+            has_diff = true;
+        }
+    }
+    fields.pop_back();
+    fields += ")";
+    values.pop_back();
+    values += ")";
+    old_values.pop_back();
+    old_values += ")";
+    diff_fields.pop_back();
+    diff_fields += ")";
+    diff_new_values.pop_back();
+    diff_new_values += ")";
+    diff_old_values.pop_back();
+    diff_old_values += ")";
+    std::string ts = baikaldb::timestamp_to_str(event->timestamp());
+    switch (event->event_type())
+    {
+    case mysub::INSERT_EVENT: {
+        DB_NOTICE("table %s.%s event_timestamp: %s commit_ts: %ld insert rows:%s - %s old_values:%s", event->db().c_str(),
+            event->table().c_str(), ts.c_str(), commit_ts, fields.c_str(), values.c_str(), old_values.c_str());
+        break;
+    }
+    case mysub::DELETE_EVENT: {
+        DB_NOTICE("table %s.%s event_timestamp: %s commit_ts: %ld delete rows:%s - %s old_values:%s", event->db().c_str(),
+            event->table().c_str(), ts.c_str(), commit_ts, fields.c_str(), values.c_str(), old_values.c_str());
+        break;
+    }
+    case mysub::UPDATE_EVENT: {
+        if (!has_diff) {
+            DB_NOTICE("table %s.%s event_timestamp: %s commit_ts: %ld update rows:%s - %s old_values:%s no diff", event->db().c_str(),
+                event->table().c_str(), ts.c_str(), commit_ts, fields.c_str(), values.c_str(), old_values.c_str());
+        } else {
+            DB_NOTICE("table %s.%s event_timestamp: %s commit_ts: %ld update rows:%s - %s old_values:%s diff_fields: %s, "
+                "diff_new_values: %s, diff_old_values: %s", event->db().c_str(), event->table().c_str(), ts.c_str(), commit_ts, 
+                fields.c_str(), values.c_str(), old_values.c_str(), diff_fields.c_str(), diff_new_values.c_str(), diff_old_values.c_str());
+        }
+        break;
+    }
+    default:
+        break;
+    }     
+}
+
+int BinLogTransfer::single_record_to_event(const std::pair<TableRecord*, TableRecord*>& delete_insert_records, 
+        mysub::EventType event_type, int64_t commit_ts, int64_t table_id, uint64_t partition_key) {
+    std::shared_ptr<mysub::Event> event(new mysub::Event);
+    CapInfo& cap_info = _cap_infos[table_id];
     auto delete_record = delete_insert_records.first;
     auto insert_record = delete_insert_records.second;
     event->set_db(cap_info.db_name);
@@ -340,9 +440,12 @@ int BinLogTransfer::single_record_to_event(mysub::Event* event,
     event->set_timestamp(tso::get_timestamp_internal(commit_ts));
     event->set_charset(cap_info.table_info->charset == pb::UTF8 ? "utf8" : "gbk");
     event->set_partition_key(partition_key);
+    event->set_shard(_partition_id);
     auto row_iter = event->mutable_row();
+    bool update_need_sub = false;
     for (const auto& field : cap_info.table_info->fields) {
-        auto field_iter = row_iter->add_field();
+        mysub::Field tmp_field;
+        auto field_iter = &tmp_field;//row_iter->add_field();
         field_iter->set_name(field.short_name.c_str());
         field_iter->set_mysql_type(mysub::MysqlType(to_mysql_type(field.type)));
         field_iter->set_is_signed(cap_info.signed_map[field.id]);
@@ -365,6 +468,28 @@ int BinLogTransfer::single_record_to_event(mysub::Event* event,
             }
             field_iter->set_is_old_null(is_null);
         }
+
+        if (event_type == mysub::UPDATE_EVENT && !update_need_sub && 
+                (cap_info.monitor_fields.count(field.id) > 0 || cap_info.monitor_fields.empty())) {
+            if (field_iter->is_new_null() != field_iter->is_old_null() || field_iter->new_value() != field_iter->old_value()) {
+                update_need_sub = true;
+            }
+        }
+        if (cap_info.fields.empty() || cap_info.fields.count(field.id) > 0) {
+            auto f = row_iter->add_field();
+            f->Swap(field_iter);
+        }
+
+    }
+    if (FLAGS_capture_print_event) {
+        // capturer tool订阅时不过滤update
+        print_event(commit_ts, event);
+    }
+    if (event_type != mysub::UPDATE_EVENT || update_need_sub) {
+        _event_vec.push_back(std::move(event));
+    }
+    if (event_type == mysub::UPDATE_EVENT && !update_need_sub) {
+        monitor_fields_filter_cnt++;
     }
     DB_DEBUG("event str %s log_id[%lu] commit_ts[%ld]", 
         event->ShortDebugString().c_str(), _log_id, commit_ts);
@@ -383,7 +508,7 @@ void BinLogTransfer::group_records(RecordCollection& records) {
                 insert_iter->second
             );
             delete_records.erase(delete_iter);
-            insert_records.erase(insert_iter++);
+            insert_iter = insert_records.erase(insert_iter);
         } else {
             insert_iter++;
         }
@@ -424,13 +549,32 @@ int Capturer::init(Json::Value& config) {
     _namespace = config["namespace"].asString();
     FLAGS_meta_server_bns = config["bns"].asString();
     _partition_id = config["db_shard"].asInt64();
+    std::map<std::string, SubTableNames> table_infos;
     if (config.isMember("table_names") && config["table_names"].isArray()) {
         for (const auto& table_info : config["table_names"]) {
             if (!table_info.isMember("name")) {
                 DB_FATAL("config table info error.");
                 return -1;
             }
-            _table_infos.push_back(table_info["name"].asString());
+            SubTableNames& info = table_infos[table_info["name"].asString()];
+            info.table_name = table_info["name"].asString();
+            bool is_monitor = false;
+            if (table_info.isMember("monitor_fields")) {
+                is_monitor = true;
+            }
+            if (table_info["fields"].isArray()) {
+                for (auto& field : table_info["fields"]) {
+                    info.fields.insert(field.asString());
+                    if (!is_monitor) {
+                        info.monitor_fields.insert(field.asString());
+                    }
+                }
+            }
+            if (is_monitor && table_info["monitor_fields"].isArray()) {
+                for (auto& field : table_info["monitor_fields"]) {
+                    info.monitor_fields.insert(field.asString());
+                }
+            }
         }
     }
     if (config.isMember("event_filter")) {
@@ -442,7 +586,7 @@ int Capturer::init(Json::Value& config) {
             }
         }
     }
-    return init_binlog();
+    return init_binlog(table_infos);
 }
 #endif
 int Capturer::init() {
@@ -451,27 +595,25 @@ int Capturer::init() {
     std::vector<std::string> split_vec;
     boost::split(split_vec, FLAGS_capture_tables,
             boost::is_any_of(";"), boost::token_compress_on);
+    std::map<std::string, SubTableNames> table_infos;
     for (const auto& tb : split_vec) {
-        _table_infos.push_back(tb);
+        SubTableNames& info = table_infos[tb];
+        info.table_name = tb;
     }
-    return init_binlog();
+    return init_binlog(table_infos);
 }
 
-int Capturer::init_binlog() {
+int Capturer::init_binlog(const std::map<std::string, SubTableNames>& table_infos) {
     if (baikaldb::init_log("baikal_capture") != 0) {
         fprintf(stderr, "log init failed.");
     }
-    DB_WARNING("log file load success");
 
     if (baikaldb::SchemaFactory::get_instance()->init() != 0) {
         DB_FATAL("SchemaFactory init failed");
         return -1;
     } 
 
-    for (const auto& table_info : _table_infos) {
-        DB_NOTICE("config namespace[%s] table[%s]", _namespace.c_str(), table_info.c_str());
-        BinlogNetworkServer::get_instance()->config(_namespace, table_info);
-    }
+    BinlogNetworkServer::get_instance()->config(_namespace, table_infos);
 
     if (baikaldb::MetaServerInteract::get_instance()->init() != 0) {
         DB_FATAL("meta server interact init failed");
@@ -484,7 +626,8 @@ int Capturer::init_binlog() {
     }
 
     _binlog_id = server->get_binlog_target_id();
-    _origin_ids = server->get_binlog_origin_ids();
+    DB_NOTICE("binlog_id: %ld", _binlog_id);
+
     server->schema_heartbeat();
     _schema_factory = baikaldb::SchemaFactory::get_instance();
     return 0;
@@ -508,26 +651,23 @@ CaptureStatus Capturer::subscribe(std::vector<std::shared_ptr<mysub::Event>>& ev
     FetchBinlog fetcher(log_id, wait_microsecs, commit_ts, _binlog_id, _partition_id);
     ret = fetcher.run(fetch_num);
     if (ret != CS_SUCCESS) {
-        DB_NOTICE("fetcher binlog error. commit_ts[%ld] time[%ld] log[%lu]",
-            commit_ts, tc.get_time(), log_id);
+        DB_NOTICE("fetcher binlog error. commit_ts[%ld] commit_timestamp[%s] time[%ld] log[%lu]",
+            commit_ts, ts_to_datetime_str(commit_ts).c_str(), tc.get_time(), log_id);
         return ret;
     }
     
-    DB_NOTICE("fetcher binlog table_id[%ld] partition_id[%ld] commit_ts[%ld] time[%ld] log[%lu]",
-        _binlog_id, _partition_id, commit_ts, tc.get_time(), log_id);
-    
     //merge
     MergeBinlog merger(fetcher.get_result(), log_id);
-    auto merge_status = merger.run(commit_ts);
+    auto merge_status = merger.run();
     if (merge_status != CS_SUCCESS) {
-        DB_NOTICE("merger binlog table_id[%ld] partition_id[%ld] commit_ts[%ld] time[%ld] log[%lu]",
-            _binlog_id, _partition_id, commit_ts, tc.get_time(), log_id);
+        DB_NOTICE("merger binlog table_id[%ld] partition_id[%ld] commit_ts[%ld] commit_timestamp[%s] time[%ld] log[%lu]",
+            _binlog_id, _partition_id, commit_ts, ts_to_datetime_str(commit_ts).c_str(), tc.get_time(), log_id);
         return merge_status;
     }
 
-    BinLogTransfer transfer(_binlog_id, merger.get_result(), event_vec, _origin_ids, log_id, get_two_way_sync());
-    if (transfer.init() != 0) {
-        DB_FATAL("BinLogTransfer error %ld return commit_ts %ld.", log_id, commit_ts);
+    BinLogTransfer transfer(_binlog_id, merger.get_result(), event_vec, log_id, get_two_way_sync(), _partition_id);
+    if (transfer.init(BinlogNetworkServer::get_instance()->get_table_ids()) != 0) {
+        DB_FATAL("BinLogTransfer error [%ld] return commit_ts [%ld] return commit_timestamp [%s]", log_id, commit_ts, ts_to_datetime_str(commit_ts).c_str());
         return CS_FAIL;
     }
     if (transfer.run(commit_ts) != 0) {
@@ -536,7 +676,100 @@ CaptureStatus Capturer::subscribe(std::vector<std::shared_ptr<mysub::Event>>& ev
         event_vec.clear();
         return CS_FAIL;
     }
-    DB_NOTICE("return success request_commit_ts[%ld] response_commit_ts[%ld]", tmp_commit_ts, commit_ts);
+    if (commit_ts < tmp_commit_ts) {
+        commit_ts = tmp_commit_ts;
+        event_vec.clear();
+        return CS_FAIL;
+    }
+    auto capturer = Capturer::get_instance();
+    capturer->update_commit_ts(commit_ts);
+    time_t now = time(nullptr);
+    uint32_t delay = std::max(0, (int)(now - tso::get_timestamp_internal(commit_ts)));
+    DB_NOTICE("subscribe success binlog table_id[%ld] partition_id[%ld] need_fetch_num[%d] wait_microsecs[%ld] fetcher: %s "
+        "merger: consume_cnt[%d] remain %s transfer: fake_cnt[%ld] table_filter[%ld] 2way_filter[%ld] monitor_filter[%ld] "
+        "event_cnt[%ld] request_ts[%ld, %s] response_ts[%ld, %s] delay[%u]s log_id[%lu] time_cost[%ld] us", _binlog_id, 
+        _partition_id, fetch_num, wait_microsecs, fetcher.result.str().c_str(), merger.consume_cnt, capturer->remain_info().c_str(), transfer.fake_cnt, 
+        transfer.table_filter_cnt, transfer.two_way_sync_filter_txn_cnt, transfer.monitor_fields_filter_cnt, event_vec.size(), tmp_commit_ts, 
+        ts_to_datetime_str(tmp_commit_ts).c_str(), commit_ts, ts_to_datetime_str(commit_ts).c_str(), delay, log_id, tc.get_time());
     return ret;
 }
+
+int Capturer::get_binlog_regions(int64_t binlog_id, std::map<int64_t, pb::RegionInfo>& region_map, std::map<int64_t, int64_t>& region_id_ts_map, int64_t commit_ts) {
+    region_map.clear();
+    region_id_ts_map.clear();
+    if (baikaldb::SchemaFactory::get_instance()->get_binlog_regions(binlog_id, _partition_id, region_map) != 0 ||
+        region_map.size() == 0) {
+        DB_FATAL("table_id %ld, %ld partition %ld get binlog regions error.", binlog_id, _binlog_id, _partition_id);
+        return -1;
+    }
+
+    if (commit_ts != _last_commit_ts) {
+        _region_binlogs_map.clear();
+        _last_commit_ts = commit_ts;
+        for (const auto& iter : region_map) {
+            region_id_ts_map[iter.first] = _last_commit_ts;
+        }
+        return 0;
+    }
+
+    auto region_info_iter = region_map.begin();
+    while (region_info_iter != region_map.end()) {
+        if (_skip_regions.count(region_info_iter->first) > 0) {
+            region_map.erase(region_info_iter++);
+            continue;
+        }
+        auto& ts_binlog_map = _region_binlogs_map[region_info_iter->first];
+        if (ts_binlog_map.size() > FLAGS_max_cache_txn_num_per_region) {
+            // 避免等待某个region时其他region过快
+            region_map.erase(region_info_iter++);
+        } else if (ts_binlog_map.size() == 0) {
+            region_id_ts_map[region_info_iter->first] = _last_commit_ts;
+            region_info_iter++;
+        } else {
+            region_id_ts_map[region_info_iter->first] = ts_binlog_map.rbegin()->first;
+            region_info_iter++;
+        }
+    }
+
+    return 0;
+}
+
+int64_t Capturer::merge_binlog(BinLogPriorityQueue& queue) {
+    int64_t all_min_commit_ts = std::numeric_limits<long long>::max();
+    for (const auto& iter : _region_binlogs_map) {
+        if (iter.second.empty()) {
+            return _last_commit_ts;
+        }
+
+        all_min_commit_ts = std::min(all_min_commit_ts, iter.second.rbegin()->first);
+    }
+
+    for (const auto& iter : _region_binlogs_map) {
+        for (const auto& ts_binlog : iter.second) {
+            if (ts_binlog.first <= all_min_commit_ts) {
+                queue.push(StoreReqWithCommit(ts_binlog.first, ts_binlog.second));
+            } else {
+                break;
+            }
+        }
+    }
+
+    return all_min_commit_ts;
+}
+
+void Capturer::update_commit_ts(int64_t commit_ts) {
+    for (auto& iter : _region_binlogs_map) {
+        auto ts_binlog_iter = iter.second.begin();
+        while (ts_binlog_iter != iter.second.end()) {
+            if (ts_binlog_iter->first <= commit_ts) {
+                iter.second.erase(ts_binlog_iter++);
+            } else {
+                break;
+            }
+        }
+    }
+
+    _last_commit_ts = commit_ts;
+}
+
 }
