@@ -43,7 +43,7 @@ int Iconv::utf8_to_gbk(const char* psrc, const size_t nsrc, std::string& dst) {
     }
     dst.resize(nsrc + 1);
 
-    const char* inbuf     = psrc;
+    char* inbuf     = const_cast<char*>(psrc);
     size_t in_bytes_left  = nsrc;
     char* outbuf          = &dst[0];
     size_t out_bytes_left = dst.size();
@@ -73,7 +73,7 @@ int Iconv::gbk_to_utf8(const char* psrc, const size_t nsrc, std::string& dst) {
     }
     dst.resize(nsrc / 2 * 3 + 1);
 
-    const char* inbuf     = psrc;
+    char* inbuf     = const_cast<char*>(psrc);
     size_t in_bytes_left  = nsrc;
     char* outbuf          = &dst[0];
     size_t out_bytes_left = dst.size();
