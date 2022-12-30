@@ -47,7 +47,7 @@ enum NodeMode {
      * 分裂packet
      */
     int analyze(QueryContext* ctx);
-    TransactionNode* create_txn_node(pb::TxnCmdType cmd_type);
+    TransactionNode* create_txn_node(pb::TxnCmdType cmd_type, int64_t txn_lock_timeout = -1);
 
 private:
     int separate_union(QueryContext* ctx);
@@ -57,7 +57,7 @@ private:
     int separate_delete(QueryContext* ctx);
 
     template<typename T>
-    int separate_single_txn(T* node, pb::OpType op_type);
+    int separate_single_txn(QueryContext* ctx, T* node, pb::OpType op_type);
 
     int separate_truncate(QueryContext* ctx);
     int separate_kill(QueryContext* ctx);

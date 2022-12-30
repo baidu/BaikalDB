@@ -161,6 +161,7 @@ int SchemaFactory::update_idc_internal(IdcMapping& idc_mapping, const pb::IdcInf
             continue;
         }
         tmp_map[address].logical_room = iter->second;
+        tmp_map[address].resource_tag = instance.resource_tag();
         idc_mapping.instance_info_mapping[address] = tmp_map[address];
     }
     return 1;
@@ -199,9 +200,11 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
     auto& tbl_info = *tbl_info_ptr;
     std::string full_name = try_to_lower(tbl_info.namespace_ + "." + tbl_info.name);
     DB_WARNING("full_name: %s, %ld", full_name.c_str(), table_name_id_mapping.size());
-    table_name_id_mapping.erase(full_name);
-    DB_WARNING("full_name deleted: %ld", table_name_id_mapping.size());
-
+    auto full_name_iter = table_name_id_mapping.find(full_name);
+    if (full_name_iter != table_name_id_mapping.end() && full_name_iter->second == table_id) {
+        table_name_id_mapping.erase(full_name);
+        DB_WARNING("full_name deleted: %ld", table_name_id_mapping.size());
+    }
     for (auto index_id : tbl_info.indices) {
         global_index_id_mapping.erase(index_id);
         if (index_info_mapping.count(index_id) == 0) {
@@ -211,8 +214,11 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
         std::string full_idx_name = tbl_info.namespace_ + "." + idx_info.name;
         DB_WARNING("full_idx_name: %s, %ld", full_idx_name.c_str(), 
             index_name_id_mapping.size());
-        index_name_id_mapping.erase(full_idx_name);
-        DB_WARNING("full_idx_name deleted: %ld", index_name_id_mapping.size());
+        auto idx_name_iter = index_name_id_mapping.find(full_idx_name);
+        if (idx_name_iter != index_name_id_mapping.end() && idx_name_iter->second == index_id) {
+            index_name_id_mapping.erase(full_idx_name);
+            DB_WARNING("full_idx_name deleted: %ld", index_name_id_mapping.size());
+        }
         index_info_mapping.erase(index_id);
     }
 
@@ -293,7 +299,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         // need not  update when version GE
         if (tbl_info.version >= table.version()) {
             //DB_WARNING("need not  update, orgin version:%ld, new version:%ld, table_id:%ld", 
-                    //tbl_info.version, table.version(), table_id);
+            //tbl_info.version, table.version(), table_id);
             return 0;
         }
         //old_tbl_name = tbl_info.name;
@@ -378,29 +384,20 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 DB_DEBUG("sign_str: %s", sign_str.c_str());
             }
         }
-    }
-
-    if (table.partition_num() > 1 && table.has_partition_info()) {
-        DB_NOTICE("update partition info table_%ld table_info[%s].", table_id, 
-            table.ShortDebugString().c_str());
-        tbl_info.partition_info.CopyFrom(table.partition_info());
-        if (table.partition_info().type() == pb::PT_RANGE) {
-            tbl_info.partition_ptr.reset(new RangePartition);
-            if (tbl_info.partition_ptr->init(table.partition_info(), table_id, table.partition_num()) != 0) {
-                DB_WARNING("init RangePartition error.");
-                return -1;
+        if (tbl_info.schema_conf.has_sign_forceindex() && tbl_info.schema_conf.sign_forceindex() != "") {
+            DB_DEBUG("sign_forceindex: %s",
+                    tbl_info.schema_conf.sign_forceindex().c_str());
+            std::vector<std::string> vec;
+            boost::split(vec,
+                    tbl_info.schema_conf.sign_forceindex(),
+                    boost::is_any_of(","));
+            for (auto& sign_str : vec) {
+                tbl_info.sign_forceindex.emplace(sign_str);
+                DB_DEBUG("sign_str: %s", sign_str.c_str());
             }
-        } else if (table.partition_info().type() == pb::PT_HASH) {
-            tbl_info.partition_ptr.reset(new HashPartition);
-            if (tbl_info.partition_ptr->init(table.partition_info(), table_id, table.partition_num()) != 0) {
-                DB_WARNING("init HashPartition error.");
-                return -1;
-            }
-        } else {
-            DB_WARNING("unknown partition type.");
-            return -1;
         }
     }
+
     tbl_info.link_field.clear();
     tbl_info.version = table.version();
     tbl_info.name = _db_name + "." + _tbl_name;
@@ -460,7 +457,9 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     }
     for (auto& dist : table.dists()) {
         DistInfo dist_info;
+        dist_info.resource_tag = dist.resource_tag();
         dist_info.logical_room = dist.logical_room();
+        dist_info.physical_room = dist.physical_room();
         dist_info.count = dist.count();
         tbl_info.dists.push_back(dist_info);
     }
@@ -561,12 +560,33 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.fields.push_back(field_info);
         //DB_WARNING("field_name:%s, field_id:%d", field_info.name.c_str(), field_info.id);
     }
+    tbl_info.is_binlog = (table.engine() == pb::BINLOG);
     bool pb_need_update = tbl_info.fields_sign != new_fields_sign.str();
     DB_NOTICE("double_buffer_write pb_need_update:%d, old:%s new:%s table:%s ", pb_need_update,
             tbl_info.fields_sign.c_str(), new_fields_sign.str().c_str(), table.ShortDebugString().c_str());
     tbl_info.fields_sign = new_fields_sign.str();
 
-
+    if (table.partition_num() > 1 && table.has_partition_info()) {
+        DB_NOTICE("update partition info table_%ld table_info[%s].", table_id, 
+            table.ShortDebugString().c_str());
+        tbl_info.partition_info.CopyFrom(table.partition_info());
+        if (table.partition_info().type() == pb::PT_RANGE) {
+            tbl_info.partition_ptr.reset(new RangePartition);
+            if (tbl_info.partition_ptr->init(table.partition_info(), tbl_info_ptr, table.partition_num()) != 0) {
+                DB_WARNING("init RangePartition error.");
+                return -1;
+            }
+        } else if (table.partition_info().type() == pb::PT_HASH) {
+            tbl_info.partition_ptr.reset(new HashPartition);
+            if (tbl_info.partition_ptr->init(table.partition_info(), tbl_info_ptr, table.partition_num()) != 0) {
+                DB_WARNING("init HashPartition error.");
+                return -1;
+            }
+        } else {
+            DB_WARNING("unknown partition type.");
+            return -1;
+        }
+    }
     if (pb_need_update) {
         const FileDescriptor* db_desc = tmp_pool->BuildFile(*tbl_info.file_proto);
         if (db_desc == nullptr) {
@@ -692,6 +712,9 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     IndexInfo& idx_info = *idx_info_ptr;
     if (index.is_global()) {
         idx_info.is_global = true;
+    }
+    if (index.index_type() == pb::I_PRIMARY || index.is_global()) {
+        idx_info.is_partitioned = table_info.partition_num > 1;
     }
     idx_info.version = table_info.version;
     idx_info.pk   = table_info.id;
@@ -945,10 +968,7 @@ void SchemaFactory::update_region(TableRegionPtr table_region_ptr,
     key_reg_map.insert(std::make_pair(region.start_key(), region.region_id()));
 
     table_region_ptr->insert_region_info(region);
-    DB_DEBUG("region_id: %ld ver:%ld key:(%s, %s), update success", 
-               region.region_id(), region.version(), 
-               str_to_hex(region.start_key()).c_str(), 
-               str_to_hex(region.end_key()).c_str());
+    DB_DEBUG("region_id: %ld %s update success", region.region_id(), region.ShortDebugString().c_str());
 }
 void SchemaFactory::clear_region(TableRegionPtr table_region_ptr, 
                                  std::map<std::string, int64_t>& clear_regions, int64_t partition) {
@@ -1165,6 +1185,7 @@ void SchemaFactory::update_leader(const pb::RegionInfo& region) {
 void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     const std::string& username = user.username();
     const std::string& password = user.password();
+    std::unordered_set<std::string> last_auth_ip_set;
     {
         DoubleBufferedUser::ScopedPtr ptr;
         if (_user_info_mapping.Read(&ptr) != 0) {
@@ -1172,10 +1193,21 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
             return ; 
         }
         auto iter = ptr->find(username);
-        if (iter != ptr->end() && !user.need_auth_addr()) {
-            // need not update when version GE
-            if (iter->second->version >= user.version()) {
-                return;
+        if (iter != ptr->end()) {
+            if (!user.need_auth_addr()) {
+                // need not update when version GE
+                if (iter->second->version >= user.version()) {
+                    return;
+                }
+                // 更新权限，本结构为链接长期持有，频繁多次更新时并不能找到所有的user_info
+                if (user.has_ddl_permission()) {
+                    iter->second->ddl_permission = user.ddl_permission();
+                }
+            } else {
+                last_auth_ip_set = iter->second->auth_ip_set;
+            }
+            if (user.has_use_read_index()) {
+                iter->second->use_read_index = user.use_read_index();
             }
         }
     }
@@ -1183,6 +1215,13 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     std::shared_ptr<UserInfo> user_info(new (std::nothrow)UserInfo);
     user_info->username = username;
     user_info->password = password;
+    user_info->resource_tag = user.resource_tag();
+    if (user.has_ddl_permission()) {
+        user_info->ddl_permission = user.ddl_permission();
+    }
+    if (user.has_use_read_index()) {
+        user_info->use_read_index = user.use_read_index();
+    }
     scramble(user_info->scramble_password,
         ("\x26\x4f\x37\x58"
         "\x43\x7a\x6c\x53"
@@ -1193,7 +1232,9 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     user_info->namespace_ = user.namespace_name();
     user_info->namespace_id = user.namespace_id();
     user_info->version = user.version();
-
+    if (user.has_txn_lock_timeout()) {
+        user_info->txn_lock_timeout = user.txn_lock_timeout();
+    }
     uint32_t db_cnt  = user.privilege_database_size();
     uint32_t tbl_cnt = user.privilege_table_size();
 
@@ -1216,15 +1257,24 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
             boost::trim(ip);
             user_info->auth_ip_set.insert(ip);
         }
+        bool bns_error = false;
         for (auto bns : user.bns()) {
             std::vector<std::string> instances;
             int ret = 0;
             boost::trim(bns);
-            get_instance_from_bns(&ret, bns, instances, false);
+            int ret2 = get_instance_from_bns(&ret, bns, instances, false);
+            if (ret2 != 0) {
+                DB_WARNING("bns error:%s", bns.c_str());
+                bns_error = true;
+            }
             for (auto& instance : instances) {
                 auto pos = instance.find(":");
                 user_info->auth_ip_set.insert(instance.substr(0, pos));
             }
+        }
+        // bns故障时保留上一次解析结果
+        if (bns_error) {
+            user_info->auth_ip_set.insert(last_auth_ip_set.begin(), last_auth_ip_set.end());
         }
     }
     auto call_func = [](std::unordered_map<std::string, std::shared_ptr<UserInfo>>& mapping, 
@@ -1491,6 +1541,26 @@ SmartTable SchemaFactory::get_table_info_ptr(int64_t tableid) {
     return iter->second;
 }
 
+SmartTable SchemaFactory::get_table_info_ptr_by_name(const std::string& table_name/*namespace.db.table*/) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return nullptr; 
+    }
+
+    auto name_id_iter = table_ptr->table_name_id_mapping.find(try_to_lower(table_name));
+    if (name_id_iter == table_ptr->table_name_id_mapping.end()) {
+        return nullptr;
+    }
+
+    int64_t table_id = name_id_iter->second;
+    auto iter = table_ptr->table_info_mapping.find(table_id);
+    if (iter == table_ptr->table_info_mapping.end()) {
+        return nullptr;
+    }
+    return iter->second;
+}
+
 IndexInfo SchemaFactory::get_index_info(int64_t indexid) {
     auto ptr = get_index_info_ptr(indexid);
     if (ptr != nullptr) {
@@ -1620,12 +1690,33 @@ std::vector<SmartTable> SchemaFactory::get_table_list(std::string namespace_, Us
     vec.reserve(table_ptr->table_info_mapping.size());
     for (auto& table_pair : table_ptr->table_info_mapping) {
         auto& table_info = table_pair.second;
-        if (user->database.count(table_info->db_id) == 1 ||
+        if (user == nullptr) {
+            vec.emplace_back(table_info);
+            continue;
+        }
+        if(user->database.count(table_info->db_id) == 1 ||
                 user->table.count(table_info->id) == 1) {
             vec.emplace_back(table_info);
         }
     }
     return vec;
+}
+
+void SchemaFactory::get_all_table_by_db(const std::string& namespace_, const std::string& db_name,
+        std::vector<SmartTable>& table_ptrs) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return;
+    }
+    for (const auto& table_pair : table_ptr->table_info_mapping) {
+        if (table_pair.second->namespace_ == namespace_) {
+            if (table_pair.second->name == (db_name + "." + table_pair.second->short_name)) {
+                table_ptrs.emplace_back(table_pair.second);
+            }
+        }
+    }
+    return;
 }
 
 void SchemaFactory::get_all_table_version(std::unordered_map<int64_t, int64_t>& table_id_version_map) {
@@ -1636,6 +1727,20 @@ void SchemaFactory::get_all_table_version(std::unordered_map<int64_t, int64_t>& 
     }
     for (auto& table_pair : table_ptr->table_info_mapping) {
         table_id_version_map[table_pair.first] = table_pair.second->version;
+    }
+}
+
+void SchemaFactory::get_all_table_split_lines(std::unordered_map<int64_t, int64_t>& table_id_split_lines_map, 
+                                              int64_t max_split_line) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return;
+    }
+    for (auto& table_pair : table_ptr->table_info_mapping) {
+        if (table_pair.second->region_split_lines >= max_split_line) {
+            table_id_split_lines_map[table_pair.first] = table_pair.second->region_split_lines;
+        }
     }
 }
 
@@ -1696,6 +1801,24 @@ bool SchemaFactory::get_separate_switch(int64_t table_id) {
 
 bool SchemaFactory::is_in_fast_importer(int64_t table_id) {
     return is_switch_open(table_id, TABLE_IN_FAST_IMPORTER);
+}
+
+int SchemaFactory::get_tail_split_nums(int64_t table_id) {
+    int num = 0;
+    int ret = get_schema_conf_value<int32_t>(table_id, TABLE_TAIL_SPLIT_NUM, num);
+    if (ret < 0) {
+        return 1;   
+    }
+    return num;
+}
+
+int SchemaFactory::get_tail_split_step(int64_t table_id) {
+    int num = 0;
+    int ret = get_schema_conf_value<int32_t>(table_id, TABLE_TAIL_SPLIT_STEP, num);
+    if (ret < 0) {
+        return 100;   
+    }
+    return num;
 }
 
 bool SchemaFactory::is_switch_open(const int64_t table_id, const std::string& switch_name) {
@@ -1779,7 +1902,7 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
         if (!has_field) {
             continue;
         }
-        if (conf_name == "pk_prefix_balance") {
+        if (conf_name == "pk_prefix_balance" || conf_name == "tail_split_num" || conf_name == "tail_split_step") {
             auto value = reflection->GetInt32(pb_conf, field);
             database_table.emplace_back(table.second->namespace_ + "." + table.second->name + "." + std::to_string(value));
         } else if (conf_name == "backup_table") {
@@ -1793,7 +1916,8 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
     return;
 }
 
-void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table, std::vector<std::string>& link_table,
+//database_table : namespace.db.table.binlog_db.binlog_table.learner_tags
+void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table,
         const std::function<bool(const SmartTable&)>& select_table) {
         DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {
@@ -1804,13 +1928,23 @@ void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table
 
     for (auto& table : table_info_mapping) {
         if (select_table(table.second)) {
-            database_table.emplace_back(table.second->namespace_ + "." + table.second->name);
+            std::string value = table.second->namespace_ + "." + table.second->name;
             auto iter = table_info_mapping.find(table.second->binlog_id);
             if (iter != table_info_mapping.end()) {
-                link_table.emplace_back(iter->second->name);
+                value += "." + iter->second->name;
             } else {
-                link_table.emplace_back("");
+                value += ".NULL.NULL";
             }
+            std::string learner_tags;
+            for (const std::string& tag : table.second->learner_resource_tags) {
+                learner_tags += tag + ",";
+            }
+            if (learner_tags.empty()) {
+                learner_tags = "NULL";
+            } else {
+                learner_tags.pop_back();
+            }
+            database_table.emplace_back(value + "." + learner_tags);
         }
     }
 
@@ -2041,6 +2175,30 @@ int SchemaFactory::get_all_region_by_table_id(int64_t table_id,
     }
     return 0;
 }
+int SchemaFactory::get_all_partition_regions(int64_t table_id, 
+        std::map<int64_t, pb::RegionInfo>* region_infos) {
+    DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+    if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+        DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
+        return -1; 
+    }
+
+    auto it = table_region_mapping_ptr->find(table_id);
+    if (it == table_region_mapping_ptr->end()) {
+        DB_WARNING("index id[%ld] not in table_region_mapping", table_id);
+        return -1;
+    }
+    auto frontground = it->second;
+    auto& key_region_mapping = frontground->key_region_mapping;
+    for (const auto& partition_map_pair : key_region_mapping) {
+        for (const auto& key_region_pair : partition_map_pair.second) {
+            int64_t region_id = key_region_pair.second;
+            frontground->get_region_info(region_id, (*region_infos)[region_id]);
+        }
+    }
+
+    return 0;
+}
 // 检测table下region范围是否连续没有空洞
 int SchemaFactory::check_region_ranges_consecutive(int64_t table_id) {
     DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
@@ -2060,7 +2218,6 @@ int SchemaFactory::check_region_ranges_consecutive(int64_t table_id) {
     }
     auto& key_region_mapping = frontground->key_region_mapping;
     for (auto& partition : key_region_mapping) {
-        auto partition_id = partition.first;
         std::string pre_region_end_key = "";
         for (auto& pair : partition.second) {
             int64_t region_id = pair.second;
@@ -2109,6 +2266,7 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
         DB_WARNING("index id[%ld] not in table_region_mapping", index.id);
         return -1;
     }
+    bool is_binlog = is_binlog_table(main_table_id);
     auto frontground = it->second;
     auto& key_region_mapping = frontground->key_region_mapping;
     if (primary == nullptr) {
@@ -2184,6 +2342,21 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
             if (key_region_iter == key_region_mapping.end()) {
                 DB_WARNING("partition %ld schema not update.", partition);
                 return -1;
+            }
+            // binlog表写入时分区内region随机选取，查询时需要广播分区所有region
+            if (is_binlog) {
+                for (auto& pair : key_region_iter->second) {
+                    int64_t region_id = pair.second;
+                    frontground->get_region_info(region_id, region_infos[region_id]);
+                    // 只有in/多个范围才拆分primary
+                    if (range_size > 1 && region_primary != nullptr) {
+                        if (region_pb_primary.count(region_id) == 0) {
+                            region_pb_primary[region_id].CopyFrom(template_primary);
+                        }
+                        region_pb_primary[region_id].add_ranges()->CopyFrom(range);
+                    }
+                }
+                continue;
             }
             StrInt64Map& map = key_region_iter->second;
             auto region_iter = map.upper_bound(start_sentinel.data());
@@ -2282,7 +2455,8 @@ int SchemaFactory::get_region_by_key(
 int SchemaFactory::get_region_by_key(IndexInfo& index,
         const std::vector<SmartRecord>&    records,
         std::map<int64_t, std::vector<SmartRecord>>& region_ids,
-        std::map<int64_t, pb::RegionInfo>& region_infos) {
+        std::map<int64_t, pb::RegionInfo>& region_infos,
+        std::set<int64_t>& record_partition_ids) {
     region_ids.clear();
     region_infos.clear();
 
@@ -2299,11 +2473,10 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
     auto frontground = it->second;
     auto& key_region_mapping = frontground->key_region_mapping;
     //partition
-    bool is_partition = is_table_partitioned(index.id);
-    FieldInfo partition_field;
-    //int64_t partition_num = 1;
+    int64_t main_table_id = index.pk;
+    bool is_partition = index.is_partitioned;
     int64_t current_partition = 0;
-    auto table_ptr = get_table_info_ptr(index.id);
+    auto table_ptr = get_table_info_ptr(main_table_id);
     for (auto& record : records) {
         MutTableKey  key;
         if (0 != key.append_index(index, record.get(), -1, false)) {
@@ -2318,6 +2491,7 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         }
         if (is_partition) {
             current_partition = table_ptr->partition_ptr->calc_partition(record);
+            record_partition_ids.emplace(current_partition);
         }
         DB_DEBUG("get region by key partition %ld", current_partition);
         auto key_region_iter = key_region_mapping.find(current_partition);
@@ -2327,6 +2501,9 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         }
         StrInt64Map& map = key_region_iter->second;
         auto region_iter = map.upper_bound(key.data());
+        if (region_iter == map.begin()) {
+            continue;
+        }
         --region_iter;
         int64_t region_id = region_iter->second;
         region_ids[region_id].push_back(record);
@@ -2354,11 +2531,10 @@ int SchemaFactory::get_region_ids_by_key(IndexInfo& index,
     auto frontground = it->second;
     auto& key_region_mapping = frontground->key_region_mapping;
     //partition
-    bool is_partition = is_table_partitioned(index.id);
-    FieldInfo partition_field;
-    //int64_t partition_num = 1;
+    int64_t main_table_id = index.pk;
+    bool is_partition = index.is_partitioned;
     int64_t current_partition = 0;
-    auto table_ptr = get_table_info_ptr(index.id);
+    auto table_ptr = get_table_info_ptr(main_table_id);
     for (auto& record : records) {
         if (record == nullptr) {
             DB_FATAL("null record");
@@ -2386,6 +2562,9 @@ int SchemaFactory::get_region_ids_by_key(IndexInfo& index,
         }
         StrInt64Map& map = key_region_iter->second;
         auto region_iter = map.upper_bound(key.data());
+        if (region_iter == map.begin()) {
+            continue;
+        }
         --region_iter;
         int64_t region_id = region_iter->second;
         region_ids.emplace_back(region_id);
@@ -2419,11 +2598,10 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
     auto frontground = it->second;
     auto& key_region_mapping = frontground->key_region_mapping;
     //partition
-    bool is_partition = is_table_partitioned(index.id);
-    FieldInfo partition_field;
-    //int64_t partition_num = 1;
+    int64_t main_table_id = index.pk;
+    bool is_partition = index.is_partitioned;
     int64_t current_partition = 0;
-    auto table_ptr = get_table_info_ptr(index.id);
+    auto table_ptr = get_table_info_ptr(main_table_id);
     for (auto& record : insert_records) {
         MutTableKey  key;
         if (0 != key.append_index(index, record.get(), -1, false)) {
@@ -2447,6 +2625,9 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         }
         StrInt64Map& map = key_region_iter->second;
         auto region_iter = map.upper_bound(key.data());
+        if (region_iter == map.begin()) {
+            continue;
+        }
         --region_iter;
         int64_t region_id = region_iter->second;
         insert_region_ids[region_id].push_back(record);
@@ -2474,6 +2655,9 @@ int SchemaFactory::get_region_by_key(IndexInfo& index,
         }
         StrInt64Map& map = key_region_mapping[current_partition];
         auto region_iter = map.upper_bound(key.data());
+        if (region_iter == map.begin()) {
+            continue;
+        }
         --region_iter;
         int64_t region_id = region_iter->second;
         delete_region_ids[region_id].push_back(record);
@@ -2492,23 +2676,123 @@ void SchemaFactory::delete_table_region_map(const pb::SchemaInfo& table) {
     }
 }
 int64_t HashPartition::calc_partition(SmartRecord record) {
-    auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
-    auto partition_field = table_ptr->get_field_ptr(_partition_info.partition_field());
-    return record->get_value(record->get_field_by_idx(partition_field->pb_idx)).get_numberic<int64_t>() % _partition_num;
+    return calc_partition(record->get_value(record->get_field_by_idx(_field_info->pb_idx)));
 }
 
-int64_t RangePartition::calc_partition(SmartRecord record) {
-    auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
-    auto field = table_ptr->get_field_ptr(_partition_info.partition_field());
-    auto field_value = record->get_value(record->get_field_by_idx(field->pb_idx));
-    size_t range_index = 0;
-    for (; range_index < _range_expr.size(); ++range_index) {
-        if (field_value.compare(_range_expr[range_index]) <= 0) {
-            return range_index;
+int64_t HashPartition::calc_partition(const ExprValue& value) {
+    if (_hash_expr == nullptr) {
+        if (value.is_numberic()) {
+            return value.get_numberic<int64_t>() % _partition_num;
+        }
+        return value.hash() % _partition_num;
+    }
+    ExprValue hash_value = _hash_expr->get_value(value);
+    if (hash_value.is_numberic()) {
+        return hash_value.get_numberic<int64_t>() % _partition_num;
+    }
+    return hash_value.hash() % _partition_num;
+}
+
+int HashPartition::init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr,
+    int64_t partition_num) {
+    _table_id = table_ptr->id;
+    _partition_num = partition_num;
+    _partition_info.CopyFrom(partition_info);
+    if (_partition_num == 0) {
+        DB_FATAL("table_id[%ld] partition_num is zero", _table_id);
+        return -1;
+    }
+    _partition_field_id = partition_info.partition_field();
+    auto _table_ptr = table_ptr;
+    _field_info = _table_ptr->get_field_ptr(_partition_field_id);
+    if (_field_info == nullptr) {
+        DB_WARNING("table_id %ld  field_id:%d not found.", _table_id, _partition_field_id);
+        return -1;
+    } 
+    if (partition_info.has_hash_expr_value()) {
+        if (0 != ExprNode::create_tree(partition_info.hash_expr_value(), &_hash_expr)) {
+            DB_FATAL("table_id[%ld] partition create expr failed expr:%s", _table_id,
+                partition_info.hash_expr_value().ShortDebugString().c_str());
+            return -1;
+        }
+        _hash_expr->expr_optimize();
+        pb::Expr expr;
+        ExprNode::create_pb_expr(&expr, _hash_expr);
+        DB_WARNING("partition create expr %s.", expr.ShortDebugString().c_str());
+        std::unordered_set<int32_t> field_ids;
+        _hash_expr->get_all_field_ids(field_ids);
+        if (field_ids.size() != 1) {
+            DB_FATAL("table_id[%ld] multiple fields not support", _table_id);
+            return -1;
+        }
+        _partition_field_id = *field_ids.begin();
+        _hash_expr->open();
+    }
+    for (int64_t i = 0; i < partition_num; i++) {
+        _partition_name_map["p" + std::to_string(i)] = i;
+    }
+    return 0;
+};
+
+int RangePartition::init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr, int64_t partition_num) {
+    _table_id = table_ptr->id;
+    _partition_num = partition_num;
+    _range_values.clear();
+    _partition_info.CopyFrom(partition_info);
+    _partition_field_id = partition_info.partition_field();
+    if (partition_info.has_range_partition_field()) {
+        if (0 != ExprNode::create_tree(partition_info.range_partition_field(), &_range_expr)) {
+            DB_FATAL("table_id[%ld] partition create expr failed expr:%s", _table_id,
+                partition_info.range_partition_field().ShortDebugString().c_str());
+            return -1;
+        }
+        _range_expr->expr_optimize();
+        pb::Expr expr;
+        ExprNode::create_pb_expr(&expr, _range_expr);
+        DB_WARNING("partition create expr %s.", expr.ShortDebugString().c_str());
+        std::unordered_set<int32_t> field_ids;
+        _range_expr->get_all_field_ids(field_ids);
+        if (field_ids.size() != 1) {
+            DB_FATAL("table_id[%ld] multiple fields not support", _table_id);
+            return -1;
+        }
+        _partition_field_id = *field_ids.begin();
+        _range_expr->open();
+    }
+    auto _table_ptr = table_ptr;
+    _field_info = _table_ptr->get_field_ptr(_partition_field_id);
+    if (_field_info == nullptr) {
+        DB_WARNING("table_id %ld  field_id:%d not found.", _table_id, _partition_field_id);
+        return -1;
+    }
+
+    for (const auto& range : partition_info.range_partition_values()) {
+        ExprNode* node_ptr = nullptr;
+        if (0 != ExprNode::create_expr_node(range.nodes(0), &node_ptr)) {
+            DB_WARNING("create expr node error.");
+            return -1;
+        }
+        _range_values.emplace_back(node_ptr->get_value(nullptr));
+        delete node_ptr;
+    }
+    if (_partition_num == 0 || _range_values.size() == 0) {
+        DB_WARNING("partition_num [%ld] or range_expr size is zero", _partition_num);
+        return -1;
+    }
+    if (_partition_info.partition_names_size() != _range_values.size()) {
+        _partition_info.clear_partition_names();
+        for (uint32_t i = 0; i < _range_values.size(); i++) {
+            _partition_info.add_partition_names("p" + std::to_string(i));
         }
     }
-    //TODO max value
-    return range_index;
+    for (int64_t i = 0; i < _partition_info.partition_names_size(); i++) {
+        _partition_name_map[_partition_info.partition_names(i)] = i;
+    }
+    return 0;
+};
+
+int64_t RangePartition::calc_partition(SmartRecord record) {
+    return calc_partition(record->get_value(record->get_field_by_idx(_field_info->pb_idx)));
 }
 
 int SchemaFactory::get_binlog_regions(int64_t table_id, pb::RegionInfo& region_info, const ExprValue& value, 
@@ -2593,13 +2877,21 @@ int SchemaFactory::is_unique_field_ids(int64_t table_id, const std::set<int32_t>
 }
 
 int SchemaFactory::fill_default_value(SmartRecord record, FieldInfo& field) {
-    if (field.default_expr_value.is_null()) {
+    // 复杂统计类型不能设置默认值，按理说也不应该not null
+    if (field.type == pb::HLL || field.type == pb::BITMAP || field.type == pb::TDIGEST) {
+        return 0;
+    }
+    if (field.default_expr_value.is_null() && field.can_null) {
         return 0;
     }
     ExprValue default_value = field.default_expr_value;
     if (field.default_value == "(current_timestamp())") {
         default_value = ExprValue::Now();
         default_value.cast_to(field.type);
+    }
+    // mysql非strict mode，不填not null字段会补充空串/0等
+    if (field.default_expr_value.is_null() && !field.can_null) {
+        default_value.type = pb::STRING;
     }
     if (0 != record->set_value(record->get_field_by_tag(field.id), default_value)) {
         DB_WARNING("fill insert value failed");

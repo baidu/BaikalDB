@@ -89,6 +89,7 @@ const std::string SQL_HANDLE_NETWORK_BALANCE            = "network_balance";
 const std::string SQL_HANDLE_STORE_RM_TXN               = "store_rm_txn";
 // handle region_adjustkey tableID regionID start_key_region_id end_key_region_id 
 const std::string SQL_HANDLE_REGION_ADJUSTKEY           = "region_adjustkey";
+const std::string SQL_HANDLE_MODIFY_PARTITION           = "modify_partition";
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -131,6 +132,8 @@ private:
     bool _handle_split_region(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle rm_privilege dbname tbname
     bool _handle_rm_privilege(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle modify_partition dbname tbname
+    bool _handle_modify_partition(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle delete_ddl tableName
     // handle suspend_ddl tableName
     // handle restart_ddl tableName
@@ -170,6 +173,22 @@ private:
     bool _handle_create_namespace(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _send_store_raft_control_request(const SmartSocket& client, pb::RaftControlRequest& req, pb::RegionInfo& info);
     bool _make_response_packet(const SmartSocket& client, const std::string& response);
+    void _make_handle_region_result_rows(const pb::MetaManagerRequest& request, 
+        const pb::MetaManagerResponse& response, 
+        std::vector<std::vector<std::string>>& rows);
+
+    bool is_packet_learner_result_success(const SmartSocket& client, 
+        const pb::QueryRequest& query_req, 
+        pb::QueryResponse& query_res);
+
+    bool is_packet_region_result_success(const SmartSocket& client, 
+        const pb::MetaManagerRequest& request, 
+        pb::MetaManagerResponse& response);
+
+    void update_unhealthy_learners_schema(const pb::QueryRequest& query_req, 
+        pb::QueryResponse& query_res,
+        std::vector<std::vector<std::string>>& rows);
+        
     int _make_common_resultset_packet(const SmartSocket& sock,
             std::vector<ResultField>& fields,
             std::vector< std::vector<std::string> >& rows);

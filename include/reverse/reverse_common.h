@@ -14,6 +14,7 @@
 
 #pragma once
 #include "reverse_arrow.h"
+#include <iconv.h>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,6 +42,23 @@ typedef std::pair<std::string, std::string> KeyRange;
 extern std::atomic_long g_statistic_insert_key_num;
 extern std::atomic_long g_statistic_delete_key_num;
 
+class Iconv {
+public:
+    Iconv() : _cd_utf8_to_gbk(iconv_open("gb18030", "utf-8")), _cd_gbk_to_utf8(iconv_open("utf-8", "gb18030")) {}
+    ~Iconv() {
+        iconv_close(_cd_utf8_to_gbk);
+        iconv_close(_cd_gbk_to_utf8);
+    }
+
+    int utf8_to_gbk(const char* psrc, const size_t nsrc, std::string& dst);
+    int gbk_to_utf8(const char* psrc, const size_t nsrc, std::string& dst);
+
+private:
+    iconv_t _cd_utf8_to_gbk;
+    iconv_t _cd_gbk_to_utf8;
+};
+static thread_local Iconv iconv_tls;
+
 #ifdef BAIDU_INTERNAL
 extern drpc::NLPCClient* wordrank_client;
 extern drpc::NLPCClient* wordseg_client;
@@ -66,21 +84,44 @@ public:
 
 #ifdef BAIDU_INTERNAL
     template <typename OUT, typename IN>
-        int nlpc_seg(drpc::NLPCClient& client, 
-                const std::string& word, 
-                OUT& s_output, IN& s_input);
-    int wordrank(std::string word, std::map<std::string, float>& term_map);
-    int wordweight(std::string word, std::map<std::string, float>& term_map, 
-            bool is_filter = false, bool is_same_weight = false);
-    int wordrank_q2b_icase(std::string word, std::map<std::string, float>& term_map);
-    int wordrank_q2b_icase_unlimit(std::string word, std::map<std::string, float>& term_map);
-    int wordseg_basic(std::string word, std::map<std::string, float>& term_map);
+    int nlpc_seg(drpc::NLPCClient& client, const std::string& word, OUT& s_output, IN& s_input);
+    int wordrank(std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
+    int wordweight(std::string word, std::map<std::string, float>& term_map,  
+                   const pb::Charset& charset, bool is_filter = false, bool is_same_weight = false);
+    int wordrank_q2b_icase(std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
+    int wordrank_q2b_icase_unlimit(std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
+    int wordseg_basic(std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
 #endif
+    void split_str(
+        const std::string& word, std::vector<std::string>& split_word, char delim, const pb::Charset& charset);
+    int simple_seg(
+        std::string word, uint32_t word_count, std::map<std::string, float>& term_map, const pb::Charset& charset);
+    int es_standard(
+        std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
+
+private:
+    int q2b_tolower(std::string& word, const pb::Charset& charset);
+    std::vector<SeperateIndex>  q2b_tolower_with_index(std::string& word, const pb::Charset& charset);
+
+    int utf8_to_gbk(std::string& word);
+    int gbk_to_utf8(std::string& word);
+
+    // gbk
     std::vector<SeperateIndex> q2b_tolower_gbk_with_index(std::string& word);
     int q2b_tolower_gbk(std::string& word);
     int es_standard_gbk(std::string word, std::map<std::string, float>& term_map);
     int simple_seg_gbk(std::string word, uint32_t word_count, std::map<std::string, float>& term_map);
     void split_str_gbk(const std::string& word, std::vector<std::string>& split_word, char delim);
+
+    // utf8
+    std::vector<SeperateIndex> q2b_tolower_utf8_with_index(std::string& word);
+    int q2b_tolower_utf8(std::string& word);
+    int es_standard_utf8(std::string word, std::map<std::string, float>& term_map);
+    int simple_seg_utf8(std::string word, uint32_t word_count, std::map<std::string, float>& term_map);
+    void split_str_utf8(const std::string& word, std::vector<std::string>& split_word, char delim);
+    size_t get_utf8_len(const char c);
+    size_t get_utf8_bom_len(const std::string& word);
+
 private:
     Tokenizer() {};
     void normalization_gbk(std::string& word);
@@ -89,6 +130,33 @@ private:
     std::unordered_map<std::string, std::string> _q2b_gbk;
     std::unordered_map<std::string, std::string> _q2b_utf8;
 };
+
+inline size_t Tokenizer::get_utf8_len(const char c) {
+    size_t utf8_len = 1;
+    if ((c & 0xFE) == 0xFC) {
+        utf8_len = 6;
+    } else if ((c & 0xFC) == 0xF8) {
+        utf8_len = 5;
+    } else if ((c & 0xF8) == 0xF0) {
+        utf8_len = 4;
+    } else if ((c & 0xF0) == 0xE0) {
+        utf8_len = 3;
+    } else if ((c & 0xE0) == 0xC0) {
+        utf8_len = 2;
+    } else {
+        utf8_len = 1;
+    }
+    return utf8_len;
+}
+
+inline size_t Tokenizer::get_utf8_bom_len(const std::string& word) {
+    size_t bom_len = 0;
+    if (word.size() >= 3 &&
+        ((uint8_t)word[0] == 0xEF && (uint8_t)word[1] == 0xBB && (uint8_t)word[2] == 0xBF)) {
+        bom_len = 3;
+    }
+    return bom_len;
+}
 
 //自动管理原子对象
 template<class T>

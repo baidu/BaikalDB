@@ -269,6 +269,14 @@ void QueryRegionManager::get_region_count_per_instance(
         }
     }
     {
+        BAIDU_SCOPED_LOCK(manager->_instance_learner_mutex);
+        if (manager->_instance_learner_map.find(instance) != manager->_instance_learner_map.end()) {
+            for (auto& table_region_ids : manager->_instance_learner_map[instance]) {
+                region_count += table_region_ids.second.size();
+            }
+        }
+    }
+    {
         BAIDU_SCOPED_LOCK(manager->_count_mutex);
         if (manager->_instance_leader_count.find(instance) != manager->_instance_leader_count.end()) {
             for (auto& table_leader : manager->_instance_leader_count[instance]) {

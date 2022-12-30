@@ -75,6 +75,7 @@ struct CreateExprOptions {
     bool is_values = false;
     bool max_one_row = false;
     bool is_not = false;
+    bool partition_expr = false;
     int row_expr_size = 1;
     pb::CompareType compare_type = pb::CMP_NULL;
 };
@@ -117,7 +118,7 @@ public:
     virtual int plan() = 0;
 
     static int analyze(QueryContext* ctx);
-   
+    
     static std::map<parser::JoinType, pb::JoinType> join_type_mapping;
     std::vector<std::string>& select_names() {
         return _select_names;
@@ -341,5 +342,6 @@ protected:
     int32_t                     _column_id = 0;
     // 同一层级的操作表集合，e.g:join的左右表
     std::vector<std::string>       _current_tables;
+    std::vector<std::string>       _partition_names;
 };
 } //namespace baikal

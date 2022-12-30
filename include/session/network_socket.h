@@ -136,7 +136,9 @@ struct NetworkSocket {
 
     std::set<uint64_t> get_subquery_signs() {
         std::unique_lock<bthread::Mutex> lck(_subquery_signs_lock);
-        return _subquery_signs;
+        auto subquery_signs = _subquery_signs;
+        _subquery_signs.clear();
+        return subquery_signs;
     }
 
     // Socket basic infomation.
@@ -209,7 +211,6 @@ struct NetworkSocket {
 
     //ddl
     int64_t txn_start_time = 0;
-    int64_t txn_timeout = 0;
     int64_t txn_pri_region_last_exec_time = 0;
     std::unordered_set<int64_t> txn_table_id_set;
     bthread::Mutex txn_tid_set_lock;

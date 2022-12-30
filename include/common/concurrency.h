@@ -36,6 +36,7 @@ struct Concurrency {
     BthreadCond service_write_concurrency;
     BthreadCond new_sign_read_concurrency; // 新sql读并发控制
     BthreadCond baikal_heartbeat_concurrency;
+    BthreadCond baikal_other_heartbeat_concurrency;
     BthreadCond upload_sst_streaming_concurrency;
 private:
     Concurrency(): snapshot_load_concurrency(-FLAGS_snapshot_load_num), 
@@ -45,6 +46,7 @@ private:
                    service_write_concurrency(-FLAGS_service_write_concurrency),
                    new_sign_read_concurrency(-FLAGS_new_sign_read_concurrency),
                    baikal_heartbeat_concurrency(-FLAGS_baikal_heartbeat_concurrency),
+                   baikal_other_heartbeat_concurrency(-FLAGS_baikal_heartbeat_concurrency),
                    upload_sst_streaming_concurrency(-FLAGS_upload_sst_streaming_concurrency) {
                    }
 };

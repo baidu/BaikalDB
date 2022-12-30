@@ -181,7 +181,9 @@ void FunctionManager::register_operators() {
     register_object_ret("dayofweek", dayofweek, pb::UINT32);
     register_object_ret("dayofmonth", dayofmonth, pb::UINT32);
     register_object_ret("dayofyear", dayofyear, pb::UINT32);
+    register_object_ret("yearweek", yearweek, pb::UINT32);
     register_object_ret("week", week, pb::UINT32);
+    register_object_ret("weekofyear", weekofyear, pb::UINT32);
     register_object_ret("month", month, pb::UINT32);
     register_object_ret("monthname", monthname, pb::STRING);
     register_object_ret("year", year, pb::UINT32);

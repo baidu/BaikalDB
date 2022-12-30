@@ -90,6 +90,12 @@ int SelectPlanner::plan() {
         return -1;
     }
 
+    if (_ctx->is_base_subscribe) {
+        if (0 != get_base_subscribe_scan_ref_slot()) {
+            return -1;
+        }
+    }
+
     create_scan_tuple_descs();
     create_agg_tuple_desc();
     create_order_by_tuple_desc();
@@ -500,21 +506,23 @@ int SelectPlanner::create_agg_node() {
             pb::Expr* expr = agg2->add_group_exprs();
             expr->CopyFrom(_group_exprs[idx]);
         }
-        for (uint32_t idx = 0; idx < _distinct_agg_funcs.size(); ++idx) {
-            if (_distinct_agg_funcs[idx].nodes(0).fn().name() == "group_concat_distinct") {
+
+        for (auto& distinct_func : _distinct_agg_funcs) {
+            if (distinct_func.nodes(0).fn().name() == "group_concat_distinct") {
                 int expr_idx = 2;
-                for (int i = 0; i < _distinct_agg_funcs[idx].nodes(1).num_children(); i++) {
+                for (int i = 0; i < distinct_func.nodes(1).num_children(); i++) {
                     pb::Expr* expr = agg2->add_group_exprs();
-                    ExprNode::get_pb_expr(_distinct_agg_funcs[idx], &expr_idx, expr);
+                    ExprNode::get_pb_expr(distinct_func, &expr_idx, expr);
                 }
-                continue;
-            }
-            int expr_idx = 1;
-            while (expr_idx < _distinct_agg_funcs[idx].nodes_size()) {
-                pb::Expr* expr = agg2->add_group_exprs();
-                ExprNode::get_pb_expr(_distinct_agg_funcs[idx], &expr_idx, expr);
+            } else {
+                int expr_idx = 1;
+                while (expr_idx < distinct_func.nodes_size()) {
+                    pb::Expr* expr = agg2->add_group_exprs();
+                    ExprNode::get_pb_expr(distinct_func, &expr_idx, expr);
+                }
             }
         }
+
         for (uint32_t idx = 0; idx < _orderby_agg_exprs.size(); ++idx) {
             pb::Expr* expr = agg2->add_group_exprs();
             expr->CopyFrom(_orderby_agg_exprs[idx]);
@@ -667,7 +675,14 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         _select_names.emplace_back(select_name);
         std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
     }
-    
+
+    if (_ctx->is_base_subscribe) {
+        if (!field->as_name.empty() && field->expr->expr_type == parser::ET_COLUMN) {
+            parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
+            _ctx->base_subscribe_select_name_alias_map[field->as_name.c_str()] = column->name.c_str();
+        }
+    }
+
     _select_exprs.emplace_back(select_expr);
     _ctx->field_column_id_mapping[select_name] = _column_id++;
     return 0;
@@ -796,6 +811,30 @@ void SelectPlanner::create_agg_tuple_desc() {
     }
     _ctx->add_tuple(agg_tuple);
     return;
+}
+
+int SelectPlanner::get_base_subscribe_scan_ref_slot() {
+    auto pk_field_info_ptr = _factory->get_index_info_ptr(_ctx->base_subscribe_table_id);
+    if (pk_field_info_ptr == nullptr) {
+        DB_WARNING("Fail to get_index_info_ptr, index_id: %ld", _ctx->base_subscribe_table_id);
+        return -1;
+    }
+    for (const auto& field_info : pk_field_info_ptr->fields) {
+        get_scan_ref_slot(_ctx->base_subscribe_table_name, field_info.table_id, field_info.id, field_info.type);
+    }
+
+    auto table_info_ptr = _factory->get_table_info_ptr(_ctx->base_subscribe_table_id);
+    if (table_info_ptr == nullptr) {
+        DB_WARNING("Fail to get_table_info_ptr, table_id: %ld", _ctx->base_subscribe_table_id);
+        return -1;
+    }
+    for (const auto& field_info : table_info_ptr->fields) {
+        if (field_info.short_name == _ctx->base_subscribe_filter_field) {
+            get_scan_ref_slot(_ctx->base_subscribe_table_name, field_info.table_id, field_info.id, field_info.type);
+            break;
+        }
+    }
+    return 0;
 }
 
 // pb::SlotDescriptor& SelectPlanner::_get_group_expr_slot() {

@@ -26,9 +26,12 @@ namespace baikaldb {
 DEFINE_int32(max_connections_per_user, 4000, "default user max connections");
 DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second");
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
+DEFINE_int64(baikal_max_allowed_packet, 268435456LL, "The largest possible packet : 256M");
 DECLARE_int64(print_time_us);
 DECLARE_string(meta_server_bns);
 DECLARE_int32(baikal_port);
+DECLARE_bool(open_to_collect_slow_query_infos);
+DECLARE_int32(slow_query_timeout_s);
 void StateMachine::run_machine(SmartSocket client,
         EpollInfo* epoll_info,
         bool shutdown) {
@@ -168,7 +171,7 @@ void StateMachine::run_machine(SmartSocket client,
             break;
         } else if (ret == RET_CMD_UNSUPPORT) {
             DB_WARNING_CLIENT(client, "un-supported query type.");
-            client->state = STATE_READ_QUERY_RESULT;
+            client->state = STATE_ERROR_REUSE;
             run_machine(client, epoll_info, shutdown);
             break;
         } else {
@@ -370,10 +373,11 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 */
             }
             std::map<int32_t, int> field_range_type;
+            auto subquery_signs = client->get_subquery_signs();
             sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id,
                     stat_info->total_time, err_count * stat_info->total_time, rows, stat_info->num_scan_rows,
                     stat_info->num_filter_rows, stat_info->region_count,
-                    field_range_type, err_count);
+                    field_range_type, err_count, stat_info->sign, subquery_signs);
         }
 
         if (op_type == pb::OP_SELECT) {
@@ -398,6 +402,9 @@ void StateMachine::_print_query_time(SmartSocket client) {
             if (stat_info->error_code == 10004) {
                 exec_sql_error << 1;
             }
+        }
+        if (stat_info->txn_alive_time > 0) {
+            txn_alive_time_cost << stat_info->txn_alive_time;
         }
     }
 
@@ -1000,7 +1007,8 @@ bool StateMachine::_query_process(SmartSocket client) {
         client->state = STATE_READ_QUERY_RESULT;
         return true;
     }
-    if (command != COM_STMT_EXECUTE && command != COM_STMT_CLOSE && client->query_ctx->sql.size() == 0) {
+    auto sql_len = client->query_ctx->sql.size();
+    if (command != COM_STMT_EXECUTE && command != COM_STMT_CLOSE && sql_len == 0) {
         DB_FATAL("SQL size is 0. command: %d", command);
         return false;
     }
@@ -1082,6 +1090,13 @@ bool StateMachine::_query_process(SmartSocket client) {
                 client->state = STATE_READ_QUERY_RESULT;
                 return true;
             }
+            // 防止超大sql文本
+            if (sql_len > std::max(FLAGS_baikal_max_allowed_packet, (int64_t)1024)) {
+                DB_WARNING("sql too big sql_len: %ld", sql_len);
+                _wrapper->make_err_packet(client, ER_NET_PACKET_TOO_LARGE, "Packets larger than max_allowed_packet are not allowed");
+                client->state = STATE_ERROR_REUSE;
+                return true;
+            }
             //DB_DEBUG_CLIENT(client, "Choose common handle cost time:[%ld(ms)]", cost.get_time());
             ret = _handle_client_query_common_query(client);
             client->state = (client->state == STATE_ERROR) ? STATE_ERROR : STATE_READ_QUERY_RESULT;
@@ -1158,6 +1173,11 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd()) {
                 ctx->is_full_export = json_iter->value.GetBool();
                 DB_WARNING("full_export: %d", ctx->is_full_export);
+            }
+            json_iter = root.FindMember("single_store_concurrency");
+            if (json_iter != root.MemberEnd()) {
+                ctx->single_store_concurrency = json_iter->value.GetInt();
+                DB_WARNING("single_store_concurrency: %d", ctx->single_store_concurrency);
             }
             json_iter = root.FindMember("ttl_duration");
             if (json_iter != root.MemberEnd()) {

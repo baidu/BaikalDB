@@ -213,7 +213,8 @@ int NewSchema<Node, List>::segment(
                     pb::SegmentType segment_type,
                     const std::map<std::string, int32_t>& name_field_id_map,
                     pb::ReverseNodeType flag,
-                    std::map<std::string, ReverseNode>& res) {
+                    std::map<std::string, ReverseNode>& res,
+                    const pb::Charset& charset) {
     // hit seg_cache, replace pk and flag
     if (res.size() > 0) {
         for (auto& pair : res) {
@@ -229,35 +230,35 @@ int NewSchema<Node, List>::segment(
             term_map[word] = 0;
             break;
         case pb::S_UNIGRAMS:
-            ret = Tokenizer::get_instance()->simple_seg_gbk(word, 1, term_map);
+            ret = Tokenizer::get_instance()->simple_seg(word, 1, term_map, charset);
             break;
         case pb::S_BIGRAMS:
-            ret = Tokenizer::get_instance()->simple_seg_gbk(word, 2, term_map);
+            ret = Tokenizer::get_instance()->simple_seg(word, 2, term_map, charset);
             break;
         case pb::S_ES_STANDARD:
-            ret = Tokenizer::get_instance()->es_standard_gbk(word, term_map);
+            ret = Tokenizer::get_instance()->es_standard(word, term_map, charset);
             break;
 #ifdef BAIDU_INTERNAL
         case pb::S_WORDRANK: 
-            ret = Tokenizer::get_instance()->wordrank(word, term_map);
+            ret = Tokenizer::get_instance()->wordrank(word, term_map, charset);
             break;
         case pb::S_WORDRANK_Q2B_ICASE: 
-            ret = Tokenizer::get_instance()->wordrank_q2b_icase(word, term_map);
+            ret = Tokenizer::get_instance()->wordrank_q2b_icase(word, term_map, charset);
             break;
         case pb::S_WORDRANK_Q2B_ICASE_UNLIMIT: 
-            ret = Tokenizer::get_instance()->wordrank_q2b_icase_unlimit(word, term_map);
+            ret = Tokenizer::get_instance()->wordrank_q2b_icase_unlimit(word, term_map, charset);
             break;
         case pb::S_WORDSEG_BASIC: 
-            ret = Tokenizer::get_instance()->wordseg_basic(word, term_map);
+            ret = Tokenizer::get_instance()->wordseg_basic(word, term_map, charset);
             break;
         case pb::S_WORDWEIGHT: 
-            ret = Tokenizer::get_instance()->wordweight(word, term_map, true);
+            ret = Tokenizer::get_instance()->wordweight(word, term_map, charset, true);
             break;
         case pb::S_WORDWEIGHT_NO_FILTER: 
-            ret = Tokenizer::get_instance()->wordweight(word, term_map, false);
+            ret = Tokenizer::get_instance()->wordweight(word, term_map, charset, false);
             break;
         case pb::S_WORDWEIGHT_NO_FILTER_SAME_WEIGHT: 
-            ret = Tokenizer::get_instance()->wordweight(word, term_map, false, true);
+            ret = Tokenizer::get_instance()->wordweight(word, term_map, charset, false, true);
             break;
 #endif
         default:
@@ -280,7 +281,7 @@ int NewSchema<Node, List>::segment(
 
 template<typename Node, typename List>
 int NewSchema<Node, List>::create_executor(const std::string& search_data, 
-    pb::MatchMode mode, pb::SegmentType segment_type) {
+    pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset) {
     _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
     _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
     //segment
@@ -294,10 +295,10 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
         or_search.push_back(search_data);
     } else if (mode == pb::M_BOOLEAN) {
         // mysql boolean模式，空格表示'或'
-        Tokenizer::get_instance()->split_str_gbk(search_data, or_search, ' ');
+        Tokenizer::get_instance()->split_str(search_data, or_search, ' ', charset);
     } else {
         // 报告需求，like语法用|表示'或'
-        Tokenizer::get_instance()->split_str_gbk(search_data, or_search, '|');
+        Tokenizer::get_instance()->split_str(search_data, or_search, '|', charset);
     }
     LogicalQuery<ThisType> logical_query(this);
     ExecutorNode<ThisType>* parent = nullptr;
@@ -329,34 +330,36 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
                 term_map[or_item] = 0;
                 break;
             case pb::S_UNIGRAMS:
-                ret = Tokenizer::get_instance()->simple_seg_gbk(or_item, 1, term_map);
+                ret = Tokenizer::get_instance()->simple_seg(or_item, 1, term_map, charset);
                 break;
             case pb::S_BIGRAMS:
-                ret = Tokenizer::get_instance()->simple_seg_gbk(or_item, 2, term_map);
+                ret = Tokenizer::get_instance()->simple_seg(or_item, 2, term_map, charset);
                 break;
             case pb::S_ES_STANDARD:
-                ret = Tokenizer::get_instance()->es_standard_gbk(or_item, term_map);
+                ret = Tokenizer::get_instance()->es_standard(or_item, term_map, charset);
                 break;
 #ifdef BAIDU_INTERNAL
             case pb::S_WORDRANK: 
-                ret = Tokenizer::get_instance()->wordrank(or_item, term_map);
+                ret = Tokenizer::get_instance()->wordrank(or_item, term_map, charset);
                 break;
             case pb::S_WORDRANK_Q2B_ICASE: 
-                ret = Tokenizer::get_instance()->wordrank_q2b_icase(or_item, term_map);
+                ret = Tokenizer::get_instance()->wordrank_q2b_icase(or_item, term_map, charset);
                 break;
             case pb::S_WORDRANK_Q2B_ICASE_UNLIMIT: 
-                ret = Tokenizer::get_instance()->wordrank_q2b_icase_unlimit(or_item, term_map);
+                ret = Tokenizer::get_instance()->wordrank_q2b_icase_unlimit(or_item, term_map, charset);
                 break;
             case pb::S_WORDSEG_BASIC: 
-                ret = Tokenizer::get_instance()->wordseg_basic(or_item, term_map);
+                ret = Tokenizer::get_instance()->wordseg_basic(or_item, term_map, charset);
                 break;
             case pb::S_WORDWEIGHT:
-                ret = Tokenizer::get_instance()->wordweight(or_item, term_map, true);
+                ret = Tokenizer::get_instance()->wordweight(or_item, term_map, charset, true);
                 break;
             case pb::S_WORDWEIGHT_NO_FILTER:
-                ret = Tokenizer::get_instance()->wordweight(or_item, term_map, false);
+                ret = Tokenizer::get_instance()->wordweight(or_item, term_map, charset, false);
                 break;
-
+            case pb::S_WORDWEIGHT_NO_FILTER_SAME_WEIGHT: 
+                ret = Tokenizer::get_instance()->wordweight(or_item, term_map, charset, false, true);
+                break;
 #endif
             default:
                 DB_WARNING("un-support segment:%d", segment_type);

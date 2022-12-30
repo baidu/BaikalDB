@@ -62,7 +62,7 @@ enum IndexHint {
     bool need_select_learner_index();
     
     void calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
-            std::vector<ExprValue>& values, SmartRecord record, size_t field_idx);
+            std::vector<ExprValue>& values, MutTableKey& key, size_t field_idx);
 
     bool check_sort_use_index(Property& sort_property);
 
@@ -82,6 +82,7 @@ enum IndexHint {
         }
         if (index_type == pb::I_FULLTEXT) {
             cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__weight"));
+            cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__querywords"));
         }
     }
     
@@ -140,7 +141,6 @@ enum IndexHint {
     bool need_filter() {
         return _need_filter;
     }
-
     
 public:
     //TODO 先mock一个，后面从schema读取

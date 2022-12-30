@@ -20,6 +20,7 @@
 #include <bitset>
 #include "proto/meta.interface.pb.h"
 #include "meta_server.h"
+#include "meta_util.h"
 #include "meta_state_machine.h"
 
 namespace baikaldb {
@@ -39,9 +40,8 @@ struct InstanceSchedulingInfo {
     std::unordered_map<int64_t, int64_t>                    regions_count_map;
     // tableID_pk_prefix -> leader_count
     std::unordered_map<std::string, int64_t>                pk_prefix_region_count;
-    // raft
-    std::string                                             logical_room;
-    std::string                                             resource_tag;
+    // raft, 机房信息
+    IdcInfo                                                 idc;
 };
 using DoubleBufferedSchedulingInfo = butil::DoublyBufferedData<std::unordered_map<std::string, InstanceSchedulingInfo>>;
 
@@ -141,12 +141,11 @@ public:
     void process_peer_heartbeat_for_store(const pb::StoreHeartBeatRequest* request, 
                 pb::StoreHeartBeatResponse* response);
     void process_pk_prefix_load_balance(std::unordered_map<std::string, int64_t>& pk_prefix_region_counts,
+            std::unordered_map<int64_t, IdcInfo>& table_balance_idc,
+            std::unordered_map<std::string, int64_t>& idc_instance_count,
             std::unordered_map<int64_t, int64_t>& table_add_peer_counts,
-            std::unordered_map<int64_t, std::string>& logical_rooms,
             std::unordered_map<std::string, int64_t>& pk_prefix_add_peer_counts,
-            std::unordered_map<std::string, int64_t>& pk_prefix_average_counts,
-            int64_t instance_count_for_logical,
-            int64_t instance_count);
+            std::unordered_map<std::string, int64_t>& pk_prefix_average_counts);
     void get_switch(const pb::QueryRequest* request, pb::QueryResponse* response);
     void store_healthy_check_function();
     // just for 单测使用
@@ -157,34 +156,35 @@ public:
     //从集群中选择可用的实例
     //排除状态不为normal, 如果输入有resource_tag会优先选择resource_tag
     //排除exclude
-    int select_instance_rolling(const std::string& resource_tag, 
+    int select_instance_rolling(const IdcInfo& idc,
                         const std::set<std::string>& exclude_stores,
-                        const std::string& logical_room, 
                         std::string& selected_instance);
-    int select_instance_min(const std::string& resource_tag,
+    int select_instance_min(const IdcInfo& idc,
                             const std::set<std::string>& exclude_stores,
-                            int64_t table_id,
-                            const std::string& logical_room,
+                            const int64_t& table_id,
                             std::string& selected_instance,
-                            int64_t average_count = 0);
-    int select_instance_min_on_pk_prefix(const std::string& resource_tag,
+                            const int64_t& average_count = 0);
+    int select_instance_min_on_pk_prefix(const IdcInfo& idc_str,
                                       const std::set<std::string>& exclude_stores,
-                                      const int64_t table_id,
+                                      const int64_t& table_id,
                                       const std::string& pk_prefix_key,
-                                      const std::string& logical_room,
                                       std::string& selected_instance,
-                                      const int64_t pk_prefix_average_count,
-                                      const int64_t table_average_count,
+                                      const int64_t& pk_prefix_average_count,
+                                      const int64_t& table_average_count,
                                       bool need_both_below_average = false);
     void auto_network_segments_division(std::string resource_tag);
     int load_snapshot();
-    bool logical_room_exist(const std::string& logical_room) {
+    bool logical_and_physical_room_valid(const std::string& logical_room, const std::string& physical_room) {
         BAIDU_SCOPED_LOCK(_physical_mutex);
-        if (_logical_physical_map.find(logical_room) != _logical_physical_map.end()
-                && _logical_physical_map[logical_room].size() != 0) {
-            return true;
+        auto logical_iter = _logical_physical_map.find(logical_room);
+        if (logical_iter == _logical_physical_map.end()) {
+            return false;
         }
-        return false;
+        if (!physical_room.empty() 
+            && logical_iter->second.find(physical_room) == logical_iter->second.end()) {
+            return false;
+        }
+        return true;
     }
 public:
     void get_instances(const std::string& resource_tag, 
@@ -213,6 +213,40 @@ public:
             }
         }
         return count;
+    }
+
+    // 获取同集群、同逻辑机房、同物理机房的store实例数
+    void get_instance_count_for_all_level(const IdcInfo& idc, 
+                                          std::unordered_map<std::string, int64_t>& idc_instance_count) {
+        idc_instance_count.clear();
+        int instances_in_resource_tag = 0;
+        int instances_in_logical_room = 0;
+        int instances_in_physical_room = 0;
+        BAIDU_SCOPED_LOCK(_instance_mutex);
+        if (_resource_tag_instance_map.count(idc.resource_tag) == 0) {
+            return;
+        }
+        for (auto& address : _resource_tag_instance_map[idc.resource_tag]) {
+            if (_instance_info.count(address) == 0 
+                    || _instance_info[address].resource_tag != idc.resource_tag) {
+                continue;
+            }
+            if (_instance_info[address].instance_status.state != pb::NORMAL 
+                    && _instance_info[address].instance_status.state != pb::FAULTY) {
+                continue;
+            }
+            instances_in_resource_tag++;
+            if (_instance_info[address].logical_room == idc.logical_room) {
+                instances_in_logical_room++;
+                if (_instance_info[address].physical_room == idc.physical_room) {
+                    instances_in_physical_room++;
+                }
+            }
+        }
+        idc_instance_count[idc.resource_tag_level()] = instances_in_resource_tag;
+        idc_instance_count[idc.logical_room_level()] = instances_in_logical_room;
+        idc_instance_count[idc.to_string()] = instances_in_physical_room;
+        return;
     }
 
     int64_t get_instance_count(const std::string& resource_tag, 
@@ -245,18 +279,16 @@ public:
     }
 
     template<typename RepeatedType>
-    int64_t get_resource_tag_count(const RepeatedType& instances, const std::string& resource_tag, 
-        std::vector<std::string>& current_instances) {
-        int64_t count = 0; 
+    void get_resource_tag_count(const RepeatedType& instances, const std::string& resource_tag, 
+        std::set<std::string>& current_instances) {
         BAIDU_SCOPED_LOCK(_instance_mutex);
         for (auto& instance : instances) {
             if (_instance_info.find(instance) != _instance_info.end()
                     && _instance_info[instance].resource_tag == resource_tag) {
-                current_instances.emplace_back(instance);
-                count++;
+                current_instances.insert(instance);
             }
         }
-        return count;
+        return;
     }
 
     int64_t get_instance_pk_prefix_peer_count(const std::string& instance, const std::string& pk_prefix) {
@@ -277,8 +309,8 @@ public:
         return pk_iter->second;
     }
 
-    // 获取pk_prefix对应的peer总数，指定logical_room则统计该logical room的peer总数
-    int64_t get_pk_prefix_peer_count(const std::string& pk_prefix_key, const std::string& logical_room) {
+    // 获取idc维度下pk_prefix对应的peer总数
+    int64_t get_pk_prefix_peer_count(const std::string& pk_prefix_key, const IdcInfo& idc) {
         int64_t count = 0;
         DoubleBufferedSchedulingInfo::ScopedPtr schedule_info_ptr;
         if (_scheduling_info.Read(&schedule_info_ptr) != 0) {
@@ -286,7 +318,7 @@ public:
             return 0;
         }
         for (const auto& instance_schedule_info: *schedule_info_ptr) {
-            if (!logical_room.empty() && instance_schedule_info.second.logical_room != logical_room) {
+            if (!instance_schedule_info.second.idc.match(idc)) {
                 continue;
             }
             const InstanceSchedulingInfo& scheduling_info = instance_schedule_info.second;
@@ -298,7 +330,8 @@ public:
         return count;
     }
     
-    int64_t get_peer_count(int64_t table_id, const std::string& logical_room) {
+    // 获取idc维度下对应的总peer总数
+    int64_t get_peer_count(int64_t table_id, const IdcInfo& idc) {
         int64_t count = 0;
         DoubleBufferedSchedulingInfo::ScopedPtr schedule_info_ptr;
         if (_scheduling_info.Read(&schedule_info_ptr) != 0) {
@@ -307,8 +340,7 @@ public:
         }
         for (const auto &instance_schedule_info: *schedule_info_ptr) {
             const InstanceSchedulingInfo &scheduling_info = instance_schedule_info.second;
-            // check logical room
-            if (!logical_room.empty() && scheduling_info.logical_room != logical_room) {
+            if (!idc.match(scheduling_info.idc)) {
                 continue;
             }
             auto region_iter = scheduling_info.regions_count_map.find(table_id);
@@ -443,10 +475,31 @@ public:
         }
         auto iter = info_iter->find(instance);
         if (iter != info_iter->end()) {
-            resource_tag = iter->second.resource_tag;
+            resource_tag = iter->second.idc.resource_tag;
             return true;
         }
         return false;
+    }
+
+    // 获取一个region所有peer的机房信息, instance->idcInfo
+    int get_instances_idc_info(const ::google::protobuf::RepeatedPtrField< ::std::string>& peers, 
+                                std::unordered_map<std::string, IdcInfo>& peer_dist_info) {
+        int ret = 0;
+        DoubleBufferedSchedulingInfo::ScopedPtr info_iter;
+        if (_scheduling_info.Read(&info_iter) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return -2;
+        }
+        for (const auto& peer : peers) {
+            auto iter = info_iter->find(peer);
+            if (iter == info_iter->end()) {
+                peer_dist_info[peer] = IdcInfo();
+                ret = -1;
+            } else {
+                peer_dist_info[peer] = iter->second.idc;
+            }
+        }
+        return ret;
     }
 
     bool instance_exist(std::string instance) {
@@ -495,17 +548,18 @@ public:
         _meta_state_machine = meta_state_machine;
     }
 
-    std::string get_logical_room(const std::string& instance) {
+    int get_instance_idc(const std::string& instance, IdcInfo& idc) {
         DoubleBufferedSchedulingInfo::ScopedPtr info_iter;
         if (_scheduling_info.Read(&info_iter) != 0) {
             DB_WARNING("read double_buffer_table error.");
-            return "";
+            return -1;
         }
         auto iter = info_iter->find(instance);
-        if (iter != info_iter->end()) {
-            return iter->second.logical_room;
+        if (iter == info_iter->end()) {
+            return -1;
         }
-        return "";
+        idc = iter->second.idc;
+        return 0;
     }
 
     static std::string get_ip(const std::string& instance) {
@@ -552,10 +606,9 @@ private:
         }
     }
     bool is_legal_for_select_instance(
+                const IdcInfo& idc,
                 const std::string& candicate_instance,
-                const std::string& resource_tag,
-                const std::set<std::string>& exclude_stores,
-                const std::string& logical_room);
+                const std::set<std::string>& exclude_stores);
     std::string construct_logical_key() {
         return MetaServer::CLUSTER_IDENTIFY
                 + MetaServer::LOGICAL_CLUSTER_IDENTIFY

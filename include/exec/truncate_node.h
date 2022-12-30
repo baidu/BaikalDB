@@ -31,9 +31,17 @@ public:
     int64_t table_id() {
         return _table_id;
     }
+    int32_t get_partition_field() {
+        return _table_info->partition_info.partition_field();
+    }
+
+    int64_t get_partition_num() {
+        return _table_info->partition_num;
+    }
 private:
     int64_t _region_id = 0;
     int64_t _table_id = 0;
+    SmartTable  _table_info;
 };
 
 }

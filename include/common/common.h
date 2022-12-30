@@ -138,6 +138,8 @@ enum ExplainType {
     SHOW_SIGN               = 8
 };
 
+const size_t ROW_BATCH_CAPACITY = 1024;
+
 inline bool explain_is_trace(ExplainType& type) {
     return type == SHOW_TRACE || type == SHOW_TRACE2;
 }
@@ -796,16 +798,99 @@ private:
     TimeCost        _the_earlist_time_for_background;
 };
 
+struct SlowQueryInfo {
+public:
+    SlowQueryInfo() {}
+    SlowQueryInfo(uint64_t log_id_, 
+                  uint64_t sign_, 
+                  int64_t start_time_,
+                  int64_t end_time_,
+                  int64_t exec_time_,
+                  int64_t filtered_rows_, 
+                  int64_t affected_rows_,
+                  int64_t scan_rows_,
+                  int64_t return_rows_,
+                  const std::string& ip_,
+                  const std::string& resource_tag_,
+                  const std::string& user_name_,
+                  const std::string& family_,
+                  const std::string& table_name_,
+                  const std::string& sql_,
+                  bool status_) : log_id(log_id_), sign(sign_), start_time(start_time_), end_time(end_time_), exec_time(exec_time_), filtered_rows(filtered_rows_), 
+                  affected_rows(affected_rows_), scan_rows(scan_rows_), return_rows(return_rows_), ip(ip_), 
+                  resource_tag(resource_tag_), user_name(user_name_), family(family_), table_name(table_name_), sql(sql_), status(status_) {}
+public:
+    uint64_t log_id = 0;
+    uint64_t sign = 0;
+    int64_t start_time = 0;
+    int64_t end_time = 0;
+    int64_t exec_time = 0;
+    int64_t filtered_rows = 0;
+    int64_t affected_rows = 0;
+    int64_t scan_rows = 0;
+    int64_t return_rows = 0;
+    std::string ip = "";
+    std::string resource_tag = "";
+    std::string user_name = "";
+    std::string family = "";
+    std::string table_name = "";
+    std::string sql = "";
+    bool status = false; //false表示没有执行完，true表示执行完成
+};
+
+DECLARE_int32(limit_slow_sql_size);
+struct BvarSlowQueryMap {
+public:
+    BvarSlowQueryMap() {}
+    BvarSlowQueryMap(const SlowQueryInfo& slow_query_info) {
+        internal_slow_query_map[slow_query_info.sign].emplace_back(slow_query_info);
+    }
+
+    BvarSlowQueryMap& operator+=(const BvarSlowQueryMap& other) {
+        const auto& other_slow_query_map = other.internal_slow_query_map;
+        if (other.internal_slow_query_map.size() == 1 && internal_slow_query_map[other_slow_query_map.begin()->first].size() > FLAGS_limit_slow_sql_size) {
+            return *this;
+        }
+        for (const auto& pair : other.internal_slow_query_map) {
+            for (const auto& slow_query_info : pair.second) {
+                internal_slow_query_map[pair.first].emplace_back(slow_query_info);
+            }
+        }
+        return *this;
+    }
+
+    BvarSlowQueryMap& operator-=(const BvarSlowQueryMap& other) {
+        return *this;
+    }
+
+public:
+    std::map<uint64_t, std::vector<SlowQueryInfo>> internal_slow_query_map;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const BvarSlowQueryMap& slow_query) {
+    for (auto& pair : slow_query.internal_slow_query_map) {
+        for (auto& pair2 : pair.second) {
+            os << "sign:" << pair.first << "; sql:" << pair2.sql << "; log_id:" << pair2.log_id << std::endl;
+        }
+    }
+    return os;
+}
+
 struct BvarMap {
     struct SumCount {
         SumCount() {}
         SumCount(int64_t table_id, int64_t sum, int64_t err_sum, int64_t count, int64_t err_count,
                 int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, int64_t region_count,
-                const std::map<int32_t, int>& field_range_type_) 
+                const std::map<int32_t, int>& field_range_type_,
+                const uint64_t sign_, const std::set<uint64_t>& subquery_signs_) 
             : table_id(table_id), sum(sum), err_sum(err_sum), count(count), err_count(err_count),
             affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows),
             region_count(region_count) {
                 field_range_type = field_range_type_;
+                parent_sign = sign_;
+                if (subquery_signs_.size() > 0) {
+                    subquery_signs = subquery_signs_;
+                }
             }
         SumCount& operator+=(const SumCount& other) {
             if (other.table_id > 0) {
@@ -814,6 +899,13 @@ struct BvarMap {
             if (field_range_type.size() <= 0) {
                 if (other.field_range_type.size() > 0) {
                     field_range_type = other.field_range_type;
+                }
+            }
+
+            parent_sign = other.parent_sign;
+            if (subquery_signs.size() <= 0) {
+                if (other.subquery_signs.size() > 0) {
+                    subquery_signs = other.subquery_signs;
                 }
             }
 
@@ -849,23 +941,30 @@ struct BvarMap {
         int64_t region_count = 0;
         // 用于索引推荐
         std::map<int32_t, int> field_range_type;
+        uint64_t parent_sign;
+        std::set<uint64_t> subquery_signs;
     };
 public:
     BvarMap() {}
     BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t err_cost,
         int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, int64_t region_count,
-        const std::map<int32_t, int>& field_range_type_, int64_t err_count) {
+        const std::map<int32_t, int>& field_range_type_, int64_t err_count, uint64_t parent_sign, std::set<uint64_t>& subquery_signs) {
         internal_map[key][index_id] = SumCount(table_id, cost, err_cost, 1, err_count, affected_rows,
-            scan_rows, filter_rows, region_count, field_range_type_);
+            scan_rows, filter_rows, region_count, field_range_type_,
+            parent_sign, subquery_signs);
     }
+
     BvarMap& operator+=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
             for (auto& pair2 : pair.second) {
                 internal_map[pair.first][pair2.first] += pair2.second;
             }
         }
+
+
         return *this;
     }
+    
     BvarMap& operator-=(const BvarMap& other) {
         for (auto& pair : other.internal_map) {
             for (auto& pair2 : pair.second) {
@@ -983,6 +1082,10 @@ struct RocksdbVars {
     bvar::Adder<int64_t>     rocksdb_get_count;
     bvar::Window<bvar::IntRecorder> rocksdb_get_time_cost_latency;
     bvar::PerSecond<bvar::Adder<int64_t> > rocksdb_get_time_cost_qps;
+    bvar::IntRecorder     rocksdb_multiget_time;
+    bvar::Adder<int64_t>     rocksdb_multiget_count;
+    bvar::Window<bvar::IntRecorder> rocksdb_multiget_time_cost_latency;
+    bvar::PerSecond<bvar::Adder<int64_t> > rocksdb_multiget_time_cost_qps;
     bvar::IntRecorder     rocksdb_scan_time;
     bvar::Adder<int64_t>     rocksdb_scan_count;
     bvar::Window<bvar::IntRecorder> rocksdb_scan_time_cost_latency;
@@ -1006,6 +1109,8 @@ private:
                    rocksdb_put_time_cost_qps("rocksdb_put_time_cost_qps", &rocksdb_put_count),
                    rocksdb_get_time_cost_latency("rocksdb_get_time_cost_latency", &rocksdb_get_time, -1),
                    rocksdb_get_time_cost_qps("rocksdb_get_time_cost_qps", &rocksdb_get_count),
+                   rocksdb_multiget_time_cost_latency("rocksdb_multiget_time_cost_latency", &rocksdb_multiget_time, -1),
+                   rocksdb_multiget_time_cost_qps("rocksdb_multiget_time_cost_qps", &rocksdb_multiget_count),
                    rocksdb_scan_time_cost_latency("rocksdb_scan_time_cost_latency", &rocksdb_scan_time, -1),
                    rocksdb_scan_time_cost_qps("rocksdb_scan_time_cost_qps", &rocksdb_scan_count),
                    rocksdb_seek_time_cost_latency("rocksdb_seek_time_cost_latency", &rocksdb_seek_time, -1),

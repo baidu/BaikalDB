@@ -125,12 +125,12 @@ uint64_t str_to_datetime(const char* str_time) {
             return 0;
         }
     }
-    if (year > 70 && year < 100) {
+    if (year >= 70 && year < 100) {
         year += 1900;
-    } else if (year < 70) {
+    } else if (year < 70 && year > 0) {
         year += 2000;
     }
-    if (month == 0 || month > 12) {
+    if (month > 12) {
         return 0;
     }
     if (day > 31) {
@@ -204,6 +204,12 @@ time_t datetime_to_timestamp(uint64_t datetime) {
     tm.tm_sec = ((datetime >> 24) & 0x3F);
     tm.tm_isdst = 0;
     //int macrosec = (datetime & 0xFFFFFF);
+    if (tm.tm_mon == 0) {
+        return 0;
+    }
+    if (tm.tm_mday == 0) {
+        return 0;
+    }
 
     tm.tm_year -= 1900;
     tm.tm_mon--;

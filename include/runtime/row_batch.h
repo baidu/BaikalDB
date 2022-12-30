@@ -20,7 +20,6 @@
 #include "mem_row_compare.h"
 
 namespace baikaldb {
-const size_t ROW_BATCH_CAPACITY = 1024;
 class RowBatch {
 public:
     RowBatch() : _idx(0) {

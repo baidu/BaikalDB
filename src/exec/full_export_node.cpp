@@ -44,10 +44,12 @@ int FullExportNode::open(RuntimeState* state) {
     _scan_node = static_cast<RocksdbScanNode*>(get_node(pb::SCAN_NODE));
     for (auto& pair : _region_infos) {
         auto& info = pair.second;
-        _start_key_sort[info.start_key()] = info.region_id();
+        _start_key_sort[info.partition_id()][info.start_key()] = info.region_id();
     }
-    for (auto& pair : _start_key_sort) {
-        _send_region_ids.emplace_back(pair.second);
+    for (auto& partition_pair : _start_key_sort) {
+        for (auto& pair : partition_pair.second) {
+            _send_region_ids.emplace_back(pair.second);
+        }
     } 
     DB_WARNING("region_count:%ld", _send_region_ids.size());
     return 0;
@@ -105,10 +107,12 @@ int FullExportNode::get_next_region_infos() {
     _start_key_sort.clear();
     for (auto& pair : _region_infos) {
         auto& info = pair.second;
-        _start_key_sort[info.start_key()] = info.region_id();
+        _start_key_sort[info.partition_id()][info.start_key()] = info.region_id();
     }
-    for (auto& pair : _start_key_sort) {
-        _send_region_ids.emplace_back(pair.second);
+    for (auto& partition_pair : _start_key_sort) {
+        for (auto& pair : partition_pair.second) {
+            _send_region_ids.emplace_back(pair.second);
+        }
     } 
     DB_WARNING("region_count:%ld", _send_region_ids.size());
     return 0;
@@ -143,14 +147,12 @@ int FullExportNode::calc_last_key(RuntimeState* state, MemRow* mem_row) {
     ScanIndexInfo& scan_index_info = *(_scan_node->main_scan_index());
     scan_index_info.region_primary.clear();
     pb::PossibleIndex pos_index;
-    pos_index.ParseFromString(scan_index_info.raw_index);
-    if (pos_index.ranges_size() == 0) {
-        pos_index.add_ranges();
-    }
-    pos_index.mutable_ranges(0)->set_left_key(key.data());
-    pos_index.mutable_ranges(0)->set_left_full(key.get_full());
-    pos_index.mutable_ranges(0)->set_left_field_cnt(pri_info->fields.size());
-    pos_index.mutable_ranges(0)->set_left_open(true);
+    pos_index.set_index_id(main_table_id);
+    auto range_index = pos_index.add_ranges();
+    range_index->set_left_key(key.data());
+    range_index->set_left_full(key.get_full());
+    range_index->set_left_field_cnt(pri_info->fields.size());
+    range_index->set_left_open(true);
     pos_index.SerializeToString(&scan_index_info.raw_index);
     return 0;
 }

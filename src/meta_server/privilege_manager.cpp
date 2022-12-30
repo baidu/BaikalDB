@@ -163,6 +163,18 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     if (user_privilege.has_need_auth_addr()) {
         tmp_mem_privilege.set_need_auth_addr(user_privilege.need_auth_addr());
     }
+    if (user_privilege.has_resource_tag()) {
+        tmp_mem_privilege.set_resource_tag(user_privilege.resource_tag());
+    }
+    if (user_privilege.has_ddl_permission()) {
+        tmp_mem_privilege.set_ddl_permission(user_privilege.ddl_permission());
+    }
+    if (user_privilege.has_txn_lock_timeout()) {
+        tmp_mem_privilege.set_txn_lock_timeout(user_privilege.txn_lock_timeout());
+    }
+    if (user_privilege.has_use_read_index()) {
+        tmp_mem_privilege.set_use_read_index(user_privilege.use_read_index());
+    }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
     std::string value;
@@ -213,6 +225,10 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
     }
     if (user_privilege.has_need_auth_addr()) {
         tmp_mem_privilege.set_need_auth_addr(user_privilege.need_auth_addr());
+    }
+    if (user_privilege.has_resource_tag() && tmp_mem_privilege.has_resource_tag() && 
+        user_privilege.resource_tag() == tmp_mem_privilege.resource_tag()) {
+        tmp_mem_privilege.clear_resource_tag();
     }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value

@@ -41,12 +41,17 @@ public:
         _txn_timeout = timeout;
     }
 
+    void set_txn_lock_timeout(int64_t timeout) {
+        _txn_lock_timeout = timeout;
+    }
+
     int64_t get_txn_timeout() const {
         return _txn_timeout;
     }
 private:
     pb::TxnCmdType     _txn_cmd = pb::TXN_INVALID;
     int64_t            _txn_timeout = 0;
+    int64_t            _txn_lock_timeout = -1;
 };
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

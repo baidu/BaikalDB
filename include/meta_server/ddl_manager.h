@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 #include "common.h"
+#include "meta_util.h"
 #include "meta_server.h"
 #include "cluster_manager.h"
 #include "proto/meta.interface.pb.h"

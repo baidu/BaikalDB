@@ -106,10 +106,19 @@ TEST(test_datetime_str_other, case_all) {
     std::cout << "tm3:" << datetime_to_timestamp(0) << std::endl;
     std::cout << "tm4:" << str_to_datetime("1970-01-01 08:00:00") << std::endl;
     std::cout << "tm5:" << str_to_datetime("1970-01-01 08:00:01") << std::endl;
-    std::cout << "tm5:" << str_to_datetime("1970-01-01 07:00:01") << std::endl;
-    std::cout << "tm4:" << datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:00")) << std::endl;
-    std::cout << "tm5:" << datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:01")) << std::endl;
-    std::cout << "tm5:" << datetime_to_timestamp(str_to_datetime("1970-01-01 07:00:01")) << std::endl;
+    std::cout << "tm6:" << str_to_datetime("1970-01-01 07:00:01") << std::endl;
+    std::cout << "tm6:" << str_to_datetime("1970-00-00 00:00:00") << std::endl;
+    std::cout << "tm7:" << datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:00")) << std::endl;
+    std::cout << "tm8:" << datetime_to_timestamp(str_to_datetime("1970-01-01 08:00:01")) << std::endl;
+    std::cout << "tm9:" << datetime_to_timestamp(str_to_datetime("1970-01-01 07:00:01")) << std::endl;
+    std::cout << "tm9:" << datetime_to_timestamp(str_to_datetime("1971-00-00 08:00:01")) << std::endl;
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = 90;
+    tm.tm_mon = -1;
+    tm.tm_mday = 0;
+    time_t t = mktime(&tm);
+    std::cout << "mktm:" << t << std::endl;
 }
 int32_t str_to_time2(const char* str_time) {
     int hour = 0;

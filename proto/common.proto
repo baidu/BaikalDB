@@ -105,6 +105,8 @@ message SchemaConf {
     optional string sign_blacklist          = 10;
     optional string sign_forcelearner       = 11;
     optional string sign_forceindex         = 12;
+    optional int32 tail_split_num           = 13; // 尾分裂新region数
+    optional int32 tail_split_step          = 14;
 };
 
 enum Engine {

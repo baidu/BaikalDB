@@ -405,45 +405,45 @@ TEST_F(ClusterManagerTest, test_add_and_drop) {
     std::string resource_tag;
     std::set<std::string> exclude_stores;
     std::string selected_instance, select1, select2;
-    int ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    int ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     select1 = selected_instance; 
     DB_WARNING("selected instance:%s", selected_instance.c_str());
     ASSERT_EQ(0, ret);
     //轮询再选一次
-    ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     select2 = selected_instance;
     ASSERT_EQ(0, ret);
     ASSERT_TRUE(select1 != select2);
     //轮询再选一次
-    ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE(select1 == selected_instance);
 
     //无resource_tag, 有exclude_store
     exclude_stores.insert("127.0.0.1:8010");
-    ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.2:8010" == selected_instance);
     
     //无resource_tag, 有exclude_store
     exclude_stores.clear();
     exclude_stores.insert("127.0.0.2:8010");
-    ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.1:8010" == selected_instance);
    
     exclude_stores.insert("127.0.0.1:8010");
-    ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     ASSERT_EQ(-1, ret);
     
     exclude_stores.clear();
     resource_tag = "resource_tag1";
-    ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     select1 = selected_instance;
     ASSERT_EQ(0, ret);
     
     exclude_stores.insert(select1 == "127.0.0.3:8010" ? "127.0.0.4:8010" : "127.0.0.3:8010");
-    ret = _cluster_manager->select_instance_rolling(resource_tag, exclude_stores, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, exclude_stores, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE(select1 == selected_instance);
     
@@ -472,40 +472,40 @@ TEST_F(ClusterManagerTest, test_add_and_drop) {
 
     resource_tag.clear();
     exclude_stores.clear();
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 1, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 1, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.2:8010" == selected_instance);
 
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 1, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 1, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.2:8010" == selected_instance);
     
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 1, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 1, selected_instance);
     ASSERT_EQ(0, ret);
     select1 = selected_instance;
     
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 1, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 1, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE(select1 != selected_instance);
     
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.1:8010" == selected_instance);
 
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.1:8010" == selected_instance);
     
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     select1 = selected_instance;
 
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE(select1 != selected_instance);
 
     exclude_stores.insert("127.0.0.1:8010");
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.2:8010" == selected_instance);
     
@@ -525,21 +525,21 @@ TEST_F(ClusterManagerTest, test_add_and_drop) {
     ASSERT_EQ(0, ret);
     
     exclude_stores.clear();
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.2:8010" == selected_instance);
 
     _cluster_manager->reset_instance_status();
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     select1 = selected_instance;
     
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE(select1 != selected_instance);
     
     exclude_stores.insert("127.0.0.1:8010");
-    ret = _cluster_manager->select_instance_min(resource_tag, exclude_stores, 2, "", selected_instance);
+    ret = _cluster_manager->select_instance_min({resource_tag, "", ""}, exclude_stores, 2, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_TRUE("127.0.0.2:8010" == selected_instance);
 } // TEST_F
@@ -588,7 +588,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     ASSERT_EQ(1, network_segment_size);
     ASSERT_EQ(32, prefix);
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++; 
     }
@@ -596,13 +596,13 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     // 开启网段rolling
     _state_machine->set_network_segment_balance(resource_tag, true);
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
     // exclude包含唯一instance, 则pick失败
     ASSERT_EQ(pick_times["127.1.1.1:8100"], 80);
-    ret = _cluster_manager->select_instance_rolling(resource_tag, {"127.1.1.1:8100"}, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {"127.1.1.1:8100"}, selected_instance);
     ASSERT_EQ(-1, ret);
     
     // case 2: 
@@ -613,7 +613,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     ASSERT_EQ(32, prefix);
     pick_times.clear(); 
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         pick_times[selected_instance]++;
     } 
     for(auto& pair : pick_times) {
@@ -623,7 +623,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     _state_machine->set_network_segment_balance(resource_tag, true); 
     pick_times.clear();
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -631,15 +631,15 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
         ASSERT_EQ(pair.second, 10);
     }
     // 一个region有三个peer，进行load balance, 必定会选另一个网段下的instance
-    ret = _cluster_manager->select_instance_rolling(resource_tag, 
-            {"127.0.1.1:8010", "127.0.1.2:8010", "127.0.1.3:8010"}, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, 
+            {"127.0.1.1:8010", "127.0.1.2:8010", "127.0.1.3:8010"}, selected_instance);
     ASSERT_EQ(0, ret);
     ASSERT_EQ(selected_instance, "127.0.1.4:8010"); 
     // 如果4变成migrate, 则pick失败
     ret = _cluster_manager->set_migrate_for_instance("127.0.1.4:8010");
     ASSERT_EQ(0, ret);
-    ret = _cluster_manager->select_instance_rolling(resource_tag, 
-            {"127.0.1.1:8010", "127.0.1.2:8010", "127.0.1.3:8010"}, "", selected_instance);
+    ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, 
+            {"127.0.1.1:8010", "127.0.1.2:8010", "127.0.1.3:8010"}, selected_instance);
     ASSERT_EQ(-1, ret);
     
     // case 3:
@@ -650,7 +650,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     ASSERT_EQ(16, prefix); 
     pick_times.clear();
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++; 
     }
@@ -660,7 +660,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     // 开启了网段balance
     _state_machine->set_network_segment_balance(resource_tag, true);
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -675,7 +675,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
             size_t random_index = butil::fast_rand() % resource_ips[resource_tag].size();
             peer_list.insert(resource_ips[resource_tag][random_index]);
         }
-        ret = _cluster_manager->select_instance_rolling(resource_tag, peer_list, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, peer_list, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++; 
     }
@@ -688,7 +688,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     _cluster_manager->get_network_segment_count(resource_tag, network_segment_size, prefix);
     pick_times.clear();
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -698,7 +698,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
     // 开启网段balance
     _state_machine->set_network_segment_balance(resource_tag, true);
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -713,7 +713,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_rolling) {
             size_t random_index = butil::fast_rand() % resource_ips[resource_tag].size();
             peer_list.insert(resource_ips[resource_tag][random_index]);
         }
-        ret = _cluster_manager->select_instance_rolling(resource_tag, peer_list, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, peer_list, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -750,7 +750,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_add_drop_instanc
     ASSERT_EQ(32, prefix);
     // rolling 30次，唯一的instance被pick 30次
     for(int i = 0; i < 30; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         ASSERT_EQ("10.0.0.0:8010", selected_instance);
     }
@@ -769,7 +769,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_add_drop_instanc
     ASSERT_EQ(32, prefix);
     // rolling 30次，每个instance被pick 15次
     for(int i = 0; i < 30; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -791,7 +791,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_add_drop_instanc
     // rolling 30次，每个instance被pick 10次
     pick_times.clear();
     for(int i = 0; i < 30; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -811,7 +811,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_add_drop_instanc
     // rolling 30次，剩下的两个instance每个被pick 15次
     pick_times.clear();
     for(int i = 0; i < 30; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         pick_times[selected_instance]++;
         ASSERT_EQ(0, ret);
         ASSERT_NE("10.0.0.0:8010", selected_instance);
@@ -837,10 +837,10 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_add_drop_instanc
     ASSERT_EQ(32, prefix);
     // 对2个resource tag，都rolling 100次，正常
     for(int i = 0; i < 100; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         ASSERT_EQ("10.222.0.1:8010", selected_instance);
-        ret = _cluster_manager->select_instance_rolling("add_drop_tag2", {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({"add_drop_tag2", "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         ASSERT_EQ("10.223.0.1:8010", selected_instance);
     }
@@ -880,7 +880,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_with_gflag) {
     ASSERT_EQ(32, prefix);
     // rolling 40次，每个instance被pick 10次。
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -908,7 +908,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_with_gflag) {
     // 正常rolling 40次，每个instance pick 10次
     pick_times.clear();
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -919,7 +919,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_with_gflag) {
     // 3，4被exclude，则在bj-network1进行pick，其中1，2每个被pick 10次
     pick_times.clear();
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {"11.0.0.3:8010", "11.0.0.4:8010"}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {"11.0.0.3:8010", "11.0.0.4:8010"}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -928,7 +928,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_with_gflag) {
     // bj-network1，4被exclude，则只能pick 3
     pick_times.clear();
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {"11.0.0.1:8010", "11.0.0.4:8010"}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {"11.0.0.1:8010", "11.0.0.4:8010"}, selected_instance);
         ASSERT_EQ(0, ret);
         ASSERT_EQ("11.0.0.3:8010", selected_instance);
     }
@@ -956,7 +956,7 @@ TEST_F(ClusterManagerTest, test_load_balance_by_network_segment_with_gflag) {
     // 现在1，2不属于同一个网段bj-network1, 模拟1，4被exclude，则2，3每个被pick 20次
     pick_times.clear();
     for(int i = 0; i < 40; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {"11.0.0.1:8010", "11.0.0.4:8010"}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {"11.0.0.1:8010", "11.0.0.4:8010"}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -993,7 +993,7 @@ TEST_F(ClusterManagerTest, test_add_cluster) {
     ASSERT_EQ(13, network_segment_size);
     ASSERT_EQ(21, prefix);
     for(int i = 0; i < 1000; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }
@@ -1021,7 +1021,7 @@ TEST_F(ClusterManagerTest, test_add_cluster) {
     ASSERT_EQ(21, prefix);
     // rolling 40次，每个instance被pick 10次。
     for(int i = 0; i < 1000; ++i) {
-        ret = _cluster_manager->select_instance_rolling(resource_tag, {}, "", selected_instance);
+        ret = _cluster_manager->select_instance_rolling({resource_tag, "", ""}, {}, selected_instance);
         ASSERT_EQ(0, ret);
         pick_times[selected_instance]++;
     }

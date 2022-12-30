@@ -98,7 +98,7 @@ int DeleteNode::open(RuntimeState* state) {
                 record->set_value(record->get_field_by_tag(slot.field_id()), 
                         row->get_value(slot.tuple_id(), slot.slot_id()));
             }
-            ret = delete_row(state, record);
+            ret = delete_row(state, record, row);
             if (ret < 0) {
                 DB_WARNING_STATE(state, "delete_row fail");
                 return -1;

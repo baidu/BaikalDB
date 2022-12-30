@@ -65,6 +65,8 @@ private:
         }
         return false;
     }
+    int select_partition(SmartTable& table_info, ScanNode* scan_node,
+        std::map<int32_t, range::FieldRange>& field_range_map);
 
     SchemaFactory* _factory = SchemaFactory::get_instance();
     QueryContext*  _ctx = nullptr;

@@ -193,6 +193,10 @@ public:
         _num_returned_rows += num;
     }
 
+    void inc_num_affected_rows(int64_t num) {
+        _num_affected_rows += num;
+    }
+
     int64_t num_affected_rows() {
         return _num_affected_rows;
     }
@@ -207,9 +211,18 @@ public:
         return _num_scan_rows;
     }
 
+    void inc_num_scan_rows(int64_t num) {
+        _num_scan_rows += num;
+    }
+
     void set_num_filter_rows(int64_t num) {
         _num_filter_rows = num;
     }
+
+    void inc_num_filter_rows(int64_t num) {
+        _num_filter_rows += num;
+    }
+
     void inc_num_filter_rows() {
         _num_filter_rows++;
     }
@@ -367,11 +380,7 @@ public:
     int memory_limit_release(int64_t rows_to_check, int64_t bytes);
     int memory_limit_release_all();
 
-    int64_t get_single_store_concurrency() {
-        return _single_store_concurrency;
-    }
-
-    void set_single_store_concurrency();
+    int64_t calc_single_store_concurrency(pb::OpType op_type);
 
 public:
     uint64_t          txn_id = 0;
@@ -405,6 +414,7 @@ public:
     std::vector<int64_t> ttl_timestamp_vec;
 
     uint64_t          sign = 0;
+    bool              need_use_read_index = false;
 private:
     bool _is_inited    = false;
     bool _is_cancelled = false;
@@ -439,11 +449,11 @@ private:
     bool              _need_learner_backup = false;
                                               // there is only 1 region.
     NetworkSocket*    _client_conn = nullptr; // used for baikaldb
+    int64_t           _single_store_concurrency = -1; // used for baikaldb
     TransactionPool*  _txn_pool = nullptr;    // used for store
     SmartTransaction  _txn = nullptr;         // used for store
     std::shared_ptr<RegionResource> _resource;// used for store
     int64_t           _primary_region_id = -1;// used for store
-    int64_t           _single_store_concurrency = FLAGS_single_store_concurrency;// used for store
     std::vector<int64_t> _scan_indices;
     size_t _row_batch_capacity = ROW_BATCH_CAPACITY;
     int _multiple = 1;

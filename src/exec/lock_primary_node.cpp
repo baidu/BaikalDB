@@ -89,6 +89,10 @@ int LockPrimaryNode::open(RuntimeState* state) {
             DB_WARNING("get index info failed index_id: %ld", index_id);
             continue;
         }
+        if (index_info->index_hint_status == pb::IHS_DISABLE
+            && index_info->state == pb::IS_DELETE_LOCAL) {
+            continue;
+        }
         if (!index_info->is_global) {
             _affected_indexes.emplace_back(index_info);
         }
@@ -191,7 +195,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
         case pb::LOCK_GET_DML: {
             for (auto& record : delete_records) {
                 //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
-                ret = delete_row(state, record);
+                ret = delete_row(state, record, nullptr);
                 if (ret < 0) {
                     DB_WARNING_STATE(state, "delete_row fail");
                     return -1;

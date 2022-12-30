@@ -91,6 +91,7 @@ struct TableSource : public Node {
     String  as_name;
     DmlNode* derived_table = nullptr;
     Vector<IndexHint*> index_hints;
+    Vector<String> partition_names;
     TableSource() {
         node_type = NT_TABLE_SOURCE;
     }
@@ -365,6 +366,7 @@ struct Assignment : public Node {
 
 struct TruncateStmt: public DmlNode {
     TableName* table_name = nullptr;
+    Vector<String> partition_names;
     TruncateStmt() {
         node_type = NT_TRUNCATE;
     }
@@ -379,6 +381,7 @@ struct DeleteStmt : public DmlNode {
     bool is_quick = false;
     Node* from_table = nullptr; //table_name or join or tableresource
     Vector<TableName*> delete_table_list;
+    Vector<String> partition_names;
     ExprNode* where = nullptr;
     OrderByClause* order = nullptr;
     LimitClause* limit = nullptr;
@@ -670,6 +673,7 @@ struct InsertStmt : public DmlNode {
     DmlNode* subquery_stmt = nullptr;
     Vector<ColumnName*> columns;
     Vector<RowExpr*> lists;
+    Vector<String> partition_names;
     Vector<Assignment*> on_duplicate;
     InsertStmt() {
         node_type = NT_INSERT;

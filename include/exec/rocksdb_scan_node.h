@@ -24,6 +24,51 @@
 
 namespace baikaldb {
 class ReverseIndexBase;
+
+class BatchTableKey {
+public:
+    BatchTableKey() {
+        _row_key_pairs.reserve(ROW_BATCH_CAPACITY);
+        _batch_vector.reserve(3);
+    }
+    void add_key(const std::string& left_key, bool left_full, const std::string& right_key, bool right_full) {
+        _row_key_pairs.emplace_back(TableKeyPair(left_key, left_full, right_key, right_full));
+    }
+    void set_start_capacity(size_t row_batch_capacity) {
+        _row_batch_capacity = row_batch_capacity;
+        _batch_vector.reserve(std::min(_row_batch_capacity * 2, ROW_BATCH_CAPACITY));
+    }
+
+    size_t size() {
+        return _row_key_pairs.size();
+    }
+    const TableKeyPair* get_next() {
+        return &_row_key_pairs[_idx++];
+    }
+    const std::vector<TableKeyPair*>& get_next_batch() {
+        size_t batch_size = ROW_BATCH_CAPACITY;
+        if (_row_batch_capacity * _multiple < ROW_BATCH_CAPACITY) {
+            batch_size = _row_batch_capacity * _multiple;
+            //两倍扩散
+            _multiple *= 2;
+        }
+        _batch_vector.clear();
+        for (size_t i = 0; i < batch_size && _idx < size(); ++i) {
+            _batch_vector.emplace_back(&_row_key_pairs[_idx++]);
+        }
+        return _batch_vector;
+    }
+    bool is_traverse_over() {
+        return _idx >= size();
+    }
+private:
+    std::vector<TableKeyPair> _row_key_pairs;
+    std::vector<TableKeyPair*> _batch_vector;
+    size_t _idx = 0;
+    int _multiple = 1;
+    size_t _row_batch_capacity = ROW_BATCH_CAPACITY;
+};
+
 class RocksdbScanNode : public ScanNode {
 public:
     RocksdbScanNode() {
@@ -80,6 +125,7 @@ public:
         return true;
     }
 
+    int64_t copy_multiget_rows(RowBatch* output_batch, std::vector<ExprNode*>* conjuncts);
 
     int32_t get_partition_field() {
         return _table_info->partition_info.partition_field();
@@ -89,9 +135,6 @@ public:
         return _table_info->partition_num;
     }
 
-    std::vector<int64_t>& get_partition() {
-        return _partitions;
-    }
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -141,6 +184,8 @@ private:
     int64_t _region_id;
     bool _use_get = false;
     bool _is_ddl_work = false;
+    bool _is_global_index = false;
+    bool _has_s_wordrank = false;
     pb::DDLType _ddl_work_type = pb::DDL_NONE;
     int64_t _ddl_index_id = -1;
 
@@ -154,8 +199,9 @@ private:
     //被选择的索引
     std::vector<SmartRecord> _left_records;
     std::vector<SmartRecord> _right_records;
-    std::vector<MutTableKey> _left_keys;
-    std::vector<MutTableKey> _right_keys;
+    BatchTableKey _scan_range_keys;
+    BatchRecord   _multiget_records;
+    RowBatch      _multiget_row_batch;
     std::vector<int> _left_field_cnts;
     std::vector<int> _right_field_cnts;
     std::vector<bool> _left_opens;
@@ -164,6 +210,7 @@ private:
     std::vector<pb::SlotDescriptor> _update_slots;
     std::vector<ExprNode*> _update_exprs;
     bool _use_encoded_key = false;
+    bool _range_key_sorted = false;
     // trace使用
     int _scan_rows = 0;
     size_t _idx = 0;
@@ -188,7 +235,6 @@ private:
 
     std::map<int32_t, int32_t> _index_slot_field_map;
     pb::StorageType _storage_type = pb::ST_UNKNOWN;
-    std::vector<int64_t> _partitions {0};
     bool _new_fulltext_tree = false;
 };
 }

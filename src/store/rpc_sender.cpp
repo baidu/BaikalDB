@@ -18,9 +18,10 @@ namespace baikaldb {
 DECLARE_int64(print_time_us);
 int RpcSender::send_no_op_request(const std::string& instance,
                                int64_t recevie_region_id,
-                               int64_t request_version) {
+                               int64_t request_version,
+                               int times) {
     int ret = 0;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < times; ++i) {
         pb::StoreReq request;
         request.set_op_type(pb::OP_NONE);
         request.set_region_id(recevie_region_id);
@@ -123,6 +124,17 @@ int RpcSender::send_init_region_method(const std::string& instance,
             pb::StoreRes& response) {
     StoreInteract store_interact(instance);
     return store_interact.send_request("init_region", init_region_request, response);
+}
+
+int RpcSender::get_leader_read_index(const std::string& leader, int64_t region_id, pb::StoreRes& response) {
+    pb::GetAppliedIndex request;
+    request.set_region_id(region_id);
+    request.set_use_read_idx(true);
+    StoreReqOptions req_options;
+    req_options.request_timeout = 1000; // 1s
+    req_options.connect_timeout = 1000; // 1s
+    StoreInteract store_interact(leader, req_options);
+    return store_interact.send_request("get_applied_index", request, response);
 }
 }//namespace
 

@@ -56,6 +56,7 @@ message DeriveExprNode {
     //与slot_id相同，只有avg AGG_EXPR与slot_id不同
     optional int32 intermediate_slot_id = 7;
     optional int32 field_id = 8;
+    optional string field_name = 9;
 };
 
 message ExprNode {

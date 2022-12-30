@@ -30,6 +30,20 @@ public:
         _rocksdb = rocksdb;
         _log_cf = log_cf;
     }
+    bool is_txn_op_type(const pb::OpType& op_type) {
+        if (op_type == pb::OP_INSERT
+            || op_type == pb::OP_DELETE
+            || op_type == pb::OP_UPDATE
+            || op_type == pb::OP_PREPARE
+            || op_type == pb::OP_ROLLBACK
+            || op_type == pb::OP_COMMIT
+            || op_type == pb::OP_SELECT_FOR_UPDATE
+            || op_type == pb::OP_KV_BATCH
+            || op_type == pb::OP_PARTIAL_ROLLBACK) {
+            return true;
+        }
+        return false;
+    }
     int read_log_entry(int64_t region_id, int64_t log_index, std::string& log_entry); 
     int read_log_entry(int64_t region_id, int64_t start_log_index, int64_t end_log_index,
         std::set<uint64_t>& txn_ids, std::map<int64_t, std::string>& log_entrys);
@@ -46,7 +60,8 @@ private:
 
 private:
     RocksWrapper*       _rocksdb;
-    rocksdb::ColumnFamilyHandle* _log_cf;    
+    rocksdb::ColumnFamilyHandle* _log_cf;
+    DISALLOW_COPY_AND_ASSIGN(LogEntryReader);  
 };
 
 } // end of namespace

@@ -40,8 +40,7 @@ void QueryContext::update_ctx_stat_info(RuntimeState* state, int64_t query_total
         if (sql_info == nullptr) {
             sql_info = SchemaFactory::get_instance()->create_sql_stat(state->sign);
         }
-        // 前几个请求可以计算，用做限制并发RuntimeState::set_single_store_concurrency
-        if (state->need_statistics || sql_info->counter < SqlStatistics::SQL_COUNTS_RANGE) {
+        if (state->need_statistics) {
             sql_info->update(query_total_time, stat_info.num_scan_rows);
         }
     }

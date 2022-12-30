@@ -71,9 +71,7 @@ int UpdatePlanner::plan() {
     ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
     int64_t table_id = info.table_id;
     _ctx->prepared_table_id = table_id;
-    if (!_ctx->is_prepared) {
-        set_dml_txn_state(table_id);
-    }
+    set_dml_txn_state(table_id);
     // 局部索引binlog处理标记
     if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
         update_node->set_local_index_binlog(true);
@@ -141,6 +139,15 @@ int UpdatePlanner::parse_kv_list() {
     }
     TableInfo& table_info = *table_info_ptr;
     parser::Vector<parser::Assignment*> set_list = _update->set_list;
+    std::set<int32_t> pk_field_ids;
+    auto pk = _factory->get_index_info_ptr(table_id);
+    if (pk == nullptr) {
+        DB_WARNING("no pk found with id: %ld", table_id);
+        return -1;
+    }
+    for (auto& field : pk->fields) {
+        pk_field_ids.emplace(field.id);
+    }
     std::set<int32_t> update_field_ids;
     for (int idx = 0; idx < set_list.size(); ++idx) {
         if (set_list[idx] == nullptr) {
@@ -163,6 +170,14 @@ int UpdatePlanner::parse_kv_list() {
         auto slot = get_scan_ref_slot(alias_name, field_info->table_id, field_info->id, field_info->type);
         _update_slots.push_back(slot);
         update_field_ids.insert(field_info->id);
+        // 更新分区键,走全局索引流程
+        if (table_info.partition_ptr != nullptr && table_info.partition_ptr->partition_field_id() == field_info->id) {
+            _ctx->execute_global_flow = true;
+        }
+        // 更新主键，走全局索引流程
+        if (pk_field_ids.count(field_info->id) > 0) {
+            _ctx->execute_global_flow = true;
+        }
 
         pb::Expr value_expr;
         if (0 != create_expr_tree(set_list[idx]->expr, value_expr, CreateExprOptions())) {

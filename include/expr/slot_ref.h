@@ -34,11 +34,14 @@ public:
         }
         return row->get_value(_tuple_id, _slot_id).cast_to(_col_type);
     }
+    virtual ExprValue get_value(const ExprValue& value) {
+        return value;
+    }
 
     SlotRef* clone() {
         SlotRef* s = new SlotRef;
         s->_tuple_id = _tuple_id;
-        s->_field_id= _field_id;
+        s->_field_id = _field_id;
         s->_slot_id = _slot_id;
         s->_node_type = _node_type;
         s->_col_type = _col_type;

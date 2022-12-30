@@ -20,7 +20,7 @@
 #include "log_entry_reader.h"
 
 namespace baikaldb {
-
+DEFINE_int64(snapshot_timeout_min, 10, "snapshot_timeout_min : 10min");
 bool inline is_snapshot_data_file(const std::string& path) {
     butil::StringPiece sp(path);
     if (sp.ends_with(SNAPSHOT_DATA_FILE_WITH_SLASH)) {
@@ -73,6 +73,45 @@ bool RocksdbReaderAdaptor::region_shutdown() {
     return _region_ptr == nullptr || _region_ptr->is_shutdown();
 }
 
+void RocksdbReaderAdaptor::context_reset() {
+    IteratorContextPtr iter_context = nullptr;
+    iter_context.reset(new IteratorContext);
+    if (iter_context == nullptr) {
+        return;
+    }
+    iter_context->reading = _context->reading;
+    iter_context->is_meta_sst = _context->is_meta_sst;
+    iter_context->prefix = _context->prefix;
+    iter_context->upper_bound = _context->upper_bound;
+    iter_context->upper_bound_slice = iter_context->upper_bound;
+    iter_context->applied_index = _context->applied_index;
+    iter_context->snapshot_index = _context->snapshot_index;
+    iter_context->need_copy_data = _context->need_copy_data;
+    iter_context->sc = _context->sc;
+    if (!iter_context->is_meta_sst) {
+        rocksdb::ReadOptions read_options;
+        read_options.snapshot = iter_context->sc->snapshot;
+        read_options.total_order_seek = true;
+        read_options.fill_cache = false;
+        read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
+        rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_data_handle();
+        iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
+        iter_context->iter->Seek(iter_context->prefix);
+        iter_context->sc->data_context = iter_context;
+    } else {        
+        rocksdb::ReadOptions read_options;
+        read_options.snapshot = iter_context->sc->snapshot;
+        read_options.prefix_same_as_start = true;
+        read_options.total_order_seek = false;
+        read_options.fill_cache = false;
+        rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
+        iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
+        iter_context->iter->Seek(iter_context->prefix);
+        iter_context->sc->meta_context = iter_context;
+    }
+    _context = iter_context;
+}
+
 ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t size) {
     if (_closed) {
         DB_FATAL("rocksdb reader has been closed, region_id: %ld, offset: %ld",
@@ -113,10 +152,19 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
                     _region_id, time_cost.get_time(), offset, _context->offset, size, _last_package.size());
             return _last_package.size();
         }
-        DB_FATAL("region_id: %ld, retry last_offset fail time_cost: %ld, "
-                "last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
-                _region_id, time_cost.get_time(), _last_offset, offset, _context->offset, size);
-        return -1;
+
+        // 重置 _context
+        if (offset == 0 && _context->offset_update_time.get_time() > FLAGS_snapshot_timeout_min * 60 * 1000 * 1000ULL) {
+            _last_offset = 0;
+            _num_lines = 0;
+            context_reset();
+            DB_FATAL("region_id: %ld, context_reset", _region_id);
+        } else {
+            DB_FATAL("region_id: %ld, retry last_offset fail time_cost: %ld, "
+                    "last_off:%lu, off:%lu, ctx->off:%lu, size:%lu", 
+                    _region_id, time_cost.get_time(), _last_offset, offset, _context->offset, size);
+            return -1;
+        }
     }
 
     size_t count = 0;
@@ -192,6 +240,7 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
         count += read_size;
         ++_num_lines;
         _context->offset += read_size;
+        _context->offset_update_time.reset();
         _context->iter->Next();
     }
     DB_WARNING("region_id: %ld read done. count: %ld, key_num: %ld, time_cost: %ld, "
@@ -617,6 +666,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context->is_meta_sst = false;
             iter_context->upper_bound = upper_bound;
             iter_context->upper_bound_slice = iter_context->upper_bound;
+            iter_context->sc = sc.get();
             rocksdb::ReadOptions read_options;
             read_options.snapshot = sc->snapshot;
             read_options.total_order_seek = true;
@@ -659,6 +709,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context.reset(new IteratorContext);
             iter_context->prefix = prefix;
             iter_context->is_meta_sst = true;
+            iter_context->sc = sc.get();
             rocksdb::ReadOptions read_options;
             read_options.snapshot = sc->snapshot;
             read_options.prefix_same_as_start = true;

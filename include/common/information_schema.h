@@ -15,6 +15,7 @@
 #pragma once
 #include "common.h"
 #include "proto/meta.interface.pb.h"
+#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
 class TableRecord;
@@ -49,6 +50,8 @@ private:
     int64_t construct_table(const std::string& table_name, FieldVec& fields);
     void init_partition_split_info();
     void init_region_status();
+    void init_learner_region_status();
+    void init_invalid_learner_region();
     void init_columns();
     void init_statistics();
     void init_schemata();
@@ -110,6 +113,11 @@ private:
     void init_table_privileges();
     void init_tablespaces();
     void init_user_privileges();
+    void init_binlog_region_infos();
+    void query_regions_concurrency(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
+    std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos);
+    void process_binlogs_region_info(std::vector<std::vector<std::string>>& result_rows, std::unordered_map<int64_t, 
+    std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
 
     std::unordered_map<std::string, pb::SchemaInfo> _tables;
     //InformationSchema在baikaldb端运行

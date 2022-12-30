@@ -20,6 +20,7 @@
 #include <atomic>
 #include <memory>
 #include <boost/lexical_cast.hpp>
+#include "concurrency.h"
 #ifdef BAIDU_INTERNAL
 #include <base/iobuf.h>
 #include <base/containers/bounded_queue.h>

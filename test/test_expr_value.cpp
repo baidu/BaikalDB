@@ -51,6 +51,48 @@ TEST(test_proto, case_all) {
     }
     return;
     */
+    {
+        double aa = 0.000000001;
+        std::ostringstream oss;
+        oss << std::setprecision(15) << aa;
+        std::cout << oss.str() << std::endl;
+        double b = 100.123;
+        char x[100];
+        snprintf(x, 100, "%.12g", b);
+        std::cout << "test:" << x << std::endl;
+        snprintf(x, 100, "%.12g", aa);
+        std::cout << "test:" << x << std::endl;
+    }
+    {
+        double aa = 0.01;
+        std::ostringstream oss;
+        oss << aa;
+        std::cout << oss.str() << std::endl;
+    }
+    {
+        double aa = 0.001;
+        std::ostringstream oss;
+        oss << aa;
+        std::cout << oss.str() << std::endl;
+    }
+    {
+        double aa = 0.0001;
+        std::ostringstream oss;
+        oss << aa;
+        std::cout << oss.str() << std::endl;
+    }
+    {
+        double aa = 0.00001;
+        std::ostringstream oss;
+        oss << aa;
+        std::cout << oss.str() << std::endl;
+    {
+        double aa = 0.000001;
+        std::ostringstream oss;
+        oss << aa;
+        std::cout << oss.str() << std::endl;
+    }
+    }
     class LogMessageVoidify {
         public: 
             LogMessageVoidify() { }

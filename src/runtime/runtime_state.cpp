@@ -126,6 +126,8 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     sign    = ctx->stat_info.sign;
     _use_backup = ctx->use_backup;
     _need_learner_backup = ctx->need_learner_backup;
+    _single_store_concurrency = ctx->single_store_concurrency;
+    need_use_read_index = ctx->need_use_read_index();
     // prepare 复用runtime
     if (_is_inited) {
         return 0;
@@ -166,38 +168,31 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     return 0;
 }
 
-void RuntimeState::set_single_store_concurrency() {
-    _single_store_concurrency = FLAGS_single_store_concurrency;//默认并发度为20
-    if (!FLAGS_limit_unappropriate_sql) {
-        return;
+int64_t RuntimeState::calc_single_store_concurrency(pb::OpType op_type) {
+    // comment设置优先
+    if (_single_store_concurrency > 0) {
+        return _single_store_concurrency;
+    }
+    int64_t single_store_concurrency = FLAGS_single_store_concurrency;//默认并发度为20
+    if (!FLAGS_limit_unappropriate_sql || op_type != pb::OP_SELECT) {
+        return single_store_concurrency;
     }
     int64_t baikaldb_alive_time_us = SchemaFactory::get_instance()->get_baikaldb_alive_time_us();
     if (baikaldb_alive_time_us < FLAGS_baikaldb_alive_time_s * 1000 * 1000LL) {
-        return;
+        return single_store_concurrency;
     }
     if (sign == 0) {
-        return;
+        return single_store_concurrency;
     }
     auto schema_factory = SchemaFactory::get_instance();
     auto sql_stat_ptr = schema_factory->get_sql_stat(sign);
     if (sql_stat_ptr == nullptr || sql_stat_ptr->counter < SqlStatistics::SQL_COUNTS_RANGE) {
-        _single_store_concurrency = 1;
+        single_store_concurrency = 1;
         DB_WARNING("select sql is unappropriate sql, need to limit concurrency as one, sql sign is [%lu]", sign);
     }
+    return single_store_concurrency;
 }
-/*
-int RuntimeState::init(const pb::CachePlan& commit_plan) {
-    txn_id = _client_conn->txn_id;
-    seq_id = _client_conn->seq_id;
-    int ret = SchemaFactory::get_instance()->get_region_by_key(commit_plan.regions(), _client_conn->region_infos);
-    if (ret != 0) {
-        // region may be removed by truncate table
-        DB_FATAL("TransactionWarn: get_region_by_key failed, txn_id: %lu", txn_id);
-        return -1;
-    }
-    return 0;
-}
-*/
+
 void RuntimeState::conn_id_cancel(uint64_t db_conn_id) {
     if (_pool != nullptr) {
         auto s = _pool->get(db_conn_id);
@@ -224,6 +219,7 @@ int RuntimeState::memory_limit_exceeded(int64_t rows_to_check, int64_t bytes) {
         _mem_tracker->set_limit_exceeded();
         DB_WARNING("log_id:%lu memory limit Exceeded limit:%ld consumed:%ld used:%ld.", _log_id,
             _mem_tracker->bytes_limit(), _mem_tracker->bytes_consumed(), _used_bytes.load());
+        BAIDU_SCOPED_LOCK(_mem_lock);
         error_code = ER_TOO_BIG_SELECT;
         error_msg.str("select reach memory limit");
         return -1;

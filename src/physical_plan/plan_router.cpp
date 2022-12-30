@@ -20,6 +20,7 @@
 #include "scalar_fn_call.h"
 #include "expr_node.h"
 #include "literal.h"
+#include "join_node.h"
 
 namespace baikaldb {
 int PlanRouter::analyze(QueryContext* ctx) {
@@ -48,8 +49,27 @@ int PlanRouter::analyze(QueryContext* ctx) {
     size_t scan_size = scan_nodes.size() + dual_scan_nodes.size();
     if (scan_size > 0) {
         bool has_join = scan_size > 1;
+        std::set<ExecNode*> escape_get_region_infos;
+        if (has_join) {
+            // 获取所有join_node的非驱动表node。
+            // 如果scan_node在这些非驱动表node的子树里，路由信息会在join执行的时候生成。PlanRouter无需生成这些scan_node的路由信息
+            // 即PlanRouter只需要获取join第一个执行的scan_node的路由信息。
+            // 解决大表作为非驱动表，copy RegionInfo导致查询性能差的问题
+            std::vector<ExecNode*> join_nodes;
+            plan->get_node(pb::JOIN_NODE, join_nodes);
+            for (const auto& join : join_nodes) {
+                if (join == nullptr) {
+                    continue;
+                }
+                JoinNode* join_node = static_cast<JoinNode*>(join);
+                ExecNode* inner_node = join_node->get_inner_node();
+                if (inner_node != nullptr) {
+                    escape_get_region_infos.insert(inner_node);
+                }
+            }
+        }
         for (auto scan_node : scan_nodes) {
-            auto ret = scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node), ctx, has_join);
+            auto ret = scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node), ctx, has_join, escape_get_region_infos);
             if (ret != 0) {
                 return ret;
             }
@@ -76,11 +96,13 @@ int PlanRouter::insert_node_analyze(T* node, QueryContext* ctx) {
         DB_WARNING("invalid index info: %ld", table_id);
         return ret;
     }
+    std::set<int64_t> record_partition_ids;
     ret = schema_factory->get_region_by_key(
             *index_ptr, 
             ctx->insert_records, 
             node->insert_records_by_region(), 
-            node->region_infos());
+            node->region_infos(),
+            record_partition_ids);
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
@@ -89,10 +111,31 @@ int PlanRouter::insert_node_analyze(T* node, QueryContext* ctx) {
         DB_WARNING("region_infos.size = 0");
         return -1;
     }
+    if (index_ptr->is_partitioned) {
+        std::set<int64_t> specified_partition_ids;
+        auto iter = ctx->table_partition_names.find(table_id);
+        if (iter != ctx->table_partition_names.end()) {
+            if (0 != schema_factory->get_partition_ids_by_name(table_id, iter->second, specified_partition_ids)) {
+                ctx->stat_info.error_code = ER_UNKNOWN_PARTITION;
+                ctx->stat_info.error_msg << "Unknown partition";
+                DB_WARNING("get partition failed");
+                return -1;
+            }
+            for (auto id : record_partition_ids) {
+                if (specified_partition_ids.count(id) == 0) {
+                    ctx->stat_info.error_code = ER_ROW_DOES_NOT_MATCH_GIVEN_PARTITION_SET;
+                    ctx->stat_info.error_msg << "Found a row not matching the given partition set";
+                    DB_WARNING("partition set match failed");
+                    return -1;
+                }
+            }
+        }
+    }
     return 0;
 }
 
-int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx, bool has_join) {
+int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx, bool has_join, 
+                                  const std::set<ExecNode*>& escape_get_region_infos) {
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     if (ctx->debug_region_id != -1) {
         pb::RegionInfo info;
@@ -130,13 +173,14 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
         int32_t {return ctx->get_slot_id(tuple_id, field_id);};
     auto get_tuple_desc = [ctx] (int32_t tuple_id)->
         pb::TupleDescriptor* { return ctx->get_tuple_desc(tuple_id);};
-    return scan_plan_router(scan_node, get_slot_id, get_tuple_desc, has_join);
+    return scan_plan_router(scan_node, get_slot_id, get_tuple_desc, has_join, escape_get_region_infos);
 }
 
 int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node, 
     const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
     const std::function<pb::TupleDescriptor*(int32_t)>& get_tuple_desc,
-    bool has_join) {
+    bool has_join,
+    const std::set<ExecNode*>& escape_get_region_infos) {
     //pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     int64_t main_table_id = scan_node->table_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance(); 
@@ -145,6 +189,18 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     bool covering_index = true;
     int idx = 0;
     bool is_full_export = _is_full_export;
+    bool is_join_inner_table = false;
+    if (has_join) {
+        // 递归判断scan_node是否在join非驱动表node的子树里，是的话，跳过获取路由信息
+        ExecNode* parent_node_ptr = scan_node;
+        while (parent_node_ptr) { 
+            if (escape_get_region_infos.find(parent_node_ptr) != escape_get_region_infos.end()) {
+                is_join_inner_table = true;
+                break;
+            }
+            parent_node_ptr = parent_node_ptr->get_parent();
+        }
+    }
     for (auto& scan_index_info : scan_node->scan_indexs()) {
         if (!scan_index_info.covering_index) {
             covering_index = false;
@@ -158,7 +214,10 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
                 continue;
             }
         }
-
+        
+        if (is_join_inner_table) {
+            continue;
+        }
         auto index_ptr = schema_factory->get_index_info_ptr(scan_index_info.router_index_id);
         if (index_ptr == nullptr) {
             DB_WARNING("invalid index info: %ld", scan_index_info.router_index_id);
@@ -255,7 +314,8 @@ int PlanRouter::truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ct
         return ret;
     }
 
-    ret = schema_factory->get_region_by_key(*index_ptr, nullptr, trunc_node->region_infos());
+    ret = schema_factory->get_region_by_key(index_ptr->id, *index_ptr, nullptr,
+        trunc_node->region_infos(), nullptr, trunc_node->get_partition());
     if (ret < 0) {
         DB_WARNING("get_region_by_key:fail :%d", ret);
         return ret;
@@ -272,7 +332,8 @@ int PlanRouter::truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ct
             return -1;
         }
         std::map<int64_t, pb::RegionInfo> index_region_infos;
-        ret = schema_factory->get_region_by_key(table_id, *index_ptr, nullptr, index_region_infos);
+        ret = schema_factory->get_region_by_key(table_id, *index_ptr, nullptr, index_region_infos,
+            nullptr, trunc_node->get_partition());
         if (ret < 0) {
             DB_WARNING("get_region_by_key:fail :%d", ret);
             return ret;
@@ -332,73 +393,33 @@ int PlanRouter::transaction_node_analyze(TransactionNode* txn_node, QueryContext
 }
 
 int PartitionAnalyze::analyze(QueryContext* ctx) {
-    if (ctx->is_explain) {
-        return 0;
-    }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     ExecNode* plan = ctx->root;
     if (!plan->need_seperate()) {
         return 0;
     }
-    std::vector<ExecNode*> scan_nodes;
-    plan->get_node(pb::SCAN_NODE, scan_nodes);
-    ExecNode* filter_node = plan->get_node(pb::WHERE_FILTER_NODE);
-    //ExecNode* having_node = plan->get_node(pb::HAVING_FILTER_NODE);
+    ExecNode* truncate_node = plan->get_node(pb::TRUNCATE_NODE);
+    std::set<int64_t> partition_ids;
 
-    if (scan_nodes.size() != 0) {
-        bool has_join = scan_nodes.size() > 1;
-        bool has_partition = false;
-        for (auto scan_node : scan_nodes) {
-            auto node = static_cast<RocksdbScanNode*>(scan_node);
-            if (node->get_partition_num() > 1) {
-                has_partition = true;
-                if (has_join) {
-                    DB_WARNING("partition table can't join.");
-                    return -1;
-                }
-            }
+    if (truncate_node != nullptr) {
+        auto node = static_cast<TruncateNode*>(truncate_node);
+        if (node->get_partition_num() == 1) {
+            return 0;
         }
-        if (has_partition) {
-            ctx->is_full_export = false;
-            bool get_partition = false;
-            auto scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);
-            int64_t table_id = scan_node->table_id();
-            scan_node->get_partition().clear();
-            if (filter_node != nullptr) {
-                //如果分区字段满足条件，进行分区选择，不然返回-1
-                for (const auto& expr : *filter_node->mutable_conjuncts()) {
-                    std::unordered_set<int32_t> field_ids;
-                    expr->get_all_field_ids(field_ids);
-                    if (field_ids.count(scan_node->get_partition_field()) == 1) {
-                        if (expr->node_type() == pb::FUNCTION_CALL &&
-                            static_cast<ScalarFnCall*>(expr)->fn().fn_op() == parser::FT_EQ &&
-                            expr->children_size() == 2 &&
-                            expr->children(0)->node_type() == pb::SLOT_REF && 
-                            static_cast<SlotRef*>(expr->children(0))->field_id() == scan_node->get_partition_field() &&
-                            expr->children(1)->is_literal()) {
-                            auto lietral_value = static_cast<Literal*>(expr->children(1))->get_value(nullptr);
-                            int64_t partition_index = 0;
-                            if (schema_factory->get_partition_index(table_id, lietral_value, partition_index) == 0) {
-                                scan_node->get_partition().push_back(partition_index);
-                                DB_DEBUG("get partition num %ld", partition_index);
-                                get_partition = true;
-                            } else {
-                                DB_WARNING("get table %ld partition number error.", table_id);
-                                return -1;
-                            }
-                        } else {
-                            DB_WARNING("pattern not supported.");
-                            return -1;
-                        }
-                    }
-                }
+        int64_t table_id = node->table_id();
+        auto iter = ctx->table_partition_names.find(table_id);
+        if (iter != ctx->table_partition_names.end()) {
+            if (0 != schema_factory->get_partition_ids_by_name(table_id, iter->second, partition_ids)) {
+                DB_WARNING("get partition failed.");
+                return -1;
             }
-            if (!get_partition) {
-                for (int64_t i = 0; i < scan_node->get_partition_num(); ++i) {
-                    scan_node->get_partition().push_back(i);
-                }
-            }
+            node->replace_partition(partition_ids);
+            return 0;
         }
+        for (int64_t i = 0; i < node->get_partition_num(); ++i) {
+            partition_ids.emplace(i);
+        }
+        node->replace_partition(partition_ids);
     }
     return 0;
 }

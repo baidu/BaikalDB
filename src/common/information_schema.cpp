@@ -16,6 +16,7 @@
 #include <boost/algorithm/string/join.hpp>
 #include "runtime_state.h"
 #include "meta_server_interact.hpp"
+#include "store_interact.hpp"
 #include "schema_factory.h"
 #include "network_socket.h"
 #include "scalar_fn_call.h"
@@ -25,6 +26,8 @@ namespace baikaldb {
 int InformationSchema::init() {
     init_partition_split_info();
     init_region_status();
+    init_learner_region_status();
+    init_invalid_learner_region();
     init_columns();
     init_statistics();
     init_schemata();
@@ -86,6 +89,7 @@ int InformationSchema::init() {
     init_table_privileges();
     init_tablespaces();
     init_user_privileges();
+    init_binlog_region_infos();
     return 0;
 }
 
@@ -328,6 +332,433 @@ void InformationSchema::init_region_status() {
             return records;
     };
 }
+
+void InformationSchema::init_binlog_region_infos() {
+    // 定义字段信息
+    FieldVec fields {
+        {"table_id", pb::INT64},
+        {"partition_id", pb::INT64},
+        {"region_id", pb::INT64},
+        {"instance_ip", pb::STRING},
+        {"table_name", pb::STRING},
+        {"check_point_datetime", pb::STRING},
+        {"max_oldest_datetime", pb::STRING},
+        {"region_oldest_datetime", pb::STRING},
+        {"binlog_cf_oldest_datetime", pb::STRING},
+        {"data_cf_oldest_datetime", pb::STRING},
+    };
+    int64_t table_id = construct_table("BINLOG_REGION_INFOS", fields);
+
+    _calls[table_id] = [table_id, this](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;    
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+
+            std::string binlog_table_name;
+            int64_t input_partition_id = -1;
+            for (auto expr : conditions) {
+                if (expr->node_type() != pb::FUNCTION_CALL) {
+                    continue;
+                }
+                int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
+                if (fn_op != parser::FT_EQ) {
+                    continue;
+                }
+                if (!expr->children(0)->is_slot_ref()) {
+                    continue;
+                }
+                SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
+                int32_t field_id = slot_ref->field_id();
+                if (field_id != 5 && field_id != 2) {
+                    continue;
+                }
+                if (expr->children(1)->is_constant()) {
+                    if (field_id == 5) {
+                        binlog_table_name = expr->children(1)->get_value(nullptr).get_string();
+                    } else if (field_id == 2) {
+                        input_partition_id = strtoll(expr->children(1)->get_value(nullptr).get_string().c_str(), NULL, 10);
+                    }
+                }
+            }
+
+            std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>> table_id_partition_binlogs;
+            std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>> table_id_to_query_info;
+            std::vector<std::vector<std::string>> result_rows;
+            SchemaFactory::get_instance()->get_partition_binlog_regions(binlog_table_name, input_partition_id, table_id_partition_binlogs); 
+            query_regions_concurrency(table_id_to_query_info, table_id_partition_binlogs);
+            process_binlogs_region_info(result_rows, table_id_to_query_info);
+            DB_WARNING("binlog_table_name: %s, input_partition_id : %ld", binlog_table_name.c_str(), input_partition_id);
+            for (const auto& result_row : result_rows) {
+                if (result_row.size() != 10) {
+                    return records;
+                }
+                int64_t current_table_id = strtoll(result_row[0].c_str(), NULL, 10);
+                int64_t current_partition_id = strtoll(result_row[1].c_str(), NULL, 10);
+                int64_t current_region_id = strtoll(result_row[2].c_str(), NULL, 10);
+                auto record = SchemaFactory::get_instance()->new_record(table_id);
+                record->set_int64(record->get_field_by_name("table_id"), current_table_id);
+                record->set_int64(record->get_field_by_name("partition_id"), current_partition_id);
+                record->set_int64(record->get_field_by_name("region_id"), current_region_id);
+                record->set_string(record->get_field_by_name("instance_ip"), result_row[3]);
+                record->set_string(record->get_field_by_name("table_name"), result_row[4]);
+                record->set_string(record->get_field_by_name("check_point_datetime"), result_row[5]);
+                record->set_string(record->get_field_by_name("max_oldest_datetime"), result_row[6]);
+                record->set_string(record->get_field_by_name("region_oldest_datetime"), result_row[7]);
+                record->set_string(record->get_field_by_name("binlog_cf_oldest_datetime"), result_row[8]);
+                record->set_string(record->get_field_by_name("data_cf_oldest_datetime"), result_row[9]);
+                records.emplace_back(record);
+            }
+            return records;
+        };
+}
+
+void InformationSchema::query_regions_concurrency(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
+    std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos) {
+    std::mutex mutex_query_info;
+    for (const auto& partition_binlog_regions_info : partition_binlog_region_infos) {
+        int64_t current_table_id = partition_binlog_regions_info.first;
+        for (const auto& partition_binlog_region_info : partition_binlog_regions_info.second) {
+            int64_t current_partition_id = partition_binlog_region_info.first;
+            for (const auto& binlog_region_info : partition_binlog_region_info.second) {
+                const int64_t& table_id = binlog_region_info.table_id();
+                const int64_t& region_id = binlog_region_info.region_id();
+                const int64_t& version = binlog_region_info.version();
+                std::vector<std::string> peers_vec;
+                std::string str_peer;
+                peers_vec.reserve(3);
+                for (const auto& peer : binlog_region_info.peers()) {
+                    str_peer += peer + ",";
+                    peers_vec.emplace_back(peer);
+                }
+                str_peer.pop_back();
+                const std::string& table_name = binlog_region_info.table_name();
+                ConcurrencyBthread bth_each_peer(6);
+                for (auto& peer : peers_vec) {
+                    static std::mutex mutex_binlog_ts;
+                    auto send_to_binlog_peer = [&]() {
+                        brpc::Channel channel;
+                        brpc::Controller cntl;
+                        brpc::ChannelOptions option;
+                        option.max_retry = 1;
+                        option.connect_timeout_ms = 30000;
+                        option.timeout_ms = 30000;
+                        channel.Init(peer.c_str(), &option);
+                        pb::StoreReq req;
+                        pb::StoreRes res;
+                        req.set_region_version(version);
+                        req.set_region_id(region_id);
+                        req.set_op_type(pb::OP_QUERY_BINLOG);
+                        pb::StoreService_Stub(&channel).query_binlog(&cntl, &req, &res, NULL);
+                        if (!cntl.Failed()) {
+                            BAIDU_SCOPED_LOCK(mutex_query_info);
+                            auto binlog_info = res.mutable_binlog_info();
+                            binlog_info->set_region_ip(peer);
+                            table_id_to_binlog_info[table_id][region_id].emplace_back(res);
+                        }
+                    };
+                    bth_each_peer.run(send_to_binlog_peer);
+                }
+                bth_each_peer.join();
+            }
+        }
+    }
+}
+
+void InformationSchema::process_binlogs_region_info(std::vector<std::vector<std::string>>& result_rows, std::unordered_map<int64_t, 
+    std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info) {
+    for (const auto& region_id_peers_info: table_id_to_query_info) {
+        int64_t table_id = region_id_peers_info.first;
+        const std::string table_name = SchemaFactory::get_instance()->get_table_info(table_id).name;
+        for (const auto& region_id_peer_info : region_id_peers_info.second) {
+            int64_t region_id = region_id_peer_info.first;
+            pb::RegionInfo region_info_tmp;
+            SchemaFactory::get_instance()->get_region_info(table_id, region_id, region_info_tmp);
+            int64_t current_partition_id = region_info_tmp.partition_id();
+            const std::vector<pb::StoreRes>& pb_peer_info_vec = region_id_peer_info.second;
+            for (const auto& binlog_peer_info : pb_peer_info_vec) {
+                const auto& binlog_info = binlog_peer_info.binlog_info();
+                const std::string& instance_ip = binlog_info.region_ip();
+                const std::string check_point_datetime = ts_to_datetime_str(binlog_info.check_point_ts());
+                const std::string oldest_datetime = ts_to_datetime_str(binlog_info.oldest_ts());
+                const std::string region_oldest_datetime = ts_to_datetime_str(binlog_info.region_oldest_ts());
+                const std::string binlog_cf_oldest_datetime = ts_to_datetime_str(binlog_info.binlog_cf_oldest_ts());
+                const std::string data_cf_oldest_datetime = ts_to_datetime_str(binlog_info.data_cf_oldest_ts());
+                std::vector<std::string> row;
+                row.reserve(10);
+                row.emplace_back(std::to_string(table_id));
+                row.emplace_back(std::to_string(current_partition_id));
+                row.emplace_back(std::to_string(region_id));
+                row.emplace_back(instance_ip);
+                row.emplace_back(table_name);
+                row.emplace_back(check_point_datetime);
+                row.emplace_back(oldest_datetime);
+                row.emplace_back(region_oldest_datetime);
+                row.emplace_back(binlog_cf_oldest_datetime);
+                row.emplace_back(data_cf_oldest_datetime);
+                result_rows.emplace_back(row);
+            }
+        }
+    }
+    //泛型排序，让展示结果有序
+    std::sort(result_rows.begin(), result_rows.end(), [](const std::vector<std::string>& a, const std::vector<std::string>& b) { 
+        const std::string str_prefix_a = a[0] + a[2];
+        const std::string str_prefix_b = b[0] + b[2];
+        errno = 0;
+        int64_t value_prefix_a = strtoll(str_prefix_a.c_str(), NULL, 10);
+        int64_t value_prefix_b = strtoll(str_prefix_b.c_str(), NULL, 10);
+        return value_prefix_a < value_prefix_b;
+    });
+}
+
+void InformationSchema::init_learner_region_status() {
+    // 定义字段信息
+    FieldVec fields {
+        {"database_name", pb::STRING},
+        {"table_name", pb::STRING},
+        {"region_id", pb::INT64},
+        {"partition_id", pb::INT64},
+        {"resource_tag", pb::STRING},
+        {"instance", pb::STRING},
+        {"version", pb::INT64},
+        {"apply_index", pb::INT64},
+        {"status", pb::STRING},
+    };
+    int64_t table_id = construct_table("LEARNER_REGION_STATUS", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+            std::string namespace_ = state->client_conn()->user_info->namespace_;
+            std::string database_name;
+            std::string table_name;
+            for (auto expr : conditions) {
+                if (expr->node_type() != pb::FUNCTION_CALL) {
+                    continue;
+                }
+                int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
+                if (fn_op != parser::FT_EQ) {
+                    continue;
+                }
+                if (!expr->children(0)->is_slot_ref()) {
+                    continue;
+                }
+                SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
+                int32_t field_id = slot_ref->field_id();
+                if (field_id != 1 && field_id != 2) {
+                    continue;
+                }
+                if (expr->children(1)->is_constant()) {
+                    if (field_id == 1) {
+                        database_name = expr->children(1)->get_value(nullptr).get_string();
+                    } else if (field_id == 2) {
+                        table_name = expr->children(1)->get_value(nullptr).get_string();
+                    }
+                }
+            }
+            DB_WARNING("database_name: %s, table_name: %s", database_name.c_str(), table_name.c_str());
+            auto* factory = SchemaFactory::get_instance();
+            std::vector<int64_t> condition_table_ids;
+            std::map<int64_t, std::string> condition_table_id_db_map;
+            std::map<int64_t, std::string> condition_table_id_tbl_map;
+            if (!database_name.empty() && !table_name.empty()) {
+                int64_t condition_table_id = 0;
+                if (factory->get_table_id(namespace_ + "." + database_name + "." + table_name, condition_table_id) != 0) {
+                    return records;
+                }
+                condition_table_ids.emplace_back(condition_table_id);
+                condition_table_id_db_map[condition_table_id]  = database_name;
+                condition_table_id_tbl_map[condition_table_id] = table_name;
+            } else {
+                auto func = [&condition_table_ids, &condition_table_id_db_map, &condition_table_id_tbl_map, &database_name, &table_name]
+                    (const SmartTable& table) -> bool {
+                    if (table != nullptr && !table->learner_resource_tags.empty()) {
+                        if (database_name.empty()) {
+                            condition_table_ids.emplace_back(table->id);
+                            std::vector<std::string> items;
+                            boost::split(items, table->name, boost::is_any_of("."));
+                            condition_table_id_db_map[table->id] = items[0];
+                            condition_table_id_tbl_map[table->id] = table->short_name;
+                        } else {
+                            if ((database_name + "." + table->short_name) == table->name) {
+                                condition_table_ids.emplace_back(table->id);
+                                condition_table_id_db_map[table->id]  = database_name;
+                                condition_table_id_tbl_map[table->id] = table->short_name;
+                            }
+                        }
+                    }
+                    return false;
+                };
+                std::vector<std::string> database_table;
+                factory->get_table_by_filter(database_table, func);
+            }
+
+            std::map<int64_t, int64_t> region_id_partition_id_map;
+            std::map<int64_t, int64_t> region_id_table_id_map;
+            std::map<std::string, std::set<int64_t>> instance_region_ids_map;
+            records.reserve(1000);
+            for (int64_t condition_table_id : condition_table_ids) {
+                std::map<int64_t, pb::RegionInfo> region_infos;
+                factory->get_all_partition_regions(condition_table_id, &region_infos);
+                for (const auto& pair : region_infos) {
+                    auto& region = pair.second;
+                    region_id_partition_id_map[region.region_id()] = region.partition_id();
+                    region_id_table_id_map[region.region_id()] = condition_table_id;
+                    for (const auto& peer : region.peers()) {
+                        instance_region_ids_map[peer].insert(region.region_id());
+                    }
+                    for (const auto& learner : region.learners()) {
+                        instance_region_ids_map[learner].insert(region.region_id());
+                    }
+                }
+            }
+
+            ConcurrencyBthread bth(instance_region_ids_map.size());
+            bthread::Mutex lock; 
+            for (const auto& pair : instance_region_ids_map) {
+                std::string store_addr = pair.first;
+                if (pair.second.empty()) {
+                    continue;
+                }
+                std::set<int64_t> region_ids = pair.second;
+                auto func = [store_addr, region_ids, table_id, &condition_table_id_db_map, &condition_table_id_tbl_map, 
+                            &region_id_table_id_map, &region_id_partition_id_map, &records, &lock]() {
+                    pb::RegionIds req;
+                    pb::StoreRes res;
+                    req.set_query_apply_index(true);
+                    for (int64_t region_id : region_ids) {
+                        req.add_region_ids(region_id);
+                    }
+                    StoreInteract interact(store_addr);
+                    interact.send_request("query_region", req, res);
+                    DB_WARNING("store_addr: %s, req_size: %d, res_size: %d", store_addr.c_str(), req.region_ids_size(), res.extra_res().infos_size());
+                    std::lock_guard<bthread::Mutex> l(lock);
+                    for (const auto& info : res.extra_res().infos()) {
+                        auto record = SchemaFactory::get_instance()->new_record(table_id);
+                        record->set_string(record->get_field_by_name("database_name"), condition_table_id_db_map[region_id_table_id_map[info.region_id()]]);
+                        record->set_string(record->get_field_by_name("table_name"), condition_table_id_tbl_map[region_id_table_id_map[info.region_id()]]);
+                        record->set_int64(record->get_field_by_name("region_id"), info.region_id());
+                        record->set_int64(record->get_field_by_name("partition_id"), region_id_partition_id_map[info.region_id()]);
+                        record->set_string(record->get_field_by_name("resource_tag"), info.resource_tag());
+                        record->set_string(record->get_field_by_name("instance"), store_addr);
+                        record->set_int64(record->get_field_by_name("version"), info.version());
+                        record->set_int64(record->get_field_by_name("apply_index"), info.apply_index());
+                        record->set_string(record->get_field_by_name("status"), info.status());
+                        records.emplace_back(record);
+                    }
+
+                };
+                bth.run(func);
+            }
+            bth.join();  
+            return records;
+    };
+}
+
+
+void InformationSchema::init_invalid_learner_region() {
+    // 定义字段信息
+    FieldVec fields {
+        {"database_name", pb::STRING},
+        {"table_name", pb::STRING},
+        {"region_id", pb::INT64},
+        {"partition_id", pb::INT64},
+        {"resource_tag", pb::STRING},
+        {"instance", pb::STRING},
+        {"version", pb::INT64},
+        {"apply_index", pb::INT64},
+        {"status", pb::STRING},
+    };
+    int64_t table_id = construct_table("INVALID_LEARNER_REGION", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+
+            records.reserve(1000);
+            SchemaFactory* factory = SchemaFactory::get_instance();
+            std::unordered_map<std::string, InstanceDBStatus> instance_info_map;
+            factory->get_all_instance_status(&instance_info_map);
+
+            ConcurrencyBthread bth(instance_info_map.size());
+            bthread::Mutex lock; 
+            for (const auto& pair : instance_info_map) {
+                std::string store_addr = pair.first;
+                if (pair.second.status == pb::DEAD || pair.second.status == pb::FAULTY) {
+                    continue;
+                }
+
+                auto func = [store_addr, table_id, &records, &lock]() {
+                    pb::RegionIds req;
+                    pb::StoreRes res;
+                    req.set_query_apply_index(true);
+                    StoreInteract interact(store_addr);
+                    interact.send_request("query_region", req, res);
+                    DB_WARNING("store_addr: %s, req_size: %d, res_size: %d", store_addr.c_str(), req.region_ids_size(), res.extra_res().infos_size());
+                    std::lock_guard<bthread::Mutex> l(lock);
+                    for (const auto& info : res.extra_res().infos()) {
+                        std::string database_name;
+                        std::string table_name;
+                        std::string status = info.status();
+                        auto factory = SchemaFactory::get_instance();
+                        SmartTable table = factory->get_table_info_ptr(info.table_id());
+                        if (table == nullptr) {
+                            status = "NOT FOUND TABLE";
+                        } else {
+                            std::vector<std::string> items;
+                            boost::split(items, table->name, boost::is_any_of("."));
+                            database_name = items[0];
+                            table_name = items[1];
+                        }
+
+                        pb::RegionInfo region_info;
+                        int ret = factory->get_region_info(info.table_id(), info.region_id(), region_info);
+                        if (ret < 0) {
+                            status = "NOT FOUND REGION";
+                        } else {
+                            bool find = false;
+                            for (const auto& address : region_info.learners()) {
+                                if (address == store_addr) {
+                                    find = true;
+                                    break;
+                                }
+                            }
+
+                            if (find) {
+                                continue;
+                            } else {
+                                status = "NOT FOUND LEARNER";
+                            }
+                        }
+
+                        auto record = factory->new_record(table_id);
+                        record->set_string(record->get_field_by_name("database_name"), database_name);
+                        record->set_string(record->get_field_by_name("table_name"), table_name);
+                        record->set_int64(record->get_field_by_name("region_id"), info.region_id());
+                        record->set_int64(record->get_field_by_name("partition_id"), region_info.partition_id());
+                        record->set_string(record->get_field_by_name("resource_tag"), info.resource_tag());
+                        record->set_string(record->get_field_by_name("instance"), store_addr);
+                        record->set_int64(record->get_field_by_name("version"), info.version());
+                        record->set_int64(record->get_field_by_name("apply_index"), info.apply_index());
+                        record->set_string(record->get_field_by_name("status"), status);
+                        records.emplace_back(record);
+                    }
+
+                };
+                bth.run(func);
+            }
+            bth.join();  
+            return records;
+    };
+}
+
 // MYSQL兼容表
 void InformationSchema::init_columns() {
     // 定义字段信息
@@ -465,8 +896,8 @@ void InformationSchema::init_columns() {
                         //extra_vec.push_back(" ");
                     }
                     if (field.on_update_value == "(current_timestamp())") {
-			extra_vec.push_back("on update CURRENT_TIMESTAMP");
-		    }
+                        extra_vec.push_back("on update CURRENT_TIMESTAMP");
+                    }
                     record->set_string(record->get_field_by_name("EXTRA"), boost::algorithm::join(extra_vec, "|"));
                     record->set_string(record->get_field_by_name("PRIVILEGES"), "select,insert,update,references");
                     record->set_string(record->get_field_by_name("COLUMN_COMMENT"), field.comment);
@@ -531,7 +962,6 @@ void InformationSchema::init_key_column_usage() {
             auto tb_vec = factory->get_table_list(namespace_, state->client_conn()->user_info.get());
             records.reserve(tb_vec.size() * 10);
             for (auto& table_info : tb_vec) {
-                int i = 0;
                 std::vector<std::string> items;
                 boost::split(items, table_info->name, boost::is_any_of("."));
                 std::string db = items[0];
@@ -835,8 +1265,7 @@ void InformationSchema::init_sign_list() {
             return false;
         };
         std::vector<std::string> database_table;
-        std::vector<std::string> binlog_table;
-        SchemaFactory::get_instance()->get_table_by_filter(database_table, binlog_table, func);
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, func);
         return records;
     };
 
@@ -863,8 +1292,34 @@ void InformationSchema::init_sign_list() {
             return false;
         };
         std::vector<std::string> database_table;
-        std::vector<std::string> binlog_table;
-        SchemaFactory::get_instance()->get_table_by_filter(database_table, binlog_table, func);
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, func);
+        return records;
+    };
+
+    _calls[forceindex_table_id] = [forceindex_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) ->
+        std::vector <SmartRecord> {
+        std::vector <SmartRecord> records;
+        records.reserve(10);
+        auto forceindex_table = SchemaFactory::get_instance()->get_table_info_ptr(forceindex_table_id);
+        auto func = [&records, &forceindex_table](const SmartTable& table) -> bool {
+            for (auto sign_index : table->sign_forceindex) {
+                auto record = SchemaFactory::get_instance()->new_record(*forceindex_table);
+                record->set_string(record->get_field_by_name("namespace"), table->namespace_);
+                std::string db_name;
+                std::vector<std::string> vec;
+                boost::split(vec, table->name, boost::is_any_of("."));
+                if (!vec.empty()) {
+                    db_name = vec[0];
+                }
+                record->set_string(record->get_field_by_name("database_name"), db_name);
+                record->set_string(record->get_field_by_name("table_name"),table->short_name);
+                record->set_string(record->get_field_by_name("sign"), sign_index);
+                records.emplace_back(record);
+            }
+            return false;
+        };
+        std::vector<std::string> database_table;
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, func);
         return records;
     };
 
@@ -892,7 +1347,7 @@ void InformationSchema::init_sign_list() {
         };
         std::vector<std::string> database_table;
         std::vector<std::string> binlog_table;
-        SchemaFactory::get_instance()->get_table_by_filter(database_table, binlog_table, func);
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, func);
         return records;
     };
 }

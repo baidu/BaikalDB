@@ -32,6 +32,11 @@ int DeletePlanner::plan() {
             return -1;
         }
         _truncate_stmt = (parser::TruncateStmt*)(_ctx->stmt);
+        for (int i = 0; i < _truncate_stmt->partition_names.size(); ++i) {
+            std::string lower_name = _truncate_stmt->partition_names[i].value;
+            std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+            _partition_names.emplace_back(lower_name);
+        }
         if (0 != parse_db_tables(_truncate_stmt->table_name)) {
             DB_WARNING("get truncate_table plan failed");
             return -1;
@@ -57,6 +62,11 @@ int DeletePlanner::plan() {
     if (_delete_stmt->from_table->node_type != parser::NT_TABLE) {
         DB_WARNING("unsupport multi table delete");
         return -1;
+    }
+    for (int i = 0; i < _delete_stmt->partition_names.size(); ++i) {
+        std::string lower_name = _delete_stmt->partition_names[i].value;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+        _partition_names.emplace_back(lower_name);
     }
     if (0 != parse_db_tables(_delete_stmt->from_table, &_join_root)) {
         return -1;
@@ -104,9 +114,7 @@ int DeletePlanner::plan() {
     ScanTupleInfo& info = _plan_table_ctx->table_tuple_mapping[try_to_lower(_current_tables[0])];
     int64_t table_id = info.table_id;
     _ctx->prepared_table_id = table_id;
-    if (!_ctx->is_prepared) {
-        set_dml_txn_state(table_id);
-    }
+    set_dml_txn_state(table_id);
     // 局部索引binlog处理标记
     if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
         delete_node->set_local_index_binlog(true);

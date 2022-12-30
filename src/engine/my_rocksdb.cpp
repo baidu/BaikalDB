@@ -164,6 +164,34 @@ rocksdb::Status Transaction::Get(const rocksdb::ReadOptions& options,
     return s;
 }
 
+void Transaction::MultiGet(const rocksdb::ReadOptions& options,
+                     rocksdb::ColumnFamilyHandle* column_family,
+                     const std::vector<rocksdb::Slice>& keys,
+                     std::vector<rocksdb::PinnableSlice>& values,
+                     std::vector<rocksdb::Status>& statuses,
+                     bool sorted_input) {
+    QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
+
+    // 限流
+    if (local != nullptr) {
+        local->get_rate_limiting();
+    }
+
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t key_count = 0;
+    // 执行
+    TimeCost cost;
+    _txn->MultiGet(options, column_family, keys.size(), keys.data(), values.data(), statuses.data(), sorted_input);
+    total_time += cost.get_time();
+    key_count += keys.size();
+    if (key_count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_multiget_time << total_time / key_count;
+        RocksdbVars::get_instance()->rocksdb_multiget_count << key_count;
+        total_time = 0;
+        key_count = 0;
+    }
+}
+
 rocksdb::Status Transaction::GetForUpdate(const rocksdb::ReadOptions& options,
                             rocksdb::ColumnFamilyHandle* column_family,
                             const rocksdb::Slice& key, std::string* value) {

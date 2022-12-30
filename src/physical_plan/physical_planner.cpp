@@ -126,9 +126,6 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
          ctx->stat_info.error_code = state.error_code;
         return ret;
     }
-    if (ctx->stmt_type == parser::NT_SELECT) {
-        state.set_single_store_concurrency();
-    }
     state.explain_type = ctx->explain_type;
     if (state.explain_type == ANALYZE_STATISTICS) {
         //如果为analyze模式需要初始化cmsketch

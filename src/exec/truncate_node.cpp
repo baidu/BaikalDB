@@ -24,6 +24,12 @@ int TruncateNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _table_id =  node.derive_node().truncate_node().table_id();
+    _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
+
+    if (_table_info == nullptr) {
+        DB_WARNING("table info not found _table_id:%ld", _table_id);
+        return -1;
+    }
     return 0;
 }
 

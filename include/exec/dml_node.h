@@ -27,12 +27,12 @@ public:
     virtual int expr_optimize(QueryContext* ctx);
     virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
     int insert_row(RuntimeState* state, SmartRecord record, bool is_update = false);
-    int delete_row(RuntimeState* state, SmartRecord record);
-    int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str);
+    int delete_row(RuntimeState* state, SmartRecord record, MemRow* row);
+    int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row);
     int remove_row(RuntimeState* state, SmartRecord record, 
             const std::string& pk_str, bool delete_primary = true);
     int update_row(RuntimeState* state, SmartRecord record, MemRow* row);
-    bool satisfy_condition_again(RuntimeState* state, SmartRecord record);
+    bool satisfy_condition_again(RuntimeState* state, MemRow* row);
     int64_t table_id() {
         return _table_id;
     }

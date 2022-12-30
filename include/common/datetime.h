@@ -27,6 +27,15 @@ extern uint64_t str_to_datetime(const char* str_time);
 
 extern time_t datetime_to_timestamp(uint64_t datetime);
 extern uint64_t timestamp_to_datetime(time_t timestamp);
+inline uint32_t datetime_to_day(uint64_t datetime) {
+    return ((datetime >> 41) & 0x1F);
+}
+inline uint32_t datetime_to_month(uint64_t datetime) {
+    return ((datetime >> 46) & 0x1FFFF) % 13;
+}
+inline uint32_t datetime_to_year(uint64_t datetime) {
+    return ((datetime >> 46) & 0x1FFFF) / 13;
+}
 
 extern int32_t datetime_to_time(uint64_t datetime);
 extern uint64_t time_to_datetime(int32_t time);

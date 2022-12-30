@@ -42,11 +42,27 @@ void DatabaseManager::create_database(const pb::MetaManagerRequest& request, bra
     int64_t tmp_database_id = _max_database_id + 1;
     database_info.set_database_id(tmp_database_id);
     database_info.set_namespace_id(namespace_id);
-    if (!database_info.has_resource_tag()) {
-        std::string resource_tag =  NamespaceManager::get_instance()->get_resource_tag(namespace_id);
-        if (resource_tag != "") {
-            database_info.set_resource_tag(resource_tag);
+    
+    pb::NameSpaceInfo namespace_info;
+    if (NamespaceManager::get_instance()->get_namespace_info(namespace_id, namespace_info) == 0) {
+        if (!database_info.has_resource_tag() && namespace_info.resource_tag() != "") {
+            database_info.set_resource_tag(namespace_info.resource_tag());
         }
+        if (!database_info.has_engine() && namespace_info.has_engine()) {
+            database_info.set_engine(namespace_info.engine());
+        } 
+        if (!database_info.has_charset() && namespace_info.has_charset()) {
+            database_info.set_charset(namespace_info.charset());
+        }
+        if (!database_info.has_byte_size_per_record() && namespace_info.has_byte_size_per_record()) {
+            database_info.set_byte_size_per_record(namespace_info.byte_size_per_record());
+        }
+        if (!database_info.has_replica_num() && namespace_info.has_replica_num()) {
+            database_info.set_replica_num(namespace_info.replica_num());
+        }  
+        if (!database_info.has_region_split_lines() && namespace_info.has_region_split_lines()) {
+            database_info.set_region_split_lines(namespace_info.region_split_lines());
+        } 
     }
     database_info.set_version(1);
     
@@ -141,7 +157,21 @@ void DatabaseManager::modify_database(const pb::MetaManagerRequest& request, bra
     if (database_info.has_resource_tag()) {
         tmp_database_info.set_resource_tag(database_info.resource_tag());
     }
-    
+    if (database_info.has_engine()) {
+        tmp_database_info.set_engine(database_info.engine());
+    }
+    if (database_info.has_charset()) {
+        tmp_database_info.set_charset(database_info.charset());
+    }
+    if (database_info.has_byte_size_per_record()) {
+        tmp_database_info.set_byte_size_per_record(database_info.byte_size_per_record());
+    }
+    if (database_info.has_replica_num()) {
+        tmp_database_info.set_replica_num(database_info.replica_num());
+    }
+    if (database_info.has_region_split_lines()) {
+        tmp_database_info.set_region_split_lines(database_info.region_split_lines());
+    }
     std::string database_value;
     if (!tmp_database_info.SerializeToString(&database_value)) {
         DB_WARNING("request serializeToArray fail, request:%s",request.ShortDebugString().c_str());

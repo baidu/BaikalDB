@@ -88,8 +88,6 @@ void TaskManager::process_ddl_work(pb::RegionDdlWork work) {
     client->query_ctx->client_conn = client.get();
     client->is_index_ddl = true;
     client->server_instance_id = NetworkServer::get_instance()->get_instance_id();
-    //ms
-    client->txn_timeout = 40000;
     std::unique_ptr<DDLWorkPlanner> planner_ptr(new  DDLWorkPlanner(client->query_ctx.get()));
     ret = planner_ptr->set_ddlwork(work);
     if (ret != 0) {

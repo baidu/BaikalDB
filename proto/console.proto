@@ -65,6 +65,7 @@ message QueryParam {
     optional string      meta_server_bns    = 24;
     optional string      baikaldb_bns       = 25;
     optional string      export_time        = 26;
+    optional string      partition_id       = 27;
 };
 
 message OverViewInfo {
@@ -215,6 +216,7 @@ message ConsoleResponse {
     repeated WatchTaskList      task_list           = 14;
     optional WatchPlatForm      plat_forms          = 15;
     repeated WatchSSTTask       sst_backup_task     = 16;
+    optional int64              partition_num       = 17;
 };
 message ShowxCondition {
     optional string t = 1;

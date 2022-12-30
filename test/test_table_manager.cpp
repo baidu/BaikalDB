@@ -501,6 +501,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     
+    // 测试点: update_byte_size
     baikaldb::pb::MetaManagerRequest update_byte_size_request;
     update_byte_size_request.set_op_type(baikaldb::pb::OP_UPDATE_BYTE_SIZE);
     update_byte_size_request.mutable_table_info()->set_table_name("new_userinfo");
@@ -824,12 +825,63 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
             DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
     }
+
+    // 测试点: update_charset
+    baikaldb::pb::MetaManagerRequest update_charset_request;
+    update_charset_request.set_op_type(baikaldb::pb::OP_UPDATE_CHARSET);
+    update_charset_request.mutable_table_info()->set_table_name("new_userinfo");
+    update_charset_request.mutable_table_info()->set_database("FC_Word");
+    update_charset_request.mutable_table_info()->set_namespace_name("FengChao");
+    update_charset_request.mutable_table_info()->set_charset(baikaldb::pb::GBK);
+    _table_manager->update_charset(update_charset_request, 9, NULL);
+    ASSERT_EQ(9, _table_manager->_table_info_map[1].schema_pb.version());
+    for (auto& table_id : _table_manager->_table_id_map) {
+        DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
+    }
+    for (auto& table_mem : _table_manager->_table_info_map) {
+        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+        DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
+        for (auto& field : table_mem.second.field_id_map) {
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
+        }
+        for (auto& index : table_mem.second.index_id_map) {
+            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
+        }
+        for (auto& partition_region : table_mem.second.partition_regions) {
+            DB_WARNING("partition_id: %ld", partition_region.first);
+            for (auto region_id : partition_region.second) {
+                DB_WARNING("region_id: %ld", region_id);
+            }   
+        } 
+    }
+    _schema_manager->load_snapshot();
+    ASSERT_EQ(9, _table_manager->_table_info_map[1].schema_pb.version()); 
+    for (auto& table_id : _table_manager->_table_id_map) {
+        DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
+    }
+    for (auto& table_mem : _table_manager->_table_info_map) {
+        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+        DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
+        for (auto& field : table_mem.second.field_id_map) {
+            DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
+        }
+        for (auto& index : table_mem.second.index_id_map) {
+            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
+        }
+        for (auto& partition_region : table_mem.second.partition_regions) {
+            DB_WARNING("partition_id: %ld", partition_region.first);
+            for (auto region_id : partition_region.second) {
+                DB_WARNING("region_id: %ld", region_id);
+            } 
+        }
+    }
+
     //测试点:删除非层次表
     request_drop_level_table_fc.set_op_type(baikaldb::pb::OP_DROP_TABLE);
     request_drop_level_table_fc.mutable_table_info()->set_table_name("new_userinfo");
     request_drop_level_table_fc.mutable_table_info()->set_database("FC_Word");
     request_drop_level_table_fc.mutable_table_info()->set_namespace_name("FengChao");
-    _table_manager->drop_table(request_drop_level_table_fc, 9, NULL);
+    _table_manager->drop_table(request_drop_level_table_fc, 10, NULL);
     //测试点：删除database
     request_drop_database.set_op_type(baikaldb::pb::OP_DROP_DATABASE);
     request_drop_database.mutable_database_info()->set_database("FC_Word");

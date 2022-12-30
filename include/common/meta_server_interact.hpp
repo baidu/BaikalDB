@@ -101,7 +101,7 @@ public:
                 _bns_channel.CallMethod(method, &cntl, &request, &response, NULL);
                 if (!cntl.Failed() && response.errcode() == pb::SUCCESS) {
                     _set_leader_address(cntl.remote_side());
-                    DB_WARNING("connet with meat server success by bns name, leader:%s",
+                    DB_WARNING("connet with meta server success by bns name, leader:%s",
                                 butil::endpoint2str(cntl.remote_side()).c_str());
                     return 0;
                 }

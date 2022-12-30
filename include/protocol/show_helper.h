@@ -61,6 +61,8 @@ const std::string SQL_SHOW_CHARACTER_SET         = "character";             // s
 const std::string SQL_SHOW_INDEX                 = "index";                 // show index
 const std::string SQL_SHOW_INDEXES               = "indexes";               // show indexes; same as `show index`
 const std::string SQL_SHOW_KEYS                  = "keys";                  // show keys; same as `show index`
+const std::string SQL_SHOW_PARTITION_TABLE       = "partition_tables";      // show partition table info
+const std::string SQL_SHOW_ABNORMAL_SWITCH       = "abnormal_switch";       // show abnormal_switch
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -133,6 +135,7 @@ private:
     bool _show_ddl_work(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show global_ddlwork tableID;
     bool _show_global_ddl_work(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_partition_table(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_diff_region_size(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show user username
     bool _show_user(const SmartSocket& client, const std::vector<std::string>& split_vec);
@@ -145,6 +148,9 @@ private:
     bool _show_engines(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_charset(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_index(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show abnormal_switch
+    // 异常的switch，如快速导入超一天，表split_lines超1kw行，peer_loadbalance，migrate关闭等
+    bool _show_abnormal_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 
             std::vector<ResultField>& fields,

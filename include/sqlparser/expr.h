@@ -223,6 +223,7 @@ struct LiteralExpr : public ExprNode {
         double double_val;
         String str_val;
     } _u;
+    String row_str;
     LiteralExpr() {
         expr_type = ET_LITETAL;
     }
@@ -239,7 +240,7 @@ struct LiteralExpr : public ExprNode {
                 std::cout << _u.str_val.value;
                 break;
             case LT_HEX:
-                std::cout << _u.str_val.value;
+                std::cout << row_str.value;
                 break;
             case LT_BOOL:
                 std::cout << _u.bool_val;
@@ -299,6 +300,7 @@ struct LiteralExpr : public ExprNode {
         }
         lit->_u.str_val.strdup(out_str.c_str(), out_str.size(), arena);
         lit->literal_type = LT_HEX;
+        lit->row_str.strdup(str, len, arena);
         return lit;
     }
 

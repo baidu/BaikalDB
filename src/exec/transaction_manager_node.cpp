@@ -21,6 +21,10 @@ namespace baikaldb {
 DEFINE_int32(wait_after_prepare_us, 0, "wait time after prepare(us)");
 
 int TransactionManagerNode::exec_begin_node(RuntimeState* state, ExecNode* begin_node) {
+    auto client_conn = state->client_conn();
+    if (client_conn->txn_start_time == 0) {
+        client_conn->txn_start_time = butil::gettimeofday_us();
+    }
     return push_cmd_to_cache(state, pb::OP_BEGIN, begin_node);
 }
 

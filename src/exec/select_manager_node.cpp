@@ -63,6 +63,7 @@ int SelectManagerNode::subquery_open(RuntimeState* state) {
     if (ret < 0) {
         return ret;
     }
+
     pb::TupleDescriptor* tuple_desc = state->get_tuple_desc(_derived_tuple_id);
     if (tuple_desc == nullptr) {
         return -1;
@@ -96,6 +97,11 @@ int SelectManagerNode::subquery_open(RuntimeState* state) {
             _sorter->add_batch(batch_ptr);
         }
     } while (!eos);
+    //更新子查询信息到外层的state
+    state->inc_num_returned_rows(_sub_query_runtime_state->num_returned_rows());
+    state->inc_num_affected_rows(_sub_query_runtime_state->num_affected_rows());
+    state->inc_num_scan_rows(_sub_query_runtime_state->num_scan_rows());
+    state->inc_num_filter_rows(_sub_query_runtime_state->num_filter_rows());
     _sorter->merge_sort();
     return affected_rows;
 }
@@ -384,6 +390,11 @@ int SelectManagerNode::construct_primary_possible_index(
         DB_WARNING("pri index info not found table_id:%ld", main_table_id);
         return -1;
     }
+    auto table_info = _factory->get_table_info_ptr(main_table_id);
+    if (table_info == nullptr) {
+        DB_WARNING("pri index info not found table_id:%ld", main_table_id);
+        return -1;
+    }
     // 不能直接清理所有索引，可能有backup请求使用scan_node
     // scan_node->clear_possible_indexes();
     // pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
@@ -400,7 +411,6 @@ int SelectManagerNode::construct_primary_possible_index(
     pb::PossibleIndex pos_index;
     pos_index.set_index_id(main_table_id);
     SmartRecord record_template = _factory->new_record(main_table_id);
-    auto mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
     auto tsorter = std::make_shared<Sorter>(_mem_row_compare.get());
     for (auto& pair : fetcher_store.start_key_sort) {
         auto& batch = fetcher_store.region_batch[pair.second];
@@ -432,10 +442,10 @@ int SelectManagerNode::construct_primary_possible_index(
             SmartRecord record = record_template->clone(false);
             if (limit != nullptr) {
                 if (limit->get_num_rows_skipped() < limit->get_offset()) {
-		    limit->add_num_rows_skipped(1);
-		    continue;
+                    limit->add_num_rows_skipped(1);
+                    continue;
                 }
-	    }
+            }
             for (auto& pri_field : pri_info->fields) {
                 int32_t field_id = pri_field.id;
                 int32_t slot_id = state->get_slot_id(tuple_id, field_id);
@@ -468,8 +478,8 @@ int SelectManagerNode::construct_primary_possible_index(
     }
     //重新做路由选择
     pos_index.SerializeToString(&scan_index_info->raw_index);
-    return _factory->get_region_by_key(*pri_info, &pos_index, scan_index_info->region_infos,
-                                       &scan_index_info->region_primary);
+    return _factory->get_region_by_key(main_table_id, *pri_info, &pos_index, scan_index_info->region_infos,
+                &scan_index_info->region_primary, scan_node->get_partition());
 }
 
 }

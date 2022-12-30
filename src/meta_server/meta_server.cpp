@@ -225,7 +225,9 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_UPDATE_TABLE_COMMENT
             || request->op_type() == pb::OP_ADD_LEARNER
             || request->op_type() == pb::OP_DROP_LEARNER
-            || request->op_type() == pb::OP_RESTART_DDL_WORK) {
+            || request->op_type() == pb::OP_RESTART_DDL_WORK
+            || request->op_type() == pb::OP_MODIFY_PARTITION
+            || request->op_type() == pb::OP_UPDATE_CHARSET) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,
@@ -512,6 +514,10 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         QueryTableManager::get_instance()->get_virtual_index_influence_info(request, response);
         break;   
     }
+    case pb::QUERY_FAST_IMPORTER_TABLES: {
+        QueryTableManager::get_instance()->get_table_in_fast_importer(request, response);
+        break;   
+    }
     default: {
         DB_WARNING("invalid op_type, request:%s logid:%lu", 
                     request->ShortDebugString().c_str(), log_id);
@@ -711,6 +717,26 @@ void MetaServer::migrate(google::protobuf::RpcController* controller,
                 BAIDU_SCOPED_LOCK(bns_mutex);
                 if (bns != "" && bns_pre_ip_port.count(bns) == 1) {
                     ip_port = bns_pre_ip_port[bns];
+                }
+            }
+            pb::QueryRequest query_req;
+            pb::QueryResponse query_res;
+            query_req.set_op_type(pb::QUERY_INSTANCE_FLATTEN);
+            query_req.set_instance_address(ip_port);
+            ret = meta_proxy(meta_bns)->send_request("query", query_req, query_res);
+            if (ret != 0) {
+                DB_WARNING("internal request fail, %s, %s", 
+                        query_req.ShortDebugString().c_str(), 
+                        query_res.ShortDebugString().c_str());
+                res_instance->set_status("PROCESSING");
+                return;
+            }
+            if (query_res.flatten_instances_size() == 1) {
+                // 在扩缩容等非迁移场景，NORMAL（非MIGRATE）实例也会收到MIGRATED指令
+                // 此时不需要drop
+                if (query_res.flatten_instances(0).status() == pb::NORMAL) {
+                    res_instance->set_status("SUCCESS");
+                    return;
                 }
             }
             pb::MetaManagerRequest internal_req;

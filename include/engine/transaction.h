@@ -169,10 +169,63 @@ public:
             }
 
     int get_update_primary_columns(
-            const TableKey& primary_key,
-            GetMode         mode,
-            const SmartRecord&   val,
-            std::map<int32_t, FieldInfo*>& fields);
+        const TableKey& primary_key,
+        GetMode         mode,
+        const SmartRecord&  val,
+        MemRow*         mem_row,
+        int32_t         tuple_id,
+        std::vector<int32_t>* field_slot,
+        std::map<int32_t, FieldInfo*>& fields);
+
+    int multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        std::vector<MutTableKey>& raw_read_keys,
+        std::vector<rocksdb::Slice>& rocksdb_keys,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool sorted_input);
+
+    int multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        const std::vector<TableKeyPair*>& read_keys,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool            check_region,
+        bool sorted_input);
+
+    int multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        BatchRecord& read_records,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool sorted_input);
+
+    int multiget_secondary(
+        int64_t         region,
+        IndexInfo&      pk_index,
+        IndexInfo&      index,
+        const std::vector<TableKeyPair*>& read_keys,
+        const SmartRecord& record_templete,
+        BatchRecord& read_records,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::vector<int32_t>& field_slot,
+        bool  parse_to_record,
+        bool  check_region,
+        bool  sorted_input);
 
     // TODO: update return status
     // Return -2 if key not found
@@ -428,8 +481,9 @@ public:
         _store_res.Clear();
         _store_res.CopyFrom(response);
     }
-    void swap_last_response(pb::StoreRes& response) {
-        response.Swap(&_store_res);
+
+    void load_last_response(pb::StoreRes& response) {
+        response.CopyFrom(_store_res);
     }
 
     void set_primary_region_id(int64_t region_id) {

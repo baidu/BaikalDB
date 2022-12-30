@@ -87,7 +87,8 @@ public:
                     pb::SegmentType segment_type,
                     const std::map<std::string, int32_t>& name_field_id_map,
                     pb::ReverseNodeType flag, 
-                    std::map<std::string, ReverseNode>& res);
+                    std::map<std::string, ReverseNode>& res,
+                    const pb::Charset& charset);
     
     static int merge_and(
                     ReverseNode& to, 
@@ -111,7 +112,8 @@ public:
     }
     //search_data 字符串格式
     //"hello world"
-    int create_executor(const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type);
+    int create_executor(
+        const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset);
     int next(SmartRecord record);
     bool_executor_type executor_type = ReverseTrait<List>::executor_type;
     void set_term(const std::string& term, Parser* parse) {

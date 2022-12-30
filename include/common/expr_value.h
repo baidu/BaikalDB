@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
+#include <iomanip>
 #include <sstream>
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
@@ -594,7 +595,7 @@ struct ExprValue {
             }
             case pb::DOUBLE: {
                 std::ostringstream oss;
-                oss << _u.double_val;
+                oss << std::setprecision(15) << _u.double_val;
                 return oss.str();
             }
             case pb::STRING:

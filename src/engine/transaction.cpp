@@ -675,7 +675,7 @@ int Transaction::get_update_primary(
                 }
             } else {
                 // cstore, get non-pk columns value from db.
-                if (0 != get_update_primary_columns(_key, mode, val, fields)) {
+                if (0 != get_update_primary_columns(_key, mode, val, nullptr, 0, nullptr, fields)) {
                     DB_WARNING("get_update_primary_columns failed: %ld", pk_index.id);
                     return -1;
                 }
@@ -707,6 +707,170 @@ int Transaction::get_update_primary(
         return -1;
     }
     return 0;
+}
+
+int Transaction::multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        std::vector<MutTableKey>& raw_read_keys,
+        std::vector<rocksdb::Slice>& rocksdb_keys,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool sorted_input) {
+    int64_t num_keys = rocksdb_keys.size();
+    std::vector<rocksdb::PinnableSlice> values(num_keys);
+    std::vector<rocksdb::Status> statuses(num_keys);
+    TimeCost cost;
+    rocksdb::ReadOptions read_opt;
+    read_opt.fill_cache = true;
+    read_opt.snapshot = _snapshot;
+    _txn->MultiGet(read_opt, _data_cf, rocksdb_keys, values, statuses, sorted_input);
+    for (int i = 0; i < num_keys; i++) {
+        if (statuses[i].ok()) {
+            rocksdb::Slice value_slice(values[i]);
+            if (_use_ttl && _read_ttl_timestamp_us > 0) {
+                int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &pk_index, _online_ttl_base_expire_time_us);
+                if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+                    DB_DEBUG("expired _read_ttl_timestamp_us:%ld row_ttl_timestamp_us:%ld",
+                            _read_ttl_timestamp_us, row_ttl_timestamp_us);
+                    //expired
+                    continue;
+                }
+            }
+            std::unique_ptr<MemRow> mem_row = mem_row_desc->fetch_mem_row();
+            if (!is_cstore()) {
+                TupleRecord tuple_record(value_slice);
+                // only decode the required field (field_ids stored in fields)
+                if (0 != tuple_record.decode_fields(fields, &field_slot, nullptr, tuple_id, &mem_row)) {
+                    DB_WARNING("decode value failed: %ld, _use_ttl:%d", pk_index.id, _use_ttl);
+                    continue;
+                }
+            } else {
+                // cstore, get non-pk columns value from db.
+                if (0 != get_update_primary_columns(raw_read_keys[i], GET_ONLY, nullptr, mem_row.get(),
+                                tuple_id, &field_slot, fields)) {
+                    DB_WARNING("get_update_primary_columns failed: %ld", pk_index.id);
+                    continue;
+                }
+            }
+            int prefix_len = 2 * sizeof(int64_t);
+            TableKey key(rocksdb_keys[i], true);
+            if (0 != mem_row->decode_key(tuple_id, pk_index, field_slot, key, prefix_len)) {
+                DB_WARNING("decode primary index failed: %ld", pk_index.id);
+                continue;
+            }
+            row_batch->move_row(std::move(mem_row));
+        } else if (statuses[i].IsNotFound()) {
+            DB_DEBUG("lock ok but key not exist");
+            continue;
+        } else {
+            DB_WARNING("unknown expect error: %d, %s", statuses[i].code(), statuses[i].ToString().c_str());
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int Transaction::multiget_primary(
+        int64_t region,
+        IndexInfo&      pk_index,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        BatchRecord& read_records,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool sorted_input) {
+    BAIDU_SCOPED_LOCK(_txn_mutex);
+    if (_region_info == nullptr) {
+        DB_WARNING("no region_info");
+        return -1;
+    }
+    last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
+    if (pk_index.type != pb::I_PRIMARY) {
+        DB_WARNING("invalid index type: %d", pk_index.type);
+        return -1;
+    }
+    std::vector<MutTableKey> raw_read_keys;
+    std::vector<rocksdb::Slice> rocksdb_keys;
+    raw_read_keys.reserve(read_records.size());
+    rocksdb_keys.reserve(read_records.size());
+    int64_t num_keys = 0;
+    while (!read_records.is_traverse_over()) {
+        MutTableKey  pk_key;
+        auto record = read_records.get_next();
+        //full key, no prefix allowed
+        if (0 != pk_key.append_index(pk_index, record.get(), -1, false)) {
+            DB_WARNING("Fail to append_index, reg:%ld, tab:%ld", region, pk_index.id);
+            continue;
+        }
+        MutTableKey  _key;
+        _key.append_i64(region).append_i64(pk_index.id).append_index(pk_key);
+        raw_read_keys.emplace_back(_key);
+        rocksdb_keys.emplace_back(_key.data());
+        ++num_keys;
+    }
+    read_records.clear();
+    return multiget_primary(region, pk_index, raw_read_keys, rocksdb_keys, tuple_id,
+        mem_row_desc, row_batch, fields, field_slot, sorted_input);
+}
+
+int Transaction::multiget_primary(
+        int64_t region, 
+        IndexInfo&      pk_index, 
+        const std::vector<TableKeyPair*>& read_keys,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::map<int32_t, FieldInfo*>& fields,
+        std::vector<int32_t>& field_slot,
+        bool            check_region,
+        bool sorted_input) {
+   BAIDU_SCOPED_LOCK(_txn_mutex);
+    if (_region_info == nullptr) {
+        DB_WARNING("no region_info");
+        return -1;
+    }
+    last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
+    if (pk_index.type != pb::I_PRIMARY) {
+        DB_WARNING("invalid index type: %d", pk_index.type);
+        return -1;
+    }
+    std::vector<MutTableKey> raw_read_keys;
+    std::vector<rocksdb::Slice> rocksdb_keys;
+    raw_read_keys.reserve(read_keys.size());
+    rocksdb_keys.reserve(read_keys.size());
+    int64_t num_keys = 0;
+    for (auto key : read_keys) {
+        auto left_key = key->left_key();
+        if (check_region) {
+            rocksdb::Slice pure_key(left_key.data());
+            rocksdb::Slice value;
+            if (!fits_region_range(pure_key, value,
+                &_region_info->start_key(), &_region_info->end_key(), pk_index, pk_index)) {
+                continue;
+            }
+        }
+        MutTableKey _key;
+        _key.append_i64(region).append_i64(pk_index.id).append_index(left_key);
+        raw_read_keys.emplace_back(_key);
+        rocksdb_keys.emplace_back(_key.data());
+        ++num_keys;
+    }
+
+    return multiget_primary(region, pk_index, raw_read_keys, rocksdb_keys, tuple_id,
+        mem_row_desc, row_batch, fields, field_slot, sorted_input);
 }
 
 //TODO: update return status
@@ -769,6 +933,112 @@ int Transaction::get_update_secondary(
         }
     }
     return res;
+}
+
+int Transaction::multiget_secondary(
+        int64_t         region,
+        IndexInfo&      pk_index,
+        IndexInfo&      index,
+        const std::vector<TableKeyPair*>& read_keys,
+        const SmartRecord& record_templete,
+        BatchRecord& read_records,
+        int32_t     tuple_id,
+        MemRowDescriptor* mem_row_desc,
+        RowBatch* row_batch,
+        std::vector<int32_t>& field_slot,
+        bool  parse_to_record,
+        bool            check_region,
+        bool sorted_input) {
+    BAIDU_SCOPED_LOCK(_txn_mutex);
+    if (_region_info == nullptr) {
+        DB_WARNING("no region_info");
+        return -1;
+    }
+    last_active_time = butil::gettimeofday_us();
+    if (_is_rolledback) {
+        DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
+        return -1;
+    }
+    if (index.type != pb::I_UNIQ) {
+        //DB_WARNING("invalid index type: %d", index.type);
+        return -2;
+    }
+    std::vector<MutTableKey> raw_read_keys;
+    std::vector<rocksdb::Slice> rocksdb_keys;
+    raw_read_keys.reserve(read_keys.size());
+    rocksdb_keys.reserve(read_keys.size());
+    int64_t num_keys = 0;
+    for (auto key : read_keys) {
+        auto left_key = key->left_key();
+        MutTableKey _key;
+        _key.append_i64(region).append_i64(index.id).append_index(left_key);
+        raw_read_keys.emplace_back(_key);
+        rocksdb_keys.emplace_back(_key.data());
+        ++num_keys;
+    }
+
+    std::vector<rocksdb::PinnableSlice> values(num_keys);
+    std::vector<rocksdb::Status> statuses(num_keys);
+    TimeCost cost;
+    rocksdb::ReadOptions read_opt;
+    read_opt.fill_cache = true;
+    read_opt.snapshot = _snapshot;
+    _txn->MultiGet(read_opt, _data_cf, rocksdb_keys, values, statuses, sorted_input);
+    for (int i = 0; i < num_keys; i++) {
+        if (statuses[i].ok()) {
+            rocksdb::Slice value_slice(values[i]);
+            if (_use_ttl && _read_ttl_timestamp_us > 0) {
+                int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &index, _online_ttl_base_expire_time_us);
+                if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+                    //expired
+                    continue;
+                }
+            }
+            rocksdb_keys[i].remove_prefix(2 * sizeof(int64_t));
+            if (!fits_region_range(rocksdb_keys[i], value_slice,
+                &_region_info->start_key(), &_region_info->end_key(), pk_index, index)) {
+                continue;
+            }
+            if (parse_to_record) {
+                SmartRecord record = record_templete->clone(true);
+                int pos = 0;
+                MutTableKey pk_val(value_slice);
+                int ret = record->decode_primary_key(index, pk_val, pos);
+                if (ret != 0) {
+                    DB_WARNING("decode primary key value failed: %ld", index.pk);
+                    continue;
+                }
+                ret = record->decode_key(index, rocksdb_keys[i]);
+                if (ret != 0) {
+                    DB_WARNING("decode index key failed: %ld", index.id);
+                    continue;
+                }
+                read_records.emplace_back(record);
+            } else {
+                std::unique_ptr<MemRow> mem_row = mem_row_desc->fetch_mem_row();
+                TableKey pkey(value_slice, true);
+                int pos = 0;
+                if (0 != mem_row->decode_primary_key(tuple_id, index, field_slot, pkey, pos)) {
+                    DB_WARNING("decode primary key failed: %ld", index.id);
+                    continue;
+                }
+                TableKey key(rocksdb_keys[i], true);
+                pos = 0;
+                if (0 != mem_row->decode_key(tuple_id, index, field_slot, key, pos)) {
+                    DB_WARNING("decode second key failed: %ld", index.id);
+                    continue;
+                }
+                row_batch->move_row(std::move(mem_row));
+            }
+        } else if (statuses[i].IsNotFound()) {
+            DB_DEBUG("lock ok but key not exist");
+            continue;
+        } else {
+            DB_WARNING("unknown expect error: %d, %s", statuses[i].code(), statuses[i].ToString().c_str());
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int Transaction::get_update_secondary(
@@ -1128,7 +1398,10 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
 int Transaction::get_update_primary_columns(
         const TableKey& primary_key,
         GetMode         mode,
-        const SmartRecord&     val,
+        const SmartRecord&  val,
+        MemRow*         mem_row,
+        int32_t         tuple_id,
+        std::vector<int32_t>* field_slot,
         std::map<int32_t, FieldInfo*>& fields) {
     if (_table_info.get() == nullptr) {
        DB_WARNING("no table_info");
@@ -1158,23 +1431,28 @@ int Transaction::get_update_primary_columns(
         }
         rocksdb::Status res = _txn->Get(read_opt, _data_cf, key.data(), &value);
         if (res.ok()){
-            //const FieldDescriptor* field = val->get_field_by_tag(field_id);
-            if (0 != val->decode_field(field_info, value)) {
-                DB_WARNING("decode value failed: %d", field_id);
+            int ret = 0;
+            if (val != nullptr) {
+                ret = val->decode_field(field_info, value);
+            } else {
+                ret = mem_row->decode_field(tuple_id, (*field_slot)[field_id], field_info.type, value);
+            }
+            if (ret < 0) {
+                DB_WARNING("decode value tuple_id: %d failed: %d", tuple_id, field_id);
                 return -1;
             }
-            //DB_DEBUG("get key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
-            //         val->get_value(field).get_string().c_str(), res.ToString().c_str());
         } else if (res.IsNotFound()) {
-            const FieldDescriptor* field = val->get_field_by_tag(field_id);
-            val->set_value(field, field_info.default_expr_value);
-            DB_DEBUG("cell not exist, default value: %s",
-                     field_info.default_value.c_str());
+            if (val != nullptr) {
+                const FieldDescriptor* field = val->get_field_by_tag(field_id);
+                val->set_value(field, field_info.default_expr_value);
+            } else {
+                mem_row->set_value(tuple_id, (*field_slot)[field_id], field_info.default_expr_value);
+            }
         } else if (res.IsBusy()) {
             DB_WARNING("get failed, busy: %s", res.ToString().c_str());
             return -1;
         } else if (res.IsTimedOut()) {
-            print_txninfo_holding_lock(key.data());        
+            print_txninfo_holding_lock(key.data());
             DB_WARNING("timedout: %s", res.ToString().c_str());
             return -1;
         } else {

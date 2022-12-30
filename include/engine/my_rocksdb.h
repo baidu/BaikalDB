@@ -70,6 +70,13 @@ public:
                      rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key,
                      rocksdb::PinnableSlice* pinnable_val);
 
+    void MultiGet(const rocksdb::ReadOptions& options,
+                     rocksdb::ColumnFamilyHandle* column_family,
+                     const std::vector<rocksdb::Slice>& keys,
+                     std::vector<rocksdb::PinnableSlice>& values,
+                     std::vector<rocksdb::Status>& statuses,
+                     bool sorted_input);
+
     rocksdb::Status GetForUpdate(const rocksdb::ReadOptions& options,
                               rocksdb::ColumnFamilyHandle* column_family,
                               const rocksdb::Slice& key, std::string* value);

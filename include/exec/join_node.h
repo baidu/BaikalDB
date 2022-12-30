@@ -64,7 +64,16 @@ public:
         }
         return true;
     }
-
+    ExecNode* get_inner_node() {
+        if (_children.size() < 2) {
+            return nullptr;
+        }
+        ExecNode* inner_node = _children[1];
+        if (join_type() == pb::RIGHT_JOIN) {
+            inner_node = _children[0];
+        }
+        return inner_node;
+    }
     int hash_join(RuntimeState* state);
     int loop_hash_join(RuntimeState* state);
 

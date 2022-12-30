@@ -22,7 +22,8 @@ class RpcSender {
 public:
     static int send_no_op_request(const std::string& instance,
                             int64_t recevie_region_id,
-                            int64_t request_version);
+                            int64_t request_version,
+                            int times = 5);
 
     static int get_peer_applied_index(const std::string& peer, int64_t region_id,
                             int64_t& applied_index, int64_t& dml_latency);
@@ -39,6 +40,7 @@ public:
                                     pb::BatchStoreRes& response,
                                     const std::string& instance,
                                     butil::IOBuf* attachment_data);
+    static int get_leader_read_index(const std::string& leader, int64_t region_id, pb::StoreRes& response);
     static void send_remove_region_method(int64_t drop_region_id, const std::string& instance);
     static int send_init_region_method(const std::string& instance_address, 
                 const pb::InitRegion& init_region_request, 

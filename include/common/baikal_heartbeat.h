@@ -19,11 +19,61 @@
 #include "meta_server_interact.hpp"
 
 namespace baikaldb {
+
+struct HeartBeatTableName {
+    std::string namespace_name;
+    std::string database;
+    std::string table_name;
+};
+
+struct SubTableNames {
+    std::string table_name;
+    std::set<std::string> fields;
+    std::set<std::string> monitor_fields;
+};
+
+struct SubTableIds {
+    int64_t id;
+    std::set<int> fields;
+    std::set<int> monitor_fields;
+};
+
 class BaikalHeartBeat {
 public:
     static void construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup = false);
     static void process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response);
     static void process_heart_beat_response(const pb::BaikalHeartBeatResponse& response, bool is_backup = false);
+};
+
+class BaseBaikalHeartBeat {
+public:
+    virtual ~BaseBaikalHeartBeat() {}
+
+    static BaseBaikalHeartBeat* get_instance() {
+        static BaseBaikalHeartBeat instance;
+        return &instance;
+    }
+
+    int  init();
+    int  heartbeat(bool is_sync);
+    void close() {
+        _shutdown = true;
+        _heartbeat_bth.join();
+    }
+
+    void set_table_names(const std::vector<HeartBeatTableName>& table_names) {
+        _table_names = table_names;
+    }
+
+private:    
+    BaseBaikalHeartBeat() {}
+    void report_heartbeat();
+
+private:
+    bool                            _is_inited = false;
+    bool                            _shutdown  = false;
+    Bthread                         _heartbeat_bth;
+    std::vector<HeartBeatTableName> _table_names;
 };
 
 class BinlogNetworkServer  {
@@ -32,8 +82,9 @@ public:
     typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec; 
     typedef ::google::protobuf::RepeatedPtrField<pb::SchemaInfo> SchemaVec;
     
-    void config(const std::string& namespace_name, const std::string& table) {
-        _table_names.push_back(namespace_name + "." + table);
+    void config(const std::string& namespace_name, const std::map<std::string, SubTableNames>& table_infos) {
+        _namespace = namespace_name;
+        _table_infos = table_infos;
     }
 
     bool init();
@@ -47,12 +98,8 @@ public:
         return _binlog_id;
     }
 
-    const std::unordered_set<int64_t>& get_binlog_origin_ids() const {
-        return _binlog_table_ids;
-    }
-
     void report_heart_beat();
-
+    int update_table_infos();
     void schema_heartbeat() {
         _heartbeat_bth.run([this]() {report_heart_beat();});
     }
@@ -61,9 +108,28 @@ public:
 
     bool process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response);
 
+    void open_schema_heartbeat() {
+        _shutdown = false;
+    }
+
+    void close_schema_heartbeat() {
+        _shutdown = true;
+        _heartbeat_bth.join();
+    }
+
+    std::map<int64_t, SubTableIds> get_table_ids() {
+        std::lock_guard<bthread::Mutex> l(_lock);
+        return _table_ids;
+    }
+
 private:
-    std::vector<std::string> _table_names;
-    std::unordered_set<int64_t> _binlog_table_ids;
+    std::string _namespace;
+    std::map<std::string, SubTableNames> _table_infos;
+    bthread::Mutex _lock;
+    std::map<int64_t, SubTableIds> _table_ids;
+
+    // std::vector<std::string> _table_names; //db.table
+    // std::map<std::string, int64_t> _table_name_id_map; //db.table => table_id
     int64_t _binlog_id {-1};
     bool _shutdown {false};
     Bthread _heartbeat_bth;

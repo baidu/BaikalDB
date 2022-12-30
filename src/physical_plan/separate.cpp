@@ -529,7 +529,7 @@ bool Separate::need_separate_single_txn(QueryContext* ctx, const int64_t main_ta
     if (ctx->get_runtime_state()->single_sql_autocommit() && 
         (ctx->enable_2pc 
             || _factory->need_begin_txn(main_table_id)
-            || ctx->open_binlog)) {
+            || ctx->open_binlog || ctx->execute_global_flow)) {
         auto client = ctx->client_conn;
         if (client != nullptr && client->txn_id == 0) {
             client->on_begin();
@@ -540,7 +540,7 @@ bool Separate::need_separate_single_txn(QueryContext* ctx, const int64_t main_ta
 }
 
 bool Separate::need_separate_plan(QueryContext* ctx, const int64_t main_table_id) {
-    if (_factory->has_global_index(main_table_id)) {
+    if (_factory->has_global_index(main_table_id) || ctx->execute_global_flow) {
         return true;
     }
     return false;
@@ -586,7 +586,7 @@ int Separate::separate_load(QueryContext* ctx) {
     parent->clear_children();
     parent->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
-        separate_single_txn(parent, pb::OP_INSERT);
+        separate_single_txn(ctx, parent, pb::OP_INSERT);
     }
     return 0;
 }
@@ -649,7 +649,7 @@ int Separate::separate_insert(QueryContext* ctx) {
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
-        separate_single_txn(packet_node, pb::OP_INSERT);
+        separate_single_txn(ctx, packet_node, pb::OP_INSERT);
     }
     return 0;
 }
@@ -702,6 +702,10 @@ int Separate::create_lock_node(
         }
         if (index_info->index_hint_status == pb::IHS_VIRTUAL) {
             DB_NOTICE("index info is virtual, skip.");
+            continue;
+        }
+        if (index_info->index_hint_status == pb::IHS_DISABLE
+            && index_info->state == pb::IS_DELETE_LOCAL) {
             continue;
         }
         if (index_info->is_global) {
@@ -816,7 +820,7 @@ int Separate::separate_update(QueryContext* ctx) {
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
-        separate_single_txn(packet_node, pb::OP_UPDATE);
+        separate_single_txn(ctx, packet_node, pb::OP_UPDATE);
     }
     return 0;
 }
@@ -855,7 +859,7 @@ int Separate::separate_delete(QueryContext* ctx) {
     packet_node->clear_children();
     packet_node->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
-        separate_single_txn(packet_node, pb::OP_DELETE);
+        separate_single_txn(ctx, packet_node, pb::OP_DELETE);
     }
     return 0;
 }
@@ -967,7 +971,7 @@ int Separate::separate_global_delete(
 }
 
 template<typename T>
-int Separate::separate_single_txn(T* node, pb::OpType op_type) {
+int Separate::separate_single_txn(QueryContext* ctx, T* node, pb::OpType op_type) {
     // create baikaldb commit node
     pb::PlanNode pb_plan_node;
     pb_plan_node.set_node_type(pb::SIGNEL_TXN_MANAGER_NODE);
@@ -984,7 +988,7 @@ int Separate::separate_single_txn(T* node, pb::OpType op_type) {
     node->clear_children();
     node->add_child(txn_manager_node);
     // create store begin node
-    std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE));
+    std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE, ctx->user_info->txn_lock_timeout));
     if (store_begin_node.get() == nullptr) {
         DB_WARNING("create store_begin_node failed");
         return -1;
@@ -1086,7 +1090,7 @@ int Separate::separate_commit(QueryContext* ctx) {
     commit_node->add_child(store_rollback_node.release());
     if (commit_node->txn_cmd() == pb::TXN_COMMIT_BEGIN) {
         // create store begin node
-        std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE));
+        std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE, ctx->user_info->txn_lock_timeout));
         if (store_begin_node.get() == nullptr) {
             DB_WARNING("create store_begin_node failed");
             return -1;
@@ -1110,7 +1114,7 @@ int Separate::separate_rollback(QueryContext* ctx) {
 
     if (rollback_node->txn_cmd() == pb::TXN_ROLLBACK_BEGIN) {
         // create store begin node
-        std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE));
+        std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE, ctx->user_info->txn_lock_timeout));
         if (store_begin_node.get() == nullptr) {
             DB_WARNING("create store_begin_node failed");
             return -1;
@@ -1125,7 +1129,7 @@ int Separate::separate_begin(QueryContext* ctx) {
     BeginManagerNode* begin_node =
             static_cast<BeginManagerNode*>(plan->get_node(pb::BEGIN_MANAGER_NODE));
     // create store begin node
-    std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE));
+    std::unique_ptr<TransactionNode> store_begin_node(create_txn_node(pb::TXN_BEGIN_STORE, ctx->user_info->txn_lock_timeout));
     if (store_begin_node.get() == nullptr) {
         DB_WARNING("create store_begin_node failed");
         return -1;
@@ -1134,7 +1138,7 @@ int Separate::separate_begin(QueryContext* ctx) {
     return 0;
 }
 
-TransactionNode* Separate::create_txn_node(pb::TxnCmdType cmd_type) {
+TransactionNode* Separate::create_txn_node(pb::TxnCmdType cmd_type, int64_t txn_lock_timeout) {
     // create fetcher node
     pb::PlanNode pb_plan_node;
     // pb_plan_node.set_txn_id(txn_id);
@@ -1149,6 +1153,9 @@ TransactionNode* Separate::create_txn_node(pb::TxnCmdType cmd_type) {
     if (store_txn_node == nullptr) {
         DB_WARNING("create store_txn_node failed");
         return nullptr;
+    }
+    if (txn_lock_timeout > 0) {
+        store_txn_node->set_txn_lock_timeout(txn_lock_timeout);
     }
     store_txn_node->init(pb_plan_node);
     return store_txn_node;

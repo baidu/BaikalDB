@@ -86,6 +86,8 @@ void HandleHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_REGION_ADJUSTKEY] = std::bind(&HandleHelper::_handle_region_adjustkey,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HANDLE_MODIFY_PARTITION] = std::bind(&HandleHelper::_handle_modify_partition,
+            this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
 
@@ -114,6 +116,7 @@ bool HandleHelper::execute(const SmartSocket& client) {
     return iter->second(client, split_vec);
 }
 
+//handle abnormal regions remove_illegal_peer resource_tag learner
 bool HandleHelper::_handle_abnormal_regions(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     static std::map<std::string, pb::RecoverOpt> opt_map = {
             {"remove_illegal_peer", pb::DO_REMOVE_ILLEGAL_PEER},
@@ -124,11 +127,21 @@ bool HandleHelper::_handle_abnormal_regions(const SmartSocket& client, const std
 
     std::string opt = "";
     std::string resource_tag = "";
+    bool is_remove_learner = false;
     if (split_vec.size() == 4) {
         opt = split_vec[3];
     } else if (split_vec.size() == 5) {
         opt = split_vec[3];
         resource_tag = split_vec[4];
+    } else if (split_vec.size() == 6) {
+        opt = split_vec[3];
+        resource_tag = split_vec[4];
+        if (split_vec[5] != "learner" || opt != "remove_illegal_peer") {
+            client->state = STATE_ERROR;
+            DB_FATAL("param invalid");
+            return false;
+        }
+        is_remove_learner = true;
     } else {
         client->state = STATE_ERROR;
         DB_FATAL("param invalid");
@@ -140,41 +153,62 @@ bool HandleHelper::_handle_abnormal_regions(const SmartSocket& client, const std
         client->state = STATE_ERROR;
         return false;
     }
-    pb::RecoverOpt recover_opt = iter->second;
-    pb::MetaManagerRequest request;
-    pb::MetaManagerResponse response;
-    request.set_op_type(pb::OP_RECOVERY_ALL_REGION);
-    request.set_recover_opt(recover_opt);
-    if (resource_tag != "") {
-        request.add_resource_tags(resource_tag);
-    }
-    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
-    std::vector< std::vector<std::string> > rows;
-    rows.reserve(10);
-    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
-    if (response.has_recover_response()) {
-        auto&  recover_response = response.recover_response();
-        std::vector<pb::PeerStateInfo> recover_region_way;
-        recover_region_way.reserve(5);
-        for (auto& peer_info : recover_response.illegal_regions()) {
-            recover_region_way.emplace_back(peer_info);
-        }
-        for (auto& peer_info : recover_response.set_peer_regions()) {
-            recover_region_way.emplace_back(peer_info);
-        }
-        for (auto& peer_info : recover_response.inited_regions()) {
-            recover_region_way.emplace_back(peer_info);
-        }
-        for (auto& peer_info : recover_region_way) {
-            std::vector<std::string> row;
-            row.emplace_back(std::to_string(peer_info.table_id()));
-            row.emplace_back(std::to_string(peer_info.region_id()));
-            row.emplace_back(opt);
-            row.emplace_back(peer_info.peer_id() + "@" + pb::PeerStatus_Name(peer_info.peer_status()));
-            rows.emplace_back(row);
-        }
-    }
 
+    
+    if (is_remove_learner) {
+        pb::QueryRequest query_req;
+        query_req.set_op_type(pb::QUERY_REGION_LEARNER_STATUS);
+        if (!resource_tag.empty()) {
+            query_req.set_resource_tag(resource_tag);
+        }
+        pb::QueryResponse query_res;
+        return is_packet_learner_result_success(client, query_req, query_res);
+    } else {
+        pb::MetaManagerRequest request;
+        pb::MetaManagerResponse response;
+        pb::RecoverOpt recover_opt = iter->second;
+        request.set_op_type(pb::OP_RECOVERY_ALL_REGION);
+        request.set_recover_opt(recover_opt);
+        if (resource_tag != "") {
+            request.add_resource_tags(resource_tag);
+        }
+        return is_packet_region_result_success(client, request, response);
+    }
+}
+
+bool HandleHelper::is_packet_learner_result_success(const SmartSocket& client, 
+    const pb::QueryRequest& query_req, 
+    pb::QueryResponse& query_res) {
+    std::vector<std::vector<std::string>> update_learner_schema_result;
+    update_learner_schema_result.reserve(10);
+    update_unhealthy_learners_schema(query_req, query_res, update_learner_schema_result);
+    std::vector<std::string> names = {"table_id", "region_id", "table_name", "peers_info", "process_result"};
+    std::vector<ResultField> fields;
+    fields.reserve(4);
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        fields.emplace_back(field);
+    }
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, update_learner_schema_result) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool HandleHelper::is_packet_region_result_success(const SmartSocket& client, 
+    const pb::MetaManagerRequest& request, 
+    pb::MetaManagerResponse& response) {
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    std::vector<std::vector<std::string>> rows;
+    rows.reserve(10);
+    _make_handle_region_result_rows(request, response, rows);
     std::vector<std::string> names = {"table_id", "region_id", "handle_region_opt", "peer"};
     std::vector<ResultField> fields;
     fields.reserve(4);
@@ -195,18 +229,118 @@ bool HandleHelper::_handle_abnormal_regions(const SmartSocket& client, const std
     return true;
 }
 
+void HandleHelper::update_unhealthy_learners_schema(const pb::QueryRequest& query_req, 
+    pb::QueryResponse& query_res, 
+    std::vector<std::vector<std::string>>& update_learner_schema_result) {
+    int ret = MetaServerInteract::get_instance()->send_request("query", query_req, query_res);
+    if (ret != 0 || query_res.errcode() != pb::SUCCESS) {
+        DB_WARNING("send_request fail");
+        return;
+    }
+
+    if (query_res.region_status_infos_size() == 0) {
+        DB_NOTICE("query unhealthy region learners size is 0, resource_tag is [%s]", 
+            (query_req.has_resource_tag()? query_req.resource_tag().c_str() : ""));
+        return;
+    }
+
+    for (auto& region_info : query_res.region_status_infos()) {
+        std::map<std::string, std::string> peer_id_peer_status;
+        for (auto& peer_info : region_info.peer_status_infos()) {
+            if (peer_info.peer_status() != pb::STATUS_NORMAL) {
+                peer_id_peer_status[peer_info.peer_id()] = pb::PeerStatus_Name(peer_info.peer_status());
+            }
+        }
+        pb::MetaManagerRequest request_update_region;
+        pb::MetaManagerResponse response_update_region;
+        request_update_region.set_op_type(pb::OP_UPDATE_REGION);
+        auto region_iter = request_update_region.add_region_infos();
+        int ret = -1;
+        pb::RegionInfo update_region_info;
+        ret = SchemaFactory::get_instance()->get_region_info(region_info.table_id(), region_info.region_id(), update_region_info);
+        if (ret < 0) {
+            DB_WARNING("master region_id [%ld] is not exist.", region_info.region_id());
+            continue;
+        }
+        *region_iter = update_region_info;
+        DB_NOTICE("update region_info is [%s]", update_region_info.ShortDebugString().c_str());
+        region_iter->clear_learners();
+        for (auto& learn : update_region_info.learners()) {
+            if (peer_id_peer_status.find(learn) == peer_id_peer_status.end()) {
+                region_iter->add_learners(learn);
+            }
+        }
+        //meta元信息清理
+        MetaServerInteract::get_instance()->send_request("meta_manager", request_update_region, response_update_region);
+
+
+        std::vector<std::string> row_result;
+        row_result.reserve(3);
+        //table_id, region_id, table_name, peers_info, success_or_not
+        row_result.emplace_back(std::to_string(region_info.table_id()));
+        row_result.emplace_back(std::to_string(region_info.region_id()));
+        row_result.emplace_back(update_region_info.table_name());
+
+        std::string peer_info_status = "";
+        for (const auto& peer_id_status : peer_id_peer_status) {
+            peer_info_status += peer_id_status.first + "@" + peer_id_status.second + ",";
+        }
+        peer_info_status.pop_back();
+        row_result.emplace_back(peer_info_status);
+        if (response_update_region.errcode()== pb::SUCCESS) {
+            row_result.emplace_back("update peer schema success");
+        } else {
+            row_result.emplace_back("update peer schema failed");
+        }
+        update_learner_schema_result.emplace_back(row_result);
+    }
+}
+
+void HandleHelper::_make_handle_region_result_rows(
+        const pb::MetaManagerRequest& request, 
+        const pb::MetaManagerResponse& response, 
+        std::vector<std::vector<std::string>>& rows) {
+    if (response.has_recover_response()) {
+        auto&  recover_response = response.recover_response();
+        std::vector<pb::PeerStateInfo> recover_region_way;
+        recover_region_way.reserve(5);
+        for (auto& peer_info : recover_response.illegal_regions()) {
+            recover_region_way.emplace_back(peer_info);
+        }
+        for (auto& peer_info : recover_response.set_peer_regions()) {
+            recover_region_way.emplace_back(peer_info);
+        }
+        for (auto& peer_info : recover_response.inited_regions()) {
+            recover_region_way.emplace_back(peer_info);
+        }
+        for (auto& peer_info : recover_region_way) {
+            std::vector<std::string> row;
+            row.emplace_back(std::to_string(peer_info.table_id()));
+            row.emplace_back(std::to_string(peer_info.region_id()));
+            row.emplace_back(pb::RecoverOpt_Name(request.recover_opt()));
+            row.emplace_back(peer_info.peer_id() + "@" + pb::PeerStatus_Name(peer_info.peer_status()));
+            rows.emplace_back(row);
+        }
+    }
+}
+
 bool HandleHelper::_handle_add_privilege(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (!client || !client->user_info) {
         DB_FATAL("param invalid");
         return false;
     }
     std::string db = "";
+    std::string resource_tag = "";
     pb::RW rw  = pb::WRITE;
+    bool permission = false;
     if (split_vec.size() == 4) {
         db = split_vec[2];
         if (boost::iequals(split_vec[3], "READ")) {
             rw = pb::READ;
+        } else if (boost::iequals(split_vec[3], "true")) {
+            permission = true;
         }
+        resource_tag = split_vec[3];
     } else {
         client->state = STATE_ERROR;
         DB_FATAL("param invalid");
@@ -218,9 +352,17 @@ bool HandleHelper::_handle_add_privilege(const SmartSocket& client, const std::v
     auto pri = request.mutable_user_privilege();
     pri->set_username(client->user_info->username);
     pri->set_namespace_name(client->user_info->namespace_);
-    auto add_db = pri->add_privilege_database();
-    add_db->set_database(db);
-    add_db->set_database_rw(rw);
+    if (db == "resource_tag") {
+        pri->set_resource_tag(resource_tag);
+    } else if (db == "ddl_permission") {
+        pri->set_ddl_permission(permission);
+    } else if (db == "use_read_index") {
+        pri->set_use_read_index(permission);
+    } else {
+        auto add_db = pri->add_privilege_database();
+        add_db->set_database(db);
+        add_db->set_database_rw(rw);
+    }
     MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
     if(!_make_response_packet(client, response.ShortDebugString())) {
@@ -528,13 +670,60 @@ bool HandleHelper::_handle_rm_privilege(const SmartSocket& client, const std::ve
         privilege_database.set_database(db);
         auto db_info = info->add_privilege_database();
         *db_info = privilege_database;
-    } else {
+    } else if (db != "resource_tag") {
         pb::PrivilegeTable privilege_table;
         privilege_table.set_database(db);
         privilege_table.set_table_name(table);
         auto table_info = info->add_privilege_table();
         *table_info = privilege_table;
+    } else {
+        // 第一个参数为resource_tag，则删除user中对应的resource_tag
+        info->set_resource_tag(table);
     }
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if(!_make_response_packet(client, response.ShortDebugString())) {
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool HandleHelper::_handle_modify_partition(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if(!client || !client->user_info) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    std::string db = "";
+    std::string table = "";
+    if (split_vec.size() == 3) {
+        db = client->current_db;
+        table = split_vec[2];
+    } else if (split_vec.size() == 4) {
+        db = split_vec[2];
+        table = split_vec[3];
+    } else {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    if (db == "" || table == "") {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_MODIFY_PARTITION);
+    auto info = request.mutable_table_info();
+    info->set_table_name(table);
+    info->set_database(db);
+    info->set_namespace_name(client->user_info->namespace_);
+    auto partition_info = info->mutable_partition_info();
+    // todo 临时代码，只修改expr_string
+    partition_info->set_type(pb::PT_HASH);
+    partition_info->set_expr_string("((userid & 0x700) >> 6) + (userid & 3)");
     MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
     if(!_make_response_packet(client, response.ShortDebugString())) {
@@ -995,11 +1184,6 @@ bool HandleHelper::_handle_copy_db(const SmartSocket& client, const std::vector<
         DB_WARNING("orgin db not exist : %s", orgin_db.c_str());
         return false;
     }
-    if (factory->get_database_id(ns + "." + desc_db, db_id) == 0) {
-        client->state = STATE_ERROR;
-        DB_WARNING("desc db exist : %s", desc_db.c_str());
-        return false;
-    }
 
     pb::MetaManagerRequest request;
     pb::MetaManagerResponse response;
@@ -1034,6 +1218,7 @@ bool HandleHelper::_handle_copy_db(const SmartSocket& client, const std::vector<
         *request.mutable_table_info() = schema_info;
         request.mutable_table_info()->set_database(desc_db);
         request.mutable_table_info()->clear_split_keys();
+        request.mutable_table_info()->clear_binlog_info();
         for (auto& index : *request.mutable_table_info()->mutable_indexs()) {
             index.clear_field_ids();
         }
@@ -1228,7 +1413,13 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         schema_conf->set_select_index_by_cost(is_open);
     } else if (key == "pk_prefix_balance") {
         int32_t pk_prefix_balance = strtol(split_vec[4].c_str(), NULL, 10);
-        schema_conf->set_pk_prefix_balance(pk_prefix_balance);
+        schema_conf->set_pk_prefix_balance(pk_prefix_balance); 
+    } else if (key == "tail_split_num") {
+        int32_t tail_split_num = strtol(split_vec[4].c_str(), NULL, 10);
+        schema_conf->set_tail_split_num(tail_split_num);
+    } else if (key == "tail_split_step") {
+        int32_t tail_split_step = strtol(split_vec[4].c_str(), NULL, 10);
+        schema_conf->set_tail_split_step(tail_split_step);
     } else if (key == "backup_table") {
         int32_t number = pb::BackupTable_descriptor()->FindValueByName(split_vec[4])->number();
         DB_WARNING("backup table enum %s => %d", split_vec[4].c_str(), number);

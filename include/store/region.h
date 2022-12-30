@@ -26,6 +26,7 @@
 #include <raft/util.h>
 #include <raft/storage.h>
 #include <raft/snapshot_throttle.h>
+#include <raft/repeated_timer_task.h>
 #else
 #include <butil/iobuf.h>
 #include <butil/containers/bounded_queue.h>
@@ -34,6 +35,7 @@
 #include <braft/util.h>
 #include <braft/storage.h>
 #include <braft/snapshot_throttle.h>
+#include <braft/repeated_timer_task.h>
 #endif
 #include "common.h"
 #include "schema_factory.h"
@@ -46,7 +48,6 @@
 #include "proto/store.interface.pb.h"
 #include "reverse_index.h"
 #include "transaction_pool.h"
-//#include "region_resource.h"
 #include "runtime_state.h"
 #include "runtime_state_pool.h"
 #include "rapidjson/document.h"
@@ -133,6 +134,21 @@ struct ApproximateInfo {
     TimeCost last_version_time_cost;
 };
 
+struct MultiSplitRegion {
+    int64_t  new_region_id;
+    std::string  new_instance;
+    std::vector<std::string> add_peer_instances;
+    std::string start_key;
+    std::string end_key;
+    MultiSplitRegion(const pb::MultiSplitRegion& region_info) {
+        new_region_id = region_info.new_region_id();
+        new_instance = region_info.new_instance();
+        for (auto adr : region_info.add_peer_instance()) {
+            add_peer_instances.emplace_back(adr);
+        }
+    }
+};
+
 class region;
 class ScopeProcStatus {
 public:
@@ -155,6 +171,65 @@ private:
     Region* _region;
 };
 
+struct FollowerReadCond {
+    BthreadCond cond;
+    pb::ErrCode errcode;
+    bool is_learner = false;
+    FollowerReadCond(bool is_learner) : errcode(pb::SUCCESS), is_learner(is_learner) {};
+    void set_failed() {
+        if (is_learner) {
+            errcode = pb::LEARNER_NOT_READY;
+        } else {
+            errcode = pb::NOT_LEADER;
+        }
+        cond.decrease_signal();
+    }
+    void finish_wait() {
+        cond.decrease_signal();
+    }
+};
+typedef std::shared_ptr<FollowerReadCond> SmartFollowerReadCond;
+
+struct ReadReqsWaitExec {
+    int64_t read_idx;
+    std::vector<SmartFollowerReadCond> reqs;
+    ReadReqsWaitExec(int64_t read_idx, std::vector<SmartFollowerReadCond>& reqs_vec) : read_idx(read_idx) {
+        reqs.swap(reqs_vec);
+    };
+};
+
+class NoOpTimer : public braft::RepeatedTimerTask {
+public:
+    NoOpTimer() {}
+    virtual ~NoOpTimer() {}
+    int init(Region* region, int timeout_ms) {
+        int ret = RepeatedTimerTask::init(timeout_ms);
+        if (region == nullptr) {
+            return -1;
+        }
+        _region = region;
+        return ret;
+    }
+    void reset_timer() {
+        if (_is_running) {
+            reset();
+        } else {
+            _is_running = true;
+            start();
+        }
+    }
+    void stop_timer() {
+        _is_running = false;
+        stop();
+    }
+    virtual void run();
+protected:
+    virtual void on_destroy() {};
+    Region* _region = nullptr;
+    bool _is_running = false;
+};
+
+
 class BinlogReadMgr {
 public:
 enum GetMode {
@@ -162,15 +237,17 @@ enum GetMode {
     MULTIGET,
     SEEK
 };
-    BinlogReadMgr(int64_t region_id, int64_t begin_ts);
+    BinlogReadMgr(int64_t region_id, int64_t begin_ts, const std::string& capture_ip, uint64_t log_id, int64_t need_read_cnt);
     BinlogReadMgr(int64_t region_id, GetMode mode);
     ~BinlogReadMgr() { }
-    int get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::StoreRes* response);
+    int get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::StoreRes* response, int64_t binlog_row_cnt);
+    int fill_fake_binlog(int64_t fake_ts, std::string& binlog);
     int get_binlog_finish(pb::StoreRes* response);
     int binlog_add_to_response(int64_t commit_ts, const std::string& binlog_value, pb::StoreRes* response);
     int multiget(std::map<int64_t, std::string>& start_binlog_map);
     int seek(std::map<int64_t, std::string>& start_binlog_map);
     void print_log();
+
 private:
     int64_t _region_id = 0;
     RocksWrapper* _rocksdb = nullptr;
@@ -182,10 +259,17 @@ private:
     bool _finish = false;
     bool _is_first_binlog = true;
     int _binlog_num = 0;
+    int64_t _begin_ts = 0;
+    uint64_t _log_id = 0;
+    int64_t _need_read_cnt = 0;
+    int64_t _binlog_total_row_cnts = 0;
+    int64_t _fake_binlog_cnt = 0;
     int64_t _first_commit_ts = -1;
     int64_t _last_commit_ts = -1;
     std::map<int64_t, int64_t> _commit_start_map;
     std::map<int64_t, std::string> _start_binlog_map;
+    std::map<int64_t, std::string> _fake_binlog_map;
+    std::string _capture_ip;
 };
 
 class BinlogAlarm {
@@ -262,6 +346,18 @@ public:
             wait_async_apply_log_queue_empty();
             _async_apply_param.stop_adjust_stall();
         }
+        if (_wait_read_idx_queue) {
+            _wait_read_idx_queue->stop();
+            _wait_read_idx_queue.reset();
+            execution_queue_join(_wait_read_idx_queue_id);
+        }
+        if (_wait_exec_queue) {
+            _wait_exec_queue->stop();
+            _wait_exec_queue.reset();
+            execution_queue_join(_wait_exec_queue_id);
+        }
+        _no_op_timer.stop();
+        _no_op_timer.destroy();
         if (_need_decrease) {
             _need_decrease = false;
             Concurrency::get_instance()->recieve_add_peer_concurrency.decrease_broadcast();
@@ -510,27 +606,42 @@ public:
             const std::string& split_key,
             int64_t key_term);
     void get_split_key_for_tail_split();
+    int init_new_region_leader(int64_t new_region_id, std::string instance, bool tail_split);
 
     void adjust_num_table_lines();
     //split第二步，发送迭代器数据
     void write_local_rocksdb_for_split();
-
+    int generate_multi_split_keys();
+    int tail_split_replay_applied_txn_for_recovery();
     int replay_applied_txn_for_recovery(
             int64_t region_id,
             const std::string& instance,
             std::string start_key,
-            const std::unordered_map<uint64_t, pb::TransactionInfo>& applied_txn);
+            const std::unordered_map<uint64_t, pb::TransactionInfo>& applied_txn,
+            std::string end_key = "");
 
     void send_log_entry_to_new_region_for_split();
-    int split_region_add_peer(int64_t new_region_id, std::string instance, std::string& new_region_leader, 
+    int tail_split_region_add_peer();
+    int split_region_add_peer(int64_t new_region_id, std::string instance,
                               std::vector<std::string> add_peer_instances, bool async);
+    void remove_one_new_region_peers(int64_t region_id, std::string leader, std::vector<std::string> peers) {
+        start_thread_to_remove_region(region_id, leader);
+        for (auto& peer : peers) {
+            start_thread_to_remove_region(region_id, peer);
+        }
+    }
     void split_remove_new_region_peers() {
-        start_thread_to_remove_region(_split_param.new_region_id, _split_param.instance);
-        for (auto& peer : _split_param.add_peer_instances) {
-            start_thread_to_remove_region(_split_param.new_region_id, peer);
+        if (_split_param.multi_new_regions.empty()) {
+            remove_one_new_region_peers(_split_param.new_region_id, _split_param.instance, _split_param.add_peer_instances);
+        } else {
+            for (auto& pair : _split_param.multi_new_regions) {
+                remove_one_new_region_peers(pair.new_region_id, pair.new_instance, pair.add_peer_instances);
+            }
         }
     }
     //split 第三步， 通知被分裂出来的region分裂完成， 增加old_region的version, update end_key
+    int send_complete_to_one_new_region(const std::string& instance, const std::vector<std::string>& peers, int64_t new_region_id, 
+                                        const std::string& start_key, const std::string& end_key = "");
     void send_complete_to_new_region_for_split(); 
     //分裂第四步完成
     void complete_split();
@@ -546,6 +657,9 @@ public:
     
     int get_split_key(std::string& split_key, int64_t& split_key_term);
     
+    bool is_splitting() {
+        return _split_param.new_region_id != 0;
+    }
     int64_t get_region_id() const {
         return _region_id;
     }
@@ -598,6 +712,13 @@ public:
             return _region_info.partition_num();
         }
         return 1;
+    }
+    int64_t get_partition_id() {
+        std::lock_guard<std::mutex> lock(_region_lock);
+        if (_region_info.has_partition_id()) {
+            return _region_info.partition_id();
+        }
+        return 0;
     }
     rocksdb::Range get_rocksdb_range() {
         return rocksdb::Range(_rocksdb_start, _rocksdb_end);
@@ -776,6 +897,10 @@ public:
         return wait_time;
     }
 
+    int apply_partial_rollback(google::protobuf::RpcController* controller,
+            SmartTransaction& txn, const pb::StoreReq* request, 
+            pb::StoreRes* response);
+
     void exec_in_txn_query(google::protobuf::RpcController* controller,
             const pb::StoreReq* request, 
             pb::StoreRes* response, 
@@ -839,6 +964,32 @@ public:
             }
         }
     }
+    //blacklist中新增的sign全部cancel
+    void cancel_all_blacklist_sign() {
+        if (_shutdown || !_init_success || get_version() <= 0) {
+            return;
+        }
+        SmartTable table_ptr = _factory->get_table_info_ptr(_table_id);
+        if (table_ptr == nullptr) {
+            return;
+        }
+        std::set<uint64_t> last_sign_blacklist;
+        if (_last_table_ptr != nullptr) {
+            last_sign_blacklist = _last_table_ptr->sign_blacklist;
+        }
+        std::unordered_map<uint64_t, SmartState> state_map = _state_pool.get_state_map();
+        for (auto& sign : table_ptr->sign_blacklist) {
+            if (last_sign_blacklist.count(sign) == 0) {
+                for (auto& pair : state_map) {
+                    if (pair.second->sign == sign) {
+                        pair.second->cancel();
+                        DB_WARNING("region_id: %ld, runtime:%p cancel", _region_id, pair.second.get());
+                    }
+                }
+            }
+        }
+        _last_table_ptr = table_ptr;
+    }
     void clear_orphan_transactions(braft::Closure* done, int64_t applied_index, int64_t term);
     void apply_clear_transactions_log();
 
@@ -854,6 +1005,7 @@ public:
         Bthread bth(&BTHREAD_ATTR_SMALL);
         std::function<void()> remove_region_function =
             [this, drop_region_id, instance_address]() {
+                DB_WARNING("remove region: %lu, peer: %s", drop_region_id, instance_address.c_str());
                 _multi_thread_cond.increase();
                 RpcSender::send_remove_region_method(drop_region_id, instance_address);
                 _multi_thread_cond.decrease_signal();
@@ -971,7 +1123,7 @@ public:
 
     int binlog_scan_when_restart();
 
-    void binlog_timeout_check(int64_t rollback_ts);
+    void binlog_timeout_check();
     
     void binlog_fake(int64_t ts, BthreadCond& cond);
 
@@ -995,11 +1147,33 @@ public:
         if (op_type == pb::OP_INSERT 
              || op_type == pb::OP_DELETE
              || op_type == pb::OP_UPDATE
-             || op_type == pb::OP_SELECT_FOR_UPDATE) {
+             || op_type == pb::OP_SELECT_FOR_UPDATE
+             || op_type == pb::OP_PARTIAL_ROLLBACK
+             || op_type == pb::OP_KV_BATCH) {
             return true;
         }
         return false;
     }
+    bool is_2pc_op_type(const pb::OpType& op_type) {
+        if (op_type == pb::OP_PREPARE 
+             || op_type == pb::OP_ROLLBACK
+             || op_type == pb::OP_COMMIT) {
+            return true;
+        }
+        return false;
+    }
+    bool is_async_apply_op_type(const pb::OpType& op_type) {
+        if (is_dml_op_type(op_type)
+            || is_2pc_op_type(op_type)
+            || op_type == pb::OP_NONE
+            || op_type == pb::OP_UPDATE_PRIMARY_TIMESTAMP
+            || op_type == pb::OP_KILL) {
+                return true;
+            }
+        return false;
+    }
+    void check_peer_latency();
+    void get_read_index(pb::StoreRes* response);
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -1037,6 +1211,12 @@ private:
         bool tail_split = false;
         std::unordered_map<uint64_t, pb::TransactionInfo> applied_txn;
 
+        // 尾分裂多region
+        std::vector<MultiSplitRegion> multi_new_regions;
+
+        int64_t sub_num_table_lines = 0;
+        std::vector<pb::TransactionInfo> adjust_txns;
+
         void reset_status() {
             split_start_index = INT_FAST64_MAX;
             split_end_index = 0;
@@ -1052,6 +1232,9 @@ private:
             snapshot = nullptr;
             applied_txn.clear();
             add_peer_instances.clear();
+            multi_new_regions.clear();
+            sub_num_table_lines = 0;
+            adjust_txns.clear();
         };
     };
 
@@ -1065,7 +1248,7 @@ private:
 
         //binlog function
     void recover_binlog();
-    void read_binlog(const pb::StoreReq* request, pb::StoreRes* response, const std::string& remote_side);
+    void read_binlog(const pb::StoreReq* request, pb::StoreRes* response, const std::string& remote_side, uint64_t log_id);
     void query_binlog_ts(const pb::StoreReq* request, pb::StoreRes* response);
     void apply_binlog(const pb::StoreReq& request, braft::Closure* done);
     int write_binlog_record(SmartRecord record);
@@ -1204,6 +1387,12 @@ private:
             }
         }
     }
+    // follower read
+    int append_pending_read(SmartFollowerReadCond c);
+    static int ask_leader_read_index(void* region, bthread::TaskIterator<SmartFollowerReadCond>& iter);
+    int ask_leader_read_index(std::vector<SmartFollowerReadCond>& tasks);
+    static int wake_up_read_request(void* region, bthread::TaskIterator<ReadReqsWaitExec>& iter);
+
 private:
     //Singleton
     RocksWrapper*       _rocksdb;
@@ -1219,7 +1408,8 @@ private:
     std::vector<pb::RegionInfo> _new_region_infos;
     size_t _snapshot_data_size = 0;
     size_t _snapshot_meta_size = 0;
-    pb::RegionInfo      _new_region_info;
+    // 最新一次分裂的新region信息，现在一次分裂可能有多个新region
+    std::vector<pb::RegionInfo>  _spliting_new_region_infos;
     int64_t             _region_id = 0;
     int64_t             _version = 0;
     int64_t             _table_id = 0; // region.main_table_id
@@ -1256,7 +1446,9 @@ private:
     // 两者diff值即为executionQueue里面排队的请求数
     int64_t                             _braft_apply_index = 0;
     int64_t                             _applied_index = 0;  //current log index
+    int64_t                             _done_applied_index = 0; // 确保已经log已经执行完(数据已写盘)，follow read用
     // 表示数据版本，conf_change,no_op等不影响数据时版本不变
+    // TODO, 裸用的地方太多, 需要整理
     int64_t                             _data_index = 0;
     int64_t                             _expected_term = -1; 
     // bthread cycle: set _applied_index_lastcycle = _applied_index when _num_table_lines == 0
@@ -1283,6 +1475,7 @@ private:
     TimeCost                            _removed_time_cost;
     TransactionPool                     _txn_pool;
     RuntimeStatePool                    _state_pool;
+    SmartTable                          _last_table_ptr; //黑名单屏蔽单线程使用
 
     // shared_ptr is not thread safe when assign
     std::mutex  _ptr_mutex;
@@ -1305,6 +1498,8 @@ private:
     bthread::Mutex  _commit_ts_map_lock;
     bthread::Mutex  _binlog_param_mutex;
     BinlogParam _binlog_param;
+    SmartTable  _binlog_table = nullptr;
+    SmartIndex  _binlog_pri = nullptr;
     std::string     _rocksdb_start;
     std::string     _rocksdb_end;
     pb::PeerStatus  _region_status = pb::STATUS_NORMAL;
@@ -1315,6 +1510,17 @@ private:
     bool            _is_learner = false;
     bool            _learner_ready_for_read = false;
     TimeCost        _learner_time;
+
+    // follower read
+    bthread::ExecutionQueueId<SmartFollowerReadCond> _wait_read_idx_queue_id;
+    bthread::ExecutionQueue<SmartFollowerReadCond>::scoped_ptr_t _wait_read_idx_queue;
+    bthread::ExecutionQueueId<ReadReqsWaitExec> _wait_exec_queue_id;
+    bthread::ExecutionQueue<ReadReqsWaitExec>::scoped_ptr_t _wait_exec_queue;
+    // leader address for learner, 单线程不加锁
+    std::string _leader_addr_for_read_idx;
+    bool _ready_for_follower_read = true;
+    // 解决零星写时主从延迟高,有写入时每100ms发一条NO OP, 停写5min后不再发NO OP
+    NoOpTimer _no_op_timer; 
 
     //NOT_LEADER分类报警
     struct NotLeaderAlarm {

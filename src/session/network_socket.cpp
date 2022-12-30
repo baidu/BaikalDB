@@ -178,6 +178,9 @@ void NetworkSocket::on_commit_rollback() {
     update_old_txn_info();
     txn_id = 0;
     seq_id = 0;
+    if (txn_start_time > 0) {
+        query_ctx->stat_info.txn_alive_time = butil::gettimeofday_us() - txn_start_time;
+    }
     txn_start_time = 0;
     txn_pri_region_last_exec_time = 0;
     open_binlog = false;

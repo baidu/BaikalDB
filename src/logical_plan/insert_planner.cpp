@@ -39,7 +39,11 @@ int InsertPlanner::plan() {
         insert->set_row_ttl_duration(_ctx->row_ttl_duration);
         DB_DEBUG("row_ttl_duration: %ld", _ctx->row_ttl_duration);
     }
-    
+    for (int i = 0; i < _insert_stmt->partition_names.size(); ++i) {
+        std::string lower_name = _insert_stmt->partition_names[i].value;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+        _partition_names.emplace_back(lower_name);
+    }
     // parse db.table in insert SQL
     if (0 != parse_db_table(insert)) {
         return -1;
@@ -73,9 +77,7 @@ int InsertPlanner::plan() {
     }
 
     _ctx->prepared_table_id = _table_id;
-    if (!_ctx->is_prepared) {
-        set_dml_txn_state(_table_id);
-    }
+    set_dml_txn_state(_table_id);
     // 局部索引binlog处理标记
     if (_ctx->open_binlog && !_factory->has_global_index(_table_id)) {
         insert_node->set_local_index_binlog(true);
@@ -268,6 +270,12 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
             }
         } else {
             SmartRecord row = _factory->new_record(_table_id);
+            if (row == nullptr) {
+                DB_WARNING("table :%ld is deleted", _table_id);
+                _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+                _ctx->stat_info.error_msg << "table not exist";
+                return -1;
+            }
             for (size_t idx = 0; idx < (size_t)row_expr->children.size(); ++idx) {
                 if (0 != fill_record_field((parser::ExprNode*)row_expr->children[idx], row, _fields[idx])) {
                     DB_WARNING("fill_record_field fail, field_id:%d", _fields[idx].id);

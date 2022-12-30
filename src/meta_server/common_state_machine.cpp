@@ -14,7 +14,9 @@
 
 #include "common_state_machine.h"
 #include "meta_server_interact.hpp"
+#include "store_interact.hpp"
 #include "meta_util.h"
+#include "region_manager.h"
 
 namespace baikaldb {
 DECLARE_string(meta_server_bns);
@@ -49,6 +51,21 @@ void MetaServerClosure::Run() {
                 raft_time_cost, 
                 total_time_cost, 
                 remote_side.c_str());
+    }
+    if (response != nullptr && response->op_type() == pb::OP_CREATE_TABLE) {
+        if(!whether_level_table && create_table_ret == 0){
+            std::string table_name = create_table_schema_pb.table_name();
+            if (init_regions->size() <= FLAGS_pre_split_threashold) {
+                if (TableManager::get_instance()->do_create_table_sync_req(
+                        create_table_schema_pb, init_regions, has_auto_increment, start_region_id, response) != 0) {
+                    DB_FATAL("fail to create table : %s", table_name.c_str());
+                } else {
+                    DB_NOTICE("create table:%s completely", table_name.c_str());
+                }
+            } else {
+                DB_NOTICE("create table:%s async completely", table_name.c_str());
+            }
+        }
     }
     if (done != nullptr) {
         done->Run();

@@ -68,6 +68,7 @@ struct QueryStat {
     int64_t     num_returned_rows = 0;
     int64_t     num_scan_rows     = 0;
     int64_t     num_filter_rows   = 0;
+    int64_t     txn_alive_time    = 0;
     uint64_t    log_id = 0;
     uint64_t    old_txn_id = 0;
     int         old_seq_id = 0;
@@ -93,6 +94,7 @@ struct QueryStat {
         send_buf_size       = 0;
         partition_key       = 0;
         sql_length          = 0;
+        txn_alive_time      = 0;
         hit_cache           = false;
         gettimeofday(&(start_stamp), NULL);
         gettimeofday(&(send_stamp), NULL);
@@ -208,6 +210,13 @@ public:
     
     int64_t get_ctx_total_time();
 
+    bool need_use_read_index() {
+        if (user_info == nullptr) {
+            return false;
+        }
+        return user_info->need_use_read_index();
+    }
+
 public:
     std::string         sql;
     std::vector<std::string> comments;
@@ -222,6 +231,7 @@ public:
     bool                is_full_export = false;
     bool                is_straight_join = false;
     ExplainType         explain_type = EXPLAIN_NULL;
+    int                 single_store_concurrency = -1;
 
     uint8_t             mysql_cmd = COM_SLEEP;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
@@ -280,6 +290,7 @@ public:
     // user can enable 2pc by comments /*{"enable_2pc":1}*/ preceding a DML statement
     bool                enable_2pc = false;
     bool                is_cancelled = false;
+    bool                execute_global_flow = false;
     std::shared_ptr<QueryContext> kill_ctx;
     std::vector<std::shared_ptr<QueryContext>> sub_query_plans;
     std::unordered_map<uint64_t, std::string> long_data_vars;
@@ -290,6 +301,15 @@ public:
     std::set<uint64_t> sign_blacklist;
     std::set<uint64_t> sign_forcelearner;
     std::map<uint64_t, std::map<int64_t, std::set<std::string>>> sign_forceindex; // sign => <table_id, index_name_set>
+
+    std::map<int64_t, std::vector<std::string>> table_partition_names;
+
+    // for base subscribe
+    bool                is_base_subscribe = false;
+    int64_t             base_subscribe_table_id = -1;
+    std::string         base_subscribe_table_name = "";
+    std::string         base_subscribe_filter_field = "";
+    std::unordered_map<std::string, std::string> base_subscribe_select_name_alias_map {};
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

@@ -52,7 +52,7 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     uint64_t log_id = 0;
     brpc::Controller* cntl = NULL;
     if (controller != NULL) {
-         cntl = static_cast<brpc::Controller*>(controller);
+        cntl = static_cast<brpc::Controller*>(controller);
         if (cntl->has_log_id()) {
             log_id = cntl->log_id();
         }
@@ -123,7 +123,9 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_UNLINK_BINLOG:
     case pb::OP_SET_INDEX_HINT_STATUS:
     case pb::OP_UPDATE_MAIN_LOGICAL_ROOM:
-    case pb::OP_UPDATE_TABLE_COMMENT: {
+    case pb::OP_UPDATE_TABLE_COMMENT:
+    case pb::OP_MODIFY_PARTITION:
+    case pb::OP_UPDATE_CHARSET: {
         if (!request->has_table_info()) { 
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
                     "no schema_info", request->op_type(), log_id);
@@ -193,6 +195,18 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
             // 只能修改有ttl的表
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "ttl_duration must > 0", request->op_type(), log_id);
+            return;
+        }
+        if (request->op_type() == pb::OP_MODIFY_PARTITION 
+                && !request->table_info().has_partition_info()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no partition_info", request->op_type(), log_id);
+            return;
+        }
+        if (request->op_type() == pb::OP_UPDATE_CHARSET 
+                && !request->table_info().has_charset()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "no charset", request->op_type(), log_id);
             return;
         }
         _meta_state_machine->process(controller, request, response, done_guard.release());
@@ -355,13 +369,70 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
     std::unordered_map<int64_t, std::set<std::int64_t>> report_region_ids;
     int64_t prepare_time =0;
     step_time_cost.reset(); 
+
+    if (request == nullptr) {
+        DB_WARNING("request is nullptr");
+        return;
+    }
+
+    std::unordered_set<int64_t> heartbeat_table_ids;
+    bool need_heartbeat_table  = (request->has_need_heartbeat_table() && request->need_heartbeat_table());
+    bool need_binlog_heartbeat = (request->has_need_binlog_heartbeat() && request->need_binlog_heartbeat());
+    if (need_heartbeat_table) {
+        for (const auto& table_info : request->heartbeat_tables()) {
+            if (need_binlog_heartbeat && table_info.table_name() == "*") {
+                // 通配符'*'处理
+                const std::string& database_name = table_info.namespace_name() + "\001" + table_info.database();
+                const int64_t database_id = DatabaseManager::get_instance()->get_database_id(database_name);
+                std::set<int64_t> table_ids;
+                int ret = DatabaseManager::get_instance()->get_table_ids(database_id, table_ids);
+                if (ret < 0) {
+                    DB_WARNING("Fail to get_table_ids, database_id : %ld", database_id);
+                    continue;
+                }
+                heartbeat_table_ids.insert(table_ids.begin(), table_ids.end());
+            } else {
+                const std::string& full_table_name = 
+                        table_info.namespace_name() + "\001" + table_info.database() + "\001" + table_info.table_name();
+                const int64_t table_id = TableManager::get_instance()->get_table_id(full_table_name);
+                if (table_id == 0) {
+                    DB_FATAL("Fail to get table_id, table_name: %s", full_table_name.c_str());
+                    continue;
+                }
+                heartbeat_table_ids.insert(table_id);
+            }
+        }
+
+        if (need_binlog_heartbeat) {
+            std::unordered_set<int64_t> heartbeat_binlog_table_ids;
+            for (const int64_t& table_id : heartbeat_table_ids) {
+                pb::SchemaInfo table_info;
+                int ret = TableManager::get_instance()->get_table_info(table_id, table_info);
+                if (ret < 0) {
+                    DB_WARNING("Fail to get_table_info, table_id: %ld", table_id);
+                    continue;
+                }
+                if (table_info.has_binlog_info() && table_info.binlog_info().has_binlog_table_id()) {
+                    heartbeat_binlog_table_ids.insert(table_info.binlog_info().binlog_table_id());
+                }
+            }
+            if (heartbeat_binlog_table_ids.empty()) {
+                DB_WARNING("heartbeat_binlog_table_ids is empty");
+            }
+            // Binlog心跳只需要返回Binlog Table对应的Region
+            std::swap(heartbeat_table_ids, heartbeat_binlog_table_ids);
+        }
+    }
+
     bool need_update_schema = false;
     bool need_update_region = false;
     int64_t last_updated_index = request->last_updated_index();
     int64_t applied_index = _meta_state_machine->applied_index();
     if (last_updated_index > 0) {
-        need_update_schema = TableManager::get_instance()->check_and_update_incremental(request, response, applied_index);
-        need_update_region = RegionManager::get_instance()->check_and_update_incremental(request, response, applied_index);
+        need_update_schema = TableManager::get_instance()->check_and_update_incremental(
+                                                            request, response, applied_index);
+        need_update_region = RegionManager::get_instance()->check_and_update_incremental(
+                                                            request, response, applied_index, heartbeat_table_ids);
         //DB_WARNING("update  update_incremental last_updated_index:%ld log_id: %lu", last_updated_index, log_id);
     }
     int64_t update_incremental_time = step_time_cost.get_time();
@@ -385,7 +456,8 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
         TableManager::get_instance()->check_update_or_drop_table(request, response); 
         //判断是否有新增的表没有下推给baikaldb
         std::vector<int64_t> new_add_region_ids;
-        TableManager::get_instance()->check_add_table(report_table_ids, new_add_region_ids, response);
+        TableManager::get_instance()->check_add_table(
+            report_table_ids, new_add_region_ids, request, response, heartbeat_table_ids);
         RegionManager::get_instance()->add_region_info(new_add_region_ids, response);      
     }
     int64_t update_table_time = step_time_cost.get_time();
@@ -396,7 +468,8 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
         //判断上报的region是否已经更新或删除
         RegionManager::get_instance()->check_update_region(request, response);
         //判断是否有新增的region没有下推到baikaldb
-        TableManager::get_instance()->check_add_region(report_table_ids, report_region_ids, response);
+        TableManager::get_instance()->check_add_region(
+            report_table_ids, report_region_ids, request, response, heartbeat_table_ids);
     }
     int64_t update_region_time = step_time_cost.get_time();
     DB_NOTICE("process schema info for baikal heartbeat, prepare_time: %ld, update_incremental_time:%ld,"
@@ -549,7 +622,7 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         indexs_name.insert(index_info.index_name());
     }
     // 分区表多region时，设置多split_key
-    if (table_info.has_region_num()) {
+    if (table_info.has_region_num() && request->table_info().split_keys_size() == 0) {
         int32_t region_num = table_info.region_num();
         if (region_num > 1) {
             auto split_keys = table_info.add_split_keys();
@@ -608,28 +681,54 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     total_region_count = partition_num * total_region_count;
     std::string resource_tag = request->table_info().resource_tag();
     boost::trim(resource_tag);
-    if (!table_info.has_resource_tag()) {
-        std::string namespace_name = table_info.namespace_name();
-        std::string database_name = namespace_name + "\001" + table_info.database();
-        int64_t namespace_id = NamespaceManager::get_instance()->get_namespace_id(namespace_name);
-        std::string namespace_resource_tag = NamespaceManager::get_instance()->get_resource_tag(namespace_id);
-        int64_t database_id = DatabaseManager::get_instance()->get_database_id(database_name);
-        std::string database_resource_tag = DatabaseManager::get_instance()->get_resource_tag(database_id);
-        if (database_resource_tag != "") {
-            resource_tag = database_resource_tag;
-        } else if (namespace_resource_tag != "") {
-            resource_tag = namespace_resource_tag;
+
+    pb::DataBaseInfo database_info;
+    pb::NameSpaceInfo namespace_info;
+    std::string namespace_name = table_info.namespace_name();
+    std::string database_name = namespace_name + "\001" + table_info.database();
+    int64_t namespace_id = NamespaceManager::get_instance()->get_namespace_id(namespace_name);
+    int64_t database_id = DatabaseManager::get_instance()->get_database_id(database_name);
+    int ns_ret = NamespaceManager::get_instance()->get_namespace_info(namespace_id, namespace_info);
+    int db_ret  = DatabaseManager::get_instance()->get_database_info(database_id, database_info);
+
+    auto* table_info_ptr = mutable_request->mutable_table_info();
+
+    if (ns_ret == 0 || db_ret == 0) {
+    #define SET_REQUEST_TABLE_INFO(TABLE_INFO_FIELD) \
+        if (!table_info.has_##TABLE_INFO_FIELD()) { \
+            if (namespace_info.has_##TABLE_INFO_FIELD()) { \
+                table_info_ptr->set_##TABLE_INFO_FIELD(namespace_info.TABLE_INFO_FIELD()); \
+            } \
+            if (database_info.has_##TABLE_INFO_FIELD()) { \
+                table_info_ptr->set_##TABLE_INFO_FIELD(database_info.TABLE_INFO_FIELD()); \
+            } \
+        }
+        SET_REQUEST_TABLE_INFO(engine);
+        SET_REQUEST_TABLE_INFO(charset);
+        SET_REQUEST_TABLE_INFO(byte_size_per_record);
+        SET_REQUEST_TABLE_INFO(replica_num);
+        SET_REQUEST_TABLE_INFO(region_split_lines);
+
+    #undef SET_REQUEST_TABLE_INFO
+
+        if (!table_info.has_resource_tag()) {
+            std::string ns_resource_tag = namespace_info.resource_tag();
+            std::string db_resource_tag = database_info.resource_tag();
+            if (db_resource_tag != "") {
+                resource_tag = db_resource_tag;
+            } else if (ns_resource_tag != "") {
+                resource_tag = ns_resource_tag;
+            }
         }
     }
-
-    mutable_request->mutable_table_info()->set_resource_tag(resource_tag);
+    // 目前建表新建region不考虑dist分布
+    table_info_ptr->set_resource_tag(resource_tag);
     DB_WARNING("create table should select instance count: %d", total_region_count);
     for (auto i = 0; i < total_region_count; ++i) { 
         std::string instance;
         int ret = ClusterManager::get_instance()->select_instance_rolling(
-                    resource_tag,
+                    {resource_tag, main_logical_room, ""},
                     {},
-                    main_logical_room,    
                     instance);
         if (ret < 0) {
             ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
@@ -748,6 +847,16 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     } else {
         table_id = ptr_region->table_id();
     }
+    if (TableManager::get_instance()->is_table_in_fast_importer(table_id)) {
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                                "region in fast importer, cannot split",
+                                request->op_type(),
+                                log_id);
+        DB_WARNING("region cannot split, region in fast importer, request: %s, region_id: %ld",
+                   request->ShortDebugString().c_str(), region_id);
+        return -1;
+    }
+
     std::string resource_tag;
     if (request->region_split().has_resource_tag()) {
         resource_tag = request->region_split().resource_tag();
@@ -767,6 +876,10 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
         }
     }
     bool is_tail_split = request->region_split().has_tail_split() && request->region_split().tail_split();
+    int region_num = request->region_split().new_region_num();
+    if (region_num < 1) {
+        region_num = 1;
+    }
     int64_t instance_num = 0;
     int ret = TableManager::get_instance()->get_replica_num(table_id, instance_num);
     if (ret < 0) {
@@ -778,16 +891,13 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     if (instance_num > 3) {
         instance_num = 3;
     }
+    // 副本分布 {resource_tag:logical_room:physical_room} : replica_count
     std::unordered_map<std::string, int64_t> replica_dists_map;
-    TableManager::get_instance()->get_replica_dists(table_id, replica_dists_map);
-    if (replica_dists_map.size() == 0) {
-        std::string main_logical_room;
-        ret = TableManager::get_instance()->get_main_logical_room(table_id, main_logical_room);
-        if (ret < 0) {
-            ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
-                                    "main logical room not exist", request->op_type(), log_id);
-        }
-        replica_dists_map[main_logical_room] = instance_num;
+    ret = TableManager::get_instance()->get_replica_dist_idcs(table_id, replica_dists_map);
+    if (ret < 0) {
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                                "replica idcs not exist", request->op_type(), log_id);
+        return -1;
     }
 
     //从cluster中选择store, 尾分裂选择replica个store, 中间分裂选择replica-1个store
@@ -797,44 +907,90 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
         response->mutable_split_response()->set_new_instance(source_instance);
         --instance_num;
         exclude_stores.insert(source_instance);
-        std::string source_logical_room = ClusterManager::get_instance()->get_logical_room(source_instance);
-        if (replica_dists_map.find(source_logical_room) != replica_dists_map.end()) {
-            replica_dists_map[source_logical_room]--;
+        // 找到中间分裂的store address所属的副本分布, replica count--
+        IdcInfo idc;
+        ClusterManager::get_instance()->get_instance_idc(source_instance, idc);
+        if (replica_dists_map.find(idc.resource_tag_level()) != replica_dists_map.end()) {
+            replica_dists_map[idc.resource_tag_level()]--;
+        } else if (replica_dists_map.find(idc.logical_room_level()) != replica_dists_map.end()) {
+            replica_dists_map[idc.logical_room_level()]--;
+        } else if (replica_dists_map.find(idc.to_string()) != replica_dists_map.end()) {
+            replica_dists_map[idc.to_string()]--;
         }
     }
-
-    int selected_instance = 0;
-    for (auto& replica_dist_pair : replica_dists_map) {
-        std::string logical_room = replica_dist_pair.first;
-        for (auto i = 0; i < replica_dist_pair.second; ++i) {
-            std::string instance;
-            // 尽量和父region的三个peer不在一个store上，同时也得保证只有三个store也能分裂
-            // 选store，如果选到了父region peer所在的store，最多重试3次
-            for (auto select_retry_time = 0; select_retry_time < 3; ++select_retry_time) {
-                ret = ClusterManager::get_instance()->select_instance_rolling(resource_tag,
-                                                                              exclude_stores,
-                                                                              logical_room,
-                                                                              instance);
-                if (ret < 0) {
-                    ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
-                                       "select instance fail", request->op_type(), log_id);
-                    return -1;
+    if (region_num == 1) {
+        int selected_instance = 0;
+        for (auto& replica_dist_pair : replica_dists_map) {
+            IdcInfo replica_idc(replica_dist_pair.first);
+            for (auto i = 0; i < replica_dist_pair.second; ++i) {
+                std::string instance;
+                // 尽量和父region的三个peer不在一个store上，同时也得保证只有三个store也能分裂
+                // 选store，如果选到了父region peer所在的store，最多重试3次
+                for (auto select_retry_time = 0; select_retry_time < 3; ++select_retry_time) {
+                    ret = ClusterManager::get_instance()->select_instance_rolling(replica_idc,
+                                                                                exclude_stores,
+                                                                                instance);
+                    if (ret < 0) {
+                        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                                        "select instance fail", request->op_type(), log_id);
+                        return -1;
+                    }
+                    if (parent_region_stores.count(instance) == 0) {
+                        break;
+                    }
                 }
-                if (parent_region_stores.count(instance) == 0) {
-                    break;
+                if (is_tail_split && selected_instance == 0) {
+                    response->mutable_split_response()->set_new_instance(instance);
+                } else {
+                    response->mutable_split_response()->add_add_peer_instance(instance);
                 }
-            }
-            if (is_tail_split && selected_instance == 0) {
-                response->mutable_split_response()->set_new_instance(instance);
-            } else {
-                response->mutable_split_response()->add_add_peer_instance(instance);
-            }
-            exclude_stores.insert(instance);
-            ++selected_instance;
-            if (selected_instance == instance_num) {
-                return 0;
+                exclude_stores.insert(instance);
+                ++selected_instance;
+                if (selected_instance == instance_num) {
+                    return 0;
+                }
             }
         }
+    } else if (is_tail_split && region_num > 1) {
+        // 每个新region选3个peer
+        for (int idx = 0; idx < region_num; ++idx) {
+            int selected_instance = 0;
+            auto new_region_info = response->mutable_split_response()->add_multi_new_regions();
+            exclude_stores.clear();
+            for (auto& replica_dist_pair : replica_dists_map) {
+                IdcInfo replica_idc(replica_dist_pair.first);
+                for (auto i = 0; i < replica_dist_pair.second; ++i) {
+                    std::string instance;
+                    // 直接rolling选
+                    ret = ClusterManager::get_instance()->select_instance_rolling(replica_idc,
+                                                                                exclude_stores,
+                                                                                instance);
+                    if (ret < 0) {
+                        ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                                        "select instance fail", request->op_type(), log_id);
+                        return -1;
+                    }
+                    if (selected_instance == 0) {
+                        new_region_info->set_new_instance(instance);
+                    } else {
+                        new_region_info->add_add_peer_instance(instance);
+                    }
+                    ++selected_instance;
+                    exclude_stores.insert(instance);
+                    if (selected_instance == instance_num) {
+                        break;
+                    }
+                }
+            }
+        }
+        if (response->mutable_split_response()->multi_new_regions_size() != region_num) {
+            DB_FATAL("region_id: %ld, is_tail_split: %d, region_num: %d != multi_new_regions_size: %d", 
+                    region_id, is_tail_split, region_num, response->mutable_split_response()->multi_new_regions_size());
+            return -1;
+        } 
+    } else {
+        DB_FATAL("not support, region_id: %ld, is_tail_split: %d, region_num: %d", region_id, is_tail_split, region_num);
+        return -1;
     }
     return 0;
 }
@@ -875,13 +1031,20 @@ int SchemaManager::whether_dists_legal(pb::MetaManagerRequest* request,
     int64_t total_count = 0;
     //检验逻辑机房是否存在
     for (auto& dist : request->table_info().dists()) {
-        std::string logical_room = dist.logical_room();
-        if (ClusterManager::get_instance()->logical_room_exist(logical_room)) {
+        if (dist.logical_room().empty() && dist.physical_room().empty()) {
+            // dist不指定逻辑机房和物理机房，则必须指定集群
+            if (dist.resource_tag().empty()) {
+                return false;
+            }
+            total_count += dist.count();
+            continue;
+        } 
+        if (ClusterManager::get_instance()->logical_and_physical_room_valid(dist.logical_room(), dist.physical_room())) {
             total_count += dist.count();
             continue;
         }
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
-                "logical room not exist, select instance fail",
+                "logical room and physical room not valid, select instance fail",
                 request->op_type(), log_id);
         return -1;
     }
@@ -927,7 +1090,8 @@ int SchemaManager::whether_main_logical_room_legal(pb::MetaManagerRequest* reque
     bool found = false;
     for (auto& dist : schema_pb.dists()) {
         std::string logical_room = dist.logical_room();
-        if (logical_room == request->table_info().main_logical_room()) {
+        if ((dist.resource_tag() == "" || dist.resource_tag() == schema_pb.resource_tag()) 
+            && logical_room == request->table_info().main_logical_room()) {
             found = true;
             break;
         }

@@ -45,6 +45,7 @@ enum PlanNodeType {
     INDEX_DDL_MANAGER_NODE = 36;
     APPLY_NODE = 37;
     LOAD_NODE = 38;
+    BASE_SUBSCRIBE_MANAGER_NODE = 39;
 };
 
 enum TxnCmdType {
@@ -104,6 +105,8 @@ message PossibleIndex {
     optional bool bool_and = 5;
     optional bool is_covering_index = 6;
     optional bool use_for_learner = 7;
+    optional bool range_key_sorted = 8;
+    optional bool is_eq = 9;
 };
 
 enum FulltextNodeType {
@@ -283,8 +286,9 @@ message PacketNode {
 };
 
 message TransactionNode {
-    required TxnCmdType txn_cmd     = 1;
-    optional int64  txn_timeout    = 2;
+    required TxnCmdType txn_cmd         = 1;
+    optional int64  txn_timeout         = 2; // 整个事务超时时间，单位ms
+    optional int64  txn_lock_timeout    = 3; // 等锁超时时间，单位ms
 };
 
 message KillNode {
@@ -347,6 +351,7 @@ message PlanNode {
     optional DerivePlanNode derive_node = 6;
     optional bool is_explain = 7;
     optional bool local_index_binlog = 8;
+    repeated int64 partitions = 9;
 };
 
 message Plan {
@@ -382,4 +387,5 @@ message TraceNode {
     optional LocalTraceNode    txn_commit_trace  = 12;
     optional LocalTraceNode    store_agg         = 13;
     repeated TraceNode         child_nodes       = 14;
+    optional int64             partition_id      = 15;
 };

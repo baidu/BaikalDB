@@ -39,6 +39,7 @@ int FilterNode::init(const pb::PlanNode& node) {
         DB_WARNING("ExecNode::init fail, ret:%d", ret);
         return ret;
     }
+
     pb::FilterNode filter_node;
     filter_node.ParseFromString(node.derive_node().filter_node());
     for (auto& expr : filter_node.conjuncts()) {
@@ -350,6 +351,8 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             DB_WARNING("expr type_inferer fail:%d", ret);
             return ret;
         }
+        ExprNode::or_node_optimize(&expr);
+
         //非bool型表达式判断
         if (expr->col_type() != pb::BOOL) {
             ExprNode::_s_non_boolean_sql_cnts << 1;
@@ -725,7 +728,7 @@ void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& o
     if (output.empty()) {
         return;
     }
-    if (!_pruned_conjuncts.empty()) {
+    if (_raw_filter_node.conjuncts_size() != 0) {
         output.back()["Extra"] += "Using where; ";
     }
 }

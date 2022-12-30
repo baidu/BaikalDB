@@ -37,13 +37,13 @@ public:
         return _offset + _limit;
     }
     int64_t get_offset() {
-	return _offset;
+        return _offset;
     }
     int64_t get_num_rows_skipped() {
-	return _num_rows_skipped;
+        return _num_rows_skipped;
     }
-    int64_t add_num_rows_skipped(int64_t num) {
-	_num_rows_skipped += num;
+    void add_num_rows_skipped(int64_t num) {
+        _num_rows_skipped += num;
     }
     int64_t get_limit() {
 	return _limit;

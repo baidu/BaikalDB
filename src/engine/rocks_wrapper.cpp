@@ -67,6 +67,9 @@ DEFINE_bool(delete_files_in_range, true, "delete_files_in_range");
 DEFINE_bool(l0_compaction_use_lz4, true, "L0 sst compaction use lz4 or not");
 DEFINE_bool(real_delete_old_binlog_cf, true, "default true");
 DEFINE_bool(rocksdb_fifo_allow_compaction, false, "default false");
+DEFINE_bool(use_direct_io_for_flush_and_compaction, false, "default false");
+DEFINE_bool(use_direct_reads, false, "default false");
+DEFINE_int32(level0_max_sst_num, 500, "max level0 num for fast importer");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log_new";
@@ -113,6 +116,8 @@ int32_t RocksWrapper::init(const std::string& path) {
     rocksdb::Options db_options;
     db_options.IncreaseParallelism(FLAGS_max_background_jobs);
     db_options.create_if_missing = true;
+    db_options.use_direct_reads = FLAGS_use_direct_reads;
+    db_options.use_direct_io_for_flush_and_compaction = FLAGS_use_direct_io_for_flush_and_compaction;
     db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.skip_stats_update_on_db_open = FLAGS_rocks_skip_stats_update_on_db_open;
     db_options.compaction_readahead_size = FLAGS_rocks_compaction_readahead_size;

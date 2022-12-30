@@ -24,7 +24,7 @@
 namespace baikaldb {
 
 int LoadPlanner::plan() {
-     if (_ctx->client_conn->txn_id != 0) {
+    if (_ctx->client_conn->txn_id != 0) {
         if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
             _ctx->stat_info.error_code = ER_NOT_ALLOWED_COMMAND;
             _ctx->stat_info.error_msg.str("not allow load data in transaction");

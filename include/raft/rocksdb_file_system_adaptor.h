@@ -34,7 +34,7 @@ const size_t SST_FILE_LENGTH = 128 * 1024 * 1024;
 class RocksdbFileSystemAdaptor;
 class Region;
 typedef std::shared_ptr<Region> SmartRegion;
-
+struct SnapshotContext;
 struct IteratorContext {
     bool reading = false;
     bool is_meta_sst = false;
@@ -47,6 +47,8 @@ struct IteratorContext {
     int64_t snapshot_index = 0;
     int64_t applied_index = 0;
     bool need_copy_data = true;
+    TimeCost offset_update_time; // 更新offset时更新此时间，长时间未访问可能对端挂掉
+    SnapshotContext* sc = nullptr;
 };
 
 typedef std::shared_ptr<IteratorContext> IteratorContextPtr;
@@ -121,6 +123,8 @@ private:
     }
 
     bool region_shutdown();
+
+    void context_reset();
 
 private:
 

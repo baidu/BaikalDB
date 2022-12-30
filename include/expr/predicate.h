@@ -24,15 +24,17 @@ namespace baikaldb {
 class AndPredicate : public ScalarFnCall {
 public:
     virtual ExprValue get_value(MemRow* row) {
-        ExprValue val1 = _children[0]->get_value(row);
-        if (!val1.is_null() && val1.get_numberic<bool>() == false) { // short-circuit
-            return ExprValue::False();
+        bool has_null_val = false;
+        for (int i = 0; i < children_size(); i++) {
+            ExprValue val = _children[i]->get_value(row);
+            if (!val.is_null() && val.get_numberic<bool>() == false) {
+                return ExprValue::False(); 
+            }
+            if (val.is_null()) {
+                has_null_val = true;
+            }
         }
-        ExprValue val2 = _children[1]->get_value(row);
-        if (!val2.is_null() && val2.get_numberic<bool>() == false) {
-            return ExprValue::False();
-        }
-        if (val1.is_null() || val2.is_null()) {
+        if (has_null_val) {
             return ExprValue::Null();
         }
         return ExprValue::True();
@@ -42,17 +44,20 @@ public:
 class OrPredicate : public ScalarFnCall {
 public:
     virtual ExprValue get_value(MemRow* row) {
-        ExprValue val1 = _children[0]->get_value(row);
-        if (!val1.is_null() && val1.get_numberic<bool>() == true) { // short-circuit
-            return ExprValue::True(); 
+        bool has_null_val = false;
+        for (int i = 0; i < children_size(); i++) {
+            ExprValue val = _children[i]->get_value(row);
+            if (!val.is_null() && val.get_numberic<bool>() == true) { // short-circuit
+                return ExprValue::True(); 
+            }
+            if (val.is_null()) {
+                has_null_val = true;
+            }
         }
-        ExprValue val2 = _children[1]->get_value(row);
-        if (!val2.is_null() && val2.get_numberic<bool>() == true) {
-            return ExprValue::True();
-        }
-        if (val1.is_null() || val2.is_null()) {
+        if (has_null_val) {
             return ExprValue::Null();
         }
+        
         return ExprValue::False();
     }
 };

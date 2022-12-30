@@ -85,7 +85,7 @@ message BatchStoreReq {
     required int64      region_id        = 1;
     repeated int64      request_lens     = 2;  // 保存每个storeReq的长度，数据放在了request_attachment里
     optional int64      resend_start_pos = 3;  // not leader重发起始pos
-}
+};
 
 message BatchStoreRes {
     required ErrCode   errcode              = 1;
@@ -95,7 +95,24 @@ message BatchStoreRes {
     optional int64     applied_index        = 5;
     optional int64     braft_applied_index  = 6;
     optional int64     dml_latency          = 7;
-}
+};
+
+message RegionIndexs {
+    optional int64     region_id    = 1;
+    optional int64     version      = 2;
+    optional int64     apply_index  = 3;
+    optional string    status       = 4;
+    optional string    resource_tag = 5;
+    optional int64     table_id     = 6;
+};
+
+message ExtraReq {
+    optional bool use_read_idx = 1;
+};
+
+message ExtraRes {
+    repeated RegionIndexs infos = 1; 
+};
 
 message StoreReq {
     required OpType op_type         = 1;  //对表的操作类型
@@ -126,6 +143,8 @@ message StoreReq {
     optional BinlogDesc binlog_desc     = 26;
     optional Binlog      binlog         = 27;
     optional uint64      sql_sign       = 28; // sql 签名
+    repeated RegionInfo multi_new_region_infos = 29;
+    optional ExtraReq   extra_req       = 30; // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
 };
 
 message RowValue {
@@ -200,6 +219,7 @@ message StoreRes {
     optional RegionRaftStat region_raft_stat = 23;
     repeated int64 ttl_timestamp = 24;
     optional BinlogQueryInfo binlog_info     = 26; //存放binlog信息
+    optional ExtraRes extra_res  = 25; // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
 };
 message InitRegion {
     required RegionInfo region_info     = 1;
@@ -211,6 +231,7 @@ message InitRegion {
 
 message GetAppliedIndex {
     required int64 region_id    = 1;
+    optional bool  use_read_idx = 2;
 };
 
 message RemoveRegion {
@@ -226,6 +247,7 @@ message RegionIds {
     optional int32  compact_type    = 4; //  1:data_cf 2:meta_cf 3:raft_log_cf
     optional bool   clear_all_txns  = 5;
     optional int64  txn_timeout     = 6;
+    optional bool   query_apply_index = 7;
 };
 
 message BackUpReq {};

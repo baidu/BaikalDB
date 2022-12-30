@@ -45,6 +45,10 @@ public:
         _state_map[db_conn_id] = state;
         state->set_pool(this);
     }
+    std::unordered_map<uint64_t, SmartState> get_state_map() {
+        std::unique_lock<std::mutex> lock(_map_mutex);
+        return _state_map;
+    }
 
 private:
     std::unordered_map<uint64_t, SmartState>  _state_map;
