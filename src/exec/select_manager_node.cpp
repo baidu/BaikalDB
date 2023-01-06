@@ -18,8 +18,10 @@
 #include "rocksdb_scan_node.h"
 #include "limit_node.h"
 #include "agg_node.h"
+#include "query_context.h"
 
 namespace baikaldb {
+DEFINE_bool(global_index_read_consistent, true, "double check for global and primary region consistency");
 int SelectManagerNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([state](TraceLocalNode& local_node) {
         local_node.set_scan_rows(state->num_scan_rows());
@@ -346,6 +348,9 @@ int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* sta
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());
         return ret;
+    }
+    if (client_conn->query_ctx->is_select && FLAGS_global_index_read_consistent) {
+        scan_node->add_global_condition_again();
     }
     ExecNode* parent = get_parent();
     while (parent != nullptr && parent->node_type() != pb::LIMIT_NODE) {

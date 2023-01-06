@@ -35,6 +35,20 @@ int LockPrimaryNode::init(const pb::PlanNode& node) {
             _affected_index_ids.emplace_back(lock_primary_node.affect_index_ids(i));
         }
     }
+
+    if (lock_primary_node.conjuncts_size() > 0) {
+        _conjuncts.clear();
+        _conjuncts_need_destory = true;
+        for (auto i = 0; i < lock_primary_node.conjuncts_size(); i++) {
+            ExprNode* conjunct = nullptr;
+            int ret = ExprNode::create_tree(lock_primary_node.conjuncts(i), &conjunct);
+            if (ret < 0) {
+                //如何释放资源
+                return ret;
+            }
+            _conjuncts.emplace_back(conjunct);
+        }
+    }
     return 0;
 }
 
@@ -62,11 +76,15 @@ void LockPrimaryNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     for (auto id : _affected_index_ids) {
         lock_primary_node->add_affect_index_ids(id);
     }
+    for (auto expr : _conjuncts) {
+        ExprNode::create_pb_expr(lock_primary_node->add_conjuncts(), expr);
+    }
 }
 
 void LockPrimaryNode::reset(RuntimeState* state) {
     _insert_records_by_region.clear();
     _delete_records_by_region.clear();
+    _conjuncts.clear();
 }
 
 int LockPrimaryNode::open(RuntimeState* state) {
@@ -76,6 +94,14 @@ int LockPrimaryNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
+    for (auto conjunct : _conjuncts) {
+         ret = conjunct->open();
+         if (ret < 0) {
+             DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
+             return ret;
+         }
+    }
+    state->tuple_id = state->tuple_descs()[0].tuple_id();
     ret = init_schema_info(state);
     if (ret == -1) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);

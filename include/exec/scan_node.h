@@ -58,17 +58,17 @@ public:
 
     void add_access_path(const SmartPath& access_path) {
         //如果使用倒排索引，则不使用代价进行索引选择
-        if ((access_path->index_type == pb::I_FULLTEXT) 
+        if ((access_path->index_type == pb::I_FULLTEXT)
             && access_path->is_possible) {
             _use_fulltext = true;
         }
 
-        if (access_path->index_info_ptr->index_hint_status == pb::IHS_DISABLE 
+        if (access_path->index_info_ptr->index_hint_status == pb::IHS_DISABLE
             && access_path->is_possible) {
             _has_disable_index = true;
         }
 
-        if (access_path->hint == AccessPath::FORCE_INDEX 
+        if (access_path->hint == AccessPath::FORCE_INDEX
             && access_path->is_possible) {
             _use_force_index = true;
         }
@@ -96,17 +96,17 @@ public:
                 path->is_possible = true;
             }
 
-            if ((path->index_type == pb::I_FULLTEXT) 
+            if ((path->index_type == pb::I_FULLTEXT)
                 && path->is_possible) {
                 _use_fulltext = true;
             }
 
-            if (path->index_info_ptr->index_hint_status == pb::IHS_DISABLE 
+            if (path->index_info_ptr->index_hint_status == pb::IHS_DISABLE
                 && path->is_possible) {
                 _has_disable_index = true;
             }
 
-            if (path->hint == AccessPath::FORCE_INDEX 
+            if (path->hint == AccessPath::FORCE_INDEX
                 && path->is_possible) {
                 _use_force_index = true;
             }
@@ -149,7 +149,7 @@ public:
 
     void show_cost(std::vector<std::map<std::string, std::string>>& path_infos);
 
-    int64_t select_index(); 
+    int64_t select_index();
 private:
     int compare_two_path(SmartPath& outer_path, SmartPath& inner_path);
     void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
@@ -158,7 +158,7 @@ private:
 
     int choose_arrow_pb_reverse_index();
 
-    int64_t select_index_common(); 
+    int64_t select_index_common();
     int64_t select_index_by_cost();
 private:
     std::set<int64_t> _possible_indexs; // reset时，重置possible的index
@@ -177,7 +177,7 @@ private:
 struct ScanIndexInfo {
     enum IndexUseFor {
         U_INIT = 0,
-        U_GLOBAL_LEARNER, // 
+        U_GLOBAL_LEARNER, //
         U_LOCAL_LEARNER
     };
     bool covering_index = false;
@@ -321,7 +321,7 @@ public:
     }
 
     int64_t select_index_in_baikaldb(const std::string& sample_sql);
-    
+
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
 
     void set_fulltext_index_tree(const FulltextInfoTree& tree) {
@@ -368,6 +368,9 @@ public:
             _main_path.path(_table_id)->calc_index_range();
         }
     }
+
+    void add_global_condition_again();
+
 protected:
     pb::Engine _engine = pb::ROCKSDB;
     int32_t _tuple_id = 0;
@@ -375,6 +378,8 @@ protected:
     AccessPathMgr _main_path;    //主集群索引选择
     AccessPathMgr _learner_path; //learner集群索引选择
     bool _learner_use_diff_index = false;
+    std::map<int64_t, SmartPath> _paths;
+    std::vector<int64_t> _multi_reverse_index;
     pb::TupleDescriptor* _tuple_desc = nullptr;
     bool _is_covering_index = true; // 只有store会用
     bool _has_index = false;
