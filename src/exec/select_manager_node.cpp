@@ -349,7 +349,7 @@ int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* sta
                 state->txn_id, state->log_id());
         return ret;
     }
-    if (client_conn->query_ctx->is_select && FLAGS_global_index_read_consistent == true) {
+    if (client_conn->query_ctx->is_select && FLAGS_global_index_read_consistent) {
         scan_node->add_global_condition_again();
     }
     ExecNode* parent = get_parent();
