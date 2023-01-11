@@ -939,6 +939,9 @@ public:
     }
 
     bool check_field_is_compatible_type(pb::PrimitiveType src_type, pb::PrimitiveType target_type) {
+        if (src_type == target_type) {
+            return true;
+        }
         switch (src_type) {
             case pb::DATETIME:
             case pb::TIMESTAMP:
