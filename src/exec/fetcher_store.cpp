@@ -716,7 +716,7 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
         if (_retry_times > 1 && _response.leader() == "0.0.0.0:0") {
             schema_factory->update_instance(remote_side, pb::FAULTY, false, false);
         }
-        if (_response.leader() != "0.0.0.0:0") {
+        if (_response.leader() != "0.0.0.0:0" && _response.leader() != "") {
             // store返回了leader，则相信store，不判断normal
             _info.set_leader(_response.leader());
             schema_factory->update_leader(_info);
