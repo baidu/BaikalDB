@@ -24,6 +24,8 @@ set(prefix_path "${THIRD_PARTY_PATH}/install/snappy|${THIRD_PARTY_PATH}/install/
 #FILE(WRITE ${ROCKSDB_SOURCES_DIR}/src/build.sh
 #        "PORTABLE=1 make -j${NUM_OF_PROCESSOR} static_lib"
 #        )
+## Fix for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105562
+set(CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} -Wno-error=maybe-uninitialized)
 
 ExternalProject_Add(
         extern_rocksdb
@@ -32,7 +34,7 @@ ExternalProject_Add(
         PREFIX ${ROCKSDB_SOURCES_DIR}
 #        GIT_REPOSITORY "https://github.com/facebook/rocksdb.git"
 #        GIT_TAG "v6.8.1"
-        URL "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz"
+        URL "https://github.com/facebook/rocksdb/archive/v6.26.0.tar.gz"
         UPDATE_COMMAND ""
 #        CONFIGURE_COMMAND ""
 #        BUILD_IN_SOURCE 1
