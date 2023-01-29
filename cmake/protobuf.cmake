@@ -132,8 +132,8 @@ FUNCTION(build_protobuf TARGET_NAME)
             UPDATE_COMMAND ""
             DEPENDS zlib
             #            GIT_REPOSITORY  "https://github.com/protocolbuffers/protobuf.git"
-            #            GIT_TAG         "v3.6.1"
-            URL "https://github.com/protocolbuffers/protobuf/archive/v3.6.1.tar.gz"
+            #            GIT_TAG         "v3.18.0"
+            URL "https://github.com/protocolbuffers/protobuf/archive/v3.18.0.tar.gz"
             CONFIGURE_COMMAND mv ../config.sh . COMMAND sh config.sh
             CMAKE_CACHE_ARGS
             -DCMAKE_INSTALL_PREFIX:PATH=${PROTOBUF_INSTALL_DIR}

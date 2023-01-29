@@ -24,6 +24,8 @@ set(prefix_path "${THIRD_PARTY_PATH}/install/snappy|${THIRD_PARTY_PATH}/install/
 #FILE(WRITE ${ROCKSDB_SOURCES_DIR}/src/build.sh
 #        "PORTABLE=1 make -j${NUM_OF_PROCESSOR} static_lib"
 #        )
+## Fix for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105562
+set(CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} -Wno-error=maybe-uninitialized)
 
 ExternalProject_Add(
         extern_rocksdb
@@ -31,8 +33,8 @@ ExternalProject_Add(
         DEPENDS gflags zlib snappy
         PREFIX ${ROCKSDB_SOURCES_DIR}
 #        GIT_REPOSITORY "https://github.com/facebook/rocksdb.git"
-#        GIT_TAG "v6.8.1"
-        URL "https://github.com/facebook/rocksdb/archive/v6.8.1.tar.gz"
+#        GIT_TAG "v7.7.3"
+        URL "https://github.com/facebook/rocksdb/archive/v7.7.3.tar.gz"
         UPDATE_COMMAND ""
 #        CONFIGURE_COMMAND ""
 #        BUILD_IN_SOURCE 1
@@ -52,6 +54,7 @@ ExternalProject_Add(
         -DCMAKE_PREFIX_PATH=${prefix_path}
         -DPORTABLE=ON
         -DWITH_SNAPPY=ON
+        -DUSE_RTTI=ON
         -DWITH_RUNTIME_DEBUG=ON
         -DROCKSDB_BUILD_SHARED=OFF
         -DWITH_BENCHMARK_TOOLS=OFF

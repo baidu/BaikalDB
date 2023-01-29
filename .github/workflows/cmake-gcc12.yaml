@@ -1,0 +1,20 @@
+name: Cmake gcc-12 Compile
+
+on:
+  [push,pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v2
+      - name: Cache cmake modules
+        uses: actions/cache@v2
+        with:
+          key: cmake-buildenv1
+          path: |
+            buildenv
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y flex bison libssl-dev autoconf g++-12 libtool make cmake libz-dev && export CC=$(which gcc-12) && export CXX=$(which g++12)
+      - name: Build
+        run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make
