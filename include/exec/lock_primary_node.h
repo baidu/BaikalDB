@@ -18,6 +18,8 @@
 #include "dml_node.h"
 
 namespace baikaldb {
+DECLARE_bool(check_condition_again_for_global_index);
+
 class LockPrimaryNode : public DMLNode {
 public:
     LockPrimaryNode() {}
@@ -48,7 +50,9 @@ public:
         return true;
     }
     void add_conjunct(ExprNode* conjunct) {
-        _conjuncts.push_back(conjunct);
+        if (FLAGS_check_condition_again_for_global_index) {
+            _conjuncts.push_back(conjunct);
+        }
     }
 
     void set_affected_index_ids(const std::vector<int64_t>& ids) {
