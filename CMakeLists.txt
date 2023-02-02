@@ -374,7 +374,9 @@ if (NOT DEBUG)
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNDEBUG")
 endif ()
 
+
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -frtti -fno-omit-frame-pointer")
+
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
 
 add_definitions(
