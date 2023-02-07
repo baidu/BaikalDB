@@ -231,6 +231,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     VARCHAR
     VARBINARY
     _BINARY
+    _UTF8MB4
     VIRTUAL
     WHEN
     WHERE
@@ -2858,6 +2859,9 @@ Literal:
     | STRING_LIT {
     }
     | _BINARY STRING_LIT {
+        $$ = $2;
+    }
+    | _UTF8MB4 STRING_LIT {
         $$ = $2;
     }
     ;
