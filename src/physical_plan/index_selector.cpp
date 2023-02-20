@@ -133,12 +133,22 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
         if (!expr->children(i)->is_row_expr()) {
             return;
         }
+        bool has_null = false;
         for (auto& pair : slots) {
             size_t idx = pair.first;
-            values[idx].push_back(static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx));
+            ExprValue val = static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx);
+            if (val.is_null()) {
+                has_null = true;
+            }
+        }
+        if (!has_null) {
+            for (auto& pair : slots) {
+                size_t idx = pair.first;
+                values[idx].push_back(static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx));
+            }
         }
     }
-    if (values.begin()->second.size() == 0) {
+    if (values.empty() || values.begin()->second.size() == 0) {
         *index_predicate_is_null = is_index_predicate(expr);
         return;
     }
