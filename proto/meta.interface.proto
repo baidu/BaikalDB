@@ -21,7 +21,9 @@ message NameSpaceInfo {
     optional int64 byte_size_per_record    = 9;
     optional int64 replica_num             = 10;
     optional int64 region_split_lines      = 11; //region分裂行数阈值
+    repeated ReplicaDist dists             = 12;
     optional bool  if_exist                = 13;
+    optional string main_logical_room      = 14;
 };
 
 message DataBaseInfo {
@@ -38,6 +40,8 @@ message DataBaseInfo {
     optional int64 byte_size_per_record    = 11;
     optional int64 replica_num             = 12;
     optional int64 region_split_lines      = 13; //region分裂行数阈值
+    repeated ReplicaDist dists             = 14;
+    optional string main_logical_room      = 15;
 };
 
 enum Status {

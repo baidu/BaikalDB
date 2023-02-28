@@ -26,6 +26,7 @@
 
 namespace baikaldb {
 
+DECLARE_int32(region_replica_num);
 const std::string SchemaManager::MAX_NAMESPACE_ID_KEY = "max_namespace_id";
 const std::string SchemaManager::MAX_DATABASE_ID_KEY = "max_database_id";
 const std::string SchemaManager::MAX_TABLE_ID_KEY = "max_table_id";
@@ -717,6 +718,10 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     std::string resource_tag = request->table_info().resource_tag();
     boost::trim(resource_tag);
 
+    if (request->table_info().has_main_logical_room()) {
+        main_logical_room = request->table_info().main_logical_room();
+    }
+
     pb::DataBaseInfo database_info;
     pb::NameSpaceInfo namespace_info;
     std::string namespace_name = table_info.namespace_name();
@@ -731,11 +736,10 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     if (ns_ret == 0 || db_ret == 0) {
     #define SET_REQUEST_TABLE_INFO(TABLE_INFO_FIELD) \
         if (!table_info.has_##TABLE_INFO_FIELD()) { \
-            if (namespace_info.has_##TABLE_INFO_FIELD()) { \
-                table_info_ptr->set_##TABLE_INFO_FIELD(namespace_info.TABLE_INFO_FIELD()); \
-            } \
             if (database_info.has_##TABLE_INFO_FIELD()) { \
                 table_info_ptr->set_##TABLE_INFO_FIELD(database_info.TABLE_INFO_FIELD()); \
+            } else if (namespace_info.has_##TABLE_INFO_FIELD()) { \
+                table_info_ptr->set_##TABLE_INFO_FIELD(namespace_info.TABLE_INFO_FIELD()); \
             } \
         }
         SET_REQUEST_TABLE_INFO(engine);
@@ -743,21 +747,23 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         SET_REQUEST_TABLE_INFO(byte_size_per_record);
         SET_REQUEST_TABLE_INFO(replica_num);
         SET_REQUEST_TABLE_INFO(region_split_lines);
+        SET_REQUEST_TABLE_INFO(resource_tag);
+        SET_REQUEST_TABLE_INFO(main_logical_room);
 
     #undef SET_REQUEST_TABLE_INFO
+    }
+    if (table_info.dists_size() == 0) {
+        if (database_info.dists_size() > 0) {
+            table_info_ptr->mutable_dists()->Swap(database_info.mutable_dists());
 
-        if (!table_info.has_resource_tag()) {
-            std::string ns_resource_tag = namespace_info.resource_tag();
-            std::string db_resource_tag = database_info.resource_tag();
-            if (db_resource_tag != "") {
-                resource_tag = db_resource_tag;
-            } else if (ns_resource_tag != "") {
-                resource_tag = ns_resource_tag;
-            }
+        } else if (namespace_info.dists_size() > 0) {
+            table_info_ptr->mutable_dists()->Swap(namespace_info.mutable_dists());
         }
     }
+    if (!mutable_request->table_info().has_replica_num()) {
+        mutable_request->mutable_table_info()->set_replica_num(FLAGS_region_replica_num);
+    }
     // 目前建表新建region不考虑dist分布
-    table_info_ptr->set_resource_tag(resource_tag);
 
     return 0;
 }
