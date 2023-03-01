@@ -65,7 +65,7 @@ public:
         TableKey table_key(key);
         int64_t region_id = table_key.extract_i64(0);
         FilterRegionInfo* filter_info  = get_filter_region_info(region_id);
-        if (filter_info == nullptr || filter_info->end_key.empty()) {
+        if (filter_info == nullptr || (!is_binlog_region(region_id) && filter_info->end_key.empty())) {
             return false;
         }
         const std::string& end_key = filter_info->end_key;
