@@ -78,7 +78,7 @@ ExprValue abs(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::DOUBLE);
-    tmp._u.double_val = ::abs(input[0].get_numberic<double>());
+    tmp._u.double_val = ::llabs(input[0].get_numberic<double>());
     return tmp;
 }
 
