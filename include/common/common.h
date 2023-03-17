@@ -27,6 +27,7 @@
 #include <bvar/bvar.h>
 #ifdef BAIDU_INTERNAL
 #include <bthread.h>
+#include <bthread_unstable.h>
 #include <base/time.h>
 #include <base/third_party/murmurhash3/murmurhash3.h>
 #include <base/containers/doubly_buffered_data.h>
@@ -40,6 +41,7 @@
 #include "naming.pb.h"
 #else
 #include <bthread/bthread.h>
+#include <bthread/unstable.h>
 #include <butil/time.h>
 #include <butil/third_party/murmurhash3/murmurhash3.h>
 #include <butil/containers/doubly_buffered_data.h>
@@ -384,6 +386,48 @@ private:
     int _concurrency = 10;
     BthreadCond _cond;
     const bthread_attr_t* _attr = NULL;
+};
+// wrapper bthread timer functions for c++ style
+class BthreadTimer {
+public:
+    BthreadTimer() {
+    }
+
+    // 可以多次run生成多次延迟调用，但只能stop最后一个
+    void run(int timeout_ms, const std::function<void()>& call) {
+        _call = new std::function<void()>;
+        *_call = call;
+        bthread_timer_add(
+                &_timer,
+                butil::milliseconds_from_now(timeout_ms),
+                [](void* p) {
+                    bthread_t tid;
+                    bthread_start_background(
+                            &tid, 
+                            NULL,
+                            [](void* p2) -> void* {
+                                auto call = static_cast<std::function<void()>*>(p2);
+                                (*call)();
+                                delete call;
+                                return NULL;
+                            },
+                            p);
+                },
+                _call);
+    }
+    // 可以撤销未做的timer，已做的也不会有副作用
+    void stop() {
+        int ret = bthread_timer_del(_timer);
+        // 撤销成功，则需要delete _call
+        // 否则在timer运行是delete
+        if (ret == 0) {
+            delete _call;
+        }
+    }
+
+private:
+    bthread_timer_t _timer = 0;
+    std::function<void()>* _call = NULL;
 };
 template <typename T> 
 class BthreadLocal {
@@ -1230,7 +1274,8 @@ extern int get_physical_room(const std::string& ip_and_port_str, std::string& ho
 extern int get_instance_from_bns(int* ret,
                           const std::string& bns_name, 
                           std::vector<std::string>& instances,
-                          bool need_alive = true); 
+                          bool need_alive = true,
+                          bool white_list = false); 
 extern int get_multi_port_from_bns(int* ret,
                           const std::string& bns_name, 
                           std::vector<std::string>& instances,

@@ -884,6 +884,8 @@ message QuerySchema {
     optional bool               can_null            = 5;
     optional string             extra               = 6;
     optional bool               deleted             = 7;
+    optional string             default_value       = 8;
+    optional string             comment             = 9;
 };
 
 message MigrateInstance {

@@ -22,14 +22,16 @@
 #include "importer_handle.h"
 #include "fast_importer.h"
 #include "dm_rocks_wrapper.h"
+#include "fn_manager.h"
+#include "rate_limiter.h"
 
 using namespace afs;
 namespace baikaldb {
-DEFINE_string(hostname, "hostname", "host name");
+DECLARE_string(hostname);
 
-DEFINE_string(param_db,            "HDFS_TASK_DB",           "param database");
 DEFINE_string(param_tbl,           "HDFS_TASK_TABLE",        "hdfs import conf table");
 DEFINE_string(result_tbl,          "HDFS_TASK_RESULT_TABLE", "hdfs import result info table");
+DEFINE_string(finish_blk_tbl,      "HDFS_TASK_FINISHED_BLOCK", "hdfs import result info table");
 DEFINE_string(sst_backup_tbl,      "SST_BACKUP_TABLE",       "sst backup result table");
 DEFINE_string(sst_backup_info_tbl, "SST_BACKUP_INFO",        "sst backup conf table");
 DEFINE_string(sql_agg_tbl,         "SQL_AGG_INFO",           "sst backup conf table");
@@ -64,7 +66,7 @@ int Fetcher::init() {
 }
 
 Fetcher::~Fetcher() {
-    destroy_filesysterm();
+    destroy_filesystem();
 }
 
 int Fetcher::querybaikaldb(std::string sql, baikal::client::ResultSet& result_set) {
@@ -116,24 +118,24 @@ void Fetcher::prepare() {
         _done_common_path.c_str(), _import_db.c_str(), _import_tbl.c_str(), _local_done_json.c_str());
 }
 // 创建文件系统
-int Fetcher::create_filesysterm(const std::string& cluster_name, const std::string& user_name, const std::string& password) {
+int Fetcher::create_filesystem(const std::string& cluster_name, const std::string& user_name, const std::string& password) {
     if (cluster_name.find("afs") != cluster_name.npos) {
 #ifdef BAIDU_INTERNAL
-        _fs = new AfsFileSystermAdaptor(cluster_name, user_name, password, "./conf/client.conf");
+        _fs = new AfsFileSystemAdaptor(cluster_name, user_name, password, "./conf/client.conf");
 #endif
     } else {
-        _fs = new PosixFileSystermAdaptor();
+        _fs = new PosixFileSystemAdaptor();
     }
 
     int ret = _fs->init();
     if (ret < 0) {
-        DB_FATAL("filesysterm init failed, cluster_name: %s", cluster_name.c_str());
+        DB_FATAL("filesystem init failed, cluster_name: %s", cluster_name.c_str());
         return ret;
     }
     return 0;
 }
 
-void Fetcher::destroy_filesysterm() {
+void Fetcher::destroy_filesystem() {
     if (_fs) {
         _fs->destroy();
         delete _fs;
@@ -147,7 +149,7 @@ int Fetcher::get_done_file(const std::string& done_file_name, Json::Value& done_
     if (!_is_local_done_json) {
         ImporterReaderAdaptor* reader = _fs->open_reader(done_file_name);
         if (reader == nullptr) {
-            DB_FATAL("open reader file: %s", done_file_name.c_str());
+            DB_WARNING("open reader file: %s", done_file_name.c_str());
             return -1;
         }
 
@@ -173,14 +175,15 @@ int Fetcher::get_done_file(const std::string& done_file_name, Json::Value& done_
     }
 
     DB_WARNING("doen file size: %d content: %s", size, st1.c_str());
+    if (size == 0) {
+        _import_ret << "failed: done file empty";
+        return -1;
+    }
     
     Json::Reader json_reader;
     bool ret1 = json_reader.parse(st1, done_root);
     if (!ret1) {
-        if (size != 0) {
-            // 空的done不写result table，很多任务会先clean done file，在写done
-            _import_ret << " parse done file failed";
-        }
+        _import_ret << " parse done file failed";
         DB_FATAL("fail parse %d, json:%s", ret1, st1.c_str());
         return -1;
     }
@@ -203,10 +206,15 @@ bool Fetcher::file_exist(const std::string& done_file_name) {
     return false;
 }
 
+
 //替换文件路径中的通配符
 std::string Fetcher::replace_path_date(int64_t version) {
     std::string str = _done_common_path;
-    str.replace(str.find("{DATE}"), 6, std::to_string(version));
+    auto pos = str.find("{DATE}");
+    if (pos == std::string::npos) {
+        return str;
+    }
+    str.replace(pos, 6, std::to_string(version));
     return str;
 }
 
@@ -244,6 +252,12 @@ int Fetcher::analyse_one_do(const Json::Value& node) {
     }
     if (node.isMember("version")) {
         int64_t done_version = atoll(node["version"].asString().c_str());
+        // 回溯
+        if (!_backtrack_done.empty()) {
+            _new_version = done_version;
+            DB_WARNING("_backtrack_done: %s, path has not DATE, new_version: %ld", _backtrack_done.c_str(), _new_version);
+            return 0;
+        }
         //初次导入
         if (_old_version == 0) {
             _new_version = done_version;
@@ -259,6 +273,11 @@ int Fetcher::analyse_one_do(const Json::Value& node) {
         }
         return 0;
     } else {
+        if (!_backtrack_done.empty() && _new_version != 0) {
+            // 之前在_backtrack_done path里解析出来了new_version
+            DB_WARNING("_backtrack_done: %s, path has DATE, new_version: %ld", _backtrack_done.c_str(), _new_version);
+            return 0;
+        }
         DB_FATAL("done file hasn`t version fail");
         return -1;
     }
@@ -457,7 +476,7 @@ int Fetcher::analyse_multi_donefile_update() {
 
 int Fetcher::analyse_version() {
     try {
-        if (_only_one_donefile) {
+        if (_only_one_donefile || _is_local_done_json) {
             //只有一个done文件，需要在读取json之后分析
             _done_real_path = _done_common_path;
             return analyse_one_donefile();
@@ -473,6 +492,155 @@ int Fetcher::analyse_version() {
     }
 }
 
+void Fetcher::get_finished_file_and_blocks(const std::string& db, const std::string& tbl) {
+    reset_all_last_import_info();
+    if (!_broken_point_continuing) {
+        return;
+    }
+    
+    baikal::client::ResultSet result_set;
+    std::vector<std::string> select_vec;
+    std::map<std::string, std::string> where_map;
+
+    select_vec.emplace_back("*");
+    where_map["table_info"] = "'" + _table_info + "'";
+    where_map["version"] = std::to_string(_new_version);
+    where_map["database_name"] = "'" + db + "'";
+    where_map["table_name"] = "'" + tbl + "'";
+    std::string sql = gen_select_sql(FLAGS_finish_blk_tbl, select_vec, where_map);
+
+    int ret = querybaikaldb(sql, result_set);
+    if (ret != 0) {
+        DB_WARNING("get finished block fail, sql:%s", sql.c_str()); 
+        return;
+    }
+    while (result_set.next()) {
+        std::string file_path;
+        std::string database_name;
+        std::string table;
+        int64_t start_pos = 0;
+        int64_t end_pos = 0;
+        int64_t import_line = 0;
+        int64_t diff_line = 0;
+        int64_t err_sql = 0;
+        int64_t affected_row = 0;
+        result_set.get_string("file_path", &file_path);
+        result_set.get_string("database_name", &database_name);
+        result_set.get_string("table_name", &table);
+        result_set.get_int64("start_pos", &start_pos);
+        result_set.get_int64("end_pos", &end_pos);
+        result_set.get_int64("import_line", &import_line);
+        result_set.get_int64("diff_line", &diff_line);
+        result_set.get_int64("err_sql", &err_sql);
+        result_set.get_int64("affected_row", &affected_row);
+        DB_WARNING("%s.%s file_path: %s:%ld:%ld has been imported, "
+                   "import_line: %ld, diff_line: %ld, err_sql: %ld, affected_row: %ld", 
+                   database_name.c_str(), table.c_str(),
+                   file_path.c_str(), start_pos, end_pos,
+                   import_line, diff_line, err_sql, affected_row);
+        _finish_blocks_last_time[file_path][start_pos] = end_pos;
+        _finish_blocks_import_line_last_import[file_path] += import_line;
+        _finish_blocks_diff_line_last_import[file_path] += diff_line;
+        _finish_blocks_err_sql_last_import[file_path] += err_sql;
+        _finish_blocks_affected_row_last_import[file_path] += affected_row;
+        _import_line_last_import += import_line;
+        _diff_line_last_import += diff_line;
+        _err_sql_last_import += err_sql;
+        _affected_row_last_import += affected_row;
+    }
+    DB_WARNING("total import_line: %ld, diff_line: %ld, err_sql: %ld, affected_row: %ld for last import",
+        _import_line_last_import, _diff_line_last_import, _err_sql_last_import, _affected_row_last_import);
+    return; 
+}
+
+void Fetcher::insert_finished_file_or_blocks(std::string db, 
+                                             std::string tbl, 
+                                             std::string path, 
+                                             int64_t start_pos, 
+                                             int64_t end_pos, 
+                                             BlockHandleResult* result,
+                                             bool file_finished) {
+    baikal::client::ResultSet result_set;
+    std::map<std::string, std::string> values_map;
+    values_map["table_info"] = "'" + _table_info + "'";
+    values_map["version"] = std::to_string(_new_version);
+    values_map["hostname"] = "'" + FLAGS_hostname + "'";
+    values_map["file_path"] = "'" + path + "'";
+    values_map["database_name"] = "'" + db + "'";
+    values_map["table_name"] = "'" + tbl + "'";
+    values_map["start_pos"] = std::to_string(start_pos);
+    values_map["end_pos"] = std::to_string(end_pos);
+    int64_t import_line = 0;
+    int64_t diff_line = 0;
+    int64_t err_sql = 0;
+    int64_t affected_row = 0;
+    if (result != nullptr) {
+        import_line += result->import_line.load();
+        diff_line += result->diff_line.load();
+        err_sql += result->errsql_line.load();
+        affected_row += result->affected_row.load();
+    }
+    if (file_finished) {
+        import_line += _finish_blocks_import_line_last_import[path];
+        diff_line += _finish_blocks_diff_line_last_import[path];
+        err_sql += _finish_blocks_err_sql_last_import[path];
+        affected_row += _finish_blocks_affected_row_last_import[path];
+    }
+    values_map["import_line"] = std::to_string(import_line);
+    values_map["diff_line"] = std::to_string(diff_line);
+    values_map["err_sql"] = std::to_string(err_sql);
+    values_map["affected_row"] = std::to_string(affected_row);
+    std::string sql = gen_insert_sql(FLAGS_finish_blk_tbl, values_map);
+
+    int ret = querybaikaldb(sql, result_set);
+    if (ret != 0) {
+        DB_WARNING("query baikaldb begin task failed, sql:%s", sql.c_str());
+        return;
+    }
+    if (file_finished) {
+        std::vector<std::string> select_vec;
+        std::map<std::string, std::string> where_map;
+        where_map["table_info"] = "'" + _table_info + "'";
+        where_map["version"] = std::to_string(_new_version);
+        where_map["file_path"] = "'" + path + "'";
+        where_map["database_name"] = "'" + db + "'";
+        where_map["table_name"] = "'" + tbl + "'";
+        std::string sql = gen_delete_sql(FLAGS_finish_blk_tbl, where_map);
+        sql += " and (start_pos != " + std::to_string(start_pos) + " or end_pos != " + std::to_string(end_pos) + ")";
+        int ret = querybaikaldb(sql, result_set);
+        if (ret != 0) {
+            DB_WARNING("delete all finished blocks fail after importer, sql:%s", sql.c_str()); 
+        }
+    }
+    return;
+}
+
+void Fetcher::delete_finished_blocks_after_import() {
+    baikal::client::ResultSet result_set;
+    std::map<std::string, std::string> where_map;
+
+    where_map["table_info"] = "'" + _table_info + "'";
+    where_map["version"] = std::to_string(_new_version);
+    std::string sql = gen_delete_sql(FLAGS_finish_blk_tbl, where_map);
+
+    int ret = querybaikaldb(sql, result_set);
+    if (ret != 0) {
+        DB_WARNING("delete all finished blocks fail after importer, sql:%s", sql.c_str()); 
+    }
+    return; 
+}
+
+bool Fetcher::is_broken_point_continuing_support_type(OpType type) {
+    if (type == OpType::REP 
+        || type == OpType::UP
+        || type == OpType::SQL_UP
+        || type == OpType::DUP_UP
+        || type == OpType::DEL) {
+        return true;
+    }
+    return false;
+}
+
 int Fetcher::importer(const Json::Value& node, OpType type, const std::string& done_path, const std::string& charset) {
     ImporterHandle* importer = ImporterHandle::new_handle(type, _baikaldb_user, done_path);
     if (importer == nullptr) {
@@ -483,29 +651,92 @@ int Fetcher::importer(const Json::Value& node, OpType type, const std::string& d
     importer->set_charset(charset);
     importer->set_local_json(_is_local_done_json);
     importer->set_retry_times(_retry_times);
+    importer->set_task_config(_config);
     ON_SCOPE_EXIT(([this, importer]() {
         delete importer;
     }));
 
+    if (!is_broken_point_continuing_support_type(type)) {
+        _broken_point_continuing = false;
+    }
+    
     int ret = importer->init(node, _filesystem_path_prefix);
     if (ret < 0) {
         _import_ret << importer->handle_result();
         DB_FATAL("importer init failed");
         return -1;
     }
-    TimeCost cost;
-    auto progress_func = [this, importer, &cost](const std::string& progress_str) {
-        std::string progress = time_print(cost.get_time());
-        progress += " (" + progress_str + ")";
-        update_task_progress(progress, importer->get_import_lines());
+    // 查出所有已完成的block信息
+    get_finished_file_and_blocks(importer->get_db(), importer->get_table());
+    importer->set_upload_errsql_info(_table_info, _new_version, _baikaldb);
+    importer->set_finished_blocks(_broken_point_continuing, _finish_blocks_last_time);
+
+    auto progress_func = [this, importer](const std::string& progress_str) {
+        _progress_info.imported_line = importer->get_import_lines() + _import_line_last_import + _import_line;
+        _progress_info.affected_row = importer->get_import_affected_row() + _affected_row_last_import + _import_affected_row;
+        _progress_info.diff_line = importer->get_import_diff_lines() + _diff_line_last_import + _import_diff_line;
+        if (_imported_tables > 0) {
+            // 多表导入
+            _progress_info.progress = time_print(_cost.get_time()) 
+                                    + " (" + progress_str + ")"
+                                    + _import_all_tbl_ret.str()
+                                    + importer->get_all_import_result(_import_line_last_import, 
+                                                                      _affected_row_last_import, 
+                                                                      _diff_line_last_import,
+                                                                      _err_sql_last_import);
+        } else {
+            _progress_info.progress = time_print(_cost.get_time()) 
+                                    + " (" + progress_str + "), diffline: " + std::to_string(_progress_info.diff_line);
+        }
+        if (!_progress_info.updated_sample_sql) {
+            _progress_info.sample_sql = importer->get_sample_sqls();
+        }
+        if (!_progress_info.updated_sample_diff_line) {
+            _progress_info.sample_diff_line = importer->get_diffline_sample();
+        }
+        if (!_progress_info.updated_sql_err_reason) {
+            _progress_info.sql_err_reason = importer->get_sql_err_reason();
+        }
+        update_task_progress();
+        // SELECT config
+        whether_importer_config_need_update();
     };
-    int64_t lines = importer->run(_fs, _config, progress_func);
+    auto finish_block_func = [this, importer](std::string path, 
+                                    int64_t start_pos, 
+                                    int64_t end_pos, 
+                                    BlockHandleResult* result, 
+                                    bool file_finished) {
+        if (_broken_point_continuing) {
+            insert_finished_file_or_blocks(importer->get_db(), 
+                                           importer->get_table(), 
+                                           path,
+                                           start_pos, 
+                                           end_pos, 
+                                           result, 
+                                           file_finished);
+        }
+    };
+    int64_t lines = importer->run(_fs, _config, progress_func, finish_block_func);
     _import_ret << importer->handle_result();
+    _import_all_tbl_ret << importer->get_all_import_result(_import_line_last_import, 
+                                                           _affected_row_last_import, 
+                                                           _diff_line_last_import,
+                                                           _err_sql_last_import);
     if (lines < 0) {
         DB_FATAL("importer run failed");
         return -1;
     }
-    _import_line = lines;
+    _import_diff_line += importer->get_import_diff_lines();
+    _import_err_sql += importer->get_err_sql_cnt();
+    _import_affected_row += importer->get_import_affected_row();
+    _import_line += lines - importer->get_import_diff_lines();
+    _import_diffline_sample = importer->get_diffline_sample();
+    if (_broken_point_continuing) {
+        _import_diff_line += _diff_line_last_import;
+        _import_line += _import_line_last_import;
+        _import_err_sql += _err_sql_last_import;
+        _import_affected_row += _affected_row_last_import;
+    }
     return 0;
 }
 
@@ -516,11 +747,53 @@ int Fetcher::import_to_baikaldb() {
         return -1;
     }
 
+    Bthread capture_worker;
+    time_t now = time(NULL);
+    int64_t start_ts = baikaldb::timestamp_to_ts((uint32_t)now);
+    if (ImporterHandle::is_launch_capture_task(done_root)) {
+        Json::Value node = ImporterHandle::get_node_json(done_root);
+        if (LaunchCapture::get_instance()->truncate_old_table(_baikaldb_user, node) != 0) {
+            DB_FATAL("truncate old table failed");
+            return -1;
+        }
+        capture_worker.run([this, &done_root, start_ts]() {
+            LaunchCapture::get_instance()->set_capture_initial_param(_baikaldb_user);
+            Json::Value node = ImporterHandle::get_node_json(done_root);
+            LaunchCapture::get_instance()->init_capture(node, start_ts);
+        });
+    }
+
+    ON_SCOPE_EXIT(([this, &capture_worker]() {
+        capture_worker.join();
+        LaunchCapture::get_instance()->destroy();
+    }));
+
     try {
         for (auto& name_type : op_name_type) {
             if (done_root.isMember(name_type.name)) {
                 DB_WARNING("%s hdfs real path:%s, charset:%s", name_type.name.c_str(), _done_real_path.c_str(), _charset.c_str());
                 for (auto& node : done_root[name_type.name]) {
+                    std::string db_name;
+                    std::string table_name;
+                    std::string mails;
+                    if (node.isMember("db") && node.isString()) {
+                        db_name = node["db"].asString();
+                    }
+                    if (node.isMember("table") && node.isString()) {
+                        table_name = node["table"].asString();
+                    }
+                    if (node.isMember("mail") && node.isString()) {
+                        const std::string& mail = node["mail"].asString();
+                        std::vector<std::string> users;
+                        boost::split(users, mail, boost::is_any_of(" ;,\n\t\r"), boost::token_compress_on);
+                        for (auto& user : users) {
+                            mails += user;
+                            if (!boost::iends_with(user, "@baidu.com")) {
+                                mails += "@baidu.com";
+                            }
+                            mails += " ";
+                        }
+                    }
                     if (_is_fast_importer) {
                         // 快速导入
                         std::string tmp_path = node["path"].asString();
@@ -577,12 +850,13 @@ int Fetcher::import_to_baikaldb() {
                         // 创建子任务并等待子任务完成
                         ret = fast_importer_main_worker.run_main_task();
                         _import_line = fast_importer_main_worker.get_import_line();
+                        _import_diff_line = fast_importer_main_worker.get_import_diff_line();
                         _import_ret << fast_importer_main_worker.get_result();
+                        _import_ret << ", import_diff_line: " << _import_diff_line;
                         if (ret < 0) {
                             DB_FATAL("fast importer run main task:%s failed", _table_info.c_str());
                             return -1;
                         }
-                        return 0;
                     } else {
                         // sql导入
                         ret = importer(node, name_type.type, _done_real_path, _charset);
@@ -590,6 +864,20 @@ int Fetcher::import_to_baikaldb() {
                             DB_FATAL("importer :%s failed", name_type.name.c_str());
                             return -1;
                         }
+                        _imported_tables += 1;
+                    }
+                    const int64_t import_all_line = _import_line + _import_diff_line;
+                    if (_import_diff_line > import_all_line * 0.5) {
+                        std::string err_msg = "import_diff_line[" + std::to_string(_import_diff_line) + 
+                                              "] bigger than 50 percent import_all_line[" + std::to_string(import_all_line) + "]";
+                        _import_ret << err_msg;
+                        DB_FATAL("fail to import_to_baikaldb, err_msg: %s", err_msg.c_str());
+                        if (mails != "") {
+                            std::string cmd = "echo \"" + _import_ret.str() + "\" | mail -s 'BaikalDB import fail, " +
+                                              db_name + "." + table_name + "' '" + mails + "' -- -f baikalDM@baidu.com";
+                            system_cmd(cmd.c_str());
+                        }
+                        return -1;
                     }
                 }
             }
@@ -600,6 +888,12 @@ int Fetcher::import_to_baikaldb() {
         return -1;
     }
 
+    if (_imported_tables == 1) {
+        _import_ret << " diff lines: " << _import_diff_line;
+        if (_import_err_sql > 0) {
+            _import_ret << " sql_err: " << _import_err_sql;
+        }
+    }
     return 0;
 }
 
@@ -702,6 +996,9 @@ int Fetcher::fetch_task(bool is_fast_importer) {
     
     while (result_set.next()) {
         _import_ret.str("");
+        _import_all_tbl_ret.str("");
+        reset_all_last_import_info();
+        _import_diffline_sample.clear();
         std::string status;
         std::string table_info;
         std::string done_file;
@@ -716,6 +1013,8 @@ int Fetcher::fetch_task(bool is_fast_importer) {
         std::string local_done_json;
         std::string table_namespace;
         std::string meta_bns;
+        std::string backtrack_done; // 回溯某一天用
+
         int64_t id = 0;
         int64_t version = 0;
         int64_t ago_days = 0;
@@ -724,6 +1023,7 @@ int Fetcher::fetch_task(bool is_fast_importer) {
         int32_t need_iconv = 0;
         int32_t is_fast_importer = 0;
         int64_t retry_times = 0;
+        int32_t broken_point_continuing = 0;
         result_set.get_string("status", &status);
         result_set.get_string("done_file", &done_file);
         result_set.get_string("cluster_name", &cluster_name);
@@ -742,13 +1042,17 @@ int Fetcher::fetch_task(bool is_fast_importer) {
         result_set.get_int64("bitflag", &bitflag);
         result_set.get_string("config", &config);
         result_set.get_string("meta_bns", &meta_bns);
+        result_set.get_string("backtrack_done", &backtrack_done);
         result_set.get_int64("retry_times", &retry_times);
         // 如果设置 need_iconv，说明文件编码与 charset字段确定不一样，importer将不进行验证，直接将文件内容编码转成 charset 设置值。
         result_set.get_int32("need_iconv", &need_iconv);
+        // 断点续传
+        result_set.get_int32("broken_point_continuing", &broken_point_continuing);
         if (id <= last_fetch_id) {
             continue;
         }
         _need_iconv = need_iconv != 0;
+        _broken_point_continuing = broken_point_continuing != 0;
         _config = config;
         result_set.get_string("local_done_json", &local_done_json);
         // 是否是快速导入
@@ -767,6 +1071,36 @@ int Fetcher::fetch_task(bool is_fast_importer) {
         }
         _id = id;
         _old_version = version;
+        _local_done_json = local_done_json;
+        _new_version = 0;
+        if (backtrack_done != "") {
+            // backtrack_done可能是done json，也可能是done路径
+            Json::Value json_root;
+            Json::Reader json_reader;
+            bool ret = json_reader.parse(backtrack_done, json_root);
+            if (ret) {
+                _local_done_json = backtrack_done;
+                DB_WARNING("backtrack_done is json: %s", backtrack_done.c_str());
+            } else {
+                if (backtrack_done.find("{DATE}") != std::string::npos) {
+                    DB_FATAL("backtrack_done has {DATE}: %s", backtrack_done.c_str());
+                    update_task_idle(id);
+                    continue;
+                }
+                auto pos = done_file.find_first_of("{DATE}");
+                if (pos != std::string::npos) {
+                    if (backtrack_done.size() < pos + 8) {
+                        DB_FATAL("backtrack_done path wrong {DATE}: %s", backtrack_done.c_str());
+                        update_task_idle(id);
+                        continue;
+                    }
+                    std::string version_str = backtrack_done.substr(pos, 8);
+                    _new_version = strtoll(version_str.c_str(), NULL, 10);
+                }
+                done_file = backtrack_done;
+                DB_WARNING("backtrack_done is path: %s", backtrack_done.c_str());
+            }
+        }
         if (cluster_name == "wutai") {
             _done_file = FLAGS_hdfs_mnt_wutai + done_file;
             _filesystem_path_prefix = FLAGS_hdfs_mnt_wutai;
@@ -789,7 +1123,6 @@ int Fetcher::fetch_task(bool is_fast_importer) {
         _old_bitflag = bitflag;
         _table_namespace = table_namespace;
         _meta_bns = meta_bns;
-        _local_done_json = local_done_json;
         if (_old_bitflag == 0) {
             _old_bitflag = 0xFFFFFFFF;
         }
@@ -800,11 +1133,19 @@ int Fetcher::fetch_task(bool is_fast_importer) {
         _user_name = user_name;
         _password = password;
         _retry_times = retry_times;
+        _backtrack_done = backtrack_done;
         prepare();
-        ret = create_filesysterm(cluster_name, user_name, password);
+        int retry_time = 6;
+        while (--retry_time > 0) {
+            ret = create_filesystem(cluster_name, user_name, password);
+            if (ret == 0) {
+                break;
+            }
+            bthread_usleep(5 * 1000 * 1000);
+        };
         if (ret < 0) {
             update_task_idle(id);
-            begin_task("create_filesystemr fail: " + cluster_name);
+            begin_task("read done file fail");
             continue;
         }
         ret = analyse_version();
@@ -816,7 +1157,7 @@ int Fetcher::fetch_task(bool is_fast_importer) {
             _only_one_donefile, _old_version, _new_version, 
             _today_version, _user_sql.c_str(), _interval_days, bitflag);
             //销毁fs
-            destroy_filesysterm();
+            destroy_filesystem();
             update_task_idle(id);
             if (!_import_ret.str().empty()) {
                 begin_task(_import_ret.str());
@@ -915,9 +1256,19 @@ int Fetcher::finish_task(bool is_succ, std::string& result, std::string& time_co
     set_map["status"]   = "'idle'";
     if (is_succ) {
         set_map["version"]   = std::to_string(std::max(_new_version, _old_version));
-        set_map["bitflag"]   = std::to_string(_new_bitflag);
         set_map["retry_times"] = std::to_string(0);
+        if (_backtrack_done.empty()) {
+            // 正常导入
+            set_map["bitflag"]   = std::to_string(_new_bitflag);
+        } else {
+            // 回溯某一天
+            set_map["backtrack_done"] = "''";
+        }
     } else {
+        if (!_backtrack_done.empty()) {
+            // 回溯某一天失败了，不再重试
+            set_map["backtrack_done"] = "''";
+        }
         set_map["retry_times"] = std::to_string(_retry_times + 1);
     }
 
@@ -940,7 +1291,14 @@ int Fetcher::finish_task(bool is_succ, std::string& result, std::string& time_co
     where_map.clear();
     set_map["exec_time"]   = "'" + time_cost + "'";
     set_map["import_line"] = std::to_string(_import_line);
-    set_map["status"]      = "'" + result + "'";
+    set_map["affected_row"] = std::to_string(_import_affected_row);
+    if (_imported_tables <= 1) {
+        // 单表导入
+        set_map["status"]      = "'" + result + "'";
+    } else {
+        // 多表导入
+        set_map["status"]      = "'" + result + ":" + _import_all_tbl_ret.str() + "'";
+    }
     where_map["id"] = std::to_string(_result_id);
 
     sql = gen_update_sql(FLAGS_result_tbl, set_map, where_map);
@@ -956,12 +1314,66 @@ int Fetcher::finish_task(bool is_succ, std::string& result, std::string& time_co
     return 0;
 }
 
-int Fetcher::update_task_progress(const std::string& progress, int64_t import_line) {
+void Fetcher::whether_importer_config_need_update() {
+    int affected_rows = 0;
+    std::vector<std::string> select_vec;
+    std::map<std::string, std::string> where_map;
+    baikal::client::ResultSet result_set;
+
+    select_vec.emplace_back("config");
+    where_map["id"] = std::to_string(_id);
+    where_map["table_info"] = "'" + _table_info + "'";
+    std::string sql = gen_select_sql(FLAGS_param_tbl, select_vec, where_map);
+
+    int ret = querybaikaldb(sql, result_set);
+    if (ret != 0) {
+        DB_WARNING("select new task failed, sql:%s", sql.c_str()); 
+        return;
+    }
+    
+    affected_rows = result_set.get_row_count();
+    DB_TRACE("select new task row number:%d sql:%s", affected_rows, sql.c_str());
+    if (affected_rows != 1) {
+        return;
+    }
+    while (result_set.next()) {
+        std::string new_config;
+        result_set.get_string("config", &new_config);
+        if (new_config != _config) {
+            // 目前只有tps才能动态调
+            DB_WARNING("id: %d, table_info: %s, new_config: %s", _id, _table_info.c_str(), new_config.c_str());
+            TaskConfig old_conf(_config);
+            TaskConfig new_conf(new_config);
+            if (old_conf.tps != new_conf.tps && new_conf.tps > 0) {
+                GenericRateLimiter::get_instance()->set_bytes_per_second(new_conf.tps);
+            }
+            _config = new_config;
+        }
+        break;
+    }
+    return; 
+}
+
+int Fetcher::update_task_progress() {
     baikal::client::ResultSet result_set;
     std::map<std::string, std::string> set_map;
     std::map<std::string, std::string> where_map;
-    set_map["exec_time"]   = "'" + progress + "'";
-    set_map["import_line"]  = std::to_string(import_line);
+    set_map["exec_time"]   = "'" + _progress_info.progress + "'";
+    set_map["import_line"]  = std::to_string(_progress_info.imported_line);
+    set_map["affected_row"]  = std::to_string(_progress_info.affected_row);
+    if (!_progress_info.updated_sample_sql && !_progress_info.sample_sql.empty()) {
+        std::string sql = boost::replace_all_copy(_progress_info.sample_sql, "\\", "\\\\"); 
+        sql = boost::replace_all_copy(sql, "'", "\\'");
+        set_map["sample_sql"] = "'" + sql + "'";
+    }
+    if (!_progress_info.updated_sample_diff_line && !_progress_info.sample_diff_line.empty()) {
+        set_map["diffline_sample"] = "'" + _progress_info.sample_diff_line + "'"; // mysql_escape_string过
+    }
+    if (!_progress_info.updated_sql_err_reason && !_progress_info.sql_err_reason.empty()) {
+        std::string sql_err_reason = boost::replace_all_copy(_progress_info.sql_err_reason, "\\", "\\\\"); 
+        sql_err_reason = boost::replace_all_copy(sql_err_reason, "'", "\\'");
+        set_map["sql_err_reason"] = "'" + sql_err_reason + "'"; // sql失败原因
+    }
     where_map["id"] = std::to_string(_result_id);
 
     std::string sql = gen_update_sql(FLAGS_result_tbl, set_map, where_map);
@@ -972,6 +1384,15 @@ int Fetcher::update_task_progress(const std::string& progress, int64_t import_li
         return -1;
     }
     DB_WARNING("update result progress succ, sql:%s", sql.c_str());
+    if (!_progress_info.sample_sql.empty()) {
+        _progress_info.updated_sample_sql = true;
+    }
+    if (!_progress_info.sample_diff_line.empty()) {
+        _progress_info.updated_sample_diff_line = true;
+    }
+    if (!_progress_info.sql_err_reason.empty()) {
+        _progress_info.updated_sql_err_reason = true;
+    }
     return 0;
 }
 
@@ -1117,6 +1538,7 @@ std::string Fetcher::time_print(int64_t cost) {
 
 int Fetcher::run(bool is_fast_importer) {
     _import_ret.str("");
+    _import_all_tbl_ret.str("");
     int ret = fetch_task(is_fast_importer);
     if (ret < 0) {
         DB_WARNING("fetch task fail:%d", ret);
@@ -1124,16 +1546,17 @@ int Fetcher::run(bool is_fast_importer) {
     }
     // fetcher成功之后清理_import_ret，避免fetchetr失败的任务残留
     _import_ret.str("");
+    _import_all_tbl_ret.str("");
     ret = begin_task();
     if (ret < 0) {
         DB_WARNING("begin task fail:%d", ret);
         return -1;
     }
 
-    baikaldb::TimeCost cost;
+    _cost.reset();
     ret = import_to_baikaldb();
 
-    std::string time_cost(time_print(cost.get_time()).c_str());
+    std::string time_cost(time_print(_cost.get_time()).c_str());
     if (ret == 0) {
 
         int ret1 = exec_user_sql();
@@ -1145,7 +1568,7 @@ int Fetcher::run(bool is_fast_importer) {
             std::string result = "success ";
             result += _import_ret.str();
             finish_task(true, result, time_cost);
-            DB_NOTICE("import to baikaldb success, cost:%s", time_print(cost.get_time()).c_str());
+            DB_NOTICE("import to baikaldb success, cost:%s", time_print(_cost.get_time()).c_str());
         }
 
     } else if (ret < 0) {
@@ -1153,16 +1576,22 @@ int Fetcher::run(bool is_fast_importer) {
         std::string result = "import failed ";
         result += _import_ret.str();
         finish_task(false, result, time_cost);
-        DB_NOTICE("import to baikaldb failed, cost:%s", time_print(cost.get_time()).c_str());
+        DB_NOTICE("import to baikaldb failed, cost:%s", time_print(_cost.get_time()).c_str());
 
     } 
-
+    // 导完删除所有finish block, 不然同版本重新执行, 会全部跳过。
+    if (!is_fast_importer && _broken_point_continuing) {
+        delete_finished_blocks_after_import();
+    }
+    DB_NOTICE("delete all finished block log");
     return 0;
 }
 
 void handle_dm_signal() {
+    DB_WARNING("recv kill signal");
     baikaldb::BackUp::shutdown();
     baikaldb::Fetcher::shutdown();
+    baikaldb::FastImporterCtrl::shutdown();
 }
 
 //处理历史遗留任务，可能由于core导致进程退出
@@ -1773,7 +2202,8 @@ int main(int argc, char **argv) {
     }
 
     auto baikaldb_trace = manager.get_service("baikaldb_trace");
-
+    // 分区表需要初始化函数集
+    baikaldb::FunctionManager::instance()->init();
     if (baikaldb::SchemaFactory::get_instance()->init() != 0) {
         DB_FATAL("SchemaFactory init failed");
         return -1;
@@ -1806,8 +2236,8 @@ int main(int argc, char **argv) {
     baikaldb::Bthread backup_fetch_worker {&BTHREAD_ATTR_NORMAL};
     backup_fetch_worker.run([&baikaldb](){
         baikaldb::BackUpImport backup(baikaldb);
-        while (true) {
-            if (baikaldb::FLAGS_is_sst_backup && !baikaldb::Fetcher::is_shutdown()) {
+        while (!baikaldb::Fetcher::is_shutdown()) {
+            if (baikaldb::FLAGS_is_sst_backup) {
                 // 产生新任务
                 backup.gen_backup_task();
             }
@@ -1817,9 +2247,9 @@ int main(int argc, char **argv) {
 
     baikaldb::Bthread fast_main_worker {&BTHREAD_ATTR_NORMAL};
     fast_main_worker.run([&baikaldb, &baikaldb_map](){
-        while (true) {
+        while (!baikaldb::Fetcher::is_shutdown()) {
             // 快速导入主任务，生成子任务，等待子任务执行完
-            if (baikaldb::FLAGS_is_fast_importer && !baikaldb::FastImporterCtrl::is_shutdown()) {
+            if (baikaldb::FLAGS_is_fast_importer) {
                 baikaldb::Fetcher fetcher(baikaldb, baikaldb_map);
                 int ret = fetcher.init();
                 if (ret < 0) {
@@ -1837,21 +2267,21 @@ int main(int argc, char **argv) {
     baikaldb::Bthread importer_worker {&BTHREAD_ATTR_NORMAL};
     importer_worker.run([&baikaldb, &baikaldb_map](){
         // 快速导入子任务和sql导入放在一个bthread里面做，避免一个DM同时做快速导入子任务和sql导入，相互影响导入性能
-        while (true) {
-             if (baikaldb::FLAGS_is_hdfs_import && !baikaldb::Fetcher::is_shutdown()) {
+        while (!baikaldb::Fetcher::is_shutdown()) {
+             if (baikaldb::FLAGS_is_hdfs_import) {
                 baikaldb::Fetcher fetcher(baikaldb, baikaldb_map);
                 // 将残留sql导入任务状态都置为idle
                 fetcher.update_main_task_idle(false);
             }
             // 处理快速导入子任务
-            if (baikaldb::FLAGS_is_fast_importer && !baikaldb::FastImporterCtrl::is_shutdown()) {
+            if (baikaldb::FLAGS_is_fast_importer) {
                 baikaldb::FastImporterCtrl fast_importer_sub_worker(baikaldb, baikaldb_map);
                 // 更新残留的快速导入子任务状态重置为idle
                 fast_importer_sub_worker.handle_restart();
                 fast_importer_sub_worker.run_sub_task();
             }
             // sql导入
-            if (baikaldb::FLAGS_is_hdfs_import && !baikaldb::Fetcher::is_shutdown()) {
+            if (baikaldb::FLAGS_is_hdfs_import) {
                 baikaldb::Fetcher fetcher(baikaldb, baikaldb_map);
                 int ret = fetcher.init();
                 if (ret < 0) {
@@ -1864,8 +2294,8 @@ int main(int argc, char **argv) {
         }
     });
 
-    while (true) {
-        if (baikaldb::FLAGS_is_sst_backup && !baikaldb::Fetcher::is_shutdown()) {
+    while (!baikaldb::Fetcher::is_shutdown()) {
+        if (baikaldb::FLAGS_is_sst_backup) {
             baikaldb::BackUpImport backup(baikaldb);
             backup.run();
         }
@@ -1876,9 +2306,8 @@ int main(int argc, char **argv) {
 
     fast_main_worker.join();
     importer_worker.join();
+    baikaldb::GenericRateLimiter::get_instance()->stop();
     baikaldb::DMRocksWrapper::get_instance()->close();
 
     return 0;
 }
-
-

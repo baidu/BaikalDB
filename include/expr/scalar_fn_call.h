@@ -27,7 +27,7 @@ public:
     virtual int open();
     virtual ExprValue get_value(MemRow* row);
     virtual ExprValue get_value(const ExprValue& value);
-    pb::Function fn() {
+    const pb::Function& fn() {
         return _fn;
     }
     virtual void transfer_pb(pb::ExprNode* pb_node) {

@@ -141,9 +141,9 @@ public:
     }
 
 private:
-    int _weight_field_id = 0;
+    FieldInfo* _weight_field = nullptr;
     std::string _query_words;
-    int32_t _query_words_field_id = 0;
+    FieldInfo* _query_words_field = nullptr;
     std::map<std::string, Parser*> _temp_map;
     using SchemaBase<Node, List>::_table_info;
     using SchemaBase<Node, List>::_exe;

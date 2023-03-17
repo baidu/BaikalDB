@@ -336,7 +336,11 @@ int ApplyNode::hash_apply(RuntimeState* state) {
     }
     std::vector<ExecNode*> scan_nodes;
     _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
-    do_plan_router(state, scan_nodes);
+    bool index_has_null = false;
+    do_plan_router(state, scan_nodes, index_has_null);
+    if (index_has_null) {
+        _inner_node->set_return_empty();
+    }
     //谓词下推后可能生成新的plannode重新生成tracenode
     _inner_node->create_trace();
     ret = _inner_node->open(state);
@@ -454,7 +458,11 @@ int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
             ((Literal*)literal)->init(value);
         }
     }
-    do_plan_router(state, scan_nodes);
+    bool index_has_null = false;
+    do_plan_router(state, scan_nodes, index_has_null);
+    if (index_has_null) {
+        _inner_node->set_return_empty();
+    }
     _inner_node->create_trace();
     ret = _inner_node->open(state);
     if (ret < 0) {

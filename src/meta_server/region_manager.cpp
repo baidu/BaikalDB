@@ -77,6 +77,12 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
             auto& mutable_region_info = const_cast<pb::RegionInfo&>(region_info); 
             mutable_region_info.set_conf_version(region_ptr->conf_version() + 1);
             new_add = false;
+            if (mutable_region_info.version() < region_ptr->version()) {
+                DB_WARNING("region_id: %ld, request version %ld < master version %ld", 
+                    region_id, mutable_region_info.version(), region_ptr->version());
+                IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "diff version");
+                return;
+            }
         }
         std::string region_value;
         if (!region_info.SerializeToString(&region_value)) {
@@ -363,13 +369,14 @@ void RegionManager::send_remove_region_request(const std::vector<int64_t>& drop_
         }
     }
     concurrency_cond.wait(-FLAGS_concurrency_num);
-    pb::MetaManagerRequest request;
-    request.set_op_type(pb::OP_DROP_REGION);
-    for (auto& drop_region_id : drop_region_ids) {
-        request.add_drop_region_ids(drop_region_id);
+    if (drop_region_ids.size() > 0) {
+        pb::MetaManagerRequest request;
+        request.set_op_type(pb::OP_DROP_REGION);
+        for (auto& drop_region_id : drop_region_ids) {
+            request.add_drop_region_ids(drop_region_id);
+        }
+        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
     }
-    SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
-    //erase_region_info(drop_region_ids);
 }
 
 // default for MIGRATE
@@ -2647,7 +2654,14 @@ void RegionManager::region_healthy_check_function() {
         }
         _region_peer_state_map.set(region_id, peer_state);
     }
-    erase_region_info(drop_region_ids);
+    if (drop_region_ids.size() > 0) {
+        pb::MetaManagerRequest request;
+        request.set_op_type(pb::OP_DROP_REGION);
+        for (auto& drop_region_id : drop_region_ids) {
+            request.add_drop_region_ids(drop_region_id);
+        }
+        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
+    }
     std::map<std::string, int64_t> uniq_instance;
     {
         BAIDU_SCOPED_LOCK(_instance_region_mutex);

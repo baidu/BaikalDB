@@ -60,14 +60,14 @@ public:
     }
     void process_download_sst(brpc::Controller* cntl, 
         std::vector<std::string>& request_vec, SstBackupType backup_type);
-    void process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest_sst);
+    int process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest_sst);
 
     //streaming download
     void process_download_sst_streaming(brpc::Controller* controller, 
         const pb::BackupRequest* request,
         pb::BackupResponse* response);
     
-    //streawming upload
+    //streaming upload
     void process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_store_latest_sst, 
         const pb::BackupRequest* request, pb::BackupResponse* response);
 private:

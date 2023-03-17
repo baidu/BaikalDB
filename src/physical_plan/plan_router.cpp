@@ -413,13 +413,13 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
                 DB_WARNING("get partition failed.");
                 return -1;
             }
-            node->replace_partition(partition_ids);
+            node->replace_partition(partition_ids, true);
             return 0;
         }
         for (int64_t i = 0; i < node->get_partition_num(); ++i) {
             partition_ids.emplace(i);
         }
-        node->replace_partition(partition_ids);
+        node->replace_partition(partition_ids, false);
     }
     return 0;
 }

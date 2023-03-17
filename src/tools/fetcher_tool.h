@@ -43,6 +43,20 @@ struct RuleDesc {
     int64_t avg;
 };
 
+struct ImporterProgressInfo {
+    int64_t imported_line = 0;
+    int64_t diff_line = 0;
+    int64_t affected_row = 0;
+    int64_t err_sql = 0;
+    std::string progress;
+    std::string sample_sql;
+    std::string sample_diff_line;
+    std::string sql_err_reason;
+    bool updated_sample_sql = false;
+    bool updated_sample_diff_line = false;
+    bool updated_sql_err_reason = false;
+};
+
 typedef std::map<std::string, std::map<std::string, RuleDesc>>  AlarmRule;
 
 class Fetcher {
@@ -75,11 +89,22 @@ public:
     int select_new_task(baikal::client::ResultSet& result_set, bool is_fast_importer);
     int update_task_doing(int64_t id, int64_t version);
     int update_task_idle(int64_t id);
-    int update_task_progress(const std::string& progress, int64_t import_line);
+    int update_task_progress();
     int exec_user_sql();
     std::string user_sql_replace(std::string &sql);
     int run(bool is_fast_importer);
     std::string time_print(int64_t cost);
+    void get_finished_file_and_blocks(const std::string& db, const std::string& tbl);
+    void insert_finished_file_or_blocks(std::string db, 
+                                        std::string tbl, 
+                                        std::string path, 
+                                        int64_t start_pos, 
+                                        int64_t end_pos, 
+                                        BlockHandleResult* result, 
+                                        bool file_finished);
+    void delete_finished_blocks_after_import();
+    void whether_importer_config_need_update();
+    bool is_broken_point_continuing_support_type(OpType type);
     static void shutdown() {
         _shutdown = true;
     }
@@ -88,7 +113,21 @@ public:
         return _shutdown;
     }
 
+    void reset_all_last_import_info() {
+        _import_line_last_import = 0;
+        _diff_line_last_import = 0;
+        _err_sql_last_import = 0;
+        _affected_row_last_import = 0;
+        _finish_blocks_last_time.clear();
+        _finish_blocks_import_line_last_import.clear();
+        _finish_blocks_diff_line_last_import.clear();
+        _finish_blocks_err_sql_last_import.clear();
+        _finish_blocks_affected_row_last_import.clear();
+    }
+
+
 private:
+
     int importer(const Json::Value& node, OpType type, const std::string& done_path, const std::string& charset);
     //字符串需要用单引号''
     std::string gen_insert_sql(const std::string& table_name, const std::map<std::string, std::string>& values_map) {
@@ -104,10 +143,15 @@ private:
                             const std::map<std::string, std::string>& where_map) {
         return _gen_update_sql(FLAGS_param_db, table_name, set_map, where_map);
     }
+    
+    std::string gen_delete_sql(const std::string& table_name,
+                               const std::map<std::string, std::string>& where_map) {
+        return _gen_delete_sql(FLAGS_param_db, table_name, where_map);
+    }
 
-    int create_filesysterm(const std::string& cluster_name, const std::string& user_name, const std::string& password);
+    int create_filesystem(const std::string& cluster_name, const std::string& user_name, const std::string& password);
 
-    void destroy_filesysterm();
+    void destroy_filesystem();
 
     int get_done_file(const std::string& done_file_name, Json::Value& done_root);
 
@@ -137,8 +181,13 @@ private:
     int64_t _today_version = 0;
     int64_t _old_version = 0;
     int64_t _new_version = 0;
-    int64_t _import_line = 0;
+    int64_t _import_line = 0; // 表示本次导入的行数，不包含diff行
+    int64_t _import_diff_line = 0; // 表示本次任务处理和导入的diff行数
+    int64_t _import_err_sql = 0; // 本次导入失败的sql数量
+    int64_t _import_affected_row = 0; // 本次导入影响行数
+    std::string _import_diffline_sample; 
     bool _need_iconv = false;
+    bool _broken_point_continuing = false;
     bool _is_fast_importer = false;
     std::string _table_namespace;
     int64_t _retry_times = 0;
@@ -146,14 +195,32 @@ private:
     std::string _cluster_name;
     std::string _user_name;
     std::string _password;
+    std::string _backtrack_done;
     
     baikal::client::Service* _baikaldb;
     baikal::client::Service* _baikaldb_user;
     const std::map<std::string, baikal::client::Service*>& _baikaldb_map;
 
-    ImporterFileSystermAdaptor* _fs;
+    ImporterFileSystemAdaptor* _fs;
     static bool _shutdown;
     std::ostringstream _import_ret;
+
+    ImporterProgressInfo _progress_info;
+
+    // 断点续传
+    std::unordered_map<std::string, std::map<int64_t, int64_t>> _finish_blocks_last_time;
+    std::unordered_map<std::string, int64_t> _finish_blocks_import_line_last_import;
+    std::unordered_map<std::string, int64_t> _finish_blocks_diff_line_last_import;
+    std::unordered_map<std::string, int64_t> _finish_blocks_err_sql_last_import;
+    std::unordered_map<std::string, int64_t> _finish_blocks_affected_row_last_import;
+    int64_t _import_line_last_import = 0;
+    int64_t _err_sql_last_import = 0;
+    int64_t _diff_line_last_import = 0;
+    int64_t _affected_row_last_import = 0;
+    // 多表导入
+    int _imported_tables = 0;
+    std::ostringstream _import_all_tbl_ret;
+    TimeCost _cost;
 };
 
 class SqlAgg {

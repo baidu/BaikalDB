@@ -79,6 +79,13 @@ message BinlogDesc {
     optional int64     primary_region_id = 4;
     optional int64     read_binlog_cnt   = 6; // 读binlog使用capture填写，需要读多少条
     optional int64     binlog_row_cnt    = 7; // 写binlog使用write binlog使用，写了多少条
+    // 8 - 13 SQL闪回功能；其中8-11为binlog元数据表中记录
+    optional bytes     user_name         = 8;
+    optional bytes     user_ip           = 9;
+    repeated bytes     db_tables         = 10; 
+    repeated uint64    signs             = 11; 
+    repeated int64     txn_ids           = 12; // capture请求binlog时使用
+    optional bool      flash_back_read   = 13; // capture请求binlog时使用
 };
 
 message BatchStoreReq {
@@ -108,6 +115,7 @@ message RegionIndexs {
 
 message ExtraReq {
     optional bool use_read_idx = 1;
+    optional int64 sign_latency = 2;
 };
 
 message ExtraRes {

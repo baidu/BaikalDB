@@ -132,6 +132,7 @@ ErrorType OnRPCDone::fill_request() {
     _request.set_region_version(_info.version());
     _request.set_log_id(_state->log_id());
     _request.set_sql_sign(_state->sign);
+    _request.mutable_extra_req()->set_sign_latency(_fetcher_store->sign_latency);
     for (auto& desc : _state->tuple_descs()) {
         if (desc.has_tuple_id()){
             _request.add_tuples()->CopyFrom(desc);
@@ -690,7 +691,8 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_response.errcode() == pb::NOT_LEADER) {
         // 兼容not leader报警，匹配规则 NOT_LEADER.*retry:4
         DB_DONE(WARNING, "NOT_LEADER, new_leader:%s, retry:%d", _response.leader().c_str(), _retry_times);
-        if (_retry_times > 0) {
+        // 临时修改，后面改成store_access
+        if (_retry_times > 1 && _response.leader() == "0.0.0.0:0") {
             schema_factory->update_instance(remote_side, pb::FAULTY, false, false);
         }
         if (_response.leader() != "0.0.0.0:0") {
@@ -831,6 +833,7 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     ttl_batch.reserve(100);
     bool global_ddl_with_ttl = (_response.row_values_size() > 0 && _response.row_values_size() == _response.ttl_timestamp_size()) ? true : false;
     int ttl_idx = 0;
+    int64_t used_size = 0;
     for (auto& pb_row : _response.row_values()) {
         if (pb_row.tuple_values_size() != _response.tuple_ids_size()) {
             // brpc SelectiveChannel+backup_request有bug，pb的repeated字段merge到一起了
@@ -846,11 +849,15 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
             int32_t tuple_id = _response.tuple_ids(i);
             row->from_string(tuple_id, pb_row.tuple_values(i));
         }
-        if (0 != _state->memory_limit_exceeded(_fetcher_store->row_cnt, row->used_size())) {
-            BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
-            _state->error_code = ER_TOO_BIG_SELECT;
-            _state->error_msg.str("select reach memory limit");
-            return E_FATAL;
+        used_size += row->used_size();
+        if (used_size > 1024 * 1024LL) {
+            if (0 != _state->memory_limit_exceeded(_fetcher_store->row_cnt, used_size)) {
+                BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
+                _state->error_code = ER_TOO_BIG_SELECT;
+                _state->error_msg.str("select reach memory limit");
+                return E_FATAL;
+            }
+            used_size = 0;
         }
         batch->move_row(std::move(row));
         if (global_ddl_with_ttl) {
@@ -1042,6 +1049,8 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
     binlog_desc->set_txn_id(state->txn_id);
     binlog_desc->set_start_ts(binlog_ctx->start_ts());
     binlog_desc->set_primary_region_id(client_conn->primary_region_id.load());
+    binlog_desc->set_user_name(state->client_conn()->user_info->username);
+    binlog_desc->set_user_ip(state->client_conn()->ip);
     auto binlog = req.mutable_binlog();
     binlog->set_start_ts(binlog_ctx->start_ts());
     binlog->set_partition_key(binlog_ctx->get_partition_key());
@@ -1059,6 +1068,12 @@ ErrorType FetcherStore::write_binlog(RuntimeState* state,
         binlog_desc->set_binlog_ts(binlog_ctx->commit_ts());
         binlog_desc->set_binlog_row_cnt(binlog_ctx->get_binlog_row_cnt());
         binlog->set_commit_ts(binlog_ctx->commit_ts());
+        for (const std::string& db_table : binlog_ctx->get_db_tables()) {
+            binlog_desc->add_db_tables(db_table);
+        }
+        for (uint64_t sign : binlog_ctx->get_signs()) {
+            binlog_desc->add_signs(sign);
+        }        
     } else if (op_type == pb::OP_ROLLBACK) {
         binlog->set_type(pb::BinlogType::ROLLBACK);
         req.set_op_type(pb::OP_ROLLBACK_BINLOG);
@@ -1198,6 +1213,19 @@ int64_t FetcherStore::get_dynamic_timeout_ms(ExecNode* store_request, pb::OpType
     return dynamic_timeout_ms;
 }
 
+int64_t FetcherStore::get_sign_latency(pb::OpType op_type, uint64_t sign) {
+    int64_t latency = -1;
+
+    if (FLAGS_use_dynamic_timeout && op_type == pb::OP_SELECT) {
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(sign);
+        if (sql_info != nullptr) {
+            latency = sql_info->latency_us_9999;
+        }
+    }
+    return latency;
+}
+
 int FetcherStore::run_not_set_state(RuntimeState* state,
                     std::map<int64_t, pb::RegionInfo>& region_infos,
                     ExecNode* store_request,
@@ -1228,7 +1256,7 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
     }
 
     dynamic_timeout_ms = get_dynamic_timeout_ms(store_request, op_type, state->sign);
-
+    sign_latency = get_sign_latency(op_type, state->sign);
     // 预分配空洞
     for (auto& pair : region_infos) {
         start_key_sort.emplace(pair.second.start_key(), pair.first);

@@ -11,6 +11,7 @@
 #include <json/json.h>
 
 #include "meta_server_interact.hpp"
+#include "backup_import.h"
 #ifdef BAIDU_INTERNAL
 #include <base/files/file.h>
 #include <base/file_util.h>
@@ -370,16 +371,29 @@ int BackUp::backup_region_streaming_with_retry(int64_t table_id, int64_t region_
         request.add_region_ids(region_id);
 
         if (get_meta_info(request, response) != 0) {
-            DB_WARNING("get meta info error.");
+            if (response.errcode() == pb::REGION_NOT_EXIST) {
+                // 被merge了
+                DB_WARNING("region: %ld not exist, maybe merged", region_id);
+                return 0;
+            }
+            DB_WARNING("get meta info error. response: %s", response.ShortDebugString().c_str());
         } else {
             for (const auto& region_info : response.region_infos()) {
                 auto tid = region_info.table_id();
                 auto rid = region_info.region_id();
+                std::vector<std::string> tmp_peers;
+                tmp_peers.reserve(response.region_infos_size());
                 if (table_id == tid && rid == region_id) {
                     for (auto& tmp_peer : region_info.peers()) {
                         if (tmp_peer != peer) {
-                            peer = tmp_peer;
-                            break;
+                            tmp_peers.emplace_back(tmp_peer);
+                        }
+                    }
+                    // 随机访问一个peer
+                    if (tmp_peers.size() > 0) {
+                        size_t idx = butil::fast_rand() % tmp_peers.size();
+                        if (idx < tmp_peers.size()) {
+                            peer = tmp_peers[idx];
                         }
                     }
                     break;
@@ -409,13 +423,17 @@ int BackUp::backup_region_streaming(int64_t table_id, int64_t region_id, const s
 
     if (data_ret == Status::SameLogIndex) {
         DB_NOTICE("same log index table[%ld] region[%ld]", table_id, region_id);
+        return 0;
     } else if (data_ret == Status::Succss) {
-        if (region_files.size() > 2) {
-            std::remove((table_path + region_files[2].filename).c_str());
-        }
+        DB_NOTICE("backup success table[%ld] region[%ld]", table_id, region_id);
     } else {
         DB_FATAL("download sst error table[%ld] region[%ld] target peer[%s]", table_id, region_id, target_peer.c_str());
         return -1;
+    }
+    for (auto idx = _backup_times - 1; idx < region_files.size(); ++idx) {
+        std::string file_name = table_path + region_files[idx].filename;
+        butil::DeleteFile(butil::FilePath(file_name), false); 
+        DB_WARNING("table_id: %ld, region_id: %ld, delete file %s", table_id, region_id, file_name.c_str());
     }
     return 0;
 }
@@ -444,8 +462,10 @@ int BackUp::run_backup_region(int64_t table_id, int64_t region_id, const std::st
         DB_NOTICE("same log index table[%ld] region[%ld]", table_id, region_id);
     } else if (data_ret == Status::Succss) {
         auto new_region_files = get_region_files(table_path, region_id, "");
-        if (new_region_files.size() > 3) {
-            std::remove((table_path + new_region_files[3].filename).c_str());
+        for (auto idx = _backup_times; idx < new_region_files.size(); ++idx) {
+            std::string file_path = table_path + new_region_files[idx].filename;
+            butil::DeleteFile(butil::FilePath(file_path), false); 
+            DB_WARNING("delete region file, table[%ld] region[%ld], file[%s]", table_id, region_id, file_path.c_str());
         }
     } else {
         DB_FATAL("download sst error table[%ld] region[%ld] target peer[%s]", table_id, region_id, target_peer.c_str());
@@ -456,13 +476,27 @@ int BackUp::run_backup_region(int64_t table_id, int64_t region_id, const std::st
 
 void BackUp::gen_backup_task(std::unordered_map<std::string, std::vector<TaskInfo>>& tasks, 
     std::unordered_set<int64_t>& table_ids, 
-    const pb::QueryResponse& response) {
+    const pb::QueryResponse& response, 
+    std::unordered_map<int64_t, std::set<int64_t>>& regions_from_meta) {
 
     for (const auto& region_info : response.region_infos()) {
         auto table_id = region_info.table_id();
         auto region_id = region_info.region_id();
         if (table_ids.count(table_id) == 1) {
-            tasks[region_info.leader()].emplace_back(table_id, region_id);
+            std::string valid_peer = region_info.leader();
+            if (!_pefered_peer_resource_tag.empty()) {
+                auto iter = _resource_tag_to_instance.find(_pefered_peer_resource_tag);
+                if (iter != _resource_tag_to_instance.end()) {
+                    for (const auto& peer : region_info.peers()) {
+                        if (iter->second.find(peer) != iter->second.end()) {
+                            valid_peer = peer;
+                            break;
+                        }
+                    }
+                }
+            }
+            tasks[valid_peer].emplace_back(table_id, region_id);
+            regions_from_meta[table_id].insert(region_id);
         }
     }
 }
@@ -472,6 +506,23 @@ int BackUp::run_backup(std::unordered_set<int64_t>& table_ids,
     std::atomic<int> failed_num {0};
     std::unordered_map<std::string, std::vector<TaskInfo>> tasks;
 
+    if (!_pefered_peer_resource_tag.empty()) {
+        // 设置了优先访问的集群
+        pb::QueryRequest request;
+        pb::QueryResponse response;
+        request.set_op_type(pb::QUERY_INSTANCE_FLATTEN);
+        request.set_resource_tag(_pefered_peer_resource_tag);
+
+        if (get_meta_info(request, response) != 0) {
+            DB_WARNING("get resource_tag instances info error: %s", _pefered_peer_resource_tag.c_str());
+            return -1;
+        }
+        for (const auto& ins : response.flatten_instances()) {
+            _resource_tag_to_instance[ins.resource_tag()].insert(ins.address());
+        }
+    }
+
+    std::unordered_map<int64_t, std::set<int64_t>> regions_from_meta;
     pb::QueryResponse response;
     for (auto table_id : table_ids) {
         pb::QueryRequest request;
@@ -482,7 +533,7 @@ int BackUp::run_backup(std::unordered_set<int64_t>& table_ids,
             DB_WARNING("get meta info error.");
             return -1;
         }
-        gen_backup_task(tasks, table_ids, response);
+        gen_backup_task(tasks, table_ids, response, regions_from_meta);
     }
     
     DB_NOTICE("backup store size[%lu]", tasks.size());
@@ -546,6 +597,30 @@ int BackUp::run_backup(std::unordered_set<int64_t>& table_ids,
         
     }
     store_cond.wait(-FLAGS_cluster_concurrent);
+
+    for (const auto& table : table_region_map) {
+        int64_t table_id = table.first;
+        for (const auto& region_file : table.second) {
+            int64_t region_id = region_file.first;
+            if (regions_from_meta[table_id].find(region_id) == regions_from_meta[table_id].end() 
+                && region_file.second.size() > 0) {
+                // 被merge了
+                std::string max_file_date_s = region_file.second[0].date;
+                int max_file_date = strtoll(max_file_date_s.c_str(), NULL, 10);
+                int64_t expire_date = get_ndays_date(get_today_date(), -_interval_days * _backup_times);
+                if (max_file_date < expire_date) {
+                    // 保证在最旧的备份前被merge才能把region对应的数据删除掉
+                    auto table_path = FLAGS_backup_dir + "/" + _meta_server_bns + \
+                                "/" + std::to_string(table_id) + "/";
+                    for (auto f : region_file.second) {
+                        std::string file_path = table_path + f.filename;
+                        butil::DeleteFile(butil::FilePath(file_path), false); 
+                        DB_WARNING("delete region file, table[%ld] region[%ld], file[%s]", table_id, region_id, file_path.c_str());
+                    }
+                }
+            }
+        }
+    }
     return failed_num;
 }
 
@@ -752,7 +827,8 @@ void BackUp::request_sst_streaming(std::string url, int64_t table_id, int64_t re
         status = Status::Error;
         return;
     }
-    ON_SCOPE_EXIT(([&status, receiver_handle, region_id, table_id, stream](){
+    std::string outfile_name;
+    ON_SCOPE_EXIT(([&status, receiver_handle, region_id, table_id, stream, &outfile_name](){
         DB_NOTICE("request sst streaming region_id[%ld] table_id[%ld] end", region_id, table_id);
         brpc::StreamClose(stream);
         receiver_handle->wait();
@@ -761,6 +837,11 @@ void BackUp::request_sst_streaming(std::string url, int64_t table_id, int64_t re
             DB_WARNING("sst streaming receiver region_id[%ld] table_id[%ld] stream[%lu] status[%d]", 
                 region_id, table_id, stream, int(receiver_handle->get_status()));
             status = Status::Error;
+        }
+        if (receiver_handle->get_status() != pb::StreamState::SS_SUCCESS 
+            && !outfile_name.empty()){
+            butil::DeleteFile(butil::FilePath(outfile_name), false); 
+            DB_WARNING("table_id: %ld, region_id: %ld, delete file: %s", table_id, region_id, outfile_name.c_str());
         }
         Bthread b;
         b.run([receiver_handle](){
@@ -791,7 +872,7 @@ void BackUp::request_sst_streaming(std::string url, int64_t table_id, int64_t re
         }
     }
     auto response_log_index = response.log_index();
-    auto outfile_name = table_path  + std::to_string(region_id) + "_" 
+    outfile_name = table_path  + std::to_string(region_id) + "_" 
         + get_current_time() + "_" + std::to_string(response_log_index) + ".sst";
 
     if (log_index == response_log_index) {
@@ -815,7 +896,7 @@ void BackUp::request_sst_streaming(std::string url, int64_t table_id, int64_t re
         receiver_handle->get_status() == pb::StreamState::SS_PROCESSING) {
         if (_shutdown) {
             DB_NOTICE("shutdown...");
-            std::remove(outfile_name.c_str());
+            butil::DeleteFile(butil::FilePath(outfile_name), false); 
             break;
         }
         DB_NOTICE("waiting for reciver handle status[%d] stream[%lu].", 
@@ -847,11 +928,17 @@ int BackUp::run_upload_per_region_streaming(const std::string& meta_server, int6
         DB_NOTICE("upload table_id[%ld], region_id[%ld] to peer[%s]", 
             table_id, region_id, peer.c_str());
         send_sst_work.run([this, &peer, &region_data_sst, table_id, region_id, &failed_nums]() {
-            auto ret = send_sst_streaming(peer, region_data_sst, table_id, region_id);
-            if (ret != Status::Succss) {
-                ++failed_nums;
+            while (true) {
+                auto ret = send_sst_streaming(peer, region_data_sst, table_id, region_id);
+                if (ret == Status::RetryLater) {
+                    continue;
+                } 
+                if (ret != Status::Succss) {
+                    ++failed_nums;
+                } 
+                break;
             }
-            });
+        });
     }
     send_sst_work.join();
     return failed_nums;
@@ -918,7 +1005,14 @@ Status BackUp::send_sst_streaming(std::string peer, std::string infile, int64_t 
 
     stub.backup(&cntl, &request, &response, NULL);
     if (cntl.Failed()) {
-        DB_WARNING("Fail to connect stream, %s", cntl.ErrorText().c_str());
+        if (response.errcode() == pb::RETRY_LATER) {
+            // retry later的时候, store没有accept stream, 返回[E1003]The server didn't accept the stream
+            bthread_usleep(1 * 1000 * 1000);
+            DB_WARNING("store reach limit, retry later, region_id: %ld, store: %s", region_id, peer.c_str());
+        } else {
+            DB_WARNING("Fail to connect stream, region_id: %ld, store: %s, err: %s", 
+                region_id, peer.c_str(), cntl.ErrorText().c_str());
+        }
         return Status::Error;
     }
 

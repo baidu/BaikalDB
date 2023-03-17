@@ -41,7 +41,7 @@ const std::string SQL_HANDLE_DROP_REGION                = "meta_drop_region";
 const std::string SQL_HANDLE_SPLIT_LINES                = "split_lines";
 // handle ttl_duration tableName ttl
 const std::string SQL_HANDLE_TTL_DURATION               = "ttl_duration";
-// handle split_region regionID splitKey
+// handle split_region tableID regionId
 const std::string SQL_HANDLE_SPLIT_REGION               = "split_region";
 // handle rm_privilege dbname tableName
 const std::string SQL_HANDLE_RM_PRIVILEGE               = "rm_privilege";
@@ -128,7 +128,7 @@ private:
     bool _handle_split_lines(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle ttl_duration tbname ttl
     bool _handle_ttl_duration(const SmartSocket& client, const std::vector<std::string>& split_vec);
-    // handle split_region regionID splitKey
+    // handle split_region tableID regionId
     bool _handle_split_region(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle rm_privilege dbname tbname
     bool _handle_rm_privilege(const SmartSocket& client, const std::vector<std::string>& split_vec);

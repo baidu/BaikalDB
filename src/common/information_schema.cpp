@@ -1170,8 +1170,12 @@ void InformationSchema::init_tables() {
                 record->set_int64(record->get_field_by_name("AUTO_INCREMENT"), 0);
                 ExprValue ct(pb::TIMESTAMP);
                 ct._u.uint32_val = table_info->timestamp;
+                std::string coll = "utf8_bin";
+                if (table_info->charset == pb::GBK) {
+                    coll = "gbk_bin";
+                }
                 record->set_value(record->get_field_by_name("CREATE_TIME"), ct.cast_to(pb::DATETIME));
-                record->set_string(record->get_field_by_name("TABLE_COLLATION"), "utf8_bin");
+                record->set_string(record->get_field_by_name("TABLE_COLLATION"), coll);
                 record->set_string(record->get_field_by_name("CREATE_OPTIONS"), "");
                 record->set_string(record->get_field_by_name("TABLE_COMMENT"), "");
                 record->set_int64(record->get_field_by_name("TABLE_ID"), table_info->id);

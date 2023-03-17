@@ -17,6 +17,7 @@
 #include "insert_manager_node.h"
 #include "update_node.h"
 #include "network_socket.h"
+#include "query_context.h"
 
 namespace baikaldb {
 int UpdateManagerNode::init(const pb::PlanNode& node) {
@@ -211,6 +212,7 @@ int UpdateManagerNode::process_binlog(RuntimeState* state, bool is_local) {
         }
         auto client = state->client_conn();
         auto binlog_ctx = client->get_binlog_ctx();
+        auto ctx = client->get_query_ctx();
         pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
         auto mutation = binlog_value->add_mutations();
         binlog_ctx->set_table_info(_table_info);
@@ -237,6 +239,15 @@ int UpdateManagerNode::process_binlog(RuntimeState* state, bool is_local) {
             mutation->CopyFrom(_update_binlog);
             binlog_ctx->set_partition_record(_partition_record);
         }
+
+        // 上面CopyFrom会覆盖mutation中其他值，所以公共部分放到CopyFrom之后设置(和InsertManagerNode、DeleteManagerNode不同)
+        if (ctx != nullptr) {
+            mutation->set_sql(ctx->sql);
+            auto stat_info = &(ctx->stat_info);
+            mutation->set_sign(stat_info->sign);
+            binlog_ctx->add_sql_info(stat_info->family, stat_info->table, stat_info->sign);
+        }
+
         mutation->add_sequence(pb::MutationType::UPDATE);
         mutation->set_table_id(_table_id);
     }

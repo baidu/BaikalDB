@@ -104,7 +104,7 @@ public:
         return true;
     }
 
-    void do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes);
+    void do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes, bool& index_has_null);
     
     pb::JoinType join_type() {
         return _join_type;

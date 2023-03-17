@@ -322,6 +322,33 @@ private:
              heart_beat_count("heart_beat_count") {
         bthread_mutex_init(&_param_mutex, NULL);
     }
+
+    class TimePeriodChecker {
+    public:
+        TimePeriodChecker(int start_hour, int end_hour) : _start_hour(start_hour),_end_hour(end_hour) {}
+
+        bool now_in_interval_period() {
+            struct tm ptm;
+            time_t timep = time(NULL);
+            localtime_r(&timep, &ptm);
+            int now = ptm.tm_hour;
+            // 跨夜
+            if (_end_hour < _start_hour) {
+                if (now >= _end_hour && now < _start_hour) {
+                    return false;
+                }
+                return true;
+            } else {
+                if (now >= _start_hour && now < _end_hour) {
+                    return true;
+                }
+                return false;
+            }
+        }
+    private:
+        int _start_hour;
+        int _end_hour;
+    };
     
     int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
@@ -338,6 +365,20 @@ private:
     void print_properties(const std::string& name);
     void print_heartbeat_info(const pb::StoreHeartBeatRequest& request);
 private:
+    class RemoveQueueItem {
+    public:
+        RemoveQueueItem(uint64_t uuid, int64_t region_id):
+            _region_uuid(uuid),_drop_region_id(region_id) {}
+        uint64_t region_uuid() const {
+            return _region_uuid;
+        }
+        uint64_t drop_region_id() const {
+            return _drop_region_id;
+        }
+    private:
+        uint64_t _region_uuid;
+        int64_t  _drop_region_id;
+    };
     std::string                             _address;
     std::string                             _physical_room;
     std::string                             _resource_tag;

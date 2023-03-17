@@ -430,6 +430,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
     for (auto& field_info : _pri_info->fields) {
         pri_field_ids.insert(field_info.id);
     }
+    _region_id = state->region_id();
     // 用数组映射slot，提升性能
     _field_slot.resize(_table_info->fields.back().id + 1);
     for (auto& slot : _tuple_desc->slots()) {
@@ -464,7 +465,6 @@ int RocksdbScanNode::open(RuntimeState* state) {
             }
         }
     }
-    _region_id = state->region_id();
     //DB_WARNING_STATE(state, "use_index: %ld table_id: %ld region_id: %ld", _index_id, _table_id, _region_id);
     _region_info = &(state->resource()->region_info);
     if (_region_info->has_main_table_id()

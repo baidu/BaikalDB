@@ -86,6 +86,9 @@ DEFINE_int32(no_op_timer_timeout_ms, 100, "no op timer timeout(ms)");
 DEFINE_int32(follow_read_timeout_s, 10, "follow read timeout(s)");
 DEFINE_bool(apply_partial_rollback, false, "apply partial rollback");
 DEFINE_bool(demotion_read_index_without_leader, true, "demotion read index without leader");
+// 并发控制
+DEFINE_int64(sign_concurrency_timeout_rate,  5,      "sign_concurrency_timeout_rate, default: 5. (0 means without timeout)");
+DEFINE_int64(min_sign_concurrency_timeout_ms,1000,   "min_sign_concurrency_timeout_ms, default: 1s");
 DECLARE_int64(exec_1pc_out_fsm_timeout_ms);
 DECLARE_string(db_path);
 DECLARE_int64(print_time_us);
@@ -97,6 +100,7 @@ DECLARE_bool(open_service_write_concurrency);
 DECLARE_bool(open_new_sign_read_concurrency);
 DECLARE_bool(stop_ttl_data);
 DECLARE_string(resource_tag);
+
 //const size_t  Region::REGION_MIN_KEY_SIZE = sizeof(int64_t) * 2 + sizeof(uint8_t);
 const uint8_t Region::PRIMARY_INDEX_FLAG = 0x01;                                   
 const uint8_t Region::SECOND_INDEX_FLAG = 0x02;
@@ -802,6 +806,9 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
             DB_WARNING("TransactionWarning: txn not exist, remote_side:%s, "
                     "region_id: %ld, txn_id: %lu, log_id:%lu op_type: %s",
                 remote_side, _region_id, txn_id, log_id, pb::OpType_Name(op_type).c_str());
+            if (txn_info.primary_region_id() == _region_id) {
+                _txn_pool.rollback_mark_finished(txn_id);
+            }
             response->set_affected_rows(0);
             response->set_errcode(pb::SUCCESS);
             return;
@@ -2432,11 +2439,7 @@ int Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
     int64_t index_id = 0;
     for (const auto& node : request.plan().nodes()) {
         if (node.node_type() == pb::SCAN_NODE) {
-            // todo 兼容代码
-            pb::PossibleIndex pos_index;
-            pos_index.ParseFromString(node.derive_node().scan_node().indexes(0));
-            index_id = pos_index.index_id();
-            //index_id = node.derive_node().scan_node().use_indexes(0);
+            index_id = node.derive_node().scan_node().use_indexes(0);
             break;
         }
     }
@@ -2451,9 +2454,71 @@ int Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
 
     TimeCost cost;
     bool is_new_sign = false;
-    if (FLAGS_open_new_sign_read_concurrency && (StoreQos::get_instance()->is_new_sign())) {
+    bool need_return_sign_concurrency_quota = false;   // 是否要归还sign并发quota
+    bool need_return_global_concurrency_quota = false; // 是否要归还全局并发quota
+    auto sqlqos_ptr = StoreQos::get_instance()->get_sql_shared_ptr(sign);
+    if (sqlqos_ptr == nullptr) {
+        DB_FATAL("sign: %lu, log_id: %lu, get sign qos nullptr", sign, request.log_id());
+        response.set_errcode(pb::RETRY_LATER);
+        response.set_errmsg("get sign qos nullptr");
+        StoreQos::get_instance()->destroy_bthread_local();
+        return -1;
+    }
+
+    auto return_concurrency_quota = [&sqlqos_ptr, 
+                                     &need_return_sign_concurrency_quota, 
+                                     &need_return_global_concurrency_quota]() {
+        if (need_return_global_concurrency_quota) {
+            Concurrency::get_instance()->global_select_concurrency.decrease_signal();
+        }
+        if (need_return_sign_concurrency_quota) {
+            sqlqos_ptr->decrease_signal();
+        }
+    };
+
+    if (FLAGS_open_new_sign_read_concurrency && (StoreQos::get_instance()->is_new_sign(sqlqos_ptr))) {
         is_new_sign = true;
         Concurrency::get_instance()->new_sign_read_concurrency.increase_wait();
+    } else if (sign != 0 && FLAGS_sign_concurrency > 0) {
+        // 并发控制
+        int sign_concurrency_ret = 0;
+        int global_concurrency_ret = 0;
+        int64_t reject_timeout = 0;
+        int64_t sign_latency = request.extra_req().sign_latency();
+        if (FLAGS_sign_concurrency_timeout_rate > 0 && sign_latency > 0) {
+            reject_timeout = sign_latency * FLAGS_sign_concurrency_timeout_rate;
+            if (reject_timeout < FLAGS_min_sign_concurrency_timeout_ms * 1000ULL) {
+                reject_timeout = FLAGS_min_sign_concurrency_timeout_ms * 1000ULL;
+            }
+        }
+        TimeCost t;
+        // sign一级并发控制
+        if (reject_timeout > 0) {
+            sign_concurrency_ret = sqlqos_ptr->increase_timed_wait(reject_timeout);
+        } else {
+            sqlqos_ptr->increase_wait();
+        }
+        need_return_sign_concurrency_quota = true;
+        if (sign_concurrency_ret == 0) {
+            if (t.get_time() > 10 * 1000) {
+                // 全局二级并发控制
+                if (reject_timeout > 0) {
+                    global_concurrency_ret = Concurrency::get_instance()->global_select_concurrency.increase_timed_wait(reject_timeout);
+                } else {
+                    Concurrency::get_instance()->global_select_concurrency.increase_wait();
+                }
+                need_return_global_concurrency_quota = true;
+            }
+        }
+        if (sign_concurrency_ret != 0 || global_concurrency_ret != 0) {
+            DB_FATAL("sign: %lu, log_id: %lu, get concurrency quota fail, sign_concurrency_ret: %d, global_concurrency_ret: %d", 
+                sign, request.log_id(), sign_concurrency_ret, global_concurrency_ret);
+            response.set_errcode(pb::RETRY_LATER);
+            response.set_errmsg("concurrency limit reject");
+            return_concurrency_quota();
+            StoreQos::get_instance()->destroy_bthread_local();
+            return -1;
+        }
     }
     int64_t wait_cost = cost.get_time();
     ON_SCOPE_EXIT([&]() {
@@ -2469,7 +2534,6 @@ int Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
         }
     });
 
-
     int ret = 0;
     if (_is_learner) {
         // learner集群可能涉及到降级，需要特殊处理scan node和filter node
@@ -2482,6 +2546,7 @@ int Region::select(const pb::StoreReq& request, pb::StoreRes& response) {
     } else {
         ret = select(request, request.plan(), request.tuples(), response);
     }
+    return_concurrency_quota();
     StoreQos::get_instance()->destroy_bthread_local();
     return ret;
 }
@@ -4691,8 +4756,9 @@ int Region::ingest_snapshot_sst(const std::string& dir) {
     return 0;
 }
 
-int Region::ingest_sst(const std::string& data_sst_file, const std::string& meta_sst_file) {
-    if (boost::filesystem::exists(boost::filesystem::path(data_sst_file))) {
+int Region::ingest_sst_backup(const std::string& data_sst_file, const std::string& meta_sst_file) {
+    if (boost::filesystem::exists(boost::filesystem::path(data_sst_file)) 
+        && boost::filesystem::file_size(boost::filesystem::path(data_sst_file)) > 0) {
         int ret_data = RegionControl::ingest_data_sst(data_sst_file, _region_id, false);
         if (ret_data < 0) {
             DB_FATAL("ingest sst fail, region_id: %ld", _region_id);
@@ -4709,6 +4775,10 @@ int Region::ingest_sst(const std::string& data_sst_file, const std::string& meta
         if (ret_meta < 0) {
             DB_FATAL("ingest sst fail, region_id: %ld", _region_id);
             return -1;
+        }
+        int ret = _meta_writer->read_num_table_lines(_region_id);
+        if (ret >= 0) {
+            _num_table_lines = _meta_writer->read_num_table_lines(_region_id);
         }
     }
     return 0;
@@ -7133,39 +7203,46 @@ void Region::ttl_remove_expired_data() {
         rocksdb::TransactionOptions txn_opt;
         txn_opt.lock_timeout = 100;
         int64_t count = 0;
+        int64_t region_oldest_ts = 0;
+        if (is_binlog_region()) {
+            region_oldest_ts = _meta_writer->read_binlog_oldest_ts(_region_id);
+        }
+        // 内部txn，不提交出作用域自动析构
+        SmartTransaction txn(new Transaction(0, nullptr));
+        txn->begin(txn_opt);
+        rocksdb::Status s;
         for (iter->Seek(table_prefix.data()); iter->Valid(); iter->Next()) {
-            if (FLAGS_stop_ttl_data) { 
+            if (FLAGS_stop_ttl_data || _shutdown) { 
                 break;
             }
             ++count;
             rocksdb::Slice key_slice(iter->key());
             key_slice.remove_prefix(2 * sizeof(int64_t));
-            if (index_info.type == pb::I_PRIMARY || _is_global_index) {
-                // check end_key
-                if (end_key_compare(key_slice, end_key) >= 0) {
-                    break;
-                }
-            }
             if (is_binlog_region()) {
                 int64_t commit_tso = decode_first_8bytes2int64(key_slice);
-                int64_t oldest_tso = _rocksdb->get_oldest_ts_in_binlog_cf();
-                if (oldest_tso > 0) {
+                int64_t oldest_tso = std::max(_rocksdb->get_oldest_ts_in_binlog_cf(), region_oldest_ts);
+                if (oldest_tso > 0) {//需要吗?
                     if (commit_tso > oldest_tso) {
                         // 未过期，后边的ts都不会过期，直接跳出
+                        DB_WARNING("commit_tso: %ld, %s, oldest_tso: %ld, %s", 
+                                commit_tso, ts_to_datetime_str(commit_tso).c_str(), 
+                                oldest_tso, ts_to_datetime_str(oldest_tso).c_str());
                         break;
                     }
                 } 
             } else {
+                if (index_info.type == pb::I_PRIMARY || _is_global_index) {
+                    // check end_key
+                    if (end_key_compare(key_slice, end_key) >= 0) {
+                        break;
+                    }
+                }
                 rocksdb::Slice value_slice1(iter->value());
                 if (ttl_decode(value_slice1, &index_info, _online_ttl_base_expire_time_us) > read_timestamp_us) {
                     //未过期
                     continue;
                 }
             }
-            // 内部txn，不提交出作用域自动析构
-            SmartTransaction txn(new Transaction(0, nullptr));
-            txn->begin(txn_opt);
-            rocksdb::Status s;
             std::string value;
             if (!is_binlog_region()) {
                 s = txn->get_txn()->GetForUpdate(read_opt, _data_cf, iter->key(), &value);
@@ -7203,13 +7280,24 @@ void Region::ttl_remove_expired_data() {
                 ++_num_delete_lines;
                 ++del_pk_num;
             }
+            if (++num_remove_lines % 100 == 0) {
+                // 批量提交，减少内部锁冲突
+                s = txn->commit();
+                if (!s.ok()) {
+                    DB_FATAL("index %ld, region_id: %ld commit failed, status: %s", 
+                            index_id, _region_id, s.ToString().c_str());
+                    continue;
+                }
+                txn.reset(new Transaction(0, nullptr));
+                txn->begin(txn_opt);
+            }
+        }
+        if (num_remove_lines % 100 != 0) {
             s = txn->commit();
             if (!s.ok()) {
                 DB_FATAL("index %ld, region_id: %ld commit failed, status: %s", 
                         index_id, _region_id, s.ToString().c_str());
-                continue;
             }
-            ++num_remove_lines;
         }
         DB_WARNING("scan index:%ld, cost: %ld, scan count: %ld, remove lines: %ld, region_id: %ld", 
                 index_id, cost.get_time(), count, num_remove_lines, _region_id);
@@ -7256,14 +7344,23 @@ void Region::process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest
         DB_WARNING("region[%ld] is shutdown or init_success.", _region_id);
         return;
     } 
-
+    // 不允许add_peer
+    if (_region_control.make_region_status_doing() < 0) {
+        DB_WARNING("region[%ld] is doing status now.", _region_id);
+        return;
+    }
     _multi_thread_cond.increase();
     ON_SCOPE_EXIT([this]() {
         _multi_thread_cond.decrease_signal();
+        _region_control.reset_region_status();
     });
 
     DB_NOTICE("backup region[%ld] process upload sst.", _region_id);
-    _backup.process_upload_sst(cntl, ingest_store_latest_sst);
+    int ret = _backup.process_upload_sst(cntl, ingest_store_latest_sst);
+    if (ret == 0) {
+        // do snapshot
+        _region_control.sync_do_snapshot();
+    }
 }
 
 void Region::process_download_sst_streaming(brpc::Controller* cntl, 
@@ -7303,7 +7400,6 @@ void Region::process_upload_sst_streaming(brpc::Controller* cntl, bool ingest_st
 
     DB_NOTICE("backup region[%ld] process upload sst.", _region_id);
     _backup.process_upload_sst_streaming(cntl, ingest_store_latest_sst, request, response);
-
 }
 
 void Region::process_query_peers(brpc::Controller* cntl, const pb::BackupRequest* request,

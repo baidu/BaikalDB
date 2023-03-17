@@ -925,13 +925,14 @@ int LogicalPlanner::create_join_node_from_item_join(const parser::JoinNode* join
         return ret;
     }
     parser::ExprNode* condition = join_item->expr;
-    //暂时不支持没有条件的join 
     /*
+    //暂时不支持没有条件的join 
     if (condition == nullptr && join_item->using_col.size() == 0) {
         DB_WARNING("has no join condition");
         return -1;
     }
     */
+    
     if (condition != nullptr) {
         std::vector<pb::Expr> join_filters;
         if (0 != flatten_filter(condition, join_filters, CreateExprOptions())) {

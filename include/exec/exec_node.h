@@ -270,13 +270,15 @@ public:
     const std::vector<int64_t>& get_partition() const {
         return _partitions;
     }
-    void replace_partition(const std::set<int64_t>& partition_ids) {
-        // 如果之前已经计算过更优的partition，或者指定过partition(p20)，则不再计算
-        if (!_is_set_partition || partition_ids.size() <= _partitions.size()) {
-            _partitions.clear();
-            _partitions.assign(partition_ids.begin(), partition_ids.end());
-            _is_set_partition = true;
+    void replace_partition(const std::set<int64_t>& partition_ids, bool is_manual) {
+        // 之前人工指定过partition(p20)，则不再计算
+        if (_is_manual) {
+            return;
         }
+        _is_manual = is_manual;
+        // fullexport + join + partition表会多轮计算partition
+        _partitions.clear();
+        _partitions.assign(partition_ids.begin(), partition_ids.end());
     }
 protected:
     int64_t _limit = -1;
@@ -290,7 +292,7 @@ protected:
     std::map<int64_t, pb::RegionInfo> _region_infos;
     pb::TraceNode* _trace = nullptr;
     bool  _local_index_binlog = false;
-    bool  _is_set_partition = false;
+    bool  _is_manual = false;
     std::vector<int64_t> _partitions {0};
     
     //返回给baikaldb的结果

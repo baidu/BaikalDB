@@ -335,14 +335,14 @@ struct IdcMapping {
 };
 
 // short name
-inline int32_t get_field_id_by_name(
-        const std::vector<FieldInfo>& fields, const std::string& name) {
+inline FieldInfo* get_field_info_by_name(
+        std::vector<FieldInfo>& fields, const std::string& name) {
     for (auto& field : fields) {
         if (field.short_name == name) {
-            return field.id;
+            return &field;
         }
     }
-    return 0;
+    return nullptr;
 }
 
 class Partition {

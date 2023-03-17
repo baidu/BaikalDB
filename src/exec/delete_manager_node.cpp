@@ -14,6 +14,7 @@
 
 #include "delete_manager_node.h"
 #include "network_socket.h"
+#include "query_context.h"
 #include "binlog_context.h"
 
 namespace baikaldb {
@@ -128,10 +129,17 @@ int DeleteManagerNode::process_binlog(RuntimeState* state, bool is_local) {
         }
         auto client = state->client_conn();
         auto binlog_ctx = client->get_binlog_ctx();
+        auto ctx = client->get_query_ctx();
         pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
         auto mutation = binlog_value->add_mutations();
         mutation->add_sequence(pb::MutationType::DELETE);
         mutation->set_table_id(_table_id);
+        if (ctx != nullptr) {
+            mutation->set_sql(ctx->sql);
+            auto stat_info = &(ctx->stat_info);
+            mutation->set_sign(stat_info->sign);
+            binlog_ctx->add_sql_info(stat_info->family, stat_info->table, stat_info->sign);
+        }
         binlog_ctx->set_table_info(_table_info);
         if (is_local) {
             SmartRecord record_template = _factory->new_record(_table_id);

@@ -27,5 +27,6 @@ DEFINE_int32(store_rocks_hang_check_timeout_s, 5, "store rocks hang check timeou
 DEFINE_int32(store_rocks_hang_cnt_limit, 3, "store rocks hang check cnt limit for slow");
 DEFINE_bool(store_rocks_hang_check, false, "store rocks hang check");
 DEFINE_int32(upload_sst_streaming_concurrency, 10, "upload_sst_streaming_concurrency");
+DEFINE_int32(global_select_concurrency, 24, "global_select_concurrency");
 }
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

@@ -187,6 +187,7 @@ public:
     void add_child(ExprNode* expr_node) {
         _children.push_back(expr_node);
     }
+    bool contains_null_function();
     bool contains_special_operator(pb::ExprNodeType expr_node_type) {
         bool contain = false;
         recursive_contains_special_operator(expr_node_type, &contain);

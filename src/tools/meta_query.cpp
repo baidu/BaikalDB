@@ -35,9 +35,10 @@ int fun_level(std::map<int64_t, const pb::QueryRegion*>& region_map, const pb::Q
     if (info.parent() == 0) {
         return 0;
     } else {
+        /*
         if (region_map.count(info.parent()) == 1) {
             return 1 + fun_level(region_map, *region_map[info.parent()]);
-        }
+        }*/
         return 0;
     }
 };
@@ -79,7 +80,7 @@ int create_table(const std::string& namespace_name, const std::string& database,
         std::string offset(level, ' ');
         std::cout << offset << info.region_id() << " " << info.parent() << "\t" 
         << info.start_key() << "\t" << info.end_key() << "\t" << info.create_time() << "\t" <<
-        info.leader() << "\t" << info.peers() << "\n";
+        info.leader() << "\t" << info.peers() << "\t" << info.version() << "\n";
     }
 
     return 0;

@@ -47,7 +47,8 @@ extern std::string _gen_select_sql(const std::string& database_name, const std::
 
 extern std::string _gen_update_sql(const std::string& database_name, const std::string& table_name, 
                         const std::map<std::string, std::string>& set_map, const std::map<std::string, std::string>& where_map);
-
+extern std::string _gen_delete_sql(const std::string& database_name, const std::string& table_name, 
+                        const std::map<std::string, std::string>& where_map);
 class BackUpImport {
 public:
     BackUpImport(baikal::client::Service* baikaldb_) {
@@ -60,8 +61,14 @@ public:
     ~BackUpImport() {}
 
     bool need_to_trigger(int64_t date, int64_t hour, int64_t interval_days, int64_t& now_date, int64_t table_id);
-    int insert_backup_task(const std::string& database_name, const std::string& table_name, 
-                            const int64_t table_id, const std::string& meta_server_bns, int64_t date);
+    int insert_backup_task(const std::string& database_name, 
+                           const std::string& table_name, 
+                           const int64_t table_id, 
+                           const std::string& meta_server_bns, 
+                           int64_t date,
+                           const std::string& pefered_peer_resource_tag,
+                           int64_t interval_days,
+                           int64_t backup_times);
     int gen_backup_task();
 
     int reset_legacy_task();

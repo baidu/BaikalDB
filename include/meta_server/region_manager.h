@@ -388,16 +388,6 @@ public:
                             std::vector<int64_t>& result_table_ids,
                             std::vector<std::string>& result_start_keys,
                             std::vector<std::string>& result_end_keys);
-    
-    void erase_region_info(const std::vector<int64_t>& drop_region_ids) {
-        std::vector<int64_t> result_region_ids;
-        std::vector<int64_t> result_partition_ids;
-        std::vector<int64_t> result_table_ids;
-        std::vector<std::string> result_start_keys;
-        std::vector<std::string> result_end_keys;
-        erase_region_info(drop_region_ids, result_region_ids, result_partition_ids, 
-                          result_table_ids, result_start_keys, result_end_keys);
-    }
    
     void set_instance_leader_count(const std::string& instance,
                                    const std::unordered_map<int64_t, int64_t>& table_leader_count,

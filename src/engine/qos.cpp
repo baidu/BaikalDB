@@ -30,6 +30,7 @@ DEFINE_int64(qos_reject_timeout_s,           30*60,  "qos_reject_timeout_s, defa
 DEFINE_int64(qos_reject_max_scan_ratio,      50,     "qos_reject_max_scan_ratio, default: 50%");
 DEFINE_int64(qos_reject_growth_multiple,     100,    "qos_reject_growth_multiple, default: 100倍");
 DEFINE_int64(qos_need_reject,                0,      "qos_need_reject, default: 0");
+DEFINE_int64(sign_concurrency,               8,      "sign_concurrency, default: 8");
 
 // need_statistics: 超过最小超额令牌时，不计入统计信息
 int64_t TokenBucket::consume(int64_t expect_tokens, int64_t* expire_time, bool* need_statistics) {
@@ -185,13 +186,6 @@ bool QosBthreadLocal::need_reject() {
     return false;
 }
 
-bool QosBthreadLocal::is_new_sign() {
-    if (_sqlqos_ptr != nullptr) {
-        return _sqlqos_ptr->is_new_sign();
-    }
-    return false;
-}
-
 void SqlQos::get_statistics_adder(int64_t count, int64_t statistics_count) {
     _get_real.adder(count);
     _get_statistics.adder(statistics_count);
@@ -260,6 +254,20 @@ void SqlQos::return_tokens(const int64_t tokens, const bool is_committed_bucket,
         StoreQos::get_instance()->globle_extended_bucket_return_tokens(tokens, expire_time);
     }
 }
+
+int SqlQos::increase_timed_wait(const int64_t reject_timeout) {
+    return _concurrency.increase_timed_wait(reject_timeout);
+} 
+
+int SqlQos::increase_wait() {
+    _concurrency.increase_wait();
+    return 0;
+} 
+
+int SqlQos::decrease_signal() {
+    _concurrency.decrease_signal();
+    return 0;
+} 
 
 void QosReject::wheather_need_reject() {
     const int window_count = FLAGS_qos_reject_interval_s * 1000 / FLAGS_token_bucket_burst_window_ms;

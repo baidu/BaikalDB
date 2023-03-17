@@ -147,12 +147,17 @@ int FullExportNode::calc_last_key(RuntimeState* state, MemRow* mem_row) {
     ScanIndexInfo& scan_index_info = *(_scan_node->main_scan_index());
     scan_index_info.region_primary.clear();
     pb::PossibleIndex pos_index;
+    pos_index.ParseFromString(scan_index_info.raw_index);
     pos_index.set_index_id(main_table_id);
-    auto range_index = pos_index.add_ranges();
-    range_index->set_left_key(key.data());
-    range_index->set_left_full(key.get_full());
-    range_index->set_left_field_cnt(pri_info->fields.size());
-    range_index->set_left_open(true);
+    // fullexport 非eq
+    pos_index.clear_is_eq();
+    if (pos_index.ranges_size() == 0) {
+        pos_index.add_ranges();
+    }
+    pos_index.mutable_ranges(0)->set_left_key(key.data());
+    pos_index.mutable_ranges(0)->set_left_full(key.get_full());
+    pos_index.mutable_ranges(0)->set_left_field_cnt(pri_info->fields.size());
+    pos_index.mutable_ranges(0)->set_left_open(true);
     pos_index.SerializeToString(&scan_index_info.raw_index);
     return 0;
 }

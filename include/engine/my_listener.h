@@ -19,6 +19,8 @@
 
 namespace baikaldb {
 class MyListener : public rocksdb::EventListener {
+public:
+    virtual ~MyListener() {}
     virtual void OnStallConditionsChanged(const rocksdb::WriteStallInfo& info) {
         bool is_stall = info.condition.cur != rocksdb::WriteStallCondition::kNormal;
         DB_WARNING("OnStallConditionsChanged, cf:%s is_stall:%d", info.cf_name.c_str(), is_stall);

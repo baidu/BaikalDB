@@ -225,9 +225,8 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
     delete tbl_info.file_proto;
     auto _pool = tbl_info.pool;
     auto _factory = tbl_info.factory;
-    Bthread bth;
-    bth.run([table_id, _pool, _factory]() {
-            bthread_usleep(3600 * 1000 * 1000LL);
+    BthreadTimer bth;
+    bth.run(3600 * 1000, [table_id, _pool, _factory]() {
             delete _factory;
             delete _pool; 
             });
@@ -605,13 +604,14 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.tbl_desc = descriptor;
         tbl_info.msg_proto = tbl_info.factory->GetPrototype(tbl_info.tbl_desc);
 
-        Bthread bth;
-        bth.run([table_id, del_pool, del_factory]() {
-                // 延迟删除
-                bthread_usleep(3600 * 1000 * 1000LL); 
-                delete del_factory;
-                delete del_pool; 
-                });
+        if (del_pool != nullptr || del_factory != nullptr) {
+            BthreadTimer bth;
+            bth.run(3600 * 1000, [table_id, del_pool, del_factory]() {
+                    // 延迟删除
+                    delete del_factory;
+                    delete del_pool; 
+                    });
+        }
     }
 
     // create name => id mapping
@@ -1262,7 +1262,7 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
             std::vector<std::string> instances;
             int ret = 0;
             boost::trim(bns);
-            int ret2 = get_instance_from_bns(&ret, bns, instances, false);
+            int ret2 = get_instance_from_bns(&ret, bns, instances, false, true);
             if (ret2 != 0) {
                 DB_WARNING("bns error:%s", bns.c_str());
                 bns_error = true;
@@ -1780,7 +1780,7 @@ int SchemaFactory::get_region_capacity(int64_t global_index_id, int64_t& region_
     auto& global_index_id_mapping = table_ptr->global_index_id_mapping;
     auto& table_info_mapping = table_ptr->table_info_mapping;
     if (global_index_id_mapping.count(global_index_id) == 0) {
-        DB_WARNING("index_id: %ld not exist", global_index_id);
+        DB_DEBUG("index_id: %ld not exist", global_index_id);
         return -1;
     }
     int64_t main_table_id = global_index_id_mapping.at(global_index_id);
@@ -2292,10 +2292,11 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
     }
     template_primary.mutable_index_conjuncts()->CopyFrom(primary->index_conjuncts());
 
-    std::map<int64_t, pb::PossibleIndex> region_pb_primary;
+    std::map<int64_t, std::vector<int>> region_idx_map;
     auto record_template = TableRecord::new_record(main_table_id);
     int range_size = primary->ranges_size();
-    for (const auto& range : primary->ranges()) {
+    for (int i = 0; i < range_size; ++i) {
+        const auto& range = primary->ranges(i);
         bool like_prefix = range.like_prefix();
         bool left_open = range.left_open();
         bool right_open = range.right_open();
@@ -2350,10 +2351,7 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
                     frontground->get_region_info(region_id, region_infos[region_id]);
                     // 只有in/多个范围才拆分primary
                     if (range_size > 1 && region_primary != nullptr) {
-                        if (region_pb_primary.count(region_id) == 0) {
-                            region_pb_primary[region_id].CopyFrom(template_primary);
-                        }
-                        region_pb_primary[region_id].add_ranges()->CopyFrom(range);
+                        region_idx_map[region_id].emplace_back(i);
                     }
                 }
                 continue;
@@ -2375,10 +2373,7 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
                     frontground->get_region_info(region_id, region_infos[region_id]);
                     // 只有in/多个范围才拆分primary
                     if (range_size > 1 && region_primary != nullptr) {
-                        if (region_pb_primary.count(region_id) == 0) {
-                            region_pb_primary[region_id].CopyFrom(template_primary);
-                        }
-                        region_pb_primary[region_id].add_ranges()->CopyFrom(range);
+                        region_idx_map[region_id].emplace_back(i);
                     }
                     // full_export只取1个region，在full_export_node里用完会循环获取
                     if (is_full_export) {
@@ -2392,10 +2387,24 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
         }
     }
     if (region_primary != nullptr) {
-        for (auto& iter : region_pb_primary) {
+        if (region_idx_map.size() == 1) {
+            auto iter = region_idx_map.begin();
             std::string raw;
-            iter.second.SerializeToString(&raw);
-            (*region_primary)[iter.first] = raw;
+            primary->SerializeToString(&raw);
+            (*region_primary)[iter->first] = raw;
+        } else {
+            for (const auto& kv : region_idx_map) {
+                const int64_t region_id = kv.first;
+                const std::vector<int>& range_idx_vec = kv.second;
+                pb::PossibleIndex pb_index;
+                pb_index.CopyFrom(template_primary);
+                for (int idx : range_idx_vec) {
+                    pb_index.add_ranges()->CopyFrom(primary->ranges(idx));
+                }
+                std::string raw;
+                pb_index.SerializeToString(&raw);
+                (*region_primary)[region_id] = raw;
+            }
         }
     }
     return 0;
