@@ -174,7 +174,7 @@ void Transaction::MultiGet(const rocksdb::ReadOptions& options,
 
     // 限流
     if (local != nullptr) {
-        local->get_rate_limiting();
+        local->get_rate_limiting(keys.size());
     }
 
     static thread_local int64_t total_time = 0;

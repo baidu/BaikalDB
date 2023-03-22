@@ -44,6 +44,9 @@ DEFINE_int32(rocks_max_background_compactions, 20, "max_background_compactions")
 DEFINE_bool(rocks_optimize_filters_for_hits, false, "rocks_optimize_filters_for_hits");
 DEFINE_int32(slowdown_write_sst_cnt, 10, "level0_slowdown_writes_trigger");
 DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
+DEFINE_bool(rocks_use_ribbon_filter, false, "use Ribbon filter:https://github.com/facebook/rocksdb/wiki/RocksDB-Bloom-Filter");
+DEFINE_bool(rocks_use_hyper_clock_cache, false, "use HyperClockCache:https://github.com/facebook/rocksdb/pull/10963");
+DEFINE_bool(rocks_use_sst_partitioner_fixed_prefix, false, "use SstPartitionerFixedPrefix:https://github.com/facebook/rocksdb/pull/6957");
 DEFINE_bool(rocks_kSkipAnyCorruptedRecords, false,
         "We ignore any corruption in the WAL and try to salvage as much data as possible");
 DEFINE_bool(rocks_data_dynamic_level_bytes, true,
@@ -101,17 +104,29 @@ int32_t RocksWrapper::init(const std::string& path) {
         table_options.cache_index_and_filter_blocks_with_high_priority = true;
         table_options.pin_l0_filter_and_index_blocks_in_cache= true;
         table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL,
-            8, false, FLAGS_rocks_high_pri_pool_ratio);
+                8, false, FLAGS_rocks_high_pri_pool_ratio);
         // 通过cache控制内存，不需要控制max_open_files
         FLAGS_rocks_max_open_files = -1;
     } else {
         table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
-        table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 8);
+        if (FLAGS_rocks_use_hyper_clock_cache) {
+#if ROCKSDB_MAJOR == 7
+            auto cache_opt = rocksdb::HyperClockCacheOptions(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, FLAGS_rocks_block_size, 8);
+            cache_opt.metadata_charge_policy = rocksdb::kDontChargeCacheMetadata; //cache会比rocks_block_cache_size_mb多占用少量内存
+            table_options.block_cache = cache_opt.MakeSharedCache(); 
+#endif
+        } else {
+            table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 8);
+        }
     }
     table_options.format_version = 4;
 
     table_options.block_size = FLAGS_rocks_block_size;
-    table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+    if (FLAGS_rocks_use_ribbon_filter) {
+        table_options.filter_policy.reset(rocksdb::NewRibbonFilterPolicy(9.9));
+    } else {
+        table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+    }
     _cache = table_options.block_cache.get();
     rocksdb::Options db_options;
     db_options.IncreaseParallelism(FLAGS_max_background_jobs);
@@ -191,6 +206,10 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.OptimizeLevelStyleCompaction();
     _data_cf_option.compaction_pri = static_cast<rocksdb::CompactionPri>(FLAGS_rocks_data_compaction_pri);
     _data_cf_option.compaction_filter = SplitCompactionFilter::get_instance();
+    if (FLAGS_rocks_use_sst_partitioner_fixed_prefix) {
+        // 按region_id拆分
+        _data_cf_option.sst_partitioner_factory = rocksdb::NewSstPartitionerFixedPrefixFactory(sizeof(int64_t));
+    }
     _data_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
     _data_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;
     _data_cf_option.optimize_filters_for_hits = FLAGS_rocks_optimize_filters_for_hits;

@@ -282,8 +282,8 @@ int NewSchema<Node, List>::segment(
 template<typename Node, typename List>
 int NewSchema<Node, List>::create_executor(const std::string& search_data, 
     pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset) {
-    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
-    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
     //segment
     TimeCost timer;
     std::vector<std::string> or_search;
@@ -421,14 +421,17 @@ int NewSchema<Node, List>::next(SmartRecord record) {
         return -1;
     }
     try {
-        if (_weight_field_id > 0) {
-            MessageHelper::set_float(record->get_field_by_tag(_weight_field_id),
-                    record->get_raw_message(), reverse_node.weight());
+        if (_weight_field != nullptr) {
+            auto field = record->get_field_by_idx(_weight_field->pb_idx);
+            if (field != nullptr) {
+                MessageHelper::set_float(field, record->get_raw_message(), reverse_node.weight());
+            }
         }
-        if (_query_words_field_id > 0) {
-            DB_DEBUG("set querywords %s", _query_words.c_str());
-            MessageHelper::set_string(record->get_field_by_tag(_query_words_field_id),
-                    record->get_raw_message(), _query_words);
+        if (_query_words_field != nullptr) {
+            auto field = record->get_field_by_idx(_query_words_field->pb_idx);
+            if (field != nullptr) {
+                MessageHelper::set_string(field, record->get_raw_message(), _query_words);
+            }
         }
     } catch (std::exception& exp) {
         DB_FATAL("pack weight or query words expection %s", exp.what());

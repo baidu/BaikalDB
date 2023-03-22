@@ -65,6 +65,7 @@ struct SnapshotContext {
     IteratorContextPtr data_context = nullptr;
     IteratorContextPtr meta_context = nullptr;
     int64_t data_index = 0;
+    int64_t binlog_check_point = 0;
 };
 
 typedef std::shared_ptr<SnapshotContext> SnapshotContextPtr;

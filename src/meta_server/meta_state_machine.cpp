@@ -121,7 +121,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
         response->set_leader(_node.leader_id().to_string());
         return;
     }
-    DB_NOTICE("baikaldb request[%s]", request->ShortDebugString().c_str());
+    DB_DEBUG("baikaldb request[%s]", request->ShortDebugString().c_str());
     TimeCost step_time_cost;
     ON_SCOPE_EXIT([]() {
         Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_broadcast();

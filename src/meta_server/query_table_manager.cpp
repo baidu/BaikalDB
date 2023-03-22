@@ -116,6 +116,7 @@ void QueryTableManager::get_flatten_schema(const pb::QueryRequest* request,
         response->set_errmsg("table not exist");
         return;
     }
+    *(response->add_schema_infos()) = schema_pb;
     for (auto& field_info : schema_pb.fields()) {
         pb::QuerySchema field_schema;
         field_schema.set_field_or_index("Field");
@@ -138,6 +139,8 @@ void QueryTableManager::get_flatten_schema(const pb::QueryRequest* request,
             field_schema.set_deleted(field_info.deleted());
             field_schema.set_extra("Deleted");
         }
+        field_schema.set_default_value(field_info.default_value());
+        field_schema.set_comment(field_info.comment());
         auto record_ptr = response->add_flatten_schema_infos();
         *record_ptr = field_schema;
     }
@@ -168,6 +171,8 @@ void QueryTableManager::get_flatten_schema(const pb::QueryRequest* request,
         extra[extra.size() - 2] = ']';
         index_schema.set_extra(extra);
         index_schema.set_deleted(false);
+        index_schema.set_default_value("");
+        index_schema.set_comment("");
         auto record_ptr = response->add_flatten_schema_infos();
         *record_ptr = index_schema;
     }

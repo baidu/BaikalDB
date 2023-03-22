@@ -496,14 +496,17 @@ public:
             return -1;
         }
         try {
-            if (_weight_field_id > 0) {
-                auto field = record->get_field_by_tag(_weight_field_id);
-                record->set_float(field, _cur_node->weight());
+            if (_weight_field != nullptr) {
+                auto field = record->get_field_by_idx(_weight_field->pb_idx);
+                if (field != nullptr) {
+                    MessageHelper::set_float(field, record->get_raw_message(), _cur_node->weight());
+                }
             }
-            if (_query_words_field_id > 0) {
-                DB_DEBUG("set querywords %s", _query_words.c_str());
-                MessageHelper::set_string(record->get_field_by_tag(_query_words_field_id),
-                        record->get_raw_message(), _query_words);
+            if (_query_words_field != nullptr) {
+                auto field = record->get_field_by_idx(_query_words_field->pb_idx);
+                if (field != nullptr) {
+                    MessageHelper::set_string(field, record->get_raw_message(), _query_words);
+                }
             }
         } catch (std::exception& exp) {
             DB_FATAL("pack weight or query words expection %s", exp.what());
@@ -519,8 +522,8 @@ private:
     std::vector<BooleanExecutorBase<typename Schema::PostingNodeT>*> _son_exe_vec;
     std::vector<ReverseIndex<Schema>*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;
-    int32_t _weight_field_id = 0;
-    int32_t _query_words_field_id = 0;
+    FieldInfo* _weight_field = nullptr;
+    FieldInfo* _query_words_field = nullptr;
     std::string _query_words;
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     bool _is_fast = false;

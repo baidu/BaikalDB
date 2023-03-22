@@ -690,8 +690,8 @@ int MutilReverseIndex<Schema>::search(
     _reverse_indexes = reverse_indexes;
     _index_info = index_info;
     _table_info = table_info;
-    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
-    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
     bool_executor_type type = NODE_COPY;
     _son_exe_vec.resize(son_size);
     bool type_init = false; 
@@ -742,8 +742,8 @@ int MutilReverseIndex<Schema>::search(
     _table_info = table_info;
     _txn = txn;
     _is_fast = is_fast;
-    _weight_field_id = get_field_id_by_name(_table_info.fields, "__weight");
-    _query_words_field_id = get_field_id_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
     _reverse_index_map = reverse_index_map;    
     _reverse_indexes.reserve(5);
     init_operator_executor(fulltext_index_info, _exe);

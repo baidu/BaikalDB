@@ -72,7 +72,6 @@ void StateMachine::run_machine(SmartSocket client,
         TimeCost cost;
         int go_on = 0;
         //auth user password and ip
-        DB_WARNING_CLIENT(client, "begin auth read");
         static bvar::LatencyRecorder auth_read_time_cost("auth_read_time_cost");
         int ret = _auth_read(client);
         auth_read_time_cost << cost.get_time();
@@ -772,7 +771,6 @@ int StateMachine::_query_read(SmartSocket sock) {
         return RET_CMD_UNSUPPORT;
     }
     if (_wrapper->is_shutdown_command(command)) {
-        DB_WARNING_CLIENT(sock, "Connection closed by client. cmd=%d", command);
         return RET_COMMAND_SHUTDOWN;
     }
 
@@ -1523,7 +1521,7 @@ void StateMachine::client_free(SmartSocket sock, EpollInfo* epoll_info) {
         DB_FATAL("s==NULL");
         return;
     }
-    DB_WARNING_CLIENT(sock, "client_free");
+    DB_WARNING_CLIENT(sock, "client_free, cmd=%d", sock->query_ctx->mysql_cmd);
     if (sock->fd == -1 || sock->is_free) {
         DB_WARNING_CLIENT(sock, "sock is already free.");
         return;

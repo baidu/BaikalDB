@@ -544,6 +544,7 @@ public:
                            const uint64_t log_id);
     int64_t get_commit_ts();
     static int64_t get_dynamic_timeout_ms(ExecNode* store_request, pb::OpType op_type, uint64_t sign);
+    static int64_t get_sign_latency(pb::OpType op_type, uint64_t sign);
 
 public:
     std::map<int64_t, std::vector<SmartRecord>>  index_records; //key: index_id
@@ -571,6 +572,7 @@ public:
     std::atomic<bool> primary_timestamp_updated{false};
     std::set<int64_t> no_copy_cache_plan_set;
     int64_t dynamic_timeout_ms = -1;
+    int64_t sign_latency = -1;
     TimeCost binlog_prewrite_time;
     PeerStatus peer_status; // 包括follower和learner
     MysqlErrCode      error_code = ER_ERROR_FIRST;

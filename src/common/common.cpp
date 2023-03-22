@@ -502,13 +502,17 @@ int get_physical_room(const std::string& ip_and_port_str, std::string& physical_
 int get_instance_from_bns(int* ret,
                           const std::string& bns_name,
                           std::vector<std::string>& instances,
-                          bool need_alive) {
+                          bool need_alive,
+                          bool white_list) {
 #ifdef BAIDU_INTERNAL
     instances.clear();
     BnsInput input;
     BnsOutput output;
     input.set_service_name(bns_name);
     input.set_type(0);
+    if (white_list) {
+        input.set_type(1);
+    }
     *ret = webfoot::get_instance_by_service(input, &output);
     // bns service not exist
     if (*ret == webfoot::WEBFOOT_RET_SUCCESS ||

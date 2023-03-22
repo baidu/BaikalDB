@@ -226,6 +226,16 @@ message ShowxCondition {
 message ShowxRequest {
     repeated ShowxCondition conditions = 1;
 };
+message QueryStatusRequest {
+    required string task_name   = 1;
+    required string platform    = 2;
+    required int64  version     = 3;
+};
+message QueryStatusResponse {
+    required ErrCode errcode    = 1;
+    optional string  status     = 2;
+    optional string  result     = 3;
+};
 message ShowxColumn {
     required string name = 1;
     required string id   = 2;
@@ -261,5 +271,7 @@ service ConsoleService {
     rpc showx(ShowxRequest) returns (ShowxResponse);
     rpc delete_database(ShowxRequest) returns (ShowxResponse);
     rpc insert_database(ShowxRequest) returns (ShowxResponse);
+    rpc backtrack(ShowxRequest) returns (ShowxResponse);
+    rpc query_status(QueryStatusRequest) returns (QueryStatusResponse);
 };
 

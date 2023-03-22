@@ -41,6 +41,7 @@ DEFINE_int64(binlog_multiget_batch, 1024, "1024");
 DEFINE_int64(binlog_seek_batch, 10000, "10000");
 DEFINE_int64(binlog_use_seek_interval_min, 60, "1h");
 DEFINE_bool(binlog_force_get, false, "false");
+DECLARE_int64(print_time_us);
 
 void print_oldest_ts(std::ostream& os, void*) {
     int64_t oldest_ts = RocksWrapper::get_instance()->get_oldest_ts_in_binlog_cf();
@@ -266,46 +267,76 @@ void Region::binlog_fake(int64_t ts, BthreadCond& cond) {
 
 void Region::binlog_fill_exprvalue(const pb::BinlogDesc& binlog_desc, pb::OpType op_type, std::map<std::string, ExprValue>& field_value_map) {
     if (binlog_desc.has_binlog_ts()) {
-        ExprValue ts;
-        ts.type = pb::INT64;
-        ts._u.int64_val = binlog_desc.binlog_ts();
-        field_value_map["ts"] = ts;
+        ExprValue value(pb::INT64);
+        value._u.int64_val = binlog_desc.binlog_ts();
+        field_value_map["ts"] = value;
     }
 
     if (binlog_desc.has_txn_id()) {
-        ExprValue txn_id;
-        txn_id.type = pb::INT64;
-        txn_id._u.int64_val = binlog_desc.txn_id();
-        field_value_map["txn_id"] = txn_id;
+        ExprValue value(pb::INT64);
+        value._u.int64_val = binlog_desc.txn_id();
+        field_value_map["txn_id"] = value;
     }
 
     if (binlog_desc.has_start_ts()) {
-        ExprValue start_ts;
-        start_ts.type = pb::INT64;
-        start_ts._u.int64_val = binlog_desc.start_ts();
-        field_value_map["start_ts"] = start_ts;
+        ExprValue value(pb::INT64);
+        value._u.int64_val = binlog_desc.start_ts();
+        field_value_map["start_ts"] = value;
     }  
 
     if (binlog_desc.has_primary_region_id()) {
-        ExprValue primary_region_id;
-        primary_region_id.type = pb::INT64;
-        primary_region_id._u.int64_val = binlog_desc.primary_region_id();
-        field_value_map["primary_region_id"] = primary_region_id;
+        ExprValue value(pb::INT64);
+        value._u.int64_val = binlog_desc.primary_region_id();
+        field_value_map["primary_region_id"] = value;
     }
 
     {
-        ExprValue binlog_region_id;
-        binlog_region_id.type = pb::INT64;
-        binlog_region_id._u.int64_val = _region_id;
-        field_value_map["binlog_region_id"] = binlog_region_id;
+        ExprValue value(pb::INT64);
+        value._u.int64_val = _region_id;
+        field_value_map["binlog_region_id"] = value;
     } 
 
+    {
+        ExprValue value(pb::INT64);
+        value._u.int64_val = _region_info.partition_id();
+        field_value_map["partition_key"] = value;
+    }
+
     if (binlog_desc.has_binlog_row_cnt()) {
-        ExprValue binlog_row_cnt;
-        binlog_row_cnt.type = pb::INT64;
-        binlog_row_cnt._u.int64_val = binlog_desc.binlog_row_cnt();
-        field_value_map["binlog_row_cnt"] = binlog_row_cnt;
+        ExprValue value(pb::INT64);
+        value._u.int64_val = binlog_desc.binlog_row_cnt();
+        field_value_map["binlog_row_cnt"] = value;
     } 
+
+    if (binlog_desc.has_user_name()) {
+        ExprValue value(pb::STRING);
+        value.str_val = binlog_desc.user_name();
+        field_value_map["user_name"] = value;
+    }
+
+    if (binlog_desc.has_user_ip()) {
+        ExprValue value(pb::STRING);
+        value.str_val = binlog_desc.user_ip();
+        field_value_map["user_ip"] = value;
+    }
+
+    if (binlog_desc.db_tables_size() > 0) {
+        ExprValue value(pb::STRING);
+        for (const auto& db_table : binlog_desc.db_tables()) {
+            value.str_val += db_table + ";";
+        }
+        value.str_val.pop_back();
+        field_value_map["db_tables"] = value;
+    }
+
+    if (binlog_desc.signs_size() > 0) {
+        ExprValue value(pb::STRING);
+        for (uint64_t sign : binlog_desc.signs()) {
+            value.str_val += std::to_string(sign) + ";";
+        }
+        value.str_val.pop_back();
+        field_value_map["signs"] = value;
+    }
 
     ExprValue binlog_type;
     binlog_type.type = pb::INT64;
@@ -768,12 +799,6 @@ int Region::write_binlog_value(const std::map<std::string, ExprValue>& field_val
     }
 
     for (auto& field : _binlog_table->fields) {
-        if (field.short_name == "partition_key") {
-            ExprValue value(pb::INT64);
-            value._u.int64_val = _region_info.partition_id();
-            record->set_value(record->get_field_by_tag(field.id), value);
-            continue;
-        }
         auto iter = field_value_map.find(field.short_name);
         if (iter == field_value_map.end()) {
             //default
@@ -1107,7 +1132,7 @@ int BinlogReadMgr::fill_fake_binlog(int64_t fake_ts, std::string& binlog) {
 }
 
 void BinlogReadMgr::print_log() {
-    if (_binlog_total_row_cnts > 0) {
+    if (_binlog_total_row_cnts > 0 && _time.get_time() > FLAGS_print_time_us) {
         DB_WARNING("region_id[%ld], begin_ts[%ld, %s], total_binlog_size[%ld], mode[%d], need_read_cnt[%ld], fake_cnt[%ld], binlog_num[%d], binlog_row_cnt[%ld]"             
                 "first_commit_ts[%ld, %s], last_commit_ts[%ld, %s], time[%ld], remote_capture_ip[%s], log_id[%lu] get binlog finish.",          
                 _region_id, _begin_ts, ts_to_datetime_str(_begin_ts).c_str(), _total_binlog_size, _mode, _need_read_cnt, _fake_binlog_cnt,
@@ -1201,6 +1226,88 @@ int64_t Region::read_data_cf_oldest_ts() {
     binlog_get_field_values(field_value_map, record);
     int64_t ts = binlog_get_int64_val("ts", field_value_map);
     return ts;
+}
+
+bool Region::flash_back_need_read(const pb::StoreReq* request, const std::map<std::string, ExprValue>& field_value_map) {
+    std::set<std::string> req_db_tables;
+    if (request->binlog_desc().db_tables_size() > 0) {
+        for (const std::string& db_table : request->binlog_desc().db_tables()) {
+            req_db_tables.insert(db_table);
+        }
+    }
+    std::set<uint64_t> req_signs;
+    if (request->binlog_desc().signs_size() > 0) {
+        for (const uint64_t sign : request->binlog_desc().signs()) {
+            req_signs.insert(sign);
+        }
+    }
+    std::set<int64_t> req_txn_ids;
+    if (request->binlog_desc().txn_ids_size() > 0) {
+        for (const uint64_t txn_id : request->binlog_desc().txn_ids()) {
+            req_txn_ids.insert(txn_id);
+        }
+    }
+
+    if (request->binlog_desc().has_user_name()) {
+        std::string user_name = request->binlog_desc().user_name();
+        if (binlog_get_str_val("user_name", field_value_map) != user_name) {
+            return false;
+        }
+    }
+    if (request->binlog_desc().has_user_ip()) {
+        std::string user_ip = request->binlog_desc().user_ip();
+        if (binlog_get_str_val("user_ip", field_value_map) != user_ip) {
+            return false;
+        }
+    }
+    if (!req_db_tables.empty()) {
+        std::string local_db_tables = binlog_get_str_val("db_tables", field_value_map);
+        if (local_db_tables.empty()) {
+            return false;
+        }
+        bool find = false;
+        std::vector<std::string> vec;
+        boost::split(vec, local_db_tables, boost::is_any_of(";"));
+        for (const std::string& db_table : vec) {
+            if (req_db_tables.count(db_table) > 0) {
+                find = true;
+                break;
+            }
+        }
+
+        if (!find) {
+            return false;
+        }
+    }
+    if (!req_signs.empty()) {
+        std::string local_signs = binlog_get_str_val("signs", field_value_map);
+        if (local_signs.empty()) {
+            return false;
+        }
+        bool find = false;
+        std::vector<std::string> vec;
+        boost::split(vec, local_signs, boost::is_any_of(";"));
+        for (const std::string& sign_str : vec) {
+            if (req_signs.count(boost::lexical_cast<uint64_t>(sign_str)) > 0) {
+                find = true;
+                break;
+            }
+        }
+
+        if (!find) {
+            return false;
+        }
+
+    }
+    if (!req_txn_ids.empty()) {
+        int64_t txn_id = binlog_get_int64_val("txn_id", field_value_map);
+        if (req_txn_ids.count(txn_id) <= 0) {
+            return false;
+        }
+    }
+
+    return true;
+
 }
 
 void Region::read_binlog(const pb::StoreReq* request,
@@ -1331,6 +1438,11 @@ void Region::read_binlog(const pb::StoreReq* request,
         }
 
         if (binlog_type != COMMIT_BINLOG || ts == begin_ts) {
+            continue;
+        }
+
+        // SQL闪回读取时过滤
+        if (request->binlog_desc().flash_back_read() && !flash_back_need_read(request, field_value_map)) {
             continue;
         }
 

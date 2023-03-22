@@ -81,14 +81,14 @@ struct ResultField {
 }; 
 
 struct DateTime {
-    uint64_t year;
-    uint64_t month;
-    uint64_t day;
-    uint64_t hour;
-    uint64_t minute;
-    uint64_t second;
-    uint64_t macrosec;
-    uint64_t is_negative;
+    uint64_t year = 0;
+    uint64_t month = 0;
+    uint64_t day = 0;
+    uint64_t hour = 0;
+    uint64_t minute = 0;
+    uint64_t second = 0;
+    uint64_t macrosec = 0;
+    uint64_t is_negative = 0;
 
     int datetype_length() {
         if (year == 0 && month == 0 && day == 0 && hour == 0

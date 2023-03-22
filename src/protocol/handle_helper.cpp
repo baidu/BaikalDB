@@ -608,33 +608,52 @@ bool HandleHelper::_handle_ttl_duration(const SmartSocket& client, const std::ve
 }
 
 bool HandleHelper::_handle_split_region(const SmartSocket& client, const std::vector<std::string>& split_vec) {
-    if(!client || !client->user_info) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if(!client || !factory || !client->query_ctx) {
         DB_FATAL("param invalid");
         return false;
     }
-    std::string split_key = "not used";
-    int64_t region;
-    if (split_vec.size() == 3) {
-        region = strtoll(split_vec[2].c_str(), NULL, 10);
-    } else if (split_vec.size() == 4) {
-        region = strtoll(split_vec[2].c_str(), NULL, 10);
-        split_key = split_key[3];
+    int64_t table_id = 0;
+    int64_t region_id = 0;
+    if (split_vec.size() == 4) {
+        table_id = strtoll(split_vec[2].c_str(), NULL, 10);
+        region_id = strtoll(split_vec[3].c_str(), NULL, 10);
     } else {
         DB_FATAL("param invalid");
         client->state = STATE_ERROR;
         return false;
     }
 
-    pb::MetaManagerRequest request;
-    pb::MetaManagerResponse response;
-    request.set_op_type(pb::OP_SPLIT_REGION);
-    auto info = request.mutable_region_split();
-    info->set_region_id(region);
-    info->set_split_key(split_key);
-    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
-    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
-    if(!_make_response_packet(client, response.ShortDebugString())) {
-        return false;
+    pb::RegionIds req;
+    req.add_region_ids(region_id);
+    pb::RegionInfo info;
+    if (factory->get_region_info(table_id, region_id, info) != 0) {
+        DB_WARNING("param invalid, no region %ld in table %ld", region_id, table_id);
+        if(!_make_response_packet(client, "no such regionID")) {
+            return false;
+        }
+        client->state = STATE_READ_QUERY_RESULT;
+        return true;
+    }
+
+    int retry_time = 3;
+    std::string leader = info.leader();
+    while(retry_time-- > 0) {
+        pb::StoreRes res;
+        StoreInteract interact(leader);
+        interact.send_request("manual_split_region", req, res);
+        DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
+        if (res.errcode() == pb::NOT_LEADER && res.has_leader() &&
+            !res.leader().empty() && res.leader() != "0.0.0.0:0") {
+            leader = res.leader();
+            info.set_leader(leader);
+            factory->update_leader(info);
+            continue;
+        }
+        if(!_make_response_packet(client, res.ShortDebugString())) {
+            return false;
+        }
+        break;
     }
     client->state = STATE_READ_QUERY_RESULT;
     return true;

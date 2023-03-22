@@ -40,7 +40,7 @@ public:
         static SplitCompactionFilter _instance;
         return &_instance;
     }
-    ~SplitCompactionFilter() {
+    virtual ~SplitCompactionFilter() {
     }
     const char* Name() const override {
         return "SplitCompactionFilter";

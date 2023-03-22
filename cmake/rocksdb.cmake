@@ -32,9 +32,7 @@ ExternalProject_Add(
         ${EXTERNAL_PROJECT_LOG_ARGS}
         DEPENDS gflags zlib snappy
         PREFIX ${ROCKSDB_SOURCES_DIR}
-#        GIT_REPOSITORY "https://github.com/facebook/rocksdb.git"
-#        GIT_TAG "v7.7.3"
-        URL "https://github.com/facebook/rocksdb/archive/v7.7.3.tar.gz"
+        URL "https://github.com/facebook/rocksdb/archive/v6.29.3.tar.gz"
         UPDATE_COMMAND ""
 #        CONFIGURE_COMMAND ""
 #        BUILD_IN_SOURCE 1
@@ -60,6 +58,7 @@ ExternalProject_Add(
         -DWITH_BENCHMARK_TOOLS=OFF
         -DWITH_CORE_TOOLS=OFF
         -DWITH_TOOLS=OFF
+        -DUSE_RTTI=ON
         ${EXTERNAL_OPTIONAL_ARGS}
         LIST_SEPARATOR |
         CMAKE_CACHE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${ROCKSDB_INSTALL_DIR}

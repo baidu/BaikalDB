@@ -75,7 +75,8 @@ public:
                                    uint64_t& rocks_soft_pending_compaction_g, uint64_t& rocks_hard_pending_compaction_g);
     int run_main_task();
     int run_sub_task();
-    int import_to_baikaldb(FastImporterImpl& fast_importer, const LinesFunc& func);
+    int import_to_baikaldb(FastImporterImpl& fast_importer, const FieldsFunc& fields_func,
+                           const SplitFunc& split_func, const ConvertFunc& convert_func);
 
     static void shutdown() {
         _shutdown = true;
@@ -87,6 +88,10 @@ public:
 
     int64_t get_import_line() {
         return _import_line;
+    }
+
+    int64_t get_import_diff_line() {
+        return _import_diff_line;
     }
 
     std::string get_result() {
@@ -117,6 +122,7 @@ private:
 
     bool _is_main_task;
     int64_t _import_line = 0;
+    int64_t _import_diff_line = 0;
     std::vector<std::string> _sub_file_paths;
     std::string _file_path_prefix;
     FastImportTaskDesc _task;
@@ -192,7 +198,7 @@ public:
     }
     
     ~SSTsender() {
-        std::remove(_path.c_str());
+        butil::DeleteFile(butil::FilePath(_path), false); 
     }
 
     int write_sst_file();
@@ -233,33 +239,41 @@ public:
     int init(pb::SchemaInfo& schema_info,
              ::google::protobuf::RepeatedPtrField< ::baikaldb::pb::RegionInfo >& region_infos);
 
-    bool split(const std::string& line, std::vector<std::string>* split_vec) {
+    bool split(std::string& line, std::vector<std::string>& split_vec) {
+        if (!convert(line)) {
+            return false;
+        }
+        boost::split(split_vec, line, boost::is_any_of(_task.delim));
+        return true;
+    }
+
+    bool convert(std::string& line) {
         if (_task.need_iconv) {
             std::string new_line;
             if (_task.charset == "utf8") {
-                if (0 != babylon::iconv_convert<babylon::Encoding::UTF8,
-                        babylon::Encoding::GB18030, babylon::IconvOnError::IGNORE>(new_line, line)) {
+                if (0 != babylon::iconv_convert<babylon::Encoding::UTF8, 
+                    babylon::Encoding::GB18030, babylon::IconvOnError::IGNORE>(new_line, line)) {
                     _import_diff_lines++;
-                    DB_FATAL("iconv gb18030 to utf8 failed, ERRLINE:%s", line.c_str());
                     return false;
                 }
             } else {
-                if (0 != babylon::iconv_convert<babylon::Encoding::GB18030,
-                        babylon::Encoding::UTF8, babylon::IconvOnError::IGNORE>(new_line, line)) {
+                if (0 != babylon::iconv_convert<babylon::Encoding::GB18030, 
+                    babylon::Encoding::UTF8, babylon::IconvOnError::IGNORE>(new_line, line)) {
                     _import_diff_lines++;
-                    DB_FATAL("iconv utf8 to gb18030 failed, ERRLINE:%s", line.c_str());
                     return false;
                 }
             }
-            boost::split(*split_vec, new_line, boost::is_any_of(_task.delim));
-        } else {
-            boost::split(*split_vec, line, boost::is_any_of(_task.delim));
+            std::swap(line, new_line);
         }
         return true;
     }
 
+    void restore_line(const std::vector<std::string>& fields, std::string& line) {
+        line = boost::join(fields, _task.delim);
+    }
+
     // 主任务不调用该函数，子任务会多次调用直至结束
-    void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    void handle_fields(const std::string& path, const std::vector<std::vector<std::string>>& fields);
 
     int put_secondary(int64_t region,
                       IndexInfo& index,
@@ -290,7 +304,16 @@ public:
         return _need_redo_task;
     }
 
+    void set_handle_files_failed() {
+        _handle_files_fail = true;
+    }
+
     int reset_region_peers_from_meta();
+
+    bool get_diff_lines_fail() {
+        return _diff_lines_fail;
+    }
+
 private:
     FastImportTaskDesc                          _task;
 
@@ -325,6 +348,8 @@ private:
     std::set<int64_t>                           _failed_region_ids;
 
     bool                                        _need_redo_task = false;
+    bool                                        _handle_files_fail = false;
+    bool                                        _diff_lines_fail = false;
 };
 
 }

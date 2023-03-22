@@ -1,0 +1,42 @@
+syntax = "proto2";
+
+option cc_generic_services = true;
+
+package fengmai;
+
+message BaseSubscribeSubtask {
+    optional int64  region_id = 1;
+    optional bytes  start_key = 2;
+    optional bytes  end_key   = 3;
+};
+
+message BaseSubscribeSubtasks {
+    repeated BaseSubscribeSubtask subtasks = 1;
+};
+
+enum BaseErrCode {
+    TASK_SUCC  = 0;
+    TASK_FAIL  = 1;
+    TASK_EXIST = 2;
+};
+
+message BaseTaskResponse {
+    required BaseErrCode errcode            = 1;
+    optional string errmsg                  = 2;
+    optional string subtasks_pb             = 3;
+};
+
+message BaseTaskRequest {
+    required string product                  = 1;
+    required string stream                   = 2;
+    required string profile                  = 3;
+    required int64  partition_id             = 4;
+    required string database                 = 5;
+    required string table                    = 6;
+    required string version                  = 7;
+    required string subtasks_pb              = 8;
+};
+
+service BaseTaskService {
+    rpc commit_base_task (BaseTaskRequest) returns (BaseTaskResponse);
+};

@@ -29,6 +29,7 @@ int64_t get_ndays_date(int64_t date, int n)
     ptm.tm_hour = 0;
     ptm.tm_min  = 0;
     ptm.tm_sec  = 0;
+    ptm.tm_isdst = 0;
                          
     time_t timep;
     timep = mktime(&ptm); //mktime把struct tm类型转换成time_t
@@ -112,6 +113,21 @@ std::string _gen_update_sql(const std::string& database_name, const std::string&
     return sql;
 }
 
+std::string _gen_delete_sql(const std::string& database_name, const std::string& table_name, 
+                        const std::map<std::string, std::string>& where_map) {
+    std::string sql = "DELETE from " + database_name + "." + table_name;
+    sql += " WHERE ";
+    std::vector<std::string> where_vec;
+    where_vec.reserve(5);
+    for (auto iter : where_map) {
+        where_vec.emplace_back(iter.first + "=" + iter.second);
+    }
+    sql += join(where_vec, " AND ");
+    DB_WARNING("delete sql: %s", sql.c_str());
+    return sql;
+}
+
+
 bool BackUpImport::need_to_trigger(int64_t date, int64_t hour, int64_t interval_days, int64_t& now_date, int64_t table_id) {
 
     struct tm local;                  
@@ -136,7 +152,14 @@ bool BackUpImport::need_to_trigger(int64_t date, int64_t hour, int64_t interval_
     return false;
 }
 
-int BackUpImport::insert_backup_task(const std::string& database_name, const std::string& table_name, const int64_t table_id, const std::string& meta_server_bns, int64_t date) {
+int BackUpImport::insert_backup_task(const std::string& database_name, 
+                                     const std::string& table_name, 
+                                     const int64_t table_id, 
+                                     const std::string& meta_server_bns, 
+                                     int64_t date, 
+                                     const std::string& pefered_peer_resource_tag,
+                                     int64_t interval_days,
+                                     int64_t backup_times) {
     
     baikal::client::ResultSet result_set;
     std::map<std::string, std::string> values_map;
@@ -147,8 +170,26 @@ int BackUpImport::insert_backup_task(const std::string& database_name, const std
     values_map["meta_server_bns"] = "'" + meta_server_bns + "'";
     values_map["status"] = "'idle'";
     values_map["date"] = std::to_string(date);
+    values_map["resource_tag"] = "'" + pefered_peer_resource_tag + "'";
+    values_map["interval_days"] = std::to_string(interval_days);
+    values_map["backup_times"] = std::to_string(backup_times);
 
-    std::string sql = gen_insert_sql(_backup_task_table, values_map);
+    // 需要用insert，避免多个dm都tricker，导致两个DM同时做一个SST备份任务
+    std::string sql = "INSERT INTO " + _database + "." + _backup_task_table;
+    std::string names;
+    std::string values;
+
+    for (auto iter : values_map) {
+        names += iter.first;
+        names += ",";
+        values += iter.second;
+        values += ",";
+    }
+
+    names.pop_back();
+    values.pop_back();
+
+    sql += " (" + names + ") VALUES (" + values + ")";
 
     int ret = querybaikaldb(sql, result_set);
     if (ret != 0) {
@@ -225,9 +266,11 @@ int BackUpImport::gen_backup_task() {
         std::string meta_server_bns;
         std::string database_name;
         std::string table_name;
+        std::string pefered_peer_resource_tag; // 优先拉取该集群的peer的sst
         int64_t date = 0;
         int64_t hour = 0;
         int64_t interval_days = 0;
+        int64_t backup_times = 0;
         int64_t now_date = 0;
 
         result_set.get_string("meta_server_bns", &meta_server_bns);
@@ -238,6 +281,8 @@ int BackUpImport::gen_backup_task() {
         result_set.get_int64("date", &date);
         result_set.get_int64("hour", &hour);
         result_set.get_int64("interval_days", &interval_days);
+        result_set.get_int64("backup_times", &backup_times);
+        result_set.get_string("resource_tag", &pefered_peer_resource_tag);
 
         //DB_NOTICE("try to tigger table_id_%ld", table_id);
         if (need_to_trigger(date, hour, interval_days, now_date, table_id) == false) {
@@ -250,7 +295,8 @@ int BackUpImport::gen_backup_task() {
             continue;
         }
 
-        ret = insert_backup_task(database_name, table_name, table_id, meta_server_bns, now_date);
+        ret = insert_backup_task(database_name, table_name, table_id, meta_server_bns, 
+                                 now_date, pefered_peer_resource_tag, interval_days, backup_times);
         if (ret != 0) {
             DB_NOTICE("table_id_%ld insert backup task fail", table_id);
             continue;
@@ -397,19 +443,28 @@ int BackUpImport::fetch_new_task() {
 
         int64_t id  = 0;
         int64_t table_id = 0;
+        int64_t interval_days = 0;
+        int64_t backup_times = 0;
         std::string meta_server_bns;
         std::string status;
+        std::string resource_tag;
 
         result_set.get_string("status", &status);
         result_set.get_string("meta_server_bns", &meta_server_bns);
         result_set.get_int64("id", &id);
         result_set.get_int64("table_id", &table_id);
+        result_set.get_string("resource_tag", &resource_tag);
+        result_set.get_int64("interval_days", &interval_days);
+        result_set.get_int64("backup_times", &backup_times);
 
+        if (backup_times <= 0) {
+            backup_times = 3;
+        }
         if (update_task_doing(id) < 0) {
             continue;
         }
 
-        baikaldb::BackUp bp(meta_server_bns);
+        baikaldb::BackUp bp(meta_server_bns, resource_tag, interval_days, backup_times);
         std::unordered_set<int64_t> table_ids;
         table_ids.insert(table_id);
 

@@ -63,7 +63,8 @@ enum Status {
     Succss = 0,
     NoData,
     SameLogIndex,
-    Error
+    Error,
+    RetryLater
 };
 
 struct TaskInfo {
@@ -84,8 +85,9 @@ public:
             DB_WARNING("wait open stream [%lu] file.", id);
             bthread_usleep(1000 * 1000LL);
             retry_time++;
-            if (retry_time > 10) {
+            if (retry_time > 600) {
                 DB_FATAL("open stream [%lu] file error.", id);
+                _status = pb::StreamState::SS_FAIL;
                 return -1;
             }
         }
@@ -128,7 +130,17 @@ public:
         _status = pb::StreamState::SS_FAIL;
     }
     bool init(const char* filename) {
-        _ofs.open(filename, std::ios::out | std::ios::binary | std::ios::trunc);
+        int retry_time = 0;
+        while (retry_time++ < 60) {
+            _ofs.open(filename, std::ios::out | std::ios::binary | std::ios::trunc);
+            if (_ofs.good() && _ofs.is_open()) {
+                DB_WARNING("open file success: %s", filename);
+                break;
+            } else {
+                DB_WARNING("open file fail: %s, retry: %d", filename, retry_time);
+                bthread_usleep(1000 * 1000LL);
+            } 
+        }
         return _ofs.good() && _ofs.is_open();
     }
 
@@ -209,7 +221,11 @@ private:
 class BackUp {
 public:
     BackUp() = default;
-    explicit BackUp(const std::string& metaserver) : _meta_server_bns(metaserver) {} 
+    explicit BackUp(const std::string& metaserver, const std::string& resource_tag, int64_t interval_days, int64_t backup_times) : 
+        _meta_server_bns(metaserver), 
+        _pefered_peer_resource_tag(resource_tag),
+        _interval_days(interval_days),
+        _backup_times(backup_times) {} 
     ~BackUp() = default;
 
     void init();
@@ -251,7 +267,8 @@ private:
 
     void gen_backup_task(std::unordered_map<std::string, std::vector<TaskInfo>>& tasks, 
         std::unordered_set<int64_t>& table_ids, 
-        const pb::QueryResponse& response);
+        const pb::QueryResponse& response,
+        std::unordered_map<int64_t, std::set<int64_t>>& regions_from_meta);
     
     struct SingleUpLoadTask {
         SingleUpLoadTask(int64_t tid, int64_t rid, 
@@ -291,6 +308,10 @@ private:
     int get_meta_info(const pb::QueryRequest& request, pb::QueryResponse& response);
     std::string _upload_date {""};
     std::string _meta_server_bns;
+    std::string _pefered_peer_resource_tag;
+    std::unordered_map<std::string, std::set<std::string>> _resource_tag_to_instance;
     static bool _shutdown;
+    int64_t _interval_days = 0;
+    int64_t _backup_times = 0;
 };
 }

@@ -152,8 +152,22 @@ int BaseBaikalHeartBeat::init() {
         return 0;
     }
 
-    if (heartbeat(true) != 0) {
-        DB_WARNING("heartbeat sync failed");
+    const int RETRY_TIMES = 3;
+    int retry = 0;
+    int ret = 0;
+    do {
+        ret = heartbeat(true);
+        if (ret != 0) {
+            DB_WARNING("heartbeat sync failed, retry_times: %d", retry);
+            ++retry;
+            bthread_usleep(30 * 1000 * 1000);
+            continue;
+        }
+        break;
+    } while (retry < RETRY_TIMES);
+
+    if (ret != 0) {
+        DB_FATAL("heartbeat sync failed, over retry_times: %d", retry);
         return -1;
     }
     
@@ -461,7 +475,7 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
         }
         *rv.Add() = region_info;
     }
-    factory->update_regions(rv);
+    factory->update_regions_double_buffer_sync(rv);
     factory->update_show_db(response.db_info());
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());

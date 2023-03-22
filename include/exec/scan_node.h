@@ -378,8 +378,6 @@ protected:
     AccessPathMgr _main_path;    //主集群索引选择
     AccessPathMgr _learner_path; //learner集群索引选择
     bool _learner_use_diff_index = false;
-    std::map<int64_t, SmartPath> _paths;
-    std::vector<int64_t> _multi_reverse_index;
     pb::TupleDescriptor* _tuple_desc = nullptr;
     bool _is_covering_index = true; // 只有store会用
     bool _has_index = false;

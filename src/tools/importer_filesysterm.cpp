@@ -1,14 +1,12 @@
-
+#include "parquet/arrow/reader.h"
 #include "importer_filesysterm.h"
+#include "importer_macros.h"
 
 namespace baikaldb {
 DEFINE_int32(file_buffer_size, 1, "read file buf size (MBytes)");
 DEFINE_int32(file_block_size, 100, "split file to block to handle(MBytes)");
-DEFINE_int32(concurrency, 5, "concurrency");
-DEFINE_int32(file_concurrency, 30, "file_concurrency");
-DEFINE_uint64(insert_values_count, 100, "insert_values_count");
 
-size_t PosixReaderAdaptor::read(size_t pos, char* buf, size_t buf_size) {
+int64_t PosixReaderAdaptor::read(size_t pos, char* buf, size_t buf_size) {
     if (_error) {
         DB_WARNING("file: %s read failed", _path.c_str());
         return -1;
@@ -23,27 +21,60 @@ size_t PosixReaderAdaptor::read(size_t pos, char* buf, size_t buf_size) {
     return size;
 }
 
-size_t AfsReaderAdaptor::read(size_t pos, char* buf, size_t buf_size) {
-    int afs_res = _reader->Seek(pos);
+#ifdef BAIDU_INTERNAL
+int64_t AfsReaderAdaptor::seek(int64_t position) {
+    int64_t afs_res = _reader->Seek(position);
+    if (afs_res == ds::kOutOfRange) {
+        DB_WARNING("AfsReaderAdaptor out of range pos: %lu", position);
+        return 0;
+    } else if (afs_res != ds::kOk) {
+        DB_FATAL("AfsReaderAdaptor seek pos: %lu failed, errno:%ld, errmsg:%s", position, afs_res, ds::Rc2Str(afs_res));
+        return -1;
+    }
+    return 0;
+}
+
+int64_t AfsReaderAdaptor::tell() {
+    int64_t afs_res = _reader->Tell();
+    if (afs_res < 0) {
+        DB_WARNING("AfsReaderAdaptor fail to tell, ret_code: %ld", afs_res);
+    }
+    return afs_res;
+}
+
+int64_t AfsReaderAdaptor::read(void* buf, size_t buf_size) {
+    int64_t afs_res = _reader->Read(buf, buf_size);
+    if (afs_res >= 0) {
+        DB_WARNING("AfsReaderAdaptor read return size: %ld", afs_res);
+        return afs_res;
+    } else {
+        DB_FATAL("AfsReaderAdaptor read errno:%ld, errmsg:%s", afs_res, ds::Rc2Str(afs_res));
+        return -1;
+    }
+}
+
+int64_t AfsReaderAdaptor::read(size_t pos, char* buf, size_t buf_size) {
+    int64_t afs_res = _reader->Seek(pos);
     if (afs_res == ds::kOutOfRange) {
         DB_WARNING("out of range pos: %lu", pos);
         return 0;
     } else if (afs_res != ds::kOk) {
-        DB_FATAL("seek pos: %lu failed, errno:%d, errmsg:%s", pos, afs_res, ds::Rc2Str(afs_res));
+        DB_FATAL("seek pos: %lu failed, errno:%ld, errmsg:%s", pos, afs_res, ds::Rc2Str(afs_res));
         return -1;
     }
 
     afs_res = _reader->Read((void*)buf, buf_size);
     if (afs_res >= 0) {
-        DB_WARNING("read pos: %lu, return size: %d", pos, afs_res);
+        DB_WARNING("read pos: %lu, return size: %ld", pos, afs_res);
         return afs_res;
     } else {
-        DB_FATAL("read pos: %lu failed, errno:%d, errmsg:%s", pos, afs_res, ds::Rc2Str(afs_res));
+        DB_FATAL("read pos: %lu failed, errno:%ld, errmsg:%s", pos, afs_res, ds::Rc2Str(afs_res));
         return -1;
     }
 }
+#endif
 
-int ImporterFileSystermAdaptor::cut_files(const std::string& path, const int64_t block_size, std::vector<std::string>& file_paths,
+int ImporterFileSystemAdaptor::cut_files(const std::string& path, const int64_t block_size, std::vector<std::string>& file_paths,
                                           std::vector<int64_t>& file_start_pos, std::vector<int64_t>& file_end_pos) {
     std::string cur_file_paths = "";
     int64_t cur_size = 0;
@@ -76,7 +107,7 @@ int ImporterFileSystermAdaptor::cut_files(const std::string& path, const int64_t
  * cur_size: 子任务累计文件大小
  * cur_file_paths: 子任务文件列表，分号分隔
  */
-int ImporterFileSystermAdaptor::cut_files(const std::string& path, const int64_t block_size, std::vector<std::string>& file_paths,
+int ImporterFileSystemAdaptor::cut_files(const std::string& path, const int64_t block_size, std::vector<std::string>& file_paths,
                                 std::vector<int64_t>& file_start_pos, std::vector<int64_t>& file_end_pos, int64_t& start_pos,
                                 int64_t& cur_size, int64_t& cur_start_pos, int64_t& cur_end_pos, std::string& cur_file_paths) {
     FileMode mode;
@@ -141,6 +172,15 @@ int ImporterFileSystermAdaptor::cut_files(const std::string& path, const int64_t
             cur_start_pos = cur_end_pos;
             start_pos = cur_end_pos;
             cur_size = 0;
+
+            if (cur_start_pos < file_size && cur_start_pos + block_size >= file_size) {
+                cur_file_paths += path + ";";
+                cur_size += (file_size - cur_start_pos);
+                cur_end_pos = file_size;
+                cur_start_pos = 0;
+                return 0;
+            }
+
             if (cur_end_pos < file_size) {
                 return cut_files(path, block_size, file_paths, file_start_pos, file_end_pos, start_pos,
                                  cur_size, cur_start_pos, cur_end_pos, cur_file_paths);
@@ -150,7 +190,9 @@ int ImporterFileSystermAdaptor::cut_files(const std::string& path, const int64_t
     return 0;
 }
 
-int ImporterFileSystermAdaptor::all_block_count(std::string path) {
+int ImporterFileSystemAdaptor::recurse_handle(
+    const std::string& path, const std::function<int(const std::string&)>& fn) {
+    
     FileMode mode;
     size_t file_size = 0;
     int ret = file_mode(path, &mode, &file_size);
@@ -172,7 +214,7 @@ int ImporterFileSystermAdaptor::all_block_count(std::string path) {
                 break;
             }
 
-            count += all_block_count(path + "/" + child_path);
+            count += recurse_handle(path + "/" + child_path, fn);
         }
 
         return count;   
@@ -190,52 +232,129 @@ int ImporterFileSystermAdaptor::all_block_count(std::string path) {
             real_path = symlink_dir.string() + "/" + buf;
         }
         DB_WARNING("path:%s is symlink, real path:%s", path.c_str(), real_path.c_str());
-        return all_block_count(real_path);
+        return recurse_handle(real_path, fn);
     }
 
     if (I_FILE != mode) {
         return 0;
     }
 
-    size_t file_block_size = FLAGS_file_block_size * 1024 * 1024ULL;
-    _all_file_size += file_size;
-    if (file_block_size == 0) {
-        return 0;
-    }
-    size_t blocks = file_size / file_block_size + 1;
-    DB_TRACE("path:%s is file, size:%lu, blocks:%lu", 
-            path.c_str(), file_size, blocks);
-    return blocks;
+    return fn(path);
 }
 
-ImporterReaderAdaptor* PosixFileSystermAdaptor::open_reader(const std::string& path) {
+int ImporterFileSystemAdaptor::all_block_count(std::string path, int32_t block_size_mb) {
+    auto fn = [this, block_size_mb] (const std::string& path) -> int {
+        FileMode mode;
+        size_t file_size = 0;
+        int ret = file_mode(path, &mode, &file_size);
+        if (ret < 0) {
+            DB_FATAL("get file mode failed, file: %s", path.c_str());
+            return 0;
+        }
+        size_t file_block_size = block_size_mb * 1024 * 1024ULL;
+        _all_file_size += file_size;
+        if (file_block_size <= 0) {
+            DB_FATAL("file_block_size: %ld <= 0", file_block_size);
+            return 0;
+        }
+        size_t blocks = file_size / file_block_size + 1;
+        DB_TRACE("path:%s is file, size:%lu, blocks:%lu", path.c_str(), file_size, blocks);
+        return blocks;
+    };
+    _all_file_size = 0;
+    return recurse_handle(path, fn);
+}
+
+int ImporterFileSystemAdaptor::all_row_group_count(const std::string& path) {
+    auto fn = [this] (const std::string& path) -> int {
+        FileMode mode;
+        size_t file_size = 0;
+        int ret = file_mode(path, &mode, &file_size);
+        if (ret < 0) {
+            DB_FATAL("get file mode failed, file: %s", path.c_str());
+            return 0;
+        }
+
+        _all_file_size += file_size;
+
+        auto res = open_arrow_file(path);
+        if (!res.ok()) {
+            DB_WARNING("Fail to open ParquetReader, reason: %s", res.status().message().c_str());
+            return 0;
+        }
+        auto infile = std::move(res).ValueOrDie();
+
+        ScopeGuard arrow_file_guard(
+            [this, infile] () {
+                if (infile != nullptr && !infile->closed()) {
+                    close_arrow_reader(infile);
+                }
+            } 
+        );
+
+        ::parquet::arrow::FileReaderBuilder builder;
+        auto status = builder.Open(infile);
+        if (!status.ok()) {
+            DB_WARNING("FileBuilder fail to open file, file_path: %s, reason: %s", 
+                        path.c_str(), status.message().c_str());
+            return 0; 
+        }
+        std::unique_ptr<::parquet::arrow::FileReader> reader;
+        status = builder.Build(&reader);
+        if (!status.ok()) {
+            DB_WARNING("FileBuilder fail to build reader, file_path: %s, reason: %s", 
+                        path.c_str(), status.message().c_str());
+            return 0;
+        }
+        if (BAIKALDM_UNLIKELY(reader == nullptr)) {
+            DB_WARNING("FileReader is nullptr, file_path: %s", path.c_str());
+            return 0;
+        }
+        if (BAIKALDM_UNLIKELY(reader->parquet_reader() == nullptr)) {
+            DB_WARNING("ParquetReader is nullptr, file_path: %s", path.c_str());
+            return 0;
+        }
+        auto file_metadata = reader->parquet_reader()->metadata();
+        if (BAIKALDM_UNLIKELY(file_metadata == nullptr)) {
+            DB_WARNING("FileMetaData is nullptr, file_path: %s", path.c_str());
+            return 0;
+        }
+
+        int num_row_groups = file_metadata->num_row_groups();
+
+        return num_row_groups;
+    };
+
+    return recurse_handle(path, fn);
+}
+
+ImporterReaderAdaptor* PosixFileSystemAdaptor::open_reader(const std::string& path) {
 
     DB_WARNING("open reader: %s", path.c_str());
 
     return new PosixReaderAdaptor(path);
 }
 
-void PosixFileSystermAdaptor::close_reader(ImporterReaderAdaptor* adaptor) {
+void PosixFileSystemAdaptor::close_reader(ImporterReaderAdaptor* adaptor) {
     if (adaptor) {
         delete adaptor;
     }
 }
 
-int  PosixFileSystermAdaptor::read_dir(const std::string& path, std::vector<std::string>& direntrys) {
-    dir_iter iter(path);
-    dir_iter end;
-    for (; iter != end; ++iter) {
-        std::string child_path = iter->path().c_str();
-        std::vector<std::string> split_vec;
-        boost::split(split_vec, child_path, boost::is_any_of("/"));
-        std::string out_path = split_vec.back();
-        direntrys.emplace_back(out_path);
-    }
-
-    return 1;
+::arrow::Result<std::shared_ptr<::arrow::io::RandomAccessFile>> 
+        PosixFileSystemAdaptor::open_arrow_file(const std::string& path) {
+    return ::arrow::io::ReadableFile::Open(path);
 }
 
-int PosixFileSystermAdaptor::file_mode(const std::string& path, FileMode* mode, size_t* file_size) {
+::arrow::Status PosixFileSystemAdaptor::close_arrow_reader(
+        std::shared_ptr<::arrow::io::RandomAccessFile> arrow_reader)  {
+    if (arrow_reader != nullptr && !arrow_reader->closed()) {
+        return arrow_reader->Close();
+    }
+    return ::arrow::Status::OK();
+}
+
+int PosixFileSystemAdaptor::file_mode(const std::string& path, FileMode* mode, size_t* file_size) {
     if (boost::filesystem::is_directory(path)) {
         *mode = I_DIR;
         return 0;
@@ -253,8 +372,22 @@ int PosixFileSystermAdaptor::file_mode(const std::string& path, FileMode* mode, 
     return -1;
 }
 
+int PosixFileSystemAdaptor::read_dir(const std::string& path, std::vector<std::string>& direntrys) {
+    dir_iter iter(path);
+    dir_iter end;
+    for (; iter != end; ++iter) {
+        std::string child_path = iter->path().c_str();
+        std::vector<std::string> split_vec;
+        boost::split(split_vec, child_path, boost::is_any_of("/"));
+        std::string out_path = split_vec.back();
+        direntrys.emplace_back(out_path);
+    }
+
+    return 1;
+}
+
 #ifdef BAIDU_INTERNAL
-int AfsFileSystermAdaptor::init() {
+int AfsFileSystemAdaptor::init() {
     // 创建一个AfsFileSystem实例
     _afs = new afs::AfsFileSystem(_afs_uri.c_str(), _afs_user.c_str(), _afs_password.c_str(), _afs_conf_file.c_str());
     if (_afs == NULL) {
@@ -282,7 +415,7 @@ int AfsFileSystermAdaptor::init() {
     return 0;
 }
 
-ImporterReaderAdaptor* AfsFileSystermAdaptor::open_reader(const std::string& path) {
+ImporterReaderAdaptor* AfsFileSystemAdaptor::open_reader(const std::string& path) {
     int afs_res = _afs->Exist(path.c_str());
     if (afs_res < 0) {
         DB_FATAL("file: %s, not exist, errno:%d, errmsg:%s", path.c_str(), afs_res, ds::Rc2Str(afs_res));
@@ -307,7 +440,7 @@ ImporterReaderAdaptor* AfsFileSystermAdaptor::open_reader(const std::string& pat
     return reader_adaptor;
 }
 
-void AfsFileSystermAdaptor::close_reader(ImporterReaderAdaptor* adaptor) {
+void AfsFileSystemAdaptor::close_reader(ImporterReaderAdaptor* adaptor) {
     afs::Reader* reader = ((AfsReaderAdaptor*)adaptor)->get_reader();
     int afs_res = _afs->CloseReader(reader);
     if (afs_res != ds::kOk) {
@@ -317,10 +450,23 @@ void AfsFileSystermAdaptor::close_reader(ImporterReaderAdaptor* adaptor) {
     delete adaptor;
 }
 
-int AfsFileSystermAdaptor::file_mode(const std::string& path, FileMode* mode, size_t* file_size) {
+::arrow::Result<std::shared_ptr<::arrow::io::RandomAccessFile>> 
+        AfsFileSystemAdaptor::open_arrow_file(const std::string& path) {
+    return AfsReadableFile::Open(path, this);
+}
+
+::arrow::Status AfsFileSystemAdaptor::close_arrow_reader(
+        std::shared_ptr<::arrow::io::RandomAccessFile> arrow_reader)  {
+    if (arrow_reader != nullptr && !arrow_reader->closed()) {
+        return arrow_reader->Close();
+    }
+    return ::arrow::Status::OK();
+}
+
+int AfsFileSystemAdaptor::file_mode(const std::string& path, FileMode* mode, size_t* file_size) {
     int afs_res = _afs->Exist(path.c_str());
     if (afs_res < 0) {
-        DB_FATAL("file: %s, not exist, errno:%d, errmsg:%s", path.c_str(), afs_res, ds::Rc2Str(afs_res));
+        DB_WARNING("file: %s, not exist, errno:%d, errmsg:%s", path.c_str(), afs_res, ds::Rc2Str(afs_res));
         return -1;
     }
 
@@ -347,7 +493,7 @@ int AfsFileSystermAdaptor::file_mode(const std::string& path, FileMode* mode, si
     return 0;
 }
 
-int  AfsFileSystermAdaptor::read_dir(const std::string& path, std::vector<std::string>& direntrys) {
+int  AfsFileSystemAdaptor::read_dir(const std::string& path, std::vector<std::string>& direntrys) {
     std::vector<afs::DirEntry> afs_entrys;
     int afs_res = _afs->Readdir(path.c_str(), &afs_entrys);
     if (afs_res < 0){
@@ -363,12 +509,192 @@ int  AfsFileSystermAdaptor::read_dir(const std::string& path, std::vector<std::s
     return 1;
 }
 
-void AfsFileSystermAdaptor::destroy() {
+void AfsFileSystemAdaptor::destroy() {
     int afs_res = _afs->DisConnect();
     if (afs_res < 0) {
         DB_FATAL("disconnect failed, errno:%d, errmsg:%s", afs_res, ds::Rc2Str(afs_res));
     } 
 }
+
+// AfsReadableFileImpl
+class AfsReadableFile::AfsReadableFileImpl {
+public:
+    explicit AfsReadableFileImpl(ImporterFileSystemAdaptor* fs, ::arrow::MemoryPool* pool) : _fs(fs), _pool(pool) {}
+    ~AfsReadableFileImpl() {}
+
+    ::arrow::Status Open(const std::string& path) {
+        if (BAIKALDM_UNLIKELY(_fs == nullptr)) {
+            return ::arrow::Status::IOError("ImporterFileSystemAdaptor is nullptr");
+        }
+        _path = path;
+        _reader = _fs->open_reader(_path);
+        if (BAIKALDM_UNLIKELY(_reader == nullptr)) {
+            return ::arrow::Status::IOError("AfsReaderAdaptor is nullptr");
+        }
+        _is_opened = true;
+        return ::arrow::Status::OK();
+    }
+
+    ::arrow::Status Close() {
+        if (!_is_opened) {
+            return ::arrow::Status::OK();
+        }
+        _is_opened = false;
+        _fs->close_reader(_reader);
+        return ::arrow::Status::OK();
+    }
+
+    bool closed() const {
+        return !_is_opened;
+    }
+
+    ::arrow::Result<int64_t> Read(int64_t nbytes, void* buffer) {
+        int64_t total_bytes = 0;
+        while (total_bytes < nbytes) {
+            int64_t ret = _reader->read(buffer + total_bytes, nbytes - total_bytes);
+            if (ret == 0) {
+                break;
+            }
+            if (ret < 0) {
+                return ::arrow::Status::IOError("ImporterReaderAdaptor fail to read");
+            }
+            total_bytes += ret;
+        }
+        return total_bytes;
+    }
+
+    ::arrow::Result<std::shared_ptr<::arrow::Buffer>> Read(int64_t nbytes) {
+        std::unique_ptr<::arrow::ResizableBuffer> buffer;
+        BAIKALDM_ARROW_ASSIGN_OR_RAISE(buffer, ::arrow::AllocateResizableBuffer(nbytes, _pool));
+        if (BAIKALDM_UNLIKELY(buffer == nullptr)) {
+            return ::arrow::Status::IOError("Arrow buffer is empty");
+        }
+
+        int64_t bytes_read;
+        BAIKALDM_ARROW_ASSIGN_OR_RAISE(bytes_read, Read(nbytes, buffer->mutable_data()));
+        if (bytes_read < nbytes) {
+            BAIKALDM_ARROW_RETURN_NOT_OK(buffer->Resize(bytes_read));
+        }
+        return std::move(buffer);
+    }
+
+    // TODO - PRead
+    ::arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, uint8_t* buffer) {
+        std::lock_guard<std::mutex> lck(_mtx);
+        BAIKALDM_ARROW_RETURN_NOT_OK(Seek(position));
+        return Read(nbytes, buffer);
+    }
+
+    ::arrow::Result<std::shared_ptr<::arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) {
+        std::unique_ptr<::arrow::ResizableBuffer> buffer;
+        BAIKALDM_ARROW_ASSIGN_OR_RAISE(buffer, ::arrow::AllocateResizableBuffer(nbytes, _pool));
+        if (BAIKALDM_UNLIKELY(buffer == nullptr)) {
+            return ::arrow::Status::IOError("Arrow buffer is empty");
+        }
+
+        int64_t bytes_read;
+        BAIKALDM_ARROW_ASSIGN_OR_RAISE(bytes_read, ReadAt(position, nbytes, buffer->mutable_data()));
+        if (bytes_read < nbytes) {
+            BAIKALDM_ARROW_RETURN_NOT_OK(buffer->Resize(bytes_read));
+            buffer->ZeroPadding();
+        }
+        return std::move(buffer);
+    }
+
+    ::arrow::Result<int64_t> GetSize() {
+        size_t file_size;
+        FileMode mode;
+        auto afs_res = _fs->file_mode(_path, &mode, &file_size);
+        if (afs_res < 0) {
+            return ::arrow::Status::IOError("AfsFileSystemAdaptor fail to get file_mode");
+        }
+        if (mode != I_FILE) {
+            return ::arrow::Status::IOError("Path: " + _path + " is not file");
+        }
+        return file_size;
+    }
+
+    ::arrow::Status Seek(int64_t position) {
+        int64_t ret = _reader->seek(position);
+        if (ret < 0) {
+            return ::arrow::Status::IOError(
+                        "AfsReaderAdaptor fail to seek, path: " + _path + ", position: " + std::to_string(position));
+        }
+        return ::arrow::Status::OK();
+    }
+
+    ::arrow::Result<int64_t> Tell() const {
+        int64_t ret = _reader->tell();
+        if (ret < 0) {
+            return ::arrow::Status::IOError("AfsReaderAdaptor fail to tell, path: " + _path);
+        }
+        return ret;
+    }
+
+private:
+    std::mutex                 _mtx;
+    bool                       _is_opened { false };
+    ::arrow::MemoryPool*       _pool;
+    std::string                _path;
+    ImporterReaderAdaptor*     _reader;
+    ImporterFileSystemAdaptor* _fs;
+};
+
+// AfsReadableFile
+::arrow::Result<std::shared_ptr<AfsReadableFile>> AfsReadableFile::Open(
+            const std::string& path, ImporterFileSystemAdaptor* fs, ::arrow::MemoryPool* pool) {
+    auto file = std::shared_ptr<AfsReadableFile>(new (std::nothrow) AfsReadableFile(fs, pool));
+    if (BAIKALDM_UNLIKELY(file == nullptr || file->_impl == nullptr)) {
+        return ::arrow::Status::OutOfMemory("Fail to new AfsReadableFile");
+    }
+    BAIKALDM_ARROW_RETURN_NOT_OK(file->_impl->Open(path));
+    return file;
+}
+
+AfsReadableFile::AfsReadableFile(ImporterFileSystemAdaptor* fs, ::arrow::MemoryPool* pool) { 
+    _impl.reset(new AfsReadableFileImpl(fs, pool)); 
+} 
+
+AfsReadableFile::~AfsReadableFile() { 
+    _impl->Close(); 
+}
+
+::arrow::Status AfsReadableFile::Close() {
+    return _impl->Close();
+}
+
+bool AfsReadableFile::closed() const {
+    return _impl->closed();
+}
+
+::arrow::Result<int64_t> AfsReadableFile::Read(int64_t nbytes, void* buffer) {
+    return _impl->Read(nbytes, buffer);
+}
+
+::arrow::Result<std::shared_ptr<::arrow::Buffer>> AfsReadableFile::Read(int64_t nbytes) {
+    return _impl->Read(nbytes);
+}
+
+::arrow::Result<int64_t> AfsReadableFile::ReadAt(int64_t position, int64_t nbytes, void* buffer) {
+    return _impl->ReadAt(position, nbytes, reinterpret_cast<uint8_t*>(buffer));
+}
+
+::arrow::Result<std::shared_ptr<::arrow::Buffer>> AfsReadableFile::ReadAt(int64_t position, int64_t nbytes) {
+    return _impl->ReadAt(position, nbytes);
+}
+
+::arrow::Status AfsReadableFile::Seek(int64_t position) {
+    return _impl->Seek(position);
+}
+
+::arrow::Result<int64_t> AfsReadableFile::Tell() const {
+    return _impl->Tell();
+}
+
+::arrow::Result<int64_t> AfsReadableFile::GetSize() {
+    return _impl->GetSize();
+}
+
 #endif
 
 // return -1 : fail 
@@ -402,293 +728,6 @@ int ReadDirImpl::next_entry(std::string& entry){
     entry = _entrys[_idx++];
     DB_WARNING("readdir: %s, get next entry: %s", _path.c_str(), entry.c_str());
     return 0;
-}
-
-
-int BlockImpl::init() {
-    _file = _fs->open_reader(_path);
-    if (_file == nullptr) {
-        DB_FATAL("open reader failed, file: %s", _path.c_str());
-        return -1;
-    }
-    _read_buffer_size = FLAGS_file_buffer_size * 1024 * 1024ULL;
-    _buf = (char*)malloc(_read_buffer_size);
-    if (_buf == nullptr) {
-        return -1;
-    }
-
-    return 0;
-}
-
-int BlockImpl::buf_resize(int64_t size) {
-    if (_buf != nullptr) {
-        free(_buf);
-        _buf = nullptr;
-    }
-
-    _read_buffer_size = size;
-    _buf = (char*)malloc(_read_buffer_size);
-    if (_buf == nullptr) {
-        return -1;
-    }
-
-    return 0;
-}
-
-bool BlockImpl::block_finish() {
-    // 只有_cur_pos > _end_pos才能判断完成，相等说明_end_pos正好在行首，需要多读一行，因为下一个block跳过了首行
-    if (_cur_pos > _end_pos) {
-        return true;
-    }
-
-    if (_cur_pos == _end_pos && _end_pos == _file_size) {
-        return true;
-    }
-
-    if (_start_pos == _end_pos) {
-        return true;
-    }
-
-    return false;
-}
-
-// 循环调用直到读取结束
-int BlockImpl::read_and_exec() {
-    if (block_finish()) {
-        return 1;
-    }
-    const int64_t file_pos = _cur_pos;
-    int64_t buf_pos = 0;
-    int64_t buf_size = _file->read(file_pos, _buf, _read_buffer_size);
-    if (buf_size < 0) {
-        DB_FATAL("read filed, file: %s, pos: %lu", _path.c_str(), file_pos);
-        return -1;
-    } else if (buf_size == 0) {
-        return 1;
-    }
-
-    MemBuf sbuf(_buf, _buf + buf_size);
-    std::istream f(&sbuf);
-
-    // 跳过首行
-    if (_escape_first_line) {
-        std::string line;
-        std::getline(f, line);
-        // 首行没读完整说明line size > _buf size 暂时不支持
-        if (f.eof()) {
-            DB_FATAL("path: %s, line_size: %lu > buf_size: %ld", _path.c_str(), line.size(), buf_size);
-            // 增大buffer重试
-            if (buf_resize(_read_buffer_size * 2) < 0) {
-                return -1;
-            }
-            return 0;
-        }
-
-        buf_pos += line.size() + 1;
-        _escape_first_line = false;
-    }
-
-    _cur_pos = file_pos + buf_pos;
-    if (block_finish()) {
-        return 1;
-    }
-
-    bool  has_get_line = false;
-    while (!f.eof()) {
-        std::string line;
-        std::getline(f, line);
-
-        // eof直接退出不更新 _cur_pos, 下次从_cur_pos继续读
-        if (f.eof()) {
-            buf_pos += line.size();
-
-            // 最后一块特殊处理，不需要跳过
-            if (file_pos + buf_pos == _end_pos && _end_pos == _file_size) {
-                if (!line.empty()) {
-                    _lines_manager.handle_line(line);
-                }
-                DB_FATAL("EOF");
-                return 1;
-            }
-
-            if (_cur_pos <= _end_pos && !has_get_line) {
-                // 增大buffer重试
-                if (buf_resize(_read_buffer_size * 2) < 0) {
-                    return -1;
-                }
-
-                return 0;
-            }
-
-            DB_WARNING("path: %s, eof, pos: %ld", _path.c_str(), buf_pos + file_pos);
-            return 0;
-        }
-        has_get_line = true;
-        buf_pos += line.size() + 1;
-        _cur_pos = file_pos + buf_pos;
-        _lines_manager.handle_line(line);
-        //write(line);
-        if (block_finish()) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-void BlockImpl::LinesManager::handle_line(std::string& line) {
-    _lines.emplace_back(line);
-    if (_lines.size() < _insert_values_count) {
-        return;
-    }
-    std::vector<std::string> tmp_lines;
-    tmp_lines.reserve(_insert_values_count);
-    _lines.swap(tmp_lines);
-    auto calc = [this, tmp_lines]() {
-        _func(_path, tmp_lines);
-        // 如果_func(数据列数不符合要求)执行太快，会卡在push_rq
-        bthread_usleep(1000);
-        _cond.decrease_signal();
-    };
-
-    _cond.increase_wait();
-    Bthread bth(&BTHREAD_ATTR_SMALL);
-    bth.run(calc);
-    _lines.clear();
-}
-
-void BlockImpl::LinesManager::join() {
-    if (_lines.size() <= 0) {
-        return;
-    }
-    std::vector<std::string> tmp_lines;
-    tmp_lines.reserve(_insert_values_count);
-    _lines.swap(tmp_lines);
-    auto calc = [this, tmp_lines]() {
-        _func(_path, tmp_lines);
-        bthread_usleep(1000);
-        _cond.decrease_signal();
-    };
-
-    _cond.increase_wait();
-    Bthread bth(&BTHREAD_ATTR_SMALL);
-    bth.run(calc);
-    _lines.clear();
-}
-
-int ImporterImpl::recurse_handle(const std::string& path, const ProgressFunc& progress_func) {
-    FileMode mode;
-    size_t file_size = 0;
-    int ret = _fs->file_mode(path, &mode, &file_size);
-    if (ret < 0) {
-        DB_FATAL("get file mode failed, file: %s", path.c_str());
-        _import_ret << "get file mode failed, file: " << path;
-        return -1;
-    }
-    
-    if (I_DIR == mode) {
-        ReadDirImpl dir_iter(path, _fs);
-        while (1) {
-            std::string child_path;
-            int ret = dir_iter.next_entry(child_path);
-            if (ret < 0) {
-                DB_FATAL("fail next_entry, path:%s child_path:%s", path.c_str(), child_path.c_str());
-                return -1;
-            } else if (ret == 1) {
-                break;
-            }
-
-            ret = recurse_handle(path + "/" + child_path, progress_func);
-            if (ret < 0) {
-                DB_FATAL("fail handle, path:%s, child_path:%s", path.c_str(), child_path.c_str());
-                return -1;
-            }
-        }
-
-        return 0;   
-    }
-
-    if (I_LINK == mode && _fs->is_posix()) {
-        char buf[2000] = {0};
-        readlink(path.c_str(), buf, sizeof(buf));
-        boost::filesystem::path symlink(path);
-        boost::filesystem::path symlink_dir = symlink.parent_path();
-        std::string real_path;
-        if (buf[0] == '/') {
-            real_path = buf;
-        } else {
-            real_path = symlink_dir.string() + "/" + buf;
-        }
-        DB_WARNING("path:%s is symlink, real path:%s", path.c_str(), real_path.c_str());
-        return recurse_handle(real_path, progress_func);
-    }
-
-    if (I_FILE != mode) {
-        return 0;
-    }
-    
-    size_t file_block_size = FLAGS_file_block_size * 1024 * 1024ULL;
-    if (file_block_size == 0) {
-        DB_FATAL("file_block_size = 0");
-        return -1;
-    }
-
-    size_t file_start_pos = 0;
-    size_t file_end_pos = file_size;
-    if (_start_pos != 0 && _start_pos < file_size) {
-        file_start_pos = _start_pos;
-    }
-    if (_end_pos != 0 && _end_pos < file_size) {
-        file_end_pos = _end_pos;
-    }
-    if (file_start_pos > file_end_pos) {
-        DB_FATAL("path: %s, file_start_pos(%ld) > file_end_pos(%ld)", path.c_str(), file_start_pos, file_end_pos);
-        return -1;
-    }
-    size_t blocks =  (file_end_pos - file_start_pos) / file_block_size + 1;
-    for (size_t i = 0; i < blocks; i++) {
-        size_t start_pos = i * file_block_size + file_start_pos; 
-        size_t end_pos   = (i + 1) * file_block_size + file_start_pos;
-        end_pos = end_pos > file_end_pos ? file_end_pos : end_pos;
-
-        auto calc = [this, path, start_pos, end_pos, file_size]() {
-            TimeCost cost;
-            std::shared_ptr<BthreadCond> auto_decrease(&_file_concurrency_cond,
-                            [](BthreadCond* cond) {cond->decrease_signal();});
-            {
-                BlockImpl block(path, start_pos, end_pos, file_size, _fs, _lines_func, _has_header, _insert_values_count);
-                int ret = block.init();
-                if (ret < 0) {
-                    _result = -1;
-                    DB_FATAL("blockImpl init failed, file: %s", path.c_str());
-                    _import_ret << "blockImpl init failed, file: " << path;
-                    return;
-                }
-                DB_WARNING("block init success, path: %s", path.c_str());
-                while (1) {
-                    ret = block.read_and_exec();
-                    if (ret < 0) {
-                        _result = -1;
-                        _import_ret << "blockImpl run failed, file: " << path;
-                        return;
-                    } else if (ret == 1) {
-                        break;
-                    } 
-                }
-            }
-            _handled_block_count++;
-            DB_TRACE("handle block path:%s, start_pos:%ld, rate of progress:%ld/%ld cost:%ld",
-                            path.c_str(), start_pos, _handled_block_count.load(), _all_block_count, cost.get_time());
-        };
-        
-        _file_concurrency_cond.increase_wait();
-        Bthread bth(&BTHREAD_ATTR_SMALL);
-        bth.run(calc);
-        // 显示进度
-        std::string progress_str = "rate of progress: " + std::to_string(_handled_block_count.load()) + "/" + std::to_string(_all_block_count);
-        progress_func(progress_str);
-    }
-    return 0;
-
 }
 
 } //baikaldb

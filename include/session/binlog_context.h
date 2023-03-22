@@ -104,6 +104,19 @@ public:
 
     int64_t get_binlog_row_cnt() const { return _binlog_row_cnt; }
 
+    void add_sql_info(const std::string& db, const std::string& table, const uint64_t sign) {
+        _db_tables.insert(db + "." + table);
+        _signs.insert(sign);
+    }
+
+    std::set<std::string>& get_db_tables() {
+        return _db_tables;
+    } 
+
+    std::set<uint64_t>& get_signs() {  
+        return _signs;
+    }
+
 private:
     SmartTable            _table_info = nullptr;
     int64_t               _start_ts = -1;
@@ -114,6 +127,8 @@ private:
     SchemaFactory*        _factory = nullptr;
     uint64_t              _partition_key = 0;
     int64_t               _binlog_row_cnt = 0;
+    std::set<std::string> _db_tables;
+    std::set<uint64_t>    _signs;
 };
 
 } // namespace baikaldb

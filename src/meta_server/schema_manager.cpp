@@ -595,6 +595,16 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
             pb::MetaManagerResponse* response,
             uint64_t log_id) {
     auto& table_info = const_cast<pb::SchemaInfo&>(request->table_info());
+    // 校验新表所在集群是否有learner
+    if (table_info.learner_resource_tags_size() > 0) {
+        for (const auto& learner_resource_tag : table_info.learner_resource_tags()) {
+            if(!ClusterManager::get_instance()->check_resource_tag_exist(learner_resource_tag)) {
+                ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                    "learner resource_tag not exist", request->op_type(), log_id);
+                return -1;
+            }
+        }
+    }
     int partition_num = 1;
     if (request->table_info().has_partition_num()) {
         partition_num = request->table_info().partition_num(); 

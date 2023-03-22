@@ -27,25 +27,23 @@
 #include <gflags/gflags.h>
 #include <json/json.h>
 #include "baikal_client.h"
-#include "common.h"
 #include "schema_factory.h"
 #include "meta_server_interact.hpp"
 #include "mut_table_key.h"
-#include "importer_filesysterm.h"
+#include "file_executor.h"
 #include <baidu/feed/mlarch/babylon/lite/iconv.h>
+#include "capture_tool.h"
+#include "flash_back.h"
 
-namespace babylon = baidu::feed::mlarch::babylon;
 namespace baikaldb {
+namespace babylon = baidu::feed::mlarch::babylon;
 DECLARE_string(insert_mod);
 DECLARE_int32(atom_check_mode);
 DECLARE_int64(atom_min_id);
 DECLARE_int64(atom_max_id);
 DECLARE_int64(atom_base_fields_cnt);
 DECLARE_bool(select_first);
-class ImporterFileSystermAdaptor;
-
-typedef std::function<void(const std::string& path, const std::vector<std::string>&)> LinesFunc;
-typedef std::function<void(const std::string&)> ProgressFunc;
+class ImporterFileSystemAdaptor;
 
 enum OpType {
     DEL = 0,
@@ -55,13 +53,14 @@ enum OpType {
     SEL,
     SEL_PRE,
     REP,
-    XBS,
-    XCUBE,
     BASE_UP, //导入基准,基准内可能有多个表的数据，需要根据第一列的level值判断
     TEST,
     ATOM_IMPORT,    // atom 导入
-    ATOM_CHECK,      // atom 校验
-    BIGTTREE_DIFF   // bigtree diff    
+    ATOM_CHECK,     // atom 校验
+    BIGTTREE_DIFF,  // bigtree diff  
+    TXN_UP,         // 事务模式导入 
+    RECOVERY, 
+    DIFF_LINE       // 打印diff lines
 };
 
 struct OpDesc {
@@ -77,12 +76,13 @@ static std::vector<OpDesc> op_name_type = {
     {"select",            SEL},
     {"select_prepare",    SEL_PRE},
     {"replace",           REP},
-    {"xbs",               XBS},
-    {"xcube",             XCUBE},
     {"test",              TEST},
     {"atom_import",       ATOM_IMPORT},
     {"atom_check",        ATOM_CHECK},
     {"bigtree_diff",      BIGTTREE_DIFF},
+    {"txn_up",            TXN_UP},
+    {"recovery",          RECOVERY},
+    {"diff_line",         DIFF_LINE},
 };
 
 struct ImportTableInfo{
@@ -90,9 +90,21 @@ struct ImportTableInfo{
     std::string table;
     std::vector<std::string> fields;
     std::set<int> ignore_indexes;
+    std::set<int> empty_as_null_indexes;
     std::string filter_field;
     std::string filter_value;
     int filter_idx;
+};
+
+struct FlashBackTableInfo{
+    std::string db;
+    std::string table;
+    std::set<std::string> skip_fields;
+
+    // 统计信息
+    std::atomic<int64_t> success_cnt {0};
+    std::atomic<int64_t> fail_cnt    {0};
+    std::atomic<int64_t> legacy_cnt  {0};
 };
 
 struct FastImportTaskDesc {
@@ -127,6 +139,7 @@ struct FastImportTaskDesc {
     std::set<int> empty_as_null_indexes;
     std::set<int> binary_indexes;
     std::map<std::string, std::string> const_map;
+    FileType file_type = FileType::Text;
 
     void reset() {
         file_path.clear();
@@ -150,6 +163,7 @@ struct FastImportTaskDesc {
         empty_as_null_indexes.clear();
         binary_indexes.clear();
         const_map.clear();
+        file_type = FileType::Text;
     }
 };
 
@@ -201,21 +215,32 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines) {};
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) {};
 
     virtual int close() { return 0; }
 
-    int handle_files(const LinesFunc& fn, ImporterFileSystermAdaptor* fs, const std::string& config, const ProgressFunc& progress_func);
+    int handle_files(const FieldsFunc& fileds_func, const SplitFunc& split_func, const ConvertFunc& convert_func, 
+                     ImporterFileSystemAdaptor* fs, const std::string& config, const ProgressFunc& progress_func,
+                     const FinishBlockFunc& finish_block_func);
 
-    int64_t run(ImporterFileSystermAdaptor* fs, const std::string& config, const ProgressFunc& progress_func);
+    int64_t run(ImporterFileSystemAdaptor* fs, const std::string& config, const ProgressFunc& progress_func,
+                const FinishBlockFunc& finish_block_func);
 
-    int query(std::string sql, baikal::client::SmartConnection& connection, bool is_retry = false);
+    int query(std::string sql, int quota, baikal::client::SmartConnection& connection, bool is_retry = false);
 
     int query(std::string sql, bool is_retry = false);
 
+    int query_dm_baikaldb(std::string sql, baikal::client::ResultSet& result_set);
+    
+    void insert_err_sqls(const std::string& err_sql);
+
+    int get_table_primary_key(std::set<std::string>& pk_fields);
+
     int rename_table(std::string old_name, std::string new_name);
 
-    std::string _mysql_escape_string(baikal::client::SmartConnection connection, const std::string& value);
+    std::string _mysql_escape_string(baikal::client::SmartConnection& connection, const std::string& value);
 
     static ImporterHandle* new_handle(OpType type,
             baikal::client::Service* baikaldb,
@@ -228,8 +253,39 @@ public:
         return new_handle(type, baikaldb, nullptr, done_path);
     }
 
+    static Json::Value get_node_json(const Json::Value& done_root) {
+        for (auto& name_type : op_name_type) {
+            if (done_root.isMember(name_type.name)) {
+                if (done_root[name_type.name].isArray() && done_root[name_type.name].size() > 0) {
+                    Json::Value node_tmp = done_root[name_type.name][0];
+                    return node_tmp;
+                }
+            }
+        }
+        return {};
+    }
+
+    static bool is_launch_capture_task(const Json::Value& done_root) {
+       try {
+           for (auto& name_type : op_name_type) {
+               if (done_root.isMember(name_type.name)) {
+                   for (auto& node : done_root[name_type.name]) {
+                       if (node.isMember("capture_task")) {
+                           if (node["capture_task"].asBool()) {
+                               return true;
+                           }
+                       }
+                   }
+               }
+           } 
+           return false;
+       } catch (Json::LogicError& e) {
+           DB_FATAL("fail parse what:%s", e.what());
+           return false;
+       }
+    }
+
     std::string handle_result() {
-        _import_ret << " diff lines: " << _import_diff_lines;
         return _import_ret.str();
     }
 
@@ -253,37 +309,181 @@ public:
         return _import_lines.load();
     }
 
-    bool split(const std::string& line, std::vector<std::string>* split_vec) {
+    int64_t get_import_diff_lines() {
+        return _import_diff_lines.load();
+    }
+        
+    int64_t get_import_affected_row() {
+        return _import_affected_row.load();
+    }
+
+    int64_t get_err_sql_cnt() {
+        return _err_cnt_retry.load();
+    }
+
+    std::string get_diffline_sample() {
+        return _diff_line_sample;
+    }
+
+    std::string get_sql_err_reason() {
+        return _sql_err_reason;
+    }
+
+    void set_upload_errsql_info(const std::string& table_info, 
+                                int64_t version, 
+                                baikal::client::Service* dm_baikaldb) {
+        _table_info = table_info;
+        _version = version;
+        _dm_baikaldb = dm_baikaldb;
+    }
+
+    void set_finished_blocks(bool is_broken_point_continuing, 
+                             std::unordered_map<std::string, std::map<int64_t, int64_t>>& finished_blocks) {
+        _broken_point_continuing = is_broken_point_continuing;
+        _finished_blocks = finished_blocks;
+    }
+
+    std::string get_sample_sqls() {
+        return _sample_sql;
+    }
+
+    void set_task_config(const std::string& conf_str) {
+        _task_config = conf_str;
+    }
+
+    std::string get_db() {
+        return _db;
+    }
+
+    std::string get_table() {
+        return _table;
+    }
+
+    std::string get_all_import_result(int64_t import_line_last_import, 
+                                      int64_t affected_row_last_import, 
+                                      int64_t diffline_last_import,
+                                      int64_t err_sql_last_import) {
+        return _db + "." + _table 
+                + ": import_line[" + std::to_string(_import_lines.load() + import_line_last_import - _import_diff_lines.load()) 
+                + "], affected_row[" + std::to_string(_import_affected_row.load() + affected_row_last_import)
+                + "], diffline[" + std::to_string(_import_diff_lines.load() + diffline_last_import)
+                + "], error_sql[" + std::to_string(_err_cnt_retry.load() + err_sql_last_import) + "]; ";  
+    }
+
+protected:
+    virtual bool split(std::string& line, std::vector<std::string>& split_vec) {
+        if (!convert(line)) {
+            return false;
+        }
+        boost::split(split_vec, line, boost::is_any_of(_delim));
+        return true;
+    }
+
+    virtual bool convert(std::string& line) {
         if (_need_iconv) {
             std::string new_line;
             if (_charset == "utf8") {
                 if (0 != babylon::iconv_convert<babylon::Encoding::UTF8, 
                     babylon::Encoding::GB18030, babylon::IconvOnError::IGNORE>(new_line, line)) {
+                    _import_lines++;
                     _import_diff_lines++;
-                    DB_FATAL("iconv gb18030 to utf8 failed, ERRLINE:%s", line.c_str());
                     return false;
                 }
             } else {
                 if (0 != babylon::iconv_convert<babylon::Encoding::GB18030, 
                     babylon::Encoding::UTF8, babylon::IconvOnError::IGNORE>(new_line, line)) {
+                    _import_lines++;
                     _import_diff_lines++;
-                    DB_FATAL("iconv utf8 to gb18030 failed, ERRLINE:%s", line.c_str());
                     return false;
                 }
             }
-            boost::split(*split_vec, new_line, boost::is_any_of(_delim));
-        } else {
-            boost::split(*split_vec, line, boost::is_any_of(_delim));
+            std::swap(line, new_line);
         }
         return true;
     }
 
-protected:
+    void restore_line(const std::vector<std::string>& fields, std::string& line) {
+        line = boost::join(fields, _delim);
+    }
+
+    std::string gen_insert_sql(baikal::client::SmartConnection& connection, const std::string& database_name, const std::string& table_name, 
+                            const std::map<std::string, std::string>& values_map) {
+
+        std::string sql = "INSERT IGNORE INTO " + database_name + "." + table_name;
+        std::string names;
+        std::string values;
+
+        for (auto iter : values_map) {
+            names += iter.first;
+            names += ",";
+            if (iter.second != "__NULL__") {
+                values += "'" + _mysql_escape_string(connection, iter.second) + "'";
+            }
+            values += ",";
+        }
+
+        names.pop_back();
+        values.pop_back();
+
+        sql += " (" + names + ") VALUES (" + values + ")";
+
+        return sql;
+    }
+    std::string gen_delete_sql(baikal::client::SmartConnection& connection, const std::string& database_name, const std::string& table_name, 
+                            const std::map<std::string, std::string>& where_map) {
+
+        std::string sql = "DELETE FROM " + database_name + "." + table_name;
+
+
+        sql += " WHERE ";
+        std::vector<std::string> where_vec;
+        where_vec.reserve(5);
+        for (auto iter : where_map) {
+            if (iter.second == "__NULL__") {
+                where_vec.push_back(iter.first + " is null");
+            } else {
+                where_vec.push_back(iter.first + "='" + _mysql_escape_string(connection, iter.second) + "'");
+            }
+        }
+        sql += boost::join(where_vec, " AND ");
+
+        return sql;
+    }
+
+    std::string gen_update_sql(baikal::client::SmartConnection& connection, const std::string& database_name, const std::string& table_name, 
+                            const std::map<std::string, std::string>& set_map, const std::map<std::string, std::string>& where_map) {
+        std::string sql = "UPDATE " + database_name + "." + table_name;
+        sql += " SET ";
+        std::vector<std::string> set_vec;
+        set_vec.reserve(5);
+        for (auto iter : set_map) {
+            if (iter.second == "__NULL__") {
+                set_vec.push_back(iter.first + "=NULL");
+            } else {
+                set_vec.push_back(iter.first + "='" + _mysql_escape_string(connection, iter.second) + "'");
+            }
+        }
+        sql += boost::join(set_vec, ", ");
+        sql += " WHERE ";
+        std::vector<std::string> where_vec;
+        where_vec.reserve(5);
+        for (auto iter : where_map) {
+            if (iter.second == "__NULL__") {
+                where_vec.push_back(iter.first + " is null");
+            } else {
+                where_vec.push_back(iter.first + "='" + _mysql_escape_string(connection, iter.second) + "'");
+            }
+        }
+        sql += boost::join(where_vec, " AND ");
+
+        return sql;
+    }
+
     // Construct
     OpType _type;
     baikal::client::Service* _baikaldb;
     std::string _done_path;
-    ImporterFileSystermAdaptor* _fs;
+    ImporterFileSystemAdaptor* _fs { nullptr };
 
     // init
     std::string _db;
@@ -301,6 +501,18 @@ protected:
     size_t _file_min_size = 0;
     size_t _file_max_size = 0;
     bool _has_header = false;
+    FileType _file_type = FileType::Text;
+    int _tps = 0;
+    bool _need_generate_sql = true;
+    std::string _sample_sql;
+
+    bool _broken_point_continuing = false;
+    // file_path -> start_pos -> end_pos
+    std::unordered_map<std::string, std::map<int64_t, int64_t>> _finished_blocks;
+    // for upload err sqls
+    baikal::client::Service* _dm_baikaldb = nullptr;
+    std::string _table_info;
+    int64_t _version;
 
     std::string _err_name;
     std::string _err_name_retry;
@@ -310,11 +522,14 @@ protected:
     std::atomic<int64_t> _err_cnt_retry{0};
     std::atomic<int64_t> _err_cnt{0};
     std::atomic<int64_t> _succ_cnt{0};
+    std::string _diff_line_sample;
+    std::string _sql_err_reason;
 
     bool    _error = false;
     bool    _null_as_string = false;
     std::atomic<int64_t> _import_lines{0};
     std::atomic<int64_t> _import_diff_lines{0};
+    std::atomic<int64_t> _import_affected_row{0};
     std::ostringstream   _import_ret;
     TimeCost _cost;
     bool    _need_iconv = false;
@@ -324,6 +539,7 @@ protected:
     std::set<int> _binary_indexes;
     int64_t _max_failure_percent = 100;
     int64_t _retry_times = 0;
+    std::string _task_config;
 };
 
 class TestOutFile {
@@ -368,6 +584,17 @@ public:
         _out.flush();
     }
 
+    void write(const std::vector<std::vector<std::string>>& fields_vec, const std::string& delim) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        for (const auto& fields : fields_vec) {
+            cnt++;
+            std::string line = boost::join(fields, delim);
+            line += "\n";
+            _out << line;  
+        }
+        _out.flush();
+    }
+
 private:
     int cnt = 0;
     std::string _file_name;
@@ -398,7 +625,9 @@ public:
         return 0;
     }
     
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines) {
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override {
         std::vector<std::string> split_vec;
         boost::split(split_vec, path, boost::is_any_of("/"));
         std::string file_name = split_vec.back();
@@ -411,9 +640,14 @@ public:
             }
         }
         auto it = _out_file.find(file_name);
-        it->second->write(lines);
+        if (it == _out_file.end()) {
+            return;
+        }
+        if (it->second == nullptr) {
+            return;
+        }
+        it->second->write(fields_vec, _delim);
     }
-
 
 private:
     bthread_mutex_t _mutex;
@@ -448,7 +682,7 @@ public:
         return 0;
     }
 
-    void handle_lines_insert(const std::string& path, const std::vector<std::string>& lines) {
+    void handle_fields_insert(const std::string& path, const std::vector<std::vector<std::string>>& fields_vec) {
         std::string sql;
         std::string insert_values;
         int cnt = 0;
@@ -458,10 +692,10 @@ public:
                 ignore_rows.load(), select_rows.load(), succ_rows.load(), fail_rows.load(), diff_rows.load());
         }
         std::map<uint64_t, std::string> id_literal_map;
-        int ret = id_literal_need_insert(lines, id_literal_map);
+        int ret = id_literal_need_insert(fields_vec, id_literal_map);
         if (ret == -1) {
-            _insert_fial_file.write(lines);
-            fail_rows += lines.size();
+            _insert_fial_file.write(fields_vec, _delim);
+            fail_rows += fields_vec.size();
             return;
         } else if (ret == -2) {
             return;
@@ -473,7 +707,8 @@ public:
             }  
         }));
         for (auto& id_literal : id_literal_map) {
-            std::vector<std::string> split_vec;split_vec.reserve(2);
+            std::vector<std::string> split_vec;
+            split_vec.reserve(2);
             split_vec.emplace_back(std::to_string(id_literal.first));
             split_vec.emplace_back(id_literal.second);
             cnt++;
@@ -508,16 +743,16 @@ public:
         sql += insert_values;
         ret = query(sql, false); 
         if (ret < 0) {
-            _insert_fial_file.write(lines);
+            _insert_fial_file.write(fields_vec, _delim);
             DB_TRACE("atom_insert fail sql:%s", sql.c_str());
-            fail_rows += lines.size();
+            fail_rows += fields_vec.size();
         } else {
             succ_rows += cnt;
         }
 
     }
 
-    void handle_lines_diff(const std::string& path, const std::vector<std::string>& lines) {
+    void handle_fields_diff(const std::string& path, const std::vector<std::vector<std::string>>& fields_vec) {
         int cnt = 0;
         if (print_log_interval.get_time() > 60 * 1000 * 1000) {
             print_log_interval.reset();
@@ -525,10 +760,10 @@ public:
                 ignore_rows.load(), select_rows.load(), succ_rows.load(), fail_rows.load(), diff_rows.load());
         }
         std::map<uint64_t, std::string> id_literal_map;
-        int ret = id_literal_need_insert(lines, id_literal_map);
+        int ret = id_literal_need_insert(fields_vec, id_literal_map);
         if (ret == -1) {
-            _insert_fial_file.write(lines);
-            fail_rows += lines.size();
+            _insert_fial_file.write(fields_vec, _delim);
+            fail_rows += fields_vec.size();
             return;
         } else if (ret == -2) {
             return;
@@ -563,15 +798,15 @@ public:
 
         ret = select_data_from_mysql(select_id_sql, id_wordid_showword_map, id_showword_wordid_map);
         if (ret != 0) {
-            _insert_fial_file.write(lines);
-            fail_rows += lines.size();
+            _insert_fial_file.write(fields_vec, _delim);
+            fail_rows += fields_vec.size();
             return;
         }
 
         ret = select_data_from_mysql(select_literal_sql, literal_wordid_showword_map, literal_showword_wordid_map);
         if (ret != 0) {
-            _insert_fial_file.write(lines);
-            fail_rows += lines.size();
+            _insert_fial_file.write(fields_vec, _delim);
+            fail_rows += fields_vec.size();
             return;
         }
 
@@ -608,25 +843,69 @@ public:
 
         ret = query(insert_sql, false); 
         if (ret < 0) {
-            _insert_fial_file.write(lines);
+            _insert_fial_file.write(fields_vec, _delim);
             DB_TRACE("atom_insert fail sql:%s", insert_sql.c_str());
-            fail_rows += lines.size();
+            fail_rows += fields_vec.size();
         } else {
             succ_rows += cnt;
         }
 
     }
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines) {
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override {
         if (FLAGS_insert_mod == "select") {
-            handle_lines_diff(path, lines);
+            handle_fields_diff(path, fields_vec);
         } else {
-            handle_lines_insert(path, lines);
+            handle_fields_insert(path, fields_vec);
         }
     }
 
-private:
+    bool split(std::string& s, std::vector<std::string>& split_vec) override {
+        std::vector<std::string> elems;
+        boost::split(split_vec, s, boost::is_any_of(_delim));
 
+        if (FLAGS_atom_base_fields_cnt == 2) {
+            if (split_vec.size() == 2) {
+                return true;
+            } else if (split_vec.size() > 2) {
+                elems.emplace_back(split_vec[0]);
+                std::string tmp_str;
+                for (int i = 1; i < split_vec.size(); i++) {
+                    tmp_str += split_vec[i];
+                    if (i < (split_vec.size() - 1)) {
+                        tmp_str += _delim;
+                    }
+                }
+                elems.emplace_back(tmp_str);
+            } 
+        } else if (FLAGS_atom_base_fields_cnt == 4) {
+            if (split_vec.size() == 4) {
+                elems.emplace_back(split_vec[1]);
+                elems.emplace_back(split_vec[3]);
+            } else if (split_vec.size() > 4) {
+                elems.emplace_back(split_vec[1]);
+                std::string tmp_str;
+                for (int i = 3; i < split_vec.size(); i++) {
+                    tmp_str += split_vec[i];
+                    if (i < (split_vec.size() - 1)) {
+                        tmp_str += _delim;
+                    }
+                }
+                elems.emplace_back(tmp_str);
+            } 
+        }
+
+        std::swap(elems, split_vec);
+        return true;
+    }
+
+    bool convert(std::string& line) override {
+        return true;
+    }
+
+private:
     void _convert_literal_sql(const std::string& literal, char *buf) {
         int32_t literallen = literal.length();
         int32_t i = 0, j = 0;
@@ -650,68 +929,15 @@ private:
         buf[j] = 0;
     }
 
-    std::vector<std::string> vStringSplit(const  std::string& s, const std::string& delim) {
-        std::vector<std::string> elems;
-
-        std::vector<std::string> split_vec;
-        boost::split(split_vec, s, boost::is_any_of(delim));
-
-        if (FLAGS_atom_base_fields_cnt == 2) {
-            if (split_vec.size() == 2) {
-                return split_vec;
-            } else if (split_vec.size() > 2) {
-                elems.emplace_back(split_vec[0]);
-                std::string tmp_str;
-                for (int i = 1; i < split_vec.size(); i++) {
-                    tmp_str += split_vec[i];
-                    if (i < (split_vec.size() - 1)) {
-                        tmp_str += delim;
-                    }
-                }
-                elems.emplace_back(tmp_str);
-            } 
-        } else if (FLAGS_atom_base_fields_cnt == 4) {
-            if (split_vec.size() == 4) {
-                elems.emplace_back(split_vec[1]);
-                elems.emplace_back(split_vec[3]);
-                return elems;
-            } else if (split_vec.size() > 4) {
-                elems.emplace_back(split_vec[1]);
-                std::string tmp_str;
-                for (int i = 3; i < split_vec.size(); i++) {
-                    tmp_str += split_vec[i];
-                    if (i < (split_vec.size() - 1)) {
-                        tmp_str += delim;
-                    }
-                }
-                elems.emplace_back(tmp_str);
-            } 
-        // } else {
-        //     assert(0);
-        }
-        return elems;
-
-        // size_t len = s.length();
-        // size_t delim_len = delim.length();
-        // if (delim_len == 0) return elems;
-        // auto find_pos = s.find(delim);
-        // if (find_pos != s.npos) {
-        //     elems.push_back(s.substr(0, find_pos));
-        //     elems.push_back(s.substr(find_pos + delim_len, len - find_pos - delim_len));
-        // } 
-        // return elems;
-    }
-
-    int id_literal_need_insert(const std::vector<std::string>& lines, std::map<uint64_t, std::string>& id_literal_map) {
+    int id_literal_need_insert(const std::vector<std::vector<std::string>>& fields_vec, std::map<uint64_t, std::string>& id_literal_map) {
         std::map<uint64_t, std::string> tmp_map;
-        for (auto& line : lines) {
-            std::vector<std::string> split_vec = vStringSplit(line, _delim);
-            if (split_vec.size() != 2) {
+        for (auto& fields : fields_vec) {
+            if (fields.size() != 2) {
                 diff_rows++;
                 continue;
             }
 
-            int64_t tmp_id = atoll(split_vec[0].c_str());
+            int64_t tmp_id = atoll(fields[0].c_str());
             if (max_id.load() < tmp_id) {
                 max_id = tmp_id;
             }
@@ -719,14 +945,13 @@ private:
                 ignore_rows++;
                 continue;
             }
-            tmp_map[tmp_id] = split_vec[1];
+            tmp_map[tmp_id] = fields[1];
         }
 
         if (tmp_map.empty()) {
             return -2;
         }
         if (FLAGS_select_first) {
-
             std::string select_id_sql = "select id, literal from " + _db + "." + 
                 _table + " where id in ("; 
 
@@ -762,7 +987,6 @@ private:
 
         return 0;
     }
-
 
     int select_data_from_mysql(const std::string& select_sql,
             std::unordered_map<int64_t, std::string>& wordid_showword_map,
@@ -860,7 +1084,9 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix) override;
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
     int db_query(baikal::client::Service* db, std::vector<std::string>& fields,
             std::string& sql, RowsBatch& row_batch);
@@ -882,6 +1108,15 @@ public:
     int do_begin(baikal::client::SmartConnection& conn);
     int do_commit(baikal::client::SmartConnection& conn);
     int do_rollback(baikal::client::SmartConnection& conn);
+
+    bool split(std::string& s, std::vector<std::string>& split_vec) override {
+        boost::split(split_vec, s, boost::is_any_of(_delim));
+        return true;
+    }
+
+    bool convert(std::string& line) override {
+        return true;
+    }
 
 private:
     bthread_mutex_t _mutex;
@@ -927,7 +1162,9 @@ public:
         return 0;
     }
    
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines) {
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override {
         std::string sql;
         std::string insert_values;
         int cnt = 0;
@@ -945,18 +1182,17 @@ public:
                 connection->close();
             }  
         }));
-        for (auto& line : lines) {
-            std::vector<std::string> split_vec = vStringSplit(line, _delim);
-            if (split_vec.size() != 2) {
+        for (auto& fields : fields_vec) {
+            if (fields_vec.size() != 2) {
                 diff_rows++;
                 continue;
             }
-            int64_t wordid = atoll(split_vec[0].c_str());
-            std::string showword = split_vec[1];
+            int64_t wordid = atoll(fields[0].c_str());
+            std::string showword = fields[1];
             tmp_wordid_showword_map[wordid] = showword;
             tmp_showword_wordid_map[showword] = wordid;
-            select_id_sql.append(" ").append(split_vec[0]).append(",");
-            select_literal_sql.append(" \"").append(_mysql_escape_string(connection, split_vec[1])).append("\",");
+            select_id_sql.append(" ").append(fields[0]).append(",");
+            select_literal_sql.append(" \"").append(_mysql_escape_string(connection, fields[1])).append("\",");
             ++cnt;
         }
 
@@ -966,13 +1202,15 @@ public:
             return;
         }
 
-        std::vector<std::string> id_not_found_lines;id_not_found_lines.reserve(lines.size());
-        std::vector<std::string> literal_not_found_lines;literal_not_found_lines.reserve(lines.size());
+        std::vector<std::string> id_not_found_lines;
+        id_not_found_lines.reserve(fields_vec.size());
+        std::vector<std::string> literal_not_found_lines;
+        literal_not_found_lines.reserve(fields_vec.size());
         std::unordered_map<int64_t, std::string> wordid_showword_map;
         std::unordered_map<std::string, int64_t> showword_wordid_map;
         int ret = select_data_from_mysql(select_id_sql, wordid_showword_map, showword_wordid_map);
         if (ret < 0) {
-            _id_fial_file.write(lines);
+            _id_fial_file.write(fields_vec, _delim);
             id_fail_rows += cnt;
         } else {
             id_succ_rows += cnt;
@@ -990,7 +1228,7 @@ public:
         showword_wordid_map.clear();
         ret = select_data_from_mysql(select_literal_sql, wordid_showword_map, showword_wordid_map);
         if (ret < 0) {
-            _literal_fial_file.write(lines);
+            _literal_fial_file.write(fields_vec, _delim);
             literal_fail_rows += cnt;
         } else {
             literal_succ_rows += cnt;
@@ -1023,20 +1261,23 @@ public:
 
     }
 
-private:
-    std::vector<std::string> vStringSplit(const  std::string& s, const std::string& delim) {
-        std::vector<std::string> elems;
+    bool split(std::string& s, std::vector<std::string>& split_vec) override {
         size_t len = s.length();
-        size_t delim_len = delim.length();
-        if (delim_len == 0) return elems;
-        auto find_pos = s.find(delim);
+        size_t delim_len = _delim.length();
+        if (delim_len == 0) return true;
+        auto find_pos = s.find(_delim);
         if (find_pos != s.npos) {
-            elems.emplace_back(s.substr(0, find_pos));
-            elems.emplace_back(s.substr(find_pos + delim_len, len - find_pos - delim_len));
+            split_vec.emplace_back(s.substr(0, find_pos));
+            split_vec.emplace_back(s.substr(find_pos + delim_len, len - find_pos - delim_len));
         } 
-        return elems;
+        return true;
     }
 
+    bool convert(std::string& line) override {
+        return true;
+    }
+
+private:
     int select_data_from_mysql(const std::string& select_sql,
             std::unordered_map<int64_t, std::string>& wordid_showword_map,
             std::unordered_map<std::string, int64_t>& showword_wordid_map) {
@@ -1103,7 +1344,9 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
     virtual int close();
 
@@ -1117,9 +1360,27 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
 };
+
+class ImporterTxnUpHandle : public ImporterHandle {
+public:
+    ImporterTxnUpHandle(OpType type, baikal::client::Service* db) : ImporterHandle(type, db) {}
+    
+    ImporterTxnUpHandle(OpType type, baikal::client::Service* db, std::string done_path) : ImporterHandle(type, db, done_path) {}
+
+    virtual int init(const Json::Value& node, const std::string& path_prefix);
+
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
+
+    void run_txn(const std::vector<std::string>& sqls);
+};
+
 
 class ImporterSelHandle : public ImporterHandle {
 public:
@@ -1129,7 +1390,9 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
 };
 
@@ -1141,7 +1404,9 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
 };
 
@@ -1153,7 +1418,9 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
 };
 
@@ -1165,7 +1432,9 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
 };
 
@@ -1177,7 +1446,9 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
 };
 
@@ -1189,9 +1460,53 @@ public:
 
     virtual int init(const Json::Value& node, const std::string& path_prefix);
 
-    virtual void handle_lines(const std::string& path, const std::vector<std::string>& lines);
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 
 private:
     std::map<std::string, ImportTableInfo> _level_table_map;
+};
+
+class ImporterRecoveryHandle : public ImporterHandle {
+public:
+    ImporterRecoveryHandle(OpType type, baikal::client::Service* db) : ImporterHandle(type, db) {
+    }
+
+    ImporterRecoveryHandle(OpType type, baikal::client::Service* db, std::string done_path) : ImporterHandle(type, db, done_path) {
+    }
+
+    ~ImporterRecoveryHandle() {
+        
+    }
+
+    virtual int init(const Json::Value& node, const std::string& path_prefix);
+    virtual int close();
+    virtual void handle_fields(const std::string& path, const std::vector<std::vector<std::string>>& fields_vec, BlockHandleResult* result) override;
+
+    std::shared_ptr<FBOutFile> output_file(const std::string& file_name);   
+
+
+private:
+    bthread::Mutex _mutex;
+    std::string _output_path;
+    std::map<std::string, std::shared_ptr<FBOutFile>> _output_files;
+    std::atomic<int64_t> _out_cnt {0};
+    std::map<std::string, FlashBackTableInfo> _table_fields_info;
+    std::string _recovery_type;
+    std::string _next_recovery_type;
+    std::set<std::string> _skip_fields;
+};
+class ImporterDiffLineHandle : public ImporterHandle {
+public:
+    ImporterDiffLineHandle(OpType type, baikal::client::Service* db) : ImporterHandle(type, db) {}
+
+    ImporterDiffLineHandle(OpType type, baikal::client::Service* db, std::string done_path) : ImporterHandle(type, db, done_path) {}
+
+    virtual int init(const Json::Value& node, const std::string& path_prefix);
+
+    virtual void handle_fields(const std::string& path, 
+                               const std::vector<std::vector<std::string>>& fields_vec,
+                               BlockHandleResult* result) override;
 };
 }

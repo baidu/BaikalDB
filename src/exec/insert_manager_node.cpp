@@ -17,6 +17,7 @@
 #include "update_manager_node.h"
 #include "insert_node.h"
 #include "network_socket.h"
+#include "query_context.h"
 #include "type_utils.h"
 #include "binlog_context.h"
 #include "auto_inc.h"
@@ -229,10 +230,18 @@ int InsertManagerNode::process_binlog(RuntimeState* state, bool is_local) {
         }
         auto client = state->client_conn();
         auto binlog_ctx = client->get_binlog_ctx();
+        auto ctx = client->get_query_ctx();
         binlog_ctx->set_table_info(_table_info);
         pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
         auto mutation = binlog_value->add_mutations();
         mutation->set_table_id(_table_id);
+        if (ctx != nullptr) {
+            // basic insert可以不记录SQL TODO
+            mutation->set_sql(ctx->sql);
+            auto stat_info = &(ctx->stat_info);
+            mutation->set_sign(stat_info->sign);
+            binlog_ctx->add_sql_info(stat_info->family, stat_info->table, stat_info->sign);
+        }
         if (is_local) {
             bool need_set_partition_record = true;
             bool has_delete_record = false;
