@@ -81,8 +81,8 @@ enum IndexHint {
             cover_field_ids.insert(field.id);
         }
         if (index_type == pb::I_FULLTEXT) {
-            cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__weight"));
-            cover_field_ids.insert(get_field_id_by_name(table_info_ptr->fields, "__querywords"));
+            cover_field_ids.insert(table_info_ptr->get_field_id_by_short_name("__weight"));
+            cover_field_ids.insert(table_info_ptr->get_field_id_by_short_name("__querywords"));
         }
     }
     

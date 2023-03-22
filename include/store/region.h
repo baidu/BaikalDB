@@ -422,6 +422,7 @@ public:
         if (_is_learner) {
             _learner.reset(new braft::Learner(groupId, peerId));
         }
+        _region_uuid = butil::fast_rand();
     }
 
     int init(bool new_region, int32_t snapshot_times);
@@ -555,6 +556,10 @@ public:
         return _region_control.transfer_leader(trans_leader_request, region, queue);
     }
 
+    int make_region_status_doing() {
+        return _region_control.make_region_status_doing();
+    }
+
     void reset_region_status () {
         _region_control.reset_region_status();
     }
@@ -568,7 +573,7 @@ public:
     //int clear_data();
     void compact_data_in_queue();
     int ingest_snapshot_sst(const std::string& dir); 
-    int ingest_sst(const std::string& data_sst_file, const std::string& meta_sst_file); 
+    int ingest_sst_backup(const std::string& data_sst_file, const std::string& meta_sst_file); 
     // other thread
     void reverse_merge();
     // other thread
@@ -729,6 +734,9 @@ public:
             return _region_info.start_key() == _region_info.end_key();
         }
         return false;
+    }
+    int64_t get_binlog_check_point() const {
+        return _binlog_param.check_point_ts;
     }
     int64_t get_log_index() const {
         return _applied_index;
@@ -1139,6 +1147,10 @@ public:
         return _is_learner;
     }
 
+    uint64_t region_uuid() const {
+        return _region_uuid;
+    }
+
     bool is_disable_write() {
         return _disable_write_cond.count() > 0;
     }
@@ -1174,6 +1186,10 @@ public:
     }
     void check_peer_latency();
     void get_read_index(pb::StoreRes* response);
+    
+    // if seek_table_lines != nullptr, seek all sst for seek_table_lines
+    bool has_sst_data(int64_t* seek_table_lines);
+
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -1255,6 +1271,7 @@ private:
     int write_binlog_value(const std::map<std::string, ExprValue>& field_value_map);
     int64_t binlog_get_int64_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     int64_t read_data_cf_oldest_ts();
+    bool flash_back_need_read(const pb::StoreReq* request, const std::map<std::string, ExprValue>& field_value_map);
     
     std::string binlog_get_str_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     
@@ -1310,8 +1327,6 @@ private:
             rocksdb::Slice(region_info.end_key()).ToString(true).c_str());
     }
 
-    // if seek_table_lines != nullptr, seek all sst for seek_table_lines
-    bool has_sst_data(int64_t* seek_table_lines);
     bool wait_rocksdb_normal(int64_t timeout = -1) {
         TimeCost cost;
         TimeCost total_cost;
@@ -1428,6 +1443,8 @@ private:
 
     std::mutex _legal_mutex;
     bool       _legal_region = true;
+
+    uint64_t   _region_uuid = 0;
 
     TimeCost                        _time_cost; //上次收到请求的时间，每次收到请求都重置一次
     LatencyOnly                     _dml_time_cost;

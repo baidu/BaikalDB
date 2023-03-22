@@ -74,7 +74,7 @@ void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNod
     for (; row_idx < range_fields.size() && 
             field_idx < index_info_ptr->fields.size(); row_idx++, field_idx++) {
         if (index_info_ptr->fields[field_idx].id == range_fields[row_idx]) {
-            key.append_value(values[row_idx]);
+            key.append_value(values[row_idx].cast_to(index_info_ptr->fields[field_idx].type));
             hit_index_field_ids.insert(range_fields[row_idx]);
         } else {
             break;
@@ -191,6 +191,11 @@ void AccessPath::calc_normal(Property& sort_property) {
             case LIKE_EQ:
                 ++eq_count;
             case LIKE_PREFIX:
+                // 数字 like不能命中索引
+                if (range.type == LIKE_PREFIX && field.type != pb::STRING) {
+                    field_break = true;
+                    break;
+                }
                 ++field_cnt;
                 hit_index_field_ids.insert(field.id);
                 _left_field_cnt = field_cnt;
@@ -277,14 +282,15 @@ void AccessPath::calc_index_range() {
                         MutTableKey& left_key, MutTableKey& right_key) {
                     size_t field_idx = field_cnt - 1;
                     if (range.left.size() == 1) {
-                        left_key.append_value(range.left[0]);
+                        // join on 条件两表字段类型可能不同，导致slotref的类型不准，需要处理
+                        left_key.append_value(range.left[0].cast_to(field.type));
                         need_cut_index_range_condition.insert(range.left_expr);
                     } else if (range.left.size() > 1) {
                         calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
                             range.left_open, range.left, left_key, field_idx);
                     }
                     if (range.right.size() == 1) {
-                        right_key.append_value(range.right[0]);
+                        right_key.append_value(range.right[0].cast_to(field.type));
                         need_cut_index_range_condition.insert(range.right_expr);
                     } else if (range.right.size() > 1) {
                         calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
@@ -324,11 +330,11 @@ void AccessPath::calc_index_range() {
                     }
                 } else {
                     if (in_records.empty()) {
-                        left_key.append_value(range.eq_in_values[0]);
-                        right_key.append_value(range.eq_in_values[0]);
+                        left_key.append_value(range.eq_in_values[0].cast_to(field.type));
+                        right_key.append_value(range.eq_in_values[0].cast_to(field.type));
                     } else {
                         for (auto& rg : in_records) {
-                            rg.left_key.append_value(range.eq_in_values[0]);
+                            rg.left_key.append_value(range.eq_in_values[0].cast_to(field.type));
                         }
                     }
                 }
@@ -343,7 +349,7 @@ void AccessPath::calc_index_range() {
                         size_t vi = 0;
                         size_t i = 0;
                         for (auto& rg : in_records) {
-                            rg.left_key.append_value(range.eq_in_values[vi]);
+                            rg.left_key.append_value(range.eq_in_values[vi].cast_to(field.type));
                             if ((++i) == offset) {
                                 i = 0;
                                 vi = ((vi + 1) % vs);
@@ -375,7 +381,7 @@ void AccessPath::calc_index_range() {
                         for (auto record : in_records) {
                             RecordRange rg;
                             rg.left_key = record.left_key;
-                            rg.left_key.append_value(value);
+                            rg.left_key.append_value(value.cast_to(field.type));
                             comb_in_records.emplace_back(rg);
                         }
                     }

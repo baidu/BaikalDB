@@ -29,7 +29,7 @@ DECLARE_int32(concurrency_num);
 DEFINE_int32(region_replica_num, 3, "region replica num, default:3"); 
 DEFINE_int32(learner_region_replica_num, 1, "learner region replica num, default:1"); 
 DEFINE_int32(region_region_size, 100 * 1024 * 1024, "region size, default:100M");
-DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 2, "time interval to clear table_tombstone. default(2d)");
+DEFINE_int64(table_tombstone_gc_time_s, 3600 * 24 * 5, "time interval to clear table_tombstone. default(5d)");
 DEFINE_uint64(statistics_heart_beat_bytesize, 256 * 1024 * 1024, "default(256M)");
 DEFINE_int32(pre_split_threashold, 300, "pre_split_threashold for sync create table");
 
@@ -3672,6 +3672,10 @@ void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, 
                         if (boost::algorithm::iequals(index_iter->index_name(), index_info.index_name()) &&
                             index_iter->index_type() != pb::I_PRIMARY) {
                             if (index_iter->hint_status() == pb::IHS_VIRTUAL) {
+                                continue;
+                            }
+                            // restore index的索引状态必须是PUBLIC
+                            if (index_info.hint_status() == pb::IHS_NORMAL && index_iter->state() != pb::IS_PUBLIC) {
                                 continue;
                             }
                             index_iter->set_hint_status(index_info.hint_status());

@@ -117,6 +117,7 @@ TEST(test_datetime_str_other, case_all) {
     tm.tm_year = 90;
     tm.tm_mon = -1;
     tm.tm_mday = 0;
+    tm.tm_isdst = 0;
     time_t t = mktime(&tm);
     std::cout << "mktm:" << t << std::endl;
 }

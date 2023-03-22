@@ -14,11 +14,17 @@
 
 #include "importer_handle.h"
 #include "backup_tool.h"
+#include "flash_back.h"
 DECLARE_bool(is_backup);
 DECLARE_bool(is_send);
 namespace baikaldb {
 DECLARE_string(meta_server_bns);
-DEFINE_string(done_file, "./data/.done", "hdfs done file");
+DECLARE_string(input_path);
+DECLARE_string(output_path);
+DEFINE_string(backup_peer_resource_tag, "", "pefered backup peer resource tag");
+DEFINE_int64(interval_days, 1, "backup interval days");
+DEFINE_int64(backup_times, 3, "backup times, default 3");
+DECLARE_string(done_file);
 DEFINE_int32(loop_cnt, 1, "import loops, use for press");
 DEFINE_int32(atom_test_concurrency, 10, "");
 DEFINE_int32(atom_test_timeout_minutes, 10, "");
@@ -27,15 +33,17 @@ class LocalImporter {
 public:
     int atom_test(baikal::client::Service* baikaldb);
     int import_to_baikaldb();
+
 private:
     int handle(const Json::Value& node, OpType type,
             baikal::client::Service* baikaldb, baikal::client::Service* backup_db);
+
 };
 
 int LocalImporter::handle(const Json::Value& node, OpType type, 
         baikal::client::Service* baikaldb, baikal::client::Service* backup_db) {
     for (int i = 0; i < FLAGS_loop_cnt; i++) {
-        std::unique_ptr<ImporterFileSystermAdaptor> fs(new PosixFileSystermAdaptor());
+        std::unique_ptr<ImporterFileSystemAdaptor> fs(new PosixFileSystemAdaptor());
         std::unique_ptr<ImporterHandle> handler;
         // 线下导入任务，done_path填""，ImporterHandle内部会根据参数生成path
         handler.reset(ImporterHandle::new_handle(type, baikaldb, backup_db, ""));
@@ -46,7 +54,10 @@ int LocalImporter::handle(const Json::Value& node, OpType type,
             return -1;
         }
 
-        int64_t lines = handler->run(fs.get(), "{}", [](const std::string&){});
+        int64_t lines = handler->run(fs.get(), 
+                                     "{}",  // config
+                                     [](const std::string&){},  // progress_func
+                                     [](std::string, int64_t,int64_t, BlockHandleResult*, bool){}); //finish_block_func
         if (lines < 0) {
             DB_FATAL("importer run failed");
             return -1;
@@ -124,6 +135,9 @@ int LocalImporter::import_to_baikaldb() {
 
     // atom_test(baikaldb);
 
+    if (!FLAGS_input_path.empty() && !FLAGS_output_path.empty()) {
+        FLAGS_done_file = FLAGS_input_path + "/done";
+    }
     std::ifstream done_ifs(FLAGS_done_file);
     std::string done_config(
         (std::istreambuf_iterator<char>(done_ifs)),
@@ -136,10 +150,31 @@ int LocalImporter::import_to_baikaldb() {
         return -1;
     }
 
+    Bthread capture_worker;
+    time_t now = time(NULL);
+    int64_t start_ts = baikaldb::timestamp_to_ts((uint32_t)now);
+    if (ImporterHandle::is_launch_capture_task(done_root)) {
+        Json::Value node = ImporterHandle::get_node_json(done_root);
+        if (LaunchCapture::get_instance()->truncate_old_table(baikaldb, node) != 0) {
+            DB_FATAL("truncate old table failed");
+            return -1;
+        }
+        capture_worker.run([this, &done_root, &baikaldb, start_ts]() {
+            LaunchCapture::get_instance()->set_capture_initial_param(baikaldb);
+            Json::Value node = ImporterHandle::get_node_json(done_root);
+            LaunchCapture::get_instance()->init_capture(node, start_ts);
+        });
+    }
+
+    ON_SCOPE_EXIT(([this, &capture_worker]() {
+        capture_worker.join();
+        LaunchCapture::get_instance()->destroy();
+    }));
+
     try {
         for (auto& name_type : op_name_type) {
             if (done_root[name_type.name].isArray()) {
-                if (done_root.isMember("path")) {
+                if (done_root.isMember("path") && done_root["update"].isArray()) {
                     if (done_root.isMember("charset")) {
                         auto charset = done_root["charset"].asString();
                         if (charset == "gbk") {
@@ -149,6 +184,12 @@ int LocalImporter::import_to_baikaldb() {
                         }
                     }
                     ret = handle(done_root, BASE_UP, baikaldb, backup_db);
+                    if (ret < 0) {
+                        DB_FATAL("handle fail, json:%s", done_config.c_str());
+                        return -1;
+                    }
+                } else if (done_root.isMember("recovery") && done_root["recovery"].isArray()) {
+                    ret = handle(done_root, RECOVERY, baikaldb, backup_db);
                     if (ret < 0) {
                         DB_FATAL("handle fail, json:%s", done_config.c_str());
                         return -1;
@@ -192,13 +233,22 @@ int main(int argc, char **argv) {
     DB_WARNING("log file load success");
 
     if (FLAGS_is_backup || FLAGS_is_send) {
-        baikaldb::BackUp bp(baikaldb::FLAGS_meta_server_bns);
+        baikaldb::BackUp bp(baikaldb::FLAGS_meta_server_bns, 
+                            baikaldb::FLAGS_backup_peer_resource_tag, 
+                            baikaldb::FLAGS_interval_days, 
+                            baikaldb::FLAGS_backup_times);
         bp.run();
         return 0;
     }
-
+    int ret = baikaldb::flash_back();
+    if (ret == 1) {
+        return 0;
+    } else if (ret == -1) {
+        DB_FATAL("flash back fail");
+        return -1;
+    }
     baikaldb::LocalImporter importer;
-    auto ret = importer.import_to_baikaldb();
+    ret = importer.import_to_baikaldb();
     auto time_print = [] (int64_t cost) -> std::string {
         std::ostringstream os;
         cost /= 1000000;

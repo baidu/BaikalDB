@@ -129,6 +129,23 @@ ExprNode* ExprNode::get_parent(ExprNode* child) {
     return nullptr;
 }
 
+bool ExprNode::contains_null_function() {
+    if (_node_type == pb::IS_NULL_PREDICATE) {
+        return true;
+    } else if (_node_type == pb::FUNCTION_CALL) {
+        if (static_cast<ScalarFnCall*>(this)->fn().name() == "ifnull" 
+            || static_cast<ScalarFnCall*>(this)->fn().name() == "isnull") {
+            return true;
+        }
+    }
+    for (auto child : _children) {
+        if (child->contains_null_function()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void ExprNode::get_all_tuple_ids(std::unordered_set<int32_t>& tuple_ids) {
     if (_node_type == pb::SLOT_REF) {
         tuple_ids.insert(static_cast<SlotRef*>(this)->tuple_id());

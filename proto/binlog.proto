@@ -37,4 +37,6 @@ message TableMutation {
     repeated bytes update_rows     = 3;
     repeated bytes deleted_rows    = 4;
     repeated MutationType sequence = 5;
+    optional bytes sql             = 6;
+    optional uint64 sign           = 7;
 }

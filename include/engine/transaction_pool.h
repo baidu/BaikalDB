@@ -57,6 +57,20 @@ public:
         return -1;
     }
 
+    void rollback_mark_finished(uint64_t txn_id) {
+        (*_finished_txn_map.read())[txn_id] = -1;
+    }
+
+    bool is_mark_finished(uint64_t txn_id) {
+        if (_finished_txn_map.read()->exist(txn_id)) {
+            return true;
+        }
+        if (_finished_txn_map.read_background()->exist(txn_id)) {
+            return true;
+        }
+        return false;
+    }
+
     void increase_prepared() {
         _num_prepared_txn.increase();
     }

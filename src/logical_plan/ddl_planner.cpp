@@ -1180,6 +1180,10 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         }
         for (auto& field : tbl_ptr->fields) {
             if (field.can_null) {
+                // 设置了默认值允许加索引
+                if (field.default_value.size() > 0) {
+                    continue;
+                }
                 _column_can_null[field.short_name] = true;
             }
         }

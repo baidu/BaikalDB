@@ -98,7 +98,7 @@ void LogicalQuery<Schema>::weight_add_subnode(
         OperatorBooleanExecutor<Schema>* result) {
     // weight_node的结构固定，第一个op_node为must, 剩下的node为weigt_term
     WeightedBooleanExecutor<Schema>* weight_result =
-            dynamic_cast<WeightedBooleanExecutor<Schema>*>(result);
+            static_cast<WeightedBooleanExecutor<Schema>*>(result);
     const ExecutorNode<Schema>* sub_node = node._sub_nodes[0];
     BooleanExecutor<Schema> *tmp= parse_executor_node(*sub_node);
     if (tmp) {

@@ -149,14 +149,14 @@ int FastImporterCtrl::query_task_baikaldb(std::string sql, baikal::client::Resul
 }
 
 // 创建文件系统
-ImporterFileSystermAdaptor* create_filesysterm(const std::string& cluster_name, const std::string& user_name, const std::string& password) {
-    ImporterFileSystermAdaptor* fs = nullptr;
+ImporterFileSystemAdaptor* create_filesystem(const std::string& cluster_name, const std::string& user_name, const std::string& password) {
+    ImporterFileSystemAdaptor* fs = nullptr;
     if (cluster_name.find("afs") != cluster_name.npos) {
 #ifdef BAIDU_INTERNAL
-        fs = new AfsFileSystermAdaptor(cluster_name, user_name, password, "./conf/client.conf");
+        fs = new AfsFileSystemAdaptor(cluster_name, user_name, password, "./conf/client.conf");
 #endif
     } else {
-        fs = new PosixFileSystermAdaptor();
+        fs = new PosixFileSystemAdaptor();
     }
 
     if (fs == nullptr) {
@@ -165,13 +165,13 @@ ImporterFileSystermAdaptor* create_filesysterm(const std::string& cluster_name, 
 
     int ret = fs->init();
     if (ret < 0) {
-        DB_FATAL("filesysterm init failed, cluster_name: %s", cluster_name.c_str());
+        DB_FATAL("filesystem init failed, cluster_name: %s", cluster_name.c_str());
         return nullptr;
     }
     return fs;
 }
 
-void destroy_filesysterm(ImporterFileSystermAdaptor* fs) {
+void destroy_filesystem(ImporterFileSystemAdaptor* fs) {
     if (fs) {
         fs->destroy();
         delete fs;
@@ -212,6 +212,7 @@ int FastImporterCtrl::update_task_doing() {
     set_map["hostname"]   = "'" + FLAGS_hostname + "'";
     set_map["start_time"]   = "now()";
     set_map["import_line"]   = "0";
+    set_map["import_diff_line"]   = "0";
     where_map["status"] = "'idle'";
     where_map["id"] = std::to_string(_task.id);
     where_map["table_info"]   = "'" + _task.table_info + "'";
@@ -314,9 +315,9 @@ int FastImporterCtrl::update_local_task(const std::map<std::string, std::string>
 }
 
 int FastImporterCtrl::gen_subtasks() {
-    auto fs = create_filesysterm(_task.cluster_name, _task.user_name, _task.password);
+    auto fs = create_filesystem(_task.cluster_name, _task.user_name, _task.password);
     if (fs == nullptr) {
-        DB_FATAL("create_filesysterm failed, cluster_name: %s, user_name: %s, password: %s",
+        DB_FATAL("create_filesystem failed, cluster_name: %s, user_name: %s, password: %s",
              _task.cluster_name.c_str(), _task.user_name.c_str(), _task.password.c_str());
         _result << "create fs fail";
         return -1;
@@ -342,7 +343,7 @@ int FastImporterCtrl::gen_subtasks() {
     std::vector<int64_t> file_start_pos;
     std::vector<int64_t> file_end_pos;
     int ret = fs->cut_files(_task.file_path, fast_importer_subtask_size_g * 1024 * 1024 * 1024LL, file_paths, file_start_pos, file_end_pos);
-    destroy_filesysterm(fs);
+    destroy_filesystem(fs);
     if (ret < 0) {
         DB_WARNING("cut file failed, file_path: %s", _task.file_path.c_str());
         _result << "cut file fail";
@@ -431,6 +432,7 @@ int FastImporterCtrl::check_subtasks(int& todo_cnt, int& doing_cnt, int& success
 
     select_vec.emplace_back("status");
     select_vec.emplace_back("import_line");
+    select_vec.emplace_back("import_diff_line");
     where_map["main_id"] = std::to_string(_task.main_id);
     where_map["resource_tag"] = "'" + FLAGS_resource_tag + "'";
     where_map["table_info"] = "'" + _task.table_info + "'";
@@ -444,6 +446,7 @@ int FastImporterCtrl::check_subtasks(int& todo_cnt, int& doing_cnt, int& success
         return -1;
     }
     _import_line = 0;
+    _import_diff_line = 0;
     todo_cnt = 0;
     doing_cnt = 0;
     success_cnt = 0;
@@ -451,6 +454,7 @@ int FastImporterCtrl::check_subtasks(int& todo_cnt, int& doing_cnt, int& success
     while(result_set.next()) {
         std::string status;
         int64_t import_line = 0;
+        int64_t import_diff_line = 0;
         result_set.get_string("status", &status);
         if (status == "doing") {
             doing_cnt++;
@@ -463,6 +467,8 @@ int FastImporterCtrl::check_subtasks(int& todo_cnt, int& doing_cnt, int& success
         }
         result_set.get_int64("import_line", &import_line);
         _import_line += import_line;
+        result_set.get_int64("import_diff_line", &import_diff_line);
+        _import_diff_line += import_diff_line;
     }
 
     return 0; 
@@ -867,47 +873,32 @@ int FastImporterCtrl::run_main_task() {
     return 0;
 }
 
-int FastImporterCtrl::import_to_baikaldb(FastImporterImpl& fast_importer, const LinesFunc& func) {
-    auto fs = create_filesysterm(_task.cluster_name, _task.user_name, _task.password);
+int FastImporterCtrl::import_to_baikaldb(FastImporterImpl& fast_importer, 
+        const FieldsFunc& fields_func, const SplitFunc& split_func, const ConvertFunc& convert_func) {
+    auto fs = create_filesystem(_task.cluster_name, _task.user_name, _task.password);
     if (fs == nullptr) {
-        DB_FATAL("create_filesysterm failed, cluster_name: %s, user_name: %s, password: %s",
+        DB_FATAL("create_filesystem failed, cluster_name: %s, user_name: %s, password: %s",
                  _task.cluster_name.c_str(), _task.user_name.c_str(), _task.password.c_str());
         _result << "create fs fail";
         fast_importer.close();
         return -1;
     }
     ON_SCOPE_EXIT(([this, &fs]() {
-        destroy_filesysterm(fs);
+        destroy_filesystem(fs);
     }));
     
     size_t i = 0;
     size_t all_files = _sub_file_paths.size();
+
     auto progress_func = [this, &fast_importer, &i, &all_files](const std::string& progress_str) {
         std::string str = "file: " + std::to_string(i) + "/" +  std::to_string(all_files) + ", " + progress_str;
         DB_WARNING("str: %s", str.c_str());
         fast_importer.progress_dialog(str);
     };
-
-    int64_t file_concurrency = 0;
-    int64_t insert_values_count = 0;
-    if (!_task.conf.empty()) {
-        Json::Reader json_reader;
-        Json::Value done_root;
-        bool ret1 = json_reader.parse(_task.conf, done_root);
-        if (ret1) {
-            try {
-                if (done_root.isMember("file_concurrency")) {
-                    file_concurrency = done_root["file_concurrency"].asInt64();
-                }
-                if (done_root.isMember("insert_values_count")) {
-                    insert_values_count = done_root["insert_values_count"].asInt64();
-                }
-            } catch (Json::LogicError& e) {
-                DB_FATAL("fail parse what:%s ", e.what());
-            }
-        }
-    }
-
+    auto finish_block_func = [this](std::string path, int64_t start_pos, int64_t end_pos, BlockHandleResult*, bool file_finish) {
+        // 快速导入不支持断点续传
+        DB_WARNING("path: %s:%ld:%ld finished", path.c_str(), start_pos,end_pos);
+    };
     TimeCost time;
     {
         // 需要保证ImporterImpl析构才真正结束,执行子任务之前把rocksdb清空
@@ -916,20 +907,28 @@ int FastImporterCtrl::import_to_baikaldb(FastImporterImpl& fast_importer, const 
             DB_FATAL("clean rocksdb fail, err: %s", s.ToString().c_str());
         }
         for (i = 0; i < _sub_file_paths.size(); ++i) {
-            ImporterImpl Impl(_sub_file_paths[i], fs, func, file_concurrency, insert_values_count,
+            ImporterImpl Impl(_sub_file_paths[i], fs, fields_func, split_func, convert_func, _task.conf,
                               i == 0 ? _task.start_pos : 0,
                               i == _sub_file_paths.size() - 1 ? _task.end_pos : 0,
-                              _task.has_header);
-            int ret = Impl.run(progress_func);
+                              _task.has_header, _task.file_type);
+            int ret = Impl.run(progress_func, finish_block_func, false, {});
             if (ret < 0) {
                 _result << Impl.get_result();
+                fast_importer.set_handle_files_failed();
+                fast_importer.close();
                 // 失败了，把子任务状态置为fail
                 return -2;
             }
         }
     }
-    fast_importer.close();
     DB_WARNING("HANDLE LINE END, time: %ld", time.get_time());
+    fast_importer.close();
+
+    if (fast_importer.get_diff_lines_fail()) {
+        DB_FATAL("FastImporter diff lines fail");
+        return -2;
+    }
+
     return 0;
 }
 
@@ -980,16 +979,28 @@ int FastImporterCtrl::run_sub_task() {
         _result << fast_importer.result() << " fast_importer init failed";
         return -1;
     }
-    auto handle_func = [this, &fast_importer](const std::string& path, const std::vector<std::string>& lines) {
-        fast_importer.handle_lines(path, lines);
-    };
+    auto fields_func = 
+        [this, &fast_importer] (const std::string& path, 
+                                const std::vector<std::vector<std::string>>& fields_vec, 
+                                BlockHandleResult*) {
+            fast_importer.handle_fields(path, fields_vec);
+        };
 
-    ret = import_to_baikaldb(fast_importer, handle_func);
+    auto split_func = 
+        [this, &fast_importer] (std::string& line, std::vector<std::string>& split_vec) {
+            return fast_importer.split(line, split_vec);
+        };
+    
+    auto convert_func = 
+        [this, &fast_importer] (std::string& line) {
+            return fast_importer.convert(line);
+        };
+
+    ret = import_to_baikaldb(fast_importer, fields_func, split_func, convert_func);
     if (ret < 0) {
         DB_FATAL("fast_importer run failed, result: %s", _result.str().c_str());
         return -1;
     }
-
 
     // 子任务更新统计信息
     if (fast_importer.need_redo_task()) {
@@ -1056,8 +1067,12 @@ int SSTsender::write_sst_file() {
         }
         iter->Next();
     }
+    if (!iter->status().ok()) {
+        DB_WARNING("iter status not ok, region_id: %ld", _region_id);
+    }
 
     if (count == 0) {
+        DB_WARNING("region_id: %ld, sst is empty", _region_id);
         return -2;
     }
     s = writer->finish();
@@ -1081,12 +1096,19 @@ void SSTsender::send_concurrency(const std::set<std::string>& peers, std::unorde
     for (const auto& peer: peers) {
         auto send_one_peer = [this, &cond, peer, &peer_ret_map]() {
             ON_SCOPE_EXIT([&cond]{cond.decrease_signal();});
-            auto s = BackUp::send_sst_streaming(peer, _path, _table_id, _region_id, true, _row_size);
-            if (s == Status::Succss) {
-                DB_WARNING("region_id: %ld, send sst to store: %s success", _region_id, peer.c_str());
-                peer_ret_map[peer] = 0;
-            } else {
-                DB_WARNING("region_id: %ld, send sst to store: %s fail", _region_id, peer.c_str());
+            while (true) {
+                auto s = BackUp::send_sst_streaming(peer, _path, _table_id, _region_id, true, _row_size);
+                if (s == Status::RetryLater) {
+                    DB_WARNING("region_id: %ld, send sst to store: %s need retry later", _region_id, peer.c_str());
+                    continue;
+                }
+                if (s == Status::Succss) {
+                    DB_WARNING("region_id: %ld, send sst to store: %s success", _region_id, peer.c_str());
+                    peer_ret_map[peer] = 0;
+                } else {
+                    DB_WARNING("region_id: %ld, send sst to store: %s fail", _region_id, peer.c_str());
+                }
+                break;
             }
         };
 
@@ -1281,6 +1303,7 @@ int FastImporterImpl::init(pb::SchemaInfo& schema_info,
             return -1;
         }
         for (auto& peer : region.peers()) {
+            DB_WARNING("region_id %ld, peer: %s", region.region_id(), peer.c_str());
             _region_peers_map[region.region_id()].insert(peer);
         }
         if (region.main_table_id() != region.table_id()) {
@@ -1435,10 +1458,9 @@ int FastImporterImpl::put_primary(int64_t region,
     return 0;
 }
 
-void FastImporterImpl::handle_lines(const std::string& path, const std::vector<std::string>& lines) {
+void FastImporterImpl::handle_fields(const std::string& path, const std::vector<std::vector<std::string>>& fields_vec) {
     rocksdb::WriteBatch batch;
     int imported_lines = 0;
-    std::vector<std::string> split_vec;
     std::vector<SmartRecord> records;
     std::vector<int64_t> region_ids;
     std::vector<SmartRecord> global_records;
@@ -1450,7 +1472,7 @@ void FastImporterImpl::handle_lines(const std::string& path, const std::vector<s
     keys.reserve(FLAGS_insert_values_count);
     values.reserve(FLAGS_insert_values_count);
     butil::Arena arena;
-    if (lines.empty()) {
+    if (fields_vec.empty()) {
         return;
     }
 
@@ -1459,16 +1481,13 @@ void FastImporterImpl::handle_lines(const std::string& path, const std::vector<s
     ON_SCOPE_EXIT([this](){
         _writing_cond.decrease_signal();
     });
-    for (auto& line : lines) {
-        split_vec.clear();
+    for (auto& fields : fields_vec) {
         bool handle_line_fail = false;
-
-        if (!split(line, &split_vec)) {
-            continue;
-        }
-        if (split_vec.size() != _task.fields.size()) {
+        if (fields.size() != _task.fields.size()) {
             if (_import_diff_lines % 1000 == 0) {
-                DB_FATAL("size diffrent file column size:%lu field size:%lu", split_vec.size(), _task.fields.size());
+                std::string line;
+                restore_line(fields, line);
+                DB_FATAL("size diffrent file column size:%lu field size:%lu", fields.size(), _task.fields.size());
                 DB_FATAL("ERRLINE:%s", line.c_str());
             }
             _import_diff_lines++;
@@ -1477,34 +1496,36 @@ void FastImporterImpl::handle_lines(const std::string& path, const std::vector<s
         // 生成record
         SmartRecord record = SchemaFactory::get_instance()->new_record(_schema_info.table_id());
         if (record == nullptr) {
-            DB_FATAL("alloc record fail for line: %s", line.c_str());
+            std::string line;
+            restore_line(fields, line);
+            DB_FATAL("alloc record fail for line: %s", line.c_str()); 
             _import_diff_lines++;
             continue;
         }
-        for (auto i = 0; i < _field_infos.size() && i < split_vec.size(); ++i) {
+        for (auto i = 0; i < _field_infos.size() && i < fields.size(); ++i) {
             if (_task.ignore_indexes.count(i) != 0
-                || (_task.empty_as_null_indexes.count(i) == 1 && split_vec[i] == "")
-                || (!_task.null_as_string && split_vec[i] == "NULL")
+                || (_task.empty_as_null_indexes.count(i) == 1 && fields[i] == "")
+                || (!_task.null_as_string && fields[i] == "NULL")
                 || _task.const_map.find(_field_infos[i]->short_name) != _task.const_map.end()) {
                 continue;
             }
             std::string value_str_from_hex = ""; 
             if (_task.binary_indexes.find(i) != _task.binary_indexes.end()) {
-                if (split_vec[i].size() < 2 
-                    || split_vec[i][0] != '0' 
-                    || (split_vec[i][1] != 'X' && split_vec[i][1] != 'x')) {
-                    DB_FATAL("decode_binary_from_hex fail: %s", split_vec[i].data());
+                if (fields[i].size() < 2 
+                    || fields[i][0] != '0' 
+                    || (fields[i][1] != 'X' && fields[i][1] != 'x')) {
+                    DB_FATAL("decode_binary_from_hex fail: %s", fields[i].data());
                     handle_line_fail = true;
                     break;
                 }
-                parser::LiteralExpr* literal = parser::LiteralExpr::make_hex(split_vec[i].data() + 2, 
-                                                split_vec[i].size() - 2, arena);
+                parser::LiteralExpr* literal = parser::LiteralExpr::make_hex(fields[i].data() + 2, 
+                                                fields[i].size() - 2, arena);
                 value_str_from_hex = literal->_u.str_val.to_string();
             } 
             ExprValue value(_field_infos[i]->type, 
-                            !value_str_from_hex.empty() ? value_str_from_hex : split_vec[i]);
+                            !value_str_from_hex.empty() ? value_str_from_hex : fields[i]);
             if (0 != record->set_value(record->get_field_by_idx(_field_infos[i]->pb_idx), value)) {
-                DB_FATAL("parse field fail: %s", split_vec[i].data());
+                DB_FATAL("parse field fail: %s", fields[i].data());
                 handle_line_fail = true;
                 break;
             }
@@ -1633,7 +1654,6 @@ void FastImporterImpl::progress_dialog(std::string progressing) {
     if (progressing.empty()) {
         std::ostringstream progressing_stream;
         progressing_stream << "compact_cnt: " << _compaction_times.load()
-                           << ", import_diff_lines: " << _import_diff_lines.load()
                            << ", send_sst_lines_cnt: " << _send_sst_lines_cnt.load()
                            << ", cost: " << _total_cost.get_time() / 1000000
                            << ", compaction_cost: " << _total_compaction_cost / 1000000
@@ -1645,6 +1665,7 @@ void FastImporterImpl::progress_dialog(std::string progressing) {
         set_map["progress"] = "'" + progressing + "'";
     }
     set_map["import_line"] = std::to_string(_import_lines.load());
+    set_map["import_diff_line"] = std::to_string(_import_diff_lines.load());
     where_map["id"] = std::to_string(_task.id);
     where_map["hostname"]   = "'" + FLAGS_hostname + "'";
     where_map["status"]   = "'doing'";
@@ -1666,18 +1687,21 @@ void FastImporterImpl::progress_dialog(std::string progressing) {
 }
 
 // 循环检测rocksdb是否达到指定的存储阈值，是的话，停止写，进行compaction，发送sst，清空rocksdb
+// 中途处理文件失败了, 不需要发部分kv, 直接人为重做整个子任务
 void FastImporterImpl::start_db_statistics() {
     Bthread bth(&BTHREAD_ATTR_SMALL);
     auto func = [this] () {
         _multi_thread_cond.increase();
         while (!_closed) {
             bool need_compaction = DMRocksWrapper::get_instance()->db_statistics();
-            if (need_compaction) {
+            if (need_compaction && !_handle_files_fail) {
                 complate();
             }
             bthread_usleep(5 * 1000 * 1000);
         }
-        complate();
+        if (!_handle_files_fail) {
+            complate();
+        }
         _multi_thread_cond.decrease_signal();
     };
     TimeCost time;
@@ -1714,6 +1738,7 @@ int FastImporterImpl::reset_region_peers_from_meta() {
     _region_peers_map.clear();
     for (auto& region : res.region_infos()) {
         for (auto& peer : region.peers()) {
+            DB_WARNING("region_id %ld, peer: %s", region.region_id(), peer.c_str());
             _region_peers_map[region.region_id()].insert(peer);
         }
     }
@@ -1751,11 +1776,21 @@ int FastImporterImpl::complate() {
         _compacting_cond.decrease_broadcast();
     });
 
+    const int64_t import_lines      = _import_lines.load();
+    const int64_t import_diff_lines = _import_diff_lines.load();
+    const int64_t import_all_lines  = import_lines + import_diff_lines;
+    if (import_diff_lines > import_all_lines * 0.5) {
+        std::string err_msg = "import_diff_lines[" + std::to_string(import_diff_lines) + 
+                              "] bigger than 50 percent import_all_lines[" + std::to_string(import_all_lines) + "]";
+        DB_FATAL("fail to complate, err_msg: %s", err_msg.c_str());
+        _diff_lines_fail = true;
+        return -1;
+    }
+
     auto upload_progress = [this, &compaction_cost, &send_cost,
                             &success_cnt, &fail_cnt, &todo_cnt, &doing_cnt]() {
         std::ostringstream progressing;
         progressing << "compaction_cnt" << _compaction_times.load()
-                    << ", import_diff_lines: " << _import_diff_lines.load()
                     << ", send_sst_lines_cnt: " << _send_sst_lines_cnt.load()
                     << ", compaction_cost: " << compaction_cost / 1000000
                     << ", send_cost: " << send_cost / 1000000
@@ -1862,7 +1897,4 @@ int FastImporterImpl::complate() {
     return 0;
 }
 
-
 } // namespace baikaldb
-
-

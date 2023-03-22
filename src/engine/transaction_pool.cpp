@@ -578,6 +578,13 @@ void TransactionPool::clear_transactions(Region* region) {
             txn_params.is_finished = txn->is_finished();
         };
         bool exist = _txn_map.call_and_get(txn_id, call);
+        bool mark_finished = is_mark_finished(txn_id);
+        if (mark_finished && exist && !txn_params.is_finished) {
+            DB_WARNING("region_id:%ld txn_id:%lu seq_id: %d txn Out-of-order execution",
+                    txn_params.primary_region_id, txn_id, txn_params.seq_id);
+            txn_commit_through_raft(txn_id, region->region_info(), pb::OP_ROLLBACK);
+            continue ;
+        }
         if (!exist || txn_params.is_primary_region || txn_params.is_finished
             || txn_params.primary_region_id == -1) {
             continue ;

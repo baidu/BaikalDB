@@ -162,11 +162,11 @@ void JoinNode::convert_to_inner_join(std::vector<ExprNode*>& input_exprs) {
             continue;
         }
         if (inner_contains_expr(expr)
-                && !expr->contains_special_operator(pb::IS_NULL_PREDICATE)) {
+                && !expr->contains_null_function()) {
             set_join_type(pb::INNER_JOIN);
             return;
         }
-        if (contains_expr(expr) && !expr->contains_special_operator(pb::IS_NULL_PREDICATE)
+        if (contains_expr(expr) && !expr->contains_null_function()
                 && !expr->contains_special_operator(pb::OR_PREDICATE)) {
             set_join_type(pb::INNER_JOIN);
             return;
@@ -191,7 +191,8 @@ int JoinNode::hash_join(RuntimeState* state) {
         if (join_node == nullptr) {
             std::vector<ExecNode*> scan_nodes;
             _outer_node->get_node(pb::SCAN_NODE, scan_nodes);
-            do_plan_router(state, scan_nodes);
+            bool index_has_null = false;
+            do_plan_router(state, scan_nodes, index_has_null);
         }
     }
     int ret = _outer_node->open(state);
@@ -230,7 +231,11 @@ int JoinNode::hash_join(RuntimeState* state) {
 
     std::vector<ExecNode*> scan_nodes;
     _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
-    do_plan_router(state, scan_nodes);
+    bool index_has_null = false;
+    do_plan_router(state, scan_nodes, index_has_null);
+    if (index_has_null) {
+        _inner_node->set_return_empty();
+    }
     //谓词下推后可能生成新的plannode重新生成tracenode
     _inner_node->create_trace();
     ret = _inner_node->open(state);
@@ -272,7 +277,8 @@ int JoinNode::nested_loop_join(RuntimeState* state) {
         if (join_node == nullptr) {
             std::vector<ExecNode*> scan_nodes;
             _outer_node->get_node(pb::SCAN_NODE, scan_nodes);
-            do_plan_router(state, scan_nodes);
+            bool index_has_null = false;
+            do_plan_router(state, scan_nodes, index_has_null);
         }
     }
     int ret = _outer_node->open(state);
@@ -305,7 +311,11 @@ int JoinNode::nested_loop_join(RuntimeState* state) {
     }
     std::vector<ExecNode*> scan_nodes;
     _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
-    do_plan_router(state, scan_nodes);
+    bool index_has_null = false;
+    do_plan_router(state, scan_nodes, index_has_null);
+    if (index_has_null) {
+        _inner_node->set_return_empty();
+    }
     //谓词下推后可能生成新的plannode重新生成tracenode
     _inner_node->create_trace();
     ret = _inner_node->open(state);

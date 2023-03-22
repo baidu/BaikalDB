@@ -147,11 +147,6 @@ bool SelectPlanner::is_full_export() {
     if (_ctx->has_derived_table || _ctx->has_information_schema) {
         return false;
     }
-    if (_select->where != nullptr) {
-        if (!is_fullexport_condition()) {
-            return false;
-        }
-    } 
     if (_select->group != nullptr) {
         return false;
     } 
@@ -178,6 +173,14 @@ bool SelectPlanner::is_full_export() {
          || (_group_exprs.size() > 0)) {
         return false;
     }
+    if (_select->where != nullptr) {
+        if (_select->limit == nullptr) {
+            return false;
+        }
+        if (!is_fullexport_condition()) {
+            return false;
+        }
+    } 
     return true;
 }
 
@@ -203,7 +206,7 @@ bool SelectPlanner::is_fullexport_condition() {
             ExprNode::destroy_tree(conjunct);
         }
     }));
-    if (conjuncts.size() > 2 || _select->limit == nullptr) {
+    if (conjuncts.size() > 2) {
         return false;
     }
     if (!check_conjuncts(conjuncts)) {
@@ -718,6 +721,7 @@ int SelectPlanner::parse_where() {
     if (_select->where == nullptr) {
         return 0;
     }
+    _where_filters.reserve(8);
     if (0 != flatten_filter(_select->where, _where_filters, CreateExprOptions())) {
         DB_WARNING("flatten_filter failed");
         return -1;

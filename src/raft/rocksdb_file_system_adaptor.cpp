@@ -626,22 +626,8 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
                                      butil::File::Error* e) {
     TimeCost time_cost;
     (void) file_meta;
-    std::string prefix;
-    std::string upper_bound;
-    size_t len = path.size();
-    if (is_snapshot_data_file(path)) {
-        len -= SNAPSHOT_DATA_FILE.size();
-        MutTableKey key;
-        key.append_i64(_region_id);
-        prefix = key.data();
-        key.append_u64(UINT64_MAX);
-        upper_bound = key.data();
-
-    } else {
-        len -= SNAPSHOT_META_FILE.size();
-        prefix = MetaWriter::get_instance()->meta_info_prefix(_region_id);
-    }
-    const std::string snapshot_path = path.substr(0, len - 1);
+    //find dirname
+    const std::string snapshot_path = path.substr(0, path.find_last_of('/'));
     //超时raft_copy_remote_file_timeout_ms，配了300s才重试
     //所以不加锁也没问题(除非这个函数能执行300s)，为了保险换把锁保证串行
     BAIDU_SCOPED_LOCK(_open_reader_adaptor_mutex);
@@ -652,6 +638,24 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             *e = butil::File::FILE_ERROR_NOT_FOUND;
         }
         return nullptr;
+    }
+
+    std::string prefix;
+    std::string upper_bound;
+    if (is_snapshot_data_file(path)) {
+        MutTableKey key;
+        key.append_i64(_region_id);
+        prefix = key.data();
+        key.append_u64(UINT64_MAX);
+        upper_bound = key.data();
+        auto region_ptr = Store::get_instance()->get_region(_region_id);
+        if (region_ptr != nullptr && region_ptr->is_binlog_region()) {
+            key.replace_i64(region_ptr->get_table_id(), 8);
+            key.append_i64(sc->binlog_check_point);
+            prefix = key.data();
+        }
+    } else {
+        prefix = MetaWriter::get_instance()->meta_info_prefix(_region_id);
     }
 
     bool is_meta_reader = false;
@@ -803,13 +807,13 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
     DB_WARNING("region_id: %ld lock_commit_meta_mutex before open snapshot", _region_id);
     _snapshots[path].ptr.reset(new SnapshotContext());
     region = Store::get_instance()->get_region(_region_id);
-    int64_t data_index = region->get_data_index();
-    _snapshots[path].ptr->data_index = data_index;
+    _snapshots[path].ptr->data_index = region->get_data_index();
+    _snapshots[path].ptr->binlog_check_point = region->get_binlog_check_point();
     region->unlock_commit_meta_mutex();
     _snapshots[path].count++;
     _snapshots[path].cost.reset();
-    DB_WARNING("region_id: %ld, data_index:%ld, open snapshot path: %s", 
-            _region_id, data_index, path.c_str());
+    DB_WARNING("region_id: %ld, data_index:%ld, binlog_check_point:%ld, open snapshot path: %s", 
+            _region_id, _snapshots[path].ptr->data_index, _snapshots[path].ptr->binlog_check_point, path.c_str());
     return true;
 }
 
@@ -837,13 +841,8 @@ SnapshotContextPtr RocksdbFileSystemAdaptor::get_snapshot(const std::string& pat
 }
 
 void RocksdbFileSystemAdaptor::close(const std::string& path) {
-    size_t len = path.size();
-    if (is_snapshot_data_file(path)) {
-        len -= SNAPSHOT_DATA_FILE_WITH_SLASH.size();
-    } else {
-        len -= SNAPSHOT_META_FILE_WITH_SLASH.size();
-    }
-    const std::string snapshot_path = path.substr(0, len);
+    //find dirname
+    const std::string snapshot_path = path.substr(0, path.find_last_of('/'));
 
     BAIDU_SCOPED_LOCK(_snapshot_mutex);
     auto iter = _snapshots.find(snapshot_path);

@@ -43,6 +43,7 @@ DECLARE_string(stable_uri);
 DECLARE_string(snapshot_uri);
 DEFINE_int64(reverse_merge_interval_us, 2 * 1000 * 1000,  "reverse_merge_interval(2 s)");
 DEFINE_int64(ttl_remove_interval_s, 24 * 3600,  "ttl_remove_interval_s(24h)");
+DEFINE_string(ttl_remove_interval_period, "",  "ttl_remove_interval_period hour(0-23)");
 DEFINE_int64(delay_remove_region_interval_s, 600,  "delay_remove_region_interval");
 //DEFINE_int32(update_status_interval_us, 2 * 1000 * 1000,  "update_status_interval(2 s)");
 DEFINE_int32(store_port, 8110, "Server port");
@@ -1038,6 +1039,22 @@ void Store::ttl_remove_thread() {
         traverse_copy_region_map([](const SmartRegion& region) {
             region->update_ttl_info();
         });
+        // 控制ttl在ttl_remove_interval_period指定时间范围,典型是晚上流量低峰
+        std::vector<std::string> periods = string_split(FLAGS_ttl_remove_interval_period, '-');
+        if (periods.size() == 2) {
+            try {
+                int start_hour = std::stoi(periods[0]);
+                int end_hour = std::stoi(periods[1]);
+                if (start_hour >= 0 && start_hour <= 23 && end_hour >= 0 && end_hour <= 23) {
+                    TimePeriodChecker tc(start_hour, end_hour);
+                    if (!tc.now_in_interval_period()) {
+                        continue;
+                    }
+                }
+            } catch (...) {
+                DB_WARNING("FLAGS_ttl_remove_interval_period %s", FLAGS_ttl_remove_interval_period.c_str());
+            }
+        }
 
         if (time.get_time() > FLAGS_ttl_remove_interval_s * 1000 * 1000LL) {
             traverse_copy_region_map([](const SmartRegion& region) {
@@ -1476,7 +1493,7 @@ void Store::whether_split_thread() {
             int64_t region_capacity = 10000000;
             int ret = _factory->get_region_capacity(ptr_region->get_global_index_id(), region_capacity);
             if (ret != 0) {
-                DB_WARNING("table info not exist, region_id: %ld", region_ids[i]);
+                DB_DEBUG("table info not exist, region_id: %ld", region_ids[i]);
                 continue;
             }
             region_capacity = std::max(FLAGS_min_split_lines, region_capacity);
@@ -1553,6 +1570,12 @@ void Store::whether_split_thread() {
                    && ptr_region->get_lastcycle_timecost() > FLAGS_none_region_merge_interval_us) {
                     DB_WARNING("region:%ld is none, log_index:%ld, process merge", 
                               region_ids[i], ptr_region->get_log_index());
+                    int64_t seek_table_lines = 0;
+                    ptr_region->has_sst_data(&seek_table_lines);
+                    if (seek_table_lines > 0) {
+                        ptr_region->set_num_table_lines(seek_table_lines);
+                        continue;
+                    }
                     process_merge_request(ptr_region->get_global_index_id(), region_ids[i]);
                     continue;
                 }
@@ -1881,15 +1904,39 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
         }
     }
     const auto& delete_region_ids = response.delete_region_ids();
-    auto remove_func = [this, delete_region_ids]() {
+    std::vector<RemoveQueueItem> remove_queue_items;
+    remove_queue_items.reserve(delete_region_ids.size());
+    for (auto& delete_region_id : delete_region_ids) {
+        if (_shutdown) {
+            return;
+        }
+        SmartRegion region = get_region(delete_region_id);
+        if (region == nullptr) {
+            continue;
+        }
+        remove_queue_items.emplace_back(RemoveQueueItem(region->region_uuid(), region->get_region_id()));
+        DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld uuid:%lu",
+                delete_region_id, region->region_uuid());
+    }
+
+    auto remove_func = [this, remove_queue_items]() {
         //删除region数据，该region已不在raft组内
-        for (auto& delete_region_id : delete_region_ids) {
+        for (auto& remove_item : remove_queue_items) {
             if (_shutdown) {
                 return;
             }
-            DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld",
-                    delete_region_id);
-            drop_region_from_store(delete_region_id, true);
+            SmartRegion region = get_region(remove_item.drop_region_id());
+            if (region == nullptr) {
+                continue;
+            }
+            if (region->region_uuid() != remove_item.region_uuid()) {
+                DB_WARNING("delete queue region not match delete_region_id:%ld",
+                    remove_item.drop_region_id());
+                continue;
+            }
+            DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld %lu",
+                    remove_item.drop_region_id(), region->region_uuid());
+            drop_region_from_store(remove_item.drop_region_id(), true);
         }
     };
     _remove_region_queue.run(remove_func);

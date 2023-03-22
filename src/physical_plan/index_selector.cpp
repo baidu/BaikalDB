@@ -638,7 +638,7 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
                     DB_WARNING("get partition failed.");
                     return -1;
                 }
-                scan_node->replace_partition(partition_ids);
+                scan_node->replace_partition(partition_ids, true);
                 return 0;
             }
         }
@@ -646,22 +646,34 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
         auto field_iter = field_range_map.find(table_info->partition_ptr->partition_field_id());
         if (partition_type == pb::PT_HASH) {
             if (field_iter != field_range_map.end() && !field_iter->second.eq_in_values.empty()) {
-                for (auto& value : field_iter->second.eq_in_values) {
-                    int64_t partition_index = 0;
-                    if (_factory->get_partition_index(table_id, value, partition_index) == 0) {
-                        partition_ids.emplace(partition_index);
-                    } else {
-                        DB_WARNING("get table %ld partition number error.", table_id);
-                        return -1;
-                    }
+                const size_t MAX_FLATSET_INIT_VALUE = 12501; // 10000 / 0.8 + 1
+                size_t flatset_init_value = field_iter->second.eq_in_values.size() / 0.8 + 1;
+                if (flatset_init_value > MAX_FLATSET_INIT_VALUE) {
+                    flatset_init_value = MAX_FLATSET_INIT_VALUE;
                 }
-                scan_node->replace_partition(partition_ids);
+                ExprValueFlatSet eq_in_values_set;
+                eq_in_values_set.init(flatset_init_value);
+                for (auto& value : field_iter->second.eq_in_values) {
+                    eq_in_values_set.insert(value);
+                }
+                for (auto& value : eq_in_values_set) {
+                    int64_t partition_index = 0;
+                    if (table_info->partition_num != 1) {
+                        partition_index = table_info->partition_ptr->calc_partition(value);
+                        if (partition_index < 0) {
+                            DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
+                            return -1;
+                        }
+                    }
+                    partition_ids.emplace(partition_index);
+                }
+                scan_node->replace_partition(partition_ids, false);
             } else {
                 DB_WARNING("table_id:%ld pattern not supported.", table_id);
                 for (int64_t i = 0; i < table_info->partition_num; ++i) {
                     partition_ids.emplace(i);
                 }
-                scan_node->replace_partition(partition_ids);
+                scan_node->replace_partition(partition_ids, false);
             }
         } else if (partition_type == pb::PT_RANGE) {
             // todo

@@ -871,7 +871,28 @@ struct ExprValue {
                  get_string().c_str(), end.get_string().c_str(), prefix_len, ret);
         return ret;
     }
+
+    // For ExprValueFlatSet
+    bool operator==(const ExprValue& other) const {
+        int64_t ret = other.compare(*this);
+        if (ret != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    struct HashFunction {
+        size_t operator()(const ExprValue& ev) const {
+            if (ev.type == pb::STRING || ev.type == pb::HEX) {
+                return ev.hash();
+            }
+            return ev._u.uint64_val;
+        }
+    };
 };
+
+using ExprValueFlatSet = butil::FlatSet<ExprValue, ExprValue::HashFunction>;
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

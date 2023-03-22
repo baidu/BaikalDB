@@ -513,6 +513,10 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
+        if (info.index_hint_status == pb::IHS_DISABLE
+            && info.state == pb::IS_DELETE_LOCAL) {
+            continue;
+        }
 
         if (info.id == _table_id) {
             continue;
