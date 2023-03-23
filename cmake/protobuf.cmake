@@ -133,7 +133,7 @@ FUNCTION(build_protobuf TARGET_NAME)
             DEPENDS zlib
             #            GIT_REPOSITORY  "https://github.com/protocolbuffers/protobuf.git"
             #            GIT_TAG         "v3.6.1"
-            URL "https://github.com/protocolbuffers/protobuf/archive/v3.6.1.tar.gz"
+            URL "https://github.com/protocolbuffers/protobuf/archive/v3.18.0.tar.gz"
             CONFIGURE_COMMAND mv ../config.sh . COMMAND sh config.sh
             CMAKE_CACHE_ARGS
             -DCMAKE_INSTALL_PREFIX:PATH=${PROTOBUF_INSTALL_DIR}
@@ -145,7 +145,7 @@ FUNCTION(build_protobuf TARGET_NAME)
 
 ENDFUNCTION()
 
-SET(PROTOBUF_VERSION 3.6.1)
+SET(PROTOBUF_VERSION 3.18.0)
 
 IF (NOT PROTOBUF_FOUND)
     message("build protobuf")
