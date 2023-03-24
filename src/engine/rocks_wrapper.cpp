@@ -175,10 +175,6 @@ int32_t RocksWrapper::init(const std::string& path) {
     _log_cf_option.write_buffer_size = FLAGS_write_buffer_size;
     _log_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
 
-    if (FLAGS_rocks_use_partitioned_index_filters) {
-        table_options.pin_l0_filter_and_index_blocks_in_cache= false;
-        _binlog_cf_option.ttl = FLAGS_rocks_binlog_ttl_days * 24 * 60 * 60;
-    }
     _binlog_cf_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(sizeof(int64_t)));
     _binlog_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
@@ -197,6 +193,10 @@ int32_t RocksWrapper::init(const std::string& path) {
     _binlog_cf_option.write_buffer_size = FLAGS_write_buffer_size;
     _binlog_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
     _binlog_cf_option.level0_file_num_compaction_trigger = FLAGS_level0_file_num_compaction_trigger;
+    if (FLAGS_rocks_use_partitioned_index_filters) {
+        table_options.pin_l0_filter_and_index_blocks_in_cache= false;
+        _binlog_cf_option.ttl = FLAGS_rocks_binlog_ttl_days * 24 * 60 * 60;
+    }
     //todo
     // prefix length: regionid(8 Bytes) tableid(8 Bytes)
     _data_cf_option.prefix_extractor.reset(
