@@ -28,7 +28,7 @@ ExternalProject_Add(
         DEPENDS zlib
         PREFIX ${MARIADB_SOURCES_DIR}
         GIT_REPOSITORY https://github.com/MariaDB/mariadb-connector-c.git
-        GIT_TAG "v2.3.1"
+        GIT_TAG "v3.2.0"
         UPDATE_COMMAND ""
         CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
