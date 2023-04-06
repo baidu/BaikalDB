@@ -220,20 +220,6 @@ int Backup::process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest_
             return -1;
         }
 
-        ret = region_ptr->ingest_sst_backup(backup_info.data_info.path, backup_info.meta_info.path);
-        if (ret != 0) {
-            cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
-            DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
-            return -1;
-        }
-
-        DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d]", _region_id, int(ingest_store_latest_sst));
-        if (!ingest_store_latest_sst) {
-            DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
-            cntl->http_response().set_status_code(brpc::HTTP_STATUS_OK);
-            return -1;
-        }
-
         BackupInfo latest_backup_info;
         latest_backup_info.meta_info.path = std::to_string(_region_id) + ".latest.meta.sst";
         latest_backup_info.data_info.path = std::to_string(_region_id) + ".latest.data.sst";
@@ -246,6 +232,20 @@ int Backup::process_upload_sst(brpc::Controller* cntl, bool ingest_store_latest_
         if (dump_sst_file(latest_backup_info) != 0) {
             cntl->http_response().set_status_code(brpc::HTTP_STATUS_PARTIAL_CONTENT);
             DB_NOTICE("upload region[%ld] ingest latest sst failed.", _region_id);
+            return -1;
+        }
+
+        ret = region_ptr->ingest_sst_backup(backup_info.data_info.path, backup_info.meta_info.path);
+        if (ret != 0) {
+            cntl->http_response().set_status_code(brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+            DB_NOTICE("upload region[%ld] ingest failed.", _region_id);
+            return -1;
+        }
+
+        DB_NOTICE("backup region[%ld] ingest_store_latest_sst [%d]", _region_id, int(ingest_store_latest_sst));
+        if (!ingest_store_latest_sst) {
+            DB_NOTICE("region[%ld] not ingest lastest sst.", _region_id);
+            cntl->http_response().set_status_code(brpc::HTTP_STATUS_OK);
             return -1;
         }
 
