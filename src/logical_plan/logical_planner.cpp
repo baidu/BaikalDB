@@ -1261,7 +1261,7 @@ int LogicalPlanner::parse_db_name_from_table_source(const parser::TableSource* t
     }
     if (!table_source->as_name.empty()) {
         alias = table_source->as_name.value;
-        _current_tables.emplace_back(db + "." + alias);
+        _current_tables.back() = db + "." + alias;
     }
     return 0;
 }
