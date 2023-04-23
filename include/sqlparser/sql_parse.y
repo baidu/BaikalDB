@@ -1820,6 +1820,9 @@ SubSelect:
         sub_query->query_stmt = (UnionStmt*)$2;
         $$ = sub_query;
     }
+    | '(' SubSelect ')' {
+        $$ = $2;
+    }
     ;
 
 // See https://dev.mysql.com/doc/refman/5.7/en/union.html
