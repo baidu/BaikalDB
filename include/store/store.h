@@ -340,7 +340,8 @@ private:
              select_time_cost("select_time_cost", 60),
              peer_delay_latency("peer_delay_latency", 60),
              heart_beat_count("heart_beat_count"),
-             follow_read_wait_time("follow_read_wait_time", 60) {
+             follow_read_wait_time("follow_read_wait_time", 60),
+             region_error_count("region_error_count") {
     }
 
     class TimePeriodChecker {
@@ -497,6 +498,7 @@ public:
     bvar::LatencyRecorder peer_delay_latency;
     bvar::Adder<int64_t>  heart_beat_count;
     bvar::LatencyRecorder follow_read_wait_time;
+    bvar::Adder<int64_t>  region_error_count;
 
     //for fake binlog tso
     TimeCost gen_tso_time;

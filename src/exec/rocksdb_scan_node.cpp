@@ -626,6 +626,7 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     }
     ON_SCOPE_EXIT(([this, state]() {
         state->set_num_scan_rows(_scan_rows);
+        state->set_read_disk_size(_read_disk_size);
     }));
 
     // 检查是否需要拒绝
@@ -750,6 +751,7 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
                 if (ret < 0) {
                     continue;
                 }
+                _read_disk_size += txn->read_disk_size;
             } else {
                 record = _left_records[_idx++];
                 int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, _get_mode,
@@ -757,6 +759,7 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
                 if (ret < 0) {
                     continue;
                 }
+                _read_disk_size += txn->read_disk_size;
             }
             std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
             for (auto slot : _tuple_desc->slots()) {
@@ -777,6 +780,7 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
             _scan_rows += key_pairs.size();
             int ret = txn->multiget_primary(_region_id, *_pri_info, key_pairs, _tuple_id, _mem_row_desc, &_multiget_row_batch,
                                 _field_ids, _field_slot, state->need_check_region(), _range_key_sorted);
+            _read_disk_size += txn->read_disk_size;
             if (ret < 0) {
                 continue;
             }
@@ -826,6 +830,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
                 if (ret < 0) {
                     continue;
                 }
+                _read_disk_size += txn->read_disk_size;
                 if (_index_info->type == pb::I_UNIQ) {
                     record->decode_key(*_index_info, key_pair->left_key().data());
                 }
@@ -835,6 +840,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
                 if (ret < 0) {
                     continue;
                 }
+                _read_disk_size += txn->read_disk_size;
             }
             if (!_is_covering_index && !_is_global_index) {
                 ++get_primary_cnt;
@@ -844,6 +850,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
                             _table_id, ret, record->to_string().c_str());
                     continue;
                 }
+                _read_disk_size += txn->read_disk_size;
             }
             std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
             for (auto slot : _tuple_desc->slots()) {
@@ -870,6 +877,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
                             _table_id, ret, record->to_string().c_str());
                 continue;
             }
+            _read_disk_size += txn->read_disk_size;
             if (_multiget_records.size() == 0) {
                 continue;
             }
@@ -881,6 +889,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
                             _table_id, ret, record->to_string().c_str());
                     continue;
                 }
+                _read_disk_size += txn->read_disk_size;
             }
         }
     }
@@ -1164,6 +1173,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             if (ret < 0) {
                 continue;
             }
+            _read_disk_size += _table_iter->last_read_disk_size;
             if (_lock != pb::LOCK_GET) {
                 if (_lock == pb::LOCK_GET_ONLY_PRIMARY) {
                     // select ... for update
@@ -1224,6 +1234,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 if (ret < 0) {
                     break;
                 }
+                _read_disk_size += _table_iter->last_read_disk_size;
                 row_batch.move_row(std::move(row));
                 ++num;
             }
@@ -1231,6 +1242,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             for (auto& field_id : _filt_field_ids) {
                 FieldInfo* field_info = _field_ids[field_id];
                 _table_iter->get_column(_tuple_id, *field_info, nullptr, &row_batch);
+                _read_disk_size += _table_iter->last_read_disk_size;
             }
             // filt
             if (filter != nullptr) {
@@ -1245,6 +1257,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             for (auto& field_id : _trivial_field_ids) {
                 FieldInfo* field_info = _field_ids[field_id];
                 _table_iter->get_column(_tuple_id, *field_info, filter.get(), &row_batch);
+                _read_disk_size += _table_iter->last_read_disk_size;
             }
 
             // move to row batch
@@ -1334,6 +1347,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                     DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s",
                             _table_id, ret, record->to_string().c_str());
                 }
+                _read_disk_size += txn->read_disk_size;
                 continue;
             } else {
                 *eos = true;
@@ -1429,6 +1443,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 //DB_WARNING_STATE(state, "get index fail, maybe reach end");
                 continue;
             }
+            _read_disk_size += _index_iter->last_read_disk_size;
         }
         // 倒排索引直接下推到了布尔引擎，但是主键条件未下推，因此也需要再次过滤
         // toto: 后续可以再次优化，把userid和source的条件干掉
@@ -1451,6 +1466,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 ++get_primary_cnt;
                 // todo: 反查直接用encode_key
                 ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, _get_mode, false);
+                _read_disk_size += txn->read_disk_size;
                 if (ret < 0) {
                     if (_reverse_indexes.size() == 0 && _reverse_index == nullptr) {
                         DB_FATAL("get primary:%ld fail, ret:%d, index primary may be not consistency: %s",
@@ -1479,6 +1495,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                         DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s",
                                 _table_id, ret, record->to_string().c_str());
                     }
+                    _read_disk_size += txn->read_disk_size;
                 }
 
             } else {

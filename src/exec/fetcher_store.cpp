@@ -836,6 +836,9 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_response.has_scan_rows()) {
         _fetcher_store->scan_rows += _response.scan_rows();
     }
+    if (_response.has_read_disk_size()) {
+        _fetcher_store->read_disk_size += _response.read_disk_size();
+    }
     if (_response.has_filter_rows()) {
         _fetcher_store->filter_rows += _response.filter_rows();
     }

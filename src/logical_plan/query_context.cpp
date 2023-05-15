@@ -33,6 +33,7 @@ void QueryContext::update_ctx_stat_info(RuntimeState* state, int64_t query_total
     stat_info.num_returned_rows += state->num_returned_rows();
     stat_info.num_affected_rows += state->num_affected_rows();
     stat_info.num_scan_rows += state->num_scan_rows();
+    stat_info.read_disk_size += state->read_disk_size();
     stat_info.num_filter_rows += state->num_filter_rows();
     stat_info.region_count += state->region_count;
     if (stmt_type == parser::NT_SELECT && stat_info.error_code == 1000 && state->sign != 0) {

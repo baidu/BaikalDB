@@ -175,7 +175,8 @@ void FuncExpr::to_stream(std::ostream& os) const {
             int children_size = children.size();
             // hll/rolling bitmap/tdigest相关的函数归一化时避免过长
             if (print_sample && children.size() > 2 && 
-                (fn_name.starts_with("hll_") || fn_name.starts_with("rb_") || fn_name.starts_with("tdigest_"))) {
+                (fn_name.starts_with("hll_") || fn_name.starts_with("rb_") || fn_name.starts_with("tdigest_") 
+                || fn_name.to_string() == "case_expr_when" || fn_name.to_string() == "case_when")) {
                 children_size = 2;
             }
             for (int i = 0; i < children_size; i++) {

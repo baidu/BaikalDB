@@ -226,6 +226,14 @@ public:
         _num_scan_rows += num;
     }
 
+    void set_read_disk_size(int64_t s) {
+        _read_disk_size = s;
+    }
+
+    int64_t read_disk_size() {
+        return _read_disk_size;
+    }
+
     void set_num_filter_rows(int64_t num) {
         _num_filter_rows = num;
     }
@@ -392,6 +400,14 @@ public:
     int memory_limit_release_all();
 
     int64_t calc_single_store_concurrency(pb::OpType op_type);
+    int64_t get_single_store_concurrency() {
+        return _single_store_concurrency;
+    }
+
+    void set_single_store_concurrency();
+    int64_t get_cost_time() {
+        return time_cost.get_time();
+    }
 
 public:
     uint64_t          txn_id = 0;
@@ -455,6 +471,7 @@ private:
     int64_t _num_returned_rows = 0; //存储baikaldb读返回的行数
     int64_t _num_scan_rows     = 0; //存储baikalStore扫描行数
     int64_t _num_filter_rows   = 0; //存储过滤行数
+    int64_t _read_disk_size = 0; // 扫描大小
     uint64_t _log_id = 0;
 
     bool              _single_sql_autocommit = true;     // used for baikaldb and store
@@ -482,6 +499,7 @@ private:
     bthread_mutex_t  _mem_lock;
     SmartMemTracker  _mem_tracker = nullptr;
     std::string      _remote_side;
+    TimeCost  time_cost;
 
     //清理长期不使用的sql签名对应的MemRowDescriptor释放内存
     void clear_mem_row_descriptor(MemRowDescriptorMap& sql_sign_to_mem_row_descriptor);

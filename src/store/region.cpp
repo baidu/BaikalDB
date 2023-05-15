@@ -2062,6 +2062,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
         response.set_last_insert_id(state.last_insert_id);
     }
     response.set_scan_rows(state.num_scan_rows());
+    response.set_read_disk_size(state.read_disk_size());
     response.set_errcode(pb::SUCCESS);
 
     txn = _txn_pool.get_txn(txn_id);
@@ -2409,6 +2410,7 @@ void Region::dml_1pc(const pb::StoreReq& request, pb::OpType op_type,
     if (commit_succ) {
         response.set_affected_rows(ret);
         response.set_scan_rows(state.num_scan_rows());
+        response.set_read_disk_size(state.read_disk_size());
         response.set_filter_rows(state.num_filter_rows());
         response.set_errcode(pb::SUCCESS);
         if (state.last_insert_id != INT64_MIN) {
@@ -2841,6 +2843,7 @@ int Region::select(const pb::StoreReq& request,
     //}
     response.set_affected_rows(rows);
     response.set_scan_rows(state.num_scan_rows());
+    response.set_read_disk_size(state.read_disk_size());
     response.set_filter_rows(state.num_filter_rows());
     if (!is_new_txn && txn != nullptr && request.op_type() == pb::OP_SELECT_FOR_UPDATE) {
         auto seq_id = txn_info.seq_id();
@@ -3255,6 +3258,9 @@ void Region::do_apply(int64_t term, int64_t index, const pb::StoreReq& request, 
                 if (res.has_scan_rows()) {
                     ((DMLClosure*)done)->response->set_scan_rows(res.scan_rows());
                 }
+		if (res.has_read_disk_size()) {
+                    ((DMLClosure*)done)->response->set_read_disk_size(res.read_disk_size());
+	        }
                 if (res.has_filter_rows()) {
                     ((DMLClosure*)done)->response->set_filter_rows(res.filter_rows());
                 }
@@ -4443,6 +4449,7 @@ void Region::on_error(const ::braft::Error& e) {
     DB_FATAL("raft node meet error, is_learner:%d, region_id: %ld, error_type:%d, error_desc:%s",
                 is_learner(), _region_id, e.type(), e.status().error_cstr());
     _region_status = pb::STATUS_ERROR;
+   Store::get_instance()->region_error_count << 1;
 }
 
 void Region::on_configuration_committed(const::braft::Configuration& conf) {

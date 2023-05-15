@@ -375,7 +375,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
             std::map<int32_t, int> field_range_type;
             auto subquery_signs = client->get_subquery_signs();
             sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id,
-                    stat_info->total_time, err_count * stat_info->total_time, rows, stat_info->num_scan_rows,
+                    stat_info->total_time, err_count * stat_info->total_time, rows, stat_info->num_scan_rows, stat_info->read_disk_size,
                     stat_info->num_filter_rows, stat_info->region_count,
                     field_range_type, err_count, stat_info->sign, subquery_signs);
         }
@@ -461,7 +461,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
             }
             sql.resize(slow_idx);
             DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
-                    "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%ld] scan_row=[%ld] bufsize=[%zu] "
+                    "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] "
+                    "row=[%ld] scan_row=[%ld] read_size=[%ld] bufsize=[%zu] "
                     "key=[%d] changeid=[%lu] logid=[%lu] traceid=[%s] family_ip=[%s] cache=[%d] stmt_name=[%s] "
                     "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%lu] region_count=[%d] sqllen=[%lu] "
                     "sql=[%s] id=[%ld] bkup=[%d] server_addr=[%s:%d]",
@@ -485,6 +486,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->table_get_row_time,
                     rows,
                     stat_info->num_scan_rows,
+                    stat_info->read_disk_size,
                     stat_info->send_buf_size,
                     stat_info->partition_key,
                     stat_info->version,
@@ -1134,32 +1136,32 @@ bool StateMachine::_query_process(SmartSocket client) {
 }
 
 void StateMachine::_parse_comment(std::shared_ptr<QueryContext> ctx) {
-    // Remove comments.
-    re2::RE2::Options option;
-    option.set_utf8(false);
-    option.set_case_sensitive(false);
-    option.set_perl_classes(true);
-    re2::RE2 reg("^\\/\\*(.*?)\\*\\/", option);
-
     // Remove ignore character.
     boost::algorithm::trim_right_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B;"));
     boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
-
-    while (boost::algorithm::starts_with(ctx->sql, "/*")) {
-        size_t len = ctx->sql.size();
-        std::string comment;
-        if (!RE2::Extract(ctx->sql, reg, "\\1", &comment)) {
-            DB_WARNING("extract commit error.");
-        }
-        if (comment.size() != 0) {
-            ctx->comments.push_back(comment);
-            ctx->sql = ctx->sql.substr(comment.size() + 4);
-        }
-        if (ctx->sql.size() == len) {
-            break;
-        }
-        // Remove ignore character.
-        boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
+    if (boost::algorithm::starts_with(ctx->sql, "/*")) {
+        // Remove comments.
+        re2::RE2::Options option;
+        option.set_utf8(false);
+        option.set_case_sensitive(false);
+        option.set_perl_classes(true);
+        re2::RE2 reg("^\\/\\*(.*?)\\*\\/", option);
+        do {
+            size_t len = ctx->sql.size();
+            std::string comment;
+            if (!RE2::Extract(ctx->sql, reg, "\\1", &comment)) {
+                DB_WARNING("extract commit error.");
+            }
+            if (comment.size() != 0) {
+                ctx->comments.push_back(comment);
+                ctx->sql = ctx->sql.substr(comment.size() + 4);
+            }
+            if (ctx->sql.size() == len) {
+                break;
+            }
+            // Remove ignore character.
+            boost::algorithm::trim_left_if(ctx->sql, boost::is_any_of(" \t\n\r\x0B"));
+        } while (boost::algorithm::starts_with(ctx->sql, "/*"));
     }
 }
 
