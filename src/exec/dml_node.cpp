@@ -175,7 +175,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         // 如果更新主键或ttl表，那么影响了全部索引
         if (!_update_affect_primary && !ttl) {
             // cstore下只更新涉及列
-            if (_table_info->engine == pb::ROCKSDB_CSTORE) {
+            if (_table_info->engine == pb::ROCKSDB_CSTORE && !_local_index_binlog) {
                 for (size_t i = 0; i < _update_slots.size(); i++) {
                     auto field_id = _update_slots[i].field_id();
                     if (_pri_field_ids.count(field_id) == 0 &&
