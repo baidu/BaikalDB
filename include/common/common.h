@@ -1371,6 +1371,12 @@ inline std::string try_to_lower(const std::string& str) {
     return str;
 }
 
+inline std::string to_lower(const std::string& str) {
+    std::string tmp = str;
+    std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::tolower);
+    return tmp;
+}
+
 inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
     butil::MurmurHash3_x64_128(key.c_str(), key.size(), 1234, out);
