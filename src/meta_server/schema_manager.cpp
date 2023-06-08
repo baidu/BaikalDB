@@ -854,15 +854,6 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
                             "table id not exist", request->op_type(), log_id);
         return -1;
     }
-    if (ptr_region->peers_size() < 2) {
-        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
-                                "region not stable, cannot split",
-                                request->op_type(),
-                                log_id);
-        DB_WARNING("region cannot split, region not stable, request: %s, region_id: %ld",
-                   request->ShortDebugString().c_str(), region_id);
-        return -1;
-    }
     int64_t table_id = 0;
     if (request->region_split().has_table_id()) {
         table_id = request->region_split().table_id();
@@ -909,6 +900,7 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
                                 "replica num not exist", request->op_type(), log_id);
         return -1;
     }
+
     // 副本分布 {resource_tag:logical_room:physical_room} : replica_count
     // 主resource tag优先
     std::vector<std::string> table_idcs;
@@ -936,6 +928,15 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
     // 5副本，分裂的时候选3个peer，剩下两个peer在分裂完之后补齐
     if (instance_num > 3) {
         instance_num = 3;
+    }
+    if (ptr_region->peers_size() < 2 && instance_num > 1) {
+        ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
+                                "region not stable, cannot split",
+                                request->op_type(),
+                                log_id);
+        DB_WARNING("region cannot split, region not stable, request: %s, region_id: %ld",
+                   request->ShortDebugString().c_str(), region_id);
+        return -1;
     }
 
     //从cluster中选择store, 尾分裂选择replica个store, 中间分裂选择replica-1个store
