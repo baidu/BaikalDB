@@ -27,6 +27,7 @@ DEFINE_int32(max_connections_per_user, 4000, "default user max connections");
 DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second");
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
 DEFINE_int64(baikal_max_allowed_packet, 268435456LL, "The largest possible packet : 256M");
+DEFINE_int32(query_cache_timeout_s, 10, "query cache timeout(s)");
 DECLARE_int64(print_time_us);
 DECLARE_string(meta_server_bns);
 DECLARE_int32(baikal_port);
@@ -1094,6 +1095,9 @@ bool StateMachine::_query_process(SmartSocket client) {
         } else if (type == SQL_SHOW_NUM) {
             _wrapper->make_simple_ok_packet(client);
             client->state = STATE_READ_QUERY_RESULT;
+        } else if (client->query_ctx->query_cache > 0) {
+            ret = _handle_client_query_with_cache(client);
+            client->state = (client->state == STATE_ERROR) ? STATE_ERROR : STATE_READ_QUERY_RESULT;
         } else {
             //对于正常的请求做限制
             if (client->user_info->is_exceed_quota()) {
@@ -1234,6 +1238,11 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd() && root["no_binlog"].IsBool()) {
                 ctx->no_binlog = json_iter->value.GetBool();
                 DB_WARNING("no_binlog: %d", ctx->no_binlog);
+            }
+            json_iter = root.FindMember("query_cache");
+            if (json_iter != root.MemberEnd()) {
+                ctx->query_cache = json_iter->value.GetInt64();
+                DB_WARNING("query_cache: %ld", ctx->query_cache);
             }
         } catch (...) {
             DB_WARNING("parse extra file error [%s]", json_str.c_str());
@@ -1866,6 +1875,62 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             str.c_str());
         return false;
     }
+    return true;
+}
+
+bool StateMachine::_handle_client_query_with_cache(SmartSocket client) {
+    TimeCost cost;
+    // Step1. 查缓存
+    auto& key = client->query_ctx->sql;
+    SmartQueryBuffer tmp_ptr(new QueryBuffer());
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_query_cache.find(key, &tmp_ptr) == 0) {
+            _query_cache.add(key, tmp_ptr); // 空buf的buf_time为0，相当于一定会过期
+        }
+    }
+    if (!tmp_ptr->is_expired(client->query_ctx->query_cache * 1000L)) {
+        // read from cache
+        tmp_ptr->get_buffer(client->send_buf);
+        client->query_ctx->stat_info.hit_cache = true;
+        client->query_ctx->stat_info.send_buf_size += client->send_buf->_size;
+        DB_DEBUG_CLIENT(client, "read cache, buf_time=%ld, buf_size=%ld, cost=%ld",
+                 butil::gettimeofday_us() - tmp_ptr->buf_time, tmp_ptr->buf->_size, cost.get_time());
+        return true;
+    }
+
+    // Step2. 排队
+    int r = tmp_ptr->cond.timed_wait(FLAGS_query_cache_timeout_s * 1000 * 1000LL); // 10s超时
+    if (r != 0) {
+        // 10s超时失败
+        client->query_ctx->stat_info.error_code = ER_QUERY_CACHE_DISABLED;
+        client->query_ctx->stat_info.error_msg << "query cache failed, timeout";
+        return false;
+    }
+    tmp_ptr->cond.increase(); // 保证相同sql的并发请求, 顺序执行
+    ON_SCOPE_EXIT([&tmp_ptr]() {
+        tmp_ptr->cond.decrease_signal();
+    });
+
+    // Step3. double check whether cache is updated before query from store
+    if (!tmp_ptr->is_expired(client->query_ctx->query_cache * 1000L)) {
+        // read from cache
+        tmp_ptr->get_buffer(client->send_buf);
+        client->query_ctx->stat_info.hit_cache = true;
+        client->query_ctx->stat_info.send_buf_size += client->send_buf->_size;
+        DB_DEBUG_CLIENT(client, "read cache after wait, buf_time=%ld, buf_size=%ld, cost=%ld",
+                 butil::gettimeofday_us() - tmp_ptr->buf_time, tmp_ptr->buf->_size, cost.get_time());
+        return true;;
+    }
+
+    // Step4. Query from store, and write to cache if succ.
+    if (!_handle_client_query_common_query(client)) {
+        return false;
+    }
+    // write to cache if succ
+    tmp_ptr->set_buffer(client->send_buf);
+    DB_DEBUG_CLIENT(client, "write cache, buf_size=%ld, cost=%ld",
+             tmp_ptr->buf->_size, cost.get_time());
     return true;
 }
 } // namespace baikal

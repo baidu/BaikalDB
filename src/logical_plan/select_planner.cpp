@@ -186,7 +186,10 @@ bool SelectPlanner::is_full_export() {
         if (!is_fullexport_condition()) {
             return false;
         }
-    } 
+    }
+    if (_ctx->query_cache > 0) {
+        return false;
+    }
     return true;
 }
 

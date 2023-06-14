@@ -297,6 +297,10 @@ public:
     // /*{"peer_index":$peer_index}*/ preceding a Select statement
     int64_t             peer_index = -1;
 
+    // user can get query data from cache in specific query_cache(ms) by comments
+    // /*{"query_cache":$query_cache}*/ preceding a Select statement
+    int64_t             query_cache = 0;
+
     // in autocommit mode, two phase commit is disabled by default (for better formance)
     // user can enable 2pc by comments /*{"enable_2pc":1}*/ preceding a DML statement
     bool                enable_2pc = false;
