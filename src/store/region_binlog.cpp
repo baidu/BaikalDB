@@ -121,6 +121,7 @@ void Region::binlog_query_primary_region(const int64_t& start_ts, const int64_t&
                 binlog_desc->set_binlog_ts(commit_ts);
                 binlog_desc->set_txn_id(txn_info.txn_id());
                 binlog_desc->set_start_ts(start_ts);
+                binlog_desc->set_primary_region_id(region_info.region_id());
 
                 butil::IOBuf data;
                 butil::IOBufAsZeroCopyOutputStream wrapper(&data);
@@ -1332,7 +1333,7 @@ void Region::read_binlog(const pb::StoreReq* request,
             return;
         }
 
-        oldest_ts = _binlog_param.oldest_ts;
+        oldest_ts = std::max(_rocksdb->get_oldest_ts_in_binlog_cf(), _binlog_param.oldest_ts);
         if (oldest_ts < 0) {
             DB_FATAL("region_id: %ld, get oldest ts failed", _region_id);
             response->set_errcode(pb::GET_VALUE_FAIL); 

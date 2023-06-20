@@ -29,6 +29,10 @@ public:
                                NetworkSocket* client_conn,
                                bool use_backup,
                                std::vector<SmartRecord>& insert_records);
+    static bool need_degrade;
+    static TimeCost last_degrade_time;
+    static bvar::Adder<int64_t> auto_inc_count;
+    static bvar::Adder<int64_t> auto_inc_error;
 };
 }
 

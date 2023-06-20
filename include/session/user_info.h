@@ -62,31 +62,37 @@ public:
         }
     }
 
-    bool allow_write(int64_t db, int64_t tbl) {
+    bool allow_write(int64_t db, int64_t tbl, const std::string& tbl_name) {
         if (database.count(db) == 1 && database[db] == pb::WRITE) {
             return true;
         }
         if (table.count(tbl) == 1 && table[tbl] == pb::WRITE) {
             return true;
         }
+        if (table_name.count(tbl_name) == 1 && table_name[tbl_name] == pb::WRITE) {
+            return true;
+        }
         return false;
     }
 
-    bool allow_read(int64_t db, int64_t tbl) {
+    bool allow_read(int64_t db, int64_t tbl, const std::string& tbl_name) {
         if (database.count(db) == 1) {
             return true;
         }
         if (table.count(tbl) == 1) {
             return true;
         }
+        if (table_name.count(tbl_name) == 1) {
+            return true;
+        }
         return false;
     }
 
-    bool allow_op(pb::OpType op_type, int64_t db, int64_t tbl) {
+    bool allow_op(pb::OpType op_type, int64_t db, int64_t tbl, const std::string& table_name) {
         if (op_type == pb::OP_SELECT) {
-            return allow_read(db, tbl);
+            return allow_read(db, tbl, table_name);
         } else {
-            return allow_write(db, tbl);
+            return allow_write(db, tbl, table_name);
         }
     }
 
@@ -136,6 +142,7 @@ public:
     std::atomic<uint32_t>    query_count;
     std::map<int64_t, pb::RW> database;
     std::map<int64_t, pb::RW> table;
+    std::map<std::string, pb::RW> table_name;
     // show databases使用
     std::set<int64_t> all_database;
     std::unordered_set<std::string> auth_ip_set;

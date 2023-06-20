@@ -63,8 +63,8 @@ BINARY_OP_PREDICATE_ALL_TYPES_DEFINE(ge);
 BINARY_OP_PREDICATE_ALL_TYPES_DEFINE(lt);
 BINARY_OP_PREDICATE_ALL_TYPES_DEFINE(le);
 // && || xor
-BINARY_OP_DEFINE(logic_and, bool);
-BINARY_OP_DEFINE(logic_or, bool);
+//BINARY_OP_DEFINE(logic_and, bool);
+//BINARY_OP_DEFINE(logic_or, bool);
 //BINARY_OP_DEFINE(logic_xor, bool);
 }
 

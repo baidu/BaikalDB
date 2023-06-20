@@ -330,9 +330,10 @@ int LoadNode::handle_lines(RuntimeState* state, std::vector<std::string>& row_li
     records.reserve(row_lines.size());
     for (auto& line : row_lines) {
         std::vector<std::string> split_vec;
+        /*
         if (ends_with(line, _terminated)) {
             line.erase(line.length() - _terminated.length(), line.length());
-        }
+        }*/
         boost::split(split_vec, line, boost::is_any_of(_terminated));
         if (split_vec.size() != _field_ids.size() + _ingore_field_indexes.size()) {
             DB_FATAL("size diffrent %lu %lu", split_vec.size(), _field_ids.size() + _ingore_field_indexes.size());

@@ -130,39 +130,17 @@ int DeleteManagerNode::process_binlog(RuntimeState* state, bool is_local) {
         auto client = state->client_conn();
         auto binlog_ctx = client->get_binlog_ctx();
         auto ctx = client->get_query_ctx();
-        pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
-        auto mutation = binlog_value->add_mutations();
-        mutation->add_sequence(pb::MutationType::DELETE);
-        mutation->set_table_id(_table_id);
-        if (ctx != nullptr) {
-            mutation->set_sql(ctx->sql);
-            auto stat_info = &(ctx->stat_info);
-            mutation->set_sign(stat_info->sign);
-            binlog_ctx->add_sql_info(stat_info->family, stat_info->table, stat_info->sign);
+        if (ctx == nullptr) {
+            DB_WARNING("ctx is null");
+            return -1;
         }
-        binlog_ctx->set_table_info(_table_info);
+        auto stat_info = &(ctx->stat_info);
         if (is_local) {
-            SmartRecord record_template = _factory->new_record(_table_id);
-            bool need_set_partition_record = true;
-            for (auto& str_record : _fetcher_store.return_str_records) {
-                mutation->add_deleted_rows(str_record);
-                if (need_set_partition_record) {
-                    SmartRecord record = record_template->clone(false);
-                    auto ret = record->decode(str_record);
-                    if (ret < 0) {
-                        DB_FATAL("decode to record fail");
-                        return -1;
-                    }
-                    binlog_ctx->set_partition_record(record);
-                    need_set_partition_record = false;
-                }
-            }
+            return binlog_ctx->add_binlog_values(_table_info, ctx->sql, stat_info->sign, pb::MutationType::DELETE,
+                _fetcher_store.return_str_records, {});
         } else {
-            binlog_ctx->set_partition_record(_del_scan_records[0]);
-            for (auto& record : _del_scan_records) {
-                std::string* row = mutation->add_deleted_rows();
-                record->encode(*row);
-            }
+            return binlog_ctx->add_binlog_values(_table_info, ctx->sql, stat_info->sign, pb::MutationType::DELETE,
+                _del_scan_records, {});
         }
     }
     return 0;

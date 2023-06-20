@@ -601,8 +601,8 @@ int MetaWriter::read_pre_commit_key(int64_t region_id, uint64_t txn_id,
     }
     num_table_lines = TableKey(rocksdb::Slice(value)).extract_i64(0);
     applied_index = TableKey(rocksdb::Slice(value)).extract_i64(sizeof(int64_t));
-    DB_WARNING("region_id: %ld read pre commit value, num_table_lines: %ld, applied_index: %ld",
-                region_id, num_table_lines, applied_index);
+    DB_WARNING("region_id: %ld read pre commit value, txn_id: %lu num_table_lines: %ld, applied_index: %ld",
+                region_id, txn_id, num_table_lines, applied_index);
     return 0;
 }
 

@@ -337,12 +337,14 @@ void SchemaManager::process_leader_heartbeat_for_store(const pb::StoreHeartBeatR
 
     int64_t timestamp = butil::gettimeofday_us();
     TimeCost step_time_cost;
+    RegionManager::get_instance()->leader_heartbeat_for_region(request, response);
+    int64_t leader_region_time = step_time_cost.get_time();
+    step_time_cost.reset();
+
+    RegionManager::get_instance()->update_binlog_status(request);
     RegionManager::get_instance()->update_leader_status(request, timestamp);
     int64_t update_status_time = step_time_cost.get_time();
     step_time_cost.reset();
-
-    RegionManager::get_instance()->leader_heartbeat_for_region(request, response);
-    int64_t leader_region_time = step_time_cost.get_time();
     step_time_cost.reset();
 
     std::string resource_tag = request->instance_info().resource_tag();
@@ -415,6 +417,14 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
                 if (table_info.has_binlog_info() && table_info.binlog_info().has_binlog_table_id()) {
                     heartbeat_binlog_table_ids.insert(table_info.binlog_info().binlog_table_id());
                 }
+                if (table_info.binlog_infos_size() > 0) {
+                    for (int i = 0; i < table_info.binlog_infos_size(); i++) {
+                        auto& binlog_info = table_info.binlog_infos(i);
+                        if (binlog_info.has_binlog_table_id()) {
+                            heartbeat_binlog_table_ids.insert(binlog_info.binlog_table_id());
+                        }
+                    }
+                }
             }
             if (heartbeat_binlog_table_ids.empty()) {
                 DB_WARNING("heartbeat_binlog_table_ids is empty");
@@ -458,7 +468,7 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
         std::vector<int64_t> new_add_region_ids;
         TableManager::get_instance()->check_add_table(
             report_table_ids, new_add_region_ids, request, response, heartbeat_table_ids);
-        RegionManager::get_instance()->add_region_info(new_add_region_ids, response);      
+        RegionManager::get_instance()->add_region_info(new_add_region_ids, response);
     }
     int64_t update_table_time = step_time_cost.get_time();
     step_time_cost.reset(); 
@@ -483,7 +493,7 @@ int SchemaManager::check_and_get_for_privilege(pb::UserPrivilege& user_privilege
     std::string namespace_name = user_privilege.namespace_name();
     int64_t namespace_id = NamespaceManager::get_instance()->get_namespace_id(namespace_name);
     if (namespace_id == 0) {
-        DB_FATAL("namespace not exist, namespace:%s, request：%s", 
+        DB_FATAL("namespace not exist, namespace:%s, request: %s", 
                         namespace_name.c_str(),
                         user_privilege.ShortDebugString().c_str());
         return -1;
@@ -493,7 +503,7 @@ int SchemaManager::check_and_get_for_privilege(pb::UserPrivilege& user_privilege
         std::string base_name = namespace_name + "\001" + pri_base.database();
         int64_t database_id = DatabaseManager::get_instance()->get_database_id(base_name); 
         if (database_id == 0) {
-            DB_FATAL("database:%s not exist, namespace:%s, request：%s",
+            DB_FATAL("database:%s not exist, namespace:%s, request: %s",
                 base_name.c_str(), namespace_name.c_str(), 
                 user_privilege.ShortDebugString().c_str());
             return -1;
@@ -505,14 +515,14 @@ int SchemaManager::check_and_get_for_privilege(pb::UserPrivilege& user_privilege
         std::string table_name = base_name + "\001" + pri_table.table_name();
         int64_t database_id = DatabaseManager::get_instance()->get_database_id(base_name);
         if (database_id == 0) {
-            DB_FATAL("database:%s not exist, namespace:%s, request：%s",
+            DB_FATAL("database:%s not exist, namespace:%s, request: %s",
                             base_name.c_str(), namespace_name.c_str(),
                             user_privilege.ShortDebugString().c_str());
             return -1;
         }
         int64_t table_id = TableManager::get_instance()->get_table_id(table_name); 
         if (table_id == 0) {
-            DB_FATAL("table_name:%s not exist, database:%s namespace:%s, request：%s",
+            DB_FATAL("table_name:%s not exist, database:%s namespace:%s, request: %s",
                         table_name.c_str(), base_name.c_str(),
                         namespace_name.c_str(), user_privilege.ShortDebugString().c_str());
             return -1;    

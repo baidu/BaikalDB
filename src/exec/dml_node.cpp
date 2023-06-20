@@ -243,6 +243,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             old_record = record->clone(true);
         }
         if (FLAGS_replace_no_get && _is_replace && _all_indexes.size() == 1) {
+            if (!_txn->fits_region_range_for_primary(*_pri_info, pk_key)) {
+                // DB_DEBUG("replace_no_get fail to fit: %s", rocksdb::Slice(pk_key.data()).ToString(true).c_str());
+                return 0;
+            }
             ret = -2;
         } else {
             ret = _txn->get_update_primary(_region_id, *_pri_info, old_record, _field_ids, GET_LOCK, true);

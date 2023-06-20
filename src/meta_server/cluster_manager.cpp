@@ -447,6 +447,7 @@ void ClusterManager::drop_instance(const pb::MetaManagerRequest& request, braft:
         return 1;
     };
     _scheduling_info.Modify(call_func, address);
+    RegionManager::get_instance()->drop_instance_binlog_ids(address);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop instance success, request:%s", request.ShortDebugString().c_str());
 }
@@ -1160,12 +1161,18 @@ void ClusterManager::store_healthy_check_function() {
         for (auto& store : store_pair.second) {
             if (_meta_state_machine->get_migrate(store_pair.first)
                 && !TableManager::get_instance()->is_cluster_in_fast_importer(store_pair.first)
+                && RegionManager::get_instance()->check_binlog_regions_can_migrate(store.address)  // 检查store上所有的binlog有其他数据超过7天的peer
                 && store.instance_status.state_duration.get_time() > delay * 1000 * 1000
                 && concurrency-- > 0) {
                 DB_WARNING("store:%s is migrating, resource_tag: %s", 
                         store.address.c_str(), store_pair.first.c_str());
                 RegionManager::get_instance()->add_peer_for_store(store.address,
                         store.instance_status);
+            } else {
+                DB_WARNING("store:%s wait for migrate, resource_tag: %s, fast_import:%d, concurrency:%ld", 
+                        store.address.c_str(), store_pair.first.c_str(),
+                        TableManager::get_instance()->is_cluster_in_fast_importer(store_pair.first),
+                        concurrency);
             }
         }
     }

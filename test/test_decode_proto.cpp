@@ -205,9 +205,37 @@ void test_proto_invalid_field() {
     }
 }
 
+void test_optional_to_repeated() {
+    Packed packed;
+    Pg pg;
+    pg.add_a(10000);
+    pg.set_b(20000);
+    (*packed.add_a()) = pg;
+    
+    std::string buffer;
+    packed.SerializeToString(&buffer);
+    
+    Optional optional;
+    optional.ParseFromString(buffer);
+    DB_WARNING("optional %s", optional.ShortDebugString().c_str());
+
+    Pg pg1;
+    pg1.add_a(20000);
+    pg1.set_b(30000);
+    Optional optional1;
+    optional1.mutable_a()->CopyFrom(pg1);
+    std::string buffer1;
+    optional1.SerializeToString(&buffer1);
+
+    Packed packed1;
+    packed1.ParseFromString(buffer1);
+    DB_WARNING("packed1 %s", packed1.ShortDebugString().c_str());
+}
+
 int main(int argc, char** argv) {
     //baidu::rpc::StartDummyServerAt(8800);
     DB_WARNING("thread num:%d", bthread::FLAGS_bthread_concurrency);
+    test_optional_to_repeated();
     sleep(10);
     
 	int batch_cnt = std::stoi(argv[1]);

@@ -68,6 +68,8 @@ DEFINE_bool(disambiguate_select_name, false, "whether use the first when select 
 DEFINE_int32(new_sign_read_concurrency, 10, "new_sign_read concurrency, default:20");
 DEFINE_bool(open_new_sign_read_concurrency, false, "open new_sign_read concurrency, default: false");
 DEFINE_bool(need_verify_ddl_permission, false, "default true");
+DEFINE_bool(use_cond_decrease_signal, false, "default false");
+
 
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 

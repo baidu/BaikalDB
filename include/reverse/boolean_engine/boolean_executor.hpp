@@ -301,10 +301,11 @@ const typename Schema::PostingNodeT* OrBooleanExecutor<Schema>::next() {
         for (auto sub : clauses) {
             sub->next();
         }
+        make_heap();
         this->_init_flag = false;
-    }
-    if (_miter != nullptr) {
-        _miter->next();
+    } else {
+        (*clauses.begin())->next();
+        shiftdown(0);
     }
     return find_next();
 }
@@ -322,9 +323,10 @@ const typename Schema::PostingNodeT* OrBooleanExecutor<Schema>::advance(
     } else if (target_id.compare(*this->current_id()) <= 0) {
         return this->current_node();
     }
-    for (auto sub : clauses) {
+    for (auto sub : clauses) { 
         sub->advance(target_id);
     }
+    make_heap();
     return find_next();
 }
 
@@ -332,8 +334,7 @@ template <typename Schema>
 const typename Schema::PostingNodeT* OrBooleanExecutor<Schema>::find_next() {
     std::vector<BooleanExecutor<Schema>*>& clauses = this->_sub_clauses;
  
-    typedef typename std::vector<BooleanExecutor<Schema>*>::iterator IteratorT;
-    IteratorT min_iter = std::min_element(clauses.begin(), clauses.end(), CompareAsc<Schema>());
+    auto min_iter = clauses.begin();
 
     const PrimaryIdT* min_id = (*min_iter)->current_id();
     if (NULL == min_id) {
@@ -349,20 +350,61 @@ const typename Schema::PostingNodeT* OrBooleanExecutor<Schema>::find_next() {
         this->_curr_id_ptr = (*min_iter)->current_id();
     }
 
-    _miter = *min_iter;
-
-    for (IteratorT sub = clauses.begin(); sub != clauses.end(); ++sub) {
-        if (sub == min_iter) {
-            continue;
+    if (clauses.size() > 1) {
+        for (int i = 0; i < clauses.size(); ++i) {
+            if (clauses[1]->current_id() != NULL && 
+                    Schema::compare_id_func(*(clauses[1]->current_id()), *this->_curr_id_ptr) == 0) {
+                this->_merge_func(*this->_curr_node_ptr, *clauses[1]->current_node(), this->_arg);
+                clauses[1]->next();
+                shiftdown(1);
+            } else {
+                break;
+            }
         }
-        if ((*sub)->current_id() != NULL) {
-            if (Schema::compare_id_func(*((*sub)->current_id()), *this->_curr_id_ptr) == 0) {
-                this->_merge_func(*this->_curr_node_ptr, *(*sub)->current_node(), this->_arg);
-                (*sub)->next();
+    }
+    if (clauses.size() > 2) {
+        for (int i = 0; i < clauses.size(); ++i) {
+            if (clauses[2]->current_id() != NULL && 
+                    Schema::compare_id_func(*(clauses[2]->current_id()), *this->_curr_id_ptr) == 0) {
+                this->_merge_func(*this->_curr_node_ptr, *clauses[2]->current_node(), this->_arg);
+                clauses[2]->next();
+                shiftdown(2);
+            } else {
+                break;
             }
         }
     }
     return this->_curr_node_ptr;
+}
+
+template <typename Schema>
+void OrBooleanExecutor<Schema>::make_heap() {
+    for (int i = static_cast<int>(this->_sub_clauses.size()) / 2 - 1; i >= 0; i--) {
+        shiftdown(i);
+    }
+}
+
+template <typename Schema>
+void OrBooleanExecutor<Schema>::shiftdown(size_t index) {
+    std::vector<BooleanExecutor<Schema>*>& clauses = this->_sub_clauses;
+    size_t left_index = index * 2 + 1;
+    size_t right_index = left_index + 1;
+    if (left_index >= clauses.size()) {
+        return;
+    }
+    size_t min_index = index;
+    if (left_index < clauses.size() &&
+            CompareAsc<Schema>()(clauses[left_index], clauses[min_index])) {
+        min_index = left_index;
+    }
+    if (right_index < clauses.size() && 
+            CompareAsc<Schema>()(clauses[right_index], clauses[min_index])) {
+        min_index = right_index;  
+    }
+    if (min_index != index) {
+        std::iter_swap(clauses.begin() + min_index, clauses.begin() + index);
+        shiftdown(min_index);
+    }
 }
 
 // WeightedBooleanExecutor

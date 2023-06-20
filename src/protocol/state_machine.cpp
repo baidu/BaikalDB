@@ -1649,13 +1649,6 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     client->query_ctx->stat_info.sql_length = client->query_ctx->sql.size();
     client->query_ctx->charset = client->charset_name;
 
-    if (SchemaFactory::get_instance()->is_big_sql(client->query_ctx->sql)) {
-        _wrapper->make_err_packet(client,
-            ER_SQL_TOO_BIG, "%s",
-            "sql too big");
-        return false;
-    }
-
     // sql planner.
     TimeCost cost;
     TimeCost cost1;
@@ -1815,9 +1808,6 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
         client->query_ctx->stat_info.send_buf_size += client->send_buf->_size;
     }
     if (ret < 0) {
-        if (client->query_ctx->stat_info.error_code == ER_SQL_TOO_BIG) {
-            SchemaFactory::get_instance()->update_big_sql(client->query_ctx->sql);
-        }
         DB_WARNING_CLIENT(client, "Failed to PhysicalPlanner::execute: %s",
             client->query_ctx->sql.c_str());
         if (client->query_ctx->stat_info.error_code == ER_ERROR_FIRST) {

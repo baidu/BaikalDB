@@ -130,9 +130,7 @@ bool NetworkSocket::transaction_has_write() {
         return true;
     }
     for (auto& pair : cache_plans) {
-        pb::OpType type = pair.second.op_type;
-        if (type == pb::OP_INSERT || type == pb::OP_DELETE || 
-            type == pb::OP_UPDATE || type == pb::OP_SELECT_FOR_UPDATE) {
+        if (is_dml_op_type(pair.second.op_type)) {
             return true;
         }
     }
@@ -167,6 +165,7 @@ void NetworkSocket::on_begin() {
     txn_id = get_txn_id();
     seq_id = 0;
     primary_region_id = -1;
+    txn_affected_rows = 0;
     auto time = butil::gettimeofday_us();
     DB_DEBUG("set txn start time %ld", time);
     txn_start_time = time;
@@ -192,6 +191,7 @@ void NetworkSocket::on_commit_rollback() {
         }
         cache_plans.clear();
     }
+    txn_affected_rows = 0;
     region_infos.clear();
     binlog_ctx.reset();
     addr_callids_map.clear();

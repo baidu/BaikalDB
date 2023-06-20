@@ -32,14 +32,23 @@
 namespace baikaldb {
 
 // Signal handlers.
-void handle_exit_signal() {
+void handle_exit_signal(int sig) {
     NetworkServer::get_instance()->graceful_shutdown();
 }
+
+void crash_handler(int sig) {
+    NetworkServer::get_instance()->fast_stop();
+    NetworkServer::get_instance()->graceful_shutdown();
+    signal(sig, SIG_DFL);
+    kill(getpid(), sig);
+}
+
 } // namespace baikaldb
 
 int main(int argc, char **argv) {
     // Initail signal handlers.
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGSEGV, (sighandler_t)baikaldb::crash_handler);
     signal(SIGINT, (sighandler_t)baikaldb::handle_exit_signal);
     signal(SIGTERM, (sighandler_t)baikaldb::handle_exit_signal);
 #ifdef BAIKALDB_REVISION
@@ -80,6 +89,10 @@ int main(int argc, char **argv) {
     }
     if (baikaldb::MetaServerInteract::get_tso_instance()->init() != 0) {
         DB_FATAL("meta server interact init failed");
+        return -1;
+    }
+    if (baikaldb::TsoFetcher::get_instance()->init() != 0) {
+        DB_FATAL("TsoFetcher init failed");
         return -1;
     }
     // 可以没有backup

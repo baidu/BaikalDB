@@ -379,6 +379,13 @@ void TableManager::create_table(const pb::MetaManagerRequest& request, const int
     if (table_mem.whether_level_table) {
         DB_NOTICE("create table completely, _max_table_id:%ld, table_name:%s", _max_table_id, table_name.c_str());
     }
+    if (table_mem.is_binlog) {
+        auto call_func = [](TableSchedulingInfo& infos, int64_t table_id) -> int {
+            infos.binlog_table_ids.insert(table_id);
+            return 1;
+        };
+        _table_scheduling_infos.Modify(call_func, table_mem.main_table_id);
+    }
     if (done) {
         ((MetaServerClosure*)done)->whether_level_table = table_mem.whether_level_table;
         ((MetaServerClosure*)done)->create_table_ret = ret;
@@ -534,7 +541,7 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
                                                                     write_rocksdb_values, 
                                                                     delete_rocksdb_keys);
     if (ret < 0) {
-        DB_WARNING("drop table fail, request：%s", request.ShortDebugString().c_str());
+        DB_WARNING("drop table fail, request: %s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
@@ -553,6 +560,13 @@ void TableManager::drop_table(const pb::MetaManagerRequest& request, const int64
         // 正在快速导入，删表把快速导入标志清掉，报警，可能需要人工恢复store rocksdb标志
         DB_FATAL("drop table: %ld, drop table is in_fast_import", drop_table_id);
         cancel_in_fast_importer(drop_table_id);
+    }
+    if (schema_info.is_binlog()) {
+        auto call_func = [](TableSchedulingInfo& infos, int64_t table_id) -> int {
+            infos.binlog_table_ids.erase(table_id);
+            return 1;
+        };
+        _table_scheduling_infos.Modify(call_func, drop_table_id);
     }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop table success, request:%s", request.ShortDebugString().c_str());
@@ -681,10 +695,23 @@ void TableManager::restore_table(const pb::MetaManagerRequest& request, const in
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("restore table success, request:%s, info:%s", 
             request.ShortDebugString().c_str(), schema_info.ShortDebugString().c_str());
+    
+    if (table_mem.is_binlog) {
+        auto call_func = [](TableSchedulingInfo& infos, int64_t table_id) -> int {
+            infos.binlog_table_ids.insert(table_id);
+            return 1;
+        };
+        _table_scheduling_infos.Modify(call_func, table_mem.main_table_id);
+    }
     if (done) {
-        Bthread bth_restore_region(&BTHREAD_ATTR_SMALL);
-        std::string resource_tag = schema_info.resource_tag();
-        std::function<void()> restore_function = [table_id, resource_tag]() {
+        std::set<std::string> resource_tag_set {schema_info.resource_tag()};
+        for (const auto& dist : schema_info.dists()) {
+            if (dist.has_resource_tag()) {
+                resource_tag_set.insert(dist.resource_tag());
+            }
+        }
+        std::function<void()> restore_function = [table_id, resource_tag_set]() {
+            for (auto& resource_tag : resource_tag_set) {
                 std::set<std::string> instances;
                 ClusterManager::get_instance()->get_instances(resource_tag, instances);
                 DB_WARNING("restore table, resource_tag:%s, instances.size:%lu", 
@@ -696,7 +723,9 @@ void TableManager::restore_table(const pb::MetaManagerRequest& request, const in
                     StoreInteract store_interact(instance);
                     store_interact.send_request("restore_region", request, response);
                 }
+            }
             };
+        Bthread bth_restore_region(&BTHREAD_ATTR_SMALL);
         bth_restore_region.run(restore_function);
     }
 }
@@ -1164,7 +1193,7 @@ void TableManager::drop_field(const pb::MetaManagerRequest& request,
             return;
         }
         auto field_id = _table_info_map[table_id].field_id_map[field.field_name()];
-        if (check_filed_is_linked(table_id, field_id)) {
+        if (check_field_is_linked(table_id, field_id)) {
             DB_WARNING("field name:%s is binlog link field, request:%s",
                         field.field_name().c_str(), request.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
@@ -1244,7 +1273,7 @@ void TableManager::rename_field(const pb::MetaManagerRequest& request,
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name not exist");
             return;
         }
-        if (check_filed_is_linked(table_id,  _table_info_map[table_id].field_id_map[field.field_name()])) {
+        if (check_field_is_linked(table_id,  _table_info_map[table_id].field_id_map[field.field_name()])) {
             DB_WARNING("field name:%s is binlog link field, request:%s",
                         field.field_name().c_str(), request.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
@@ -1329,7 +1358,7 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
             return;
         }
         auto field_id = _table_info_map[table_id].field_id_map[field_name];
-        if (check_filed_is_linked(table_id, field_id)) {
+        if (check_field_is_linked(table_id, field_id)) {
             DB_WARNING("field name:%s is binlog link field, request:%s",
                         field.field_name().c_str(), request.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
@@ -1351,9 +1380,14 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
                     mem_field.set_can_null(field.can_null());
                 }
                 if (field.auto_increment() != mem_field.auto_increment()) {
-                    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
-                                         "modify field auto_increment unsupported");
-                    return;
+                    //可以去除auto increment
+                    if (!field.auto_increment() && mem_field.auto_increment()) {
+                        mem_field.set_auto_increment(field.auto_increment());
+                    } else {
+                        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
+                                "modify field auto_increment unsupported");
+                        return;
+                    }
                 }
                 if (field.has_default_value()) {
                     mem_field.set_default_value(field.default_value());
@@ -1623,15 +1657,32 @@ int TableManager::load_table_snapshot(const std::string& value) {
     }
     if (table_pb.engine() == pb::BINLOG) {
         table_mem.is_binlog = true;
+        auto call_func = [](TableSchedulingInfo& infos, int64_t table_id) -> int {
+            infos.binlog_table_ids.insert(table_id);
+            return 1;
+        };
+        _table_scheduling_infos.Modify(call_func, table_pb.table_id());
     }
     if (table_pb.has_binlog_info()) {
         auto& binlog_info = table_pb.binlog_info();
         if (binlog_info.has_binlog_table_id()) {
             table_mem.is_linked = true;
-            table_mem.binlog_id = binlog_info.binlog_table_id();
+            table_mem.binlog_ids.insert(binlog_info.binlog_table_id());
         }
         for (auto target_id : binlog_info.target_table_ids()) {
             table_mem.binlog_target_ids.insert(target_id);
+        }
+    }
+    if (table_pb.binlog_infos_size() > 0) {
+        for (int i = 0; i < table_pb.binlog_infos_size(); i++) {
+            auto& binlog_info = table_pb.binlog_infos(i);
+            if (binlog_info.has_binlog_table_id()) {
+                table_mem.is_linked = true;
+                table_mem.binlog_ids.insert(binlog_info.binlog_table_id());
+            }
+            for (auto target_id : binlog_info.target_table_ids()) {
+                table_mem.binlog_target_ids.insert(target_id);
+            }
         }
     }
     for (auto& field : table_pb.fields()) {
@@ -3497,19 +3548,26 @@ void TableManager::link_binlog(const pb::MetaManagerRequest& request, const int6
     //check内存，更新内存
     auto& table_mem =  _table_info_map[table_id];
     auto& binlog_table_mem =  _table_info_map[binlog_table_id];
-    if (table_mem.is_linked) {
+    if (table_mem.binlog_ids.count(binlog_table_id) > 0) {
         DB_WARNING("table already linked, request:%s", request.DebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table already linked");
+        return;
+    }
+    if (!binlog_table_mem.is_binlog) {
+        DB_WARNING("table is not binlog, request:%s", request.DebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is not binlog");
         return;
     }
     // 验证普通表使用的分区字段
     pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
     bool get_field_info = false;
+    bool partition_is_same_hint = true; // 默认分区方式一样
+    pb::FieldInfo link_field;
     if (binlog_table_mem.is_partition) {
         if (request.table_info().has_link_field()) {
             for (const auto& field_info : mem_schema_pb.fields()) {
                 if (field_info.field_name() == request.table_info().link_field().field_name()) {
-                    mem_schema_pb.mutable_link_field()->CopyFrom(field_info);
+                    link_field = field_info;
                     get_field_info = true;
                     break;
                 }
@@ -3524,20 +3582,33 @@ void TableManager::link_binlog(const pb::MetaManagerRequest& request, const int6
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "no link field info");
             return;
         }
-    }
-    
-    if (!binlog_table_mem.is_binlog) {
-        DB_WARNING("table is not binlog, request:%s", request.DebugString().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is not binlog");
-        return;
+        if (request.table_info().has_partition_is_same_hint()) {
+            partition_is_same_hint = request.table_info().partition_is_same_hint();
+        } else {
+            DB_WARNING("table no set partition_is_same_hint, request:%s", request.DebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "no set partition_is_same_hint");
+            return;
+        }
     }
     DB_NOTICE("link binlog tableid[%ld] binlog_table_id[%ld]", table_id, binlog_table_id);
     table_mem.is_linked = true;
-    table_mem.binlog_id = binlog_table_id;
+    table_mem.binlog_ids.insert(binlog_table_id);
     binlog_table_mem.binlog_target_ids.insert(table_id);
-
-    auto binlog_info = mem_schema_pb.mutable_binlog_info();
-    binlog_info->set_binlog_table_id(binlog_table_id);
+    if (mem_schema_pb.has_binlog_info() && mem_schema_pb.binlog_info().has_binlog_table_id()) {
+        auto binlog_info = mem_schema_pb.add_binlog_infos();
+        binlog_info->set_binlog_table_id(binlog_table_id);
+        if (get_field_info) {
+            binlog_info->mutable_link_field()->CopyFrom(link_field);
+        }
+        binlog_info->set_partition_is_same_hint(partition_is_same_hint);
+    } else {
+        auto binlog_info = mem_schema_pb.mutable_binlog_info();
+        binlog_info->set_binlog_table_id(binlog_table_id);
+        if (get_field_info) {
+            mem_schema_pb.mutable_link_field()->CopyFrom(link_field);
+        }
+        mem_schema_pb.set_partition_is_same_hint(partition_is_same_hint);
+    }
     mem_schema_pb.set_version(mem_schema_pb.version() + 1);
     set_table_pb(mem_schema_pb);
     std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
@@ -3608,14 +3679,26 @@ void TableManager::unlink_binlog(const pb::MetaManagerRequest& request, const in
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table is not binlog");
         return;
     }
-    table_mem.is_linked = false;
-    table_mem.binlog_id = 0;
+    table_mem.binlog_ids.erase(binlog_table_id);
     binlog_table_mem.binlog_target_ids.erase(table_id);
 
     pb::SchemaInfo mem_schema_pb =  _table_info_map[table_id].schema_pb;
     auto binlog_info = mem_schema_pb.mutable_binlog_info();
-    binlog_info->clear_binlog_table_id();
-    mem_schema_pb.clear_link_field();
+    if (binlog_info->binlog_table_id() == binlog_table_id) {
+        binlog_info->clear_binlog_table_id();
+        mem_schema_pb.clear_link_field();
+    }
+    auto binlog_iter = mem_schema_pb.mutable_binlog_infos()->begin();
+    for (; binlog_iter != mem_schema_pb.mutable_binlog_infos()->end(); ++binlog_iter) {
+        if ((*binlog_iter).binlog_table_id() == binlog_table_id) {
+            mem_schema_pb.mutable_binlog_infos()->erase(binlog_iter);
+            break;
+        }
+    }
+    if (table_mem.binlog_ids.empty()) {
+        table_mem.is_linked = false;
+    }
+
     mem_schema_pb.set_version(mem_schema_pb.version() + 1);
     set_table_pb(mem_schema_pb);
     std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};

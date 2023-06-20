@@ -128,9 +128,13 @@ private:
         bool is_primary_region = true;
         bool is_finished = false;
         bool is_prepared = false;
+        bool is_exist = false;
         int seq_id = 0;
         int64_t primary_region_id = -1;
     };
+    bool process_out_of_order_txn(Region* region, uint64_t txn_id, TxnParams& txn_params);
+
+private:
     int64_t _region_id = 0;
     int64_t _latest_active_txn_ts = 0;
     bool _use_ttl = false;

@@ -102,8 +102,8 @@ BINARY_OP_PREDICATE_ALL_TYPES_FN(ge, >=);
 BINARY_OP_PREDICATE_ALL_TYPES_FN(lt, <);
 BINARY_OP_PREDICATE_ALL_TYPES_FN(le, <=);
 // && || ; not used, see predicate.h
-BINARY_OP_PREDICATE_FN(logic_and, bool, _u.bool_val, &&);
-BINARY_OP_PREDICATE_FN(logic_or, bool, _u.bool_val, ||);
+//BINARY_OP_PREDICATE_FN(logic_and, bool, _u.bool_val, &&);
+//BINARY_OP_PREDICATE_FN(logic_or, bool, _u.bool_val, ||);
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -17,7 +17,7 @@
 #include "common.h"
 
 namespace baikaldb {
-extern std::string timestamp_to_str(time_t timestamp);
+extern std::string timestamp_to_str(time_t timestamp, bool is_utc = false);
 extern time_t str_to_timestamp(const char* str_time);
 
 // encode DATETIME to string format

@@ -690,6 +690,7 @@ void MetaStateMachine::on_leader_stop() {
     }
     RegionManager::get_instance()->clear_region_peer_state_map();
     RegionManager::get_instance()->clear_region_learner_peer_state_map();
+    RegionManager::get_instance()->clear_binlog_region_state_map();
     DB_WARNING("leader stop");
     CommonStateMachine::on_leader_stop();
     DBManager::get_instance()->clear_all_tasks();

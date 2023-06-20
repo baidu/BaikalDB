@@ -67,7 +67,7 @@ bool FunctionManager::swap_op(pb::Function& fn) {
 void FunctionManager::register_operators() {
     // ~ ! -1 -1.1
     register_object("bit_not_uint", bit_not_uint);
-    register_object("logic_not_bool", logic_not_bool);
+    //register_object("logic_not_bool", logic_not_bool);
     register_object("minus_int", minus_int);
     register_object("minus_uint", minus_uint);
     register_object("minus_double", minus_double);
@@ -92,8 +92,8 @@ void FunctionManager::register_operators() {
     REGISTER_SWAP_PREDICATE_ALL_TYPES(lt, gt);
     REGISTER_SWAP_PREDICATE_ALL_TYPES(le, ge);
     // && ||
-    REGISTER_BINARY_OP(logic_and, bool);
-    REGISTER_BINARY_OP(logic_or, bool);
+    //REGISTER_BINARY_OP(logic_and, bool);
+    //REGISTER_BINARY_OP(logic_or, bool);
     auto register_object_ret = [this](const std::string& name, 
             std::function<ExprValue(const std::vector<ExprValue>&)> T, 
             pb::PrimitiveType ret_type) {

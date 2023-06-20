@@ -58,7 +58,8 @@ public:
 
         _router_start_key = _work.start_key();
         _router_end_key = _work.end_key();
-        DB_NOTICE("process table_id_%ld index_id_%ld field_num %d", _table_id, _index_id, _field_num);
+        DB_NOTICE("process table_id_%ld index_id_%ld _is_global_index:%d field_num %d", _table_id,
+            _index_id, _is_global_index, _field_num);
         return 0;
     }
 

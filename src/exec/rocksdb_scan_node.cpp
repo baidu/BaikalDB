@@ -74,8 +74,11 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
     if (pos_index.has_sort_index()) {
         if (pos_index.ranges_size() > 1) {
-            _sort_use_index_by_range = true;
-            _sort_limit_by_range = pos_index.sort_index().sort_limit();
+            // limit没下推，不能走_sort_limit_by_range逻辑
+            if (_limit != -1) {
+                _sort_use_index_by_range = true;
+                _sort_limit_by_range = pos_index.sort_index().sort_limit();
+            }
         } else {
             _sort_use_index = true;
         }
@@ -128,13 +131,17 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
                 return -1;
             }
             for (auto& range : pos_index.ranges()) {
-                SmartRecord record = _factory->new_record(_table_id);
-                record->decode(range.left_pb_record());
                 std::string word;
-                ret = record->get_reverse_word(*index_info, word);
-                if (ret < 0) {
-                    DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", index_id);
-                    return ret;
+                if (range.has_left_key()) {
+                    word = range.left_key();
+                } else {
+                    SmartRecord record = _factory->new_record(_table_id);
+                    record->decode(range.left_pb_record());
+                    ret = record->get_reverse_word(*index_info, word);
+                    if (ret < 0) {
+                        DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", index_id);
+                        return ret;
+                    }
                 }
                 _reverse_infos.emplace_back(*index_info);
                 _query_words.emplace_back(word);
@@ -642,6 +649,7 @@ int64_t RocksdbScanNode::copy_multiget_rows(RowBatch* output_batch, std::vector<
         if (do_copy) {
             output_batch->move_row(std::move(row));
             ++_num_rows_returned;
+            ++_num_rows_returned_by_range;
         } else {
             ++index_filter_cnt;
         }

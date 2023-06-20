@@ -57,7 +57,8 @@ public:
         return _bytes_limit > 0 && _bytes_consumed > _bytes_limit;
     }
     bool any_limit_exceeded() {
-        if (limit_exceeded() || (_parent !=nullptr && _parent->limit_exceeded())) {
+        if (limit_exceeded() || (_parent !=nullptr && _parent->any_limit_exceeded())) {
+            _limit_exceeded = true;
             return true;
         }
         return false;

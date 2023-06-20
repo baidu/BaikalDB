@@ -55,21 +55,47 @@ int DeletePlanner::plan() {
     if (!_delete_stmt) {
         return -1;
     }
-    if (_delete_stmt->delete_table_list.size() != 0) {
+    if (_delete_stmt->delete_table_list.size() > 1) {
         DB_WARNING("unsupport multi table delete");
         return -1;
     }
-    if (_delete_stmt->from_table->node_type != parser::NT_TABLE) {
+    if (_delete_stmt->from_table->node_type == parser::NT_JOIN) {
         DB_WARNING("unsupport multi table delete");
         return -1;
+    }
+    if (_delete_stmt->from_table->node_type == parser::NT_TABLE) {
+        if (0 != parse_db_tables(_delete_stmt->from_table, &_join_root)) {
+            DB_WARNING("parse db table fail");
+            return -1;
+        }
+    } 
+    if (_delete_stmt->from_table->node_type == parser::NT_TABLE_SOURCE) {
+        if (0 != parse_db_tables(_delete_stmt->from_table, &_join_root)) {
+            DB_WARNING("parse db table fail");
+            return -1;
+        }
+    } 
+    for (int i = 0; i < _delete_stmt->delete_table_list.size(); ++i) {
+        parser::TableName* del_table = _delete_stmt->delete_table_list[i];
+        std::string full_table;
+        if (!del_table->db.empty()) {
+            full_table = del_table->db.value;
+        } else {
+            full_table = _ctx->cur_db;
+        }
+        full_table += ".";
+        full_table += del_table->table.value;
+        if (full_table != _current_tables[0]) {
+            _ctx->stat_info.error_code = ER_UNKNOWN_TABLE;
+            _ctx->stat_info.error_msg << "Unknown table '" << del_table->table.value << "' in MULTI DELETE";
+            DB_FATAL("Unknown table in MULTI DELETE");
+            return -1;
+        }
     }
     for (int i = 0; i < _delete_stmt->partition_names.size(); ++i) {
         std::string lower_name = _delete_stmt->partition_names[i].value;
         std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
         _partition_names.emplace_back(lower_name);
-    }
-    if (0 != parse_db_tables(_delete_stmt->from_table, &_join_root)) {
-        return -1;
     }
     // delete from xxx; => truncate table xxx;
     if (FLAGS_delete_all_to_truncate &&

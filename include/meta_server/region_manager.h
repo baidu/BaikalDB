@@ -43,6 +43,10 @@ struct RegionLearnerState {
     TimeCost tc;
 };
 
+struct BinlogRegionState {
+    std::map<std::string, int64_t> peer_oldest_timestamp_to_now_interval;
+};
+
 typedef std::shared_ptr<RegionStateInfo> SmartRegionStateInfo;
 class RegionManager {
 public:
@@ -83,11 +87,16 @@ public:
                                             const std::string& end_key, int64_t partition_id);
     void check_update_region(const pb::BaikalHeartBeatRequest* request,
                 pb::BaikalHeartBeatResponse* response);
+    bool binlog_peer_can_delete(const std::string& instance, int64_t region_id);
+    bool check_binlog_regions_can_migrate(const std::string& instance);
+
     void add_region_info(const std::vector<int64_t>& new_add_region_ids, 
                          pb::BaikalHeartBeatResponse* response);
     SmartRegionInfo get_region_info(int64_t region_id);
     void get_region_info(const std::vector<int64_t>& region_ids,
                          std::vector<SmartRegionInfo>& region_infos);
+
+    void update_binlog_status(const pb::StoreHeartBeatRequest* request);
 
     void update_leader_status(const pb::StoreHeartBeatRequest* request, int64_t timestamp);
 
@@ -103,6 +112,7 @@ public:
                         std::unordered_map<int64_t, int64_t>& table_replica_nums,
                         std::unordered_map<int64_t, std::unordered_map<std::string, int>>& table_replica_dists_maps,
                         std::vector<std::pair<std::string, pb::RaftControlRequest>>& remove_peer_requests,
+                        std::set<int64_t>& binlog_table_ids,
                         int32_t table_pk_prefix_dimension,
                         pb::StoreHeartBeatResponse* response);
     
@@ -177,8 +187,10 @@ public:
         _region_info_map.clear();
         _region_state_map.clear();
         _region_peer_state_map.clear();
+        _binlog_region_state_map.clear();
         _instance_region_map.clear();
         _instance_learner_map.clear();
+        _instance_binlog_map.clear();
         _instance_leader_count.clear();
         _instance_pk_prefix_leader_count.clear();
         _remove_region_peer_on_pk_prefix.clear();
@@ -188,6 +200,12 @@ public:
 
     void clear_region_peer_state_map() {
         _region_peer_state_map.clear();
+    }
+
+    void clear_binlog_region_state_map() {
+        _binlog_region_state_map.clear();
+        BAIDU_SCOPED_LOCK(_instance_binlog_mutex);
+        _instance_binlog_map.clear();
     }
 
     void clear_region_learner_peer_state_map() {
@@ -235,6 +253,20 @@ public:
                 region_ids.emplace_back(region_id);
             }
         }
+    }
+    BinlogRegionState get_binlog_region_state(int64_t region_id) {
+        return _binlog_region_state_map.get(region_id);
+    }
+    void get_binlog_ids(const std::string& instance, std::set<int64_t>& region_ids) {
+        BAIDU_SCOPED_LOCK(_instance_binlog_mutex);
+        if (_instance_binlog_map.find(instance) ==  _instance_binlog_map.end()) {
+            return;
+        }
+        region_ids = _instance_binlog_map[instance];
+    }
+    void drop_instance_binlog_ids(const std::string& instance) {
+        BAIDU_SCOPED_LOCK(_instance_binlog_mutex);
+        _instance_binlog_map.erase(instance);
     }
     void get_region_ids(const std::string& instance, 
             std::unordered_map<int64_t, std::set<int64_t>>& table_region_ids) {
@@ -360,6 +392,7 @@ public:
         for (auto& region_id : drop_region_ids) {
             _region_state_map.erase(region_id);
             _region_peer_state_map.erase(region_id);
+            _binlog_region_state_map.erase(region_id);
         }
     }
     void set_region_mem_info(int64_t region_id, 
@@ -503,6 +536,7 @@ private:
         _last_opt_times = butil::gettimeofday_us();
         bthread_mutex_init(&_instance_region_mutex, NULL);
         bthread_mutex_init(&_instance_learner_mutex, NULL);
+        bthread_mutex_init(&_instance_binlog_mutex, NULL);
         bthread_mutex_init(&_count_mutex, NULL);
         bthread_mutex_init(&_doing_mutex, NULL);
     }
@@ -515,13 +549,16 @@ private:
     
     bthread_mutex_t                                     _instance_region_mutex;
     bthread_mutex_t                                     _instance_learner_mutex;
+    bthread_mutex_t                                     _instance_binlog_mutex;
     //实例和region_id的映射关系，在需要主动发送迁移实例请求时需要
     std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_region_map;
     std::unordered_map<std::string, std::unordered_map<int64_t, std::set<int64_t>>>  _instance_learner_map;
+    std::unordered_map<std::string, std::set<int64_t>>  _instance_binlog_map;
 
     ThreadSafeMap<int64_t, RegionStateInfo>        _region_state_map;
     ThreadSafeMap<int64_t, RegionPeerState>        _region_peer_state_map;
     ThreadSafeMap<int64_t, RegionLearnerState>        _region_learner_peer_state_map;
+    ThreadSafeMap<int64_t, BinlogRegionState>         _binlog_region_state_map;
     //该信息只在meta_server的leader中内存保存, 该map可以单用一个锁
     bthread_mutex_t                                     _count_mutex;
     std::unordered_map<std::string, std::unordered_map<int64_t, int64_t>> _instance_leader_count;

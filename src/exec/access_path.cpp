@@ -80,9 +80,6 @@ void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNod
             break;
         }
     }
-    if (row_idx == range_fields.size()) {
-        need_cut_index_range_condition.insert(expr);
-    }
 }
 
 // 这块暂时复用之前的，之后要考虑先过滤掉等于符号再判断
@@ -120,6 +117,7 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
 struct RecordRange {
     MutTableKey left_key;
     MutTableKey right_key;
+    int64_t partition_id = -1;
 };
 // 现在只支持CNF，DNF怎么做?
 // 普通索引按照range匹配，匹配到EQ可以往下走，匹配到RANGE、LIKE_PREFIX停止
@@ -128,6 +126,10 @@ struct RecordRange {
 // 对于row_expr，满足全命中索引range后裁剪
 void AccessPath::calc_normal(Property& sort_property) {
     int field_cnt = 0;
+    // offset: in条件组合展开后的步长,用于非首字段的对应
+    // hit_fields_cnt: in_row_expr谓词匹配的字段个数,用于判断是否可以剪切
+    std::map< ExprNode*, std::pair<uint32_t, uint32_t>> in_row_expr_map; // <in_row_expr,<offset, hit_fields_cnt>
+    size_t in_records_size = 1;
     for (auto& field : index_info_ptr->fields) {
         bool field_break = false;
         auto iter = field_range_map.find(field.id);
@@ -141,50 +143,53 @@ void AccessPath::calc_normal(Property& sort_property) {
                 ++field_cnt;
                 _is_eq_or_in = false;
                 hit_index_field_ids.insert(field.id);
-                auto range_func = [&range, this, field_cnt, field]() {
-                    size_t field_idx = field_cnt - 1;
-                    if (range.left.size() == 1) {
+                size_t field_idx = field_cnt - 1;
+                if (range.left.size() == 1) {
+                    _left_open = range.left_open;
+                    _left_field_cnt = field_cnt;
+                    need_cut_index_range_condition.insert(range.left_expr);
+                } else if (range.left.size() > 1) {
+                    size_t row_idx = 0;
+                    while (row_idx < range.left_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
+                        if (index_info_ptr->fields[field_idx].id == range.left_row_field_ids[row_idx]) {
+                            hit_index_field_ids.insert(range.left_row_field_ids[row_idx]);
+                        } else {
+                            break;
+                        }
+                        row_idx++;
+                        field_idx++;
+                    }
+                    _left_field_cnt = field_idx;
+                    if (row_idx == range.left_row_field_ids.size()) {
                         _left_open = range.left_open;
-                        _left_field_cnt = field_cnt;
-                    } else if (range.left.size() > 1) {
-                        size_t row_idx = 0;
-                        while (row_idx < range.left_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
-                            if (index_info_ptr->fields[field_idx].id == range.left_row_field_ids[row_idx]) {
-                                hit_index_field_ids.insert(range.left_row_field_ids[row_idx]);
-                            } else {
-                                break;
-                            }
-                            row_idx++, field_idx++;
-                        }
-                        _left_field_cnt = field_idx;
-                        if (row_idx == range.left_row_field_ids.size()) {
-                            _left_open = range.left_open;
-                        } else {
-                            _left_open = false;
-                        }
+                        need_cut_index_range_condition.insert(range.left_expr);
+                    } else {
+                        _left_open = false;
                     }
-                    if (range.right.size() == 1) {
+                }
+                if (range.right.size() == 1) {
+                    _right_open = range.right_open;
+                    _right_field_cnt = field_cnt;
+                    need_cut_index_range_condition.insert(range.right_expr);
+                } else if (range.right.size() > 1) {
+                    size_t row_idx = 0;
+                    while (row_idx < range.right_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
+                        if (index_info_ptr->fields[field_idx].id == range.right_row_field_ids[row_idx]) {
+                            hit_index_field_ids.insert(range.right_row_field_ids[row_idx]);
+                        } else {
+                            break;
+                        }
+                        row_idx++;
+                        field_idx++;
+                    }
+                    _right_field_cnt = field_idx;
+                    if (row_idx == range.right_row_field_ids.size()) {
                         _right_open = range.right_open;
-                        _right_field_cnt = field_cnt;
-                    } else if (range.right.size() > 1) {
-                        size_t row_idx = 0;
-                        while (row_idx < range.right_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
-                            if (index_info_ptr->fields[field_idx].id == range.right_row_field_ids[row_idx]) {
-                                hit_index_field_ids.insert(range.right_row_field_ids[row_idx]);
-                            } else {
-                                break;
-                            }
-                            row_idx++, field_idx++;
-                        }
-                        _right_field_cnt = field_idx;
-                        if (row_idx == range.right_row_field_ids.size()) {
-                            _right_open = range.right_open;
-                        } else {
-                            _right_open = false;
-                        }
+                        need_cut_index_range_condition.insert(range.right_expr);
+                    } else {
+                        _right_open = false;
                     }
-                };
-                range_func();
+                }
                 break;
             }
             case EQ:
@@ -206,6 +211,12 @@ void AccessPath::calc_normal(Property& sort_property) {
                     _like_prefix = true;
                     field_break = true;
                     _is_eq_or_in = false;
+                } else if (range.is_row_expr) {
+                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids)) {
+                        need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+                    }
+                } else {
+                    need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                 }
                 break;
             case LIKE:
@@ -220,6 +231,42 @@ void AccessPath::calc_normal(Property& sort_property) {
                 _left_open = false;
                 _right_open = false;
                 _in_pred = true;
+                if (range.is_row_expr && in_row_expr_map.count(*range.conditions.begin()) == 1) {
+                    // in_row_expr的非首个字段不组合展开,按offset填充,例如(a, b) in ((1,2))的b
+                    // flat fill other row_expr field value exclude the first.
+                    if (range.eq_in_values.size() > 0 && in_records_size % range.eq_in_values.size() == 0) {
+                        // do nothing
+                    } else {
+                        DB_FATAL("inx:%ld in_records.size() %lu != values.size()'s multiples %lu ",
+                                index_id, in_records_size, range.eq_in_values.size());
+                        field_break = true;
+                        break;
+                    }
+                    in_row_expr_map[*range.conditions.begin()].second++;
+                } else {
+                    // 第一个in不限制FLAGS_max_in_records_num
+                    if (in_records_size > 1 && in_records_size * range.eq_in_values.size() > FLAGS_max_in_records_num) {
+                        field_break = true;
+                        break;
+                    }
+                    if (range.is_row_expr) {
+                        // in_row_expr的首个字段进行组合展开,并记录展开offset,用于后续字段映射
+                        // 例如: a in ("a1", "a2") and (b, c) in (("b1","c1")), 则b与a组合展开后,如下
+                        // (("a1", "b1") ("a2", "b1")),则b的offset = in_records.size();
+                        in_row_expr_map[*range.conditions.begin()] = std::pair<uint32_t, uint32_t>(in_records_size, 1);
+                    }
+                    in_records_size = range.eq_in_values.size() * in_records_size;
+                }
+                if (range.is_row_expr) {
+                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids) &&
+                            in_row_expr_map[*range.conditions.begin()].second == range.left_row_field_ids.size()) {
+                        // (a,b) IN (("a1", "b1")) and (b,c) IN (("b1","c2")) hit_index_field_ids=(a,b,c),
+                        // (a,b)与(b,c)都包含于hit_index_field_ids中,需要进一步判断字段b是那个pred命中的.
+                        need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+                    }
+                } else {
+                    need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+                }
                 break;
             default:
                 break;
@@ -249,13 +296,13 @@ void AccessPath::calc_normal(Property& sort_property) {
 }
 
 // 填充索引的range
-void AccessPath::calc_index_range() {
+void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std::string, int64_t>& expr_partition_map) {
     if (index_type == pb::I_FULLTEXT) {
         return;
     }
-    ExprNode* in_row_expr = nullptr;
     MutTableKey left_key;
     MutTableKey right_key;
+    int64_t partition_id = -1;
     if (index_type == pb::I_KEY || index_type == pb::I_UNIQ) {
         uint8_t null_flag = 0;
         left_key.append_u8(null_flag);
@@ -284,14 +331,12 @@ void AccessPath::calc_index_range() {
                     if (range.left.size() == 1) {
                         // join on 条件两表字段类型可能不同，导致slotref的类型不准，需要处理
                         left_key.append_value(range.left[0].cast_to(field.type));
-                        need_cut_index_range_condition.insert(range.left_expr);
                     } else if (range.left.size() > 1) {
                         calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
                             range.left_open, range.left, left_key, field_idx);
                     }
                     if (range.right.size() == 1) {
                         right_key.append_value(range.right[0].cast_to(field.type));
-                        need_cut_index_range_condition.insert(range.right_expr);
                     } else if (range.right.size() > 1) {
                         calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
                             range.right_open, range.right, right_key, field_idx);
@@ -310,15 +355,6 @@ void AccessPath::calc_index_range() {
             case EQ:
             case LIKE_EQ:
             case LIKE_PREFIX:
-                if (range.type == LIKE_PREFIX) {
-                    // do nothing
-                } else if (range.is_row_expr) {
-                    if (all_in_index(range.left_row_field_ids, hit_index_field_ids)) {
-                        need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
-                    }
-                } else {
-                    need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
-                }
                 if (_like_prefix) {
                     if (in_records.empty()) {
                         left_key.append_string_prefix(range.eq_in_values[0].get_string());
@@ -330,10 +366,22 @@ void AccessPath::calc_index_range() {
                     }
                 } else {
                     if (in_records.empty()) {
+                        if (range.type == EQ && field.id == partition_field_id) {
+                            auto iter = expr_partition_map.find(range.eq_in_values[0].get_string());
+                            if (iter != expr_partition_map.end()) {
+                                partition_id = iter->second;
+                            }
+                        }
                         left_key.append_value(range.eq_in_values[0].cast_to(field.type));
                         right_key.append_value(range.eq_in_values[0].cast_to(field.type));
                     } else {
                         for (auto& rg : in_records) {
+                            if (range.type == EQ && field.id == partition_field_id) {
+                                auto iter = expr_partition_map.find(range.eq_in_values[0].get_string());
+                                if (iter != expr_partition_map.end()) {
+                                    rg.partition_id = iter->second;
+                                }
+                            }
                             rg.left_key.append_value(range.eq_in_values[0].cast_to(field.type));
                         }
                     }
@@ -349,6 +397,12 @@ void AccessPath::calc_index_range() {
                         size_t vi = 0;
                         size_t i = 0;
                         for (auto& rg : in_records) {
+                            if (field.id == partition_field_id) {
+                                auto iter = expr_partition_map.find(range.eq_in_values[vi].get_string());
+                                if (iter != expr_partition_map.end()) {
+                                    rg.partition_id = iter->second;
+                                }
+                            }
                             rg.left_key.append_value(range.eq_in_values[vi].cast_to(field.type));
                             if ((++i) == offset) {
                                 i = 0;
@@ -380,6 +434,12 @@ void AccessPath::calc_index_range() {
                         // 为保持前面已处理字段步长稳定性, 当前字段需要写在外层循环与in_records进行展开.
                         for (auto record : in_records) {
                             RecordRange rg;
+                            if (field.id == partition_field_id) {
+                                auto iter = expr_partition_map.find(value.get_string());
+                                if (iter != expr_partition_map.end()) {
+                                    rg.partition_id = iter->second;
+                                }
+                            }
                             rg.left_key = record.left_key;
                             rg.left_key.append_value(value.cast_to(field.type));
                             comb_in_records.emplace_back(rg);
@@ -388,6 +448,7 @@ void AccessPath::calc_index_range() {
                     in_records.swap(comb_in_records);
                     comb_in_records.clear();
                 }
+                /*
                 if (range.is_row_expr) {
                     in_row_expr = *range.conditions.begin();
                     if (all_in_index(range.left_row_field_ids, hit_index_field_ids) &&
@@ -399,6 +460,7 @@ void AccessPath::calc_index_range() {
                 } else {
                     need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                 }
+                */
                 break;
             default:
                 break;
@@ -411,7 +473,7 @@ void AccessPath::calc_index_range() {
     } else if (in_records.size() > 0) {
         is_possible = true;
         butil::FlatSet<std::string> filter;
-        filter.init(12301);
+        filter.init(ajust_flat_size(in_records.size()));
         for (auto& rg : in_records) {
             if (filter.seek(rg.left_key.data()) != nullptr) {
                 continue;
@@ -422,6 +484,9 @@ void AccessPath::calc_index_range() {
                 && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
                 && !_like_prefix) {
                 rg.left_key.set_full(true);
+            }
+            if (rg.partition_id != -1) {
+                range->set_partition_id(rg.partition_id);
             }
             range->set_left_key(rg.left_key.data());
             range->set_left_full(rg.left_key.get_full());
@@ -456,6 +521,9 @@ void AccessPath::calc_index_range() {
             && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
             && !_like_prefix) {
             right_key.set_full(true);
+        }
+        if (partition_id != -1) {
+            range->set_partition_id(partition_id);
         }
         range->set_left_key(left_key.data());
         range->set_left_full(left_key.get_full());
@@ -508,26 +576,20 @@ void AccessPath::calc_fulltext() {
     }
     if (hit_index && values != nullptr) {
         hit_index_field_ids.emplace(field_id);
-        SmartRecord record_template = SchemaFactory::get_instance()->new_record(table_id);
         is_possible = true;
         pos_index.set_index_id(index_id);
         butil::FlatSet<std::string> filter;
-        filter.init(12301);
+        filter.init(ajust_flat_size(values->size()));
         for (auto value : *values) {
-            record_template->set_value(record_template->get_field_by_tag(field_id), value);
-            std::string str;
-            record_template->encode(str);
+            std::string str = value.get_string();
             if (filter.seek(str) != nullptr) {
                 continue;
             }
             filter.insert(str);
             auto range = pos_index.add_ranges();
-            range->set_left_pb_record(str);
-            range->set_right_pb_record(str);
+            range->set_left_key(str);
             range->set_left_field_cnt(1);
-            range->set_right_field_cnt(1);
             range->set_left_open(false);
-            range->set_right_open(false);
             if (range_type == MATCH_LANGUAGE) {
                 range->set_match_mode(pb::M_NARUTAL_LANGUAGE);
             } else if (range_type == MATCH_BOOLEAN) {

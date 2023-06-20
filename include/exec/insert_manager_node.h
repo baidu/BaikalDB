@@ -107,6 +107,9 @@ public:
     void set_records(std::vector<SmartRecord>& records) {
         _origin_records.swap(records);
     }
+    void copy_records(std::vector<SmartRecord>& records) {
+        _origin_records.insert(_origin_records.end(), records.begin(), records.end());
+    }
 
     int subquery_open(RuntimeState* state);
 

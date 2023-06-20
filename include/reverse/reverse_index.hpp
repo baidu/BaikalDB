@@ -804,18 +804,23 @@ int MutilReverseIndex<Schema>::init_term_executor(
     auto reverse_iter = static_cast<ReverseIndex<Schema>*>(_reverse_index_map[index_id]);
     //析构用，可以重复。
     _reverse_indexes.push_back(reverse_iter);
-    SmartRecord record = SchemaFactory::get_instance()->new_record(_table_info.id);
-    record->decode(fulltext_index_info.possible_index().ranges(0).left_pb_record());
-    auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-    if (index_info == nullptr || index_info->id == -1) {
-        DB_WARNING("no index_info found for index id: %ld", index_id);
-        return -1;
-    }
     std::string word;
-    int ret = record->get_reverse_word(*index_info, word);
-    if (ret < 0) {
-        DB_WARNING("index_info to word fail for index_id: %ld", index_id);
-        return ret;
+    auto& range = fulltext_index_info.possible_index().ranges(0);
+    if (range.has_left_key()) {
+        word = range.left_key();
+    } else {
+        SmartRecord record = SchemaFactory::get_instance()->new_record(_table_info.id);
+        record->decode(range.left_pb_record());
+        auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
+        if (index_info == nullptr || index_info->id == -1) {
+            DB_WARNING("no index_info found for index id: %ld", index_id);
+            return -1;
+        }
+        int ret = record->get_reverse_word(*index_info, word);
+        if (ret < 0) {
+            DB_WARNING("index_info to word fail for index_id: %ld", index_id);
+            return ret;
+        }
     }
     reverse_iter->create_executor(_txn, _index_info, _table_info, word, 
         fulltext_index_info.possible_index().ranges(0).match_mode(),

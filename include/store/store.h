@@ -319,7 +319,8 @@ private:
              dml_time_cost("dml_time_cost", 60),
              select_time_cost("select_time_cost", 60),
              peer_delay_latency("peer_delay_latency", 60),
-             heart_beat_count("heart_beat_count") {
+             heart_beat_count("heart_beat_count"),
+             follow_read_wait_time("follow_read_wait_time", 60) {
         bthread_mutex_init(&_param_mutex, NULL);
     }
 
@@ -462,6 +463,7 @@ public:
     bvar::LatencyRecorder select_time_cost;
     bvar::LatencyRecorder peer_delay_latency;
     bvar::Adder<int64_t>  heart_beat_count;
+    bvar::LatencyRecorder follow_read_wait_time;
 
     //for fake binlog tso
     TimeCost gen_tso_time;

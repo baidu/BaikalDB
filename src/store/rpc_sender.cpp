@@ -126,10 +126,11 @@ int RpcSender::send_init_region_method(const std::string& instance,
     return store_interact.send_request("init_region", init_region_request, response);
 }
 
-int RpcSender::get_leader_read_index(const std::string& leader, int64_t region_id, pb::StoreRes& response) {
+int RpcSender::get_leader_read_index(const std::string& leader, int64_t region_id, pb::StoreRes& response, bool need_raft_log_index) {
     pb::GetAppliedIndex request;
     request.set_region_id(region_id);
     request.set_use_read_idx(true);
+    request.set_use_raft_log_index(need_raft_log_index);
     StoreReqOptions req_options;
     req_options.request_timeout = 1000; // 1s
     req_options.connect_timeout = 1000; // 1s

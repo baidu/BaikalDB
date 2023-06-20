@@ -231,15 +231,35 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
     bool new_fulltext_flag = true;
     std::vector<ExprNode*> or_exprs;
     expr->flatten_or_expr(&or_exprs);
+    bool match_against = false;
+    RangeType match_type = MATCH_LANGUAGE;
     for (auto sub_expr : or_exprs) {
         if (sub_expr->node_type() != pb::LIKE_PREDICATE) {
-            return;
+            if (sub_expr->node_type() == pb::FUNCTION_CALL) {
+                int32_t fn_op = static_cast<ScalarFnCall*>(sub_expr)->fn().fn_op();
+                if (fn_op != parser::FT_MATCH_AGAINST) {
+                    return;
+                }
+                match_against = true;
+            } else {
+                return;
+            }
         }
-        if (!sub_expr->children(0)->is_slot_ref()) {
+        if (match_against) {
+            if (!sub_expr->children(0)->children(0)->is_slot_ref()) {
+                return;
+            }
+        } else if (!sub_expr->children(0)->is_slot_ref()) {
             return;
         }
         if (!sub_expr->children(1)->is_literal()) {
             return;
+        }
+        if (match_against) {
+            ExprValue mode = sub_expr->children(2)->get_value(nullptr);
+            if (mode.get_string() == "IN BOOLEAN MODE") {
+                match_type = MATCH_BOOLEAN;
+            }
         }
     }
     std::vector<int64_t> index_ids; 
@@ -253,7 +273,10 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
         }
         int64_t index_id = 0;
         for (auto& sub_expr : or_exprs) {
-            int32_t field_id = static_cast<SlotRef*>(sub_expr->children(0))->field_id();
+            SlotRef* slot_ref = match_against ? 
+                static_cast<SlotRef*>(sub_expr->children(0)->children(0)) : 
+                static_cast<SlotRef*>(sub_expr->children(0));
+            int32_t field_id = slot_ref->field_id();
             // 所有字段都有arrow索引，才建立 or节点。
             // TODO 删除所有pb类型之后 删除该逻辑
             new_fulltext_flag = new_fulltext_flag && is_field_has_arrow_reverse_index(table_id, field_id, &index_id);
@@ -276,8 +299,10 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
 
     size_t index_ids_index = 0;
     for (auto sub_expr : or_exprs) {
-
-        int32_t field_id = static_cast<SlotRef*>(sub_expr->children(0))->field_id();
+        SlotRef* slot_ref = match_against ? 
+            static_cast<SlotRef*>(sub_expr->children(0)->children(0)) : 
+            static_cast<SlotRef*>(sub_expr->children(0));
+        int32_t field_id = slot_ref->field_id();
         field_range_map[field_id].like_values.push_back(sub_expr->children(1)->get_value(nullptr));
         field_range_map[field_id].conditions.insert(expr);
         field_range_map[field_id].type = OR_LIKE;
@@ -291,6 +316,9 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
             fulltext_or_range.left_row_field_ids.push_back(field_id);
             fulltext_or_range.is_exact_like = true;
             fulltext_or_range.type = OR_LIKE;
+            if (match_against) {
+                fulltext_or_range.type = match_type;
+            }
             fulltext_or_range.conditions.insert(expr);
             fulltext_or_range.like_values.push_back(sub_expr->children(1)->get_value(nullptr));
 
@@ -616,13 +644,13 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                 calc_covering_user_slots = &slot_ids;
             }
         }
+        access_path->insert_no_cut_condition(expr_field_map);
         access_path->calc_is_covering_index(tuple_descs[tuple_id], calc_covering_user_slots);
         scan_node->add_access_path(access_path);
     }
     // 分区表解析分区信息
     select_partition(table_info, scan_node, field_range_map);
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
-    scan_node->set_expr_field_map(std::move(expr_field_map));
     return scan_node->select_index_in_baikaldb(sample_sql); 
 }
 
@@ -646,28 +674,24 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
         auto field_iter = field_range_map.find(table_info->partition_ptr->partition_field_id());
         if (partition_type == pb::PT_HASH) {
             if (field_iter != field_range_map.end() && !field_iter->second.eq_in_values.empty()) {
-                const size_t MAX_FLATSET_INIT_VALUE = 12501; // 10000 / 0.8 + 1
-                size_t flatset_init_value = field_iter->second.eq_in_values.size() / 0.8 + 1;
-                if (flatset_init_value > MAX_FLATSET_INIT_VALUE) {
-                    flatset_init_value = MAX_FLATSET_INIT_VALUE;
-                }
                 ExprValueFlatSet eq_in_values_set;
-                eq_in_values_set.init(flatset_init_value);
+                eq_in_values_set.init(ajust_flat_size(field_iter->second.eq_in_values.size()));
                 for (auto& value : field_iter->second.eq_in_values) {
                     eq_in_values_set.insert(value);
                 }
-                for (auto& value : eq_in_values_set) {
-                    int64_t partition_index = 0;
-                    if (table_info->partition_num != 1) {
+                if (table_info->partition_num != 1) {
+                    for (auto& value : eq_in_values_set) {
+                        int64_t partition_index = 0;
                         partition_index = table_info->partition_ptr->calc_partition(value);
                         if (partition_index < 0) {
                             DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
                             return -1;
                         }
+                        scan_node->add_expr_partition_pair(value.get_string(), partition_index);
+                        partition_ids.emplace(partition_index);
                     }
-                    partition_ids.emplace(partition_index);
+                    scan_node->replace_partition(partition_ids, false);
                 }
-                scan_node->replace_partition(partition_ids, false);
             } else {
                 DB_WARNING("table_id:%ld pattern not supported.", table_id);
                 for (int64_t i = 0; i < table_info->partition_num; ++i) {

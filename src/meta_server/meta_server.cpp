@@ -510,6 +510,17 @@ void MetaServer::query(google::protobuf::RpcController* controller,
         ClusterManager::get_instance()->get_switch(request, response);
         break;
     }
+    case pb::QUERY_BINLOG_TIMESTAMPS: {
+        if (!_meta_state_machine->is_leader()) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("not leader");
+            response->set_leader(butil::endpoint2str(_meta_state_machine->get_leader()).c_str());
+            DB_WARNING("meta state machine is not leader, request: %s", request->ShortDebugString().c_str());
+            return;
+        }
+        QueryRegionManager::get_instance()->get_binlog_timestamps(request, response);
+        break;
+    }
     case pb::QUERY_SHOW_VIRINDX_INFO_SQL: {
         QueryTableManager::get_instance()->get_virtual_index_influence_info(request, response);
         break;   
