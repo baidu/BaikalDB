@@ -3851,9 +3851,9 @@ bool ShowHelper::_show_meta_binlog(const SmartSocket& client, const std::vector<
         row.reserve(4);
         row.emplace_back(std::to_string(region_info.region_id()));
         for (auto i = 0; i < region_info.peer_id_size(); ++i) {
-            std::string peer_state_str = region_info.peer_id().at(i) + ": ";
+            std::string peer_state_str = region_info.peer_id(i) + ": ";
             if (i < region_info.oldest_ts_to_now_size()) {
-                peer_state_str += std::to_string(region_info.oldest_ts_to_now().at(i) / (3600.0 * 24)) + "day";
+                peer_state_str += std::to_string(region_info.oldest_ts_to_now(i) / (3600.0 * 24)) + "day";
             } else {
                 peer_state_str += "0";
             }
