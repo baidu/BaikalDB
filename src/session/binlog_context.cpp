@@ -249,8 +249,7 @@ int BinlogContext::add_binlog_values(SmartTable& table_info,
                 continue;
             }
             _table_binlogs[binlog_id] = BinlogInfo{.binlog_table_info = binlog_table_info,
-                                                   .partition_is_same_hint = iter->second,
-                                                   .binlog_by_partition = {}};
+                                                   .partition_is_same_hint = iter->second };
         }
         auto& binlog_info = _table_binlogs[binlog_id];
         if (binlog_info.binlog_table_info->partition_num == 1) { // binlog表不分区
@@ -394,8 +393,7 @@ int BinlogContext::add_binlog_values(SmartTable& table_info,
                 continue;
             }
             _table_binlogs[binlog_id] = BinlogInfo{.binlog_table_info = binlog_table_info,
-                                                   .partition_is_same_hint = iter->second,
-                                                   .binlog_by_partition = {}};
+                                                   .partition_is_same_hint = iter->second };
         }
         auto& binlog_info = _table_binlogs[binlog_id];
         if (binlog_info.binlog_table_info->partition_num == 1) { // binlog表不分区
