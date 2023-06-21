@@ -22,8 +22,7 @@
 #include "meta_server_interact.hpp"
 
 namespace baikaldb {
-DEFINE_bool(meta_tso_autoinc_degrade, false, "meta_tso_autoinc_degrade");
-BRPC_VALIDATE_GFLAG(meta_tso_autoinc_degrade, brpc::PassValidate);
+DECLARE_bool(meta_tso_autoinc_degrade);
 
 bool AutoInc::need_degrade = false;
 TimeCost AutoInc::last_degrade_time;
