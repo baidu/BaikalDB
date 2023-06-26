@@ -370,18 +370,6 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 DB_DEBUG("sign_str: %s", sign_str.c_str());
             }
         }
-        if (tbl_info.schema_conf.has_sign_forceindex() && tbl_info.schema_conf.sign_forceindex() != "") {
-            DB_DEBUG("sign_forceindex: %s",
-                    tbl_info.schema_conf.sign_forceindex().c_str());
-            std::vector<std::string> vec;
-            boost::split(vec,
-                    tbl_info.schema_conf.sign_forceindex(),
-                    boost::is_any_of(","));
-            for (auto& sign_str : vec) {
-                tbl_info.sign_forceindex.emplace(sign_str);
-                DB_DEBUG("sign_str: %s", sign_str.c_str());
-            }
-        }
         if (tbl_info.schema_conf.auto_inc_rand_max() > 0) {
             tbl_info.auto_inc_rand_max = tbl_info.schema_conf.auto_inc_rand_max();
         }
