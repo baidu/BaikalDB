@@ -193,6 +193,13 @@ int UpdatePlanner::parse_kv_list() {
                 node->set_col_type(pb::STRING);
                 node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
             }
+        } else if (value_expr.nodes(0).node_type() == pb::NULL_LITERAL
+            && !field_info->can_null) {
+            auto node = value_expr.mutable_nodes(0);
+            node->set_num_children(0);
+            node->set_node_type(pb::STRING_LITERAL);
+            node->set_col_type(pb::STRING);
+            node->mutable_derive_node()->set_string_val(field_info->default_value);
         }
         _update_values.push_back(value_expr);
     }

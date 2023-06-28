@@ -106,6 +106,8 @@ void TSOStateMachine::gen_tso(const pb::TsoRequest* request, pb::TsoResponse* re
                     _tso_obj.current_timestamp.set_logical(new_logical);
                     need_retry = false;
                 } else {
+                    // TODO 需要等50ms，physical是精确到1ms，这样会浪费50倍的buffer
+                    // 可以选择physical增加1ms来利用，需要限制到上次update的50ms内
                     DB_WARNING("logical part outside of max logical interval, retry later, please check ntp time");
                     need_retry = true;
                 }

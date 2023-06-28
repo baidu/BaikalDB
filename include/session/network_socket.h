@@ -192,6 +192,7 @@ struct NetworkSocket {
     bool            autocommit = true;       // The autocommit flag set by SET AUTOCOMMIT=0/1
     uint64_t        txn_id = 0;              // ID of the current transaction, 0 means out-transaction query
     int             seq_id = 0;              // The query sequence id within a transaction, starting from 1
+    std::atomic<int64_t> txn_affected_rows {0}; // txn中所有sql的affected_rows累加，用来限制大事务
     uint64_t        server_instance_id = 0;  // The global unique instance id of the current BaikalDB process, 
                                              // fetched from BaikalMeta when a BaikalDB instance starts,
     std::set<int>   need_rollback_seq;       // The sequence id for the commands need rollback within the transaction

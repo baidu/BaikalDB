@@ -46,12 +46,10 @@ int KillPlanner::plan() {
             DB_WARNING("conn_id equal %ld is_query:%d", k->conn_id, k->is_query);
             _ctx->kill_ctx = sock->query_ctx;
             _ctx->kill_ctx->kill_all_ctx();
-            // kill xxx 复用client_free,会导致被kill的sock的DataBuffer被继续占用，导致下一次建立连接失败
-            // 但是kill指令用的很少，后续再考虑优化
-            // kill query xx没问题
             if (!k->is_query) {
-//                client->state = STATE_ERROR;
-                StateMachine::get_instance()->client_free(sock, epoll_info);
+                sock->state = STATE_ERROR;
+                //client_free 会core
+//                StateMachine::get_instance()->client_free(sock, epoll_info);
             }
             break;
         }

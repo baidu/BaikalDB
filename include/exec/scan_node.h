@@ -320,6 +320,14 @@ public:
         }
     }
 
+    void add_expr_partition_pair(const std::string& expr_str, int64_t partition_id) {
+        _expr_partition_map.emplace(expr_str, partition_id);
+    }
+
+    void set_partition_field_id(int64_t partition_field_id) {
+        _partition_field_id = partition_field_id;
+    }
+
     int64_t select_index_in_baikaldb(const std::string& sample_sql);
 
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
@@ -358,14 +366,10 @@ public:
         return _current_global_backup;
     }
 
-    void set_expr_field_map(const std::map<ExprNode*, std::unordered_set<int32_t>>& expr_field_map) {
-        _expr_field_map = expr_field_map;
-    }
     void calc_index_range() {
-        _main_path.path(_select_idx)->calc_index_range();
-        _main_path.path(_select_idx)->insert_no_cut_condition(_expr_field_map);
+        _main_path.path(_select_idx)->calc_index_range(_partition_field_id, _expr_partition_map);
         if (!_main_path.path(_select_idx)->index_info_ptr->is_global && _select_idx != _table_id) {
-            _main_path.path(_table_id)->calc_index_range();
+            _main_path.path(_table_id)->calc_index_range(_partition_field_id, _expr_partition_map);
         }
     }
 
@@ -377,6 +381,8 @@ protected:
     int64_t _table_id = -1;
     AccessPathMgr _main_path;    //主集群索引选择
     AccessPathMgr _learner_path; //learner集群索引选择
+    std::map<std::string, int64_t> _expr_partition_map;
+    int64_t _partition_field_id = -1;
     bool _learner_use_diff_index = false;
     pb::TupleDescriptor* _tuple_desc = nullptr;
     bool _is_covering_index = true; // 只有store会用
@@ -391,7 +397,6 @@ protected:
     std::vector<ScanIndexInfo> _scan_indexs;
     bthread::Mutex _current_index_mutex;
     bool _current_global_backup = false;
-    std::map<ExprNode*, std::unordered_set<int32_t>> _expr_field_map;
 };
 }
 

@@ -377,6 +377,29 @@ void QueryRegionManager::get_region_peer_status(const pb::QueryRequest* request,
     manager->region_peer_state_map().traverse_with_key_value(func);
 }
 
+void QueryRegionManager::get_binlog_timestamps(const pb::QueryRequest* request, pb::QueryResponse* response) {
+    RegionManager* manager = RegionManager::get_instance();
+    if (manager == nullptr) {
+        return;
+    }
+    std::set<int64_t> binlog_region_ids;
+    if (request->instance_address() == "") {
+        DB_WARNING("query binlog region can not without instance");
+        return;
+    } 
+    manager->get_binlog_ids(request->instance_address(), binlog_region_ids);
+    for (auto region_id : binlog_region_ids) {
+        pb::BinlogRegionInfo* region_info = response->add_binlog_region_state();
+        region_info->set_region_id(region_id);
+        auto binlog_status = manager->get_binlog_region_state(region_id);
+        for (auto& peer : binlog_status.peer_oldest_timestamp_to_now_interval) {
+            region_info->add_peer_id(peer.first);
+            region_info->add_oldest_ts_to_now(peer.second);
+        }
+    }
+    return;
+}
+
 void QueryRegionManager::get_region_learner_status(const pb::QueryRequest* request, pb::QueryResponse* response) {
     RegionManager* manager = RegionManager::get_instance();
     std::map<int64_t, std::string> table_id_name_map;

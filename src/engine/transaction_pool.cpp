@@ -491,6 +491,24 @@ void TransactionPool::update_primary_timestamp(const pb::TransactionInfo& txn_in
     bth.run(update_fun);
 }
 
+bool TransactionPool::process_out_of_order_txn(Region* region, uint64_t txn_id, TxnParams& txn_params) {
+    auto call = [this, &txn_params](SmartTransaction& txn) {
+        txn_params.seq_id = txn->seq_id();
+        txn_params.primary_region_id = txn->primary_region_id();
+        txn_params.is_primary_region = txn->is_primary_region();
+        txn_params.is_finished = txn->is_finished();
+    };
+    txn_params.is_exist = _txn_map.call_and_get(txn_id, call);
+    bool mark_finished = is_mark_finished(txn_id);
+    if (mark_finished && txn_params.is_exist && !txn_params.is_finished) {
+        DB_WARNING("region_id:%ld txn_id:%lu seq_id: %d txn Out-of-order execution",
+                txn_params.primary_region_id, txn_id, txn_params.seq_id);
+        txn_commit_through_raft(txn_id, region->region_info(), pb::OP_ROLLBACK);
+        return true;
+    }
+    return false;
+}
+
 // 清理僵尸事务：包括长时间（clear_delay_ms）未更新的事务
 void TransactionPool::clear_transactions(Region* region) {
     std::vector<uint64_t>  txns_need_query_primary;
@@ -514,8 +532,10 @@ void TransactionPool::clear_transactions(Region* region) {
         // 事务存在时间过长报警
         if (cur_time - txn->begin_time > FLAGS_long_live_txn_interval_ms * 1000LL) {
             if (txn->has_write()) {
-                DB_FATAL("TransactionWarning: txn %s seq_id: %d is alive for %d ms, %ld, %ld, %lds",
-                    txn->get_txn()->GetName().c_str(), txn->seq_id(), FLAGS_long_live_txn_interval_ms,
+                DB_FATAL("TransactionWarning: txn %s seq_id: %d  remote_side: %s is alive for %d ms, %ld, %ld, %lds",
+                    txn->get_txn()->GetName().c_str(), txn->seq_id(),
+                    txn->remote_side.c_str(),
+                    FLAGS_long_live_txn_interval_ms,
                     cur_time,
                     txn->begin_time,
                     (cur_time - txn->begin_time) / 1000000);
@@ -547,8 +567,10 @@ void TransactionPool::clear_transactions(Region* region) {
         if (txn->is_primary_region() &&
            (cur_time - txn->last_active_time > txn_timeout * 1000LL)) {
             primary_txns_need_clear.emplace_back(txn->txn_id());
-            DB_FATAL("TransactionFatal: primary txn %s seq_id: %d is idle for %ld ms, %ld, %ld, %lds",
-                 txn->get_txn()->GetName().c_str(), txn->seq_id(), txn_timeout,
+            DB_FATAL("TransactionFatal: primary txn %s seq_id: %d remote_side: %s is idle for %ld ms, %ld, %ld, %lds",
+                 txn->get_txn()->GetName().c_str(), txn->seq_id(),
+                 txn->remote_side.c_str(),
+                 txn_timeout,
                  cur_time,
                  txn->last_active_time,
                  (cur_time - txn->last_active_time) / 1000000);
@@ -563,6 +585,10 @@ void TransactionPool::clear_transactions(Region* region) {
         remove_txn(txn_id, false);
     }
     if (!region->is_leader()) {
+        for (auto txn_id : txns_need_query_primary) {
+            TxnParams txn_params;
+            process_out_of_order_txn(region, txn_id, txn_params);
+        }
         return ;
     }
     // 只对primary region进行超时rollback
@@ -571,21 +597,10 @@ void TransactionPool::clear_transactions(Region* region) {
     }
     for (auto txn_id : txns_need_query_primary) {
         TxnParams txn_params;
-        auto call = [this, &txn_params](SmartTransaction& txn) {
-            txn_params.seq_id = txn->seq_id();
-            txn_params.primary_region_id = txn->primary_region_id();
-            txn_params.is_primary_region = txn->is_primary_region();
-            txn_params.is_finished = txn->is_finished();
-        };
-        bool exist = _txn_map.call_and_get(txn_id, call);
-        bool mark_finished = is_mark_finished(txn_id);
-        if (mark_finished && exist && !txn_params.is_finished) {
-            DB_WARNING("region_id:%ld txn_id:%lu seq_id: %d txn Out-of-order execution",
-                    txn_params.primary_region_id, txn_id, txn_params.seq_id);
-            txn_commit_through_raft(txn_id, region->region_info(), pb::OP_ROLLBACK);
+        if (process_out_of_order_txn(region, txn_id, txn_params)) {
             continue ;
         }
-        if (!exist || txn_params.is_primary_region || txn_params.is_finished
+        if (!txn_params.is_exist || txn_params.is_primary_region || txn_params.is_finished
             || txn_params.primary_region_id == -1) {
             continue ;
         }
@@ -626,8 +641,8 @@ void TransactionPool::clear_orphan_transactions() {
                 txn->rollback_current_request();
             }
             if (txn->in_process()) {
-                DB_WARNING("txn is processing region_id:%ld txn_id: %lu need delay rollback, retry:%d", 
-                        _region_id, txn->txn_id(), retry);
+                DB_WARNING("txn is processing region_id:%ld txn_id: %lu remote_side: %s need delay rollback, retry:%d", 
+                        _region_id, txn->txn_id(), txn->remote_side.c_str(), retry);
                 has_process = true;
             }
             // 只读事务处理

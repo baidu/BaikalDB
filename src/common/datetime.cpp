@@ -18,19 +18,23 @@
 #include "expr_value.h"
 
 namespace baikaldb {
-std::string timestamp_to_str(time_t timestamp) {
+std::string timestamp_to_str(time_t timestamp, bool is_utc) {
     // 内部存储采用了uint32，因此小于0的都不合法
     if (timestamp <= 0) {
         return "0000-00-00 00:00:00";
     }
-    char str_time[21] = {0};
     struct tm tm;
-    localtime_r(&timestamp, &tm);  
-    // 夏令时影响
-    if (tm.tm_isdst == 1) {
-        timestamp = timestamp - 3600;
-        localtime_r(&timestamp, &tm);
+    if (is_utc) {
+        gmtime_r(&timestamp, &tm);
+    } else {
+        localtime_r(&timestamp, &tm);  
+        // 夏令时影响
+        if (tm.tm_isdst == 1) {
+            timestamp = timestamp - 3600;
+            localtime_r(&timestamp, &tm);
+        }
     }
+    char str_time[21] = {0};
     strftime(str_time, sizeof(str_time), "%Y-%m-%d %H:%M:%S", &tm);
     return std::string(str_time);
 }

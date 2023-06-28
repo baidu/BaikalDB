@@ -216,8 +216,9 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& u
                     continue;
                 }
             }
-            used_size += cur_row->used_size();
             AggFnCall::initialize_all(_agg_fn_calls, key.data(), *agg_row, used_size, false);
+            used_size += cur_row->used_size();
+            used_size += key.size();
             // 可能会rehash
             _hash_map.insert(key.data(), *agg_row);
         } else {

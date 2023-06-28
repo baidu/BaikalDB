@@ -25,6 +25,9 @@
 #include <set>
 
 namespace baikaldb {
+
+DEFINE_string(twoway_repl_mark_prefix, "MysqlBaikalDBTrans.repl_mark", "twoway relp_mark prefix");
+
 int InsertManagerNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -231,67 +234,32 @@ int InsertManagerNode::process_binlog(RuntimeState* state, bool is_local) {
         auto client = state->client_conn();
         auto binlog_ctx = client->get_binlog_ctx();
         auto ctx = client->get_query_ctx();
-        binlog_ctx->set_table_info(_table_info);
-        pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
-        auto mutation = binlog_value->add_mutations();
-        mutation->set_table_id(_table_id);
-        if (ctx != nullptr) {
-            // basic insert可以不记录SQL TODO
-            mutation->set_sql(ctx->sql);
-            auto stat_info = &(ctx->stat_info);
-            mutation->set_sign(stat_info->sign);
-            binlog_ctx->add_sql_info(stat_info->family, stat_info->table, stat_info->sign);
+        if (ctx == nullptr) {
+            DB_WARNING("ctx is null");
+            return -1;
+        }
+        auto stat_info = &(ctx->stat_info);
+        if (_table_info->name.find(FLAGS_twoway_repl_mark_prefix) == 0) {
+            if (_origin_records.size() > 0) {
+                binlog_ctx->set_repl_mark_info(_table_info,ctx->sql,stat_info->sign, _origin_records[0]);
+            }
+            return 0;
         }
         if (is_local) {
-            bool need_set_partition_record = true;
-            bool has_delete_record = false;
-            SmartRecord record_template = _factory->new_record(_table_id);
             if (_need_ignore || _is_replace || _on_dup_key_update) {
-                for (auto& str_record : _fetcher_store.return_str_records) {
-                    if (need_set_partition_record) {
-                        SmartRecord record = record_template->clone(false);
-                        auto ret = record->decode(str_record);
-                        if (ret < 0) {
-                            DB_FATAL("decode to record fail");
-                            return -1;
-                        }
-                        binlog_ctx->set_partition_record(record);
-                        need_set_partition_record = false;
-                    }
-                    mutation->add_insert_rows(str_record);
-                }
-                for (auto& str_record : _fetcher_store.return_str_old_records) {
-                    mutation->add_deleted_rows(str_record);
-                    has_delete_record = true;
-                }
+                bool has_delete_record = _fetcher_store.return_str_old_records.size() > 0;
+                return binlog_ctx->add_binlog_values(_table_info,ctx->sql, stat_info->sign,
+                    has_delete_record ? pb::MutationType::UPDATE : pb::MutationType::INSERT,
+                    _fetcher_store.return_str_records, _fetcher_store.return_str_old_records);
             } else {
-                // basic insert
-                binlog_ctx->set_partition_record(_origin_records[0]);
-                for (auto& record : _origin_records) {
-                    std::string* row = mutation->add_insert_rows();
-                    record->encode(*row);
-                }
-            }
-            if (has_delete_record) {
-                mutation->add_sequence(pb::MutationType::UPDATE);
-            } else {
-                mutation->add_sequence(pb::MutationType::INSERT);
+                return binlog_ctx->add_binlog_values(_table_info,ctx->sql, stat_info->sign,
+                    pb::MutationType::INSERT, _origin_records, {});
             }
         } else {
-            binlog_ctx->set_partition_record(_insert_scan_records[0]);
-            if (_del_scan_records.size() == 0) {
-                mutation->add_sequence(pb::MutationType::INSERT);
-            } else {
-                mutation->add_sequence(pb::MutationType::UPDATE);
-            }
-            for (auto& record : _insert_scan_records) {
-                std::string* row = mutation->add_insert_rows();
-                record->encode(*row);
-            }
-            for (auto& record : _del_scan_records) {
-                std::string* row = mutation->add_deleted_rows();
-                record->encode(*row);
-            }
+            bool has_delete_record = _del_scan_records.size() > 0;
+            return binlog_ctx->add_binlog_values(_table_info,ctx->sql, stat_info->sign,
+                has_delete_record ? pb::MutationType::UPDATE : pb::MutationType::INSERT,
+                _insert_scan_records, _del_scan_records);
         }
     }
     return 0;

@@ -30,6 +30,26 @@ int FullExportNode::init(const pb::PlanNode& node) {
     return 0;
 }
 
+void FullExportNode::get_next_partition() {
+    _region_infos.clear();
+    _start_key_sort.clear();
+    auto iter = _origin_region_infos.begin();
+    if (iter != _origin_region_infos.end()) {
+        _current_partition = iter->first;
+        _region_infos = iter->second;
+        for (auto& pair : _region_infos) {
+            auto& info = pair.second;
+            _start_key_sort[info.partition_id()][info.start_key()] = info.region_id();
+        }
+        for (auto& partition_pair : _start_key_sort) {
+            for (auto& pair : partition_pair.second) {
+                _send_region_ids.emplace_back(pair.second);
+            }
+        }
+        _origin_region_infos.erase(iter);
+    }
+}
+
 int FullExportNode::open(RuntimeState* state) {
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
@@ -43,15 +63,10 @@ int FullExportNode::open(RuntimeState* state) {
     state->seq_id = client_conn->seq_id;
     _scan_node = static_cast<RocksdbScanNode*>(get_node(pb::SCAN_NODE));
     for (auto& pair : _region_infos) {
-        auto& info = pair.second;
-        _start_key_sort[info.partition_id()][info.start_key()] = info.region_id();
+        _origin_region_infos[pair.second.partition_id()][pair.first] = pair.second;
     }
-    for (auto& partition_pair : _start_key_sort) {
-        for (auto& pair : partition_pair.second) {
-            _send_region_ids.emplace_back(pair.second);
-        }
-    } 
-    DB_WARNING("region_count:%ld", _send_region_ids.size());
+    get_next_partition();
+    DB_WARNING("region_count:%ld _current_partition:%ld ", _send_region_ids.size(), _current_partition);
     return 0;
 }
 
@@ -91,6 +106,7 @@ int FullExportNode::get_next_region_infos() {
     }
     scan_index_info.router_index->mutable_ranges(0)->set_left_key(_last_router_key);
     scan_index_info.router_index->mutable_ranges(0)->set_left_full(true);
+    scan_index_info.router_index->mutable_ranges(0)->set_partition_id(_current_partition);
     scan_index_info.router_index->mutable_ranges(0)->set_left_field_cnt(index_ptr->fields.size());
     scan_index_info.router_index->mutable_ranges(0)->set_left_open(false);
     int ret = schema_factory->get_region_by_key(main_table_id, 
@@ -113,8 +129,8 @@ int FullExportNode::get_next_region_infos() {
         for (auto& pair : partition_pair.second) {
             _send_region_ids.emplace_back(pair.second);
         }
-    } 
-    DB_WARNING("region_count:%ld", _send_region_ids.size());
+    }
+    DB_WARNING("region_count:%ld _current_partition:%ld", _send_region_ids.size(), _current_partition);
     return 0;
 }
 
@@ -155,6 +171,7 @@ int FullExportNode::calc_last_key(RuntimeState* state, MemRow* mem_row) {
         pos_index.add_ranges();
     }
     pos_index.mutable_ranges(0)->set_left_key(key.data());
+    pos_index.mutable_ranges(0)->set_partition_id(_current_partition);
     pos_index.mutable_ranges(0)->set_left_full(key.get_full());
     pos_index.mutable_ranges(0)->set_left_field_cnt(pri_info->fields.size());
     pos_index.mutable_ranges(0)->set_left_open(true);
@@ -191,15 +208,27 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     uint64_t log_id = state->log_id();
 
     if (_send_region_ids.empty()) {
-        if (_last_router_key.empty()) {
+        if (_last_router_key.empty() && _origin_region_infos.empty()) {
             state->set_eos();
             DB_WARNING("process full select done log_id:%lu", log_id);
             *eos = true;
             return 0;
         }
-        int ret = get_next_region_infos();
-        if (ret < 0) {
-            return -1;
+        if (!_last_router_key.empty()) {
+            int ret = get_next_region_infos();
+            if (ret < 0) {
+                return -1;
+            }
+        }
+        if (_send_region_ids.empty() && _origin_region_infos.empty()) {
+            state->set_eos();
+            DB_WARNING("process full select done log_id:%lu", log_id);
+            *eos = true;
+            return 0;
+        }
+        if (_send_region_ids.empty()) {
+            get_next_partition();
+            DB_WARNING("region_count:%ld _current_partition:%ld", _send_region_ids.size(), _current_partition);
         }
         if (_send_region_ids.empty()) {
             state->set_eos();

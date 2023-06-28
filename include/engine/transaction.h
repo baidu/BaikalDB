@@ -321,7 +321,7 @@ public:
         return _in_process.compare_exchange_strong(expected, desire);
     }
 
-    void select_update_txn_status(int seq_id) {
+    void normal_select_update_txn_status(int seq_id) {
         _current_req_point_seq.clear();
         _current_req_point_seq.insert(seq_id);
         _in_process = false;
@@ -472,6 +472,8 @@ public:
     int fits_region_range_for_primary(IndexInfo& pk_index,
         SmartRecord record,
         bool& result);
+    bool fits_region_range_for_primary(IndexInfo& pk_index,
+        MutTableKey& pk_key);
     
     pb::StoreReq* get_raftreq() {
         return &_store_req;
@@ -558,6 +560,7 @@ public:
     int         dml_num_affected_rows = 0; //for autocommit dml return
     int64_t     batch_num_increase_rows = 0;//用于batch txn
     pb::ErrCode err_code = pb::SUCCESS;
+    std::string remote_side = ""; // 便于定位超时事务来源
 
 private:
     int get_update_primary(

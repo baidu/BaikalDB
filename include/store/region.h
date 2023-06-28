@@ -342,6 +342,7 @@ public:
         cond.wait();
     }
     void shutdown() {
+        _doing_shutdown = true;
         if (get_version() == 0) {
             wait_async_apply_log_queue_empty();
             _async_apply_param.stop_adjust_stall();
@@ -366,6 +367,7 @@ public:
         if (_shutdown.compare_exchange_strong(expected_status, true)) {
             is_learner() ? _learner->shutdown(NULL) : _node.shutdown(NULL);
             _init_success = false;
+            _region_status = pb::STATUS_ERROR;
             DB_WARNING("raft node was shutdown, region_id: %ld", _region_id);
         }
     }
@@ -1155,25 +1157,6 @@ public:
         return _disable_write_cond.count() > 0;
     }
 
-    bool is_dml_op_type(const pb::OpType& op_type) {
-        if (op_type == pb::OP_INSERT 
-             || op_type == pb::OP_DELETE
-             || op_type == pb::OP_UPDATE
-             || op_type == pb::OP_SELECT_FOR_UPDATE
-             || op_type == pb::OP_PARTIAL_ROLLBACK
-             || op_type == pb::OP_KV_BATCH) {
-            return true;
-        }
-        return false;
-    }
-    bool is_2pc_op_type(const pb::OpType& op_type) {
-        if (op_type == pb::OP_PREPARE 
-             || op_type == pb::OP_ROLLBACK
-             || op_type == pb::OP_COMMIT) {
-            return true;
-        }
-        return false;
-    }
     bool is_async_apply_op_type(const pb::OpType& op_type) {
         if (is_dml_op_type(op_type)
             || is_2pc_op_type(op_type)
@@ -1185,7 +1168,7 @@ public:
         return false;
     }
     void check_peer_latency();
-    void get_read_index(pb::StoreRes* response);
+    void get_read_index(const baikaldb::pb::GetAppliedIndex* request, pb::StoreRes* response);
     
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
     bool has_sst_data(int64_t* seek_table_lines);
@@ -1408,6 +1391,11 @@ private:
     int ask_leader_read_index(std::vector<SmartFollowerReadCond>& tasks);
     static int wake_up_read_request(void* region, bthread::TaskIterator<ReadReqsWaitExec>& iter);
 
+    uint32_t get_time_interval_from_oldest_timestamp_to_now() {
+        uint32_t timestamp =  tso::get_timestamp_internal(std::max(_binlog_param.oldest_ts, _rocksdb->get_oldest_ts_in_binlog_cf()));
+        return time(NULL) - timestamp;
+    }
+
 private:
     //Singleton
     RocksWrapper*       _rocksdb;
@@ -1475,6 +1463,7 @@ private:
     ApproximateInfo                     _approx_info;
 
     bool                                _report_peer_info = false;
+    bool                                _doing_shutdown = false;
     std::atomic<bool>                   _shutdown;
     bool                                _init_success = false;
     bool                                _need_decrease = false; // addpeer时候从init到on_snapshot_load整体限制

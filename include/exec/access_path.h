@@ -44,7 +44,7 @@ enum IndexHint {
         return true;
     }
 
-    void calc_index_range();
+    void calc_index_range(int64_t partition_field_id, const std::map<std::string, int64_t>& expr_partition_map);
 
     void calc_index_match(Property& sort_property) {
         fetch_field_ids();

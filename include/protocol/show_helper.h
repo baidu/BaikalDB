@@ -30,6 +30,9 @@ const std::string SQL_SHOW_NAMESPACE             = "namespace";             // s
 const std::string SQL_SHOW_META                  = "meta";                  // show meta;
 const std::string SQL_SHOW_TABLE_STATUS          = "table";                 // show table status;
 const std::string SQL_SHOW_TABLES                = "tables";                // show tables;
+const std::string SQL_SHOW_FUNCTION_STATUS       = "function";              // show function status;
+const std::string SQL_SHOW_PROCEDURE_STATUS      = "procedure";             // show procedure status;
+const std::string SQL_SHOW_TRIGGERS              = "triggers";              // show triggers;
 const std::string SQL_SHOW_SOCKET                = "socket";                // show socket;
 const std::string SQL_SHOW_WARNINGS              = "warnings";              // show warnings;
 const std::string SQL_SHOW_PROCESSLIST           = "processlist";           // show processlist;
@@ -63,6 +66,7 @@ const std::string SQL_SHOW_INDEXES               = "indexes";               // s
 const std::string SQL_SHOW_KEYS                  = "keys";                  // show keys; same as `show index`
 const std::string SQL_SHOW_PARTITION_TABLE       = "partition_tables";      // show partition table info
 const std::string SQL_SHOW_ABNORMAL_SWITCH       = "abnormal_switch";       // show abnormal_switch
+const std::string SQL_SHOW_META_BINLOG           = "meta_binlog";           // show meta_binlog db.table
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -109,6 +113,12 @@ private:
     bool _show_cost(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show full tables;
     bool _show_full_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show function status;
+    bool _show_function_status(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show procedure status;
+    bool _show_procedure_status(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show triggers;
+    bool _show_triggers(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show full columns from tableName;
     bool _show_full_columns(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show schema_conf database_table;
@@ -151,6 +161,9 @@ private:
     // sql: show abnormal_switch
     // 异常的switch，如快速导入超一天，表split_lines超1kw行，peer_loadbalance，migrate关闭等
     bool _show_abnormal_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
+    bool _show_meta_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 
             std::vector<ResultField>& fields,

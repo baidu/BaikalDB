@@ -240,6 +240,7 @@ message InitRegion {
 message GetAppliedIndex {
     required int64 region_id    = 1;
     optional bool  use_read_idx = 2;
+    optional bool  use_raft_log_index = 3;
 };
 
 message RemoveRegion {

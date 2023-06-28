@@ -85,8 +85,17 @@ message SplitKey {
 
 message BinlogInfo {
     repeated int64 target_table_ids = 1;
-    optional int64 binlog_table_id = 2;
+    optional int64 binlog_table_id = 2; // binlog表自己不设置
+    optional FieldInfo link_field  = 3;
+    optional bool partition_is_same_hint = 4; // 普通表和binlog表分区方式不一样的hit
 };
+/*
+    普通表    binlog表
+    不分区     不分区    binlog分发无需处理分区
+    分区       不分区    binlog分发无需处理分区
+    不分区      分区     binlog分发必须处理分区
+    分区        分区     binlog分发在分区方式一样时可以简化处理，默认分区认为一样，通过partition_is_same_hint显示指定 
+*/
 
 enum PartitionType {
     PT_HASH = 1;
@@ -155,7 +164,7 @@ message SchemaInfo {
     repeated SplitKey split_keys            = 36;
     optional SchemaConf schema_conf         = 37; //一些可以随意修改的配置放在这里
     optional int64 ttl_duration             = 38; //0表示无ttl，>0表示有ttl，建表时指定
-    optional BinlogInfo    binlog_info      = 39;
+    optional BinlogInfo    binlog_info      = 39; // 主binlog信息，订阅以此为准
     optional PartitionInfo partition_info   = 40;
     optional bool is_binlog                 = 41;
     optional FieldInfo link_field           = 42;
@@ -164,6 +173,8 @@ message SchemaInfo {
     optional int64 online_ttl_expire_time_us = 45; 
     optional string comment                 = 46;
     optional bool  if_exist                 = 47;
+    optional bool partition_is_same_hint    = 48;
+    repeated BinlogInfo    binlog_infos     = 49;
 };
 
 message PartitionRegion {
@@ -536,6 +547,11 @@ enum PeerStatus {
     STATUS_INITED             = 8;
 };
 
+message BinlogPeerState {
+    required int64   region_id = 1;
+    optional uint32  oldest_timestamp_to_now_interval = 2;
+};
+
 message PeerStateInfo {
     optional string      peer_id     = 1;
     optional PeerStatus  peer_status = 2;
@@ -601,6 +617,7 @@ message StoreHeartBeatRequest {
     optional bool need_peer_balance             = 6;
     repeated DdlWorkInfoHeartBeat ddlwork_infos = 7;
     repeated LearnerHeartBeat learner_regions   = 8;
+    repeated BinlogPeerState binlog_ts_infos    = 9;
 };
 
 message StoreHeartBeatResponse {
@@ -721,6 +738,7 @@ enum QueryOpType {
     QUERY_SHOW_VIRINDX_INFO_SQL                   = 309;//展示虚拟索引的影响   
     QUERY_REGION_LEARNER_STATUS                   = 310;
     QUERY_FAST_IMPORTER_TABLES                    = 311;
+    QUERY_BINLOG_TIMESTAMPS                       = 312;
 };
 
 message PhysicalInstance {
@@ -759,6 +777,13 @@ message VirtualInfoAndSqls{
     optional string   affected_sign      =2;
     optional string   affected_sqls      =3;
 }
+
+message BinlogRegionInfo {
+    required int64    region_id          =1;
+    repeated string   peer_id            =2;
+    repeated uint32   oldest_ts_to_now   =3;
+}
+
 message QueryResponse {
     required ErrCode            errcode             = 1;
     optional string             errmsg              = 2;
@@ -785,6 +810,7 @@ message QueryResponse {
     repeated RegionDdlWork      region_ddl_infos    = 23;
     repeated ResourceTagInfo    resource_tag_infos  = 24;
     repeated VirtualInfoAndSqls virtual_index_influence_info = 25;
+    repeated BinlogRegionInfo   binlog_region_state = 26;
 };
 
 message DdlPeerInfo {

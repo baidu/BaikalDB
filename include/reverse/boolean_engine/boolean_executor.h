@@ -150,7 +150,7 @@ public:
     void set_merge_func(MergeFuncT merge_func);
 
 protected:
-    //子节点
+    //子节点，针对or做堆
     std::vector<BooleanExecutor<Schema>*> _sub_clauses;
     //布尔操作的函数（and or weight）
     MergeFuncT _merge_func;
@@ -200,8 +200,9 @@ public:
 
 private:
 
-    BooleanExecutor<Schema>* _miter = nullptr;
     const PostingNodeT* find_next();
+    void make_heap();
+    void shiftdown(size_t index);
 };
 
 template <typename Schema>

@@ -119,11 +119,12 @@ int32_t RocksWrapper::init(const std::string& path) {
             table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 8);
         }
     }
-    table_options.format_version = 4;
 
     table_options.block_size = FLAGS_rocks_block_size;
     if (FLAGS_rocks_use_ribbon_filter) {
+#if ROCKSDB_MAJOR >= 7 || (ROCKSDB_MAJOR == 6 && ROCKSDB_MINOR > 22)
         table_options.filter_policy.reset(rocksdb::NewRibbonFilterPolicy(9.9));
+#endif
     } else {
         table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
     }
@@ -136,6 +137,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.skip_stats_update_on_db_open = FLAGS_rocks_skip_stats_update_on_db_open;
     db_options.compaction_readahead_size = FLAGS_rocks_compaction_readahead_size;
+    db_options.table_cache_numshardbits = 8;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
     //打开后有些集群内存严重上涨
@@ -208,7 +210,9 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.compaction_filter = SplitCompactionFilter::get_instance();
     if (FLAGS_rocks_use_sst_partitioner_fixed_prefix) {
         // 按region_id拆分
+#if ROCKSDB_MAJOR >= 7 || (ROCKSDB_MAJOR == 6 && ROCKSDB_MINOR > 22)
         _data_cf_option.sst_partitioner_factory = rocksdb::NewSstPartitionerFixedPrefixFactory(sizeof(int64_t));
+#endif
     }
     _data_cf_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
     _data_cf_option.compaction_style = rocksdb::kCompactionStyleLevel;

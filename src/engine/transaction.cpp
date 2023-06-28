@@ -222,6 +222,17 @@ int Transaction::fits_region_range_for_global_index(IndexInfo& pk_index,
             index_info);
     return 0;
 }
+
+bool Transaction::fits_region_range_for_primary(IndexInfo& pk_index,
+        MutTableKey& pk_key) {
+    return fits_region_range(rocksdb::Slice(pk_key.data()), 
+            rocksdb::Slice(""), 
+            &_region_info->start_key(), 
+            &_region_info->end_key(), 
+            pk_index, 
+            pk_index);
+}
+
 int Transaction::fits_region_range_for_primary(IndexInfo& pk_index,
         SmartRecord record,
         bool& result) {

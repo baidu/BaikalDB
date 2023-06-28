@@ -28,3 +28,16 @@ message TestTupleRecord {
 	optional bool col13 = 13;
 	optional bytes col14 = 14;
 }
+
+message Pg {
+    repeated int32 a = 1;
+	optional int32 b = 2;
+};
+
+message Packed {
+  repeated Pg a = 1;
+}
+
+message Optional {
+  optional Pg a = 1;
+}

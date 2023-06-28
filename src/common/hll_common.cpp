@@ -629,7 +629,7 @@ uint64_t hll_estimate(const ExprValue& hll) {
 
 int hll_merge_agg(std::string& hll1, std::string& hll2) {
     if (!is_hll_object(hll1) || !is_hll_object(hll2)) {
-        DB_WARNING("waong hll object");
+        DB_WARNING("wrong hll object");
         return -1;
     }
     struct hllhdr *hdr1 = (struct hllhdr *)hll1.data();
@@ -759,7 +759,7 @@ int hll_merge(uint8_t *max, std::string& hll) {
 
 int hll_merge(std::string& hll1, std::string& hll2) {
     if (!is_hll_object(hll1) || !is_hll_object(hll2)) {
-        DB_WARNING("waong hll object");
+        DB_WARNING("wrong hll object");
         return -1;
     }
     uint8_t max[HLL_REGISTERS];

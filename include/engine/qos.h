@@ -241,11 +241,11 @@ public:
 
     void sql_statistics_adder(int64_t count);
 
-    int increase_timed_wait(const int64_t reject_timeout);
+    int increase_timed_wait_with_max_wait_cnt(const int max_wait_cnt, const int64_t reject_timeout);
 
-    int increase_wait();
+    int increase_wait_with_max_wait_cnt(const int max_wait_cnt);
    
-    int decrease_signal();
+    int decrease_signal_with_wait_cnt();
 
     void inc_index_count(const int64_t index_id) {
         bool print_log = false;
@@ -297,10 +297,10 @@ public:
         if (get_qps != 0 || scan_qps != 0) {
             DB_WARNING("sign: %lu, get_qps: %ld, scan_qps: %ld, sql_qps: %ld,"
                        " get_real: %ld, scan_real: %ld, token_fetch_qps: %ld,"
-                       " concurrency: %d", 
+                       " concurrency: %d, wait_count: %d", 
                         _sign, get_qps, scan_qps, _sql_qps, 
                         _get_real.get_qps_value(), _scan_real.get_qps_value(), _token_fetch.get_qps_value(), 
-                        _concurrency.count());
+                        _concurrency.count(),  _concurrency.total_count());
         }
 
         std::lock_guard<bthread::Mutex> lock(_mutex);

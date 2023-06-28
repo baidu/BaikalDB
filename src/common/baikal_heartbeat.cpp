@@ -15,6 +15,7 @@
 #include "baikal_heartbeat.h"
 #include "schema_factory.h"
 #include "task_fetcher.h"
+
 namespace baikaldb {
 
 DECLARE_int32(baikal_heartbeat_interval_us);
@@ -369,6 +370,12 @@ int BinlogNetworkServer::update_table_infos() {
             std::vector<SmartTable> tmp_table_ptrs;
             factory->get_all_table_by_db(_namespace, vec[0], tmp_table_ptrs);
             for (SmartTable t : tmp_table_ptrs) {
+                if (t != nullptr && !t->is_linked) {
+                    if (t->name != "baidu_dba.heartbeat") {
+                        DB_WARNING("table[%s.%s] not linked", t->namespace_.c_str(), t->name.c_str());
+                    }
+                    continue;
+                }
                 SubTableNames& names = table_id_names_map[t->id];
                 names.table_name = t->name;
                 names.fields = info.second.fields;
@@ -383,29 +390,69 @@ int BinlogNetworkServer::update_table_infos() {
                 DB_FATAL("get table[%s.%s] fail", _namespace.c_str(), db_table_name.c_str());
                 continue;
             }
+            if (!t->is_linked) {
+                if (t->name != "baidu_dba.heartbeat") {
+                    DB_WARNING("table[%s.%s] not linked", t->namespace_.c_str(), t->name.c_str());
+                }
+                continue;
+            }
             table_id_names_map[t->id] = info.second;
             table_ptrs.emplace_back(t);
             DB_NOTICE("get table_name[%s.%s] table_id[%ld]", _namespace.c_str(), db_table_name.c_str(), t->id);
         }
     }
-    std::map<int64_t, SubTableIds> tmp_table_ids;
-    for (SmartTable table : table_ptrs) {
-        if (!table->is_linked) {
-            if (table->name != "baidu_dba.heartbeat") {
-                DB_FATAL("table[%s.%s] not linked", table->namespace_.c_str(), table->name.c_str());
-            }
+    if (table_ptrs.empty()) {
+        DB_WARNING("no sub table");
+        return 0;
+    }
+    std::set<int64_t> all_binlog_ids;
+    for (auto& table_ptr : table_ptrs) {
+        if(table_ptr == nullptr) {
             continue;
         }
-
-        if (_binlog_id != -1) {
-            if (table->binlog_id != _binlog_id) {
-                DB_FATAL("table[%s.%s] has different binlog id %ld", table->namespace_.c_str(), table->name.c_str(), table->binlog_id);
-                continue;
+        for (auto pair : table_ptr->binlog_ids) {
+            all_binlog_ids.emplace(pair.first);
+        }
+    }
+    // 获取所有表公共的binlog表_binlog_id
+    std::set<int64_t> common_binlog_ids;
+    for (auto id : all_binlog_ids) {
+        bool find = true;
+        for (auto& table_ptr : table_ptrs) {
+            if(table_ptr != nullptr && table_ptr->binlog_ids.count(id) == 0) {
+                find = false;
+                break;
             }
+        }
+        if (find) {
+            common_binlog_ids.emplace(id);
+        }
+    }
+    if (common_binlog_ids.size() == 0) {
+        DB_FATAL("get binlog id error.");
+        return -1;
+    }
+    if (common_binlog_ids.size() > 1) {
+        DB_WARNING("selected multi binlog_ids: %ld maybe config error", common_binlog_ids.size());
+    }
+    for (SmartTable table : table_ptrs) {
+        if (table != nullptr && common_binlog_ids.count(table->binlog_id) != 0) {
+            _binlog_id = table->binlog_id;
+        }
+    }
+
+    if (_binlog_id == -1) {
+        DB_FATAL("get binlog id error.");
+        return -1;
+    }
+    std::map<int64_t, SubTableIds> tmp_table_ids;
+    for (SmartTable table : table_ptrs) {
+        if (table->binlog_id != _binlog_id && table->binlog_ids.count(_binlog_id) == 0) {
+            DB_WARNING("table[%s.%s] has different binlog id %ld", table->namespace_.c_str(), table->name.c_str(), table->binlog_id);
+            continue;
         } else {
             DB_NOTICE("insert table[%s.%s] table_id: %ld, binlog table id %ld", 
                 table->namespace_.c_str(), table->name.c_str(), table->id, table->binlog_id);
-            _binlog_id = table->binlog_id;
         }
 
         SubTableNames& names = table_id_names_map[table->id];
@@ -434,11 +481,6 @@ int BinlogNetworkServer::update_table_infos() {
             tmp_table_ids[table->id] = table_ids;
         }
 
-    }
-
-    if (_binlog_id == -1) {
-        DB_FATAL("get binlog id error.");
-        return -1;
     }
 
     std::lock_guard<bthread::Mutex> l(_lock);

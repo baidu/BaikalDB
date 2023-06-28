@@ -74,6 +74,8 @@ public:
     // Stop server.
     void stop();
 
+    void fast_stop();
+
     // Gracefully shutdown.
     void graceful_shutdown();
 

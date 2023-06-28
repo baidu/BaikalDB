@@ -84,6 +84,10 @@ int IndexDDLManagerNode::open(RuntimeState* state) {
             _fetcher_store.region_batch.erase(iter);
             continue;
         }
+        if (!_is_global_index && !max_pk_str.empty()) {
+            DB_WARNING("split only return first region, task_%s", _task_id.c_str());
+            break;
+        }
         auto& ttl_batch = _fetcher_store.region_id_ttl_timestamp_batch[pair.second];
         if (global_ddl_with_ttl && batch->size() != ttl_batch.size()) {
             DB_FATAL("region_id: %ld, batch size diff with ttl size %ld vs %ld", pair.second, batch->size(), ttl_batch.size());

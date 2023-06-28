@@ -791,7 +791,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         if (_ctx->stmt_type == parser::NT_SELECT) {
             op_type = pb::OP_SELECT;
         }
-        if (!_ctx->user_info->allow_op(op_type, db.id, tbl.id)) {
+        if (!_ctx->user_info->allow_op(op_type, db.id, tbl.id, table)) {
             DB_WARNING("user %s has no permission to access: %s.%s, db.id:%ld, tbl.id:%ld", 
                 _username.c_str(), database.c_str(), table.c_str(), db.id, tbl.id);
             _ctx->stat_info.error_code = ER_TABLEACCESS_DENIED_ERROR;

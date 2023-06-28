@@ -170,6 +170,7 @@ struct TableInfo {
     int64_t                 region_split_lines;
     int64_t                 byte_size_per_record = 1; //默认情况下不分裂，兼容以前的表
     int64_t                 auto_inc_field_id = -1; //自增字段id
+    int64_t                 auto_inc_rand_max = -1; //meta挂掉后降级到随机id，>0生效
     pb::SchemaConf          schema_conf;
     pb::Charset             charset;
     pb::Engine              engine;
@@ -212,9 +213,11 @@ struct TableInfo {
     std::set<uint64_t> binlog_target_ids;
     // 该表关联的 binlog 表id
     int64_t binlog_id = 0;
+    // key关联的binlog表id,val: partition_is_same_hint默认分区方式一样
+    std::map<int64_t, bool> binlog_ids;
     std::shared_ptr<Partition> partition_ptr = nullptr;
     // 普通表 使用该字段和 binlog 表进行关联
-    std::vector<FieldInfo> link_field;
+    std::map<int64_t, FieldInfo> link_field_map;
     std::unordered_map<int64_t, int64_t>    reverse_fields;
     std::unordered_map<int64_t, int64_t>    arrow_reverse_fields;
     std::vector<std::string> learner_resource_tags;
@@ -616,8 +619,6 @@ public:
     static int update_big_sql_double_buffer(
             void* meta, bthread::TaskIterator<std::string>& iter);
     void update_big_sql_double_buffer(bthread::TaskIterator<std::string>& iter);
-
-    bool is_big_sql(const std::string& sql);
 
     static int update_regions_double_buffer(
             void* meta, bthread::TaskIterator<RegionVec>& iter);
@@ -1087,8 +1088,8 @@ public:
         }
         return false;
     }
-
-    int get_binlog_regions(int64_t table_id, pb::RegionInfo& region_info, const ExprValue& value = ExprValue{}, 
+    
+    int get_binlog_region_by_partition_id(int64_t table_id, int64_t partition_id, pb::RegionInfo& region_info,
         PartitionRegionSelect prs = PRS_RANDOM);
 
     bool is_region_info_exist(int64_t table_id) {
@@ -1163,7 +1164,6 @@ private:
     DoubleBufferedTableRegionInfo _table_region_mapping;
     bthread::ExecutionQueueId<RegionVec> _region_queue_id = {0};
 
-    DoubleBufferStringSet _double_buffer_big_sql;
     DoubleBufferedSql _double_buffer_sql_stat;
 
     std::string _physical_room;

@@ -36,6 +36,8 @@ public:
                 const std::string& instance,
                 std::set<int64_t>& peer_ids);
 
+    void get_binlog_timestamps(const pb::QueryRequest* request, pb::QueryResponse* response);
+
     void send_transfer_leader(const pb::QueryRequest* request, pb::QueryResponse* response);
     void send_set_peer(const pb::QueryRequest* request, pb::QueryResponse* response);
     void get_region_peer_status(const pb::QueryRequest* request, pb::QueryResponse* response);

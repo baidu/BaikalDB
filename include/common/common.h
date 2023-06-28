@@ -72,6 +72,8 @@ namespace braft = raft;
 #endif
 
 namespace baikaldb {
+DECLARE_bool(use_cond_decrease_signal);
+
 enum RETURN_VALUE {
     RET_SUCCESS          = 0,
     RET_ERROR            = 1,   // Common error.
@@ -243,7 +245,11 @@ public:
     void decrease_broadcast() {
         bthread_mutex_lock(&_mutex);
         --_count;
-        bthread_cond_broadcast(&_cond);
+        if (!FLAGS_use_cond_decrease_signal) {
+            bthread_cond_broadcast(&_cond);
+        } else {
+            bthread_cond_signal(&_cond);
+        }
         bthread_mutex_unlock(&_mutex);
     }
     
@@ -305,8 +311,60 @@ public:
         return ret;
     }
     
+    int total_count() {
+        return _total_count;
+    }
+
+    int increase_wait_with_max_wait_cnt(int max_wait_cnt, int cond = 0) {
+        int ret = 0;
+        bthread_mutex_lock(&_mutex);
+        if (++_total_count < max_wait_cnt) {
+            while (_count + 1 > cond) {
+                ret = bthread_cond_wait(&_cond, &_mutex);
+                if (ret != 0) {
+                    DB_WARNING("wait timeout, ret:%d", ret);
+                    break;
+                }
+            }
+        } else {
+            ret = -2;
+        }
+        ++_count; // 不能放在while前面
+        bthread_mutex_unlock(&_mutex);
+        return ret;
+    }
+
+    int increase_timed_wait_with_max_wait_cnt(int max_wait_cnt, int64_t timeout_us, int cond = 0) {
+        int ret = 0;
+        bthread_mutex_lock(&_mutex);
+        if(++_total_count < max_wait_cnt) {
+            timespec tm = butil::microseconds_from_now(timeout_us);
+            while (_count + 1 > cond) {
+                ret = bthread_cond_timedwait(&_cond, &_mutex, &tm);
+                if (ret != 0) {
+                    DB_WARNING("wait timeout, ret:%d", ret);
+                    break; 
+                }
+            }
+        } else {
+            ret = -2;
+        }
+        ++_count;
+        bthread_mutex_unlock(&_mutex);
+        return ret;
+    }
+
+    void decrease_signal_with_wait_cnt() {
+        bthread_mutex_lock(&_mutex);
+        --_count;
+        --_total_count;
+        bthread_cond_signal(&_cond);
+        bthread_mutex_unlock(&_mutex);
+    }
+    
 private:
     int _count;
+    int _total_count = 0;
     bthread_cond_t _cond;
     bthread_mutex_t _mutex;
 };
@@ -1322,6 +1380,11 @@ using DoubleBufferStringSet = DoubleBufferSet<std::string>;
 inline int set_insert(std::unordered_set<std::string>& set, const std::string& item) {
     set.insert(item);
     return 1;
+}
+
+inline size_t ajust_flat_size(size_t value) {
+    //FlatSet的元素个数 * 100 > nbucket * load_factor时，会进行resize；// load_factor默认为80
+    return value > 12501 ? 12501 : value * 100 / 80 + 1;
 }
 
 //map double buffer

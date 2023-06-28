@@ -165,28 +165,26 @@ int UpdateManagerNode::open(RuntimeState* state) {
         DB_WARNING("fetch store failed, log_id:%lu ret:%d ", state->log_id(), ret);
         return -1;
     }
-    std::vector<SmartRecord>& delete_records = delete_manager->get_real_delete_records();
-    if (delete_records.size() == 0) {
+    _del_scan_records = delete_manager->get_real_delete_records();
+    if (_del_scan_records.size() == 0) {
         DB_WARNING("no record return");
         return 0;
     }
 
-    for (auto record : delete_records) {
-        if (open_binlog) {
-            std::string* row = _update_binlog.add_deleted_rows();
-            record->encode(*row);
-            _partition_record = record;
-        }
-        update_record(state, record);
-        if (open_binlog) {
-            std::string* row = _update_binlog.add_insert_rows();
-            record->encode(*row);
-        }
+    for (auto record : _del_scan_records) {
+        auto new_record = record->clone(true);
+        update_record(state, new_record);
+        _insert_scan_records.emplace_back(new_record);
     }
 
     InsertManagerNode* insert_manager = static_cast<InsertManagerNode*>(_children[1]);
     insert_manager->init_insert_info(this);
-    insert_manager->set_records(delete_records);
+    if (open_binlog) {
+        // binlog会使用_insert_scan_records
+        insert_manager->copy_records(_insert_scan_records);
+    } else {
+        insert_manager->set_records(_insert_scan_records);
+    }
     ret = insert_manager->open(state);
     if (ret < 0) {
         DB_WARNING("fetch store failed, log_id:%lu ret:%d ", state->log_id(), ret);
@@ -213,43 +211,18 @@ int UpdateManagerNode::process_binlog(RuntimeState* state, bool is_local) {
         auto client = state->client_conn();
         auto binlog_ctx = client->get_binlog_ctx();
         auto ctx = client->get_query_ctx();
-        pb::PrewriteValue* binlog_value = binlog_ctx->mutable_binlog_value();
-        auto mutation = binlog_value->add_mutations();
-        binlog_ctx->set_table_info(_table_info);
+        if (ctx == nullptr) {
+            DB_WARNING("ctx is null");
+            return -1;
+        }
+        auto stat_info = &(ctx->stat_info);
         if (is_local) {
-            for (auto& str_record : _fetcher_store.return_str_records) {
-                mutation->add_insert_rows(str_record);
-            }
-            SmartRecord record_template = _factory->new_record(_table_id);
-            bool need_set_partition_record = true;
-            for (auto& str_record : _fetcher_store.return_str_old_records) {
-                if (need_set_partition_record) {
-                    SmartRecord record = record_template->clone(false);
-                    auto ret = record->decode(str_record);
-                    if (ret < 0) {
-                        DB_FATAL("decode to record fail");
-                        return -1;
-                    }
-                    binlog_ctx->set_partition_record(record);
-                    need_set_partition_record = false;
-                }
-                mutation->add_deleted_rows(str_record);
-            }
+            return binlog_ctx->add_binlog_values(_table_info,ctx->sql, stat_info->sign, pb::MutationType::UPDATE,
+                _fetcher_store.return_str_records, _fetcher_store.return_str_old_records);
         } else {
-            mutation->CopyFrom(_update_binlog);
-            binlog_ctx->set_partition_record(_partition_record);
+            return binlog_ctx->add_binlog_values(_table_info,ctx->sql, stat_info->sign, pb::MutationType::UPDATE,
+                _insert_scan_records, _del_scan_records);
         }
-
-        // 上面CopyFrom会覆盖mutation中其他值，所以公共部分放到CopyFrom之后设置(和InsertManagerNode、DeleteManagerNode不同)
-        if (ctx != nullptr) {
-            mutation->set_sql(ctx->sql);
-            auto stat_info = &(ctx->stat_info);
-            mutation->set_sign(stat_info->sign);
-            binlog_ctx->add_sql_info(stat_info->family, stat_info->table, stat_info->sign);
-        }
-
-        mutation->add_sequence(pb::MutationType::UPDATE);
-        mutation->set_table_id(_table_id);
     }
     return 0;
 }

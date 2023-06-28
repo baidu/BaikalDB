@@ -31,8 +31,8 @@ namespace baikaldb {
 DEFINE_int64(retry_interval_us, 500 * 1000, "retry interval ");
 DEFINE_int32(single_store_concurrency, 20, "max request for one store");
 DEFINE_int64(max_select_rows, 10000000, "query will be fail when select too much rows");
+DEFINE_int64(max_affected_rows, 10000000, "query will be fail when select too much rows");
 DEFINE_int64(print_time_us, 10000, "print log when time_cost > print_time_us(us)");
-DEFINE_int64(binlog_alarm_time_s, 30, "alarm, > binlog_alarm_time_s from prewrite to commit");
 DEFINE_int64(baikaldb_alive_time_s, 10 * 60, "obervation time length in baikaldb, default:10 min");
 BRPC_VALIDATE_GFLAG(print_time_us, brpc::NonNegativeInteger);
 DEFINE_int32(fetcher_request_timeout, 100000,
@@ -61,10 +61,25 @@ OnRPCDone::OnRPCDone(FetcherStore* fetcher_store, RuntimeState* state, ExecNode*
     if (_store_request->get_trace() != nullptr) {
         _trace_node = std::make_shared<pb::TraceNode>();
     }
-    if (_info.leader() == "0.0.0.0:0" || _info.leader() == "") {
-        _store_addr = rand_peer(_info);
-    } else {
-        _store_addr = _info.leader();
+    std::string resource_tag = FLAGS_insulate_fetcher_resource_tag.empty() ? FLAGS_fetcher_resource_tag : FLAGS_insulate_fetcher_resource_tag;
+    if (!resource_tag.empty()) {
+        std::string baikaldb_logical_room = SchemaFactory::get_instance()->get_logical_room();
+        for (auto& peer : _info.peers()) {
+            auto status = SchemaFactory::get_instance()->get_instance_status(peer);
+            if (status.status == pb::NORMAL 
+                    && status.resource_tag == resource_tag 
+                    && status.logical_room == baikaldb_logical_room) {
+                _store_addr = peer;
+                break;
+            }
+        }
+    } 
+    if (_store_addr.empty()) {
+        if (_info.leader() == "0.0.0.0:0" || _info.leader() == "") {
+            _store_addr = rand_peer(_info);
+        } else {
+            _store_addr = _info.leader();
+        }
     }
     async_rpc_region_count << 1;
     DB_DONE(DEBUG, "OnRPCDone");
@@ -76,7 +91,7 @@ OnRPCDone::~OnRPCDone() {
 ErrorType OnRPCDone::check_status() {
     if (_fetcher_store->error != E_OK) {
         DB_DONE(WARNING, "recieve error, other region failed");
-        return E_FATAL;
+        return _fetcher_store->error;
     }
 
     if (_state->is_cancelled() || _fetcher_store->is_cancelled) {
@@ -151,7 +166,7 @@ ErrorType OnRPCDone::fill_request() {
         txn_info->set_primary_region_id(_client_conn->primary_region_id.load());
         if (_fetcher_store->need_process_binlog(_state, _op_type)) {
             auto binlog_ctx = _client_conn->get_binlog_ctx();
-            txn_info->set_commit_ts(binlog_ctx->commit_ts());
+            txn_info->set_commit_ts(binlog_ctx->get_last_commit_ts());
             txn_info->set_open_binlog(true);
         }
         if (_client_conn->primary_region_id != -1
@@ -371,7 +386,6 @@ void OnRPCDone::select_addr() {
                     int64_t peer_index = _client_conn->query_ctx->peer_index;
                     std::vector<std::string> sorted_peers; // leader first
                     sorted_peers.emplace_back(_info.leader());
-                    SchemaFactory* schema_factory = SchemaFactory::get_instance();
                     for (auto& peer: _info.peers()) {
                         if (_info.leader() != peer) {
                             sorted_peers.emplace_back(peer);
@@ -792,10 +806,14 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
                 _fetcher_store->index_records[index_id].insert(_fetcher_store->index_records[index_id].end(),
                     result_record.second.begin(), result_record.second.end());
             }
-            _fetcher_store->return_str_records.insert(_fetcher_store->return_str_records.end(),
-                return_str_records.begin(), return_str_records.end());
-            _fetcher_store->return_str_old_records.insert(_fetcher_store->return_str_old_records.end(),
-                return_str_old_records.begin(), return_str_old_records.end());
+            if (!return_str_records.empty()) {
+                std::vector<std::string>&  str_records = _fetcher_store->return_str_records[_info.partition_id()];
+                str_records.insert(str_records.end(), return_str_records.begin(), return_str_records.end());
+            }
+            if (!return_str_old_records.empty()) {
+                std::vector<std::string>&  str_old_records =  _fetcher_store->return_str_old_records[_info.partition_id()];
+                str_old_records.insert(str_old_records.end(), return_str_old_records.begin(), return_str_old_records.end());
+            }
         }
     }
     if (_response.has_scan_rows()) {
@@ -807,8 +825,14 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_response.has_last_insert_id()) {
         _client_conn->last_insert_id = _response.last_insert_id();
     }
-    if (_op_type != pb::OP_SELECT && _op_type != pb::OP_SELECT_FOR_UPDATE) {
+    if (_op_type != pb::OP_SELECT && _op_type != pb::OP_SELECT_FOR_UPDATE && _op_type != pb::OP_ROLLBACK) {
         _fetcher_store->affected_rows += _response.affected_rows();
+        _client_conn->txn_affected_rows += _response.affected_rows();
+        if (_client_conn->txn_affected_rows > FLAGS_max_affected_rows) {
+            DB_DONE(FATAL, "_affected_row:%ld > %ld FLAGS_max_affected_rows", 
+                    _client_conn->txn_affected_rows.load(), FLAGS_max_affected_rows);
+            return E_BIG_SQL;
+        }
         return E_OK;
     }
     if (!_response.leader().empty() && _response.leader() != "0.0.0.0:0" && _response.leader() != _info.leader()) {
@@ -875,14 +899,16 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
         _state->cmsketch->add_proto(_response.cmsketch());
         DB_DONE(WARNING, "cmsketch:%s", _response.cmsketch().ShortDebugString().c_str());
     }
-    // 减少锁冲突
-    if (_fetcher_store->region_batch.count(_region_id) == 1) {
-        _fetcher_store->region_batch[_region_id] = batch;
-    } else {
-        //分裂单独处理
+    {
         BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
-        _fetcher_store->split_start_key_sort.emplace(_info.start_key(), _region_id);
-        _fetcher_store->split_region_batch[_region_id] = batch;
+        // merge可能会重复请求相同的region_id
+        if (_fetcher_store->region_batch.count(_region_id) == 1) {
+            _fetcher_store->region_batch[_region_id] = batch;
+        } else {
+            //分裂单独处理start_key_sort
+            _fetcher_store->start_key_sort.emplace(_info.start_key(), _region_id);
+            _fetcher_store->region_batch[_region_id] = batch;
+        }
     }
 
     if (_trace_node != nullptr) {
@@ -987,7 +1013,8 @@ void FetcherStore::other_normal_peer_to_leader(pb::RegionInfo& info, std::string
 }
 
 int64_t FetcherStore::get_commit_ts() {
-    int64_t timestamp = TsoFetcher::get_tso();
+    auto binlog_ctx = client_conn->get_binlog_ctx();
+    int64_t timestamp = TsoFetcher::get_instance()->get_tso(binlog_ctx->tso_count());
     if (timestamp < 0) {
         return -1;
     }
@@ -998,14 +1025,6 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
     if (need_process_binlog(state, op_type)) {
         auto binlog_ctx = client_conn->get_binlog_ctx();
         uint64_t log_id = state->log_id();
-        if (need_get_binlog_region) {
-            need_get_binlog_region = false;
-            int ret = binlog_ctx->get_binlog_regions(log_id);
-            if (ret < 0) {
-                DB_WARNING("binlog ctx prepare fail log_id:%lu", log_id);
-                return E_FATAL;
-            }
-        }
         if (op_type == pb::OP_PREPARE || binlog_prepare_success) {
             binlog_cond.increase();
             auto write_binlog_func = [this, state, binlog_ctx, op_type, log_id]() {
@@ -1013,18 +1032,27 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
                     binlog_cond.decrease_signal();
                 });
                 if (op_type == pb::OP_PREPARE) {
-                    int64_t timestamp = TsoFetcher::get_tso();
+                    int64_t timestamp = TsoFetcher::get_instance()->get_tso(binlog_ctx->tso_count());
                     if (timestamp < 0) {
                         DB_WARNING("get tso failed log_id: %lu txn_id:%lu op_type:%s", log_id, state->txn_id,
                             pb::OpType_Name(op_type).c_str());
                         error = E_FATAL;
                         return;
                     }
+                    write_binlog_param.txn_id = state->txn_id;
+                    write_binlog_param.log_id = log_id;
+                    write_binlog_param.primary_region_id = client_conn->primary_region_id;
+                    write_binlog_param.global_conn_id = client_conn->get_global_conn_id();
+                    write_binlog_param.username = client_conn->user_info->username;
+                    write_binlog_param.ip = client_conn->ip;
+                    write_binlog_param.client_conn = client_conn;
+                    write_binlog_param.fetcher_store = this;
                     binlog_ctx->set_start_ts(timestamp);
                 }
-                auto ret = write_binlog(state, op_type, log_id);
+                write_binlog_param.op_type = op_type;
+                auto ret = binlog_ctx->write_binlog(&write_binlog_param);
                 if (ret != E_OK) {
-                    error = ret;
+                    error = E_FATAL;
                 }
             };
             Bthread bth(&BTHREAD_ATTR_SMALL);
@@ -1033,155 +1061,6 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
         return E_OK;
     }
     return E_OK;
-}
-
-ErrorType FetcherStore::write_binlog(RuntimeState* state,
-                                     const pb::OpType op_type,
-                                     const uint64_t log_id) {
-    TimeCost write_binlog_cost;                                     
-    auto binlog_ctx = client_conn->get_binlog_ctx();
-    pb::StoreReq req;
-    pb::StoreRes res;
-
-    req.set_db_conn_id(client_conn->get_global_conn_id());
-    req.set_log_id(log_id);
-    auto binlog_desc = req.mutable_binlog_desc();
-    binlog_desc->set_txn_id(state->txn_id);
-    binlog_desc->set_start_ts(binlog_ctx->start_ts());
-    binlog_desc->set_primary_region_id(client_conn->primary_region_id.load());
-    binlog_desc->set_user_name(state->client_conn()->user_info->username);
-    binlog_desc->set_user_ip(state->client_conn()->ip);
-    auto binlog = req.mutable_binlog();
-    binlog->set_start_ts(binlog_ctx->start_ts());
-    binlog->set_partition_key(binlog_ctx->get_partition_key());
-    if (op_type == pb::OP_PREPARE) {
-        binlog->set_type(pb::BinlogType::PREWRITE);
-        req.set_op_type(pb::OP_PREWRITE_BINLOG);
-        binlog_desc->set_binlog_ts(binlog_ctx->start_ts());
-        binlog_ctx->calc_binlog_row_cnt();
-        binlog_desc->set_binlog_row_cnt(binlog_ctx->get_binlog_row_cnt());
-        auto prewrite_value = binlog->mutable_prewrite_value();
-        prewrite_value->CopyFrom(binlog_ctx->binlog_value());
-    } else if (op_type == pb::OP_COMMIT) {
-        binlog->set_type(pb::BinlogType::COMMIT);
-        req.set_op_type(pb::OP_COMMIT_BINLOG);
-        binlog_desc->set_binlog_ts(binlog_ctx->commit_ts());
-        binlog_desc->set_binlog_row_cnt(binlog_ctx->get_binlog_row_cnt());
-        binlog->set_commit_ts(binlog_ctx->commit_ts());
-        for (const std::string& db_table : binlog_ctx->get_db_tables()) {
-            binlog_desc->add_db_tables(db_table);
-        }
-        for (uint64_t sign : binlog_ctx->get_signs()) {
-            binlog_desc->add_signs(sign);
-        }        
-    } else if (op_type == pb::OP_ROLLBACK) {
-        binlog->set_type(pb::BinlogType::ROLLBACK);
-        req.set_op_type(pb::OP_ROLLBACK_BINLOG);
-        binlog_desc->set_binlog_ts(binlog_ctx->start_ts());
-    } else {
-        // todo DDL
-    }
-    int ret = 0;
-    pb::RegionInfo& info = binlog_ctx->binglog_region();
-    int64_t region_id = info.region_id();
-    req.set_region_id(region_id);
-    req.set_region_version(info.version());
-    int retry_times = 0;
-    do {
-        brpc::Channel channel;
-        brpc::Controller cntl;
-        cntl.set_log_id(log_id);
-        brpc::ChannelOptions option;
-        option.max_retry = 1;
-        option.connect_timeout_ms = FLAGS_fetcher_connect_timeout;
-        option.timeout_ms = FLAGS_fetcher_request_timeout;
-        std::string addr = info.leader();
-        if (retry_times == 0) {
-            // 重试前已经选择了normal的实例
-            // 或者store返回了正确的leader
-            choose_other_if_dead(info, addr);
-        }
-        ret = channel.Init(addr.c_str(), &option);
-        if (ret != 0) {
-            DB_WARNING("binlog channel init failed, addr:%s, ret:%d, log_id:%lu",
-                    addr.c_str(), ret, log_id);
-            return E_FATAL;
-        }
-
-        client_conn->insert_callid(addr, region_id, cntl.call_id());
-
-        pb::StoreService_Stub(&channel).query_binlog(&cntl, &req, &res, NULL);
-        if (cntl.Failed()) {
-            DB_WARNING("binlog call failed  errcode:%d, error:%s, region_id:%ld log_id:%lu",
-                cntl.ErrorCode(), cntl.ErrorText().c_str(), region_id, log_id);
-            // 只有网络相关错误码才重试
-            if (!rpc_need_retry(cntl.ErrorCode())) {
-                return E_FATAL;
-            }
-            other_normal_peer_to_leader(info, addr);
-            bthread_usleep(FLAGS_retry_interval_us);
-            retry_times++;
-            continue;
-        }
-        //DB_WARNING("binlog fetch store req: %s log_id:%lu", req.DebugString().c_str(), log_id);
-        //DB_WARNING("binlog fetch store res: %s log_id:%lu", res.DebugString().c_str(), log_id);
-        if (res.errcode() == pb::NOT_LEADER) {
-            DB_WARNING("binlog NOT_LEADER, addr:%s region_id:%ld retry:%d, new_leader:%s, log_id:%lu", addr.c_str(),
-                region_id, retry_times, res.leader().c_str(), log_id);
-
-            if (res.leader() != "0.0.0.0:0") {
-                // store返回了leader，则相信store，不判断normal
-                info.set_leader(res.leader());
-                SchemaFactory::get_instance()->update_leader(info);
-            } else {
-                other_normal_peer_to_leader(info, addr);
-            }
-            retry_times++;
-            bthread_usleep(retry_times * FLAGS_retry_interval_us);
-        } else if (res.errcode() == pb::VERSION_OLD) {
-            DB_WARNING("VERSION_OLD, region_id: %ld, retry:%d, now:%s, log_id:%lu",
-                    region_id, retry_times, info.ShortDebugString().c_str(), log_id);
-            for (auto r : res.regions()) {
-                DB_WARNING("new version region:%s", r.ShortDebugString().c_str());
-                info.CopyFrom(r);
-            }
-            req.set_region_id(info.region_id());
-            req.set_region_version(info.version());
-        } else if (res.errcode() == pb::REGION_NOT_EXIST) {
-            other_normal_peer_to_leader(info, addr);
-            retry_times++;
-        } else if (res.errcode() != pb::SUCCESS) {
-            DB_WARNING("errcode:%s, write_binlog failed, instance:%s region_id:%ld retry:%d log_id:%lu",
-                    pb::ErrCode_Name(res.errcode()).c_str(), addr.c_str(), region_id, retry_times, log_id);
-            return E_FATAL;
-        } else {
-            // success
-            binlog_prepare_success = true;
-            break;
-        }
-    } while (retry_times < 5);
-    int64_t query_cost = write_binlog_cost.get_time();
-    if (query_cost > FLAGS_print_time_us || retry_times > 0) {
-        DB_WARNING("write binlog region_id:%ld log_id:%lu txn_id:%ld cost time:%ld op_type:%s ip:%s",
-            region_id, log_id, state->txn_id, query_cost, pb::OpType_Name(op_type).c_str(), info.leader().c_str());
-    }
-    if (binlog_prepare_success) {
-        if (op_type == pb::OP_PREPARE) {
-            binlog_prewrite_time.reset();
-        } else if (op_type == pb::OP_COMMIT) {
-            if (binlog_prewrite_time.get_time() > FLAGS_binlog_alarm_time_s * 1000 * 1000LL) {
-                // 报警日志
-                DB_WARNING("binlog takes too long from prewrite to commit, txn_id: %ld, binlog_region_id: %ld, start_ts: %ld, commit_ts: %ld",
-                    state->txn_id, region_id, binlog_ctx->start_ts(), binlog_ctx->commit_ts());
-            }
-        } else {
-            // do nothing
-        }
-        return E_OK;
-    } else {
-        DB_WARNING("exec failed log_id:%lu", log_id);
-        return E_FATAL;
-    }
 }
 
 int64_t FetcherStore::get_dynamic_timeout_ms(ExecNode* store_request, pb::OpType op_type, uint64_t sign) {
@@ -1234,10 +1113,8 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
                     pb::OpType op_type, 
                     GlobalBackupType backup_type) {
     region_batch.clear();
-    split_region_batch.clear();
     index_records.clear();
     start_key_sort.clear();
-    split_start_key_sort.clear();
     no_copy_cache_plan_set.clear();
     error = E_OK;
     skip_region_set.clear();
@@ -1383,19 +1260,13 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
                     log_id, state->txn_id, current_seq_id, pb::OpType_Name(op_type).c_str());
             if (error == E_BIG_SQL) {
                 error_code = ER_SQL_TOO_BIG;
-                error_msg.str("sql too big");
+                error_msg.str("sql/txn too big");
             }
         } else {
             DB_WARNING("fetcher node open fail, log_id:%lu, txn_id: %lu, seq_id: %d op_type: %s",
                     log_id, state->txn_id, current_seq_id, pb::OpType_Name(op_type).c_str());
         }
         return -1;
-    }
-    for (auto& pair : split_start_key_sort) {
-        start_key_sort.emplace(pair.first, pair.second);
-    }
-    for (auto& pair : split_region_batch) {
-        region_batch.emplace(pair.first, pair.second);
     }
 
     return affected_rows.load();

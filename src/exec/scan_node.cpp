@@ -390,7 +390,7 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
             return 0;
         }
 
-        if (!inner_path->need_filter() && outer_path->is_sort_index <= inner_path->is_sort_index) {
+        if (!inner_path->need_filter() && outer_path->need_filter()  && outer_path->is_sort_index <= inner_path->is_sort_index) {
             outer_path->is_possible = false;
             return -1;
         }
@@ -411,7 +411,7 @@ int AccessPathMgr::compare_two_path(SmartPath& outer_path, SmartPath& inner_path
             return 0;
         }
 
-        if (!outer_path->need_filter() && inner_path->is_sort_index <= outer_path->is_sort_index) {
+        if (!outer_path->need_filter() && inner_path->need_filter() && inner_path->is_sort_index <= outer_path->is_sort_index) {
             inner_path->is_possible = false;
             return -2;
         }
@@ -735,24 +735,16 @@ int ScanNode::create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextInd
             root->set_fulltext_node_type(pb::FNT_TERM);
             auto possible_index = root->mutable_possible_index();
             possible_index->set_index_id(inner_node_pair.first);
-            SmartRecord record_template = SchemaFactory::get_instance()->new_record(_table_id);
-
             if (inner_node.like_values.size() != 1) {
                 DB_WARNING("like values size not equal one");
                 return -1;
             }
-            record_template->set_value(record_template->get_field_by_tag(
-                inner_node.left_row_field_ids[0]), inner_node.like_values[0]);
-            std::string str;
-            record_template->encode(str);
+            std::string str = inner_node.like_values[0].get_string();
             auto range = possible_index->add_ranges();
             auto range_type = inner_node.type;
-            range->set_left_pb_record(str);
-            range->set_right_pb_record(str);
+            range->set_left_key(str);
             range->set_left_field_cnt(1);
-            range->set_right_field_cnt(1);
             range->set_left_open(false);
-            range->set_right_open(false);
             if (range_type == range::MATCH_LANGUAGE) {
                 range->set_match_mode(pb::M_NARUTAL_LANGUAGE);
             } else if (range_type == range::MATCH_BOOLEAN) {

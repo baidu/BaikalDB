@@ -107,6 +107,7 @@ message SchemaConf {
     optional string sign_forceindex         = 12;
     optional int32 tail_split_num           = 13; // 尾分裂新region数
     optional int32 tail_split_step          = 14;
+    optional int64 auto_inc_rand_max        = 15; //meta挂掉后降级到随机id
 };
 
 enum Engine {

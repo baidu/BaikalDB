@@ -40,6 +40,7 @@
 #include "runtime_state.h"
 
 namespace baikaldb {
+
 int ExecNode::init(const pb::PlanNode& node) {
     _pb_node = node;
     _limit = node.limit();
@@ -381,10 +382,7 @@ int ExecNode::push_cmd_to_cache(RuntimeState* state,
     }
     auto client = state->client_conn();
     // cache dml cmd in baikaldb before sending to store
-    if (op_type != pb::OP_INSERT
-            && op_type != pb::OP_DELETE
-            && op_type != pb::OP_UPDATE
-            && op_type != pb::OP_BEGIN) {
+    if (!is_dml_op_type(op_type) && op_type != pb::OP_BEGIN) {
         return 0;
     }
     if (client->cache_plans.count(seq_id)) {

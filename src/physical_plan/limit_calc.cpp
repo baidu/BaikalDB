@@ -33,8 +33,7 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
     node->set_limit(limit);
     switch (node->node_type()) {
         case pb::TABLE_FILTER_NODE:
-        case pb::WHERE_FILTER_NODE:
-        case pb::HAVING_FILTER_NODE: {
+        case pb::WHERE_FILTER_NODE: {
             // 空filter可以下推
             if (static_cast<FilterNode*>(node)->pruned_conjuncts().empty()) {
                 break;
@@ -42,6 +41,7 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
                 return;
             }
         }
+        case pb::HAVING_FILTER_NODE: 
         case pb::SORT_NODE:
         case pb::MERGE_AGG_NODE:
         case pb::AGG_NODE:

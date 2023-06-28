@@ -39,6 +39,7 @@ DEFINE_int32(check_interval, 10, "interval for conn idle timeout");
 DEFINE_int32(connect_idle_timeout_s, 1800, "connection idle timeout threshold (second)");
 DEFINE_int32(slow_query_timeout_s, 60, "slow query threshold (second)");
 DEFINE_int32(print_agg_sql_interval_s, 10, "print_agg_sql_interval_s");
+DEFINE_int32(check_degrade_interval_s, 300, "check_degrade_interval_s");
 DEFINE_int32(backup_pv_threshold, 50, "backup_pv_threshold");
 DEFINE_double(backup_error_percent, 0.5, "use backup table if backup_error_percent > 0.5");
 DEFINE_int64(health_check_interval_us, 10 * 1000 * 1000, "health_check_interval_us");
@@ -410,6 +411,7 @@ void NetworkServer::print_agg_sql() {
     static std::set<uint64_t> parent_sign_to_counts;
     TimeCost cost;
     TimeCost reset_counter_cost;
+    TimeCost degrade_cost;
     while (!_shutdown) {
         bool need_reset_counter = false;
         if (reset_counter_cost.get_time() > 24 * 3600 * 1000 * 1000LL) {
@@ -643,6 +645,20 @@ void NetworkServer::print_agg_sql() {
                     DB_FATAL("table_id: %ld, %s use backup, count:%ld, err:%ld", 
                             table_id, tbl_ptr->name.c_str(), pair.second.count, pair.second.err);
                 }
+            }
+        }
+        if (degrade_cost.get_time() > FLAGS_check_degrade_interval_s * 1000 * 1000LL) {
+            int64_t auto_count = AutoInc::auto_inc_count.reset();
+            int64_t auto_error = AutoInc::auto_inc_error.reset();
+            if (auto_count > FLAGS_backup_pv_threshold && auto_error * 1.0 / auto_count > FLAGS_backup_error_percent) {
+                AutoInc::need_degrade = true;
+                DB_FATAL("meta_tso_autoinc_degrade, auto inc, auto_count:%ld, auto_error:%ld", auto_count, auto_error);
+            }
+            int64_t tso_count = TsoFetcher::get_instance()->tso_count.reset();
+            int64_t tso_error = TsoFetcher::get_instance()->tso_error.reset();
+            if (tso_count > FLAGS_backup_pv_threshold && tso_error * 1.0 / tso_count > FLAGS_backup_error_percent) {
+                TsoFetcher::get_instance()->set_degrade();
+                DB_FATAL("meta_tso_autoinc_degrade, tso, tso_count:%ld, tso_error:%ld", tso_count, tso_error);
             }
         }
         bthread_usleep_fast_shutdown(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL, _shutdown);
@@ -1099,6 +1115,7 @@ int NetworkServer::fetch_instance_info() {
         return -1;
     }
     _instance_id = response.start_id();
+    TsoFetcher::get_instance()->set_instance_id(_instance_id);
     DB_NOTICE("baikaldb instance_id: %lu", _instance_id);
     return 0;
 }
@@ -1175,6 +1192,28 @@ void NetworkServer::stop() {
         }
 
         // 待现有工作处理完成，需要获取锁
+        if (sock->mutex.try_lock()) {
+            sock->shutdown = true;
+            MachineDriver::get_instance()->dispatch(sock, _epoll_info, true);
+        }
+    }
+    return;
+}
+
+void NetworkServer::fast_stop() {
+    if (_epoll_info == nullptr) {
+        DB_WARNING("_epoll_info not initialized yet.");
+        return;
+    }
+    for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+        SmartSocket sock = _epoll_info->get_fd_mapping(idx);
+        if (!sock) {
+            continue;
+        }
+        if (sock == nullptr || sock->fd == 0) {
+            continue;
+        }
+
         if (sock->mutex.try_lock()) {
             sock->shutdown = true;
             MachineDriver::get_instance()->dispatch(sock, _epoll_info, true);

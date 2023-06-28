@@ -712,7 +712,7 @@ void Store::get_applied_index(google::protobuf::RpcController* controller,
         return;
     }
     if (request->use_read_idx()) {
-        region->get_read_index(response);
+        region->get_read_index(request, response);
         return;
     }
     response->set_region_status(region->region_status());
@@ -1934,7 +1934,7 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
                     remove_item.drop_region_id());
                 continue;
             }
-            DB_WARNING("receive delete region response from meta server heart beat, delete_region_id:%ld %lu",
+            DB_WARNING("real begin delete region from meta server heart beat, delete_region_id:%ld %lu",
                     remove_item.drop_region_id(), region->region_uuid());
             drop_region_from_store(remove_item.drop_region_id(), true);
         }

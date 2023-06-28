@@ -23,7 +23,27 @@
 #include "mem_row_descriptor.h"
 #include "runtime_state.h"
 
-namespace baikaldb { 
+namespace baikaldb {
+
+inline bool is_dml_op_type(const pb::OpType& op_type) {
+        if (op_type == pb::OP_INSERT
+             || op_type == pb::OP_DELETE
+             || op_type == pb::OP_UPDATE
+             || op_type == pb::OP_SELECT_FOR_UPDATE
+             || op_type == pb::OP_PARTIAL_ROLLBACK
+             || op_type == pb::OP_KV_BATCH) {
+            return true;
+        }
+        return false;
+    }
+inline bool is_2pc_op_type(const pb::OpType& op_type) {
+    if (op_type == pb::OP_PREPARE
+            || op_type == pb::OP_ROLLBACK
+            || op_type == pb::OP_COMMIT) {
+        return true;
+    }
+    return false;
+}
 
 class RuntimeState;
 class QueryContext;

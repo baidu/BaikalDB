@@ -202,7 +202,7 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
         range_index->set_left_key(_start_key);
         range_index->set_left_full(_ddl_pk_key_is_full);
         range_index->set_left_field_cnt(_field_num);
-        range_index->set_left_open(false);
+        range_index->set_left_open(true);
     }
     // 暂时用不上
     // if (_end_key != "") {

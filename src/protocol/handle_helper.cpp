@@ -1284,6 +1284,14 @@ bool HandleHelper::_handle_binlog(const SmartSocket& client, const std::vector<s
     if (split_vec.size() > 6) {
         table_info->mutable_link_field()->set_field_name(split_vec[6]);
     }
+    if (split_vec.size() > 7) {
+        if (split_vec[7] != "true" && split_vec[7] != "false") {
+            DB_FATAL("partition_is_same_hint invalid");
+            client->state = STATE_ERROR;
+            return false;
+        }
+        table_info->set_partition_is_same_hint(split_vec[7] == "true" ? true : false);
+    }
     auto binlog_info = request.mutable_binlog_info();
     binlog_info->set_namespace_name(client->user_info->namespace_);
     binlog_info->set_database(binlog_table_db);
@@ -1439,6 +1447,9 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
     } else if (key == "tail_split_step") {
         int32_t tail_split_step = strtol(split_vec[4].c_str(), NULL, 10);
         schema_conf->set_tail_split_step(tail_split_step);
+    } else if (key == "auto_inc_rand_max") {
+        int64_t num = strtol(split_vec[4].c_str(), NULL, 10);
+        schema_conf->set_auto_inc_rand_max(num);
     } else if (key == "backup_table") {
         int32_t number = pb::BackupTable_descriptor()->FindValueByName(split_vec[4])->number();
         DB_WARNING("backup table enum %s => %d", split_vec[4].c_str(), number);

@@ -39,6 +39,7 @@ public:
     bool get_batch(RowBatch* batch);
     // fullexport分批获取region
     int get_next_region_infos();
+    void get_next_partition();
     // 达到limit后，记录最后一条数据，下次查询可以接着上次查询
     // 用于inner join后数据变少，可以再次获取数据
     int calc_last_key(RuntimeState* state, MemRow* mem_row);
@@ -50,6 +51,8 @@ public:
 private:
     FetcherStore _fetcher_store;
     std::deque<int64_t> _send_region_ids;
+    std::map<int64_t, std::map<int64_t, pb::RegionInfo>> _origin_region_infos;
+    int64_t _current_partition = 0;
     // <partition_id, <start_key,region_id>>
     std::map<int64_t, std::map<std::string, int64_t>> _start_key_sort;
     RocksdbScanNode* _scan_node = nullptr;

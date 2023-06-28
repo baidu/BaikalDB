@@ -89,6 +89,7 @@ message PossibleIndex {
         optional bytes right_key = 12;
         optional bool  left_full = 13;
         optional bool  right_full = 14;
+        optional int32 partition_id = 15;
     };
 
     message SortIndex {

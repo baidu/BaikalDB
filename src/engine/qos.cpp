@@ -255,17 +255,17 @@ void SqlQos::return_tokens(const int64_t tokens, const bool is_committed_bucket,
     }
 }
 
-int SqlQos::increase_timed_wait(const int64_t reject_timeout) {
-    return _concurrency.increase_timed_wait(reject_timeout);
+int SqlQos::increase_timed_wait_with_max_wait_cnt(const int max_wait_cnt, const int64_t reject_timeout) {
+    return _concurrency.increase_timed_wait_with_max_wait_cnt(max_wait_cnt, reject_timeout);
 } 
 
-int SqlQos::increase_wait() {
-    _concurrency.increase_wait();
+int SqlQos::increase_wait_with_max_wait_cnt(const int max_wait_cnt) {
+    _concurrency.increase_wait_with_max_wait_cnt(max_wait_cnt);
     return 0;
 } 
 
-int SqlQos::decrease_signal() {
-    _concurrency.decrease_signal();
+int SqlQos::decrease_signal_with_wait_cnt() {
+    _concurrency.decrease_signal_with_wait_cnt();
     return 0;
 } 
 

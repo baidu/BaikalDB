@@ -311,6 +311,17 @@ private:
     std::map<int64_t, std::set<std::string>> _region_id_dead_peers;
 };
 
+struct WriteBinlogParam {
+    int64_t txn_id = 0;
+    uint64_t log_id = 0;
+    uint64_t global_conn_id = 0;
+    int64_t primary_region_id = -1;
+    pb::OpType op_type;
+    std::string username;
+    std::string ip;
+    NetworkSocket* client_conn = nullptr;
+    FetcherStore* fetcher_store;
+};
 class FetcherStore {
 public:
     FetcherStore() {
@@ -320,10 +331,8 @@ public:
     
     void clear() {
         region_batch.clear();
-        split_region_batch.clear();
         index_records.clear();
         start_key_sort.clear();
-        split_start_key_sort.clear();
         error = E_OK;
         skip_region_set.clear();
         affected_rows = 0;
@@ -438,6 +447,7 @@ public:
             case EHOSTDOWN:    // 112, Host is down
             case EHOSTUNREACH: // 113, No route to host
             case ECANCELED:    // 125, Operation Cancelled
+            case brpc::ENOMETHOD: //1002, Method not found
             case brpc::EBACKUPREQUEST: // 1007, Sending backup request
                 return true;
             default:
@@ -548,14 +558,14 @@ public:
 
 public:
     std::map<int64_t, std::vector<SmartRecord>>  index_records; //key: index_id
-    std::vector<std::string>  return_str_records;
-    std::vector<std::string>  return_str_old_records;
+    std::map<int64_t, std::vector<std::string>>  return_str_records;
+    std::map<int64_t, std::vector<std::string>>  return_str_old_records;
     std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
-    std::map<int64_t, std::shared_ptr<RowBatch>> split_region_batch;
+    //std::map<int64_t, std::shared_ptr<RowBatch>> split_region_batch;
     std::map<int64_t, std::vector<int64_t>> region_id_ttl_timestamp_batch;
 
     std::multimap<std::string, int64_t> start_key_sort;
-    std::multimap<std::string, int64_t> split_start_key_sort;
+    //std::multimap<std::string, int64_t> split_start_key_sort;
     bthread::Mutex region_lock;
     std::set<int64_t> skip_region_set;
     std::atomic<ErrorType> error = {E_OK};
@@ -568,17 +578,16 @@ public:
     BthreadCond binlog_cond;
     NetworkSocket* client_conn = nullptr;
     bool  binlog_prepare_success = false;
-    bool  need_get_binlog_region = true;
     std::atomic<bool> primary_timestamp_updated{false};
     std::set<int64_t> no_copy_cache_plan_set;
     int64_t dynamic_timeout_ms = -1;
     int64_t sign_latency = -1;
-    TimeCost binlog_prewrite_time;
     PeerStatus peer_status; // 包括follower和learner
     MysqlErrCode      error_code = ER_ERROR_FIRST;
     std::ostringstream error_msg;
     int32_t region_count = 0;
     std::set<brpc::CallId> callids;
+    WriteBinlogParam write_binlog_param;
     GlobalBackupType global_backup_type = GBT_INIT;
 };
 

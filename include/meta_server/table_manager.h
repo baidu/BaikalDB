@@ -70,7 +70,8 @@ struct TableMem {
     bool is_linked = false;
     bool is_binlog = false;
     std::vector<std::string> learner_resource_tag;
-    int64_t binlog_id = 0;
+    // 业务表linked的binlog表id集合
+    std::set<int64_t> binlog_ids;
     std::vector<pb::Expr> range_infos;
     bool exist_global_index(int64_t global_index_id) {
         for (auto& index : schema_pb.indexs()) {
@@ -108,6 +109,8 @@ struct TableSchedulingInfo {
     std::unordered_map<int64_t, std::vector<pb::PrimitiveType>> table_pk_types;
     std::unordered_map<int64_t, int32_t> table_pk_prefix_dimension;
     int64_t table_pk_prefix_timestamp;
+    // for binlog peer balance
+    std::set<int64_t> binlog_table_ids;
 };
 using DoubleBufferedTableSchedulingInfo = butil::DoublyBufferedData<TableSchedulingInfo>;
 
@@ -667,6 +670,15 @@ public:
         }
         return false;
     }
+    int get_binlog_table_ids(std::set<int64_t>& binlog_table_ids) {
+        DoubleBufferedTableSchedulingInfo::ScopedPtr info;
+        if (_table_scheduling_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return -1;
+        }
+        binlog_table_ids = info->binlog_table_ids;
+        return 0;
+    }
     bool cancel_in_fast_importer(const int64_t& table_id) {
         auto call_func = [table_id](TableSchedulingInfo& infos) -> int {
             infos.table_in_fast_importer.erase(table_id);
@@ -926,14 +938,25 @@ public:
         return table_iter->second.is_linked || table_iter->second.binlog_target_ids.size() > 0;
     }
 
-    bool check_filed_is_linked(int64_t table_id, int32_t field_id) {
+    bool check_field_is_linked(int64_t table_id, int32_t field_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         auto table_iter = _table_info_map.find(table_id);
         if (table_iter == _table_info_map.end()) {
             return false;
         }
-        if (table_iter->second.is_linked && table_iter->second.schema_pb.has_link_field()) {
-            return  table_iter->second.schema_pb.link_field().field_id() == field_id;
+        if (table_iter->second.is_linked) {
+            if (table_iter->second.schema_pb.has_link_field()) {
+                if (table_iter->second.schema_pb.link_field().field_id() == field_id) {
+                    return true;
+                }
+            }
+            if (table_iter->second.schema_pb.binlog_infos_size() > 0) {
+                for (int i = 0; i < table_iter->second.schema_pb.binlog_infos_size();i++) {
+                    if (table_iter->second.schema_pb.binlog_infos(i).link_field().field_id() == field_id) {
+                        return true;
+                    }
+                }
+            }
         }
         return false;
     }

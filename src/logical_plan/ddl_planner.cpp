@@ -828,6 +828,10 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     }
                     get_expr_field_name(expr);
                 }
+                if (p_option->partition_num <= 1) {
+                    DB_WARNING("partition_num need > 1");
+                    return -1;
+                }
                 table.set_partition_num(p_option->partition_num);
             }
             if (expr_field_names.size() != 1) {

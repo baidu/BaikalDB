@@ -71,7 +71,7 @@ void Sorter::merge_sort() {
     }
 }
 void Sorter::make_heap() {
-    for (int i = _min_heap.size() / 2 - 1; i >= 0; i--) {
+    for (int i = static_cast<int>(_min_heap.size()) / 2 - 1; i >= 0; i--) {
         shiftdown(i);
     }
 }
