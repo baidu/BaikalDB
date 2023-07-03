@@ -42,7 +42,11 @@ void ShowHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_FULL_COLUMNS] = std::bind(&ShowHelper::_show_full_columns,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_COLUMNS] = std::bind(&ShowHelper::_show_columns,
+            this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_FULL_TABLES] = std::bind(&ShowHelper::_show_full_tables,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_TABLES] = std::bind(&ShowHelper::_show_tables,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_SCHEMA_CONF] = std::bind(&ShowHelper::_show_schema_conf,
             this, std::placeholders::_1, std::placeholders::_2);
@@ -829,64 +833,6 @@ bool ShowHelper::_show_procedure_status(const SmartSocket& client, const std::ve
     return true;
 }
 
-bool ShowHelper::_show_tables(const SmartSocket& client, const std::vector<std::string>& split_vec) {
-    SchemaFactory* factory = SchemaFactory::get_instance();
-    if (client == nullptr || client->query_ctx == nullptr || client->user_info == nullptr || factory == nullptr) {
-        DB_FATAL("param invalid");
-        //client->state = STATE_ERROR;
-        return false;
-    }
-
-    std::string namespace_ = client->user_info->namespace_;
-    std::string db = client->current_db;
-    if (split_vec.size() == 4) {
-        db = remove_quote(split_vec[3].c_str(), '`');
-    }
-    if (db == "") {
-        DB_WARNING("no database selected");
-        _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
-        client->state = STATE_READ_QUERY_RESULT;
-        return false;
-    }
-    if (db == "information_schema") {
-        namespace_ = "INTERNAL";
-    }
-
-    // Make fields.
-    std::vector<ResultField> fields;
-    fields.reserve(1);
-    do {
-        ResultField field;
-        field.name = "Tables_in_" + db;
-        field.db = db;
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-
-    // Make rows.
-    std::vector< std::vector<std::string> > rows;
-    rows.reserve(10);
-    std::vector<std::string> tables =  factory->get_table_list(
-            namespace_, db, client->user_info.get());
-    for (uint32_t cnt = 0; cnt < tables.size(); ++cnt) {
-        //DB_NOTICE("table:%s", tables[cnt].c_str());
-        std::vector<std::string> row;
-        row.emplace_back(tables[cnt]);
-        rows.emplace_back(row);
-    }
-
-    // Make mysql packet.
-    if (_make_common_resultset_packet(client, fields, rows) != 0) {
-        DB_FATAL_CLIENT(client, "Failed to make result packet.");
-        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "%s", client->query_ctx->sql.c_str());
-        client->state = STATE_ERROR;
-        return false;
-    }
-    client->state = STATE_READ_QUERY_RESULT;
-    return true;
-}
-
 bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     if (client == nullptr || client->query_ctx == nullptr || client->user_info == nullptr || factory == nullptr) {
@@ -1515,21 +1461,8 @@ bool ShowHelper::_show_full_tables(const SmartSocket& client, const std::vector<
 
     // Make fields.
     std::vector<ResultField> fields;
-    fields.reserve(2);
-    do {
-        ResultField field;
-        field.name = "Tables_in_" + current_db;
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Table_type";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
+    fields.emplace_back(make_result_field("Tables_in_" + current_db, MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Table_type", MYSQL_TYPE_VARCHAR, 1024));
 
     // Make rows.
     std::vector< std::vector<std::string> > rows;
@@ -1562,6 +1495,101 @@ bool ShowHelper::_show_full_tables(const SmartSocket& client, const std::vector<
     return true;
 }
 
+bool ShowHelper::_show_tables(const SmartSocket& client, const std::vector<std::string>& split_vec)  {
+    bool is_like_pattern = false;
+    std::string like_pattern;
+    re2::RE2::Options option;
+    std::unique_ptr<re2::RE2> regex_ptr;
+    if (client == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr || client == nullptr || client->user_info == nullptr || client->query_ctx == nullptr) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+
+    std::string namespace_ = client->user_info->namespace_;
+    std::string current_db = client->current_db;
+
+
+    if (split_vec.size() == 4) {
+        current_db = remove_quote(split_vec[3].c_str(), '`');
+    } else if (split_vec.size() == 2) {
+    } else if (split_vec.size() == 6) {
+        // TODO: where [LIKE 'pattern' | WHERE expr]
+        is_like_pattern = true;
+        std::string like_str;
+        current_db = remove_quote(split_vec[3].c_str(), '`');
+        like_str = remove_quote(split_vec[5].c_str(), '"');
+        like_str = remove_quote(like_str.c_str(), '\'');
+        for (auto ch : like_str) {
+            if (ch == '%') {
+                like_pattern.append(".*");
+            } else {
+                like_pattern.append(1, ch);
+            }
+        }
+        option.set_utf8(false);
+        option.set_case_sensitive(false);
+        regex_ptr.reset(new re2::RE2(like_pattern, option));
+    } else if (split_vec.size() > 6 && (split_vec[4] == "where")) {
+        // show tables in `db` where table_type = 'BASE TABLE';
+        current_db = remove_quote(split_vec[3].c_str(), '`');
+    } else {
+        for (int i = 0; i < split_vec.size();i++) {
+            DB_WARNING("vec[%d] %s", i, split_vec[i].c_str());
+        }
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    if (current_db == "") {
+        DB_WARNING("no database selected");
+        _wrapper->make_err_packet(client, ER_NO_DB_ERROR, "No database selected");
+        client->state = STATE_READ_QUERY_RESULT;
+        return false;
+    }
+    if (current_db == "information_schema") {
+        namespace_ = "INTERNAL";
+    }
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    fields.emplace_back(make_result_field("Tables_in_" + current_db, MYSQL_TYPE_VARCHAR, 1024));
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    rows.reserve(10);
+    std::vector<std::string> tables =  factory->get_table_list(
+            namespace_, current_db, client->user_info.get());
+    //DB_NOTICE("db:%s table.size:%d", current_db.c_str(), tables.size());
+    for (uint32_t cnt = 0; cnt < tables.size(); ++cnt) {
+        //DB_NOTICE("table:%s", tables[cnt].c_str());
+        if (is_like_pattern) {
+            if (!RE2::FullMatch(tables[cnt], *regex_ptr)) {
+                DB_NOTICE("not match");
+                continue;
+            }
+        }
+        std::vector<std::string> row;
+        row.emplace_back(tables[cnt]);
+        rows.emplace_back(row);
+    }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "%s", client->query_ctx->sql.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
 bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     SchemaFactory* factory = SchemaFactory::get_instance();
     if (client == nullptr || client->user_info == nullptr || factory == nullptr) {
@@ -1577,69 +1605,15 @@ bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector
     // Make fields.
     std::vector<ResultField> fields;
     fields.reserve(9);
-    do {
-        ResultField field;
-        field.name = "Field";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Type";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Collation";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Null";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Key";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "default";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Extra";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Privileges";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
-    do {
-        ResultField field;
-        field.name = "Comment";
-        field.type = MYSQL_TYPE_VARCHAR;
-        field.length = 1024;
-        fields.emplace_back(field);
-    } while (0);
+    fields.emplace_back(make_result_field("Field", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Type", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Collation", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Null", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Key", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Default", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Extra", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Privileges", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Comment", MYSQL_TYPE_VARCHAR, 1024));
 
     std::string db = client->current_db;
     std::string table;
@@ -1741,6 +1715,139 @@ bool ShowHelper::_show_full_columns(const SmartSocket& client, const std::vector
         }
         row.emplace_back("select,insert,update,references");
         row.emplace_back(" ");
+        rows.emplace_back(row);
+    }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool ShowHelper::_show_columns(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (client == nullptr || client->user_info == nullptr || factory == nullptr) {
+        DB_FATAL("param invalid");
+        //client->state = STATE_ERROR;
+        return false;
+    }
+    bool is_like_pattern = false;
+    std::string like_pattern;
+    re2::RE2::Options option;
+    std::unique_ptr<re2::RE2> regex_ptr;
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    fields.reserve(6);
+    fields.emplace_back(make_result_field("Field", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Type", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Null", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Key", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Default", MYSQL_TYPE_VARCHAR, 1024));
+    fields.emplace_back(make_result_field("Extra", MYSQL_TYPE_VARCHAR, 1024));
+
+    std::string db = client->current_db;
+    std::string table;
+    if (split_vec.size() == 4) {
+        std::string db_table = split_vec[3];
+        std::string::size_type position = db_table.find_first_of('.');
+        if (position == std::string::npos) {
+            // `table_name`
+            table = remove_quote(db_table.c_str(), '`');
+        } else {
+            // `db_name`.`table_name`
+            db = remove_quote(db_table.substr(0, position).c_str(), '`');
+            table = remove_quote(db_table.substr(position + 1,
+                    db_table.length() - position - 1).c_str(), '`');
+        }
+    } else if (split_vec.size() == 6) {
+        db = remove_quote(split_vec[5].c_str(), '`');
+        table = remove_quote(split_vec[3].c_str(), '`');
+    } else if (split_vec.size() == 8) {
+          is_like_pattern = true;
+          std::string like_str;
+          db = remove_quote(split_vec[5].c_str(), '`');
+          table = remove_quote(split_vec[3].c_str(), '`');
+          like_str = remove_quote(split_vec[7].c_str(), '"');
+          like_str = remove_quote(like_str.c_str(), '\'');
+          for (auto ch : like_str) {
+              if (ch == '%') {
+                  like_pattern.append(".*");
+              } else {
+                  like_pattern.append(1, ch);
+              }
+          }
+          option.set_utf8(false);
+          option.set_case_sensitive(false);
+          regex_ptr.reset(new re2::RE2(like_pattern, option));
+    } else {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    std::string namespace_ = client->user_info->namespace_;
+    if (db == "information_schema") {
+        namespace_ = "INTERNAL";
+    }
+    std::string full_name = namespace_ + "." + db + "." + table;
+    int64_t table_id = -1;
+    if (factory->get_table_id(full_name, table_id) != 0) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    TableInfo info = factory->get_table_info(table_id);
+    std::map<int32_t, IndexInfo> field_index;
+    for (auto& index_id : info.indices) {
+        IndexInfo index_info = factory->get_index_info(index_id);
+        for (auto& field : index_info.fields) {
+            if (field_index.count(field.id) == 0) {
+                field_index[field.id] = index_info;
+            }
+        }
+    }
+    // Make rows.
+    std::vector<std::vector<std::string> > rows;
+    rows.reserve(10);
+    for (auto& field : info.fields) {
+        if (field.deleted) {
+            continue;
+        }
+        std::vector<std::string> row;
+        std::vector<std::string> split_vec;
+        boost::split(split_vec, field.name,
+                     boost::is_any_of(" \t\n\r."), boost::token_compress_on);
+        if (is_like_pattern) {
+            if (!RE2::FullMatch(split_vec[split_vec.size() - 1], *regex_ptr)) {
+                DB_NOTICE("not match");
+                continue;
+            }
+        }
+        row.emplace_back(split_vec[split_vec.size() - 1]);
+        row.emplace_back(to_mysql_type_full_string(field.type));
+        row.emplace_back(field.can_null ? "YES" : "NO");
+        if (field_index.count(field.id) == 0) {
+            row.emplace_back(" ");
+        } else {
+            std::string index = IndexType_Name(field_index[field.id].type);
+            if (field_index[field.id].type == pb::I_FULLTEXT) {
+                index += "(" + pb::SegmentType_Name(field_index[field.id].segment_type) + ")";
+            }
+            row.emplace_back(index);
+        }
+        if (field.default_value == "(current_timestamp())") {
+            row.emplace_back("CURRENT_TIMESTAMP");
+        } else {
+            row.emplace_back(field.default_value);
+        }
+        if (info.auto_inc_field_id == field.id) {
+            row.emplace_back("auto_increment");
+        } else {
+            row.emplace_back(" ");
+        }
         rows.emplace_back(row);
     }
 

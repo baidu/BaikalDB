@@ -29,7 +29,6 @@ const std::string SQL_SHOW_DATABASES             = "databases";             // s
 const std::string SQL_SHOW_NAMESPACE             = "namespace";             // show namespace
 const std::string SQL_SHOW_META                  = "meta";                  // show meta;
 const std::string SQL_SHOW_TABLE_STATUS          = "table";                 // show table status;
-const std::string SQL_SHOW_TABLES                = "tables";                // show tables;
 const std::string SQL_SHOW_FUNCTION_STATUS       = "function";              // show function status;
 const std::string SQL_SHOW_PROCEDURE_STATUS      = "procedure";             // show procedure status;
 const std::string SQL_SHOW_TRIGGERS              = "triggers";              // show triggers;
@@ -39,7 +38,9 @@ const std::string SQL_SHOW_WARNINGS              = "warnings";              // s
 const std::string SQL_SHOW_PROCESSLIST           = "processlist";           // show processlist;
 const std::string SQL_SHOW_COST                  = "cost";                  // show cost switch;
 const std::string SQL_SHOW_FULL_TABLES           = "full_tables";           // show full tables;
+const std::string SQL_SHOW_TABLES                = "tables";                // show tables;
 const std::string SQL_SHOW_FULL_COLUMNS          = "full_columns";          // show full columns;
+const std::string SQL_SHOW_COLUMNS               = "columns";               // show columns;
 const std::string SQL_SHOW_SCHEMA_CONF           = "schema_conf";           // show schema_conf database_table;
 const std::string SQL_SHOW_VIRTUAL_INDEX         = "virtual";               // show virtual index;
 const std::string SQL_SHOW_SESSION_VARIABLES     = "show session variables";
@@ -102,8 +103,6 @@ private:
     bool _show_abnormal_regions(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show databases;
     bool _show_databases(const SmartSocket& client, const std::vector<std::string>& split_vec);
-    // sql: show tables;
-    bool _show_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show create table tableName;
     bool _show_create_table(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show collation
@@ -118,6 +117,8 @@ private:
     bool _show_cost(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show full tables;
     bool _show_full_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show tables;
+    bool _show_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show function status;
     bool _show_function_status(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show procedure status;
@@ -128,6 +129,8 @@ private:
     bool _show_events(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show full columns from tableName;
     bool _show_full_columns(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show columns from tableName;
+    bool _show_columns(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show schema_conf database_table;
     bool _show_schema_conf(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show all_tables ttl/binlog; 
