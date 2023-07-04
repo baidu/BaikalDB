@@ -1601,6 +1601,7 @@ private:
     std::string     _rocksdb_end;
     pb::PeerStatus  _region_status = pb::STATUS_NORMAL;
     BinlogAlarm     _binlog_alarm;
+    TimeCost        _binlog_update_ck_tc;
 
     //learner
     std::unique_ptr<braft::Learner> _learner;

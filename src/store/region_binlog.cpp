@@ -63,6 +63,7 @@ DECLARE_string(db_path);
         }\
     }while (0);
     
+DEFINE_int64(binlog_update_checkpoint_interval_us, 10 * 1000 * 1000LL, "binlog update checkpoint interval us: 10s");
 
 void print_oldest_ts(std::ostream& os, void*) {
     int64_t oldest_ts = RocksWrapper::get_instance()->get_oldest_ts_in_binlog_cf();
@@ -768,9 +769,14 @@ int Region::binlog_update_check_point() {
     }
 
     int64_t check_point_ts = _binlog_param.ts_binlog_map.empty() ? _binlog_param.max_ts_applied : _binlog_param.ts_binlog_map.begin()->first;
-    if (_binlog_param.check_point_ts >= check_point_ts) {
+    if (_binlog_param.check_point_ts < check_point_ts) {
+        _binlog_param.check_point_ts = check_point_ts;
+    }
+
+    if (_binlog_update_ck_tc.get_time() < FLAGS_binlog_update_checkpoint_interval_us) {
         return 0;
     }
+    _binlog_update_ck_tc.reset();
 
     int ret = _meta_writer->write_binlog_check_point(_region_id, check_point_ts);
     if (ret != 0) {
@@ -780,8 +786,6 @@ int Region::binlog_update_check_point() {
 
     DB_WARNING("region_id: %ld, check point ts %ld, %s => %ld, %s", _region_id, _binlog_param.check_point_ts, 
         ts_to_datetime_str(_binlog_param.check_point_ts).c_str(), check_point_ts, ts_to_datetime_str(check_point_ts).c_str());
-    _binlog_param.check_point_ts = check_point_ts;
-
     return 0;
 }
 
