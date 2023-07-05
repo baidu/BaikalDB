@@ -75,8 +75,19 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     }
     if (pos_index.has_sort_index()) {
         if (pos_index.ranges_size() > 1) {
-            // limit没下推，不能走_sort_limit_by_range逻辑
+            bool multi_range_limit = false;
             if (_limit != -1) {
+                multi_range_limit = true;
+            } else {
+                // limit没下推，并且filter条件不为空，不能走_sort_limit_by_range逻辑
+                if (get_parent() != nullptr && (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+                    get_parent()->node_type() == pb::WHERE_FILTER_NODE)) {
+                    if (static_cast<FilterNode*>(get_parent())->mutable_conjuncts()->empty()) {
+                        multi_range_limit = true;
+                    }
+                }
+            }
+            if (multi_range_limit) {
                 _sort_use_index_by_range = true;
                 _sort_limit_by_range = pos_index.sort_index().sort_limit();
             }
