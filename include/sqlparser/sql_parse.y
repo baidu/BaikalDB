@@ -2035,7 +2035,7 @@ FunctionaNameCurdate:
     ;
 
 FunctionaNameDateRelate:
-    DAY | MONTH | YEAR
+    HOUR | DAY | MONTH | YEAR | DATE
     ;
 
 FunctionCallNonKeyword: 

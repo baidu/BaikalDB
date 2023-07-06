@@ -531,6 +531,7 @@ int BinlogContext::send_binlog_data(const WriteBinlogParam* param, const SmartPa
     req.set_region_id(region_id);
     req.set_region_version(info.version());
     int retry_times = 0;
+    param->fetcher_store->binlog_prepare_success = false;
     do {
         brpc::Channel channel;
         brpc::Controller cntl;

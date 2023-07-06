@@ -1509,8 +1509,10 @@ int Transaction::remove_columns(const TableKey& primary_key) {
 
 static TimeCost print_lock_last_time;
 void Transaction::print_txninfo_holding_lock(const std::string& key) {
+    return; //pthread会卡bthread，基本不用这个追case了
     //内部有pthread锁
     if (print_lock_last_time.get_time() > 10 * 1000 * 1000) {
+        print_lock_last_time.reset();
         auto lock_info = _db->get_db()->GetLockStatusData();
         for (auto& it : lock_info) {
             if (it.second.key.size() == key.size() && it.second.key == key) {
@@ -1521,7 +1523,6 @@ void Transaction::print_txninfo_holding_lock(const std::string& key) {
                 break;
             }
         }
-        print_lock_last_time.reset();
     }
 }
 } //nanespace baikaldb

@@ -833,7 +833,7 @@ void Region::exec_in_txn_query(google::protobuf::RpcController* controller,
             remote_side, _region_id, txn_id, pb::OpType_Name(op_type).c_str(), last_seq, seq_id, log_id);
         // OP_SELECT_FOR_UPDATE强制KV模式保证一致
         // 不走幂等，重新执行一遍，这样db那边能拿到数据
-        if (op_type != pb::OP_SELECT_FOR_UPDATE) {
+        if (op_type != pb::OP_SELECT_FOR_UPDATE && op_type != pb::OP_SELECT) {
             txn->load_last_response(*response);
             response->set_affected_rows(txn->dml_num_affected_rows);
             response->set_errcode(txn->err_code);
@@ -2827,7 +2827,8 @@ int Region::select(const pb::StoreReq& request,
         }
         txn->push_cmd_to_cache(seq_id, plan_item);
         //DB_WARNING("put txn cmd to cache: region_id: %ld, txn_id: %lu:%d", _region_id, txn_info.txn_id(), seq_id);
-        txn->save_last_response(response);
+        // OP_SELECT_FOR_UPDATE幂等重新执行一次，不保存response
+        //txn->save_last_response(response);
     }
 
     //DB_NOTICE("select rows:%d", rows);

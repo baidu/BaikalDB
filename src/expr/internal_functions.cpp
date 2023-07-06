@@ -1077,6 +1077,33 @@ ExprValue curtime(const std::vector<ExprValue>& input) {
 ExprValue current_time(const std::vector<ExprValue>& input) {
     return curtime(input);
 }
+ExprValue date(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue in = input[0];
+    if (in.type == pb::INT64) {
+        in.cast_to(pb::STRING);
+    }
+    ExprValue tmp(pb::DATE);
+    uint64_t dt = in.cast_to(pb::DATETIME)._u.uint64_val;
+    tmp._u.uint32_val = datetime_to_date(dt);
+    return tmp;
+}
+ExprValue hour(const std::vector<ExprValue>& input) {
+    // Mysql最大值为838，BaikalDB最大值为1023
+    if (input.size() == 0 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue in = input[0];
+    time_t t = in.cast_to(pb::TIME)._u.int32_val;
+    if (t < 0) {
+        t = -t;
+    }
+    ExprValue tmp(pb::UINT32);
+    tmp._u.uint32_val = (t >> 12) & 0x3FF;
+    return tmp;
+}
 ExprValue day(const std::vector<ExprValue>& input) {
     if (input.size() == 0 || input[0].is_null()) {
         return ExprValue::Null();
