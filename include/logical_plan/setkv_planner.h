@@ -32,6 +32,7 @@ private:
     int set_autocommit_1();
     int set_autocommit(parser::ExprNode* expr);
     int set_user_variable(const std::string& key, parser::ExprNode* expr);
+    int set_sql_mode(parser::ExprNode* expr);
 
 private:
     parser::SetStmt*  _set_stmt;
