@@ -536,10 +536,8 @@ public:
             if (client_conn->need_send_binlog()) {
                 return true;
             }
-        } else if (op_type == pb::OP_ROLLBACK) {
-            if (state->open_binlog() && binlog_prepare_success) {
-                return true;
-            }
+        } else if (op_type == pb::OP_ROLLBACK && state->open_binlog()) {
+            return true;
         }
         return false;
     }
@@ -577,7 +575,6 @@ public:
     bool is_cancelled = false;
     BthreadCond binlog_cond;
     NetworkSocket* client_conn = nullptr;
-    bool  binlog_prepare_success = false;
     std::atomic<bool> primary_timestamp_updated{false};
     std::set<int64_t> no_copy_cache_plan_set;
     int64_t dynamic_timeout_ms = -1;
