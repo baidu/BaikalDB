@@ -1025,39 +1025,37 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
     if (need_process_binlog(state, op_type)) {
         auto binlog_ctx = client_conn->get_binlog_ctx();
         uint64_t log_id = state->log_id();
-        if (op_type == pb::OP_PREPARE || binlog_prepare_success) {
-            binlog_cond.increase();
-            auto write_binlog_func = [this, state, binlog_ctx, op_type, log_id]() {
-                ON_SCOPE_EXIT([this]() {
-                    binlog_cond.decrease_signal();
-                });
-                if (op_type == pb::OP_PREPARE) {
-                    int64_t timestamp = TsoFetcher::get_instance()->get_tso(binlog_ctx->tso_count());
-                    if (timestamp < 0) {
-                        DB_WARNING("get tso failed log_id: %lu txn_id:%lu op_type:%s", log_id, state->txn_id,
-                            pb::OpType_Name(op_type).c_str());
-                        error = E_FATAL;
-                        return;
-                    }
-                    write_binlog_param.txn_id = state->txn_id;
-                    write_binlog_param.log_id = log_id;
-                    write_binlog_param.primary_region_id = client_conn->primary_region_id;
-                    write_binlog_param.global_conn_id = client_conn->get_global_conn_id();
-                    write_binlog_param.username = client_conn->user_info->username;
-                    write_binlog_param.ip = client_conn->ip;
-                    write_binlog_param.client_conn = client_conn;
-                    write_binlog_param.fetcher_store = this;
-                    binlog_ctx->set_start_ts(timestamp);
-                }
-                write_binlog_param.op_type = op_type;
-                auto ret = binlog_ctx->write_binlog(&write_binlog_param);
-                if (ret != E_OK) {
+        binlog_cond.increase();
+        auto write_binlog_func = [this, state, binlog_ctx, op_type, log_id]() {
+            ON_SCOPE_EXIT([this]() {
+                binlog_cond.decrease_signal();
+            });
+            if (op_type == pb::OP_PREPARE) {
+                int64_t timestamp = TsoFetcher::get_instance()->get_tso(binlog_ctx->tso_count());
+                if (timestamp < 0) {
+                    DB_WARNING("get tso failed log_id: %lu txn_id:%lu op_type:%s", log_id, state->txn_id,
+                        pb::OpType_Name(op_type).c_str());
                     error = E_FATAL;
+                    return;
                 }
-            };
-            Bthread bth(&BTHREAD_ATTR_SMALL);
-            bth.run(write_binlog_func);
-        }
+                write_binlog_param.txn_id = state->txn_id;
+                write_binlog_param.log_id = log_id;
+                write_binlog_param.primary_region_id = client_conn->primary_region_id;
+                write_binlog_param.global_conn_id = client_conn->get_global_conn_id();
+                write_binlog_param.username = client_conn->user_info->username;
+                write_binlog_param.ip = client_conn->ip;
+                write_binlog_param.client_conn = client_conn;
+                write_binlog_param.fetcher_store = this;
+                binlog_ctx->set_start_ts(timestamp);
+            }
+            write_binlog_param.op_type = op_type;
+            auto ret = binlog_ctx->write_binlog(&write_binlog_param);
+            if (ret != E_OK) {
+                error = E_FATAL;
+            }
+        };
+        Bthread bth(&BTHREAD_ATTR_SMALL);
+        bth.run(write_binlog_func);
         return E_OK;
     }
     return E_OK;

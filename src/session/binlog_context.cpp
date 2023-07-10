@@ -531,7 +531,7 @@ int BinlogContext::send_binlog_data(const WriteBinlogParam* param, const SmartPa
     req.set_region_id(region_id);
     req.set_region_version(info.version());
     int retry_times = 0;
-    param->fetcher_store->binlog_prepare_success = false;
+    bool binlog_prepare_success = false;
     do {
         brpc::Channel channel;
         brpc::Controller cntl;
@@ -604,7 +604,7 @@ int BinlogContext::send_binlog_data(const WriteBinlogParam* param, const SmartPa
             return -1;
         } else {
             // success
-            param->fetcher_store->binlog_prepare_success = true;
+            binlog_prepare_success = true;
             break;
         }
     } while (retry_times < 5);
@@ -613,7 +613,7 @@ int BinlogContext::send_binlog_data(const WriteBinlogParam* param, const SmartPa
         DB_WARNING("write binlog region_id:%ld log_id:%lu txn_id:%ld cost time:%ld op_type:%s ip:%s",
             region_id, param->log_id, param->txn_id, query_cost, pb::OpType_Name(param->op_type).c_str(), info.leader().c_str());
     }
-    if (param->fetcher_store->binlog_prepare_success) {
+    if (binlog_prepare_success) {
         if (param->op_type == pb::OP_PREPARE) {
             partition_binlog_ptr->binlog_prewrite_time.reset();
         } else if (param->op_type == pb::OP_COMMIT) {
