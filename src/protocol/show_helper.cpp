@@ -1500,7 +1500,8 @@ bool ShowHelper::_show_full_tables(const SmartSocket& client, const std::vector<
         client->state = STATE_READ_QUERY_RESULT;
         return false;
     }
-    if (current_db == "information_schema") {
+    if (to_lower(current_db) == "information_schema") {
+        current_db = "information_schema";
         namespace_ = "INTERNAL";
     }
 
@@ -1597,7 +1598,8 @@ bool ShowHelper::_show_tables(const SmartSocket& client, const std::vector<std::
         client->state = STATE_READ_QUERY_RESULT;
         return false;
     }
-    if (current_db == "information_schema") {
+    if (to_lower(current_db) == "information_schema") {
+        current_db = "information_schema";
         namespace_ = "INTERNAL";
     }
 
