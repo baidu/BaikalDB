@@ -31,7 +31,7 @@ namespace baikaldb {
 DEFINE_int64(retry_interval_us, 500 * 1000, "retry interval ");
 DEFINE_int32(single_store_concurrency, 20, "max request for one store");
 DEFINE_int64(max_select_rows, 10000000, "query will be fail when select too much rows");
-DEFINE_int64(max_affected_rows, 10000000, "query will be fail when select too much rows");
+DEFINE_int64(max_affected_rows, 10000000, "query will be fail when affect too much rows");
 DEFINE_int64(print_time_us, 10000, "print log when time_cost > print_time_us(us)");
 DEFINE_int64(baikaldb_alive_time_s, 10 * 60, "obervation time length in baikaldb, default:10 min");
 BRPC_VALIDATE_GFLAG(print_time_us, brpc::NonNegativeInteger);
@@ -828,7 +828,8 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_op_type != pb::OP_SELECT && _op_type != pb::OP_SELECT_FOR_UPDATE && _op_type != pb::OP_ROLLBACK) {
         _fetcher_store->affected_rows += _response.affected_rows();
         _client_conn->txn_affected_rows += _response.affected_rows();
-        if (_client_conn->txn_affected_rows > FLAGS_max_affected_rows) {
+        // 事务限制affected_rows，非事务限制会导致部分成功
+        if (_client_conn->txn_affected_rows > FLAGS_max_affected_rows && _state->txn_id != 0) {
             DB_DONE(FATAL, "_affected_row:%ld > %ld FLAGS_max_affected_rows", 
                     _client_conn->txn_affected_rows.load(), FLAGS_max_affected_rows);
             return E_BIG_SQL;
