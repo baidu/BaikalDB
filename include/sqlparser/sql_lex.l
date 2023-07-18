@@ -140,7 +140,7 @@ MEDIUMTEXT { return MEDIUMTEXT; }
 MINUTE_MICROSECOND { un_reserved_keyword(yylval, yyscanner, parser); return MINUTE_MICROSECOND; }
 MINUTE_SECOND { un_reserved_keyword(yylval, yyscanner, parser); return MINUTE_SECOND; }
 MOD { un_reserved_keyword(yylval, yyscanner, parser); return MOD; }
-NAMESPACE { return NAMESPACE; }
+NAMESPACE_ { return NAMESPACE; }
 NOT { return NOT; }
 NO_WRITE_TO_BINLOG { return NO_WRITE_TO_BINLOG; }
 NULL { return NULLX; }
@@ -385,8 +385,6 @@ HLL { un_reserved_keyword(yylval, yyscanner, parser); return HLL; }
 BITMAP { un_reserved_keyword(yylval, yyscanner, parser); return BITMAP; }
 TDIGEST { un_reserved_keyword(yylval, yyscanner, parser); return TDIGEST; }
 LEARNER { un_reserved_keyword(yylval, yyscanner, parser); return LEARNER; }
-QUOTA { un_reserved_keyword(yylval, yyscanner, parser); return QUOTA; }
-RESOURCE_TAG { un_reserved_keyword(yylval, yyscanner, parser); return RESOURCE_TAG; }
 
 ADDDATE { un_reserved_keyword(yylval, yyscanner, parser); return ADDDATE; /* The following tokens belong to builtin functions. */}
 BIT_AND { un_reserved_keyword(yylval, yyscanner, parser); return BIT_AND; }
