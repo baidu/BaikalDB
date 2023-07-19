@@ -686,9 +686,15 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
 
         auto iter = _binlog_param.ts_binlog_map.find(start_ts);
         if (iter == _binlog_param.ts_binlog_map.end()) {
-            DB_FATAL("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s can not find in map, remote_side: %s", 
-                _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime_str(ts).c_str(), start_ts, ts_to_datetime_str(start_ts).c_str(),
-                remote_side.c_str());
+            if (type == COMMIT_BINLOG) {
+                DB_FATAL("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s can not find in map, remote_side: %s", 
+                    _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime_str(ts).c_str(), start_ts, ts_to_datetime_str(start_ts).c_str(),
+                    remote_side.c_str());
+            } else {
+                DB_WARNING("region_id: %ld, type: %s, txn_id: %ld, commit_ts: %ld, %s, start_ts: %ld, %s can not find in map, remote_side: %s", 
+                    _region_id, binlog_type_name(type), txn_id, ts, ts_to_datetime_str(ts).c_str(), start_ts, ts_to_datetime_str(start_ts).c_str(),
+                    remote_side.c_str());
+            }
             return 0;
         } else {
             bool repeated_commit = false;

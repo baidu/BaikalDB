@@ -61,9 +61,12 @@ std::string datetime_to_str(uint64_t datetime) {
     return std::string(buf);
 }
 
-uint64_t str_to_datetime(const char* str_time) {
+uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime) {
     //[YY]YY-MM-DD HH:MM:SS.xxxxxx
     //[YY]YYMMDDHHMMSS.xxxxxx
+
+    bool is_full = false;
+
     while (*str_time == ' ') {
         str_time++;
     }
@@ -112,6 +115,7 @@ uint64_t str_to_datetime(const char* str_time) {
         sscanf(buf, "%4lu%*[^0-9a-z]%2lu%*[^0-9a-z]%2lu"
                 "%*[^0-9a-z]%2lu%*[^0-9a-z]%2lu%*[^0-9a-z]%2lu.%6lu",
                 &year, &month, &day, &hour, &minute, &second, &macrosec);
+        is_full = true;
     } else {
         if (idx <= 6) {
             sscanf(buf, "%2lu%2lu%2lu", &year, &month, &day);
@@ -120,11 +124,14 @@ uint64_t str_to_datetime(const char* str_time) {
         } else if (idx == 12) {
             sscanf(buf, "%2lu%2lu%2lu%2lu%2lu%2lu.%6lu", 
                     &year, &month, &day, &hour, &minute, &second, &macrosec);
+            is_full = true;
         } else if (idx <= 13) {
             sscanf(buf, "%2lu%2lu%2lu%2lu%2lu%2lu", &year, &month, &day, &hour, &minute, &second);
+            is_full = true;
         } else if (idx >= 14) {
             sscanf(buf, "%4lu%2lu%2lu%2lu%2lu%2lu.%6lu", 
                     &year, &month, &day, &hour, &minute, &second, &macrosec);
+            is_full = true;
         } else {
             return 0;
         }
@@ -142,6 +149,10 @@ uint64_t str_to_datetime(const char* str_time) {
     }
     if (hour > 23 || minute > 59 || second > 59) {
         return 0;
+    }
+
+    if (is_full_datetime != nullptr) {
+        *is_full_datetime = is_full;
     }
 
     //datetime中间计算时会转化成int64, 最高位必须为0
@@ -360,6 +371,15 @@ int32_t str_to_time(const char* str_time) {
         }
         if (str_time[idx] == '.') {
             break;
+        }
+    }
+
+    // 先判断是否是完整的datetime类型字符串, 12为YYMMDDHHMMSS
+    if (idx >= 12) {
+        bool is_full_datetime = false;
+        uint64_t datetime = str_to_datetime(str_time, &is_full_datetime);
+        if (is_full_datetime) {
+            return datetime_to_time(datetime);
         }
     }
 

@@ -21,6 +21,7 @@
 #include "common.h"
 #include "datetime.h"
 #include "expr_value.h"
+#include "internal_functions.h"
 
 int main(int argc, char* argv[])
 {
@@ -187,6 +188,30 @@ uint64_t time_to_datetime2(int32_t time) {
 
     return timestamp_to_datetime(now);
 }
+
+std::vector<ExprValue> construct_null_expr_value() {
+    ExprValue expr_value;
+    return {expr_value};
+}
+
+std::vector<ExprValue> construct_time_expr_value(const char* str_time) {
+    ExprValue expr_value(pb::TIME);
+    expr_value._u.int32_val = str_to_time(str_time);
+    return {expr_value};
+}
+
+std::vector<ExprValue> construct_date_expr_value(const char* str_time) {
+    ExprValue expr_value(pb::DATE);
+    expr_value._u.uint32_val = datetime_to_date(str_to_datetime(str_time));
+    return {expr_value};
+}
+
+std::vector<ExprValue> construct_datetime_expr_value(const char* str_time) {
+    ExprValue expr_value(pb::DATETIME);
+    expr_value._u.uint64_val = str_to_datetime(str_time);
+    return {expr_value};
+}
+
 TEST(test_datetime_time, case_all) {
     int hour = 0;
     int minute = 0;
@@ -215,7 +240,6 @@ TEST(test_datetime_time, case_all) {
     EXPECT_EQ(time_to_str(seconds_to_time(-3601)), "-01:00:01");
 }
 
-
 TEST(test_datetime_timestamp, case_all) {
     EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("2017-12-03 19:28:44.123456"))), "2017-12-03 19:28:44");
     EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("0000-00-00 00:00:00"))), "0000-00-00 00:00:00");
@@ -225,6 +249,39 @@ TEST(test_datetime_timestamp, case_all) {
     // < 1970-01-01 08:00:01非法，都当做0
     EXPECT_EQ(timestamp_to_str(datetime_to_timestamp(str_to_datetime("1970-01-01 07:00:01"))), "0000-00-00 00:00:00");
     //EXPECT_EQ(datetime_to_str(timestamp_to_datetime(str_to_timestamp("2017-12-03 19:28:44"))), "2017-12-03 19:28:44");
+}
+
+TEST(test_hour_date, case_all) {
+    EXPECT_EQ(hour(construct_null_expr_value()).get_string(), "");                          // NULL返回NULL
+    EXPECT_EQ(hour(construct_time_expr_value("  19:28:44")).get_string(), "19");
+    EXPECT_EQ(hour(construct_time_expr_value("-19:28:44")).get_string(), "19");             // 负数取反
+    EXPECT_EQ(hour(construct_time_expr_value("-119:28:44")).get_string(), "119");
+    EXPECT_EQ(hour(construct_time_expr_value("-119:28:44")).get_string(), "119");
+    EXPECT_EQ(hour(construct_time_expr_value("1 19:28:44")).get_string(), "43");
+    EXPECT_EQ(hour(construct_time_expr_value("-1 19:28:44")).get_string(), "43");
+    EXPECT_EQ(hour(construct_time_expr_value("192844")).get_string(), "19");
+    EXPECT_EQ(hour(construct_time_expr_value("-192844")).get_string(), "19");
+    EXPECT_EQ(hour(construct_time_expr_value("2844")).get_string(), "0");
+    EXPECT_EQ(hour(construct_time_expr_value("844")).get_string(), "0");
+    EXPECT_EQ(hour(construct_time_expr_value("-44")).get_string(), "0");
+    EXPECT_EQ(hour(construct_time_expr_value("4")).get_string(), "0");
+    
+    EXPECT_EQ(hour(construct_time_expr_value("1234567 19:28:44")).get_string(), "187");     // HOUR有范围限制
+    EXPECT_EQ(hour(construct_time_expr_value("2023-06-29 19:28:44")).get_string(), "19");
+    EXPECT_EQ(hour(construct_time_expr_value("2023-06-29")).get_string(), "999");           // 异常输入，str_to_time()会将2023-06-29转换成999:06:29
+    EXPECT_EQ(hour(construct_time_expr_value("06-29 19:28:44")).get_string(), "0");         // 异常输入
+    EXPECT_EQ(hour(construct_time_expr_value("9999-09-29 19:28:44")).get_string(), "19");
+    EXPECT_EQ(hour(construct_time_expr_value("9999-13-29 19:28:44")).get_string(), "0");    // 异常输入
+    EXPECT_EQ(hour(construct_time_expr_value("99999-09-29 19:28:44")).get_string(), "0");   // 异常输入
+
+    EXPECT_EQ(date(construct_null_expr_value()).get_string(), "");
+    EXPECT_EQ(date(construct_date_expr_value("2023-06-28")).get_string(), "2023-06-28");
+    EXPECT_EQ(date(construct_date_expr_value("2023-16-28")).get_string(), "0000-00-00");    // 异常输入
+    EXPECT_EQ(date(construct_date_expr_value("99999-06-28")).get_string(), "0000-00-00");   // 异常输入
+
+    EXPECT_EQ(date(construct_datetime_expr_value("2023-06-28 22:35:40")).get_string(), "2023-06-28");
+    EXPECT_EQ(date(construct_datetime_expr_value("2023-16-28 22:35:40")).get_string(), "0000-00-00");  // 异常输入
+    EXPECT_EQ(date(construct_datetime_expr_value("99999-06-28 22:35:40")).get_string(), "0000-00-00"); // 异常输入
 }
 
 }  // namespace baikal

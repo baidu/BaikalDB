@@ -822,12 +822,3 @@ baikaldb_proto_library(
     include = "proto",
     visibility = ["//visibility:public"],
 )
-
-cc_binary(
-    name = "test_date_time",
-    srcs = ["test/test_date_time.cpp"],
-    copts = ["-Iexternal/gtest/include"],
-    deps = [
-        ":common",
-    ],
-)
