@@ -551,6 +551,10 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
                                           _factory->get_table_info_ptr(table_id)->name.c_str());
                                continue;
                            }
+                           auto indexInfoPtr = _factory->get_index_info_ptr(index_id);
+                           if (indexInfoPtr == nullptr || indexInfoPtr->state != pb::IS_PUBLIC || indexInfoPtr->index_hint_status != pb::IHS_NORMAL) {
+                               continue;
+                           }
                            scan->add_force_indexes(index_id);
                        }
                     }
@@ -577,6 +581,10 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
                         if (ret != 0) {
                             DB_WARNING("index_name: %s in table:%s not exist", index_name.c_str(),
                                         _factory->get_table_info_ptr(table_id)->name.c_str());
+                            continue;
+                        }
+                        auto indexInfoPtr = _factory->get_index_info_ptr(index_id);
+                        if (indexInfoPtr == nullptr || indexInfoPtr->state != pb::IS_PUBLIC || indexInfoPtr->index_hint_status != pb::IHS_NORMAL) {
                             continue;
                         }
                         scan->add_force_indexes(index_id);
@@ -1232,6 +1240,10 @@ int LogicalPlanner::create_join_node_from_terminator(const std::string db,
             DB_WARNING("index_name: %s in table:%s not exist",
                         index_name.c_str(), alias_full_name.c_str());
             return -1;
+        }
+        auto indexInfoPtr = _factory->get_index_info_ptr(index_id);
+        if (indexInfoPtr == nullptr || indexInfoPtr->state != pb::IS_PUBLIC || indexInfoPtr->index_hint_status != pb::IHS_NORMAL) {
+            continue;
         }
         (*join_root_ptr)->force_indexes.insert(index_id);
     }
