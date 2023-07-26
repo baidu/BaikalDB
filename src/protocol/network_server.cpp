@@ -974,12 +974,30 @@ void NetworkServer::connection_timeout_check() {
 
                 int query_time_diff = time_now - ctx->stat_info.start_stamp.tv_sec;
                 if (query_time_diff > FLAGS_slow_query_timeout_s) {
-                    DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][sql=%s]",
+                    std::string sql = ctx->sql;
+                    size_t slow_idx = 0;
+                    bool is_blank = false;
+                    for (size_t i = 0; i < sql.size(); i++) {
+                        if (sql[i] == ' ' || sql[i] == '\t' || sql[i] == '\n') {
+                            if (!is_blank) {
+                                sql[slow_idx++] = ' ';
+                                is_blank = true;
+                            }
+                        } else {
+                            is_blank = false;
+                            sql[slow_idx++] = sql[i];
+                        }
+                    }
+                    sql.resize(slow_idx);
+                    DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][conn_id=%ld][sign=%lu][server_addr=%s:%d][sql=%s]",
                             query_time_diff, sock->fd, sock->ip.c_str(), sock->port,
                             time_now, sock->last_active,
                             sock->user_info->username.c_str(),
                             ctx->stat_info.log_id,
-                            ctx->sql.c_str());
+                            sock->conn_id,
+                            ctx->stat_info.sign,
+                            butil::my_ip_cstr(), FLAGS_baikal_port,
+                            sql.c_str());
                     if (FLAGS_open_to_collect_slow_query_infos) {
                         SlowQueryInfo slow_query_info(ctx->stat_info.log_id, 
                             ctx->stat_info.sign,
