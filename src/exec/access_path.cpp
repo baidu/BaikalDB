@@ -355,7 +355,7 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
             case EQ:
             case LIKE_EQ:
             case LIKE_PREFIX:
-                if (_like_prefix) {
+                if (_like_prefix && range.type == LIKE_PREFIX) {
                     if (in_records.empty()) {
                         left_key.append_string_prefix(range.eq_in_values[0].get_string());
                         right_key.append_string_prefix(range.eq_in_values[0].get_string());
