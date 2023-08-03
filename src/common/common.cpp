@@ -321,6 +321,7 @@ void stripslashes(std::string& str, bool is_gbk) {
     size_t fast = 0;
     bool has_slash = false;
     static std::unordered_map<char, char> trans_map = {
+        {'0', '\x00'},
         {'\\', '\\'},
         {'\"', '\"'},
         {'\'', '\''},
