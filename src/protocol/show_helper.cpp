@@ -157,15 +157,8 @@ bool ShowHelper::execute(const SmartSocket& client) {
     }
     auto iter = _calls.find(key);
     if (iter == _calls.end() || iter->second == nullptr) {
-        // Make mysql packet.
-        std::vector<ResultField> fields;
-        std::vector< std::vector<std::string> > rows;
-        if (_make_common_resultset_packet(client, fields, rows) != 0) {
-            DB_FATAL_CLIENT(client, "Failed to make result packet.");
-            _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
-            client->state = STATE_ERROR;
-            return true;
-        }
+        _wrapper->make_simple_ok_packet(client);
+        client->state = STATE_READ_QUERY_RESULT;
         return true;
     }
     return iter->second(client, split_vec);
