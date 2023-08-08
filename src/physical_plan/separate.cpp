@@ -617,6 +617,7 @@ int Separate::separate_insert(QueryContext* ctx) {
         _row_ttl_duration = ctx->row_ttl_duration;
     }
     int64_t main_table_id = insert_node->table_id();
+    bool should_delete = false;
     if (!need_separate_plan(ctx, main_table_id)) {
         manager_node->set_op_type(pb::OP_INSERT);
         manager_node->set_region_infos(insert_node->region_infos());
@@ -633,6 +634,7 @@ int Separate::separate_insert(QueryContext* ctx) {
             DB_WARNING("separte global insert failed table_id:%ld", main_table_id);
             return -1;
         }
+        should_delete = true;
     }
 
     if (ctx->sub_query_plans.size() > 0) {
@@ -652,6 +654,9 @@ int Separate::separate_insert(QueryContext* ctx) {
     }
 
     packet_node->clear_children();
+    if (should_delete) {
+        delete insert_node;
+    }
     packet_node->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
         separate_single_txn(ctx, packet_node, pb::OP_INSERT);
@@ -683,7 +688,7 @@ int Separate::separate_global_insert(InsertManagerNode* manager_node, InsertNode
         create_lock_node(table_id, pb::LOCK_DML, Separate::BOTH, manager_node);
     }
     // 复用
-    delete insert_node;
+    insert_node->clear_children();
     return 0;
 }
 
@@ -810,6 +815,7 @@ int Separate::separate_update(QueryContext* ctx) {
         return -1;
     }
     int64_t main_table_id = update_node->table_id();
+    bool should_delete = false;
     if (!need_separate_plan(ctx, main_table_id)) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_UPDATE);
@@ -821,8 +827,12 @@ int Separate::separate_update(QueryContext* ctx) {
             DB_WARNING("separte global update failed table_id:%ld", main_table_id);
             return -1;
         }
+        should_delete = true;
     }
     packet_node->clear_children();
+    if (should_delete) {
+        delete update_node;
+    }
     packet_node->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
         separate_single_txn(ctx, packet_node, pb::OP_UPDATE);
@@ -849,6 +859,7 @@ int Separate::separate_delete(QueryContext* ctx) {
     if (ret < 0) {
         return -1;
     }
+    bool should_delete = false;
     if (!need_separate_plan(ctx, main_table_id)) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_DELETE);
@@ -860,8 +871,12 @@ int Separate::separate_delete(QueryContext* ctx) {
             DB_WARNING("separte global delete failed table_id:%ld", main_table_id);
             return -1;
         }
+        should_delete = true;
     }
     packet_node->clear_children();
+    if (should_delete) {
+        delete delete_node;
+    }
     packet_node->add_child(manager_node.release());
     if (need_separate_single_txn(ctx, main_table_id)) {
         separate_single_txn(ctx, packet_node, pb::OP_DELETE);
@@ -901,7 +916,6 @@ int Separate::separate_global_update(
     manager_node->set_update_exprs(update_node->update_exprs());
     update_node->clear_children();
     update_node->clear_update_exprs();
-    delete update_node;
     create_lock_node(
             main_table_id,
             pb::LOCK_GET_DML,
@@ -997,7 +1011,6 @@ int Separate::separate_global_delete(
             pri_node->add_conjunct(conjunct);
         }
     }
-    delete delete_node;
     return 0;
 }
 
