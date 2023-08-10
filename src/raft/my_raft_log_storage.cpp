@@ -451,6 +451,10 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
     DB_WARNING("Truncating region_id: %ld to first index kept:%ld from first log index:%ld",
             _region_id, first_index_kept, _first_log_index.load());
     
+    int64_t start_index = _first_log_index.load();
+    if (start < 0){
+        return 0;
+    }
     _first_log_index.store(first_index_kept);
     if (first_index_kept > _last_log_index.load()) {
         _last_log_index.store(first_index_kept - 1);
@@ -485,7 +489,7 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
 
     //替换为remove_range
     char start_key[LOG_DATA_KEY_SIZE];
-    _encode_log_data_key(start_key, LOG_DATA_KEY_SIZE, 0);
+    _encode_log_data_key(start_key, LOG_DATA_KEY_SIZE, start_index);
     char end_key[LOG_DATA_KEY_SIZE];
     _encode_log_data_key(end_key, LOG_DATA_KEY_SIZE, first_index_kept);
    
