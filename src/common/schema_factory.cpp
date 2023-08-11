@@ -1250,14 +1250,14 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
         if (iter != ptr->end()) {
             if (!user.need_auth_addr()) {
                 // need not update when version GE
-//                if (iter->second->version >= user.version()) {
-//                    return;
-//                }
+                if (iter->second->version >= user.version()) {
+                    return;
+                }
                 // 更新权限，本结构为链接长期持有，频繁多次更新时并不能找到所有的user_info
                 if (user.has_ddl_permission()) {
                     iter->second->ddl_permission = user.ddl_permission();
                 }
-                user_info = iter->second; // 更新原UserInfo，使connection中的user_info可以不重启，更新生效
+//                user_info = iter->second; // 更新原UserInfo，使connection中的user_info可以不重启，更新生效
             } else {
                 last_auth_ip_set = iter->second->auth_ip_set;
             }
