@@ -452,7 +452,7 @@ int MyRaftLogStorage::truncate_prefix(const int64_t first_index_kept) {
             _region_id, first_index_kept, _first_log_index.load());
     
     int64_t start_index = _first_log_index.load();
-    if (start < 0){
+    if (start_index < 0){
         return 0;
     }
     _first_log_index.store(first_index_kept);
