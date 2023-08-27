@@ -357,7 +357,7 @@ void TSOStateMachine::update_timestamp() {
     if (delta > tso::update_timestamp_guard_ms) {
         next = now;
     } else if (prev_logical > tso::max_logical / 2) {
-        next = now + tso::update_timestamp_guard_ms;
+        next = prev_physical + tso::update_timestamp_guard_ms;
     } else {
         DB_WARNING("don't need update timestamp prev:%ld now:%ld save:%ld", prev_physical, now, last_save);
         return;
