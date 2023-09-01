@@ -160,6 +160,24 @@ void common_raft_control(google::protobuf::RpcController* controller,
         response->set_errcode(pb::SUCCESS);
         return;
     }
+
+    case pb::GetPeerList : {
+        std::vector<braft::PeerId> peers;
+        std::string leader = butil::endpoint2str(node->leader_id().addr).c_str();
+        std::string self = butil::endpoint2str(node->node_id().peer_id.addr).c_str();
+        if (self != leader || !node->list_peers(&peers).ok()) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_leader(leader);
+            return;
+        }
+        response->set_errcode(pb::SUCCESS);
+        for (auto &peer : peers) {
+            std::string peer_string = butil::endpoint2str(peer.addr).c_str();
+            response->add_peers(peer_string);
+        }
+        return;
+    }
+
     default:
         DB_FATAL("node:%s %s unsupport request type:%d, log_id:%lu",
                         node->node_id().group_id.c_str(),

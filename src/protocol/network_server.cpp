@@ -55,6 +55,7 @@ DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(open_to_collect_slow_query_infos, false, "open to collect slow_query_infos, default: false");
 DEFINE_uint64(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
 DEFINE_int32(slow_query_batch_size, 100, "slow query sql batch size, default: 100");
+DECLARE_bool(auto_update_meta_list);
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 
@@ -97,8 +98,42 @@ void NetworkServer::report_heart_beat() {
             }
         }
 
+        if (FLAGS_auto_update_meta_list) {
+            update_meta_list();
+        }
+
         _heart_beat_count << -1;
         bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
+    }
+}
+
+void NetworkServer::update_meta_list() {
+    pb::RaftControlRequest req;
+    req.set_op_type(pb::GetPeerList);
+    pb::RaftControlResponse res;
+    if (!MetaServerInteract::get_instance()->is_inited()) {
+        return;
+    }
+    if (MetaServerInteract::get_instance()->send_request("raft_control", req, res) == 0) {
+        std::string meta_list = "";
+        for (auto i = 0; i < res.peers_size(); i ++) {
+            if (i != 0) {
+                meta_list += ",";
+            }
+            meta_list += res.peers(i);
+        }
+        if (meta_list != "" && meta_list != FLAGS_meta_server_bns) {
+            DB_WARNING("meta list %s change to:%s", FLAGS_meta_server_bns.c_str(), meta_list.c_str());
+            if (MetaServerInteract::get_instance()->reset_bns_channel(meta_list) == 0) {
+                FLAGS_meta_server_bns = meta_list;
+            }
+            if (MetaServerInteract::get_auto_incr_instance()->is_inited()) {
+                MetaServerInteract::get_auto_incr_instance()->reset_bns_channel(meta_list);
+            }
+            if (MetaServerInteract::get_tso_instance()->is_inited()) {
+                MetaServerInteract::get_tso_instance()->reset_bns_channel(meta_list);
+            }
+        }
     }
 }
 

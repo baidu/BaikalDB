@@ -54,12 +54,14 @@ public:
         return &_instance;
     }
 
+
     MetaServerInteract() {}
     bool is_inited() {
         return _is_inited;
     }
     int init(bool is_backup = false);
     int init_internal(const std::string& meta_bns);
+    int reset_bns_channel(const std::string& meta_bns);
     template<typename Request, typename Response>
     int send_request(const std::string& service_name,
                                      const Request& request,
@@ -98,7 +100,8 @@ public:
                 }
                 short_channel.CallMethod(method, &cntl, &request, &response, NULL);
             } else {
-                _bns_channel.CallMethod(method, &cntl, &request, &response, NULL);
+                std::unique_lock<std::mutex> lck(_bns_channel_mutex);
+                _bns_channel->CallMethod(method, &cntl, &request, &response, NULL);
                 if (!cntl.Failed() && response.errcode() == pb::SUCCESS) {
                     _set_leader_address(cntl.remote_side());
                     DB_WARNING("connet with meta server success by bns name, leader:%s",
@@ -149,11 +152,12 @@ public:
         _master_leader_address = addr;
     }
 private:
-    brpc::Channel _bns_channel;
+    brpc::Channel *_bns_channel = nullptr;
     int32_t _request_timeout = 30000;
     int32_t _connect_timeout = 5000;
     bool _is_inited = false;
     std::mutex _master_leader_mutex;
+    std::mutex _bns_channel_mutex;
     butil::EndPoint _master_leader_address;
 };
 }//namespace
