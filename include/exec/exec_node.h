@@ -117,7 +117,7 @@ public:
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return NULL;
     }
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         for (size_t idx = 0; idx < _children.size(); ++idx) {
             _children[idx]->find_place_holder(placeholders);
         }
@@ -274,9 +274,6 @@ public:
                                   pb::OpType op_type,
                                   ExecNode* store_request,
                                   int seq_id);
-    virtual int push_cmd_to_cache(RuntimeState* state,
-                                  pb::OpType op_type,
-                                  ExecNode* store_request);
     std::map<int64_t, std::vector<SmartRecord>>& get_return_records() {
         return _return_records;
     }
@@ -300,10 +297,14 @@ public:
         _partitions.clear();
         _partitions.assign(partition_ids.begin(), partition_ids.end());
     }
+    bool is_get_keypoint() {
+        return _is_get_keypoint;
+    }
 protected:
     int64_t _limit = -1;
     int64_t _num_rows_returned = 0;
     bool _is_explain = false;
+    bool _is_get_keypoint = false;
     bool _return_empty = false;
     pb::PlanNodeType _node_type;
     std::vector<ExecNode*> _children;

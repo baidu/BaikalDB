@@ -55,7 +55,7 @@ public:
 #endif
 
 namespace baikaldb {
-DECLARE_int32(limit_slow_sql_size);
+DECLARE_uint64(limit_slow_sql_size);
 class NetworkServer {
 public:
     virtual ~NetworkServer();
@@ -121,6 +121,7 @@ private:
     int insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_sql_map, 
         std::set<std::string>& family_tbl_tag_set, 
         std::set<uint64_t>& sign_to_counts);
+    int get_filter_sign_set(const std::map<uint64_t, std::string>& sign_sql_map, std::set<uint64_t>& need_filter_sign);
     void insert_subquery_signs_info(std::map<uint64_t, std::set<uint64_t>>& parent_sign_to_subquery_signs, bool is_insert_success);
     int insert_subquery_values(const std::string& values);
 

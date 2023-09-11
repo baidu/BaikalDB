@@ -43,6 +43,13 @@ struct BinlogClosure : public braft::Closure {
     BinlogClosure() : cond(nullptr) { };
     BinlogClosure(BthreadCond* cond) : cond(cond) { };
     virtual void Run() {
+        if (check_status) {
+            if (!status().ok()) {
+                response->set_errcode(pb::NOT_LEADER);
+                response->set_errmsg("leader transfer");
+                DB_FATAL("leader transfer");
+            }
+        }
         if (cond) {
             cond->decrease_broadcast();
         }
@@ -57,6 +64,27 @@ struct BinlogClosure : public braft::Closure {
     TimeCost cost;
     pb::StoreRes* response = nullptr;
     google::protobuf::Closure* done = nullptr;
+    bool check_status = false;
+};
+
+struct OlapOPClosure : public braft::Closure {
+    OlapOPClosure() : cond(nullptr) { };
+    OlapOPClosure(BthreadCond* cond) : cond(cond) { };
+    virtual void Run() {
+        if (!status().ok()) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("leader transfer");
+            DB_FATAL("leader transfer");
+        }
+
+        if (cond) {
+            cond->decrease_signal();
+        }
+        delete this;
+    }
+
+    BthreadCond* cond;
+    pb::StoreRes* response = nullptr;
 };
 
 struct AddPeerClosure : public braft::Closure {

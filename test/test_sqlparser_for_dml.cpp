@@ -404,6 +404,37 @@ TEST(test_parser, case_insert) {
         ASSERT_TRUE(select_stmt->is_in_braces == true);
     }
 }
+TEST(test_parser, case_merge) {
+    {
+        parser::SqlParser parser;
+        std::string sql_insert8 = "insert LOW_PRIORITY merge into db.table_a set field_a = 10 "
+            "on duplicate key update db.table_a.field_a = 1";
+        parser.parse(sql_insert8);
+
+        ASSERT_EQ(0, parser.error);
+        ASSERT_EQ(1, parser.result.size());
+        ASSERT_TRUE(typeid(*(parser.result[0])) == typeid(parser::InsertStmt));
+        parser::InsertStmt* insert_stmt = (parser::InsertStmt*)parser.result[0];
+        std::cout << insert_stmt->to_string() << std::endl;
+        ASSERT_FALSE(insert_stmt->is_replace);
+        ASSERT_FALSE(insert_stmt->is_ignore);
+        ASSERT_TRUE(insert_stmt->is_merge);
+        ASSERT_EQ(insert_stmt->priority, parser::PE_LOW_PRIORITY);
+        ASSERT_TRUE(insert_stmt->table_name != nullptr);
+        ASSERT_TRUE(std::string(insert_stmt->table_name->db.value) == "db");
+        ASSERT_EQ(std::string(insert_stmt->table_name->table.value), "table_a");
+        ASSERT_EQ(1, insert_stmt->columns.size());
+        ASSERT_TRUE(insert_stmt->columns[0]->db.empty());
+        ASSERT_TRUE(insert_stmt->columns[0]->table.empty());
+        ASSERT_TRUE(std::string(insert_stmt->columns[0]->name.value) == "field_a");
+
+        ASSERT_EQ(1, insert_stmt->lists.size());
+        parser::RowExpr* row_expr0 = insert_stmt->lists[0];
+        ASSERT_EQ(1, row_expr0->children.size());
+        
+        ASSERT_EQ(1, insert_stmt->on_duplicate.size());
+    }
+}
 TEST(test_parser, case_replace) {
     {
         parser::SqlParser parser;

@@ -16,6 +16,8 @@
 #include <climits>
 #include <iostream>
 #include <fstream>
+#include <sstream>
+#include <iomanip>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -234,6 +236,28 @@ TEST(test_proto, case_all) {
     }
 }
 
+TEST(float_fmt_cost, case_all) {
+    srand(static_cast <unsigned> (time(0)));
+    std::vector<double> float_vec;
+    for (int i = 0; i < 10000; i++) {
+        float_vec.push_back(rand() / (RAND_MAX + 1.));
+    }
+    TimeCost cost;
+    for (int i = 0; i < 10000; i++) {
+        char tmp_buf[100] = {0};
+        snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", float_vec[i]);
+    }
+    int64_t old_cost =  cost.get_time();
+    cost.reset();
+    for (int i = 0; i < 10000; i++) {
+        std::stringstream ss;
+        ss << std::setprecision(12) << float_vec[i];
+        std::string double_string = ss.str();
+    }
+    int64_t new_cost =  cost.get_time();
+    std::cout << "old_cost:" << old_cost << " new_cost: " << new_cost << std::endl;
+}
+
 TEST(test_compare, case_all) {
     class LogMessageVoidify {
         public: 
@@ -338,6 +362,27 @@ TEST(test_compare, case_all) {
         v1.str_val = "\xff\xff";
         v1.cast_to(pb::INT64);
         EXPECT_EQ(v1.get_numberic<int64_t>(), 65535);
+    }
+    {
+        ExprValue v1(pb::MAXVALUE_TYPE);
+        ExprValue v2(pb::INT32);
+        v2._u.int32_val = 2147483647; 
+        EXPECT_GT(v1.compare(v2), 0);
+    }
+    {
+        ExprValue v1(pb::MAXVALUE_TYPE);
+        ExprValue v2(pb::MAXVALUE_TYPE);
+        EXPECT_EQ(v1.compare(v2), 0);
+    }
+    {
+        ExprValue v1(pb::INT32);
+        v1._u.int32_val = 2147483647;
+        ExprValue v2(pb::MAXVALUE_TYPE);
+        EXPECT_LT(v1.compare(v2), 0);
+    }
+    {
+        ExprValue v1(pb::MAXVALUE_TYPE);
+        EXPECT_EQ(v1.get_string(), "MAXVALUE");
     }
     ExprValue dt(pb::STRING);
     dt.str_val = "2018-1-1 10:11:11";

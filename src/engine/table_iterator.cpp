@@ -18,6 +18,26 @@
 
 namespace baikaldb {
 DEFINE_bool(cstore_scan_fill_cache, true, "cstore_scan_fill_cache");
+DEFINE_bool(scan_fill_cache, true, "iterator_prefix_same_as_start");
+
+TableIterator* Iterator::scan_binlog_primary(
+        const IndexRange&       range, 
+        std::map<int32_t, FieldInfo*>&   fields, 
+        std::vector<int32_t>& field_slot,
+        bool is_offline_binlog) {
+    // check_region=false, forward=true, txn=nullptr
+    TableIterator* iter = new (std::nothrow)TableIterator(false, true);
+    if (nullptr == iter) {
+        return nullptr;
+    }
+    iter->set_is_offline_binlog(is_offline_binlog);
+    if (0 != iter->open(range, fields, field_slot, nullptr)) {
+        DB_WARNING("open table iterator failed");
+        delete iter;
+        return nullptr;
+    }
+    return iter;
+}
 
 TableIterator* Iterator::scan_primary(
         SmartTransaction        txn,
@@ -282,10 +302,31 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
 
 
     if (txn != nullptr) {
+        // 查询请求txn都不为空
         read_options.snapshot = txn->get_snapshot();
-        _iter = new myrocksdb::Iterator(txn->get_txn()->GetIterator(read_options, _data_cf));
+        myrocksdb::Transaction* my_txn = txn->get_txn();
+        bool same_prefix = false;
+        if (my_txn->use_cold_db()) {
+            same_prefix = _db->cold_data_cf_same_prefix(_lower_bound_slice, _upper_bound_slice);
+        } else {
+            same_prefix = _db->data_cf_same_prefix(_lower_bound_slice, _upper_bound_slice);
+        }
+
+        if (_forward && same_prefix) {
+            read_options.prefix_same_as_start = true;
+            read_options.total_order_seek = false;
+        } else {
+            read_options.prefix_same_as_start = false;
+            read_options.total_order_seek = true;
+        }
+        read_options.fill_cache = FLAGS_scan_fill_cache;
+        _iter = new myrocksdb::Iterator(my_txn->GetIterator(read_options, _data_cf));
     } else {
-        _iter = new myrocksdb::Iterator(_db->new_iterator(read_options, RocksWrapper::DATA_CF));
+        if (!_is_offline_binlog) {
+            _iter = new myrocksdb::Iterator(_db->new_iterator(read_options, RocksWrapper::DATA_CF));
+        } else {
+            _iter = new myrocksdb::Iterator(_db->new_cold_iterator(read_options, RocksWrapper::COLD_DATA_CF));
+        }
     }
     if (!_iter) {
         DB_FATAL("create iterator failed: %ld", index_id);

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "ddl_planner.h"
 #include "handle_helper.h"
 #include "query_context.h"
 #include "store_interact.hpp"
@@ -87,6 +88,14 @@ void HandleHelper::init() {
     _calls[SQL_HANDLE_REGION_ADJUSTKEY] = std::bind(&HandleHelper::_handle_region_adjustkey,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_MODIFY_PARTITION] = std::bind(&HandleHelper::_handle_modify_partition,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HANDLE_SPECIFY_SPLIT_KEYS] = std::bind(&HandleHelper::_handle_specify_split_keys,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HADNLE_CONVERT_PARTITION] = std::bind(&HandleHelper::_handle_convert_partition,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HANDLE_OFFLINE_BINLOG] = std::bind(&HandleHelper::_handle_offline_binlog,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HADNLE_LINK_EXTERNAL_SST] = std::bind(&HandleHelper::_handle_link_external_sst,
             this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
@@ -333,6 +342,7 @@ bool HandleHelper::_handle_add_privilege(const SmartSocket& client, const std::v
     std::string resource_tag = "";
     pb::RW rw  = pb::WRITE;
     bool permission = false;
+    std::string range_partition_type_str;
     if (split_vec.size() == 4) {
         db = split_vec[2];
         if (boost::iequals(split_vec[3], "READ")) {
@@ -341,6 +351,7 @@ bool HandleHelper::_handle_add_privilege(const SmartSocket& client, const std::v
             permission = true;
         }
         resource_tag = split_vec[3];
+        range_partition_type_str = split_vec[3];
     } else {
         client->state = STATE_ERROR;
         DB_FATAL("param invalid");
@@ -358,6 +369,16 @@ bool HandleHelper::_handle_add_privilege(const SmartSocket& client, const std::v
         pri->set_ddl_permission(permission);
     } else if (db == "use_read_index") {
         pri->set_use_read_index(permission);
+    } else if (db == "enable_plan_cache") {
+        pri->set_enable_plan_cache(permission);
+    } else if (db == "request_range_partition_type") {
+        pb::RangePartitionType range_partition_type = pb::RPT_DEFAULT;
+        if (!pb::RangePartitionType_Parse(range_partition_type_str, &range_partition_type)) {
+            DB_FATAL("Invalid range_partition_type_str: %s", range_partition_type_str.c_str());
+            client->state = STATE_ERROR;
+            return false;
+        }
+        pri->set_request_range_partition_type(range_partition_type);
     } else {
         auto add_db = pri->add_privilege_database();
         add_db->set_database(db);
@@ -1458,6 +1479,15 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         schema_conf->set_in_fast_import(is_open);
         auto table_schema = factory->get_table_info(table_id);
         table_info->set_resource_tag(table_schema.resource_tag);
+    } else if (key == "binlog_backup_days") {
+        auto table = factory->get_table_info_ptr(table_id);
+        if (table == nullptr || !table->is_binlog) {
+            DB_FATAL("not binlog table, name: %s, table_id: %ld", full_name.c_str(), table_id);
+            client->state = STATE_ERROR;
+            return false;
+        }
+        int days = strtol(split_vec[4].c_str(), NULL, 10);
+        schema_conf->set_binlog_backup_days(days);
     } else if (key.find("blacklist") != key.npos || key.find("forcelearner") != key.npos
             || key.find("forceindex") != key.npos) {
         auto table = factory->get_table_info_ptr(table_id);
@@ -1566,7 +1596,20 @@ bool HandleHelper::_handle_store_compact_region(const SmartSocket& client, const
         client->state = STATE_ERROR;
         return false;
     }
-    const std::string& store_addr = split_vec[2];
+    std::vector<std::string> store_addr;
+    store_addr.reserve(32);
+    if (split_vec[2].find(":") != std::string::npos) {
+        store_addr.emplace_back(split_vec[2]);
+    } else {
+        int ret = SchemaFactory::get_instance()->get_all_instance_by_resource_tag(split_vec[2], store_addr);
+        if (ret != 0 || store_addr.empty()) {
+            if(!_make_response_packet(client, "ERROR: invalid resource_tag")) {
+                return false;
+            }
+            client->state = STATE_READ_QUERY_RESULT;
+            return true;
+        }
+    }
     const std::string& type = split_vec[3];
     pb::RegionIds req;
     if (ops.find(type) != ops.end()) {
@@ -1581,12 +1624,16 @@ bool HandleHelper::_handle_store_compact_region(const SmartSocket& client, const
         client->state = STATE_READ_QUERY_RESULT;
         return true;
     }
-
-    pb::StoreRes res;
-    StoreInteract interact(store_addr);
-    interact.send_request("compact_region", req, res);
-    DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), req.ShortDebugString().c_str());
-    if(!_make_response_packet(client, res.ShortDebugString())) {
+    int count = 0;
+    for (const auto& addr : store_addr) {
+        pb::StoreRes res;
+        StoreInteract interact(addr);
+        interact.send_request("compact_region", req, res);
+        DB_WARNING("compact_region store: %s, req: %s, res: %s", addr.c_str(), req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
+        count++;
+    }
+    std::string result = "compact store count:" + std::to_string(count);
+    if(!_make_response_packet(client, result)) {
         return false;
     }
     client->state = STATE_READ_QUERY_RESULT;
@@ -1683,6 +1730,297 @@ bool HandleHelper::_handle_region_adjustkey(const SmartSocket& client, const std
     client->state = STATE_READ_QUERY_RESULT;
     return true;
 }
+
+bool HandleHelper::_handle_specify_split_keys(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if (client == nullptr || client->user_info == nullptr) {
+        DB_FATAL("Invalid client");
+        return false;
+    }
+    if(split_vec.size() < 4) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    const std::string& ns = client->user_info->namespace_;
+    const std::string& db = split_vec[2];
+    const std::string& table = split_vec[3];
+    if (db.empty() || table.empty()) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    std::string split_keys_str;
+    for (size_t i = 4; i < split_vec.size(); ++i) {
+        if (split_vec[i].empty()) {
+            continue;
+        }
+        split_keys_str += split_vec[i];
+        split_keys_str += ",";
+    }
+    if (!split_keys_str.empty()) {
+        split_keys_str.pop_back();
+    }
+
+    // 获取SchemaInfo
+    pb::QueryRequest query_request;
+    pb::QueryResponse query_response;
+    query_request.set_op_type(pb::QUERY_SCHEMA_FLATTEN);
+    query_request.set_namespace_name(ns);
+    query_request.set_database(db);
+    query_request.set_table_name(table);
+    MetaServerInteract::get_instance()->send_request("query", query_request, query_response);
+    if (query_response.errcode() != pb::SUCCESS || query_response.schema_infos().size() != 1) {
+        DB_FATAL("Fail to query schema");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    pb::SchemaInfo schema_info = query_response.schema_infos(0);
+    if (DDLPlanner::parse_partition_pre_split_keys(split_keys_str, schema_info) != 0) {
+        DB_FATAL("Fail to parse_partition_pre_split_keys");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    // 更改split_keys
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_SPECIFY_SPLIT_KEYS);
+    auto info = request.mutable_table_info();
+    if (info == nullptr) {
+        DB_FATAL("table_info is nullptr");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    info->set_namespace_name(ns);
+    info->set_database(db);
+    info->set_table_name(table);
+    info->mutable_split_keys()->Swap(schema_info.mutable_split_keys());
+    
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if (response.errcode() != pb::SUCCESS) {
+        DB_FATAL("Fail to send_request");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    if(!_make_response_packet(client, response.ShortDebugString())) {
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool HandleHelper::_handle_convert_partition(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if (client == nullptr || client->user_info == nullptr) {
+        DB_FATAL("Invalid client");
+        return false;
+    }
+    if(split_vec.size() < 5) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    const std::string& db = split_vec[2];
+    const std::string& table = split_vec[3];
+    if (db == "" || table == "") {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    const std::string& primary_range_partition_type_str = split_vec[4];
+    pb::RangePartitionType primary_range_partition_type = pb::RPT_DEFAULT;
+    if (!pb::RangePartitionType_Parse(primary_range_partition_type_str, &primary_range_partition_type)) {
+        DB_FATAL("Invalid primary_range_partition_type: %s", primary_range_partition_type_str.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+    std::unordered_set<pb::RangePartitionType> gen_range_partition_types;
+    for (size_t i = 5; i < split_vec.size(); ++i) {
+        const std::string& range_partition_type_str = split_vec[i];
+        pb::RangePartitionType range_partition_type = pb::RPT_DEFAULT;
+        if (!pb::RangePartitionType_Parse(range_partition_type_str, &range_partition_type)) {
+            DB_FATAL("Invalid gen_range_partition_type: %s", range_partition_type_str.c_str());
+            client->state = STATE_ERROR;
+            return false;
+        }
+        gen_range_partition_types.insert(range_partition_type);
+    }
+
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_CONVERT_PARTITION);
+    auto info = request.mutable_table_info();
+    if (info == nullptr) {
+        DB_FATAL("table_info is nullptr");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    info->set_table_name(table);
+    info->set_database(db);
+    info->set_namespace_name(client->user_info->namespace_);
+
+    auto partition_info = info->mutable_partition_info();
+    if (partition_info == nullptr) {
+        DB_FATAL("partition_info is nullptr");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    partition_info->set_type(pb::PT_RANGE);
+    partition_info->set_primary_range_partition_type(primary_range_partition_type);
+    for (const auto& range_partition_type : gen_range_partition_types) {
+        partition_info->add_gen_range_partition_types(range_partition_type);
+    }
+
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if (response.errcode() != pb::SUCCESS) {
+        DB_FATAL("Fail to send_request");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    if(!_make_response_packet(client, response.ShortDebugString())) {
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+// handle offline_binlog tableid reigonid oldest newest
+bool HandleHelper::_handle_offline_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if (client == nullptr || client->user_info == nullptr) {
+        DB_FATAL("Invalid client");
+        return false;
+    }
+    if(split_vec.size() != 6) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    int64_t table_id = strtoll(split_vec[2].c_str(), NULL, 10);
+    int64_t region_id = strtoll(split_vec[3].c_str(), NULL, 10);
+    int64_t oldest_ts = strtoll(split_vec[4].c_str(), NULL, 10);
+    int64_t newest_ts = strtoll(split_vec[5].c_str(), NULL, 10);
+
+    pb::RegionInfo info;
+    if (SchemaFactory::get_instance()->get_region_info(table_id, region_id, info) != 0) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    pb::StoreReq req;
+    req.set_op_type(pb::OP_RECOVER_OFFLINE_BINLOG);
+    req.set_region_version(info.version());
+    req.set_region_id(region_id);
+    auto offline_binlog_info = req.mutable_extra_req()->mutable_offline_binlog_info();
+    offline_binlog_info->set_oldest_ts(oldest_ts);
+    offline_binlog_info->set_newest_ts(newest_ts);
+    
+    int retry_time = 3;
+    std::string leader = info.leader();
+    while(retry_time-- > 0) {
+        pb::StoreRes res;
+        StoreInteract interact(leader);
+        interact.send_request("query_binlog", req, res);
+        DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
+        if (res.errcode() == pb::NOT_LEADER && res.has_leader() &&
+            !res.leader().empty() && res.leader() != "0.0.0.0:0") {
+            leader = res.leader();
+            continue;
+        }
+        if(!_make_response_packet(client, res.ShortDebugString())) {
+            return false;
+        }
+        break;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+// handle link_external_sst dbName tableName partitionName
+bool HandleHelper::_handle_link_external_sst(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+     SchemaFactory* factory = SchemaFactory::get_instance();
+    if(!client || !factory || !client->query_ctx) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    int64_t table_id = 0;
+    int64_t region_id = 0;
+    if (split_vec.size() != 5) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    const std::string& db = split_vec[2];
+    const std::string& table = split_vec[3];
+    const std::string& partition = split_vec[4];
+    if (db == "" || table == "" || partition == "") {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::string namespace_ = client->user_info->namespace_;
+    std::string table_full_name = namespace_ + "." + db + "." + table;
+    if (0 != factory->get_table_id(table_full_name, table_id)) {
+        DB_FATAL("get table_id failed, %s", table_full_name.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+    auto table_ptr = factory->get_table_info_ptr(table_id);
+    if (table_ptr == nullptr) {
+        DB_FATAL("get_table failed, %s, %ld", table_full_name.c_str(), table_id);
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    int64_t partition_id = -1;
+    if (table_ptr->is_range_partition) {
+        RangePartition* partition_ptr = static_cast<RangePartition*>(table_ptr->partition_ptr.get());
+        if (!partition_ptr->get_partition_id_by_name(partition, partition_id)) {
+            DB_FATAL("get partition id failed %s", table_full_name.c_str());
+            client->state = STATE_ERROR;
+            return false;
+        }
+    } else {
+        DB_FATAL("%s not range partition table", table_full_name.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::vector<int64_t> partition_id_vec { partition_id };
+    std::map<std::string, pb::RegionInfo> region_infos_map;
+    if (SchemaFactory::get_instance()->get_all_region_by_table_id(table_id, &region_infos_map, partition_id_vec) != 0) {
+        DB_WARNING("get_all_region_by_table_id failed, table_id[%ld], partition_id[%ld]", table_id, partition_id);
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    for (const auto& iter : region_infos_map) {
+        int retry_time = 3;
+        std::string leader = iter.second.leader();
+        while(retry_time-- > 0) {
+            pb::RegionIds req;
+            pb::StoreRes res;
+            req.add_region_ids(iter.second.region_id());
+            StoreInteract interact(leader);
+            interact.send_request("manual_link_external_sst", req, res);
+            DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
+            if (res.errcode() == pb::NOT_LEADER && res.has_leader() &&
+                !res.leader().empty() && res.leader() != "0.0.0.0:0") {
+                leader = res.leader();
+                continue;
+            }
+            if(!_make_response_packet(client, res.ShortDebugString())) {
+                return false;
+            }
+            break;
+        }
+    }
+
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
 
 /*
  *  绝大数的handle sql返回的都是与meta交互的response info一个信息

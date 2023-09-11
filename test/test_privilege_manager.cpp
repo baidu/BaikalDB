@@ -21,6 +21,7 @@
 #include "database_manager.h"
 #include "table_manager.h"
 #include "region_manager.h"
+#include "cluster_manager.h"
 #include <gflags/gflags.h>
 namespace baikaldb {
     DECLARE_string(db_path);
@@ -47,6 +48,14 @@ protected:
         _schema_manager = baikaldb::SchemaManager::get_instance(); 
         _table_manager = baikaldb::TableManager::get_instance(); 
         _region_manager = baikaldb::RegionManager::get_instance();
+        _cluster_manager = baikaldb::ClusterManager::get_instance();
+
+        butil::EndPoint addr;
+        addr.ip = butil::my_ip();
+        addr.port = 8081;
+        braft::PeerId peer_id(addr, 0);
+        _state_machine = new baikaldb::MetaStateMachine(peer_id); 
+        _cluster_manager->set_meta_state_machine(_state_machine);
     }
     virtual void TearDown() {}
     baikaldb::PrivilegeManager* _privilege_manager;
@@ -57,7 +66,35 @@ protected:
     baikaldb::DatabaseManager* _database_manager;
     baikaldb::TableManager* _table_manager;
     baikaldb::RegionManager* _region_manager;
+    baikaldb::ClusterManager* _cluster_manager;
+    baikaldb::MetaStateMachine* _state_machine;
 };
+
+TEST_F(PrivilegeManagerTest, test_construct_env) {
+    // 增加逻辑机房
+    baikaldb::pb::MetaManagerRequest request_logical;
+    request_logical.set_op_type(baikaldb::pb::OP_ADD_LOGICAL);
+    request_logical.mutable_logical_rooms()->add_logical_rooms("test_logical");
+    _cluster_manager->add_logical(request_logical, NULL);
+
+    // 增加物理机房
+    baikaldb::pb::MetaManagerRequest request_physical;
+    request_physical.set_op_type(baikaldb::pb::OP_ADD_PHYSICAL);
+    request_physical.mutable_physical_rooms()->set_logical_room("test_logical");
+    request_physical.mutable_physical_rooms()->add_physical_rooms("test_phyical");
+    _cluster_manager->add_physical(request_physical, NULL);
+
+    // 增加实例
+    baikaldb::pb::MetaManagerRequest request_instance;
+    request_instance.set_op_type(baikaldb::pb::OP_ADD_INSTANCE);
+    request_instance.mutable_instance()->set_address("127.0.0.1:8010");
+    request_instance.mutable_instance()->set_capacity(100000);
+    request_instance.mutable_instance()->set_used_size(5000);
+    request_instance.mutable_instance()->set_resource_tag("e0");
+    request_instance.mutable_instance()->set_physical_room("test_phyical");
+    _cluster_manager->add_instance(request_instance, NULL);
+}
+
 // add_logic add_physical add_instance
 TEST_F(PrivilegeManagerTest, test_create_drop_modify) {
     //测试点：增加命名空间"FengChao"
@@ -198,7 +235,8 @@ TEST_F(PrivilegeManagerTest, test_create_drop_modify) {
     request_create_table_fc.mutable_table_info()->set_table_name("userinfo");
     request_create_table_fc.mutable_table_info()->set_database("FC_Word");
     request_create_table_fc.mutable_table_info()->set_namespace_name("FengChao");
-    request_create_table_fc.mutable_table_info()->add_init_store("127.0.0.1:8010");
+    // request_create_table_fc.mutable_table_info()->add_init_store("127.0.0.1:8010");
+    request_create_table_fc.mutable_table_info()->set_resource_tag("e0");
     baikaldb::pb::FieldInfo* field = request_create_table_fc.mutable_table_info()->add_fields();
     field->set_field_name("userid");
     field->set_mysql_type(baikaldb::pb::INT64);
@@ -312,7 +350,8 @@ TEST_F(PrivilegeManagerTest, test_create_drop_modify) {
     request_create_table_fc_level.mutable_table_info()->set_table_name("planinfo");
     request_create_table_fc_level.mutable_table_info()->set_database("FC_Word");
     request_create_table_fc_level.mutable_table_info()->set_namespace_name("FengChao");
-    request_create_table_fc_level.mutable_table_info()->add_init_store("127.0.0.1:8010");
+    // request_create_table_fc_level.mutable_table_info()->add_init_store("127.0.0.1:8010");
+    request_create_table_fc.mutable_table_info()->set_resource_tag("e0");
     request_create_table_fc_level.mutable_table_info()->set_upper_table_name("userinfo");
     field = request_create_table_fc_level.mutable_table_info()->add_fields();
     field->set_field_name("userid");

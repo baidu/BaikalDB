@@ -79,7 +79,25 @@ private:
     int whether_main_logical_room_legal(pb::MetaManagerRequest* request, 
                             pb::MetaManagerResponse* response,
                             uint64_t log_id);
-    MetaStateMachine*                                   _meta_state_machine;
+    bool is_table_info_op_type(pb::OpType op_type) {
+        if (op_type == pb::OP_CREATE_TABLE
+            || op_type == pb::OP_DROP_TABLE
+            || op_type == pb::OP_RESTORE_TABLE
+            || op_type == pb::OP_RENAME_TABLE) {
+            return true;
+        }
+        return false;
+    }
+    // Partition
+    int pre_process_for_partition(const pb::MetaManagerRequest* request,
+                                  pb::MetaManagerResponse* response,
+                                  uint64_t log_id);
+    int pre_process_for_dynamic_partition(const pb::MetaManagerRequest* request,
+                                          pb::MetaManagerResponse* response,
+                                          uint64_t log_id,
+                                          pb::PrimitiveType partition_col_type);
+
+    MetaStateMachine* _meta_state_machine;
 }; //class
 
 }//namespace

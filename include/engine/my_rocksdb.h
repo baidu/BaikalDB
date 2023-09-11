@@ -19,6 +19,20 @@
 namespace baikaldb {
 
 namespace myrocksdb {
+#define COLD_DB_CHECK_READ(handle) \
+    do {\
+        if (_use_cold_db && handle != _cold_data_handle) {\
+            DB_FATAL("cold db read not cold handle"); \
+            return rocksdb::Status::IOError("not cold handle");\
+        }\
+    }while (0);
+#define COLD_DB_CHECK_WRITE \
+    do {\
+        if (_use_cold_db) {\
+            DB_FATAL("cold db not support write"); \
+            return rocksdb::Status::IOError("cold db not support write");\
+        }\
+    }while (0);
 
 class Iterator {
 public:
@@ -46,7 +60,8 @@ private:
 
 class Transaction {
 public:
-    explicit Transaction(rocksdb::Transaction* txn) : _txn(txn) { }
+    explicit Transaction(rocksdb::Transaction* txn, bool use_cold_db, rocksdb::ColumnFamilyHandle* handle) : 
+            _txn(txn), _use_cold_db(use_cold_db), _cold_data_handle(handle) { }
 
     virtual ~Transaction() { delete _txn; }
 
@@ -99,12 +114,17 @@ public:
     rocksdb::Status Put(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::SliceParts& key,
                      const rocksdb::SliceParts& value);
 
+    rocksdb::Status Merge(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key,
+                       const rocksdb::Slice& value,
+                       const bool assume_tracked = false);
     rocksdb::Status Delete(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key) {
+        COLD_DB_CHECK_WRITE;
         return _txn->Delete(column_family, key);
     }
 
     rocksdb::Status Delete(rocksdb::ColumnFamilyHandle* column_family,
                         const rocksdb::SliceParts& key) {
+        COLD_DB_CHECK_WRITE;
         return _txn->Delete(column_family, key);
     }
 
@@ -114,13 +134,17 @@ public:
 
     rocksdb::TransactionID GetID() const { return _txn->GetID(); }
 
-    rocksdb::Iterator* GetIterator(const rocksdb::ReadOptions& read_options) {
-        return _txn->GetIterator(read_options);
-    }
+    // rocksdb::Iterator* GetIterator(const rocksdb::ReadOptions& read_options) {
+    //     return _txn->GetIterator(read_options);
+    // }
 
     rocksdb::Iterator* GetIterator(const rocksdb::ReadOptions& read_options,
                                 rocksdb::ColumnFamilyHandle* column_family) {
-        return _txn->GetIterator(read_options, column_family);
+        if (_use_cold_db) {
+            return _txn->GetIterator(read_options, _cold_data_handle);
+        } else {
+            return _txn->GetIterator(read_options, column_family);
+        }
     }
 
     rocksdb::Status Prepare()  { return _txn->Prepare(); }
@@ -140,8 +164,12 @@ public:
 
     void DisableIndexing() { _txn->DisableIndexing(); }
 
+    bool use_cold_db() const { return _use_cold_db; }
+
 private:
     rocksdb::Transaction* _txn = nullptr;
+    bool _use_cold_db = false;
+    rocksdb::ColumnFamilyHandle* _cold_data_handle = nullptr;
 };
 
 } // namespace myrocksdb

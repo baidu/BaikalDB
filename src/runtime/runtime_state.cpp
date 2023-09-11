@@ -27,8 +27,7 @@ DEFINE_bool(limit_unappropriate_sql, false, "limit concurrency as one when selec
 int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
-        TransactionPool* pool,
-        bool store_compute_separate, bool is_binlog_region) {
+        TransactionPool* pool, StateOption option) {
     //thread_local map:线程局部变量map,保存签名,  tuple_sign => pair<TimeCost, std::shared_ptr<SmartDescriptor>>, 避免重复BuildFile
     static thread_local MemRowDescriptorMap sql_sign_to_mem_row_descriptor;
     for (auto& tuple : tuples) {
@@ -70,7 +69,7 @@ int RuntimeState::init(const pb::StoreReq& req,
     if (req.has_not_check_region()) {
         _need_check_region = !req.not_check_region();
     }
-    if (is_binlog_region) {
+    if (option.is_binlog_region) {
         // binlog region 不检查
         _need_check_region = false;
     }
@@ -98,13 +97,13 @@ int RuntimeState::init(const pb::StoreReq& req,
         DB_WARNING("error: txn pool is null: %ld", _region_id);
         return -1;
     }
-    is_separate = store_compute_separate;
+    is_separate = option.store_compute_separate;
     _log_id = req.log_id();
     _txn_pool = pool;
     _txn = _txn_pool->get_txn(txn_id);
     if (_txn != nullptr) {
         _txn->set_resource(_resource);
-        _txn->set_separate(store_compute_separate);
+        _txn->set_separate(option.store_compute_separate);
     }
     return 0;
 }

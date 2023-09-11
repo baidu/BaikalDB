@@ -32,6 +32,7 @@ public:
 
     virtual void close(RuntimeState* state) override {
         ExecNode::close(state);
+        _execute_child_idx = 0;
         std::vector<int32_t>().swap(_seq_ids);
         std::vector<SmartRecord>().swap(_insert_scan_records);
         std::vector<SmartRecord>().swap(_del_scan_records);
@@ -53,7 +54,7 @@ public:
             int seq_id,
             const std::vector<SmartRecord>& insert_scan_records,
             const std::vector<SmartRecord>& delete_scan_records);
-    int send_request_concurrency(RuntimeState* state, size_t start_child);
+    int send_request_concurrency(RuntimeState* state, size_t execute_child_idx);
     int get_region_infos(RuntimeState* state,
             DMLNode* dml_node,
             const std::vector<SmartRecord>& insert_scan_records,
@@ -66,9 +67,11 @@ protected:
     FetcherStore _fetcher_store;
     pb::OpType  _op_type;
     SchemaFactory*                  _factory = nullptr;
-    std::vector<int32_t>        _seq_ids; 
+    std::vector<int32_t>        _seq_ids;
+    size_t  _execute_child_idx = 0;
     size_t  _uniq_index_number = 0;
     size_t  _affected_index_num = 0;
+    std::map<int32_t, FieldInfo*> _update_fields;
     std::vector<SmartRecord> _insert_scan_records;
     std::vector<SmartRecord> _del_scan_records;
 };

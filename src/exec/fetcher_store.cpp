@@ -46,6 +46,8 @@ DEFINE_string(fetcher_resource_tag, "", "store read resource_tag perfered, only 
 DECLARE_int32(transaction_clear_delay_ms);
 DEFINE_bool(use_dynamic_timeout, false, "whether use dynamic_timeout");
 DEFINE_bool(use_read_index, false, "whether use follower read");
+DEFINE_bool(read_random_select_peer, false, "read random select peers");
+
 BRPC_VALIDATE_GFLAG(use_dynamic_timeout, brpc::PassValidate);
 bvar::Adder<int64_t> OnRPCDone::async_rpc_region_count {"async_rpc_region_count"};
 bvar::LatencyRecorder OnRPCDone::total_send_request {"total_send_request"};
@@ -192,9 +194,6 @@ ErrorType OnRPCDone::fill_request() {
                 && (pair.first < _start_seq_id || pair.first >= _current_seq_id)) {
                 continue;
             }
-            if (_op_type == pb::OP_PREPARE && plan_item.op_type == pb::OP_PREPARE) {
-                continue;
-            }
             if (!need_copy_cache_plan && plan_item.op_type != pb::OP_BEGIN
                 && !_state->single_txn_cached()) {
                 DB_DONE(DEBUG, "not copy cache");
@@ -319,9 +318,31 @@ void OnRPCDone::select_addr() {
         // 没有learner副本时报警
         DB_DONE(DEBUG, "has abnormal learner, learner size: 0");
     }
-    if (_op_type == pb::OP_SELECT && _state->txn_id == 0 && _state->need_use_read_index) {
-        _request.mutable_extra_req()->set_use_read_idx(true);
+    if (_op_type == pb::OP_SELECT && _state->txn_id == 0) {
+        // follower read, 走read index
+        if (_state->need_use_read_index) {
+            _request.mutable_extra_req()->set_use_read_idx(true);
+        }
+        // 读随机访问所有peer
+        if (FLAGS_read_random_select_peer && _retry_times == 0) {
+            FetcherStore::other_normal_peer_to_leader(_info, "");
+            _addr = _info.leader();
+        }
+        // 倾向访问的store集群，仅第一次有效, 如pap-bj db第一次优先访问pap-bj的store
+        if (FLAGS_fetcher_resource_tag != "" && _retry_times == 0) {
+            std::string baikaldb_logical_room = SchemaFactory::get_instance()->get_logical_room();
+            for (auto& peer : _info.peers()) {
+                auto status = SchemaFactory::get_instance()->get_instance_status(peer);
+                if (status.status == pb::NORMAL 
+                        && status.resource_tag == FLAGS_fetcher_resource_tag
+                        && status.logical_room == baikaldb_logical_room) {
+                    _addr = peer;
+                    break;
+                }
+            }
+        }
     }
+    
     // 是否指定访问资源隔离, 如offline
     std::string insulate_resource_tag = FLAGS_insulate_fetcher_resource_tag;
     if (_state->client_conn() != nullptr 
@@ -331,20 +352,6 @@ void OnRPCDone::select_addr() {
     }
     if (!insulate_resource_tag.empty() && _op_type == pb::OP_SELECT && _state->txn_id == 0) {
         return select_resource_insulate_read_addr(insulate_resource_tag);
-    }
-    
-    // 倾向访问的store集群，仅第一次有效, 如pap-bj db第一次优先访问pap-bj的store
-    if (FLAGS_fetcher_resource_tag != "" && _retry_times == 0 && _op_type == pb::OP_SELECT && _state->txn_id == 0) {
-        std::string baikaldb_logical_room = SchemaFactory::get_instance()->get_logical_room();
-        for (auto& peer : _info.peers()) {
-            auto status = SchemaFactory::get_instance()->get_instance_status(peer);
-            if (status.status == pb::NORMAL 
-                    && status.resource_tag == FLAGS_fetcher_resource_tag
-                    && status.logical_room == baikaldb_logical_room) {
-                _addr = peer;
-                break;
-            }
-        }
     }
 
     if (_op_type == pb::OP_SELECT && _state->txn_id == 0 && _info.learners_size() > 0 && 
@@ -725,7 +732,17 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
         bthread_usleep(_retry_times * FLAGS_retry_interval_us);
         return E_RETRY;
     }
-    if (_response.errcode() == pb::DISABLE_WRITE_TIMEOUT || _response.errcode() == pb::RETRY_LATER || _response.errcode() == pb::IN_PROCESS) {
+    if (_response.errcode() == pb::RETRY_LATER) {
+        DB_DONE(WARNING, "request failed, errcode: %s, errmsg: %s", pb::ErrCode_Name(_response.errcode()).c_str(), _response.errmsg().c_str());
+        if (FLAGS_fetcher_follower_read) {
+            // choose another peer to retry
+            schema_factory->update_instance(remote_side, pb::BUSY, false, false);
+            FetcherStore::other_normal_peer_to_leader(_info, _addr);
+        }
+        bthread_usleep(_retry_times * FLAGS_retry_interval_us);
+        return E_RETRY;
+    }
+    if (_response.errcode() == pb::DISABLE_WRITE_TIMEOUT || _response.errcode() == pb::IN_PROCESS) {
         DB_DONE(WARNING, "request failed, errcode: %s", pb::ErrCode_Name(_response.errcode()).c_str());
         bthread_usleep(_retry_times * FLAGS_retry_interval_us);
         return E_RETRY;
@@ -825,7 +842,7 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_response.has_last_insert_id()) {
         _client_conn->last_insert_id = _response.last_insert_id();
     }
-    if (_op_type != pb::OP_SELECT && _op_type != pb::OP_SELECT_FOR_UPDATE && _op_type != pb::OP_ROLLBACK) {
+    if (_op_type != pb::OP_SELECT && _op_type != pb::OP_SELECT_FOR_UPDATE && _op_type != pb::OP_ROLLBACK && _op_type != pb::OP_COMMIT) {
         _fetcher_store->affected_rows += _response.affected_rows();
         _client_conn->txn_affected_rows += _response.affected_rows();
         // 事务限制affected_rows，非事务限制会导致部分成功
@@ -989,7 +1006,7 @@ void FetcherStore::choose_other_if_dead(pb::RegionInfo& info, std::string& addr)
     }
 }
 
-void FetcherStore::other_normal_peer_to_leader(pb::RegionInfo& info, std::string& addr) {
+void FetcherStore::other_normal_peer_to_leader(pb::RegionInfo& info, const std::string& addr) {
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
 
     std::vector<std::string> normal_peers;
@@ -1037,6 +1054,7 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
                     DB_WARNING("get tso failed log_id: %lu txn_id:%lu op_type:%s", log_id, state->txn_id,
                         pb::OpType_Name(op_type).c_str());
                     error = E_FATAL;
+                    need_send_rollback = false;
                     return;
                 }
                 write_binlog_param.txn_id = state->txn_id;

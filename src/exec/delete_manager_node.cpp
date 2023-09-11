@@ -62,7 +62,7 @@ int DeleteManagerNode::init_delete_info(const pb::UpdateNode& update_node) {
 }
 
 int DeleteManagerNode::open_global_delete(RuntimeState* state) {
-    ExecNode* select_manager_node = _children[0];
+    ExecNode* select_manager_node = _children[_execute_child_idx++];
     auto ret = select_manager_node->open(state);
     if (ret < 0) {
         DB_WARNING("select manager node fail");
@@ -97,25 +97,22 @@ int DeleteManagerNode::open_global_delete(RuntimeState* state) {
     
     //对主表进行lock_delete操作, 上一步scan得到的数据没有加锁，在真正的加锁操作中间是有可能被修改的。
     //所以delete_primary删除的同时需要返回最新的数据到baikaldb
-    DMLNode* pri_node = static_cast<DMLNode*>(_children[1]);
+    DMLNode* pri_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
     int64_t affected_rows = send_request(state, pri_node, std::vector<SmartRecord>{}, scan_records);
     if (affected_rows < 0) {
         return affected_rows;
     }
-    _children.erase(_children.begin() + 1);
     //从第三个孩子开始是索引数据的删除node
     if (_fetcher_store.index_records.size() <= 0) {
         return affected_rows;
     }
     _del_scan_records.swap(_fetcher_store.index_records[_table_info->id]);
-    auto iter = _children.begin() + 1;
-    while (iter != _children.end()) {
-        DMLNode* sec_node = static_cast<DMLNode*>(*iter);
+    while (_execute_child_idx < _children.size()) {
+        DMLNode* sec_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
         ret = send_request(state, sec_node, std::vector<SmartRecord>{}, _del_scan_records);
         if (ret < 0) {
             return ret;
         }
-        iter = _children.erase(iter);
     }
     process_binlog(state, false);
     return affected_rows;

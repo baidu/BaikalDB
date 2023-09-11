@@ -50,7 +50,8 @@ enum IndexHint {
         fetch_field_ids();
         switch (index_type) {
             case pb::I_FULLTEXT:
-                calc_fulltext();
+            case pb::I_VECTOR:
+                calc_fulltext(sort_property);
                 break;
             default:
                 calc_normal(sort_property);
@@ -68,7 +69,7 @@ enum IndexHint {
 
     void calc_normal(Property& sort_property);
 
-    void calc_fulltext();
+    void calc_fulltext(Property& sort_property);
     
     void fetch_field_ids() {
         if (index_type == pb::I_KEY || index_type == pb::I_UNIQ || index_type == pb::I_PRIMARY) {
@@ -83,6 +84,8 @@ enum IndexHint {
         if (index_type == pb::I_FULLTEXT) {
             cover_field_ids.insert(table_info_ptr->get_field_id_by_short_name("__weight"));
             cover_field_ids.insert(table_info_ptr->get_field_id_by_short_name("__querywords"));
+        } else if (index_type == pb::I_VECTOR) {
+            cover_field_ids.insert(table_info_ptr->get_field_id_by_short_name("__weight"));
         }
     }
     
@@ -92,11 +95,16 @@ enum IndexHint {
     // TODO 后续做成index的统计信息，现在只是单列统计聚合
     void calc_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity);
     void show_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity);
-
-    void insert_no_cut_condition(const std::map<ExprNode*, std::unordered_set<int32_t>>& expr_field_map) {
+    void get_date_in_values(const ExprValue& left, bool left_open, const ExprValue& right, bool right_open, std::vector<ExprValue>& dates);
+    void insert_no_cut_condition(const std::map<ExprNode*, std::unordered_set<int32_t>>& expr_field_map, bool is_get_keypoint) {
         for (auto& pair : expr_field_map) {
             const auto& expr = pair.first;
             const auto& expr_field_ids = pair.second;
+            if (is_get_keypoint) {
+                other_condition.insert(expr);
+                other_field_ids.insert(expr_field_ids.begin(), expr_field_ids.end());
+                continue;
+            }
             if (need_cut_index_range_condition.count(expr) == 0) {
                 // primary 没有过滤index_conjuncts，后续store会增加这个过滤
                 if (all_in_index(expr_field_ids, cover_field_ids) && index_type != pb::I_PRIMARY) {
@@ -163,7 +171,7 @@ public:
     std::unordered_set<ExprNode*> need_cut_index_range_condition;
     std::unordered_set<ExprNode*> index_other_condition;
     std::unordered_set<ExprNode*> other_condition;
-    std::map<int32_t, range::FieldRange> field_range_map;
+    std::shared_ptr<std::map<int32_t, range::FieldRange>> field_range_map;
     int64_t index_read_rows = 0;
     int64_t table_get_rows = 0;
     double cost = 0.0;

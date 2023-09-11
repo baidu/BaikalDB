@@ -158,8 +158,8 @@ int ReverseIndex<Schema>::delete_reverse(
 template <typename Schema>
 int ReverseIndex<Schema>::search(
                        myrocksdb::Transaction* txn,
-                       const IndexInfo& index_info,
-                       const TableInfo& table_info,
+                       SmartIndex& index_info,
+                       SmartTable& table_info,
                        const std::string& search_data,
                        pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
@@ -255,8 +255,8 @@ int ReverseIndex<Schema>::get_reverse_list_two(
 template <typename Schema>
 int ReverseIndex<Schema>::create_executor(
                             myrocksdb::Transaction* txn,
-                            const IndexInfo& index_info,
-                            const TableInfo& table_info,
+                            SmartIndex& index_info,
+                            SmartTable& table_info,
                             const std::string& search_data, 
                             pb::MatchMode mode,
                             std::vector<ExprNode*> conjuncts, 
@@ -676,8 +676,8 @@ int ReverseIndex<Schema>::_insert_one_reverse_node(
 template <typename Schema>
 int MutilReverseIndex<Schema>::search(
                        myrocksdb::Transaction* txn,
-                       const IndexInfo& index_info,
-                       const TableInfo& table_info,
+                       SmartIndex& index_info,
+                       SmartTable& table_info,
                        const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
                        const std::vector<std::string>& search_datas,
                        const std::vector<pb::MatchMode>& modes,
@@ -690,8 +690,8 @@ int MutilReverseIndex<Schema>::search(
     _reverse_indexes = reverse_indexes;
     _index_info = index_info;
     _table_info = table_info;
-    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
-    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info->fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
     bool_executor_type type = NODE_COPY;
     _son_exe_vec.resize(son_size);
     bool type_init = false; 
@@ -733,8 +733,8 @@ int MutilReverseIndex<Schema>::search(
 template <typename Schema>
 int MutilReverseIndex<Schema>::search(
     myrocksdb::Transaction* txn,
-    const IndexInfo& index_info,
-    const TableInfo& table_info,
+    SmartIndex& index_info,
+    SmartTable& table_info,
     std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
     bool is_fast, const pb::FulltextIndex& fulltext_index_info) {
 
@@ -742,8 +742,8 @@ int MutilReverseIndex<Schema>::search(
     _table_info = table_info;
     _txn = txn;
     _is_fast = is_fast;
-    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
-    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info->fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
     _reverse_index_map = reverse_index_map;    
     _reverse_indexes.reserve(5);
     init_operator_executor(fulltext_index_info, _exe);
@@ -809,7 +809,7 @@ int MutilReverseIndex<Schema>::init_term_executor(
     if (range.has_left_key()) {
         word = range.left_key();
     } else {
-        SmartRecord record = SchemaFactory::get_instance()->new_record(_table_info.id);
+        SmartRecord record = SchemaFactory::get_instance()->new_record(_table_info->id);
         record->decode(range.left_pb_record());
         auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
         if (index_info == nullptr || index_info->id == -1) {

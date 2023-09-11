@@ -58,9 +58,9 @@ public:
 
     void add_access_path(const SmartPath& access_path) {
         //如果使用倒排索引，则不使用代价进行索引选择
-        if ((access_path->index_type == pb::I_FULLTEXT)
+        if ((access_path->index_type == pb::I_FULLTEXT || access_path->index_type == pb::I_VECTOR)
             && access_path->is_possible) {
-            _use_fulltext = true;
+            _use_fulltext_or_vector = true;
         }
 
         if (access_path->index_info_ptr->index_hint_status == pb::IHS_DISABLE
@@ -85,7 +85,7 @@ public:
     }
 
     void reset() {
-        _use_fulltext = false;
+        _use_fulltext_or_vector = false;
         _has_disable_index = false;
         _use_force_index = false;
         // 重置is_possible状态，只有此状态会在预处理时修改
@@ -96,9 +96,9 @@ public:
                 path->is_possible = true;
             }
 
-            if ((path->index_type == pb::I_FULLTEXT)
+            if ((path->index_type == pb::I_FULLTEXT || path->index_type == pb::I_VECTOR)
                 && path->is_possible) {
-                _use_fulltext = true;
+                _use_fulltext_or_vector = true;
             }
 
             if (path->index_info_ptr->index_hint_status == pb::IHS_DISABLE
@@ -121,7 +121,7 @@ public:
         _possible_indexs.clear();
         _paths.clear();
         _multi_reverse_index.clear();
-        _use_fulltext = false;
+        _use_fulltext_or_vector = false;
         _possible_index_cnt = 0;
         _cover_index_cnt = 0;
         _fulltext_use_arrow = false;
@@ -166,7 +166,7 @@ private:
     std::vector<int64_t> _multi_reverse_index;
     std::map<int32_t, double> _filed_selectiy; //缓存，避免重复的filed_id多次调用代价接口
     int64_t _table_id = 0;
-    bool _use_fulltext = false;
+    bool _use_fulltext_or_vector = false;
     bool _has_disable_index = false;
     bool _use_force_index = false;
     int32_t _possible_index_cnt = 0;
@@ -302,7 +302,7 @@ public:
         }
         return true;
     }
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         ExecNode::find_place_holder(placeholders);
     }
 
@@ -365,6 +365,10 @@ public:
     bool current_use_global_backup() const {
         return _current_global_backup;
     }
+    
+    bool is_rocksdb_scan_node() const {
+        return _is_rocksdb_scan_node;
+    }
 
     void calc_index_range() {
         _main_path.path(_select_idx)->calc_index_range(_partition_field_id, _expr_partition_map);
@@ -383,10 +387,11 @@ protected:
     AccessPathMgr _learner_path; //learner集群索引选择
     std::map<std::string, int64_t> _expr_partition_map;
     int64_t _partition_field_id = -1;
-    bool _learner_use_diff_index = false;
     pb::TupleDescriptor* _tuple_desc = nullptr;
+    bool _learner_use_diff_index = false;
     bool _is_covering_index = true; // 只有store会用
     bool _has_index = false;
+    bool _is_rocksdb_scan_node = false;
     pb::LockCmdType _lock = pb::LOCK_NO;
     RouterPolicy _router_policy = RouterPolicy::RP_RANGE;
     google::protobuf::RepeatedPtrField<pb::RegionInfo> _old_region_infos;

@@ -88,10 +88,13 @@ int64_t AccessPathMgr::select_index_common() {
         }
         prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, index_id));
         //DB_NOTICE("index_id:%ld prefix_ratio_index_score:%u", index_id,prefix_ratio_index_score);
-        // 优先选倒排，没有就取第一个
+        // 优先选倒排或向量，没有就取第一个
         switch (info.type) {
             case pb::I_FULLTEXT:
                 _multi_reverse_index.push_back(index_id);
+                break;
+            case pb::I_VECTOR:
+                return index_id;
                 break;
             default:
                 break;
@@ -458,7 +461,7 @@ int64_t AccessPathMgr::pre_process_select_index() {
         return 0;
     }
 
-    if (_use_fulltext) {
+    if (_use_fulltext_or_vector) {
         return 0;
     }
 
@@ -513,7 +516,7 @@ int64_t AccessPathMgr::select_index() {
     int64_t select_idx = pre_process_select_index();
     if (select_idx == 0) {
         if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
-            && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext) {
+            && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext_or_vector) {
             DB_DEBUG("table %ld has statistics", _table_id);
             select_idx = select_index_by_cost();
         } else {

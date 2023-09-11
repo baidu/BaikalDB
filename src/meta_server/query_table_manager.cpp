@@ -223,7 +223,10 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
     boost::trim(input_database);
     std::string input_namespace_name = request->namespace_name();
     boost::trim(input_namespace_name);
-    std::string key = input_namespace_name + "." + input_database + "." + input_table_name;
+    std::string key = input_namespace_name + "." + input_database;
+    if (!input_table_name.empty()) {
+        key += "." + input_table_name;
+    }
     TableManager* manager = TableManager::get_instance();
     std::unordered_map<int64_t, TableMem> table_info_map_tmp;
     {
@@ -235,7 +238,7 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
                 auto table = response->add_flatten_tables();
                 *table = table_info.second;
             }
-            DB_WARNING("use cache for show table status on db: %s", key.c_str());
+            DB_WARNING("use cache for show table status on db key: %s", key.c_str());
             return;
         }
     }

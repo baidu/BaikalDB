@@ -58,6 +58,112 @@ int RegionControl::remove_data(int64_t drop_region_id) {
     return 0;
 }
 
+int RegionControl::remove_cold_data(int64_t drop_region_id) {
+    TimeCost cost;
+    MutTableKey region_start;
+    MutTableKey region_end;
+    region_start.append_i64(drop_region_id);
+    region_end.append_i64(drop_region_id).append_u64(UINT64_MAX);
+
+    rocksdb::Slice begin(region_start.data());
+    rocksdb::Slice end(region_end.data());
+    auto rocksdb = RocksWrapper::get_instance();
+    auto s = rocksdb->remove_cold_range(begin, end);
+    if (!s.ok()) {
+        DB_FATAL("region_id: %ld delete files in range failed %s", drop_region_id, s.ToString().c_str());
+        return -1;
+    }
+    DB_WARNING("region_id: %ld delete files in range, cost: %ld", drop_region_id, cost.get_time());
+    return 0;
+}
+
+int RegionControl::remove_cold_binlog(int64_t drop_region_id) {
+    TimeCost cost;
+    MutTableKey region_start;
+    MutTableKey region_end;
+    region_start.append_i64(drop_region_id);
+    region_end.append_i64(drop_region_id).append_u64(UINT64_MAX);
+
+    rocksdb::Slice begin(region_start.data());
+    rocksdb::Slice end(region_end.data());
+    auto rocksdb = RocksWrapper::get_instance();
+    auto s = rocksdb->remove_cold_binlog(begin, end);
+    if (!s.ok()) {
+        DB_FATAL("region_id: %ld delete files in range failed, cold_binlog cf %s", drop_region_id, s.ToString().c_str());
+        return -1;
+    }
+    DB_WARNING("region_id: %ld delete files in range, cold_binlog cf, cost: %ld", drop_region_id, cost.get_time());
+    return 0;
+}
+
+int RegionControl::remove_expired_offline_data(int64_t region_id, int64_t table_id, int64_t ttl_ts, int64_t newest_ts) {
+    TimeCost cost;
+    auto rocksdb = RocksWrapper::get_instance();
+    // cold_data_cf, delete < oldest_ts
+    {
+        MutTableKey region_start;
+        MutTableKey region_end;
+        region_start.append_i64(region_id).append_i64(table_id);
+        region_end.append_i64(region_id).append_i64(table_id).append_i64(ttl_ts);
+        rocksdb::Slice begin(region_start.data());
+        rocksdb::Slice end(region_end.data());
+        auto s = rocksdb->remove_cold_range(begin, end);
+        if (!s.ok()) {
+            DB_FATAL("region_id: %ld, table_id: %ld, ttl_ts: %ld, %s delete cold_data_cf files in range failed %s, cost: %ld", 
+                    region_id, table_id, ttl_ts, ts_to_datetime_str(ttl_ts).c_str(), s.ToString().c_str(), cost.get_time());
+            return -1;
+        }
+    }
+    // cold_data_cf, delete >= newest_ts
+    {
+        MutTableKey region_start;
+        MutTableKey region_end;
+        region_start.append_i64(region_id).append_i64(table_id).append_i64(newest_ts);
+        region_end.append_i64(region_id).append_i64(table_id).append_i64(INT64_MAX);
+        rocksdb::Slice begin(region_start.data());
+        rocksdb::Slice end(region_end.data());
+        auto s = rocksdb->remove_cold_range(begin, end);
+        if (!s.ok()) {
+            DB_FATAL("region_id: %ld, table_id: %ld, newest_ts: %ld, %s delete cold_data_cf files in range failed %s, cost: %ld", 
+                    region_id, table_id, newest_ts, ts_to_datetime_str(newest_ts).c_str(), s.ToString().c_str(), cost.get_time());
+            return -1;
+        }
+    }
+    // cold_binlog_cf, delete < oldest_ts
+    {
+        MutTableKey region_start;
+        MutTableKey region_end;
+        region_start.append_i64(region_id);
+        region_end.append_i64(region_id).append_i64(ttl_ts);
+        rocksdb::Slice begin(region_start.data());
+        rocksdb::Slice end(region_end.data());
+        auto s = rocksdb->remove_cold_binlog(begin, end);
+        if (!s.ok()) {
+            DB_FATAL("region_id: %ld, ttl_ts: %ld, %s delete cold_binlog_cf files in range failed %s, cost: %ld", 
+                    region_id, ttl_ts, ts_to_datetime_str(ttl_ts).c_str(), s.ToString().c_str(), cost.get_time());
+            return -1;
+        }
+    }
+    // cold_binlog_cf, delete >= newest_ts
+    {
+        MutTableKey region_start;
+        MutTableKey region_end;
+        region_start.append_i64(region_id).append_i64(newest_ts);
+        region_end.append_i64(region_id).append_i64(INT64_MAX);
+        rocksdb::Slice begin(region_start.data());
+        rocksdb::Slice end(region_end.data());
+        auto s = rocksdb->remove_cold_binlog(begin, end);
+        if (!s.ok()) {
+            DB_FATAL("region_id: %ld, newest_ts: %ld, %s delete cold_binlog_cf files in range failed %s, cost: %ld", 
+                    region_id, ttl_ts, ts_to_datetime_str(newest_ts).c_str(), s.ToString().c_str(), cost.get_time());
+            return -1;
+        }
+    }
+    DB_WARNING("binlog region_id: %ld, table_id: %ld, ttl_ts: %ld, %s, newest_ts: %ld, %s delete expired offline data in range, cost: %ld",
+                region_id, table_id, ttl_ts, ts_to_datetime_str(ttl_ts).c_str(), newest_ts, ts_to_datetime_str(newest_ts).c_str(), cost.get_time());
+    return 0;
+}
+
 void RegionControl::compact_data(int64_t region_id) {
     MutTableKey start_key;
     MutTableKey end_key;
@@ -172,6 +278,8 @@ int RegionControl::clear_all_infos_for_region(int64_t drop_region_id) {
     DB_WARNING("region_id: %ld, clear_all_infos_for_region do compact in queue", drop_region_id);
     //compact_data_in_queue(drop_region_id);
     remove_data(drop_region_id);
+    remove_cold_data(drop_region_id);
+    remove_cold_binlog(drop_region_id);
     remove_meta(drop_region_id);
     remove_snapshot_path(drop_region_id);
     remove_log_entry(drop_region_id);

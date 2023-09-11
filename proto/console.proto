@@ -90,6 +90,7 @@ message WatchTableInfo {
     optional int64              main_table_id        = 13;
     optional int64              region_split_lines   = 14;
     optional int64              table_size           = 15;
+    optional string             binlog               = 16;
 };
 
 message WatchUserInfo {

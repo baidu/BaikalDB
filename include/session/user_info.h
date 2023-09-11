@@ -120,6 +120,7 @@ public:
         }
         return use_read_index;
     }
+
 public:
     std::string     username;
     std::string     password;
@@ -138,6 +139,9 @@ public:
     bool            need_auth_addr = false;
     bool            ddl_permission = false;
     bool            use_read_index = true; // 上线先默认true
+    bool            enable_plan_cache = false;
+
+    pb::RangePartitionType request_range_partition_type = pb::RPT_DEFAULT;
 
     std::atomic<uint32_t>    query_count;
     std::map<int64_t, pb::RW> database;

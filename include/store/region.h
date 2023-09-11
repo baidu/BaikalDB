@@ -47,6 +47,7 @@
 #include "proto/meta.interface.pb.h"
 #include "proto/store.interface.pb.h"
 #include "reverse_index.h"
+#include "vector_index.h"
 #include "transaction_pool.h"
 #include "runtime_state.h"
 #include "runtime_state_pool.h"
@@ -90,6 +91,9 @@ namespace baikaldb {
 DECLARE_int64(disable_write_wait_timeout_us);
 DECLARE_int32(prepare_slow_down_wait);
 DECLARE_int64(binlog_warn_timeout_minute);
+extern void print_metadata_info(const rocksdb::LiveFileMetaData& metadata);
+extern int copy_file(const std::string& local_file, const std::string& user_define_path, std::string& external_file, uint64_t size);
+extern void print_external_info(const rocksdb::ExternalSstFileInfo& info);
 
 static const int32_t RECV_QUEUE_SIZE = 128;
 struct StatisticsInfo {
@@ -237,7 +241,7 @@ enum GetMode {
     MULTIGET,
     SEEK
 };
-    BinlogReadMgr(int64_t region_id, int64_t begin_ts, const std::string& capture_ip, uint64_t log_id, int64_t need_read_cnt);
+    BinlogReadMgr(int64_t region_id, int64_t begin_ts, const std::string& capture_ip, uint64_t log_id, int64_t need_read_cnt, bool is_read_offline_binlog = false);
     BinlogReadMgr(int64_t region_id, GetMode mode);
     ~BinlogReadMgr() { }
     int get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::StoreRes* response, int64_t binlog_row_cnt);
@@ -247,6 +251,8 @@ enum GetMode {
     int multiget(std::map<int64_t, std::string>& start_binlog_map);
     int seek(std::map<int64_t, std::string>& start_binlog_map);
     void print_log();
+    // only used by offline binlog
+    int get_prewrite_binlog(int64_t start_ts, std::map<int64_t, std::string>& start_binlog_map, bool& batch_finish, bool finish_get_all);
 
 private:
     int64_t _region_id = 0;
@@ -270,6 +276,7 @@ private:
     std::map<int64_t, std::string> _start_binlog_map;
     std::map<int64_t, std::string> _fake_binlog_map;
     std::string _capture_ip;
+    bool _read_offline_binlog = false;
 };
 
 class BinlogAlarm {
@@ -317,6 +324,36 @@ private:
     std::map<std::string, TsAccessTime> _ip_ts_map; 
 };
 
+
+struct OfflineBinlogParam {
+    // updated in on_apply
+    int64_t oldest_ts  = 0;
+    int64_t newest_ts  = 0;
+    // end ts -> file path
+    std::multimap<int64_t, std::string> data_ssts;
+    std::multimap<int64_t, std::string> binlog_ssts;
+};
+
+struct OfflineBinlogTask {
+    // 本次备份任务备份的ts区间 [backup_task_start_ts, backup_task_end_ts), 一天
+    int64_t backup_task_start_ts = 0;
+    int64_t backup_task_end_ts = 0;
+    // 本次备份任务成功后, 离线binlog的ts总区间, [new_oldest_ts, new_newest_ts), 表配置的天数
+    int64_t new_oldest_ts = 0;
+    int64_t new_newest_ts  = 0;
+    std::vector<std::string> data_ssts;
+    std::vector<std::string> binlog_ssts;
+
+    void clear() {
+        backup_task_start_ts = 0;
+        backup_task_end_ts = 0;
+        new_oldest_ts = 0;
+        new_newest_ts  = 0;
+        data_ssts.clear();
+        binlog_ssts.clear();
+    }
+};
+
 class TransactionPool;
 typedef std::shared_ptr<Region> SmartRegion;
 class Region : public braft::StateMachine, public std::enable_shared_from_this<Region> {
@@ -330,6 +367,9 @@ public:
         shutdown();
         join();
         for (auto& pair : _reverse_index_map) {
+            delete pair.second;
+        }
+        for (auto& pair : _vector_index_map) {
             delete pair.second;
         }
     }
@@ -577,11 +617,15 @@ public:
     int ingest_snapshot_sst(const std::string& dir); 
     int ingest_sst_backup(const std::string& data_sst_file, const std::string& meta_sst_file); 
     // other thread
+    void vector_compaction();
+    // other thread
     void reverse_merge();
     // other thread
     void reverse_merge_doing_ddl();
     // other thread
     void ttl_remove_expired_data();
+
+    int restore_faiss(const std::string& path, const std::vector<std::string>& files);
 
     // dump the the tuples in this region in format {{k1:v1},{k2:v2},{k3,v3}...}
     // used for debug
@@ -661,7 +705,7 @@ public:
             std::vector<pb::BatchStoreReq>& requests,
             std::vector<butil::IOBuf>& req_datas,      // cntl attachment的数据
             int64_t& split_end_index);
-    
+    int get_split_key(const int64_t userid, std::string& split_key, int64_t& split_key_term);
     int get_split_key(std::string& split_key, int64_t& split_key_term);
     
     bool is_splitting() {
@@ -713,13 +757,14 @@ public:
         std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.end_key();
     }
-    int64_t get_partition_num() {
-        std::lock_guard<std::mutex> lock(_region_lock);
-        if (_region_info.has_partition_num()) {
-            return _region_info.partition_num();
-        }
-        return 1;
-    }
+    // 当前系统未使用region partition_num，range分区不易维护
+    // int64_t get_partition_num() {
+    //     std::lock_guard<std::mutex> lock(_region_lock);
+    //     if (_region_info.has_partition_num()) {
+    //         return _region_info.partition_num();
+    //     }
+    //     return 1;
+    // }
     int64_t get_partition_id() {
         std::lock_guard<std::mutex> lock(_region_lock);
         if (_region_info.has_partition_id()) {
@@ -1173,6 +1218,35 @@ public:
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
     bool has_sst_data(int64_t* seek_table_lines);
 
+    // for olap
+    int manual_link_external_sst();
+    int ingest_cold_sst_on_snapshot_load();
+    bool need_flush_to_cold_rocksdb();
+    int flush_to_cold_rocksdb();
+    int flush_hot_to_cold(std::vector<std::string>& external_files);
+    int sync_olap_info(pb::OlapRegionStat state, const std::vector<std::string>& external_files);
+    // int copy_files(const std::vector<rocksdb::LiveFileMetaData>& sst_files, std::vector<std::string>& external_files);
+    // int copy_file(const std::string& local_file, std::string& external_file);
+    int get_hot_sst(bool do_compaction_if_need, std::vector<rocksdb::LiveFileMetaData>& sst_file_meta);
+    int get_cold_sst(std::set<std::string>& sst_relative_filename);
+    int ingest_cold_sst(const std::vector<std::string>& external_files);
+    int check_hot_sst(const std::vector<rocksdb::LiveFileMetaData>& sst_files);
+    void apply_olap_info(const pb::StoreReq& request, braft::Closure* done);
+    int modify_olap_region_num_table_lines();
+    pb::OlapRegionStat olap_state() {
+        return _olap_state.load();
+    }
+
+    // for binlog backup
+    int restore_offline_binlog_info_on_snapshot_load(bool need_ingest_sst);
+    int get_binlog_backup_days();
+    void do_backup_binlog();
+    void print_offline_binlog_infos();
+    int ingest_offline_binlog_sst(const std::vector<std::string>& data_ssts, 
+                                  const std::vector<std::string>& binlog_ssts);
+    void delete_remote_expired_file();
+    bool need_clear_offline_binlog_sst();
+    void clear_offline_binlog();
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -1245,7 +1319,7 @@ private:
         std::map<int64_t, bool> timeout_start_ts_done; // 标记超时反查的start_ts, 仅用来避免重复commit导致的报警，不用于严格一致性场景
     };
 
-        //binlog function
+    // online binlog function
     void recover_binlog();
     void read_binlog(const pb::StoreReq* request, pb::StoreRes* response, const std::string& remote_side, uint64_t log_id);
     void query_binlog_ts(const pb::StoreReq* request, pb::StoreRes* response);
@@ -1258,8 +1332,9 @@ private:
     
     std::string binlog_get_str_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     
-    void binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, std::vector<int32_t>& field_slot);
-    void binlog_get_field_values(std::map<std::string, ExprValue>& field_value_map, SmartRecord record);
+    void binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, std::vector<int32_t>& field_slot, 
+    SmartTable& binlog_table, SmartIndex& binlog_pri);
+    void binlog_get_field_values(std::map<std::string, ExprValue>& field_value_map, SmartRecord& record, SmartTable& binlog_table);
     int binlog_reset_on_snapshot_load_restart();
     
     int binlog_reset_on_snapshot_load();
@@ -1270,10 +1345,20 @@ private:
     
     void binlog_query_primary_region(const int64_t& start_ts, const int64_t& txn_id, pb::RegionInfo& region_info, int64_t rollback_ts);
     void binlog_fill_exprvalue(const pb::BinlogDesc& binlog_desc, pb::OpType op_type, std::map<std::string, ExprValue>& field_value_map);
+    //offline binlog backup
+    void transfer_binlog_leader();
+    bool has_enough_online_binlog_data();
+    bool need_trigger_to_backup(const int backup_days);
+    int  write_offline_binlog_data();
+    void update_offline_binlog_info(const pb::StoreReq& request, braft::Closure* done);
+    void recover_offline_binlog_info(const pb::StoreReq* request, pb::StoreRes* response);
+    void query_offline_binlog_info(pb::StoreRes* response);
     //binlog end
     void apply_kv_in_txn(const pb::StoreReq& request, braft::Closure* done, 
                          int64_t index, int64_t term);
 
+    void apply_kv_olap(const pb::StoreReq& request, braft::Closure* done, 
+                                  int64_t index, int64_t term);
     void apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done, 
                                   int64_t index, int64_t term);
     bool validate_version(const pb::StoreReq* request, pb::StoreRes* response);
@@ -1424,6 +1509,7 @@ private:
     // todo liguoqiang  如何初始化这个
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     std::map<int64_t, ReverseIndexBase*> _reverse_unsafe_index_map;
+    std::map<int64_t, VectorIndex*> _vector_index_map;
     // todo 是否可以改成无锁的
     BthreadCond _disable_write_cond;
     BthreadCond _real_writing_cond;
@@ -1441,6 +1527,7 @@ private:
     bool                                _storage_compute_separate = false;
     bool                                _use_ttl = false; // online TTL会更新，只会false 变为true
     int64_t                             _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
+    std::atomic<bool>                   _need_vector_compact{false}; //split的数据，把vector compact一次
     std::atomic<bool>                   _reverse_remove_range{false}; //split的数据，把拉链过滤一遍, safe reverse index合并
     std::atomic<bool>                   _reverse_unsafe_remove_range{false};//unsafe reverse index合并
     //raft node
@@ -1477,6 +1564,7 @@ private:
     int64_t                             _snapshot_num_table_lines = 0;  //last snapshot number
     TimeCost                            _snapshot_time_cost;
     int64_t                             _snapshot_index = 0; //last snapshot log index
+    std::string                         _snapshot_path;
     bool                                _removed = false;
     TimeCost                            _removed_time_cost;
     TransactionPool                     _txn_pool;
@@ -1504,8 +1592,11 @@ private:
     bthread::Mutex  _commit_ts_map_lock;
     bthread::Mutex  _binlog_param_mutex;
     BinlogParam _binlog_param;
-    SmartTable  _binlog_table = nullptr;
-    SmartIndex  _binlog_pri = nullptr;
+    // offline binlog, only for binlog_backup_days>0 binlog tables
+    bthread::Mutex  _offline_binlog_param_mutex;
+    OfflineBinlogParam  _offline_binlog_param;
+    OfflineBinlogTask   _offline_binlog_task;
+
     std::string     _rocksdb_start;
     std::string     _rocksdb_end;
     pb::PeerStatus  _region_status = pb::STATUS_NORMAL;
@@ -1527,6 +1618,9 @@ private:
     bool _ready_for_follower_read = true;
     // 解决零星写时主从延迟高,有写入时每100ms发一条NO OP, 停写5min后不再发NO OP
     NoOpTimer _no_op_timer; 
+
+    // olap
+    std::atomic<pb::OlapRegionStat> _olap_state  {pb::OLAP_ACTIVE};
 
     //NOT_LEADER分类报警
     struct NotLeaderAlarm {

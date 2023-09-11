@@ -30,7 +30,7 @@ public:
         _num_rows_skipped = 0;
     }
     virtual int expr_optimize(QueryContext* ctx);
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
 
     int64_t other_limit() {
@@ -46,7 +46,7 @@ public:
         _num_rows_skipped += num;
     }
     int64_t get_limit() {
-	return _limit;
+        return _limit;
     }
 private:
     int64_t _offset;

@@ -51,11 +51,9 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
         client_conn->seq_id++;
         //dml请求放入cache, 同时更新client_conn上的region_info信息
         state->client_conn()->region_infos = dml_manager_node->region_infos();
-        push_cmd_to_cache(state, _op_type, dml_manager_node->children(0));
-        _children.erase(_children.begin());
+        push_cmd_to_cache(state, _op_type, dml_manager_node->children(0), client_conn->seq_id);
         dml_manager_node->clear_children();
         state->set_single_txn_cached();
-        delete dml_manager_node;
     } else {
         has_global_index = true;
         ret = dml_manager_node->open(state);
@@ -103,9 +101,16 @@ int SingleTxnManagerNode::open(RuntimeState* state) {
 void SingleTxnManagerNode::reset(RuntimeState* state) {
     auto client_conn = state->client_conn();
     // add begin back
-    CachePlan& plan_item = client_conn->cache_plans[1];
-    this->add_child(plan_item.root, 0);
+    CachePlan& begin_item = client_conn->cache_plans[1];
+    this->add_child(begin_item.root, 0);
     client_conn->cache_plans.erase(1);
+    auto iter = client_conn->cache_plans.find(2);
+    if (iter != client_conn->cache_plans.end()) {
+        ExecNode* dml_manager_node = _children[1];
+        CachePlan& plan_item = iter->second;
+        dml_manager_node->add_child(plan_item.root);
+        client_conn->cache_plans.erase(2);
+    }
     client_conn->on_begin();
     state->txn_id = client_conn->txn_id;
     state->seq_id = 1;

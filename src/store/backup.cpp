@@ -97,8 +97,9 @@ int Backup::backup_datainfo_to_file(const std::string& path, int64_t& file_size)
     uint64_t row = 0;
     RocksWrapper* db = RocksWrapper::get_instance();
     rocksdb::Options options = db->get_options(db->get_data_handle()); 
-
-    std::unique_ptr<SstFileWriter> writer(new SstFileWriter(options));
+    options.bottommost_compression = rocksdb::kZSTD;
+    options.bottommost_compression_opts = rocksdb::CompressionOptions();
+    std::unique_ptr<SstFileWriter> writer(new SstFileWriter(options, false));
     rocksdb::ExternalSstFileInfo sst_file_info;
     auto ret = writer->open(path);
     if (!ret.ok()) {

@@ -20,6 +20,7 @@ namespace parser {
 
 static const char* priority_str[] = {"", " LOW_PRIORITY", " DELAYED", " HIGH_PRIORITY"};
 static const char* for_lock_str[] = {"", " FOR UPDATE", " IN SHARED MODE"};
+
 enum PriorityEnum {
     PE_NO_PRIORITY = 0,
     PE_LOW_PRIORITY = 1,
@@ -95,10 +96,24 @@ struct TableSource : public Node {
     TableSource() {
         node_type = NT_TABLE_SOURCE;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (derived_table != nullptr) {
             derived_table->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (table_name != nullptr) {
+            table_name->set_cache_param(p_cache_param_);
+        }
+        if (derived_table != nullptr) {
+            derived_table->set_cache_param(p_cache_param_);
+        }
+        for (int i = 0; i < index_hints.size(); i++) {
+            if (index_hints[i] != nullptr) {
+                index_hints[i]->set_cache_param(p_cache_param_);
+            }
         }
     }
     virtual bool is_complex_node() {
@@ -142,7 +157,7 @@ struct JoinNode : public Node {
         is_complex = true;
         node_type = NT_JOIN;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (left != nullptr) {
             left->set_print_sample(print_sample_);
@@ -152,6 +167,23 @@ struct JoinNode : public Node {
         }
         if (expr != nullptr) {
             expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (left != nullptr) {
+            left->set_cache_param(p_cache_param_);
+        }
+        if (right != nullptr) {
+            right->set_cache_param(p_cache_param_);
+        }
+        if (expr != nullptr) {
+            expr->set_cache_param(p_cache_param_);
+        }
+        for (int i = 0; i < using_col.size(); ++i) {
+            if (using_col[i] != nullptr) {
+                using_col[i]->set_cache_param(p_cache_param_);
+            }
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -175,7 +207,7 @@ struct JoinNode : public Node {
         if (using_col.size() != 0) {
             os << ")";
         }
-    }    
+    }
 };
 
 struct ByItem : public Node {
@@ -184,10 +216,16 @@ struct ByItem : public Node {
     ByItem() {
         node_type = NT_BY_ITEM;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (expr != nullptr) {
             expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (expr != nullptr) {
+            expr->set_cache_param(p_cache_param_);
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -213,10 +251,18 @@ struct GroupByClause : public Node {
         }
         return false;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         for (int i = 0; i < items.size(); i++) {
             items[i]->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        for (int i = 0; i < items.size(); i++) {
+            if (items[i] != nullptr) {
+                items[i]->set_cache_param(p_cache_param_);
+            }
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -246,10 +292,18 @@ struct OrderByClause : public Node {
         }
         return false;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         for (int i = 0; i < items.size(); i++) {
             items[i]->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        for (int i = 0; i < items.size(); i++) {
+            if (items[i] != nullptr) {
+                items[i]->set_cache_param(p_cache_param_);
+            }
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -284,13 +338,22 @@ struct LimitClause : public Node {
         }
         return false;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (offset != nullptr) {
             offset->set_print_sample(print_sample_);
         }
         if (count != nullptr) {
             count->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (offset != nullptr) {
+            offset->set_cache_param(p_cache_param_);
+        }
+        if (count != nullptr) {
+            count->set_cache_param(p_cache_param_);
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -333,16 +396,30 @@ struct SelectField : public Node {
             return false;
         }
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (expr != nullptr) {
             expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (expr != nullptr) {
+            expr->set_cache_param(p_cache_param_);
+        }
+        if (wild_card != nullptr) {
+            wild_card->set_cache_param(p_cache_param_);
         }
     }
     virtual void to_stream(std::ostream& os) const override {
         os << " " << expr << wild_card;
         if (!as_name.empty()) {
             os << " AS " << as_name;
+        }
+    }
+    virtual void find_placeholder(std::unordered_set<int>& placeholders) override {
+        if (expr != nullptr) {
+            expr->find_placeholder(placeholders);
         }
     }
 };
@@ -353,10 +430,19 @@ struct Assignment : public Node {
     Assignment() {
         node_type = NT_ASSIGNMENT;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (expr != nullptr) {
             expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (name != nullptr) {
+            name->set_cache_param(p_cache_param_);
+        }
+        if (expr != nullptr) {
+            expr->set_cache_param(p_cache_param_);
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -369,6 +455,12 @@ struct TruncateStmt: public DmlNode {
     Vector<String> partition_names;
     TruncateStmt() {
         node_type = NT_TRUNCATE;
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (table_name != nullptr) {
+            table_name->set_cache_param(p_cache_param_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override {
         os << "TRUNCATE " << table_name;
@@ -388,7 +480,7 @@ struct DeleteStmt : public DmlNode {
     DeleteStmt() {
         node_type = NT_DELETE;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (from_table != nullptr) {
             from_table->set_print_sample(print_sample_);
@@ -401,6 +493,26 @@ struct DeleteStmt : public DmlNode {
         }
         if (limit != nullptr) {
             limit->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (from_table != nullptr) {
+            from_table->set_cache_param(p_cache_param_);
+        }
+        for (int i = 0; i < delete_table_list.size(); i++) {
+            if (delete_table_list[i] != nullptr) {
+                delete_table_list[i]->set_cache_param(p_cache_param_);
+            }
+        }
+        if (where != nullptr) {
+            where->set_cache_param(p_cache_param_);
+        }
+        if (order != nullptr) {
+            order->set_cache_param(p_cache_param_);
+        }
+        if (limit != nullptr) {
+            limit->set_cache_param(p_cache_param_);
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -446,7 +558,7 @@ struct UpdateStmt : public DmlNode {
     UpdateStmt() {
         node_type = NT_UPDATE;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         if (table_refs != nullptr) {
             table_refs->set_print_sample(print_sample_);
@@ -462,6 +574,26 @@ struct UpdateStmt : public DmlNode {
         }
         if (limit != nullptr) {
             limit->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (table_refs != nullptr) {
+            table_refs->set_cache_param(p_cache_param_);
+        }
+        for (int i = 0; i < set_list.size(); i++) {
+            if (set_list[i] != nullptr) {
+                set_list[i]->set_cache_param(p_cache_param_);
+            }
+        }
+        if (where != nullptr) {
+            where->set_cache_param(p_cache_param_);
+        }
+        if (order != nullptr) {
+            order->set_cache_param(p_cache_param_);
+        }
+        if (limit != nullptr) {
+            limit->set_cache_param(p_cache_param_);
         }
     }
     virtual void to_stream(std::ostream& os) const override {
@@ -487,13 +619,13 @@ struct UpdateStmt : public DmlNode {
     }
 };
 
-struct SelectStmtOpts {
+struct SelectStmtOpts : public Node {
     bool distinct = false;
     bool sql_cache = false;
     bool calc_found_rows = false;
     bool straight_join = false;
     PriorityEnum priority;
-    void to_stream(std::ostream& os) const {
+    void to_stream(std::ostream& os) const override {
        static const char* distinct_str[] = {"", " DISTINCT"};
        static const char* sql_cache_str[] = {"", " SQL_CACHE"};
        static const char* calc_found_rows_str[] = {"", " SQL_CALC_FOUND_ROWS"};
@@ -559,7 +691,7 @@ struct SelectStmt : public DmlNode {
         }
         return false;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         for (int i = 0; i < fields.size(); i++) {
             fields[i]->set_print_sample(print_sample_);
@@ -581,6 +713,35 @@ struct SelectStmt : public DmlNode {
         }
         if (limit != nullptr) {
             limit->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (select_opt != nullptr) {
+            select_opt->set_cache_param(p_cache_param_);
+        }
+        for (int i = 0; i < fields.size(); i++) {
+            if (fields[i] != nullptr) {
+                fields[i]->set_cache_param(p_cache_param_);
+            }
+        }
+        if (table_refs != nullptr) {
+            table_refs->set_cache_param(p_cache_param_);
+        }
+        if (where != nullptr) {
+            where->set_cache_param(p_cache_param_);
+        }
+        if (group != nullptr) {
+            group->set_cache_param(p_cache_param_);
+        }
+        if (having != nullptr) {
+            having->set_cache_param(p_cache_param_);
+        }
+        if (order != nullptr) {
+            order->set_cache_param(p_cache_param_);
+        }
+        if (limit != nullptr) {
+            limit->set_cache_param(p_cache_param_);
         }
     }
 
@@ -632,9 +793,23 @@ struct UnionStmt : public DmlNode {
         is_complex = true;
         node_type = NT_UNION;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         for (int i = 0; i < select_stmts.size(); i++) {
             select_stmts[i]->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        for (int i = 0; i < select_stmts.size(); i++) {
+            if (select_stmts[i] != nullptr) {
+                select_stmts[i]->set_cache_param(p_cache_param_);
+            }
+        }
+        if (order != nullptr) {
+            order->set_cache_param(p_cache_param_);
+        }
+        if (limit != nullptr) {
+            limit->set_cache_param(p_cache_param_);
         }
     }
 
@@ -668,6 +843,7 @@ struct UnionStmt : public DmlNode {
 struct InsertStmt : public DmlNode {
     PriorityEnum priority;
     bool is_replace = false;
+    bool is_merge = false;
     bool is_ignore = false;
     TableName* table_name = nullptr;
     DmlNode* subquery_stmt = nullptr;
@@ -678,7 +854,7 @@ struct InsertStmt : public DmlNode {
     InsertStmt() {
         node_type = NT_INSERT;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         for (int i = 0; i < lists.size(); i++) {
             lists[i]->set_print_sample(print_sample_);
@@ -688,6 +864,30 @@ struct InsertStmt : public DmlNode {
         }
         for (int i = 0; i < on_duplicate.size(); i++) {
             on_duplicate[i]->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (table_name != nullptr) {
+            table_name->set_cache_param(p_cache_param_);
+        }
+        if (subquery_stmt != nullptr) {
+            subquery_stmt->set_cache_param(p_cache_param_);
+        }
+        for (int i = 0; i < columns.size(); i++) {
+            if (columns[i] != nullptr) {
+                columns[i]->set_cache_param(p_cache_param_);
+            }
+        }
+        for (int i = 0; i < lists.size(); i++) {
+            if (lists[i] != nullptr) {
+                lists[i]->set_cache_param(p_cache_param_);
+            }
+        }
+        for (int i = 0; i < on_duplicate.size(); i++) {
+            if (on_duplicate[i] != nullptr) {
+                on_duplicate[i]->set_cache_param(p_cache_param_);
+            }
         }
     }
     static InsertStmt* New(butil::Arena& arena) {
@@ -700,8 +900,9 @@ struct InsertStmt : public DmlNode {
     virtual void to_stream(std::ostream& os) const override {
         static const char* desc_str[] = {" INSERT", " REPLACE"};
         static const char* ignore_str[] = {"", " IGNORE"};
+        static const char* merge_str[] = {"", " MERGE"};
         os << desc_str[is_replace];
-        os << priority_str[priority] << ignore_str[is_ignore] << " INTO ";
+        os << priority_str[priority] << ignore_str[is_ignore] << merge_str[is_merge] << " INTO ";
         if (table_name != nullptr) {
             table_name->to_stream(os);
         }
@@ -845,6 +1046,28 @@ struct LoadDataStmt : public DdlNode {
     OnDuplicateKeyHandle on_duplicate_handle = ON_DUPLICATE_KEY_IGNORE;
     Vector<ColumnName*>  columns;
     Vector<Assignment*> set_list;
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (fields_info != nullptr) {
+            fields_info->set_cache_param(p_cache_param_);
+        }
+        if (lines_info != nullptr) {
+            lines_info->set_cache_param(p_cache_param_);
+        }
+        if (table_name != nullptr) {
+            table_name->set_cache_param(p_cache_param_);
+        }
+        for (int i = 0; i < columns.size(); i++) {
+            if (columns[i] != nullptr) {
+                columns[i]->set_cache_param(p_cache_param_);
+            }
+        }
+        for (int i = 0; i < set_list.size(); i++) {
+            if (set_list[i] != nullptr) {
+                set_list[i]->set_cache_param(p_cache_param_);
+            }
+        }
+    }
 
     virtual void to_stream(std::ostream& os) const override {
         os << "LOAD DATA ";

@@ -26,6 +26,7 @@ public:
     static const rocksdb::WriteOptions write_options;
     //level one
     static const std::string META_IDENTIFY;
+    static const std::string ROCKS_HANG_CHECK_IDENTIFY;
     //level two
     static const std::string APPLIED_INDEX_INDENTIFY;
     static const std::string NUM_TABLE_LINE_INDENTIFY;
@@ -40,7 +41,8 @@ public:
     static const std::string BINLOG_OLDEST_IDENTIFY;
     static const std::string LEARNER_IDENTIFY;
     static const std::string LOCAL_STORAGE_IDENTIFY;
-    static const std::string ROCKS_HANG_CHECK_IDENTIFY;
+    static const std::string OLAP_REGION_IDENTIFY;
+    static const std::string REGION_OFFLINE_BINLOG_IDENTIFY;
 
     virtual ~MetaWriter() {}
    
@@ -94,6 +96,12 @@ public:
     std::string binlog_oldest_ts_key(int64_t region_id) const;
     int write_binlog_oldest_ts(int64_t region_id, int64_t ts);
     int64_t read_binlog_oldest_ts(int64_t region_id);
+    std::string olap_key(int64_t region_id) const;
+    int write_olap_info(int64_t region_id, const pb::OlapRegionInfo& olap_info);
+    int read_olap_info(int64_t region_id, pb::OlapRegionInfo& olap_info);
+    std::string offline_binlog_key(int64_t region_id) const;
+    int write_region_offline_binlog_info(int64_t region_id, const pb::RegionOfflineBinlogInfo& offline_binlog_info);
+    int read_region_offline_binlog_info(int64_t region_id, pb::RegionOfflineBinlogInfo& offline_binlog_info);
     int rocks_hang_check();
 public:
     std::string region_info_key(int64_t region_id) const;

@@ -140,8 +140,17 @@ public:
         bool                check_region, 
         bool                forward);
 
+    static TableIterator* scan_binlog_primary(
+        const IndexRange&       range, 
+        std::map<int32_t, FieldInfo*>&   fields, 
+        std::vector<int32_t>& field_slot,
+        bool is_offline_binlog = false);
+    
     bool is_cstore() {
         return _is_cstore;
+    }
+    void set_is_offline_binlog(bool open) {
+        _is_offline_binlog = open;
     }
     void reset_primary_keys() {
         _primary_keys.clear();
@@ -168,6 +177,7 @@ protected:
     bool                    _valid = true;
     bool                    _use_ttl = false;
     bool                    _is_cstore = false;
+    bool                    _is_offline_binlog = false;
     int64_t                 _read_ttl_timestamp_us = 0;
     int64_t                 _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
     int64_t                 _region;

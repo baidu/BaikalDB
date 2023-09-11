@@ -16,10 +16,11 @@
 #pragma once
 
 #include <unordered_set>
-#include "schema_factory.h"
+#include "dml.h"
+#include "network_socket.h"
 #include "proto/plan.pb.h"
 #include "query_context.h"
-#include "dml.h"
+#include "schema_factory.h"
 
 namespace baikaldb {
 
@@ -77,6 +78,7 @@ struct CreateExprOptions {
     bool is_not = false;
     bool partition_expr = false;
     int row_expr_size = 1;
+    bool is_plan_cache = false;
     pb::CompareType compare_type = pb::CMP_NULL;
 };
 
@@ -239,7 +241,7 @@ protected:
     int create_alias_node(const parser::ColumnName* term, pb::Expr& expr);
 
     //TODO: primitive len for STRING, BOOL and NULL
-    int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr);
+    int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr, const CreateExprOptions& options);
     // (a,b)
     int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr, const CreateExprOptions& options);
 
@@ -272,6 +274,22 @@ protected:
 
     int generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt);
 
+    // non-prepare plan cache
+    virtual int plan_cache_get() {
+        return 0;
+    }
+    virtual int plan_cache_add() {
+        return 0;
+    }
+    virtual bool enable_plan_cache() {
+        return false;
+    }
+    int fill_placeholders(
+            std::unordered_multimap<int, ExprNode*>& placeholders, 
+            const std::vector<const parser::Node*>& parser_placeholders);
+
+    int set_dml_local_index_binlog(const int64_t table_id);
+
 private:
     int create_n_ary_predicate(const parser::FuncExpr* item, 
             pb::Expr& expr,
@@ -300,8 +318,11 @@ private:
             const CreateExprOptions& options);
     int handle_exists_subquery(const parser::ExprNode* item, pb::Expr& expr,
             const CreateExprOptions& options);
-    void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
     int construct_in_predicate_node(const parser::FuncExpr* func_item, pb::Expr& expr, pb::ExprNode** node);
+
+protected:
+    void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
+
 protected:
     QueryContext*       _ctx = nullptr;
     std::shared_ptr<QueryContext> _cur_sub_ctx = nullptr;

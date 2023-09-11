@@ -28,16 +28,12 @@ int DmlManagerNode::open(RuntimeState* state) {
         return 0;
     }
     ExecNode* dml_node = _children[0];
-    ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, client_conn->seq_id, _op_type); 
+    ret = _fetcher_store.run(state, _region_infos, dml_node, client_conn->seq_id, client_conn->seq_id, _op_type);
     if (ret < 0) {
         DB_WARNING("fetcher store fail, txn_id: %lu seq_id: %d need_rollback_seq[%d]",
             state->txn_id, client_conn->seq_id, client_conn->seq_id);
         client_conn->need_rollback_seq.insert(client_conn->seq_id);
         return -1;
-    }
-    ret = push_cmd_to_cache(state, _op_type, dml_node);
-    if (ret > 0) {
-        _children.clear();
     }
     return _fetcher_store.affected_rows.load();
 }
@@ -57,7 +53,12 @@ int DmlManagerNode::get_region_infos(RuntimeState* state,
         DB_WARNING("index info: %ld is virtual, skip", global_index_id);
         return 0;
     }
-    int ret = _factory->get_region_by_key(*index_info_ptr,
+    std::shared_ptr<UserInfo> user_info = nullptr;
+    if (state != nullptr && state->client_conn() != nullptr) {
+        user_info = state->client_conn()->user_info;
+    }
+    int ret = _factory->get_region_by_key(user_info,
+                *index_info_ptr,
                 insert_scan_records,
                 delete_scan_records,
                 dml_node->insert_records_by_region(),
@@ -106,7 +107,6 @@ int DmlManagerNode::send_request(RuntimeState* state,
              state->log_id(), client_conn->seq_id, seq_id_str.c_str());
         return -1;
     }
-    push_cmd_to_cache(state, _op_type, dml_node);
     _seq_ids.push_back(client_conn->seq_id);
     _region_infos.clear();
     return _fetcher_store.affected_rows.load();
@@ -133,7 +133,7 @@ int DmlManagerNode::send_request_light(RuntimeState* state,
     }
     return fetcher_store.affected_rows.load();
 }
-int DmlManagerNode::send_request_concurrency(RuntimeState* state, size_t start_child) {
+int DmlManagerNode::send_request_concurrency(RuntimeState* state, size_t execute_child_idx) {
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {
         DB_WARNING("connection is nullptr: %lu", state->txn_id);
@@ -142,13 +142,11 @@ int DmlManagerNode::send_request_concurrency(RuntimeState* state, size_t start_c
     int error = 0;
     int prev_seq_id = client_conn->seq_id;
     ConcurrencyBthread send_bth(_affected_index_num + 1, &BTHREAD_ATTR_SMALL);
-    auto it = _children.begin() + start_child;
-    std::map<int, ExecNode*> cache_map;
+    auto it = _children.begin() + execute_child_idx;
     while (it != _children.end()) {
         DMLNode* exec_node = static_cast<DMLNode*>(*it);
         client_conn->seq_id++;
         int start_seq_id = client_conn->seq_id;
-        cache_map[start_seq_id] = exec_node;
         auto send_func = [this, state, exec_node, start_seq_id, &error]() {
             int ret = 0;
             FetcherStore fetcher_store;
@@ -164,13 +162,7 @@ int DmlManagerNode::send_request_concurrency(RuntimeState* state, size_t start_c
         ++it;
     }
     send_bth.join();
-    if (error >= 0) {
-        // 并发都执行成功，将exec_node加入cache
-        for (auto pair : cache_map) {
-            push_cmd_to_cache(state, _op_type, pair.second, pair.first);
-        }
-        _children.erase(_children.begin() + start_child, _children.end());
-    } else {
+    if (error < 0) {
         // 有执行失败，回滚
         std::string seq_id_str = "[";
         for (int seq_id = prev_seq_id + 1; seq_id <= client_conn->seq_id; seq_id++) {

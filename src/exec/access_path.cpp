@@ -24,6 +24,7 @@ namespace baikaldb {
 using namespace range;
 DEFINE_uint64(max_in_records_num, 10000, "max_in_records_num");
 DEFINE_int64(index_use_for_learner_delay_s, 3600, "1h");
+DEFINE_bool(date_range_to_in, false, "date range to in");
 
 bool AccessPath::need_add_to_learner_paths() {
     int64_t _1h = FLAGS_index_use_for_learner_delay_s * 1000 * 1000LL;
@@ -132,11 +133,21 @@ void AccessPath::calc_normal(Property& sort_property) {
     size_t in_records_size = 1;
     for (auto& field : index_info_ptr->fields) {
         bool field_break = false;
-        auto iter = field_range_map.find(field.id);
-        if (iter == field_range_map.end()) {
+        auto iter = field_range_map->find(field.id);
+        if (iter == field_range_map->end()) {
             break;
         }
         FieldRange& range = iter->second;
+        if (FLAGS_date_range_to_in 
+                && range.type == RANGE 
+                && field.type == pb::PrimitiveType::DATE 
+                && !range.is_row_expr
+                && range.left.size() == 1 && range.right.size() == 1) {
+            get_date_in_values(range.left[0], range.left_open, range.right[0], range.right_open, range.eq_in_values);
+            range.type = IN;
+            // will fall throught to case IN to handle
+            // 可能会导致seek压力大
+        } 
         switch (range.type) {
             case RANGE: {
                 field_break = true;
@@ -275,7 +286,7 @@ void AccessPath::calc_normal(Property& sort_property) {
             break;
         }
     }
-    if (hit_index_field_ids.size() < field_range_map.size()) {
+    if (hit_index_field_ids.size() < field_range_map->size()) {
         //除cut contition外有过滤条件
         _need_filter = true;
     }
@@ -292,12 +303,32 @@ void AccessPath::calc_normal(Property& sort_property) {
     if (_left_field_cnt != 0 || _right_field_cnt != 0) {
         is_possible = true;
     }
-    index_other_condition_count = field_range_map.size() - hit_index_field_ids.size();
+    index_other_condition_count = field_range_map->size() - hit_index_field_ids.size();
+}
+
+void AccessPath::get_date_in_values(const ExprValue& left, bool left_open, const ExprValue& right, bool right_open, std::vector<ExprValue>& dates) {
+    ExprValue begin = left;
+    ExprValue end = right;
+    begin.cast_to(pb::TIMESTAMP);
+    end.cast_to(pb::TIMESTAMP);
+    if (left_open) {
+        begin._u.uint32_val += 24 * 3600;
+    }
+    if (right_open) {
+        end._u.uint32_val -= 24 * 3600;
+    }
+    while (begin.compare(end) <= 0) {
+        ExprValue tmp = begin;
+        tmp.cast_to(pb::DATE);
+        dates.emplace_back(tmp);
+        begin._u.uint32_val += 24 * 3600;
+    }
+    return;
 }
 
 // 填充索引的range
 void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std::string, int64_t>& expr_partition_map) {
-    if (index_type == pb::I_FULLTEXT) {
+    if (index_type == pb::I_FULLTEXT || index_type == pb::I_VECTOR) {
         return;
     }
     MutTableKey left_key;
@@ -314,12 +345,12 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
     std::map< ExprNode*, std::pair<uint32_t, uint32_t>> in_row_expr_map; // <in_row_expr,<offset, hit_fields_cnt>
     int field_cnt = 0;
     for (auto& field : index_info_ptr->fields) {
-        auto iter = field_range_map.find(field.id);
+        auto iter = field_range_map->find(field.id);
         field_cnt ++;
         if (field_cnt > hit_index_field_ids.size()) {
             break;
         }
-        if (iter == field_range_map.end()) {
+        if (iter == field_range_map->end()) {
             break;
         }
         FieldRange& range = iter->second;
@@ -537,10 +568,10 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
     }
 }
 
-void AccessPath::calc_fulltext() {
+void AccessPath::calc_fulltext(Property& sort_property) {
     int32_t field_id = index_info_ptr->fields[0].id;
-    auto iter = field_range_map.find(field_id);
-    if (iter == field_range_map.end()) {
+    auto iter = field_range_map->find(field_id);
+    if (iter == field_range_map->end()) {
         return;
     }
     FieldRange& range = iter->second;
@@ -562,6 +593,11 @@ void AccessPath::calc_fulltext() {
             if (range.type != OR_LIKE) {
                 pos_index.set_bool_and(true);
             }
+            break;
+        case MATCH_VECTOR:
+            hit_index = true;
+            need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+            values = &range.like_values;
             break;
         case EQ:
         case IN:
@@ -595,16 +631,17 @@ void AccessPath::calc_fulltext() {
             } else if (range_type == MATCH_BOOLEAN) {
                 range->set_match_mode(pb::M_BOOLEAN);
             }
+            range->set_topk(sort_property.expected_cnt);
         }
     } else {
         pos_index.set_index_id(index_id);
         pos_index.add_ranges();
     }
-    if (hit_index_field_ids.size() < field_range_map.size()) {
+    if (hit_index_field_ids.size() < field_range_map->size()) {
         //除cut contition外有过滤条件
         _need_filter = true;
     }
-    index_other_condition_count = field_range_map.size() - hit_index_field_ids.size();
+    index_other_condition_count = field_range_map->size() - hit_index_field_ids.size();
 }
 
 double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
@@ -656,8 +693,8 @@ double AccessPath::fields_to_selectivity(const std::unordered_set<int32_t>& fiel
             selectivity *= sel_iter->second;
             continue;
         }
-        auto iter = field_range_map.find(field_id);
-        if (iter == field_range_map.end()) {
+        auto iter = field_range_map->find(field_id);
+        if (iter == field_range_map->end()) {
             continue;
         }
         double field_sel = calc_field_selectivity(field_id, iter->second);

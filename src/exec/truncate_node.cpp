@@ -69,6 +69,17 @@ int TruncateNode::open(RuntimeState* state) {
             _table_id, _region_id, res.code(), res.ToString().c_str());
         return -1;
     }
+    res = _db->remove_cold_range(begin, end);
+    if (!res.ok()) {
+        DB_WARNING_STATE(state, "truncate table delete cold file in range failed: table:%ld, region:%ld, code=%d, msg=%s", 
+            _table_id, _region_id, res.code(), res.ToString().c_str());
+        return -1;
+    }
+    // reset faiss索引
+    auto& vector_index_map = state->vector_index_map();
+    for (auto& pair : vector_index_map) {
+        pair.second->reset();
+    }
     DB_WARNING_STATE(state, "truncate table:%ld, region:%ld, cost:%ld", 
             _table_id, _region_id, cost.get_time());
     /*

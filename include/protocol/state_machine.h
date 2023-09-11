@@ -102,7 +102,8 @@ private:
                     sql_error("sql_error"),
                     sql_error_second("sql_error_second", &sql_error),
                     exec_sql_error("exec_sql_error"),
-                    exec_sql_error_second("exec_sql_error_second", &exec_sql_error){
+                    exec_sql_error_second("exec_sql_error_second", &exec_sql_error), 
+                    hit_cache_ratio("hit_cache_ratio", &hit_cache, bvar::FLAGS_bvar_dump_interval) {
         _wrapper = MysqlWrapper::get_instance();
     }
 
@@ -143,11 +144,14 @@ private:
     bvar::PerSecond<bvar::Adder<int> > sql_error_second;
     bvar::Adder<int> exec_sql_error;
     bvar::PerSecond<bvar::Adder<int> > exec_sql_error_second;
+    bvar::IntRecorder hit_cache;
+    bvar::Window<bvar::IntRecorder> hit_cache_ratio;
     std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > select_by_users;
     std::unordered_map<std::string, std::unique_ptr<bvar::LatencyRecorder> > dml_by_users;
-    std::mutex          _mutex;
+    std::mutex _mutex;
+    MysqlWrapper* _wrapper = nullptr;
 
-    MysqlWrapper*   _wrapper = nullptr;
+    static constexpr int EXPANDED_MONITOR_VALUE = 10000;
 
 public:
     bvar::Adder<BvarMap> sql_agg_cost;

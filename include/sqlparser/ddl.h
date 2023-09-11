@@ -95,6 +95,7 @@ enum ColumnOptionType : unsigned char {
     COLUMN_OPT_PRIMARY_KEY,
     COLUMN_OPT_UNIQ_KEY,
     COLUMN_OPT_FULLTEXT,
+    COLUMN_OPT_VECTOR,
     COLUMN_OPT_ON_UPDATE,
     COLUMN_OPT_COMMENT,
     COLUMN_OPT_COLLATE,
@@ -108,7 +109,8 @@ enum ConstraintType : unsigned char {
     CONSTRAINT_INDEX,
     CONSTRAINT_UNIQ,
     CONSTRAINT_FOREIGN_KEY,
-    CONSTRAINT_FULLTEXT
+    CONSTRAINT_FULLTEXT,
+    CONSTRAINT_VECTOR
 };
 
 enum IndexDistibuteType : unsigned char {
@@ -137,7 +139,13 @@ enum TableOptionType : unsigned char {
     TABLE_OPT_STATS_PERSISTENT,
     TABLE_OPT_SHARD_ROW_ID,
     TABLE_OPT_PACK_KEYS,
-    TABLE_OPT_PARTITION
+    TABLE_OPT_PARTITION,
+    TABLE_OPT_DYNAMIC_PARTITION_ATTR
+};
+
+enum PartitionOptionType : unsigned char {
+    PARTITION_OPT_NONE = 0,
+    PARTITION_OPT_COMMENT
 };
 
 enum DatabaseOptionType : unsigned char {
@@ -167,6 +175,7 @@ enum AlterSpecType : unsigned char {
 
     ALTER_SPEC_ADD_PARTITION,
     ALTER_SPEC_DROP_PARTITION,
+    ALTER_SPEC_MODIFY_PARTITION,
     ALTER_SPEC_REORGANIZE_PARTITION
 };
 
@@ -257,16 +266,27 @@ struct TableOption : public Node {
     }
 };
 
+struct PartitionOption : public Node {
+    PartitionOptionType type;
+    String              str_value;
+
+    PartitionOption() {
+        node_type = NT_PARTITION_OPT;
+    }
+};
+
 struct PartitionRange : public Node {
     String name;
     ExprNode* less_expr;
+    std::pair<ExprNode*, ExprNode*> range;
+    Vector<PartitionOption*> options;
 };
 
-struct PartitionOption : public TableOption {
+struct TablePartitionOption : public TableOption {
     PartitionType type;
     ExprNode* expr = nullptr;
     int64_t partition_num = 1;
-    Vector<PartitionRange*> range;
+    Vector<PartitionRange*> ranges;
 };
 
 struct Constraint : public Node {
@@ -364,6 +384,10 @@ struct AlterTableSpec : public Node {
     String                  resource_tag;
     bool                    force = false;
     bool                    is_virtual_index = false;
+    bool                    is_unique_indicator = false; // for re
+
+    // Partition
+    PartitionRange*          partition_range = nullptr;
 
     AlterTableSpec() {
         node_type = NT_ALTER_SEPC;

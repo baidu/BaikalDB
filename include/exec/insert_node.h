@@ -42,7 +42,7 @@ public:
     }
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual int expr_optimize(QueryContext* ctx);
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders);
     int insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert_records);
 
     std::vector<ExprNode*>& insert_values() {

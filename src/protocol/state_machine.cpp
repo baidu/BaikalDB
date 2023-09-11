@@ -325,9 +325,10 @@ int StateMachine::_query_more(SmartSocket client, bool shutdown) {
             client->query_ctx->stat_info.error_code = ER_EXEC_PLAN_FAILED;
             client->query_ctx->stat_info.error_msg << "exec physical plan failed";
         }
+        std::string str = client->query_ctx->stat_info.error_msg.str();
         _wrapper->make_err_packet(client,
             client->query_ctx->stat_info.error_code, "%s",
-            client->query_ctx->stat_info.error_msg.str().c_str());
+            str.c_str());
 
         return ret;
     }
@@ -386,6 +387,12 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 select_by_users[client->username].reset(new bvar::LatencyRecorder("select_" + client->username));
             }
             (*select_by_users[client->username]) << stat_info->total_time;
+            // non-prepare plan cache
+            if (stat_info->hit_cache) {
+                hit_cache << EXPANDED_MONITOR_VALUE;
+            } else {
+                hit_cache << 0;
+            }
         } else if (op_type == pb::OP_INSERT ||
                 op_type == pb::OP_UPDATE ||
                 op_type == pb::OP_DELETE) {
@@ -1172,6 +1179,27 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
                 ctx->is_full_export = json_iter->value.GetBool();
                 DB_WARNING("full_export: %d", ctx->is_full_export);
             }
+            json_iter = root.FindMember("keypoint_range");
+            if (json_iter != root.MemberEnd()) {
+                int64_t keypoint_range = json_iter->value.GetInt64();
+                if (keypoint_range > 0) {
+                    ctx->get_runtime_state()->keypoint_range = keypoint_range;
+                }
+            }
+            json_iter = root.FindMember("partition_threshold");
+            if (json_iter != root.MemberEnd()) {
+                int64_t partition_threshold = json_iter->value.GetInt64();
+                if (partition_threshold > 0) {
+                    ctx->get_runtime_state()->partition_threshold = partition_threshold;
+                }
+            }
+            json_iter = root.FindMember("range_count_limit");
+            if (json_iter != root.MemberEnd()) {
+                int64_t range_count_limit = json_iter->value.GetInt64();
+                if (range_count_limit > 0) {
+                    ctx->get_runtime_state()->range_count_limit = range_count_limit;
+                }
+            }
             json_iter = root.FindMember("single_store_concurrency");
             if (json_iter != root.MemberEnd()) {
                 ctx->single_store_concurrency = json_iter->value.GetInt();
@@ -1190,6 +1218,11 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd()) {
                 ctx->peer_index = json_iter->value.GetInt64();
                 DB_WARNING("peer_index: %ld", ctx->peer_index);
+            }
+            json_iter = root.FindMember("no_binlog");
+            if (json_iter != root.MemberEnd() && root["no_binlog"].IsBool()) {
+                ctx->no_binlog = json_iter->value.GetBool();
+                DB_WARNING("no_binlog: %d", ctx->no_binlog);
             }
         } catch (...) {
             DB_WARNING("parse extra file error [%s]", json_str.c_str());
@@ -1662,8 +1695,9 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
             client->query_ctx->stat_info.error_msg << "get logical plan failed";
         }
+        std::string str = client->query_ctx->stat_info.error_msg.str();
         _wrapper->make_err_packet(client,
-            client->query_ctx->stat_info.error_code, "%s", client->query_ctx->stat_info.error_msg.str().c_str());
+            client->query_ctx->stat_info.error_code, "%s", str.c_str());
         return false;
     }
     // DDL query need to interact with metaserver.
@@ -1681,7 +1715,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     // for (uint32_t idx = 0; idx < tuples.size(); ++idx) {
     //     DB_WARNING("TupleDescriptor: %s", pb2json(tuples[idx]).c_str());
     // }
-    if (client->query_ctx->exec_prepared == false) {
+    if (!client->query_ctx->exec_prepared && !client->query_ctx->is_plan_cache) {
         ret = client->query_ctx->create_plan_tree();
         if (ret < 0) {
             DB_FATAL_CLIENT(client, "Failed to pb_plan to execnode: %s",
@@ -1721,9 +1755,10 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             client->query_ctx->stat_info.error_code = ER_GEN_PLAN_FAILED;
             client->query_ctx->stat_info.error_msg << "get physical plan failed";
         }
+        std::string str = client->query_ctx->stat_info.error_msg.str();
         _wrapper->make_err_packet(client,
             client->query_ctx->stat_info.error_code, "%s",
-            client->query_ctx->stat_info.error_msg.str().c_str());
+            str.c_str());
         return false;
     }
     client->query_ctx->stat_info.query_plan_time = cost.get_time();
@@ -1814,9 +1849,10 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
             client->query_ctx->stat_info.error_code = ER_EXEC_PLAN_FAILED;
             client->query_ctx->stat_info.error_msg << "exec physical plan failed";
         }
+        std::string str = client->query_ctx->stat_info.error_msg.str();
         _wrapper->make_err_packet(client,
             client->query_ctx->stat_info.error_code, "%s",
-            client->query_ctx->stat_info.error_msg.str().c_str());
+            str.c_str());
         return false;
     }
     return true;

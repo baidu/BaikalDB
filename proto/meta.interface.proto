@@ -102,16 +102,35 @@ enum PartitionType {
     PT_RANGE = 2;
 };
 
-message PartitionMethod {
-    required PartitionType type = 1;
-    repeated FieldInfo field_infos = 2;
-    repeated int32 partition_fields = 3;
-    optional Expr range_partition_field = 4;
-    repeated Expr range_partition_values = 5;
-    repeated string partition_names = 6;
-    optional Expr hash_expr_value = 7;
-    optional string expr_string = 8;
-    optional int64 partition_num = 9;
+message PartitionRange {
+    optional Expr left_value  = 1;
+    optional Expr right_value = 2;
+};
+
+enum RangePartitionType {
+    RPT_DEFAULT = 0;
+    RPT_NEW_StatsEngine = 1;
+};
+
+message RangePartitionInfo {
+    optional int64 partition_id      = 1;
+    optional string partition_name   = 2;
+    optional Expr less_value         = 3;
+    optional PartitionRange range    = 4;
+    optional string resource_tag     = 5;
+    optional bool is_cold            = 6;
+    repeated SplitKey split_keys     = 7; // 仅创建动态分区时使用该字段
+    optional RangePartitionType type = 8; // 默认值为第一个枚举值
+};
+
+message DynamicPartitionAttr {
+    optional bool enable              = 1;
+    optional string time_unit         = 2;
+    optional int32 start              = 3;
+    optional int32 cold               = 4;
+    optional int32 end                = 5;
+    optional string prefix            = 6;
+    optional int32 start_day_of_month = 7;
 };
 
 message PartitionInfo {
@@ -119,10 +138,15 @@ message PartitionInfo {
     optional FieldInfo field_info = 2;
     optional int32 partition_field = 3;
     optional Expr range_partition_field = 4;
-    repeated Expr range_partition_values = 5;
-    repeated string partition_names = 6;
+    repeated Expr range_partition_values = 5; // 未使用
+    repeated string partition_names = 6; // 未使用
     optional Expr hash_expr_value = 7;
     optional string expr_string = 8;
+    repeated RangePartitionInfo range_partition_infos = 9;
+    optional DynamicPartitionAttr dynamic_partition_attr = 10;
+    optional int64 max_range_partition_id = 11;
+    repeated RangePartitionType gen_range_partition_types = 12;
+    optional RangePartitionType primary_range_partition_type = 13 [default = RPT_DEFAULT];
 };
 
 message SchemaInfo {
@@ -196,6 +220,9 @@ message FieldInfo {
     optional bytes encrypt            = 11; //指定加密字段
     optional uint32 flag              = 12;
     optional bytes default_literal    = 13;
+    optional bool is_unique_indicator = 14; //olap表,是否指标唯一列
+    optional int32  float_total_len    = 15;
+    optional int32 float_precision_len = 16;
 };
 
 enum IndexType {
@@ -204,6 +231,7 @@ enum IndexType {
     I_UNIQ          = 2;
     I_KEY           = 3;
     I_FULLTEXT      = 4; //query切词，word切词，node无额外信息
+    I_VECTOR        = 5; //向量索引，使用faiss库
 };
 
 enum SegmentType {
@@ -233,6 +261,12 @@ enum StorageType {
     ST_UNKNOWN = 3;
 };
 
+// faiss.MetricType，目前只支持METRIC_INNER_PRODUCT和METRIC_L2
+enum MetricType {
+    METRIC_INNER_PRODUCT = 0;
+    METRIC_L2 = 1;
+};
+
 message IndexInfo {
     required string index_name          = 1;
     optional string new_index_name      = 2;
@@ -246,6 +280,10 @@ message IndexInfo {
     optional StorageType storage_type   = 10;
     optional IndexHintStatus hint_status = 11;
     optional int64 drop_timestamp = 12;
+    optional string vector_description = 13; // faiss index_factory的描述，暂时支持(数字可改)：IVF1000,PQ16; HNSW16; Flat; 默认是HNSW16
+    optional int32 dimension = 14; //向量维度
+    optional MetricType metric_type = 15;// MetricType，默认是METRIC_L2
+    optional int32 nprobe = 16; //IVF查询的质心数量，默认是5
 };
 
 //address format: ip:port
@@ -271,7 +309,7 @@ message RegionInfo {
     optional int64 num_table_lines         = 19; //region包含的主表行数
     optional int64 main_table_id           = 20; //如果是全局二级索引的region保存主表的table_id
     optional bool is_binlog_region         = 21; //是否为binlog region
-    optional int64 partition_num           = 22;
+    optional int64 partition_num           = 22; // 当前系统未使用region partition_num，range分区不易维护
     repeated string learners               = 23;
     optional bool is_learner               = 24;
 };
@@ -304,21 +342,23 @@ message PrivilegeTable {
 };
 
 message UserPrivilege {
-    required string username                      = 1;
-    optional string password                      = 2;
-    required string namespace_name                = 3;
-    optional int64 namespace_id                   = 4;
-    repeated PrivilegeDatabase privilege_database = 5; 
-    repeated PrivilegeTable privilege_table       = 6; 
-    repeated string bns                           = 7;
-    repeated string ip                            = 8;
-    optional int64 version                        = 9;
-    optional bool encrypt                         = 10; //加密用户才能访问加密列
-    optional bool need_auth_addr                  = 11;
-    optional string resource_tag                  = 12; // 优先访问的store resource_tag
-    optional bool ddl_permission                  = 13; // ddl权限，空则认为没有权限，默认无权限
-    optional int64 txn_lock_timeout               = 14; // 事务等锁超时时间，对优先级低的账号减少锁占用时间
-    optional bool use_read_index                  = 15; // 读是否走folloewr read use read idx
+    required string username                                 = 1;
+    optional string password                                 = 2;
+    required string namespace_name                           = 3;
+    optional int64 namespace_id                              = 4;
+    repeated PrivilegeDatabase privilege_database            = 5;
+    repeated PrivilegeTable privilege_table                  = 6;
+    repeated string bns                                      = 7;
+    repeated string ip                                       = 8;
+    optional int64 version                                   = 9;
+    optional bool encrypt                                    = 10; // 加密用户才能访问加密列
+    optional bool need_auth_addr                             = 11;
+    optional string resource_tag                             = 12; // 优先访问的store resource_tag
+    optional bool ddl_permission                             = 13; // ddl权限，空则认为没有权限，默认无权限
+    optional int64 txn_lock_timeout                          = 14; // 事务等锁超时时间，对优先级低的账号减少锁占用时间
+    optional bool use_read_index                             = 15; // 读是否走folloewr read use read idx
+    optional bool enable_plan_cache                          = 16; // 是否缓存执行计划
+    optional RangePartitionType request_range_partition_type = 17; // 访问的Range分区类型
 };
 
 //集群信息
@@ -505,6 +545,8 @@ message MetaManagerRequest {
     optional RecoverOpt          recover_opt            = 25;
     optional IndexDdlRequest     index_ddl_request      = 26;
     optional int64               learner_replica_num    = 27;
+    optional bool                is_dynamic_change      = 28; // 标识是否为动态分区变更
+
 };
 
 message CreateTableResponse {
@@ -582,16 +624,17 @@ message LearnerHeartBeat {
 };
 
 message PeerHeartBeat {
-    required int64 region_id            = 1;
+    required int64 region_id     = 1;
     //为了在创建表失败的情况下，该region能够删除
-    required int64 table_id     = 2;
-    required int64 log_index    = 3;
-    optional bytes start_key    = 4;
-    optional bytes end_key      = 5;
+    required int64 table_id      = 2;
+    required int64 log_index     = 3;
+    optional bytes start_key     = 4;
+    optional bytes end_key       = 5;
     //如果是全局二级索引的region保存主表的table_id
     optional int64 main_table_id = 6;
     optional bool  exist_leader  = 7;
-    optional bool  is_learner     = 8;
+    optional bool  is_learner    = 8;
+    optional int64 partition_id  = 9;
 };
 
 message AddPeer {
@@ -900,6 +943,7 @@ message QueryTable {
     optional int64              region_split_lines  = 20;
     optional int64              partition_num       = 21;
     optional int64              fast_importer_ts    = 22;
+    optional string             binlog              = 23;
 };
 
 message QuerySchema {

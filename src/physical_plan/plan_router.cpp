@@ -96,8 +96,13 @@ int PlanRouter::insert_node_analyze(T* node, QueryContext* ctx) {
         DB_WARNING("invalid index info: %ld", table_id);
         return ret;
     }
+    std::shared_ptr<UserInfo> user_info = nullptr;
+    if (ctx != nullptr && ctx->client_conn != nullptr) {
+        user_info = ctx->client_conn->user_info;
+    }
     std::set<int64_t> record_partition_ids;
     ret = schema_factory->get_region_by_key(
+            user_info,
             *index_ptr, 
             ctx->insert_records, 
             node->insert_records_by_region(), 
@@ -313,7 +318,6 @@ int PlanRouter::truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ct
         DB_WARNING("invalid index info: %ld", table_id);
         return ret;
     }
-
     ret = schema_factory->get_region_by_key(index_ptr->id, *index_ptr, nullptr,
         trunc_node->region_infos(), nullptr, trunc_node->get_partition());
     if (ret < 0) {
@@ -403,9 +407,6 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
 
     if (truncate_node != nullptr) {
         auto node = static_cast<TruncateNode*>(truncate_node);
-        if (node->get_partition_num() == 1) {
-            return 0;
-        }
         int64_t table_id = node->table_id();
         auto iter = ctx->table_partition_names.find(table_id);
         if (iter != ctx->table_partition_names.end()) {
@@ -416,6 +417,16 @@ int PartitionAnalyze::analyze(QueryContext* ctx) {
             node->replace_partition(partition_ids, true);
             return 0;
         }
+        // Range Partition
+        SmartTable p_table = schema_factory->get_table_info_ptr(table_id);
+        if (p_table != nullptr && p_table->is_range_partition) {
+            for (const auto& range_partition_info : p_table->partition_info.range_partition_infos()) {
+                partition_ids.emplace(range_partition_info.partition_id());
+            }
+            node->replace_partition(partition_ids, false);
+            return 0;
+        }
+        // Hash Partition
         for (int64_t i = 0; i < node->get_partition_num(); ++i) {
             partition_ids.emplace(i);
         }

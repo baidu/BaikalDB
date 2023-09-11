@@ -74,6 +74,8 @@ namespace braft = raft;
 namespace baikaldb {
 DECLARE_bool(use_cond_decrease_signal);
 
+#define BAIKALDB_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define BAIKALDB_UNLIKELY(x) __builtin_expect(!!(x), 0)
 enum RETURN_VALUE {
     RET_SUCCESS          = 0,
     RET_ERROR            = 1,   // Common error.
@@ -139,7 +141,8 @@ enum ExplainType {
     SHOW_TRACE              = 5,
     SHOW_TRACE2             = 6,
     EXPLAIN_SHOW_COST       = 7,
-    SHOW_SIGN               = 8
+    SHOW_SIGN               = 8,
+    SHOW_KEYPOINT           = 9
 };
 
 const size_t ROW_BATCH_CAPACITY = 1024;
@@ -940,7 +943,7 @@ public:
     bool status = false; //false表示没有执行完，true表示执行完成
 };
 
-DECLARE_int32(limit_slow_sql_size);
+DECLARE_uint64(limit_slow_sql_size);
 struct BvarSlowQueryMap {
 public:
     BvarSlowQueryMap() {}

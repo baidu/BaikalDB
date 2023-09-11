@@ -380,10 +380,11 @@ void TSOStateMachine::on_leader_start() {
     current.set_physical(now);
     current.set_logical(0);
     int64_t last_save = _tso_obj.last_save_physical;
-    if (last_save - now < tso::update_timestamp_interval_ms) {
+    if (now < last_save + tso::update_timestamp_guard_ms) {
+        DB_WARNING("time maybe fallback, now:%ld, last_save:%ld", now, last_save);
         current.set_physical(last_save + tso::update_timestamp_guard_ms);
-        last_save = now + tso::save_interval_ms;
     }
+    last_save = current.physical() + tso::save_interval_ms;
     auto func = [this, last_save, current]() {
         DB_WARNING("leader_start current(phy:%ld,log:%ld) save:%ld", current.physical(),
         current.logical(), last_save);

@@ -348,4 +348,118 @@ int TableKey::skip_field(const FieldInfo& field_info, int& pos) const {
     return 0;
 }
 
+// Dynamic Partition
+void TableKey::get_partition_col_pos(
+        const std::vector<pb::PrimitiveType>& types,
+        const size_t partition_col_num,
+        int& pos) {
+    if (types.size() < partition_col_num) {
+        pos = -1;
+        return;
+    }
+    for (size_t i = 0; i < partition_col_num; ++i) {
+        get_partition_col_pos(types[i], pos);
+        if (pos < 0) {
+            return;
+        }
+    }
+}
+
+void TableKey::get_partition_col_pos(const pb::PrimitiveType& type, int& pos) {
+    switch (type) {
+        case pb::INT8: {
+            if (pos + sizeof(int8_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(int8_t);
+        } break;
+        case pb::INT16: {
+            if (pos + sizeof(int16_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(int16_t);
+        } break;
+        case pb::TIME:
+        case pb::INT32: {
+            if (pos + sizeof(int32_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(int32_t);
+        } break;
+        case pb::UINT8: {
+            if (pos + sizeof(uint8_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(uint8_t);
+        } break;
+        case pb::UINT16: {
+            if (pos + sizeof(uint16_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(uint16_t);
+
+        } break;
+        case pb::UINT32:
+        case pb::TIMESTAMP:
+        case pb::DATE: {
+            if (pos + sizeof(uint32_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(uint32_t);
+        } break;
+        case pb::INT64: {
+            if (pos + sizeof(int64_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(int64_t);
+        } break;
+        case pb::UINT64: 
+        case pb::DATETIME: {
+            if (pos + sizeof(uint64_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(uint64_t);
+        } break;
+        case pb::FLOAT: {
+            if (pos + sizeof(float) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(float);
+        } break;
+        case pb::DOUBLE: {
+            if (pos + sizeof(double) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(double);
+        } break;
+        case pb::STRING: {
+            if (pos >= (int)size()) {
+                pos = -1;
+                return;
+            }
+            pos += (strlen(_data.data_ + pos) + 1);
+        } break;
+        case pb::BOOL: {
+            if (pos + sizeof(uint8_t) > size()) {
+                pos = -1;
+                return;
+            }
+            pos += sizeof(uint8_t);
+        } break;
+        default: {
+            pos = -1;
+        } break;
+    }
+}
+
 } // end of namespace baikaldb

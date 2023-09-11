@@ -16,7 +16,7 @@ using namespace parser;
 #include "sql_parse.yacc.hh"
 using parser::LiteralExpr;
 using parser::SqlParser;
- //redefine the lex
+//redefine the lex
 #define YY_DECL int sql_lex(YYSTYPE *yylval, YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser)
 #define YY_USER_ACTION yylloc->start = yytext;\
   yylloc->end = yytext + yyleng;
@@ -164,6 +164,7 @@ REGEXP { return REGEXP; }
 RENAME { return RENAME; }
 REPEAT { return REPEAT; }
 REPLACE { return REPLACE; }
+MERGE { return MERGE; }
 RESTRICT { return RESTRICT; }
 REVOKE { return REVOKE; }
 RIGHT { return RIGHT; }
@@ -223,6 +224,7 @@ ANY { un_reserved_keyword(yylval, yyscanner, parser); return ANY; }
 ASCII { un_reserved_keyword(yylval, yyscanner, parser); return ASCII; }
 AUTO_INCREMENT { un_reserved_keyword(yylval, yyscanner, parser); return AUTO_INCREMENT; }
 AVG_ROW_LENGTH { un_reserved_keyword(yylval, yyscanner, parser); return AVG_ROW_LENGTH; }
+DYNAMIC_PARTITION_ATTR { un_reserved_keyword(yylval, yyscanner, parser); return DYNAMIC_PARTITION_ATTR; }
 AVG { un_reserved_keyword(yylval, yyscanner, parser); return AVG; }
 BEGIN { un_reserved_keyword(yylval, yyscanner, parser); return BEGINX; }
 WORK  { un_reserved_keyword(yylval, yyscanner, parser); return WORK; }
@@ -369,6 +371,7 @@ UNDEFINED { un_reserved_keyword(yylval, yyscanner, parser); return UNDEFINED; }
 VALUE { un_reserved_keyword(yylval, yyscanner, parser); return VALUE; }
 VARIABLES { un_reserved_keyword(yylval, yyscanner, parser); return VARIABLES; }
 VIEW { un_reserved_keyword(yylval, yyscanner, parser); return VIEW; }
+VECTOR { un_reserved_keyword(yylval, yyscanner, parser); return VECTOR; }
 WARNINGS { un_reserved_keyword(yylval, yyscanner, parser); return WARNINGS; }
 WEEK { un_reserved_keyword(yylval, yyscanner, parser); return WEEK; }
 YEAR { un_reserved_keyword(yylval, yyscanner, parser); return YEAR; }

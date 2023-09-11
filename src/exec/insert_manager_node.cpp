@@ -73,11 +73,16 @@ int InsertManagerNode::init_insert_info(InsertNode* insert_node, bool is_local) 
     _tuple_id = insert_node->tuple_id();
     _values_tuple_id = insert_node->values_tuple_id();
     _is_replace = insert_node->is_replace();
+    _is_merge = insert_node->is_merge();
     _need_ignore = insert_node->need_ignore();
     _selected_field_ids = insert_node->prepared_field_ids();
     _table_info = _factory->get_table_info_ptr(_table_id);
     if (_table_info == nullptr) {
         DB_WARNING("no table found with table_id: %ld", _table_id);
+        return -1;
+    }
+    if (_is_merge && _table_info->indices.size() > 1) {
+        DB_FATAL("table_id: %ld has multi index not support merge", _table_id);
         return -1;
     }
     for (const auto index_id : _table_info->indices) {
@@ -110,6 +115,15 @@ int InsertManagerNode::init_insert_info(InsertNode* insert_node, bool is_local) 
     _update_slots.swap(insert_node->update_slots());
     _update_exprs.swap(insert_node->update_exprs());
     _insert_values.swap(insert_node->insert_values());
+    std::set<int32_t> affect_field_ids;
+    for (auto& slot : _update_slots) {
+        affect_field_ids.insert(slot.field_id());
+    }
+    for (auto& field_info : _table_info->fields) {
+        if (affect_field_ids.count(field_info.id) == 1) {
+            _update_fields[field_info.id] = &field_info;
+        }
+    }
     return 0;
 }
 
@@ -144,7 +158,7 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
     }
     for (auto& field : _table_info->fields) {
         if (insert_prepared_field_ids.count(field.id) == 0) {
-            default_fields.push_back(&field);
+            default_fields.emplace_back(&field);
         }
     }
     for (size_t i = 0; i < _select_projections.size(); i++) {
@@ -193,6 +207,7 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
                 }
                 // 20190101101112 这种转换现在只支持string类型
                 pb::PrimitiveType field_type = table_field_map[_selected_field_ids[i]]->type;
+                result.float_precision_len = table_field_map[_selected_field_ids[i]]->float_precision_len;
                 if (is_datetime_specic(field_type) && result.is_numberic()) {
                     result.cast_to(pb::STRING).cast_to(field_type);
                 } else {
@@ -205,7 +220,7 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
                     return -1;
                 }
             }
-            _origin_records.push_back(record);
+            _origin_records.emplace_back(record);
             //DB_WARNING("record:%s", record->debug_string().c_str());
         }
     } while (!eos);
@@ -333,29 +348,26 @@ int InsertManagerNode::open(RuntimeState* state) {
 int InsertManagerNode::basic_insert(RuntimeState* state) {
     int ret = 0;
     _affected_rows = _insert_scan_records.size();
-    auto iter = _children.begin();
     // 保证主键单独执行
-    DMLNode* dml_node = static_cast<DMLNode*>(*iter);
+    DMLNode* dml_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
     ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
     if (ret < 0) {
         DB_WARNING("exec node failed, log_id:%lu ret:%d ", state->log_id(), ret);
         return -1;
     }
-    iter = _children.erase(iter);
     size_t cur = 1;
     // 全局唯一二级索引串行执行, 最后一个唯一索引和非唯一索引并发
-    while (iter != _children.end() && cur < _uniq_index_number) {
-        DMLNode* dml_node = static_cast<DMLNode*>(*iter);
+    while (_execute_child_idx < _children.size() && cur < _uniq_index_number) {
+        DMLNode* dml_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
         ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
         if (ret < 0) {
             DB_WARNING("exec node failed, log_id:%lu _uniq_index_number:%zu cur:%zu ret:%d ",
                 state->log_id(), _uniq_index_number, cur, ret);
             return -1;
         }
-        iter = _children.erase(iter);
-        cur++;
+        ++cur;
     }
-    ret = send_request_concurrency(state, 0);
+    ret = send_request_concurrency(state, _execute_child_idx);
     if (ret < 0) {
         DB_WARNING("exec concurrency failed, log_id:%lu ret:%d ", state->log_id(), ret);
         return ret;
@@ -394,14 +406,14 @@ int InsertManagerNode::insert_ignore(RuntimeState* state) {
     // 重新生成需要insert的行
     _insert_scan_records.clear();
     for (auto& id : _record_ids) {
-        _insert_scan_records.push_back(_origin_records[id]);
+        _insert_scan_records.emplace_back(_origin_records[id]);
     }
     if (_insert_scan_records.size() == 0) {
         return 0;
     }
     _affected_rows = _record_ids.size();
     // 写主表和全局二级索引并发
-    ret = send_request_concurrency(state, 0);
+    ret = send_request_concurrency(state, _execute_child_idx);
     if (ret < 0) {
         DB_WARNING("exec concurrency failed log_id:%lu, ret:%d ", state->log_id(), ret);
         return ret;
@@ -467,39 +479,36 @@ int InsertManagerNode::insert_replace(RuntimeState* state) {
     }
     _insert_scan_records.clear();
     for (auto& id : _record_ids) {
-        _insert_scan_records.push_back(_origin_records[id]);
+        _insert_scan_records.emplace_back(_origin_records[id]);
     }
     _del_scan_records = _store_records[_pri_info->id];
     _affected_rows += _insert_scan_records.size(); 
     _affected_rows += _del_scan_records.size(); 
-    size_t start_child = 0;
     if (!_main_table_reversed) {
-        ++start_child;
+        ++_execute_child_idx;
     }
     if (!_has_conflict_record) {
         // 完全没有冲突,写主表和全局二级索引全并发
-        ret = send_request_concurrency(state, start_child);
+        ret = send_request_concurrency(state, _execute_child_idx);
         if (ret < 0) {
             DB_WARNING("exec concurrency failed, log_id:%lu ret:%d ", state->log_id(), ret);
             return ret;
         }
     } else {
-        auto iter = _children.begin() + start_child;
         size_t cur = 0;
         // 写主表和全局唯一二级索引串行，最后一个唯一索引和其他并发
-        while (iter != _children.end() && cur < _uniq_index_number) {
-            DMLNode* dml_node = static_cast<DMLNode*>(*iter);
+        while (_execute_child_idx < _children.size() && cur < _uniq_index_number) {
+            DMLNode* dml_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
             ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
             if (ret < 0) {
                 DB_WARNING("exec node failed, log_id:%lu _uniq_index_number:%zu cur:%zu ret:%d ",
                 state->log_id(), _uniq_index_number, cur, ret);
                 return -1;
             }
-            iter = _children.erase(iter);
             cur++;
         }
         // 全局非唯一二级索引并行
-        ret = send_request_concurrency(state, start_child);
+        ret = send_request_concurrency(state, _execute_child_idx);
         if (ret < 0) {
             DB_WARNING("exec concurrency failed, log_id:%lu ret:%d ", state->log_id(), ret);
             return ret;
@@ -560,7 +569,7 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
     }
     _insert_scan_records.clear();
     for (auto& id : _record_ids) {
-        _insert_scan_records.push_back(_origin_records[id]);
+        _insert_scan_records.emplace_back(_origin_records[id]);
     }
     if (dup_record_ids.size() > 0) {
         // 2=插入+删除
@@ -585,39 +594,36 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
         }
     }
     for (auto record :  updated_records) {
-        _insert_scan_records.push_back(record);
+        _insert_scan_records.emplace_back(record);
     }
     _del_scan_records = _store_records[_pri_info->id];
     _affected_rows += _insert_scan_records.size();
     _affected_rows += _del_scan_records.size(); 
-    size_t start_child = 0;
     if (!_main_table_reversed) {
-        ++start_child;
+        ++_execute_child_idx;
     }
     if (!_has_conflict_record) {
         // 完全没有冲突,写主表和全局二级索引全并发
-        ret = send_request_concurrency(state, start_child);
+        ret = send_request_concurrency(state, _execute_child_idx);
         if (ret < 0) {
             DB_WARNING("exec concurrency failed, log_id:%lu ret:%d ", state->log_id(), ret);
             return ret;
         }
     } else {
-        auto iter = _children.begin() + start_child;
         size_t cur = 0;
         // 写主表和全局唯一二级索引串行，最后一个唯一索引和非唯一索引并发
-        while (iter != _children.end() && cur < _uniq_index_number) {
-            DMLNode* dml_node = static_cast<DMLNode*>(*iter);
+        while (_execute_child_idx < _children.size() && cur < _uniq_index_number) {
+            DMLNode* dml_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
             ret = send_request(state, dml_node, _insert_scan_records, _del_scan_records);
             if (ret < 0) {
                 DB_WARNING("exec node failed, log_id:%lu _uniq_index_number:%zu cur:%zu ret:%d ",
                 state->log_id(), _uniq_index_number, cur, ret);
                 return -1;
             }
-            iter = _children.erase(iter);
             cur++;
         }
         // 全局非唯一二级索引并行
-        ret = send_request_concurrency(state, start_child);
+        ret = send_request_concurrency(state, _execute_child_idx);
         if (ret < 0) {
             DB_WARNING("exec concurrency failed, log_id:%lu ret:%d", state->log_id(), ret);
             return ret;
@@ -648,8 +654,15 @@ void InsertManagerNode::update_record(const SmartRecord& record, const SmartReco
     for (size_t i = 0; i < _update_exprs.size(); i++) {
         auto& slot = _update_slots[i];
         auto expr = _update_exprs[i];
-        record->set_value(record->get_field_by_tag(slot.field_id()),
-            expr->get_value(row).cast_to(slot.slot_type()));
+        auto field = _update_fields[slot.field_id()];
+        if (field->type == pb::FLOAT || field->type == pb::DOUBLE) {
+            auto& expr_value = expr->get_value(row).cast_to(slot.slot_type());
+            expr_value.float_precision_len = field->float_precision_len;
+            record->set_value(record->get_field_by_tag(slot.field_id()), expr_value);
+        } else {
+            record->set_value(record->get_field_by_tag(slot.field_id()),
+                expr->get_value(row).cast_to(slot.slot_type()));
+        }
     }
 }
 
@@ -678,32 +691,6 @@ int InsertManagerNode::expr_optimize(QueryContext* ctx) {
         }
     }
     return 0;
-}
-
-void InsertManagerNode::reset(RuntimeState* state) {
-    auto client_conn = state->client_conn();
-    // add dml node back
-    std::vector<ExecNode*> old_children = this->children();
-    this->clear_children();
-    if (_is_replace || _on_dup_key_update) {
-        size_t idx = 0;
-        for (auto& iter : client_conn->cache_plans) {
-            if (old_children.size() == 1 && (idx == _uniq_index_number + 1)) {
-                this->add_child(old_children[0]);
-            }
-            idx++;
-            this->add_child(iter.second.root);
-        }
-    } else {
-        for (auto& iter : client_conn->cache_plans) {
-            this->add_child(iter.second.root);
-        }
-        for (auto& child : old_children) {
-            this->add_child(child);
-        }
-    }
-    client_conn->cache_plans.clear();
-    ExecNode::reset(state);
 }
 
 int InsertManagerNode::reverse_main_table(RuntimeState* state) {
@@ -743,7 +730,7 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
             if (pk_record_iter == _primary_record_key_record_map.end()) {
                 if (pk_key_iter == pk_key_set.end()) {
                     // 二级索引的主键主表没有返回，需要反查主表
-                    _insert_scan_records.push_back(record);
+                    _insert_scan_records.emplace_back(record);
                     pk_key_set.insert(pk_key);
                     if (_on_dup_key_update) {
                         MutTableKey mt_key;
@@ -781,14 +768,13 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
     }
     // 反查主表
     if (_insert_scan_records.size() > 0) {
-        DMLNode* pri_node = static_cast<DMLNode*>(_children[0]);
+        DMLNode* pri_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
         ret = send_request(state, pri_node, _insert_scan_records, _del_scan_records);
         if (ret < 0) {
             DB_WARNING("exec node failed, log_id:%lu ret:%d ", state->log_id(), ret);
             return -1;
         }
         _main_table_reversed = true;
-        _children.erase(_children.begin());
         add_store_records();
         if (_on_dup_key_update) {
             for (auto record : _store_records[_pri_info->id]) {
@@ -816,15 +802,12 @@ int InsertManagerNode::reverse_main_table(RuntimeState* state) {
 int InsertManagerNode::get_record_from_store(RuntimeState* state) {
     int ret = 0;
     // 获取主表数据
-    DMLNode* pri_node = static_cast<DMLNode*>(_children[0]);
+    DMLNode* pri_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
     ret = send_request(state, pri_node, _insert_scan_records, _del_scan_records);
     if (ret < 0) {
         DB_WARNING("exec node failed, log_id:%lu ret:%d ", state->log_id(), ret);
         return -1;
     }
-    // send_request成功后会把node缓存到NetworkSocket的cache_plan,这里需要将node移除
-    // 防止二次释放
-    _children.erase(_children.begin());
     add_store_records();
     if (_on_dup_key_update) {
         int64_t index_id = _pri_info->id;
@@ -844,19 +827,13 @@ int InsertManagerNode::get_record_from_store(RuntimeState* state) {
         _primary_record_key_record_map_construct = true;
     }
     // 获取二级索引数据，返回索引数据+pk数据
-    auto iter = _children.begin();
-    size_t cnt = 0;
-    auto node_type = (*iter)->node_type();
-    while (node_type == pb::LOCK_SECONDARY_NODE) {
-        DMLNode* sec_node = static_cast<DMLNode*>(*iter);
+    while (_execute_child_idx < _children.size() && _children[_execute_child_idx]->node_type() == pb::LOCK_SECONDARY_NODE) {
+        DMLNode* sec_node = static_cast<DMLNode*>(_children[_execute_child_idx++]);
         ret = send_request(state, sec_node, _insert_scan_records, _del_scan_records);
         if (ret < 0) {
             DB_WARNING("exec node failed, log_id:%lu ret:%d ", state->log_id(), ret);
             return -1;
         }
-        cnt++;
-        iter = _children.erase(iter);
-        node_type = (*iter)->node_type();
         add_store_records();
     }
     return 0;
@@ -883,7 +860,7 @@ int InsertManagerNode::process_records_before_send(RuntimeState* state) {
     int32_t id = 0; 
     std::set<int> need_remove_ids;
     for (auto record : _origin_records) {
-        for (const auto pair : _index_info_map) {
+        for (const auto& pair : _index_info_map) {
             auto info = *pair.second;
             MutTableKey mt_key;
             int64_t index_id = info.id;
@@ -928,7 +905,7 @@ int InsertManagerNode::process_records_before_send(RuntimeState* state) {
     }
 
     for (auto& id : _record_ids) {
-        _insert_scan_records.push_back(_origin_records[id]);
+        _insert_scan_records.emplace_back(_origin_records[id]);
     }
     return 0;
 }

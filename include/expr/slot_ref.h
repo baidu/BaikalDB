@@ -37,7 +37,6 @@ public:
     virtual ExprValue get_value(const ExprValue& value) {
         return value;
     }
-
     SlotRef* clone() {
         SlotRef* s = new SlotRef;
         s->_tuple_id = _tuple_id;

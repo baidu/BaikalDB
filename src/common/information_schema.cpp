@@ -519,13 +519,18 @@ void InformationSchema::init_learner_region_status() {
         {"table_name", pb::STRING},
         {"region_id", pb::INT64},
         {"partition_id", pb::INT64},
+        {"partition_name", pb::STRING},
+        {"partition_is_cold", pb::INT64},
         {"resource_tag", pb::STRING},
         {"instance", pb::STRING},
         {"version", pb::INT64},
         {"apply_index", pb::INT64},
         {"status", pb::STRING},
+        {"olap_state", pb::STRING},
+        {"external_full_path", pb::STRING},
+        {"path_diff", pb::INT64},
     };
-    int64_t table_id = construct_table("LEARNER_REGION_STATUS", fields);
+    int64_t table_id = construct_table("REGION_INFO", fields);
     // 定义操作
     _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
         std::vector<SmartRecord> {
@@ -576,7 +581,7 @@ void InformationSchema::init_learner_region_status() {
             } else {
                 auto func = [&condition_table_ids, &condition_table_id_db_map, &condition_table_id_tbl_map, &database_name, &table_name]
                     (const SmartTable& table) -> bool {
-                    if (table != nullptr && !table->learner_resource_tags.empty()) {
+                    if (table != nullptr) {
                         if (database_name.empty()) {
                             condition_table_ids.emplace_back(table->id);
                             std::vector<std::string> items;
@@ -600,7 +605,8 @@ void InformationSchema::init_learner_region_status() {
             std::map<int64_t, int64_t> region_id_partition_id_map;
             std::map<int64_t, int64_t> region_id_table_id_map;
             std::map<std::string, std::set<int64_t>> instance_region_ids_map;
-            records.reserve(1000);
+            records.reserve(1024);
+            std::map<int64_t, std::map<int64_t, std::pair<std::string, bool>>> table_partition_name_cold;
             for (int64_t condition_table_id : condition_table_ids) {
                 std::map<int64_t, pb::RegionInfo> region_infos;
                 factory->get_all_partition_regions(condition_table_id, &region_infos);
@@ -615,6 +621,15 @@ void InformationSchema::init_learner_region_status() {
                         instance_region_ids_map[learner].insert(region.region_id());
                     }
                 }
+
+                auto table = factory->get_table_info_ptr(condition_table_id);
+                if (table == nullptr) {
+                    continue;
+                }
+
+                for (const auto& info : table->partition_info.range_partition_infos()) {
+                    table_partition_name_cold[table->id][info.partition_id()] = {info.partition_name(), info.is_cold()};
+                }
             }
 
             ConcurrencyBthread bth(instance_region_ids_map.size());
@@ -626,7 +641,7 @@ void InformationSchema::init_learner_region_status() {
                 }
                 std::set<int64_t> region_ids = pair.second;
                 auto func = [store_addr, region_ids, table_id, &condition_table_id_db_map, &condition_table_id_tbl_map, 
-                            &region_id_table_id_map, &region_id_partition_id_map, &records, &lock]() {
+                            &table_partition_name_cold, &region_id_table_id_map, &region_id_partition_id_map, &records, &lock]() {
                     pb::RegionIds req;
                     pb::StoreRes res;
                     req.set_query_apply_index(true);
@@ -642,12 +657,31 @@ void InformationSchema::init_learner_region_status() {
                         record->set_string(record->get_field_by_name("database_name"), condition_table_id_db_map[region_id_table_id_map[info.region_id()]]);
                         record->set_string(record->get_field_by_name("table_name"), condition_table_id_tbl_map[region_id_table_id_map[info.region_id()]]);
                         record->set_int64(record->get_field_by_name("region_id"), info.region_id());
-                        record->set_int64(record->get_field_by_name("partition_id"), region_id_partition_id_map[info.region_id()]);
+                        int64_t partition_id = region_id_partition_id_map[info.region_id()];
+                        record->set_int64(record->get_field_by_name("partition_id"), partition_id);
+                        auto iter = table_partition_name_cold.find(info.table_id());
+                        if (iter != table_partition_name_cold.end()) {
+                            auto iter2 = iter->second.find(partition_id);
+                            if (iter2 != iter->second.end()) {
+                                record->set_string(record->get_field_by_name("partition_name"), iter2->second.first);
+                                record->set_int64(record->get_field_by_name("partition_is_cold"), iter2->second.second);
+                            }
+                        }
                         record->set_string(record->get_field_by_name("resource_tag"), info.resource_tag());
                         record->set_string(record->get_field_by_name("instance"), store_addr);
                         record->set_int64(record->get_field_by_name("version"), info.version());
                         record->set_int64(record->get_field_by_name("apply_index"), info.apply_index());
                         record->set_string(record->get_field_by_name("status"), info.status());
+                        record->set_string(record->get_field_by_name("olap_state"), pb::OlapRegionStat_Name(info.olap_state()));
+                        std::string files;
+                        for (auto& f : info.external_full_path()) {
+                            files += f + ";";
+                        }
+                        if (!files.empty()) {
+                            files.pop_back();
+                        }
+                        record->set_string(record->get_field_by_name("external_full_path"), files);
+                        record->set_int64(record->get_field_by_name("path_diff"), info.path_diff());
                         records.emplace_back(record);
                     }
 

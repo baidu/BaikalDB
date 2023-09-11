@@ -251,7 +251,7 @@ int SortNode::fill_tuple(RowBatch* batch) {
     return 0;
 }
 
-void SortNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+void SortNode::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
     ExecNode::find_place_holder(placeholders);
     for (auto& expr : _order_exprs) {
         expr->find_place_holder(placeholders);

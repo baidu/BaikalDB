@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#include "meta_server_interact.hpp"
 #include "packet_node.h"
 #include "full_export_node.h"
 #include "runtime_state.h"
@@ -21,6 +20,8 @@
 namespace baikaldb {
 DEFINE_int32(expect_bucket_count, 100, "expect_bucket_count");
 DEFINE_bool(field_charsetnr_set_by_client, false, "set charsetnr by client");
+DECLARE_int32(key_point_collector_interval);
+
 int PacketNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -127,6 +128,7 @@ int PacketNode::handle_show_cost(RuntimeState* state) {
     }
 
     std::vector<std::vector<std::string>> rows;
+    rows.reserve(5);
     bool fill_name = true;
     for (auto& path_info : path_infos) {
         std::vector<std::string> row;
@@ -137,7 +139,7 @@ int PacketNode::handle_show_cost(RuntimeState* state) {
                 field.type = MYSQL_TYPE_STRING;
                 _fields.push_back(field);
             }
-            row.push_back(pair.second);
+            row.emplace_back(pair.second);
         }
         fill_name = false;
         rows.push_back(row);
@@ -277,6 +279,133 @@ int PacketNode::handle_trace2(RuntimeState* state) {
     return 0;
 }
 
+int PacketNode::pack_keypoints(RuntimeState* state, 
+                               std::map<std::string, std::vector<std::string>>& partition_key_pks,
+                               int partition_field_id, int partition_slot_id) {
+    int ret = 0;
+    bool eos = false;
+    do {
+        if (_children.empty()) {
+            break;
+        }
+        RowBatch batch;
+        ret = _children[0]->get_next(state, &batch, &eos);
+        if (ret < 0) {
+            DB_WARNING("children:get_next fail:%d", ret);
+            return ret;
+        }
+        for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
+            MemRow* row = batch.get_row().get();
+            std::string key_point;
+            std::string paritition_key = row->get_value(0, partition_slot_id).get_string();
+            for (auto expr : _projections) {
+                key_point += expr->get_value(row).cast_to(expr->col_type()).get_string() + ",";
+            }
+            if (!key_point.empty()) {
+                key_point.pop_back();
+            }
+            partition_key_pks[paritition_key].emplace_back(key_point);
+        }
+    } while (!eos);
+    return 0;
+}
+
+int PacketNode::handle_keypoint(RuntimeState* state) {
+    _fields.clear();
+    std::vector<std::string> names = {
+        "partition_key", "rows", "keypoints"
+    };
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.emplace_back(field);
+    }
+
+    // pk field types
+    int partition_key_field_id = -1;
+    int partition_key_slot_id = -1;
+    pb::TupleDescriptor* tuple = state->get_tuple_desc(0);
+    if (tuple == nullptr) {
+        DB_WARNING("get tuple fail");
+        return -1;
+    }
+    int64_t table_id = tuple->table_id();
+    auto pk_info = SchemaFactory::get_instance()->get_index_info_ptr(table_id);
+    if (pk_info == nullptr || pk_info->fields.empty()) {
+        DB_WARNING("get pk info fail");
+        return -1;
+    }
+    partition_key_field_id = pk_info->fields[0].id;
+    for (const auto& slot : tuple->slots()) {
+        if (slot.field_id() == partition_key_field_id) {
+            partition_key_slot_id = slot.slot_id();
+            break;
+        }
+    }
+    if (partition_key_field_id < 0 || partition_key_slot_id < 0) {
+        DB_WARNING("get partition key field_id or slot_id fail");
+        return -1;
+    }
+    if (FLAGS_key_point_collector_interval <= 0) {
+        DB_WARNING("not open key_point_collector");
+        return -1;
+    }
+    int64_t keypoint_range = state->keypoint_range / FLAGS_key_point_collector_interval;
+    if (keypoint_range <= 1) {
+        keypoint_range = 2;
+    }
+    int64_t partition_threshold = state->partition_threshold / FLAGS_key_point_collector_interval;
+    if (partition_threshold <= 1) {
+        partition_threshold = 2;
+    }
+    int64_t range_count_limit = state->range_count_limit;
+    std::map<std::string, std::vector<std::string>> partition_key_pks;
+    pack_keypoints(state, partition_key_pks, partition_key_field_id, partition_key_slot_id);
+
+    std::vector<std::vector<std::string>> rows;
+    rows.reserve(1);
+    for (auto& sub_info : partition_key_pks) {
+        std::vector<std::string> row;
+        const std::string& partition_key = sub_info.first;
+        row.emplace_back(partition_key);
+        row.emplace_back(std::to_string(sub_info.second.size() * FLAGS_key_point_collector_interval));
+        std::string pks;
+        std::string last_pk;
+        int key_count = 0;
+        int keypoint_range_per_user = keypoint_range;
+        // 目前只有大户拆分的场景需要通过range_count_limit聚合, 多账户场景不需要聚合
+        if (range_count_limit > 0 && sub_info.second.size() > keypoint_range_per_user * range_count_limit) {
+            keypoint_range_per_user = sub_info.second.size() / range_count_limit + 1;
+        }
+        for (auto& pk : sub_info.second) {
+            if (++key_count % keypoint_range_per_user == 0) {
+                if (last_pk != pk) {
+                    pks += pk + ";";
+                    last_pk = pk;
+                }
+            }
+        }
+        if (key_count < partition_threshold) {
+            continue;
+        }
+        if (!pks.empty()) {
+            pks.pop_back();
+        }
+        row.emplace_back(pks);
+        rows.emplace_back(row);
+    }
+    state->inc_num_returned_rows(rows.size());
+    pack_head();
+    pack_fields();
+    for (auto& row : rows) {
+        pack_vector_row(row);
+    }
+    
+    pack_eof();
+    return 0;
+}
+
 int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
     auto subquery_exprs_vec = state->mutable_subquery_exprs();
     bool eos = false;
@@ -347,7 +476,9 @@ int PacketNode::open(RuntimeState* state) {
         pack_ok(state->num_affected_rows(), _client);
         return 0;
     }
-
+    if (state->explain_type == SHOW_KEYPOINT) {
+        return handle_keypoint(state);
+    }
     if (_trace != nullptr) {
         return open_trace(state);
     }
@@ -879,7 +1010,7 @@ int PacketNode::pack_eof() {
     return 0;
 }
 
-void PacketNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+void PacketNode::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
     ExecNode::find_place_holder(placeholders);
     for (auto& expr : _projections) {
         expr->find_place_holder(placeholders);

@@ -25,7 +25,7 @@ public:
     }
     virtual ~DMLNode() {}
     virtual int expr_optimize(QueryContext* ctx);
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders);
     int insert_row(RuntimeState* state, SmartRecord record, bool is_update = false);
     int delete_row(RuntimeState* state, SmartRecord record, MemRow* row);
     int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row);
@@ -59,6 +59,9 @@ public:
     bool is_replace() {
         return _is_replace;
     }
+    bool is_merge() {
+        return _is_merge;
+    }
     bool need_ignore() {
         return _need_ignore;
     }
@@ -91,6 +94,7 @@ protected:
     std::unique_ptr<MemRow> _dup_update_row; // calc for on_dup_key_update
     int _num_increase_rows = 0; // update num_table_lines 
     bool _is_replace = false;
+    bool _is_merge = false;
     bool _need_ignore = false;
     bool _on_dup_key_update = false;
     bool _update_affect_primary = true;
@@ -109,7 +113,7 @@ protected:
     std::vector<SmartIndex>     _all_indexes; 
     std::vector<SmartIndex>     _affected_indexes; 
     std::vector<SmartIndex>*    _indexes_ptr = &_all_indexes;
-    std::vector<SmartIndex>     _reverse_indes; 
+    std::vector<SmartIndex>     _reverse_or_vector_indexes; 
     std::unordered_set<int64_t> _ignore_index_ids;
 
     SmartIndex        _global_index_info; 
@@ -118,6 +122,7 @@ protected:
     std::map<int64_t, std::vector<SmartRecord>> _insert_records_by_region;
     std::map<int64_t, std::vector<SmartRecord>> _delete_records_by_region;
     std::map<int32_t, FieldInfo*> _field_ids;
+    std::map<int32_t, FieldInfo*> _update_fields;
     std::set<int32_t> _pri_field_ids;
     int64_t _row_ttl_duration = 0; //insert语句可以带上ttl用来覆盖表的配置
     int64_t _ttl_timestamp_us = 0; //ttl写入时间，0表示无ttl

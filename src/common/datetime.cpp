@@ -80,11 +80,19 @@ uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime) {
     if (isdigit(buf[2]) && isdigit(buf[4])) {
         has_delim = false;
     }
+    // 兼容YYY-MM-DD
+    if (buf[3] == '-') {
+        has_delim = true;
+    }
+    int32_t year_length = -1;
     uint32_t idx = 0;
     for (; idx < len; ++idx) {
         if (has_delim) {
             if (!isdigit(buf[idx])) {
                 delim_cnt++;
+                if (year_length == -1) {
+                    year_length = idx;
+                }
             }
             if (delim_cnt > 5 && buf[idx] == '.') {
                 break;
@@ -119,15 +127,18 @@ uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime) {
     } else {
         if (idx <= 6) {
             sscanf(buf, "%2lu%2lu%2lu", &year, &month, &day);
+            year_length = 2;
         } else if (idx == 8) {
             sscanf(buf, "%4lu%2lu%2lu", &year, &month, &day);
         } else if (idx == 12) {
             sscanf(buf, "%2lu%2lu%2lu%2lu%2lu%2lu.%6lu", 
                     &year, &month, &day, &hour, &minute, &second, &macrosec);
             is_full = true;
+            year_length = 2;
         } else if (idx <= 13) {
             sscanf(buf, "%2lu%2lu%2lu%2lu%2lu%2lu", &year, &month, &day, &hour, &minute, &second);
             is_full = true;
+            year_length = 2;
         } else if (idx >= 14) {
             sscanf(buf, "%4lu%2lu%2lu%2lu%2lu%2lu.%6lu", 
                     &year, &month, &day, &hour, &minute, &second, &macrosec);
@@ -136,10 +147,12 @@ uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime) {
             return 0;
         }
     }
-    if (year >= 70 && year < 100) {
-        year += 1900;
-    } else if (year < 70 && year > 0) {
-        year += 2000;
+    if (year_length == 2) {
+        if (year >= 70 && year < 100) {
+            year += 1900;
+        } else if (year < 70 && year > 0) {
+            year += 2000;
+        }
     }
     if (month > 12) {
         return 0;
@@ -630,6 +643,68 @@ size_t date_format_internal(char* s, size_t maxsize, const char* format, const s
 
 int64_t timestamp_to_ts(uint32_t  timestamp) {
     return (((int64_t)timestamp) * 1000 - tso::base_timestamp_ms) << 18;
+}
+
+// Dynamic Partition
+int get_current_timestamp(time_t& current_ts) {
+    current_ts = ::time(NULL);
+    return 0;
+}
+
+int get_specified_timestamp(const time_t& ts, const int64_t offset, TimeUnit time_unit, time_t& specified_ts) {
+    struct tm tm;
+    localtime_r(&ts, &tm);
+
+    if (time_unit == TimeUnit::DAY) {
+        tm.tm_mday += offset; 
+    } else if (time_unit == TimeUnit::MONTH) {
+        tm.tm_mon += offset;
+    } else {
+        return -1;
+    }
+
+    specified_ts = mktime(&tm);
+    return 0;
+}
+
+int get_current_day_timestamp(time_t& current_day_ts) {
+    struct tm tm;
+    time_t current_ts = ::time(NULL);
+    localtime_r(&current_ts, &tm);
+    
+    tm.tm_hour = 0;
+    tm.tm_min  = 0;
+    tm.tm_sec  = 0;
+
+    current_day_ts = mktime(&tm);
+    return 0;
+}
+
+int get_current_month_timestamp(const int start_day_of_month, time_t& current_month_ts) {
+    struct tm tm;
+    time_t current_ts = ::time(NULL);
+    localtime_r(&current_ts, &tm);
+    
+    tm.tm_mday = start_day_of_month;
+    tm.tm_hour = 0;
+    tm.tm_min  = 0;
+    tm.tm_sec  = 0;
+
+    current_month_ts = mktime(&tm);
+    return 0;
+}
+
+int timestamp_to_format_str(const time_t ts, const char* format, std::string& str) {
+    if (ts <= 0) {
+        return -1;
+    }
+    struct tm tm;
+    localtime_r(&ts, &tm);
+
+    char str_time[21] = {0};
+    strftime(str_time, sizeof(str_time), format, &tm);
+    str = std::string(str_time);
+    return 0;
 }
 
 }  // baikaldb

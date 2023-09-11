@@ -160,6 +160,15 @@ public:
             int& pos) const;
 
     int skip_field(const FieldInfo& field_info, int& pos) const;
+
+    // Dynamic Partition
+    void get_partition_col_pos(
+            const std::vector<pb::PrimitiveType>& types,
+            const size_t partition_col_num,
+            int& pos);
+            
+    void get_partition_col_pos(const pb::PrimitiveType& type, int& pos);
+
 private:
     bool             _full;  //full key or just a prefix
     rocksdb::Slice   _data;

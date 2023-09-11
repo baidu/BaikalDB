@@ -70,9 +70,13 @@ struct TableMem {
     bool is_linked = false;
     bool is_binlog = false;
     std::vector<std::string> learner_resource_tag;
+
+    // Partition
+    // <partition_id, drop_ts>, 存放分区删除的时间点
+    std::map<int64_t, int64_t> drop_partition_ts_map;
+
     // 业务表linked的binlog表id集合
     std::set<int64_t> binlog_ids;
-    std::vector<pb::Expr> range_infos;
     bool exist_global_index(int64_t global_index_id) {
         for (auto& index : schema_pb.indexs()) {
             if (index.is_global() && index.index_id() == global_index_id) {
@@ -160,7 +164,10 @@ public:
     void update_byte_size(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_split_lines(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_charset(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void add_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void drop_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void modify_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void convert_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void set_main_logical_room(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_schema_conf(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_statistics(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -168,6 +175,9 @@ public:
     void update_ttl_duration(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_resource_tag(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_table_comment(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void update_dynamic_partition_attr(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void drop_partition_ts(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void specify_split_keys(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
 
     void add_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void add_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -256,6 +266,10 @@ public:
 
     void on_leader_start();
     void on_leader_stop();
+
+    bool is_create_table_support_engine(pb::Engine engine) {
+        return (engine == pb::ROCKSDB || engine == pb::ROCKSDB_CSTORE || engine == pb::BINLOG);
+    }
    
 public:
     void set_max_table_id(int64_t max_table_id) {
@@ -589,25 +603,30 @@ public:
         return 0;
     }
     // 获取表副本分布，表副本分布{resource_tag:logical_room:phyiscal_room} -> count
-    int64_t get_replica_dist_idcs(int64_t table_id, std::unordered_map<std::string, int64_t>& replica_dists_map) {
+    int64_t get_replica_dist_idcs(int64_t table_id, std::vector<std::string>& idcs, std::vector<int>& replices) {
         BAIDU_SCOPED_LOCK(_table_mutex);
         if (_table_info_map.find(table_id) == _table_info_map.end()) {
             return -1;
         }
+        const std::string& table_resource_tag = _table_info_map[table_id].schema_pb.resource_tag();
         if (_table_info_map[table_id].schema_pb.dists_size() > 0) {
             for (const auto& idc : _table_info_map[table_id].schema_pb.dists()) {
-                std::string key = idc.resource_tag();
-                if (key.empty()) {
-                    // 兼容性，dist里resource_tag可能为空
-                    key = _table_info_map[table_id].schema_pb.resource_tag();
+                if (idc.resource_tag() != "" && idc.resource_tag() != table_resource_tag) {
+                    continue;
                 }
-                key += ":" + idc.logical_room() + ":"  + idc.physical_room(); 
-                replica_dists_map[key] = idc.count();
+                idcs.emplace_back(table_resource_tag + ":" + idc.logical_room() + ":" + idc.physical_room());
+                replices.emplace_back(idc.count());
+            }
+            for (const auto& idc : _table_info_map[table_id].schema_pb.dists()) {
+                if (idc.resource_tag() != "" && idc.resource_tag() != table_resource_tag) {
+                    idcs.emplace_back(idc.resource_tag() + ":" + idc.logical_room() + ":" + idc.physical_room());
+                    replices.emplace_back(idc.count());
+                }
             }
         } else {
             // 没指定副本分布
-            std::string key = _table_info_map[table_id].schema_pb.resource_tag() + "::";
-            replica_dists_map[key] = _table_info_map[table_id].schema_pb.replica_num();
+            idcs.emplace_back(table_resource_tag + "::");
+            replices.emplace_back(_table_info_map[table_id].schema_pb.replica_num());
         }
         return 0;
     }
@@ -1055,7 +1074,63 @@ public:
         int64_t database_id = 0;
         return check_table_exist(schema_info, namespace_id, database_id, table_id);
     }
+
+    // Dynamic Partition
+    // 获取需要分区变更的表
+    void get_change_partition_schemas(std::vector<pb::SchemaInfo>& add_partition_schemas, 
+                                      std::vector<pb::SchemaInfo>& del_partition_schemas,
+                                      std::vector<pb::SchemaInfo>& cold_partition_schemas);
     
+    void get_change_partition_schema(const pb::SchemaInfo& schema, 
+                                     pb::SchemaInfo& add_partition_schema, 
+                                     pb::SchemaInfo& del_partition_schema,
+                                     pb::SchemaInfo& cold_partition_schema);
+
+    // 判断副本所在分区是否存在
+    void check_partition_exist_for_peer(
+            const pb::StoreHeartBeatRequest* request, pb::StoreHeartBeatResponse* response);
+
+    // 获取主表id
+    void get_table_ids(std::set<int64_t>& table_ids) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        for (const auto& table_info : _table_info_map) {
+            if (!table_info.second.is_global_index) {
+                table_ids.insert(table_info.first);
+            }
+        }
+    }
+
+    // 获取指定表分区的region_ids
+    void get_region_ids(const int64_t table_id, const int64_t partition_id, std::set<int64_t>& region_ids) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return;
+        }
+        region_ids = _table_info_map[table_id].partition_regions[partition_id];
+    }
+    
+    // 获取指定表分区的副本分布
+    void get_partition_info(
+            const int64_t table_id, const int64_t partition_id, 
+            int64_t& replica_num, std::string& resource_tag) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return;
+        }
+        const auto& schema_pb = _table_info_map[table_id].schema_pb;
+        if (!schema_pb.has_partition_info() || schema_pb.partition_info().type() != pb::PT_RANGE) {
+            return;
+        }
+        // 分区副本数量直接使用表副本数量
+        replica_num = schema_pb.replica_num();
+        for (const auto& range_partition_info : schema_pb.partition_info().range_partition_infos()) {
+            if (range_partition_info.partition_id() == partition_id && range_partition_info.has_resource_tag()) {
+                resource_tag = range_partition_info.resource_tag() + "::";
+                break;
+            }
+        }
+    }
+
 private:
     TableManager(): _max_table_id(0) {
         bthread_mutex_init(&_table_mutex, NULL);
@@ -1151,6 +1226,50 @@ private:
     void load_virtual_indextosqls_to_memory(const pb::BaikalHeartBeatRequest* request);
     void drop_virtual_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     VirtualIndexInfo get_virtual_index_id_set();
+
+    // Dynamic Partition
+    // 获取分区的预分裂SplitKey
+    int get_partition_split_key(
+        const pb::SchemaInfo& table_info, 
+        const pb::RangePartitionInfo& range_partition_info, 
+        const time_t normalized_current_ts, 
+        const int offset,
+        TimeUnit unit,
+        ::google::protobuf::RepeatedPtrField<pb::SplitKey>& split_key);
+
+    // 从SchemaInfo移除指定分区
+    int remove_partitions(pb::SchemaInfo& table_info, const std::set<int64_t>& partition_ids);
+
+    // 设置分区删除时间
+    void set_drop_partition_timestamp(const int64_t table_id, const int64_t partition_id, const int64_t drop_ts) {
+        BAIDU_SCOPED_LOCK(_table_mutex);
+        if (_table_info_map.find(table_id) == _table_info_map.end()) {
+            return;
+        }
+        auto& drop_partition_ts_map = _table_info_map[table_id].drop_partition_ts_map;
+        drop_partition_ts_map[partition_id] = drop_ts;
+    }
+
+    // 判断分区表的partition_id对应分区是否存在
+    bool is_range_partition_exist(const pb::SchemaInfo& schema_pb, const int64_t partition_id) {
+        bool is_partition_exist = false;
+        for (const auto& range_partition_info : schema_pb.partition_info().range_partition_infos()) {
+            if (range_partition_info.partition_id() == partition_id) {
+                is_partition_exist = true;
+                break;
+            }
+        }
+        return is_partition_exist;
+    }
+
+    void get_main_logical_room(const pb::SchemaInfo& table_info, std::string& main_logical_room);
+
+    void drop_partition_internal(pb::SchemaInfo& mem_schema_pb, 
+                                 const std::vector<std::string>& range_partition_names_vec, 
+                                 const bool is_dynamic_change,
+                                 const int64_t apply_index, 
+                                 braft::Closure* done);
+
 private:
     bthread_mutex_t                                     _table_mutex;
     bthread_mutex_t                                     _load_virtual_to_memory_mutex;

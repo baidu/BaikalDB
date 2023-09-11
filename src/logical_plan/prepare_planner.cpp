@@ -236,59 +236,65 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     }
 
     std::shared_ptr<QueryContext> prepare_ctx = iter->second;
-    _ctx->stat_info.family = prepare_ctx->stat_info.family;
-    _ctx->stat_info.table = prepare_ctx->stat_info.table;
-    _ctx->stat_info.sample_sql << prepare_ctx->stat_info.sample_sql.str();
-    _ctx->stat_info.sign = prepare_ctx->stat_info.sign;
-    if (params.size() != prepare_ctx->placeholders.size()) {
-        _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
-        _ctx->stat_info.error_msg << "Incorrect arguments to EXECUTE: " 
-                                  << params.size() << ", " 
-                                  << prepare_ctx->placeholders.size();
-        return -1;
-    }
-    auto& tuple_descs = prepare_ctx->tuple_descs();
     // ttl沿用prepare的注释
     DB_DEBUG("row_ttl_duration %ld", prepare_ctx->row_ttl_duration);
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
-    _ctx->is_complex = prepare_ctx->is_complex;
-    _ctx->mutable_tuple_descs()->assign(tuple_descs.begin(), tuple_descs.end());
-    _ctx->ref_slot_id_mapping.insert(prepare_ctx->ref_slot_id_mapping.begin(),
-                                     prepare_ctx->ref_slot_id_mapping.end());
-    // TODO dml的plan复用
+    _ctx->copy_query_context(prepare_ctx.get());
+
+    auto* p_placeholders = &prepare_ctx->placeholders;
     if (!prepare_ctx->is_select) {
+        // TODO dml的plan复用
         // enable_2pc=true or table has global index need generate txn_id
         set_dml_txn_state(prepare_ctx->prepared_table_id);
         _ctx->plan.CopyFrom(prepare_ctx->plan);
-        int ret = _ctx->create_plan_tree();
+        int ret = set_dml_local_index_binlog(prepare_ctx->prepared_table_id);
+        if (ret < 0) {
+            DB_WARNING("Failed to set_dml_local_index_binlog");
+            return -1;
+        }
+        ret = _ctx->create_plan_tree();
         if (ret < 0) {
             DB_WARNING("Failed to pb_plan to execnode");
             return -1;
         }
         _ctx->root->find_place_holder(_ctx->placeholders);
-    } else {
-        if (client->txn_id == 0) {
-            prepare_ctx->get_runtime_state()->set_single_sql_autocommit(true);
-        } else {
-            prepare_ctx->get_runtime_state()->set_single_sql_autocommit(false);
-        }
-        // select prepare plan复用
-        _ctx->runtime_state = prepare_ctx->runtime_state;
-        _ctx->root = prepare_ctx->root;
-        _ctx->placeholders = prepare_ctx->placeholders;
+        p_placeholders = &_ctx->placeholders;
+    }
+    if (p_placeholders == nullptr) {
+        DB_WARNING("p_placeholders is nullptr");
+        return -1;
     }
 
-    for (size_t idx = 0; idx < params.size(); ++idx) {
-        auto place_holder_iter = _ctx->placeholders.find(idx);
-        if (place_holder_iter == _ctx->placeholders.end() || place_holder_iter->second == nullptr) {
-            _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
-            _ctx->stat_info.error_msg << "Place holder index error";
+    int max_placeholder_id = -1;
+    for (auto& kv : *p_placeholders) {
+        const int placeholder_id = kv.first;
+        if (placeholder_id > max_placeholder_id) {
+            max_placeholder_id = placeholder_id;
+        }
+    }
+    if (max_placeholder_id + 1 != params.size()) {
+        _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
+        _ctx->stat_info.error_msg << "Incorrect arguments to EXECUTE: " 
+                                  << params.size() << ", " 
+                                  << (max_placeholder_id + 1);
+        return -1;
+    }
+    for (auto& kv : *p_placeholders) {
+        const int placeholder_id = kv.first;
+        Literal* place_holder = static_cast<Literal*>(kv.second);
+        if (place_holder == nullptr) {
+            DB_WARNING("place_holder is nullptr");
             return -1;
         }
-        Literal* place_holder = static_cast<Literal*>(place_holder_iter->second);
-        place_holder->init(params[idx]);
+        if (params.size() <= placeholder_id) {
+            _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
+            _ctx->stat_info.error_msg << "Incorrect arguments to EXECUTE: " 
+                                      << params.size() << ", " 
+                                      << (max_placeholder_id + 1);
+            return -1;
+        }        
+        place_holder->init(params[placeholder_id]);
     }
-    _ctx->stmt_type = prepare_ctx->stmt_type;
     _ctx->exec_prepared = true;
     return 0;
 }

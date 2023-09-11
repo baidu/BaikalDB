@@ -19,6 +19,7 @@
 #include "binlog_context.h"
 
 namespace baikaldb {
+DEFINE_int32(cache_plans_size, 20, "non-prepare plan cache size");
 DECLARE_string(db_version);
 static UserInfo dummy;
 bvar::Adder<int64_t> NetworkSocket::bvar_prepare_count{"bvar_prepare_count"};
@@ -53,6 +54,8 @@ NetworkSocket::NetworkSocket() {
     is_auth_result_send_partly = 0;
     query_ctx.reset(new QueryContext);
     user_info.reset(new UserInfo);
+    non_prepared_plans.init(FLAGS_cache_plans_size);
+
     pb::ExprNode str_node;
     str_node.set_node_type(pb::STRING_LITERAL);
     str_node.set_col_type(pb::STRING);

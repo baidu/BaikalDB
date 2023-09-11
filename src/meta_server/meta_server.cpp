@@ -226,8 +226,14 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_ADD_LEARNER
             || request->op_type() == pb::OP_DROP_LEARNER
             || request->op_type() == pb::OP_RESTART_DDL_WORK
+            || request->op_type() == pb::OP_ADD_PARTITION
+            || request->op_type() == pb::OP_DROP_PARTITION
             || request->op_type() == pb::OP_MODIFY_PARTITION
-            || request->op_type() == pb::OP_UPDATE_CHARSET) {
+            || request->op_type() == pb::OP_CONVERT_PARTITION
+            || request->op_type() == pb::OP_UPDATE_DYNAMIC_PARTITION_ATTR
+            || request->op_type() == pb::OP_DROP_PARTITION_TS
+            || request->op_type() == pb::OP_UPDATE_CHARSET
+            || request->op_type() == pb::OP_SPECIFY_SPLIT_KEYS) {
         SchemaManager::get_instance()->process_schema_info(controller,
                                              request,
                                              response,

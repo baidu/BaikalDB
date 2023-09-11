@@ -30,6 +30,7 @@ int InsertNode::init(const pb::PlanNode& node) {
     _tuple_id = insert_node.tuple_id();
     _values_tuple_id = insert_node.values_tuple_id();
     _is_replace = insert_node.is_replace();
+    _is_merge = insert_node.is_merge();
     _row_ttl_duration = insert_node.row_ttl_duration();
     DB_DEBUG("_row_ttl_duration:%ld", _row_ttl_duration);
     _need_ignore = insert_node.need_ignore();
@@ -98,6 +99,7 @@ int InsertNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "init schema failed fail:%d", ret);
         return ret;
     }
+
     // cstore下只更新涉及列
     if (_is_replace && _table_info->engine == pb::ROCKSDB_CSTORE) {
         for (auto& field_info : _table_info->fields) {
@@ -269,7 +271,7 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
     return 0;
 }
 
-void InsertNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+void InsertNode::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
     DMLNode::find_place_holder(placeholders);
     for (auto& expr : _insert_values) {
         expr->find_place_holder(placeholders);

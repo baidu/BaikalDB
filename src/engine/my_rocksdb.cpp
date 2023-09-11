@@ -115,6 +115,7 @@ void Iterator::Prev() {
 rocksdb::Status Transaction::Get(const rocksdb::ReadOptions& options,
                     rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key,
                     std::string* value) {
+    COLD_DB_CHECK_READ(column_family);
     QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
 
     // 限流
@@ -141,6 +142,7 @@ rocksdb::Status Transaction::Get(const rocksdb::ReadOptions& options,
 rocksdb::Status Transaction::Get(const rocksdb::ReadOptions& options,
                     rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key,
                     rocksdb::PinnableSlice* pinnable_val) {
+    COLD_DB_CHECK_READ(column_family);
     QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
 
     // 限流
@@ -170,6 +172,11 @@ void Transaction::MultiGet(const rocksdb::ReadOptions& options,
                      std::vector<rocksdb::PinnableSlice>& values,
                      std::vector<rocksdb::Status>& statuses,
                      bool sorted_input) {
+    if (_use_cold_db && column_family != _cold_data_handle) {
+        DB_FATAL("cold db read not cold handle");
+        statuses[0] = rocksdb::Status::IOError("not cold handle");
+        return;
+    }
     QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
 
     // 限流
@@ -195,6 +202,7 @@ void Transaction::MultiGet(const rocksdb::ReadOptions& options,
 rocksdb::Status Transaction::GetForUpdate(const rocksdb::ReadOptions& options,
                             rocksdb::ColumnFamilyHandle* column_family,
                             const rocksdb::Slice& key, std::string* value) {
+    COLD_DB_CHECK_READ(column_family);
     QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
 
     // 限流
@@ -221,6 +229,7 @@ rocksdb::Status Transaction::GetForUpdate(const rocksdb::ReadOptions& options,
 rocksdb::Status Transaction::GetForUpdate(const rocksdb::ReadOptions& options,
                             rocksdb::ColumnFamilyHandle* column_family,
                             const rocksdb::Slice& key, rocksdb::PinnableSlice* pinnable_val) {
+    COLD_DB_CHECK_READ(column_family);
     QosBthreadLocal* local = StoreQos::get_instance()->get_bthread_local();
 
     // 限流
@@ -246,6 +255,7 @@ rocksdb::Status Transaction::GetForUpdate(const rocksdb::ReadOptions& options,
 
 rocksdb::Status Transaction::Put(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key,
                     const rocksdb::Slice& value) {
+    COLD_DB_CHECK_WRITE;
     static thread_local int64_t total_time = 0;
     static thread_local int64_t count = 0;
     TimeCost cost;
@@ -263,6 +273,7 @@ rocksdb::Status Transaction::Put(rocksdb::ColumnFamilyHandle* column_family, con
 
 rocksdb::Status Transaction::Put(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::SliceParts& key,
                     const rocksdb::SliceParts& value) {
+    COLD_DB_CHECK_WRITE;
     static thread_local int64_t total_time = 0;
     static thread_local int64_t count = 0;
     TimeCost cost;
@@ -275,6 +286,25 @@ rocksdb::Status Transaction::Put(rocksdb::ColumnFamilyHandle* column_family, con
         count = 0;
     }
     
+    return s;
+}
+
+rocksdb::Status Transaction::Merge(rocksdb::ColumnFamilyHandle* column_family, const rocksdb::Slice& key,
+                       const rocksdb::Slice& value,
+                       const bool assume_tracked) {
+    COLD_DB_CHECK_WRITE;
+    static thread_local int64_t total_time = 0;
+    static thread_local int64_t count = 0;
+    TimeCost cost;
+    auto s = _txn->Merge(column_family, key, value, assume_tracked);
+    total_time += cost.get_time();
+    if (++count >= FLAGS_rocksdb_cost_sample) {
+        RocksdbVars::get_instance()->rocksdb_put_time << total_time / count;
+        RocksdbVars::get_instance()->rocksdb_put_count << count;
+        total_time = 0;
+        count = 0;
+    }
+
     return s;
 }
  

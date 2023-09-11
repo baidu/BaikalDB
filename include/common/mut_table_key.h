@@ -86,6 +86,13 @@ public:
         return *this;
     }
 
+    MutTableKey& replace_u32(uint32_t val, size_t pos) {
+        uint32_t encode = KeyEncoder::to_endian_u32(val);
+        size_t len = sizeof(uint32_t);
+        _data.replace(pos, len, (char*)&encode, sizeof(uint32_t));
+        return *this;
+    }
+
     MutTableKey& append_i64(int64_t val) {
         uint64_t encode = KeyEncoder::to_endian_u64(KeyEncoder::encode_i64(val));
         _data.append((char*)&encode, sizeof(uint64_t));
@@ -102,6 +109,13 @@ public:
     MutTableKey& append_u64(uint64_t val) {
         uint64_t encode = KeyEncoder::to_endian_u64(val);
         _data.append((char*)&encode, sizeof(uint64_t));
+        return *this;
+    }
+
+    MutTableKey& replace_u64(uint64_t val, size_t pos) {
+        uint64_t encode = KeyEncoder::to_endian_u64(val);
+        size_t len = sizeof(uint64_t);
+        _data.replace(pos, len, (char*)&encode, sizeof(uint64_t));
         return *this;
     }
 
@@ -208,10 +222,24 @@ public:
         return _data;
     }
 
+    // Dynamic Partition
+    MutTableKey& replace_partition_col(const ExprValue& new_partition_value, int pos) {
+        switch (new_partition_value.type) {
+        case pb::DATE:
+            replace_u32(new_partition_value._u.uint32_val, pos);
+            break;
+        case pb::DATETIME:
+            replace_u64(new_partition_value._u.uint64_val, pos);
+            break;
+        default:
+            break;
+        }
+        return *this;
+    }
+
 private:
     bool           _full;  //full key or just a prefix
     std::string    _data;
-
 };
 
 class TableKeyPair {

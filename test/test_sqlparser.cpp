@@ -420,4 +420,49 @@ TEST(test_parser, set_kv) {
         EXPECT_EQ(strcmp(name->name.value, "userval"), 0);
     }
 }
+
+TEST(test_parser, alter_table) {
+    {
+        parser::SqlParser parser;
+        std::string sql = "alter table tb add index idx(a,b)";
+        parser.parse(sql);
+        EXPECT_EQ(parser.error, parser::SUCC);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql = "alter table tb add index global idx(a,b)";
+        parser.parse(sql);
+        EXPECT_EQ(parser.error, parser::SUCC);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql = "alter table tb add fulltext index idx(a,b)";
+        parser.parse(sql);
+        EXPECT_EQ(parser.error, parser::SUCC);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql = "alter table tb add vector index idx(a,b)";
+        parser.parse(sql);
+        EXPECT_EQ(parser.error, parser::SUCC);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql = "alter table tb add unique index idx(a,b)";
+        parser.parse(sql);
+        EXPECT_EQ(parser.error, parser::SUCC);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql = "alter table tb add column a int(10) not null ";
+        parser.parse(sql);
+        EXPECT_EQ(parser.error, parser::SUCC);
+    }
+    {
+        parser::SqlParser parser;
+        std::string sql = "alter table tb add column unique a int(10) not null ";
+        parser.parse(sql);
+        EXPECT_EQ(parser.error, parser::SUCC);
+    }
+}
 }  // namespace baikal

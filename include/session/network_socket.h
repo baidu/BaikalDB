@@ -30,6 +30,7 @@
 #include "user_info.h"
 #include "type_utils.h"
 #include "common.h"
+#include "lru_cache.h"
 
 namespace baikaldb {
 
@@ -68,6 +69,25 @@ struct CachePlan {
     int32_t     sql_id;
     ExecNode*   root = nullptr;
     std::vector<pb::TupleDescriptor> tuple_descs;
+};
+
+struct PlanCacheKey {
+    std::string namespace_name;
+    std::string db_name;
+    std::string parameterized_sql;
+    bool operator==(const PlanCacheKey& key) const {
+        return namespace_name == key.namespace_name &&
+               db_name == key.db_name               &&
+               parameterized_sql == key.parameterized_sql;
+    }
+};
+
+struct PlanCacheKeyHasher {
+    size_t operator()(const PlanCacheKey& key) const {
+        return std::hash<std::string>{}(key.namespace_name) ^
+               std::hash<std::string>{}(key.db_name)        ^
+               std::hash<std::string>{}(key.parameterized_sql);
+    }
 };
 
 struct NetworkSocket {
@@ -220,6 +240,10 @@ struct NetworkSocket {
     static std::atomic<uint64_t> txn_id_counter;
 
     bool is_explain_sign = false;//标志位，表示命令是否为查询sql签名
+
+    // non-prepare plan cache
+    Cache<PlanCacheKey, std::shared_ptr<QueryContext>, PlanCacheKeyHasher> non_prepared_plans;
+
 private:
     std::set<uint64_t> _subquery_signs;
     bthread::Mutex     _subquery_signs_lock;

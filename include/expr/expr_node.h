@@ -57,6 +57,7 @@ public:
             case pb::TIME_LITERAL:
             case pb::TIMESTAMP_LITERAL:
             case pb::PLACE_HOLDER_LITERAL:
+            case pb::MAXVALUE_LITERAL:
                 return true;
             default:
                 return false;
@@ -173,7 +174,7 @@ public:
         return size;
     }
 
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         for (size_t idx = 0; idx < _children.size(); ++idx) {
             _children[idx]->find_place_holder(placeholders);
         }
@@ -256,7 +257,6 @@ public:
             c->flatten_or_expr(or_exprs);
         }
     }
-
     virtual void transfer_pb(pb::ExprNode* pb_node);
     static void create_pb_expr(pb::Expr* expr, ExprNode* root);
     static int create_tree(const pb::Expr& expr, ExprNode** root);

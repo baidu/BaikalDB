@@ -99,12 +99,8 @@ void QueryPrivilegeManager::construct_query_response_for_privilege(const pb::Use
         flatten_privilege.set_namespace_name(namespace_name);
         flatten_privilege.set_table_rw(privilege_database.database_rw());
         flatten_privilege.set_privilege(privilege_database.database() + ".*");
-        std::multimap<std::string, pb::QueryUserPrivilege> user_privilege_map;
-        if (namespace_privileges.find(namespace_name) != namespace_privileges.end()) {
-            user_privilege_map = namespace_privileges[namespace_name];
-        }
+        std::multimap<std::string, pb::QueryUserPrivilege>& user_privilege_map = namespace_privileges[namespace_name];
         user_privilege_map.insert(std::pair<std::string, pb::QueryUserPrivilege>(username, flatten_privilege));
-        namespace_privileges[namespace_name] = user_privilege_map;
     }
     for (auto& privilege_table : user_privilege.privilege_table()) {
         pb::QueryUserPrivilege flatten_privilege; 
@@ -112,12 +108,8 @@ void QueryPrivilegeManager::construct_query_response_for_privilege(const pb::Use
         flatten_privilege.set_namespace_name(namespace_name);
         flatten_privilege.set_table_rw(privilege_table.table_rw()); 
         flatten_privilege.set_privilege(privilege_table.database() + "." + privilege_table.table_name());
-        std::multimap<std::string, pb::QueryUserPrivilege> user_privilege_map;
-        if (namespace_privileges.find(namespace_name) != namespace_privileges.end()) {
-            user_privilege_map = namespace_privileges[namespace_name];
-        }
+        std::multimap<std::string, pb::QueryUserPrivilege>& user_privilege_map = namespace_privileges[namespace_name];
         user_privilege_map.insert(std::pair<std::string, pb::QueryUserPrivilege>(username, flatten_privilege));
-        namespace_privileges[namespace_name] = user_privilege_map;
     }
 }
 }// namespace

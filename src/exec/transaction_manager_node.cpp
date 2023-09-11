@@ -25,7 +25,7 @@ int TransactionManagerNode::exec_begin_node(RuntimeState* state, ExecNode* begin
     if (client_conn->txn_start_time == 0) {
         client_conn->txn_start_time = butil::gettimeofday_us();
     }
-    return push_cmd_to_cache(state, pb::OP_BEGIN, begin_node);
+    return push_cmd_to_cache(state, pb::OP_BEGIN, begin_node, client_conn->seq_id);
 }
 
 int TransactionManagerNode::exec_prepared_node(RuntimeState* state, ExecNode* prepared_node, int start_seq_id) {

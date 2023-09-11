@@ -31,6 +31,7 @@
 #include "statistics.h"
 #include "expr_node.h"
 #include "literal.h"
+#include "user_info.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/join.hpp>
 
@@ -55,6 +56,8 @@ static const std::string VIRTUAL_DATABASE_NAME = "__virtual_db";              //
 static const std::string TABLE_IN_FAST_IMPORTER= "in_fast_import";
 static const std::string TABLE_TAIL_SPLIT_NUM  = "tail_split_num";            //尾分裂数量
 static const std::string TABLE_TAIL_SPLIT_STEP = "tail_split_step";           //尾分裂步长
+static const std::string TABLE_BINLOG_BACKUP_DAYS = "binlog_backup_days";     //binlog表备份天数
+
 struct UserInfo;
 class TableRecord;
 typedef std::shared_ptr<TableRecord> SmartRecord;
@@ -146,6 +149,9 @@ struct FieldInfo {
     bool                deleted = false;
     bool                noskip = false;
     uint32_t            flag   = 0;
+    bool                is_unique_indicator = false; // 指标唯一列
+    int32_t             float_total_len = -1;
+    int32_t             float_precision_len = -1;
 };
 
 struct DistInfo {
@@ -208,6 +214,8 @@ struct TableInfo {
     // 该表是否已和 binlog 表关联
     bool is_linked = false;
     bool is_binlog = false;
+    // 是否是range分区表
+    bool is_range_partition = false;
     pb::PartitionInfo partition_info;
     // 该binlog表关联的普通表集合
     std::set<uint64_t> binlog_target_ids;
@@ -224,6 +232,10 @@ struct TableInfo {
     std::set<uint64_t> sign_blacklist;
     std::set<uint64_t> sign_forcelearner;
     std::set<std::string> sign_forceindex;
+    // use for olap merge operator
+    std::vector<FieldInfo> fields_need_sum;
+    FieldInfo version_field;
+    bool has_version = false;
     
     TableInfo() {}
     FieldInfo* get_field_ptr(int32_t field_id) {
@@ -283,6 +295,11 @@ struct IndexInfo {
     int64_t                 restore_time = -1;
     int64_t                 disable_time = -1;
     int32_t                 max_field_id = 0;
+    //vector index
+    int32_t                 dimension = 0;
+    int32_t                 nprobe = 5;
+    std::string             vector_description;
+    pb::MetricType          metric_type = pb::METRIC_L2;
 };
 
 struct DatabaseInfo {
@@ -351,12 +368,13 @@ inline FieldInfo* get_field_info_by_name(
 class Partition {
 public:
     virtual int init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr, int64_t partition_num) = 0;
-    virtual int64_t calc_partition(SmartRecord record) = 0;
-    virtual int64_t calc_partition(const ExprValue& field_value) = 0;
+    virtual int64_t calc_partition(const std::shared_ptr<UserInfo>& user_info, SmartRecord record) = 0;
+    virtual int64_t calc_partition(const std::shared_ptr<UserInfo>& user_info, const ExprValue& field_value) = 0;
     virtual std::string to_str() = 0;
     virtual int64_t partition_field_id() const = 0;
     virtual pb::PartitionType partition_type() const = 0;
     virtual bool get_partition_id_by_name(const std::string& partition_name, int64_t& partition_id) = 0;
+    virtual std::string get_partition_uniq_str(int64_t partition_id) = 0;
     virtual ~Partition() {}
 };
 
@@ -369,10 +387,9 @@ public:
             _hash_expr = nullptr;
         }
     }
-    int init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr,
-        int64_t partition_num);
-    int64_t calc_partition(SmartRecord record);
-    int64_t calc_partition(const ExprValue& field_value);
+    int init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr, int64_t partition_num);
+    int64_t calc_partition(const std::shared_ptr<UserInfo>& user_info, SmartRecord record);
+    int64_t calc_partition(const std::shared_ptr<UserInfo>& user_info, const ExprValue& field_value);
 
     bool get_partition_id_by_name(const std::string& partition_name, int64_t& partition_id) {
         auto iter = _partition_name_map.find(partition_name);
@@ -402,6 +419,9 @@ public:
         partition_s += std::to_string(_partition_num);
         return partition_s;
     }
+    std::string get_partition_uniq_str(int64_t partition_id) {
+        return std::to_string(partition_id);
+    }
 private:
     int64_t _table_id;
     int64_t _partition_num;
@@ -415,6 +435,15 @@ private:
 
 class RangePartition : public Partition {
 public: 
+    struct Range {
+        pb::RangePartitionType partition_type;
+        std::string partition_name;
+        int64_t partition_id;
+        ExprValue left_value;
+        ExprValue right_value;
+        bool is_cold;
+    };
+
     ~RangePartition() {
         if (_range_expr != nullptr) {
             _range_expr->close();
@@ -423,23 +452,75 @@ public:
         }
     }
     int init(const pb::PartitionInfo& partition_info, SmartTable& table_ptr, int64_t partition_num);
-    int64_t calc_partition(SmartRecord record);
-    int64_t calc_partition(const ExprValue& value) {
-        size_t range_index = 0;
+    int64_t calc_partition(const std::shared_ptr<UserInfo>& user_info, SmartRecord record);
+    int64_t calc_partition(const std::shared_ptr<UserInfo>& user_info, const ExprValue& value) {
         if (_range_expr == nullptr) {
-            for (; range_index < _range_values.size(); ++range_index) {
-                if (value.compare(_range_values[range_index]) < 0) {
-                    return range_index;
-                }
-            }
+            return -1;
+        }
+        pb::RangePartitionType req_range_partition_type = pb::RPT_DEFAULT;
+        if (user_info != nullptr) {
+            req_range_partition_type = user_info->request_range_partition_type;
         }
         auto field_value = _range_expr->get_value(value);
-        for (; range_index < _range_values.size(); ++range_index) {
-            if (field_value.compare(_range_values[range_index]) < 0) {
-                return range_index;
+        int64_t partition_id = -1;
+        for (auto it = _ranges.rbegin(); it != _ranges.rend(); ++it) {
+            if (!is_specified_range(*it, req_range_partition_type)) {
+                continue;
+            }
+            if (field_value.compare(it->left_value) >= 0 &&
+                    field_value.compare(it->right_value) < 0) {
+                partition_id = it->partition_id;
+                break;
             }
         }
-        return range_index;
+        return partition_id;
+    }
+    int64_t calc_partitions(
+            const std::shared_ptr<UserInfo>& user_info,
+            const ExprValue& left_value, const bool left_open,
+            const ExprValue& right_value, const bool right_open, 
+            std::set<int64_t>& partition_ids) {
+        if (_range_expr == nullptr) {
+            return -1;
+        }
+        // 升级成支持所有的range_expr类型 OLAPTODO
+        if (_range_expr->node_type() != pb::SLOT_REF) {
+            for (const auto& range : _ranges) {
+                partition_ids.emplace(range.partition_id);
+            }
+            return 0;
+        }
+        pb::RangePartitionType req_range_partition_type = pb::RPT_DEFAULT;
+        if (user_info != nullptr) {
+            req_range_partition_type = user_info->request_range_partition_type;
+        }
+        ExprValue left_value_tmp = _range_expr->get_value(left_value);
+        ExprValue right_value_tmp = _range_expr->get_value(right_value);
+        for (const auto& range : _ranges) {
+            if (!is_specified_range(range, req_range_partition_type)) {
+                continue;
+            }
+            // 分区右端点为开区间
+            if (!left_value_tmp.is_null()) {
+                if (left_value_tmp.compare(range.right_value) >= 0) {
+                    continue;
+                }
+            }
+            // 分区左端点为闭区间
+            if (!right_value_tmp.is_null()) {
+                if (right_open) {
+                    if (right_value_tmp.compare(range.left_value) <= 0) {
+                        continue;
+                    }
+                } else {
+                    if (right_value_tmp.compare(range.left_value) < 0) {
+                        continue;
+                    }
+                }
+            }
+            partition_ids.emplace(range.partition_id);
+        }
+        return 0;
     }
 
     int64_t partition_field_id() const {
@@ -459,28 +540,139 @@ public:
         return false;
     }
 
+    const std::vector<Range>& ranges() {
+        return _ranges;
+    }
+
+    std::set<int64_t> get_specified_partition_ids(const std::shared_ptr<UserInfo>& user_info) {
+        std::set<int64_t> partition_ids;
+        pb::RangePartitionType req_range_partition_type = pb::RPT_DEFAULT;
+        if (user_info != nullptr) {
+            req_range_partition_type = user_info->request_range_partition_type;
+        }
+        for (const auto& range : _ranges) {
+            if (!is_specified_range(range, req_range_partition_type)) {
+                continue;
+            }
+            partition_ids.emplace(range.partition_id);
+        }
+        return partition_ids;
+    } 
+
     std::string to_str() {
-        std::vector<std::string> exprs;
-        exprs.reserve(5);
         std::string partition_s = "\nPARTITION BY RANGE (";
         if (_partition_info.has_expr_string()) {
             partition_s += _partition_info.expr_string();
         } else {
             partition_s += _partition_info.field_info().field_name();
         }
-        partition_s += ")\n";
-        for (uint32_t i = 0; i < _range_values.size(); i++) {
-            partition_s += "\nPARTITION ";
-            partition_s += _partition_info.partition_names(i);
-            partition_s += " VALUES LESS THAN (";
-            partition_s += _range_values[i].get_string();
-            partition_s += "),";
+        partition_s += ") (\n";
+        for (size_t i = 0; i < _ranges.size(); ++i) {
+            partition_s += "PARTITION ";
+            partition_s += _ranges[i].partition_name;
+            partition_s += " VALUES [";
+            if (_ranges[i].left_value.type != pb::MAXVALUE_TYPE) {
+                partition_s += "'";
+                partition_s += _ranges[i].left_value.get_string();
+                partition_s += "'";
+            } else {
+                partition_s += _ranges[i].left_value.get_string();
+            }
+            partition_s += ", ";
+            if (_ranges[i].right_value.type != pb::MAXVALUE_TYPE) {
+                partition_s += "'";
+                partition_s += _ranges[i].right_value.get_string();
+                partition_s += "'";
+            } else {
+                partition_s += _ranges[i].right_value.get_string();
+            }
+            partition_s += ")";
+            if (_partition_info.range_partition_infos(i).has_resource_tag() ||
+                    _partition_info.range_partition_infos(i).has_is_cold()  ||
+                    _partition_info.range_partition_infos(i).has_type()) {
+                partition_s += " COMMENT '{";
+                if (_partition_info.range_partition_infos(i).has_resource_tag()) {
+                    partition_s += "\"resource_tag\":\"";
+                    partition_s += _partition_info.range_partition_infos(i).resource_tag();
+                    partition_s += "\",";
+                }
+                if (_partition_info.range_partition_infos(i).has_is_cold()) {
+                    partition_s += "\"is_cold\":";
+                    partition_s += _partition_info.range_partition_infos(i).is_cold() ? "true" : "false";
+                    partition_s += ",";
+                }
+                if (_partition_info.range_partition_infos(i).has_type()) {
+                    partition_s += "\"type\":\"";
+                    partition_s += pb::RangePartitionType_Name(_partition_info.range_partition_infos(i).type());
+                    partition_s += "\",";
+                }
+                partition_s.pop_back();
+                partition_s += "}'";
+            }
+            if (i != _ranges.size() - 1) { 
+                partition_s += ",\n";
+            } else {
+                partition_s += "\n";
+            }
         }
-        if (!partition_s.empty()) {
-            partition_s.pop_back();
-        }
+        partition_s += ")";
         return partition_s;
     }
+
+    // 生成afs路径使用
+    std::string get_partition_uniq_str(int64_t partition_id) {
+        if (_field_info == nullptr || _field_info->type != pb::DATE) {
+            return std::to_string(partition_id);
+        }
+
+        bool find = false;
+        std::string uniq_str;
+        for (auto it = _ranges.rbegin(); it != _ranges.rend(); ++it) {
+            if (it->partition_id == partition_id) {
+                uniq_str = it->left_value.get_string();
+                uniq_str += "_";
+                uniq_str += it->right_value.get_string();
+                find = true;
+                break;
+            }
+        }
+        if (find) {
+            return uniq_str;
+        } else {
+            return std::to_string(partition_id);
+        }
+    }
+
+    // show active_range工具使用
+    void get_active_range(std::map<std::string, std::string>& active_ranges, pb::RangePartitionType type) {
+        active_ranges.clear();
+        for (size_t i = 0; i < _ranges.size(); ++i) {
+            if (!_partition_info.range_partition_infos(i).is_cold() && type == _partition_info.range_partition_infos(i).type()) {
+                std::string left = _ranges[i].left_value.get_string();
+                std::string right = _ranges[i].right_value.get_string();
+                if (active_ranges.empty()) {
+                    active_ranges[left] = right;
+                } else {
+                    auto iter = active_ranges.rbegin();
+                    if (iter->second == left) {
+                        iter->second = right;
+                    } else {
+                        active_ranges[left] = right;
+                    }
+                }
+            }
+        }
+    }
+
+private:
+    bool is_specified_range(const Range& range, const pb::RangePartitionType req_range_partition_type) {
+        // 访问指定类型热分区
+        if (!range.is_cold && req_range_partition_type != range.partition_type) {
+            return false;
+        }
+        return true;
+    }
+
 private:
     int64_t _table_id;
     int64_t _partition_num;
@@ -489,7 +681,7 @@ private:
     ExprNode* _range_expr = nullptr;
     SmartTable _table_ptr;
     FieldInfo* _field_info = nullptr;
-    std::vector<ExprValue> _range_values;
+    std::vector<Range> _ranges;
     std::map<std::string, int64_t> _partition_name_map;
 };
 
@@ -722,8 +914,10 @@ public:
     bool get_separate_switch(int64_t table_id);
     bool is_switch_open(const int64_t table_id, const std::string& switch_name);
     bool is_in_fast_importer(int64_t table_id);
+    bool is_olap_table(int64_t table_id, int64_t partition_id, bool* is_cold);
     int get_tail_split_nums(int64_t table_id);
     int get_tail_split_step(int64_t table_id);
+    int get_binlog_backup_days(int64_t table_id);
     void get_cost_switch_open(std::vector<std::string>& database_table);
     void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
     void get_table_by_filter(std::vector<std::string>& database_table,
@@ -759,20 +953,23 @@ public:
             const RepeatedPtrField<pb::RegionInfo>& input_regions,
             std::map<int64_t, pb::RegionInfo>& output_regions);
 
-    int get_region_by_key(IndexInfo& index,
+    int get_region_by_key(const std::shared_ptr<UserInfo>& user_info,
+            IndexInfo& index,
             const std::vector<SmartRecord>& records,
             std::map<int64_t, std::vector<SmartRecord>>& region_ids,
             std::map<int64_t, pb::RegionInfo>& region_infos,
             std::set<int64_t>& record_partition_ids);
 
-    int get_region_by_key(IndexInfo& index,
+    int get_region_by_key(const std::shared_ptr<UserInfo>& user_info,
+            IndexInfo& index,
             const std::vector<SmartRecord>& insert_records,
             const std::vector<SmartRecord>& delete_records,
             std::map<int64_t, std::vector<SmartRecord>>& insert_region_ids,
             std::map<int64_t, std::vector<SmartRecord>>& delete_region_ids,
             std::map<int64_t, pb::RegionInfo>& region_infos);
 
-    int get_region_ids_by_key(IndexInfo& index,
+    int get_region_ids_by_key(const std::shared_ptr<UserInfo>& user_info,
+                              IndexInfo& index,
                               const std::vector<SmartRecord>&  records,
                               std::vector<int64_t>& region_ids);
 
@@ -816,6 +1013,22 @@ public:
         DoubleBufferedIdc::ScopedPtr idc_ptr;
         if (_double_buffer_idc.Read(&idc_ptr) == 0) {
             *info_map = idc_ptr->instance_info_mapping;
+            return 0;
+        } else {
+            DB_WARNING("read double_buffer_idc error.");
+            return -1;
+        }
+    }
+    int get_all_instance_by_resource_tag(const std::string& resource_tag, std::vector<std::string>& instances) {
+        instances.clear();
+        DoubleBufferedIdc::ScopedPtr idc_ptr;
+        if (_double_buffer_idc.Read(&idc_ptr) == 0) {
+            const auto& map = idc_ptr->instance_info_mapping;
+            for (const auto& iter : map) {
+                if (iter.second.resource_tag == resource_tag) {
+                    instances.emplace_back(iter.first);
+                }
+            }
             return 0;
         } else {
             DB_WARNING("read double_buffer_idc error.");
@@ -975,10 +1188,6 @@ public:
             DB_WARNING("table_id: %ld not exist", table_id);
             return -1;
         }
-        if (table_info->partition_num == 1) {
-            DB_WARNING("non partition table :%ld", table_id);
-            return -1;
-        }
         if (table_info->partition_ptr != nullptr) {
             for (auto& name : partition_names) {
                 int64_t partition_id;
@@ -1012,38 +1221,33 @@ public:
             return true;
         }
         return false;
-    }    
+    }   
 
-    int get_partition_index(int64_t table_id, const ExprValue& value, int64_t& partition_index) {
-        DoubleBufferedTable::ScopedPtr table_ptr;
-        if (_double_buffer_table.Read(&table_ptr) != 0) {
-            DB_WARNING("read double_buffer_table error.");
-            return -1;
-        }
-        auto& table_info_mapping = table_ptr->table_info_mapping;
-        auto iter = table_info_mapping.find(table_id);
-        if (iter == table_info_mapping.end()) {
-            DB_WARNING("table_id: %ld not exist", table_id);
-            return -1;
-        }
-        auto& table_info = iter->second;
-        if (table_info->partition_num == 1) {
-            //非分区表，返回0分区
-            partition_index = 0;
-            return 0;
-        }
-        if (table_info->partition_ptr != nullptr) {
-            partition_index = table_info->partition_ptr->calc_partition(value);
-            if (partition_index < 0) {
-                DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
-                return -1;
-            }
-        } else {
-            DB_WARNING("partition info error, value:%s", value.get_string().c_str());
-            return -1;
-        }
-        return 0;
-    }
+    // int get_partition_index(int64_t table_id, const ExprValue& value, int64_t& partition_index) {
+    //     DoubleBufferedTable::ScopedPtr table_ptr;
+    //     if (_double_buffer_table.Read(&table_ptr) != 0) {
+    //         DB_WARNING("read double_buffer_table error.");
+    //         return -1;
+    //     }
+    //     auto& table_info_mapping = table_ptr->table_info_mapping;
+    //     auto iter = table_info_mapping.find(table_id);
+    //     if (iter == table_info_mapping.end()) {
+    //         DB_WARNING("table_id: %ld not exist", table_id);
+    //         return -1;
+    //     }
+    //     auto& table_info = iter->second;
+    //     if (table_info->partition_num == 1 && !table_info->is_range_partition) {
+    //         // 非分区表，返回0分区
+    //         partition_index = 0;
+    //         return 0;
+    //     }
+    //     partition_index = table_info->partition_ptr->calc_partition(value);
+    //     if (partition_index < 0) {
+    //         DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
+    //         return -1;
+    //     }
+    //     return 0;
+    // }
 
     int get_binlog_id(int64_t table_id, int64_t& binlog_id) {
         DoubleBufferedTable::ScopedPtr table_ptr;
@@ -1119,6 +1323,35 @@ public:
 
     int64_t get_baikaldb_alive_time_us() {
         return _baikaldb_restart_time.get_time();
+    }
+
+    // Range Partition
+    // 检查table_id对应表是否为range分区表
+    bool is_range_partition_table(const int64_t table_id) {
+        DoubleBufferedTable::ScopedPtr table_ptr;
+        if (_double_buffer_table.Read(&table_ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return false;
+        }
+        // 获取主表id
+        auto& global_index_id_mapping = table_ptr->global_index_id_mapping;
+        if (global_index_id_mapping.find(table_id) == global_index_id_mapping.end()) {
+            DB_WARNING("table_id: %ld has no main_table_id", table_id);
+            return -1;
+        }
+        const int64_t main_table_id = global_index_id_mapping.at(table_id);
+        // 判断是否是range分区表
+        auto& table_info_mapping = table_ptr->table_info_mapping;
+        auto iter = table_info_mapping.find(main_table_id);
+        if (iter == table_info_mapping.end()) {
+            DB_WARNING("main_table_id: %ld not exist", main_table_id);
+            return false;
+        }
+        auto& table_info = iter->second;
+        if (!table_info->is_range_partition) {
+            return false;
+        }
+        return true;
     }
 
 private:

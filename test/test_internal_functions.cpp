@@ -33,6 +33,8 @@ int main(int argc, char* argv[])
 namespace baikaldb {
 TEST(round, round) {
     {
+        std::cout << ::round(-1.123) << " " << ::round(-1.523) << "\n";
+        std::cout << ::round(1.123) << " " << ::round(1.523) << "\n";
         std::vector<ExprValue> input;
         ExprValue v1(pb::DOUBLE);
         v1._u.double_val = 3.1356;

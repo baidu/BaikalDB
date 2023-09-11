@@ -31,6 +31,7 @@ namespace baikaldb {
 
 struct ExprValue {
     pb::PrimitiveType type;
+    int32_t float_precision_len;
     union {
         bool bool_val;
         int8_t int8_val;
@@ -49,6 +50,7 @@ struct ExprValue {
 
     explicit ExprValue(pb::PrimitiveType type_ = pb::NULL_TYPE) : type(type_) {
         _u.int64_val = 0;
+        float_precision_len = 0;
         if (type_ == pb::BITMAP) {
             _u.bitmap = new(std::nothrow) Roaring();
         } else if (type_ == pb::TDIGEST) {
@@ -61,12 +63,14 @@ struct ExprValue {
     ExprValue(const ExprValue& other) {
         type = other.type;
         _u = other._u;
+        float_precision_len = other.float_precision_len;
         str_val = other.str_val;
         if (type == pb::BITMAP) {
             _u.bitmap = new(std::nothrow) Roaring();
             *_u.bitmap = *other._u.bitmap;
         }
     }
+    
     ExprValue& operator=(const ExprValue& other) {
         if (this != &other) {
             if (type == pb::BITMAP) {
@@ -75,6 +79,7 @@ struct ExprValue {
             }
             type = other.type;
             _u = other._u;
+            float_precision_len = other.float_precision_len;
             str_val = other.str_val;
             if (type == pb::BITMAP) {
                 _u.bitmap = new(std::nothrow) Roaring();
@@ -87,6 +92,7 @@ struct ExprValue {
     ExprValue(ExprValue&& other) noexcept {
         type = other.type;
         _u = other._u;
+        float_precision_len = other.float_precision_len;
         str_val = other.str_val;
         if (type == pb::BITMAP) {
             other._u.bitmap = nullptr;
@@ -101,6 +107,7 @@ struct ExprValue {
             }
             type = other.type;
             _u = other._u;
+            float_precision_len = other.float_precision_len;
             if (type == pb::BITMAP) {
                 other._u.bitmap = nullptr;
             }
@@ -117,6 +124,7 @@ struct ExprValue {
     }
     explicit ExprValue(const pb::ExprValue& value) {
         type = value.type();
+        float_precision_len = 0;
         switch (type) {
             case pb::BOOL:
                 _u.bool_val = value.bool_val();
@@ -179,6 +187,7 @@ struct ExprValue {
 
     explicit ExprValue(pb::PrimitiveType primitive_type, const std::string& value_str) {
         type = pb::STRING;
+        float_precision_len = 0;
         str_val = value_str;
         if (primitive_type == pb::STRING 
             || primitive_type == pb::HEX 
@@ -294,7 +303,7 @@ struct ExprValue {
                 value->set_uint32_val(_u.uint8_val);
                 break;
             case pb::UINT16:
-                value->set_uint32_val(_u.uint16_val );
+                value->set_uint32_val(_u.uint16_val);
                 break;
             case pb::UINT32:
             case pb::TIMESTAMP:
@@ -344,8 +353,16 @@ struct ExprValue {
             case pb::UINT64:
                 return _u.uint64_val;
             case pb::FLOAT:
+                if (float_precision_len > 0) {
+                    int32_t carry = ::pow(10, float_precision_len);
+                    return ::round(_u.float_val * carry) / carry;
+                }
                 return _u.float_val;
             case pb::DOUBLE:
+                if (float_precision_len > 0) {
+                    int32_t carry = ::pow(10, float_precision_len);
+                    return ::round(_u.double_val * carry) / carry;
+                }
                 return _u.double_val;
             case pb::STRING:
                 if (std::is_integral<T>::value) {
@@ -425,7 +442,7 @@ struct ExprValue {
     }
 
     ExprValue& cast_to(pb::PrimitiveType type_) {
-        if (is_null() || type == type_) {
+        if (is_null() || is_maxvalue() || type == type_) {
             return *this;
         }
         switch (type_) {
@@ -569,6 +586,9 @@ struct ExprValue {
     }
 
     std::string get_string() const {
+        if (type == pb::MAXVALUE_TYPE) {
+            return "MAXVALUE";
+        }
         switch (type) {
             case pb::BOOL:
                 return std::to_string(_u.bool_val);
@@ -671,6 +691,16 @@ struct ExprValue {
     }
 
     int64_t compare(const ExprValue& other) const {
+        if (type == pb::MAXVALUE_TYPE || other.type == pb::MAXVALUE_TYPE) {
+            // MAXVALUE_TYPE只用于Range分区最大值
+            if (type == pb::MAXVALUE_TYPE && other.type == pb::MAXVALUE_TYPE) {
+                return 0;
+            } else if (type == pb::MAXVALUE_TYPE) {
+                return 1;
+            } else {
+                return -1;
+            }
+        }
         switch (type) {
             case pb::BOOL:
                 return _u.bool_val - other._u.bool_val;
@@ -748,7 +778,7 @@ struct ExprValue {
         }
         return compare(other);
     }
-    
+
     bool is_null() const { 
         return type == pb::NULL_TYPE || type == pb::INVALID_TYPE;
     }
@@ -809,6 +839,10 @@ struct ExprValue {
         return type == pb::PLACE_HOLDER;
     }
 
+    bool is_maxvalue() const {
+        return type == pb::MAXVALUE_TYPE;
+    }
+
     SerializeStatus serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const;
 
     static ExprValue Null() {
@@ -825,7 +859,8 @@ struct ExprValue {
         ret._u.bool_val = true;
         return ret;
     }
-    static ExprValue Now(int precision = 6) {
+    // 默认不带us
+    static ExprValue Now(int precision = 0) {
         ExprValue tmp(pb::TIMESTAMP);
         tmp._u.uint32_val = time(NULL);
         tmp.cast_to(pb::DATETIME);

@@ -537,12 +537,14 @@ public:
                 return true;
             }
         } else if (op_type == pb::OP_ROLLBACK && state->open_binlog()) {
-            return true;
+            if (need_send_rollback) {
+                return true;
+            }
         }
         return false;
     }
     static void choose_other_if_dead(pb::RegionInfo& info, std::string& addr);
-    static void other_normal_peer_to_leader(pb::RegionInfo& info, std::string& addr);
+    static void other_normal_peer_to_leader(pb::RegionInfo& info, const std::string& addr);
     ErrorType process_binlog_start(RuntimeState* state, pb::OpType op_type);
     void process_binlog_done(RuntimeState* state, pb::OpType op_type) {
         binlog_cond.wait();
@@ -584,6 +586,7 @@ public:
     std::ostringstream error_msg;
     int32_t region_count = 0;
     std::set<brpc::CallId> callids;
+    bool need_send_rollback = true;
     WriteBinlogParam write_binlog_param;
     GlobalBackupType global_backup_type = GBT_INIT;
 };

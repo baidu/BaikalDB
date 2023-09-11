@@ -395,8 +395,28 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->update_split_lines(request, iter.index(), done);
             break;
         }
+        case pb::OP_ADD_PARTITION: {
+            TableManager::get_instance()->add_partition(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_DROP_PARTITION: {
+            TableManager::get_instance()->drop_partition(request, iter.index(), done);
+            break;
+        }
         case pb::OP_MODIFY_PARTITION: {
             TableManager::get_instance()->modify_partition(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_CONVERT_PARTITION: {
+            TableManager::get_instance()->convert_partition(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_UPDATE_DYNAMIC_PARTITION_ATTR: {
+            TableManager::get_instance()->update_dynamic_partition_attr(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_DROP_PARTITION_TS: {
+            TableManager::get_instance()->drop_partition_ts(request, iter.index(), done);
             break;
         }
         case pb::OP_UPDATE_CHARSET: {
@@ -479,6 +499,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
         }
         case pb::OP_REMOVE_GLOBAL_INDEX_DATA: {
             TableManager::get_instance()->remove_global_index_data(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_SPECIFY_SPLIT_KEYS: {
+            TableManager::get_instance()->specify_split_keys(request, iter.index(), done);
             break;
         }
         default: {

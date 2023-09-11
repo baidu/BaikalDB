@@ -129,6 +129,7 @@ int Transaction::begin(const Transaction::TxnOptions& txn_opt) {
     } else {
         rocks_txn_opt.lock_timeout = txn_opt.lock_timeout;
     }
+    _use_cold_db = txn_opt.use_cold_db;
     return begin(rocks_txn_opt);
 }
 
@@ -150,13 +151,28 @@ int Transaction::begin(const rocksdb::TransactionOptions& txn_opt) {
         _txn_opt.lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms +
             butil::fast_rand_less_than(FLAGS_rocks_transaction_lock_timeout_ms);
     }
-    auto txn = _db->begin_transaction(_write_opt, _txn_opt);
+
+    rocksdb::Transaction* txn = nullptr;
+    if (_use_cold_db) {
+        txn = _db->begin_cold_transaction(_write_opt, _txn_opt);
+        _snapshot = _db->get_cold_snapshot();
+        _cold_data_cf = _db->get_cold_data_handle();
+        if (txn == nullptr || _snapshot == nullptr || _cold_data_cf == nullptr) {
+            DB_FATAL("cold data cf is null");
+            return -1;
+        }
+        DB_WARNING("begin cold transaction");
+        _data_cf = _cold_data_cf;
+    } else {
+        txn = _db->begin_transaction(_write_opt, _txn_opt);
+        _snapshot = _db->get_snapshot();
+    }
     if (txn == nullptr) {
         DB_WARNING("start_trananction failed");
         return -1;
     }
 
-    _txn = new myrocksdb::Transaction(txn);
+    _txn = new myrocksdb::Transaction(txn, _use_cold_db, _cold_data_cf);
     if (_pool != nullptr) {
         _use_ttl = _pool->use_ttl();
         _online_ttl_base_expire_time_us = _pool->online_ttl_base_expire_time_us();
@@ -169,7 +185,6 @@ int Transaction::begin(const rocksdb::TransactionOptions& txn_opt) {
     }
     _in_process = true;
     _current_req_point_seq.insert(1);
-    _snapshot = _db->get_snapshot();
     return 0; 
 }
 
@@ -384,7 +399,7 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
 //TODO: finer return status
 //return -3 when region not match
 int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record,
-                             std::set<int32_t>* update_fields) {
+                             std::set<int32_t>* update_fields, bool is_merge) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
     if (_is_rolledback) {
@@ -409,7 +424,13 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
     } else {
         value = "";
     }
-    auto res = put_kv_without_lock(key.data(), value, _write_ttl_timestamp_us);
+
+    rocksdb::Status res;
+    if (is_merge) {
+        res = _txn->Merge(_data_cf, key.data(), value);
+    } else {
+        res = put_kv_without_lock(key.data(), value, _write_ttl_timestamp_us);
+    }
     if (res.IsTimedOut()) {
         print_txninfo_holding_lock(key.data());        
         int64_t region_id =  _region_info != nullptr ? _region_info->region_id() : 0;
@@ -420,8 +441,13 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
         DB_FATAL("put primary fail, error: %s", res.ToString().c_str());
         return -1;
     }
+
     if (_is_separate) {
-        add_kvop_put(key.data(), value, _write_ttl_timestamp_us, true);
+        if (is_merge) {
+            add_kvop_merge(key.data(), value);
+        } else {
+            add_kvop_put(key.data(), value, _write_ttl_timestamp_us, true);
+        }
     }
     // cstore, put non-pk columns values to db
     if (is_cstore()) {
@@ -537,6 +563,16 @@ int Transaction::put_kv(const std::string& key, const std::string& value, int64_
     if (!res.ok()) {
         DB_FATAL("put kv info fail, error: %s", res.ToString().c_str());
 
+        return -1;
+    }
+    return 0;
+}
+
+int Transaction::merge_kv(const std::string& key, const std::string& value) {
+    BAIDU_SCOPED_LOCK(_txn_mutex);
+    auto res = _txn->Merge(_data_cf, rocksdb::Slice(key), rocksdb::Slice(value));
+    if (!res.ok()) {
+        DB_FATAL("merge kv info fail, error: %s", res.ToString().c_str());
         return -1;
     }
     return 0;
@@ -1383,7 +1419,7 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
         if (update_by_delete_old) {
             auto res = _txn->Delete(_data_cf, key.data());
             DB_DEBUG("del key=%s, res=%s", str_to_hex(key.data()).c_str(),
-                     res.ToString().c_str());
+                    res.ToString().c_str());
             if (!res.ok()) {
                 return -1;
             }
@@ -1394,8 +1430,8 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
         }
         auto res = _txn->Put(_data_cf, key.data(), value);
         DB_DEBUG("put key=%s,val=%s,res=%s", str_to_hex(key.data()).c_str(),
-                 record->get_value(record->get_field_by_tag(field_id)).get_string().c_str(),
-                 res.ToString().c_str());
+                record->get_value(record->get_field_by_tag(field_id)).get_string().c_str(),
+                res.ToString().c_str());
         if (!res.ok()) {
             return -1;
         }
@@ -1497,8 +1533,8 @@ int Transaction::remove_columns(const TableKey& primary_key) {
             DB_WARNING("timedout: %s", res.ToString().c_str());
             return -1;
         } else if (!res.ok()) {
-           DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
-           return -1;
+        DB_WARNING("delete error: code=%d, msg=%s", res.code(), res.ToString().c_str());
+        return -1;
         }
         if (_is_separate) {
             add_kvop_delete(key.data(), false);

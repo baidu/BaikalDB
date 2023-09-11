@@ -259,6 +259,8 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
             ExprValue mode = sub_expr->children(2)->get_value(nullptr);
             if (mode.get_string() == "IN BOOLEAN MODE") {
                 match_type = MATCH_BOOLEAN;
+            } else if (mode.get_string() == "IN VECTOR MODE") {
+                match_type = MATCH_VECTOR;
             }
         }
     }
@@ -344,6 +346,8 @@ void IndexSelector::hit_match_against_field_range(ExprNode* expr,
     RangeType type = MATCH_LANGUAGE;
     if (mode.get_string() == "IN BOOLEAN MODE") {
         type = MATCH_BOOLEAN;
+    } else if (mode.get_string() == "IN VECTOR MODE") {
+        type = MATCH_VECTOR;
     }
     field_range_map[field_id].type = type;
     field_range_map[field_id].like_values.push_back(value);
@@ -515,7 +519,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
     
     // 重构思路：先计算单个field的range范围，然后index根据field的范围情况进一步计算
     // field_id => range映射
-    std::map<int32_t, FieldRange> field_range_map;
+    std::shared_ptr<std::map<int32_t, FieldRange>> field_range_map = std::make_shared<std::map<int32_t, FieldRange>>();
     FulltextInfoTree fulltext_index_tree;
     //最外一层 and
     fulltext_index_tree.root.reset(new FulltextInfoNode);
@@ -527,7 +531,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
     if (conjuncts != nullptr) {
         for (auto expr : *conjuncts) {
             bool index_predicate_is_null = false;
-            hit_field_range(expr, field_range_map, &index_predicate_is_null, table_id, fulltext_index_tree.root.get());
+            hit_field_range(expr, *field_range_map, &index_predicate_is_null, table_id, fulltext_index_tree.root.get());
             if (index_predicate_is_null) {
                 if (index_has_null != nullptr) {
                     *index_has_null = true;
@@ -538,7 +542,7 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         }
     }
 
-    for (auto& pair : field_range_map) {
+    for (auto& pair : *field_range_map) {
         field_range_type[pair.first] = pair.second.type;
     }
 
@@ -644,12 +648,15 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                 calc_covering_user_slots = &slot_ids;
             }
         }
-        access_path->insert_no_cut_condition(expr_field_map);
+        access_path->insert_no_cut_condition(expr_field_map, scan_node->is_get_keypoint());
         access_path->calc_is_covering_index(tuple_descs[tuple_id], calc_covering_user_slots);
         scan_node->add_access_path(access_path);
     }
     // 分区表解析分区信息
-    select_partition(table_info, scan_node, field_range_map);
+    if (select_partition(table_info, scan_node, *field_range_map) != 0) {
+        DB_WARNING("Fail to select_partition, table_id: %ld", table_id);
+        return -1;
+    }
     scan_node->set_fulltext_index_tree(std::move(fulltext_index_tree));
     return scan_node->select_index_in_baikaldb(sample_sql); 
 }
@@ -670,10 +677,28 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
                 return 0;
             }
         }
+        
+        std::shared_ptr<UserInfo> user_info = nullptr;
+        if (_ctx != nullptr) {
+            auto client_conn = _ctx->client_conn;
+            if (client_conn == nullptr) {
+                DB_WARNING("client_conn is nullptr");
+                return -1;
+            }
+            user_info = client_conn->user_info;
+        }
+
         auto partition_type = table_info->partition_ptr->partition_type();
         auto field_iter = field_range_map.find(table_info->partition_ptr->partition_field_id());
+
+        if (partition_type != pb::PT_HASH && partition_type != pb::PT_RANGE) {
+            DB_WARNING("Invalid partition type, %d", partition_type);
+            return -1;
+        }
+
         if (partition_type == pb::PT_HASH) {
             if (field_iter != field_range_map.end() && !field_iter->second.eq_in_values.empty()) {
+                scan_node->set_partition_field_id(field_iter->first);
                 ExprValueFlatSet eq_in_values_set;
                 eq_in_values_set.init(ajust_flat_size(field_iter->second.eq_in_values.size()));
                 for (auto& value : field_iter->second.eq_in_values) {
@@ -682,7 +707,7 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
                 if (table_info->partition_num != 1) {
                     for (auto& value : eq_in_values_set) {
                         int64_t partition_index = 0;
-                        partition_index = table_info->partition_ptr->calc_partition(value);
+                        partition_index = table_info->partition_ptr->calc_partition(user_info, value);
                         if (partition_index < 0) {
                             DB_WARNING("get partition number error, value:%s", value.get_string().c_str());
                             return -1;
@@ -700,7 +725,57 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
                 scan_node->replace_partition(partition_ids, false);
             }
         } else if (partition_type == pb::PT_RANGE) {
-            // todo
+            RangePartition* partition_ptr = static_cast<RangePartition*>(table_info->partition_ptr.get());
+            if (field_iter != field_range_map.end()) {
+                if (!field_iter->second.eq_in_values.empty()) {
+                    // 等值条件
+                    const size_t MAX_FLATSET_INIT_VALUE = 12501; // 10000 / 0.8 + 1
+                    size_t flatset_init_value = field_iter->second.eq_in_values.size() / 0.8 + 1;
+                    if (flatset_init_value > MAX_FLATSET_INIT_VALUE) {
+                        flatset_init_value = MAX_FLATSET_INIT_VALUE;
+                    }
+                    scan_node->set_partition_field_id(field_iter->first);
+                    ExprValueFlatSet eq_in_values_set;
+                    eq_in_values_set.init(flatset_init_value);
+                    for (auto& value : field_iter->second.eq_in_values) {
+                        eq_in_values_set.insert(value);
+                    }
+                    for (auto& value : eq_in_values_set) {
+                        int64_t partition_index = partition_ptr->calc_partition(user_info, value);
+                        if (partition_index < 0) {
+                            // 未找到partition，则跳过
+                            continue;
+                        }
+                        scan_node->add_expr_partition_pair(value.get_string(), partition_index);
+                        partition_ids.emplace(partition_index);
+                    }
+                } else {
+                    // 范围条件
+                    bool left_open = false;
+                    bool right_open = false;
+                    ExprValue left_value;
+                    ExprValue right_value;
+                    // 行值表达式第一个Slot如果不是分区列，会退化成获取所有分区
+                    if (field_iter != field_range_map.end()) {
+                        if (!field_iter->second.left.empty()) {
+                            left_value = field_iter->second.left[0];
+                            left_open = field_iter->second.left_open;
+                        }
+                        if (!field_iter->second.right.empty()) {
+                            right_value = field_iter->second.right[0];
+                            right_open = field_iter->second.right_open;
+                        }
+                    }
+                    if (partition_ptr->calc_partitions(user_info, 
+                            left_value, left_open, right_value, right_open, partition_ids) != 0) {
+                        DB_WARNING("Fail to calc_partitions");
+                        return -1;
+                    }
+                }
+            } else {
+                partition_ids = partition_ptr->get_specified_partition_ids(user_info);
+            }
+            scan_node->replace_partition(partition_ids, false);
         }
     }
     return 0;

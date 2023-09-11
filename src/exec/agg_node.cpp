@@ -283,7 +283,7 @@ void AggNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
         ExprNode::create_pb_expr(agg_node->add_agg_funcs(), agg);
     }
 }
-void AggNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+void AggNode::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
     ExecNode::find_place_holder(placeholders);
     for (auto& expr : _group_exprs) {
         expr->find_place_holder(placeholders);

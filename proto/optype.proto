@@ -35,6 +35,7 @@ enum OpType {
     OP_TXN_COMPLETE                         = 26; // 手动完成特定事务处理
     OP_CLEAR_APPLYING_TXN                   = 27; // 清理未apply的事务
     OP_SELECT_FOR_UPDATE                    = 28;
+    OP_MERGE_KV                             = 29;
     // fake op
     OP_UNION                                = 51;
     OP_LOAD                                 = 52;
@@ -49,6 +50,12 @@ enum OpType {
     OP_FAKE_BINLOG                          = 64; //fake     binlog
     OP_RECOVER_BINLOG                       = 65; //recover  binlog
     OP_QUERY_BINLOG                         = 66; //query region binlog info
+    OP_UPDATE_OFFLINE_BINLOG                = 67; //update offline binlog info
+    OP_QUERY_OFFLINE_BINLOG                 = 68; //query region offline binlog info
+    OP_RECOVER_OFFLINE_BINLOG               = 69; //recover offline binlog
+
+    // for olap
+    OP_OLAP_INFO                            = 80; //olap信息更新
 
     // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房
@@ -131,4 +138,10 @@ enum OpType {
     OP_SWAP_TABLE                           = 192; //原子交换两个表名
     OP_MODIFY_PARTITION                     = 193;
     OP_UPDATE_CHARSET                       = 194;
+    OP_ADD_PARTITION                        = 195;
+    OP_DROP_PARTITION                       = 196;
+    OP_UPDATE_DYNAMIC_PARTITION_ATTR        = 197;
+    OP_DROP_PARTITION_TS                    = 198;
+    OP_SPECIFY_SPLIT_KEYS                   = 199; // 指定RangePartition分区的预分裂Key
+    OP_CONVERT_PARTITION                    = 200;
 };
