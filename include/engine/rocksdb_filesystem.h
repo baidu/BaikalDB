@@ -14,9 +14,6 @@
 #pragma once
 #include "rocksdb/file_system.h"
 #include "rocksdb/utilities/options_type.h"
-#if BAIDU_INTERNAL
-#include <json/json.h>
-#endif
 #include "schema_factory.h"
 #include "mut_table_key.h"
 #include "table_key.h"

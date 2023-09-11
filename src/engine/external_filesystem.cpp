@@ -16,6 +16,7 @@
 
 namespace baikaldb {
 
+#ifdef BAIDU_INTERNAL
 AfsFileSystem::~AfsFileSystem() {
     for (auto& info : _ugi_infos) {
         if (info.afs != nullptr) {
@@ -256,4 +257,5 @@ int AfsFileSystem::list(const std::string& cluster, const std::string& path, std
     }
     return 0;
 }
+#endif
 } // namespace baikaldb

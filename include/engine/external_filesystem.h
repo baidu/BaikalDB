@@ -88,6 +88,7 @@ private:
     DISALLOW_COPY_AND_ASSIGN(ExtFileWriter);
 };
 
+#ifdef BAIDU_INTERNAL
 class AfsFileReader : public ExtFileReader {
 public:
     explicit AfsFileReader(const std::string& uri, const std::string& name, afs::Reader* reader, 
@@ -210,6 +211,7 @@ private:
     std::shared_ptr<afs::AfsFileSystem> _fs;
     std::shared_ptr<AfsStatis> _statis;
 };
+#endif
 
 class ExtFileSystem {
 public:
@@ -254,6 +256,7 @@ private:
     DISALLOW_COPY_AND_ASSIGN(ExtFileSystem);
 };
 
+#ifdef BAIDU_INTERNAL
 class AfsFileSystem : public ExtFileSystem {
 public:
 struct AfsUgi {
@@ -288,6 +291,7 @@ private:
     std::map<std::string, std::shared_ptr<AfsStatis>> _uri_afs_statics;
     std::vector<AfsUgi> _ugi_infos;
 };
+#endif
 
 
 }  // namespace baikaldb
