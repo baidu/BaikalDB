@@ -256,7 +256,9 @@ public:
         options.allow_global_seqno = true;                // 当外部文件的seqno不能用时会生成新的seqno，需要设置为true
         options.write_global_seqno = false;               // 为true时会把seqno写入外部文件，需要设置为false禁止对外部文件进行修改
         options.verify_checksums_before_ingest = false;   // 不用校验checksum，否则会影响ingest性能，rocksdb默认也为false
+#if ROCKSDB_MAJOR >= 7
         options.fail_if_not_bottommost_level = true;      // 我们ingest的sst没有区间重合，理论上会ingest到最后一层，所以设置为true进行校验
+#endif
         if (_cold_txn_db != nullptr) {
             return _cold_txn_db->IngestExternalFile(_cold_column_family, external_files, options);
         } else {
