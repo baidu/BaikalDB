@@ -34,6 +34,7 @@ COPTS  = [
     "-Iinclude/common",
     "-Iinclude/engine",
     "-Iinclude/reverse",
+    "-Iinclude/vector_index",
     "-Iinclude/reverse/boolean_engine",
     "-Iinclude/exec",
     "-Iinclude/expr",
@@ -764,7 +765,7 @@ cc_library(
 
 cc_library(
     name = "reverse",
-    srcs = glob(["src/reverse/*.cpp"]),
+    srcs = glob(["src/reverse/*.cpp", "src/vector/*.cpp"]),
     hdrs = glob([
         "include/**/*.h",
         "include/**/*.hpp",
