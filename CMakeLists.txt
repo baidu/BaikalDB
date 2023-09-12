@@ -392,7 +392,7 @@ file(GLOB PROTOCOL src/protocol/*.cpp)
 list(REMOVE_ITEM PROTOCOL src/protocol/main.cpp)
 file(GLOB RAFT src/raft/*.cpp)
 file(GLOB RAFT_META src/raft_meta/*.cpp)
-file(GLOB REVERSE src/reverse/*.cpp)
+file(GLOB REVERSE src/reverse/*.cpp src/vector_index/*.cpp)
 file(GLOB RUNTIME src/runtime/*.cpp)
 file(GLOB SESSION src/session/*.cpp)
 file(GLOB SQLPARSER include/sqlparser/*.cc ${CMAKE_CURRENT_BINARY_DIR}/sqlparser/*.cc)
@@ -414,6 +414,7 @@ set(COMMON_INC
         include/protocol
         include/raft
         include/reverse
+        include/vector_index
         include/reverse/boolean_engine
         include/runtime
         include/session
