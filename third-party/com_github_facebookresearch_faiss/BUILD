@@ -33,10 +33,10 @@ cc_library(
         "-pipe",
         "-fPIC",
         "-fopenmp",
-        "-mavx2"
-        "-mfma"
-        "-mf16c"
-        "-mpopcnt"
+        "-mavx2",
+        "-mfma",
+        "-mf16c",
+        "-mpopcnt",
         "-O2",
     ],
     linkopts = [
