@@ -11,7 +11,12 @@ cc_library(
         "faiss/invlists/*.cpp",
     ]),
     hdrs = glob([
-        "include/*.h",
+        "faiss/*.h",
+        "faiss/impl/*.h",
+        "faiss/impl/**/*.h",
+        "faiss/utils/*.h",
+        "faiss/utils/**/*.h",
+        "faiss/invlists/*.h",
     ]),
     includes = [
         ".",
