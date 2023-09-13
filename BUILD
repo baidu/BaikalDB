@@ -784,6 +784,7 @@ cc_library(
         "//external:arrow",
         "//external:croaring",
         "//external:rapidjson",
+        "//external:faiss",
         ":common",
     ],
     visibility = ["//visibility:public"],
