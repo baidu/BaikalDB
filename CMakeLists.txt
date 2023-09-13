@@ -323,6 +323,7 @@ SET(DEP_INC
 
         ${Boost_INCLUDE_DIR}
         ${ARROW_INCLUDE_DIR}
+        ${FAISS_INCLUDE_DIR}
         ${CROARING_INCLUDE_DIR}
         ${RAPIDJSON_INCLUDE_DIR}
 
