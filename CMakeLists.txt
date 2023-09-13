@@ -119,6 +119,30 @@ else ()
     include(arrow)
 endif ()
 
+#openblas
+if (WITH_SYSTEM_LIBS)
+    find_path(OPENBLAS_INCLUDE_DIR NAMES openblas/api.h)
+    find_library(OPENBLAS_LIBRARIES NAMES openblas)
+    if ((NOT OPENBLAS_INCLUDE_DIR) OR (NOT OPENBLAS_LIBRARIES))
+        message(FATAL_ERROR "Fail to find openblas")
+    endif ()
+    ADD_LIBRARY(openblas SHARED IMPORTED GLOBAL)
+else ()
+    include(openblas)
+endif ()
+
+#faiss
+if (WITH_SYSTEM_LIBS)
+    find_path(FAISS_INCLUDE_DIR NAMES faiss/api.h)
+    find_library(FAISS_LIBRARIES NAMES faiss)
+    if ((NOT FAISS_INCLUDE_DIR) OR (NOT FAISS_LIBRARIES))
+        message(FATAL_ERROR "Fail to find faiss")
+    endif ()
+    ADD_LIBRARY(faiss SHARED IMPORTED GLOBAL)
+else ()
+    include(faiss)
+endif ()
+
 #croaring
 if (WITH_SYSTEM_LIBS)
     find_path(CROARING_INCLUDE_DIR NAMES roaring/roaring.h)
@@ -444,7 +468,7 @@ file(GLOB COMMON
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 
-set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow croaring glog gflags protobuf re2 snappy rocksdb brpc braft)
+set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow openblas faiss croaring glog gflags protobuf re2 snappy rocksdb brpc braft)
 if (WITH_GPERF)
     set(COMMON_DEPS ${COMMON_DEPS} gperf)
 endif ()
