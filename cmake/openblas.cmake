@@ -19,17 +19,15 @@ SET(OPENBLAS_INSTALL_DIR ${THIRD_PARTY_PATH}/install/openblas)
 SET(OPENBLAS_INCLUDE_DIR "${OPENBLAS_INSTALL_DIR}/include" CACHE PATH "openblas include directory." FORCE)
 SET(OPENBLAS_LIBRARIES "${OPENBLAS_INSTALL_DIR}/lib/libopenblas.a" CACHE FILEPATH "openblas library." FORCE)
 
-set(prefix_path "${THIRD_PARTY_PATH}/install/openblas")
-
 ExternalProject_Add(
         extern_openblas
         ${EXTERNAL_PROJECT_LOG_ARGS}
         URL "https://github.com/xianyi/OpenBLAS/archive/refs/tags/v0.3.24.tar.gz"
         PREFIX ${OPENBLAS_SOURCES_DIR}
         UPDATE_COMMAND ""
-        LIST_SEPARATOR |
+        CONFIGURE_COMMAND ""
         BUILD_IN_SOURCE 1
-        BUILD_COMMAND $(MAKE) -j ${NUM_OF_PROCESSOR} 
+        BUILD_COMMAND $(MAKE) -j ${NUM_OF_PROCESSOR} PREFIX=${OPENBLAS_INSTALL_DIR}  
         INSTALL_COMMAND $(MAKE) install PREFIX=${OPENBLAS_INSTALL_DIR}
 )
 ADD_LIBRARY(openblas STATIC IMPORTED GLOBAL)

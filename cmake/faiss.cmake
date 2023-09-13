@@ -19,8 +19,6 @@ SET(FAISS_INSTALL_DIR ${THIRD_PARTY_PATH}/install/faiss)
 SET(FAISS_INCLUDE_DIR "${FAISS_INSTALL_DIR}/include" CACHE PATH "faiss include directory." FORCE)
 SET(FAISS_LIBRARIES "${FAISS_INSTALL_DIR}/lib/libfaiss.a" CACHE FILEPATH "faiss library." FORCE)
 
-set(prefix_path "${THIRD_PARTY_PATH}/install/openblas")
-
 ExternalProject_Add(
         extern_faiss
         ${EXTERNAL_PROJECT_LOG_ARGS}
@@ -41,7 +39,7 @@ ExternalProject_Add(
         -DFAISS_OPT_LEVEL=avx2
         -DMKL_LIBRARIES=${THIRD_PARTY_PATH}/install/openblas
         -DCMAKE_BUILD_TYPE=${THIRD_PARTY_BUILD_TYPE}
-        -DCMAKE_PREFIX_PATH=${prefix_path}
+        -DCMAKE_PREFIX_PATH=${FAISS_INSTALL_DIR}
         ${EXTERNAL_OPTIONAL_ARGS}
         LIST_SEPARATOR |
         CMAKE_CACHE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${FAISS_INSTALL_DIR}
