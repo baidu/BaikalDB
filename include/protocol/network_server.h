@@ -34,6 +34,12 @@ public:
     uint64_t get_affected_rows() {
         return 0;
     }
+    bool next() {
+        return false;
+    }
+    int get_uint64(const std::string& col, uint64_t* val) {
+        return 0;
+    }
 };
 class Service {
 public:
