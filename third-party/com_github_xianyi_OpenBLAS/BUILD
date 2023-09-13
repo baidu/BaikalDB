@@ -1,11 +1,9 @@
 licenses(["notice"])  
 genrule(
-    name = "build",
+    name = "build_blas",
     srcs = glob(["**/*"]),
-    outs = [
-        glob(["include/*.h"]) + 
+    outs = glob(["include/*.h"]) + 
         ["lib/libopenblas.a"],
-    ],
     cmd = "\n".join([
         "blas=\"external/com_github_xianyi_OpenBLAS\"",
         "outs=($(OUTS))",
@@ -17,7 +15,7 @@ genrule(
 cc_library(
     name = "openblas",
     srcs = ["lib/libopenblas.a"],
-    hdrs = glob(["include/*.h"])
+    hdrs = glob(["include/*.h"]),
     linkopts = ["-pthread"],
     linkstatic = True,
     visibility = ["//visibility:public"],
