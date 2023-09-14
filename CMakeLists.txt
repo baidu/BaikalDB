@@ -55,7 +55,8 @@ SET(EXTERNAL_PROJECT_LOG_ARGS
         LOG_INSTALL 0)
 
 include(ProcessorCount)
-ProcessorCount(NUM_OF_PROCESSOR)
+#ProcessorCount(NUM_OF_PROCESSOR)
+SET(NUM_OF_PROCESSOR 4)
 message(NUM_OF_PROCESSOR: ${NUM_OF_PROCESSOR})
 
 #thread
