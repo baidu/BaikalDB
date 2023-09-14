@@ -323,6 +323,7 @@ SET(DEP_INC
 
         ${Boost_INCLUDE_DIR}
         ${ARROW_INCLUDE_DIR}
+        ${OPENBLAS_INCLUDE_DIR}
         ${FAISS_INCLUDE_DIR}
         ${CROARING_INCLUDE_DIR}
         ${RAPIDJSON_INCLUDE_DIR}
@@ -364,6 +365,8 @@ SET(DEP_LIB
         ${RE2_LIBRARIES}
 
         ${ARROW_LIBRARIES}
+        ${OPENBLAS_LIBRARIES}
+        ${FAISS_LIBRARIES}
         ${CROARING_LIBRARIES}
         ${Boost_LIBRARIES}
         #        ${BZ2_LIBRARIES}
