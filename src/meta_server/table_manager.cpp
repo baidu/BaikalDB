@@ -1201,7 +1201,7 @@ void TableManager::add_partition(const pb::MetaManagerRequest& request,
 
     if (done && is_create_table_support_engine(mem_schema_pb.engine())) {
         uint64_t log_id = butil::fast_rand();
-        std::atomic<bool> success = true;
+        bool success = true;
         std::vector<int64_t> succ_region_ids;
         bthread_mutex_t init_region_mutex;
 
