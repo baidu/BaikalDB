@@ -10,7 +10,7 @@ genrule(
         "cp -r $${blas} build ",
         "(cd build " + 
         "&& make --silent -j4 && make install PREFIX=.)",
-        "cp build/include/*.h $(location include/)",
+        "cp build/include/*.h $(location)",
         "cp build/lib/libopenblas.a $(location lib/libopenblas.a)"
     ]),
 )
