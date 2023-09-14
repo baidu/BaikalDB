@@ -1,6 +1,6 @@
 licenses(["notice"])  
 genrule(
-    name = "build_blas",
+    name = "build",
     srcs = glob(["**/*"]),
     outs = glob(["include/*.h"]) + 
         ["lib/libopenblas.a"],
@@ -9,7 +9,7 @@ genrule(
         "outs=($(OUTS))",
         "cp -r $${blas} build ",
         "(cd build " + 
-        "&& make -j4 && make install PREFIX=.. )",
+        "&& make --silent -j4 && make install PREFIX=.. )",
     ]),
 )
 

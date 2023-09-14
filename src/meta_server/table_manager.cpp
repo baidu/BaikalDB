@@ -83,8 +83,8 @@ void TableTimer::run() {
         request.set_is_dynamic_change(true);
         request.mutable_table_info()->Swap(&schema);
         DB_NOTICE("DDL_LOG add dynamic partition req[%s]", request.ShortDebugString().c_str());
-        // baidu::rpc::DoNothing()作为done，用于标识raft的leader
-        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, baidu::rpc::DoNothing());
+        // brpc::DoNothing()作为done，用于标识raft的leader
+        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, brpc::DoNothing());
     }
     for (auto& schema : del_partition_schemas) {
         pb::MetaManagerRequest request;
@@ -92,7 +92,7 @@ void TableTimer::run() {
         request.set_is_dynamic_change(true);
         request.mutable_table_info()->Swap(&schema);
         DB_NOTICE("DDL_LOG drop dynamic partition req[%s]", request.ShortDebugString().c_str());
-        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, baidu::rpc::DoNothing());
+        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, brpc::DoNothing());
     }
     for (auto& schema : cold_partition_schemas) {
         pb::MetaManagerRequest request;
@@ -100,7 +100,7 @@ void TableTimer::run() {
         request.set_is_dynamic_change(true);
         request.mutable_table_info()->Swap(&schema);
         DB_NOTICE("DDL_LOG modify dynamic partition req[%s]", request.ShortDebugString().c_str());
-        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, baidu::rpc::DoNothing());
+        SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, brpc::DoNothing());
     }
 
     // gc删除很久的partition的drop_ts
@@ -1586,7 +1586,7 @@ void TableManager::update_dynamic_partition_attr(const pb::MetaManagerRequest& r
             alter_partition_request.set_is_dynamic_change(true);
             alter_partition_request.mutable_table_info()->Swap(&add_partition_schema);
             DB_NOTICE("DDL_LOG add dynamic partition req[%s]", request.ShortDebugString().c_str());
-            SchemaManager::get_instance()->process_schema_info(NULL, &alter_partition_request, NULL, baidu::rpc::DoNothing());
+            SchemaManager::get_instance()->process_schema_info(NULL, &alter_partition_request, NULL, brpc::DoNothing());
         }
         if (del_partition_schema.partition_info().range_partition_infos_size() != 0) {
             pb::MetaManagerRequest alter_partition_request;
@@ -1594,7 +1594,7 @@ void TableManager::update_dynamic_partition_attr(const pb::MetaManagerRequest& r
             alter_partition_request.set_is_dynamic_change(true);
             alter_partition_request.mutable_table_info()->Swap(&del_partition_schema);
             DB_NOTICE("DDL_LOG drop dynamic partition req[%s]", alter_partition_request.ShortDebugString().c_str());
-            SchemaManager::get_instance()->process_schema_info(NULL, &alter_partition_request, NULL, baidu::rpc::DoNothing());
+            SchemaManager::get_instance()->process_schema_info(NULL, &alter_partition_request, NULL, brpc::DoNothing());
         }
         if (cold_partition_schema.partition_info().range_partition_infos_size() != 0) {
             pb::MetaManagerRequest alter_partition_request;
@@ -1602,7 +1602,7 @@ void TableManager::update_dynamic_partition_attr(const pb::MetaManagerRequest& r
             alter_partition_request.set_is_dynamic_change(true);
             alter_partition_request.mutable_table_info()->Swap(&cold_partition_schema);
             DB_NOTICE("DDL_LOG modify dynamic partition req[%s]", alter_partition_request.ShortDebugString().c_str());
-            SchemaManager::get_instance()->process_schema_info(NULL, &alter_partition_request, NULL, baidu::rpc::DoNothing());
+            SchemaManager::get_instance()->process_schema_info(NULL, &alter_partition_request, NULL, brpc::DoNothing());
         }
     }
 }
