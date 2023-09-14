@@ -96,9 +96,9 @@ BRPC_VALIDATE_GFLAG(rocksdb_perf_level, brpc::NonNegativeInteger);
 Store::~Store() {
 }
 
+#ifdef BAIDU_INTERNAL
 // uri,user,password,conf_file,root_path     多组afs ugi使用英文分号分割用户名密码等信息使用英文逗号分割
 int get_afs_infos(std::vector<AfsFileSystem::AfsUgi>& ugi_infos) {
-#ifdef BAIDU_INTERNAL
     ugi_infos.clear();
     if (FLAGS_cold_rocksdb_afs_infos.empty()) {
         return 0;
@@ -130,9 +130,9 @@ int get_afs_infos(std::vector<AfsFileSystem::AfsUgi>& ugi_infos) {
         }
         ugi_infos.emplace_back(ugi);
     }
-#endif
     return 0;
 }
+#endif
 
 int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     butil::EndPoint addr;
