@@ -17,7 +17,7 @@ INCLUDE(ExternalProject)
 SET(OPENBLAS_SOURCES_DIR ${THIRD_PARTY_PATH}/openblas)
 SET(OPENBLAS_INSTALL_DIR ${THIRD_PARTY_PATH}/install/openblas)
 SET(OPENBLAS_INCLUDE_DIR "${OPENBLAS_INSTALL_DIR}/include" CACHE PATH "openblas include directory." FORCE)
-SET(OPENBLAS_LIBRARIES "${OPENBLAS_INSTALL_DIR}/lib/libopenblas_vortexp-r0.3.24.a" CACHE FILEPATH "openblas library." FORCE)
+SET(OPENBLAS_LIBRARIES "${OPENBLAS_INSTALL_DIR}/lib/*.a" CACHE FILEPATH "openblas library." FORCE)
 
 ExternalProject_Add(
         extern_openblas
