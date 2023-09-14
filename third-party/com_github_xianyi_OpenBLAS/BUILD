@@ -7,8 +7,9 @@ genrule(
     cmd = "\n".join([
         "blas=\"external/com_github_xianyi_OpenBLAS\"",
         "outs=($(OUTS))",
-        "cp -r $${blas} build && cd build ",
-        "&& make -j4 && make install PREFIX=..",
+        "cp -r $${blas} build ",
+        "(cd build " + 
+        "&& make -j4 && make install PREFIX=.. )",
     ]),
 )
 
