@@ -386,6 +386,7 @@ SET(DEP_LIB
         rt
         m
         ${CMAKE_THREAD_LIBS_INIT}
+        gfortran
         )
 
 message("DEP INCLUDES: ${DEP_INC}")
