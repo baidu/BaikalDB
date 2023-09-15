@@ -366,8 +366,8 @@ SET(DEP_LIB
         ${RE2_LIBRARIES}
 
         ${ARROW_LIBRARIES}
-        ${OPENBLAS_LIBRARIES}
         ${FAISS_LIBRARIES}
+        ${OPENBLAS_LIBRARIES}
         ${CROARING_LIBRARIES}
         ${Boost_LIBRARIES}
         #        ${BZ2_LIBRARIES}
