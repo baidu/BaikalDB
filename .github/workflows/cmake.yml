@@ -15,6 +15,6 @@ jobs:
         path: |
            buildenv
     - name: Install Dependencies
-      run: sudo apt-get update && sudo apt-get install -y flex bison libssl-dev autoconf g++ libtool make cmake libz-dev
+      run: sudo apt-get update && sudo apt-get install -y flex bison libssl-dev autoconf g++ libtool make cmake libz-dev locate gfortran
     - name: Build
       run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make 
