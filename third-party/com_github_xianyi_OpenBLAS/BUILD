@@ -2,7 +2,7 @@ licenses(["notice"])
 genrule(
     name = "build",
     srcs = glob(["**/*"]),
-    outs = glob(["include/cblas.h"]) + 
+    outs = ["include/cblas.h"] + 
         ["lib/libopenblas.a"],
     cmd = "\n".join([
         "blas=\"external/com_github_xianyi_OpenBLAS\"",
@@ -10,8 +10,8 @@ genrule(
         "cp -r $${blas} build ",
         "(cd build " + 
         "&& make --silent -j4 && make install PREFIX=.)",
-        "cp build/include/*.h $(location include/cblas.h)",
-        "cp build/lib/libopenblas.a $(location lib/libopenblas.a)"
+        "cp build/include/*.h $$(dirname $(location include/cblas.h))",
+        "cp build/lib/libopenblas.a $(location lib/libopenblas.a)",
     ]),
 )
 

@@ -64,6 +64,10 @@ COPTS  = [
     "-UNDEBUG",
 ]
 
+LINKOPTS = [
+    "-lgfortran", 
+]
+
 cc_library(
     name = "common",
     srcs = glob(["src/common/*.cpp"]),
@@ -76,6 +80,7 @@ cc_library(
 
     includes = [
         "include/common/",
+        "include/session/",
     ],
 
     deps = [
@@ -90,6 +95,8 @@ cc_library(
         "//external:braft",
         "//external:arrow",
         "//external:croaring",
+        "//external:faiss",
+        "//external:openblas",
         "//external:re2",
         "//external:tcmalloc_and_profiler",
         ":cc_baikaldb_internal_proto",
@@ -552,6 +559,7 @@ cc_library(
     copts = COPTS,
     includes = [
         "include/meta_server",
+        "include/expr",
     ],
     deps = [
         ":cc_baikaldb_internal_proto",
@@ -562,6 +570,8 @@ cc_library(
         "//external:rocksdb",
         "//external:rapidjson",
         ":engine",
+        ":expr",
+        ":mem_row",
         ":common",
     ],
     visibility = ["//visibility:public"],
@@ -579,6 +589,7 @@ cc_binary(
         "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
         "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
     ],
+    linkopts = LINKOPTS,
     deps = [
         ":meta_server",
         ":cc_baikaldb_internal_proto",
@@ -602,6 +613,7 @@ cc_binary(
         "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
         "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
     ],
+    linkopts = LINKOPTS,
     deps = [
         ":store",
         ":session",
@@ -718,6 +730,7 @@ cc_binary(
         "-DBAIDU_RPC_ENABLE_CPU_PROFILER",
         "-DBAIDU_RPC_ENABLE_HEAP_PROFILER",
     ],
+    linkopts = LINKOPTS,
     deps = [
         ":protocol2",
         ":common",
@@ -765,7 +778,7 @@ cc_library(
 
 cc_library(
     name = "reverse",
-    srcs = glob(["src/reverse/*.cpp", "src/vector/*.cpp"]),
+    srcs = glob(["src/reverse/*.cpp", "src/vector_index/*.cpp"]),
     hdrs = glob([
         "include/**/*.h",
         "include/**/*.hpp",
@@ -773,6 +786,7 @@ cc_library(
     copts = COPTS,
     includes = [
         "include/reverse",
+        "include/vector_index",
         "include/reverse/boolean_engine",
     ],
     deps = [
