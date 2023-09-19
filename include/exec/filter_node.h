@@ -60,7 +60,7 @@ public:
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
 
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         ExecNode::find_place_holder(placeholders);
         for (auto& expr : _conjuncts) {
             expr->find_place_holder(placeholders);

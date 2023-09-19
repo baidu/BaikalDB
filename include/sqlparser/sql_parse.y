@@ -192,6 +192,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RENAME
     REPEAT
     REPLACE
+    MERGE
     RESTRICT
     REVOKE
     RIGHT
@@ -331,6 +332,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     INVOKER
     JSON
     KEY_BLOCK_SIZE
+    DYNAMIC_PARTITION_ATTR
     LANGUAGE
     LOCAL
     LESS
@@ -415,6 +417,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     VALUE
     VARIABLES
     VIEW
+    VECTOR 
     WARNINGS
     WEEK
     YEAR
@@ -575,9 +578,13 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IndexOptionList
     IndexOption
     IndexType
-    PartitionOpt
-    PartitionRangeList
+    TablePartitionOpt
     PartitionRange
+    PartitionRangeList
+    PartitionRangeListOpt
+    PartitionOption
+    PartitionOptionList
+    PartitionOptionListOpt
     TransactionChar
     FieldItemList
     FieldItem
@@ -637,6 +644,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %type <integer>
     PriorityOpt 
     IgnoreOptional
+    MergeOptional
     QuickOptional
     Order
     IndexHintType
@@ -757,19 +765,20 @@ Statement:
     ;
 
 InsertStmt:
-    INSERT PriorityOpt IgnoreOptional IntoOpt TableName PartitionNameListOpt InsertValues OnDuplicateKeyUpdate {
-        InsertStmt* insert = (InsertStmt*)$7;
+    INSERT PriorityOpt IgnoreOptional MergeOptional IntoOpt TableName PartitionNameListOpt InsertValues OnDuplicateKeyUpdate {
+        InsertStmt* insert = (InsertStmt*)$8;
         insert->priority = (PriorityEnum)$2;
         insert->is_ignore = (bool)$3;
-        insert->table_name = (TableName*)$5;
-        if ($6 != nullptr) {
-            for (int i = 0; i < $6->size(); ++i) {
-                insert->partition_names.push_back((*$6)[i], parser->arena);
+        insert->is_merge = (bool)$4;
+        insert->table_name = (TableName*)$6;
+        if ($7 != nullptr) {
+            for (int i = 0; i < $7->size(); ++i) {
+                insert->partition_names.push_back((*$7)[i], parser->arena);
             }
         }
-        if ($8 != nullptr) {
-            for (int i = 0; i < $8->children.size(); ++i) {
-                (insert->on_duplicate).push_back((Assignment*)$8->children[i], parser->arena);
+        if ($9 != nullptr) {
+            for (int i = 0; i < $9->children.size(); ++i) {
+                (insert->on_duplicate).push_back((Assignment*)$9->children[i], parser->arena);
             }
         }
         $$ = insert;
@@ -810,6 +819,14 @@ IgnoreOptional:
         $$ = false; // false
     }
     | IGNORE {
+        $$ = true; //true;
+    }
+    ;
+MergeOptional:
+    {
+        $$ = false; // false
+    }
+    | MERGE {
         $$ = true; //true;
     }
     ;
@@ -2694,6 +2711,7 @@ AllIdent:
     | INVOKER
     | JSON
     | KEY_BLOCK_SIZE
+    | DYNAMIC_PARTITION_ATTR
     | LANGUAGE
     | LOCAL
     | LESS
@@ -2922,6 +2940,9 @@ FulltextSearchModifierOpt:
     }
     | IN BOOLEAN MODE {
         $$ = LiteralExpr::make_string("IN BOOLEAN MODE", parser->arena);
+    }
+    | IN VECTOR MODE {
+        $$ = LiteralExpr::make_string("IN VECTOR MODE", parser->arena);
     }
     ;
 
@@ -3468,6 +3489,17 @@ ConstraintElem:
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
+    | VECTOR KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_VECTOR;
+        item->name = $3;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$7;
+        $$ = item;
+    }
     | KeyOrIndex IndexName '(' ColumnNameList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
@@ -3640,7 +3672,7 @@ NumericType:
         field_type->total_len = float_opt->total_len;
         field_type->float_len = float_opt->float_len;
 
-        Node* list_node = $2;
+        Node* list_node = $3;
         for (int idx = 0; idx < list_node->children.size(); ++idx) {
             TypeOption* type_opt = (TypeOption*)(list_node->children[idx]);
             if (type_opt->is_unsigned) {
@@ -3666,7 +3698,7 @@ NumericType:
         }
         field_type->float_len = float_opt->float_len;
 
-        Node* list_node = $2;
+        Node* list_node = $3;
         for (int idx = 0; idx < list_node->children.size(); ++idx) {
             TypeOption* type_opt = (TypeOption*)(list_node->children[idx]);
             if (type_opt->is_unsigned) {
@@ -4231,7 +4263,13 @@ TableOption:
         option->uint_value = ((LiteralExpr*)$3)->_u.int64_val;
         $$ = option;
     }
-    | PARTITION BY PartitionOpt
+    | DYNAMIC_PARTITION_ATTR EqOpt STRING_LIT {
+        TableOption* option = new_node(TableOption);
+        option->type = TABLE_OPT_DYNAMIC_PARTITION_ATTR;
+        option->str_value = ((LiteralExpr*)$3)->_u.str_val;
+        $$ = option;
+    }
+    | PARTITION BY TablePartitionOpt
     {
         TableOption* option = (TableOption*)$3;
         option->type = TABLE_OPT_PARTITION;
@@ -4239,12 +4277,79 @@ TableOption:
     }
     ;
 
+PartitionOption:
+    COMMENT EqOpt STRING_LIT
+    {
+        PartitionOption* option = new_node(PartitionOption);
+        option->type = PARTITION_OPT_COMMENT;
+        option->str_value = ((LiteralExpr*)$3)->_u.str_val;
+        $$ = option;
+    }
+    ;
+
+PartitionOptionList:
+    PartitionOption
+    {
+        Node* list = new_node(Node);
+        list->children.reserve(10, parser->arena);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | PartitionOptionList PartitionOption
+    {
+        $1->children.push_back($2, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+PartitionOptionListOpt:
+    {
+        $$ = new_node(Node);
+    }
+    | PartitionOptionList {
+        $$ = $1;
+    }
+    ;
+
 PartitionRange:
-    PARTITION AllIdent VALUES LESS THAN '(' Expr ')'
+    PARTITION AllIdent VALUES LESS THAN '(' Expr ')' PartitionOptionListOpt
     {
         PartitionRange* p = new_node(PartitionRange);
         p->name = $2;
         p->less_expr = $7;
+        for (int idx = 0; idx < $9->children.size(); ++idx) {
+            p->options.push_back((PartitionOption*)($9->children[idx]), parser->arena);
+        }
+        $$ = p;
+    }
+    | PARTITION AllIdent VALUES LESS THAN MAXVALUE PartitionOptionListOpt
+    {
+        PartitionRange* p = new_node(PartitionRange);
+        p->name = $2;
+        p->less_expr = LiteralExpr::make_maxvalue(parser->arena);
+        for (int idx = 0; idx < $7->children.size(); ++idx) {
+            p->options.push_back((PartitionOption*)($7->children[idx]), parser->arena);
+        }
+        $$ = p;
+    }
+    | PARTITION AllIdent VALUES '[' Expr ',' Expr ')' PartitionOptionListOpt
+    {
+        PartitionRange* p = new_node(PartitionRange);
+        p->name = $2;
+        p->range = std::make_pair($5, $7);
+        for (int idx = 0; idx < $9->children.size(); ++idx) {
+            p->options.push_back((PartitionOption*)($9->children[idx]), parser->arena);
+        }
+        $$ = p;
+    }
+    | PARTITION AllIdent VALUES '[' Expr ',' MAXVALUE ')' PartitionOptionListOpt
+    {
+        PartitionRange* p = new_node(PartitionRange);
+        p->name = $2;
+        p->range = std::make_pair($5, LiteralExpr::make_maxvalue(parser->arena));
+        for (int idx = 0; idx < $9->children.size(); ++idx) {
+            p->options.push_back((PartitionOption*)($9->children[idx]), parser->arena);
+        }
         $$ = p;
     }
     ;
@@ -4256,7 +4361,7 @@ PartitionRangeList:
         list->children.push_back($1, parser->arena);
         $$ = list;
     }
-    | PartitionRangeList ','  PartitionRange
+    | PartitionRangeList ',' PartitionRange
     {
         Node* list = $1;
         list->children.push_back($3, parser->arena);
@@ -4264,26 +4369,37 @@ PartitionRangeList:
     }
     ;
 
-PartitionOpt:
-    RANGE '(' Expr ')' '(' PartitionRangeList ')'
+PartitionRangeListOpt:
     {
-        PartitionOption* option = new_node(PartitionOption);
+        $$ = new_node(Node);
+    }
+    | PartitionRangeList
+    {
+        $$ = $1;
+    }
+    ;
+
+TablePartitionOpt:
+    RANGE '(' Expr ')' '(' PartitionRangeListOpt ')'
+    {
+        TablePartitionOption* option = new_node(TablePartitionOption);
         option->type = PARTITION_RANGE;
         option->expr = $3;
         for (int i = 0; i < $6->children.size(); i++) {
-            option->range.push_back(static_cast<PartitionRange*>($6->children[i]), parser->arena);
+            option->ranges.push_back(static_cast<PartitionRange*>($6->children[i]), parser->arena);
         }
         $$ = option;
     }
     | HASH '(' Expr ')' PARTITIONS INTEGER_LIT 
     {
-        PartitionOption* option = new_node(PartitionOption);
+        TablePartitionOption* option = new_node(TablePartitionOption);
         option->type = PARTITION_HASH;
         option->expr = $3;
         option->partition_num = ((LiteralExpr*)$6)->_u.int64_val;
         $$ = option;
     }
     ;
+
 EqOpt:
     {}
     | EQ_OP
@@ -4859,6 +4975,15 @@ AlterSpec:
         spec->new_columns.push_back((ColumnDef*)$3, parser->arena);
         $$ = spec;
     }
+    | ADD COLUMN UNIQUE ColumnDef ColumnPosOpt
+    {
+        // 非标语法，olap表加unique列，会用__sign__做唯一
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_COLUMN;
+        spec->is_unique_indicator = true;
+        spec->new_columns.push_back((ColumnDef*)$4, parser->arena);
+        $$ = spec;
+    }
     | ADD ColumnKwdOpt '(' ColumnDefList ')'
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
@@ -4962,12 +5087,39 @@ AlterSpec:
             spec->set_list.push_back(assign, parser->arena);
         }
         spec->where = $5;
+        $$ = spec;
     }
     | MODIFY ColumnKwdOpt ColumnDef ColumnPosOpt
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_MODIFY_COLUMN;
         spec->new_columns.push_back((ColumnDef*)$3, parser->arena);
+        $$ = spec;
+    }
+    | ADD PartitionRange 
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_PARTITION;
+        spec->partition_range = (PartitionRange*)$2;
+        $$ = spec;
+    }
+    | DROP PARTITION AllIdent 
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_PARTITION;
+        spec->partition_range = new_node(PartitionRange);
+        spec->partition_range->name = $3;
+        $$ = spec;
+    }
+    | MODIFY PARTITION AllIdent PartitionOptionListOpt 
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_MODIFY_PARTITION;
+        spec->partition_range = new_node(PartitionRange);
+        spec->partition_range->name = $3;
+        for (int idx = 0; idx < $4->children.size(); ++idx) {
+            spec->partition_range->options.push_back((PartitionOption*)($4->children[idx]), parser->arena);
+        }
         $$ = spec;
     }
     ;

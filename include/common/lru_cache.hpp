@@ -19,21 +19,21 @@
 
 namespace baikaldb  {
 
-template <typename ItemKey, typename ItemType>
-int Cache<ItemKey, ItemType>::init(int64_t len_threshold) {
+template <typename ItemKey, typename ItemType, typename HashType>
+int Cache<ItemKey, ItemType, HashType>::init(int64_t len_threshold) {
     _len_threshold = len_threshold;
     return 0;
 }
 
-template <typename ItemKey, typename ItemType>
-std::string Cache<ItemKey, ItemType>::get_info() {
+template <typename ItemKey, typename ItemType, typename HashType>
+std::string Cache<ItemKey, ItemType, HashType>::get_info() {
     char buf[100];
     snprintf(buf, sizeof(buf), "hit:%ld, total:%ld,", _hit_count, _total_count);
     return buf;
 }
 
-template <typename ItemKey, typename ItemType>
-int Cache<ItemKey, ItemType>::check(const ItemKey& key) {
+template <typename ItemKey, typename ItemType, typename HashType>
+int Cache<ItemKey, ItemType, HashType>::check(const ItemKey& key) {
     std::lock_guard<std::mutex> lock(_mutex);
     if (_lru_map.count(key) == 1) {
         return 0;
@@ -41,8 +41,8 @@ int Cache<ItemKey, ItemType>::check(const ItemKey& key) {
     return -1;
 }
 
-template <typename ItemKey, typename ItemType>
-int Cache<ItemKey, ItemType>::find(const ItemKey& key, ItemType* value) {
+template <typename ItemKey, typename ItemType, typename HashType>
+int Cache<ItemKey, ItemType, HashType>::find(const ItemKey& key, ItemType* value) {
     std::lock_guard<std::mutex> lock(_mutex);
     ++_total_count;
     if (_lru_map.count(key) == 1) {
@@ -56,8 +56,8 @@ int Cache<ItemKey, ItemType>::find(const ItemKey& key, ItemType* value) {
     return -1;
 }
 
-template <typename ItemKey, typename ItemType>
-int Cache<ItemKey, ItemType>::add(const ItemKey& key, const ItemType& value) {
+template <typename ItemKey, typename ItemType, typename HashType>
+int Cache<ItemKey, ItemType, HashType>::add(const ItemKey& key, const ItemType& value) {
     std::lock_guard<std::mutex> lock(_mutex);
     LruNode<ItemKey, ItemType>* node = NULL;
     if (_lru_map.count(key) == 1) {
@@ -79,14 +79,15 @@ int Cache<ItemKey, ItemType>::add(const ItemKey& key, const ItemType& value) {
     return 0;
 }
 
-template <typename ItemKey, typename ItemType>
-int Cache<ItemKey, ItemType>::del(const ItemKey& key) {
+template <typename ItemKey, typename ItemType, typename HashType>
+int Cache<ItemKey, ItemType, HashType>::del(const ItemKey& key) {
     std::lock_guard<std::mutex> lock(_mutex);
     LruNode<ItemKey, ItemType>* node = NULL;
     if (_lru_map.count(key) == 1) {
         node = _lru_map[key];
         node->RemoveFromList();
         _lru_map.erase(node->key);
+        delete node;
     }
     return 0;
 }

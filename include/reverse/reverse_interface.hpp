@@ -282,8 +282,8 @@ int NewSchema<Node, List>::segment(
 template<typename Node, typename List>
 int NewSchema<Node, List>::create_executor(const std::string& search_data, 
     pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset) {
-    _weight_field = get_field_info_by_name(_table_info.fields, "__weight");
-    _query_words_field = get_field_info_by_name(_table_info.fields, "__querywords");
+    _weight_field = get_field_info_by_name(_table_info->fields, "__weight");
+    _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
     //segment
     TimeCost timer;
     std::vector<std::string> or_search;
@@ -416,7 +416,7 @@ int NewSchema<Node, List>::next(SmartRecord record) {
         return -1;
     }
     const Node& reverse_node = *_cur_node;
-    int ret = record->decode_key(_index_info, reverse_node.key());
+    int ret = record->decode_key(*_index_info, reverse_node.key());
     if (ret < 0) {
         return -1;
     }

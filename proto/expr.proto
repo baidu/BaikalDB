@@ -32,6 +32,7 @@ enum ExprNodeType {
     BITMAP_LITERAL = 26;
     TDIGEST_LITERAL = 27;
     REGEXP_PREDICATE = 28;
+    MAXVALUE_LITERAL = 29;
 };
 
 message Function {
@@ -57,6 +58,8 @@ message DeriveExprNode {
     optional int32 intermediate_slot_id = 7;
     optional int32 field_id = 8;
     optional string field_name = 9;
+    //PreparePlanner和PlanCache使用
+    optional int32 placeholder_id = 10;
 };
 
 message ExprNode {

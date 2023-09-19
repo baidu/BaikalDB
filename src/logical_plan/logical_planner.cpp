@@ -30,7 +30,6 @@
 #include "kill_planner.h"
 #include "prepare_planner.h"
 #include "predicate.h"
-#include "network_socket.h"
 #include "parser.h"
 #include "mysql_err_code.h"
 #include "physical_planner.h"
@@ -40,6 +39,7 @@ DECLARE_int32(bthread_concurrency); //bthread.cpp
 }
 
 namespace baikaldb {
+DEFINE_bool(enable_plan_cache, false, "enable plan cache");
 DECLARE_string(log_plat_name);
 
 std::map<parser::JoinType, pb::JoinType> LogicalPlanner::join_type_mapping {
@@ -48,7 +48,6 @@ std::map<parser::JoinType, pb::JoinType> LogicalPlanner::join_type_mapping {
         { parser::JT_LEFT_JOIN, pb::LEFT_JOIN},
         { parser::JT_RIGHT_JOIN, pb::RIGHT_JOIN}
     };
-
 
 int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item, 
         pb::Expr& expr,
@@ -388,6 +387,9 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
             ctx->client_conn->is_explain_sign = true;
             ctx->explain_type = SHOW_SIGN;
             ctx->is_explain = true;
+        } else if (format == "keypoint") {
+            ctx->explain_type = SHOW_KEYPOINT;
+            ctx->is_get_keypoint = true;
         } else {
             ctx->is_explain = true;
         }
@@ -456,6 +458,16 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         DB_WARNING("invalid command type: %d", ctx->stmt_type);
         return -1;
     }
+    if ((FLAGS_enable_plan_cache || ctx->user_info->enable_plan_cache) && 
+            parser.result[0]->node_type != parser::NT_EXPLAIN && ctx->stmt_type == parser::NT_SELECT) {
+        if (planner->plan_cache_get() != 0) {
+            DB_WARNING("Fail to plan_cache_get");
+            return -1;
+        }
+        if (ctx->stat_info.hit_cache) {
+            return 0;
+        }
+    }
     if (planner->plan() != 0) {
         DB_WARNING("gen plan failed, type:%d", ctx->stmt_type);
         return -1;
@@ -466,6 +478,14 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
             return -1;
         }
     }
+    if ((FLAGS_enable_plan_cache || ctx->user_info->enable_plan_cache) && 
+            parser.result[0]->node_type != parser::NT_EXPLAIN && ctx->stmt_type == parser::NT_SELECT) {
+        if (planner->plan_cache_add() != 0) {
+            DB_WARNING("Fail to plan_cache_get");
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -474,19 +494,23 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
     if (ctx->plan.nodes_size() > 0 && ctx->plan.nodes(0).node_type() == pb::PACKET_NODE) {
         op_type = ctx->plan.nodes(0).derive_node().packet_node().op_type();
     }
-    stmt->set_print_sample(true);
     auto stat_info = &(ctx->stat_info);
-    if (!stat_info->family.empty() && !stat_info->table.empty() ) {
-        stat_info->sample_sql << "family_table_tag_optype_plat=[" << stat_info->family << "\t"
-            << stat_info->table << "\t" << stat_info->resource_tag << "\t" << op_type << "\t"
-            << FLAGS_log_plat_name << "] sql=[" << stmt << "]";
-        uint64_t out[2];
-        butil::MurmurHash3_x64_128(stat_info->sample_sql.str().c_str(), stat_info->sample_sql.str().size(), 0x1234, out);
-        stat_info->sign = out[0];
+    if (!stat_info->family.empty() && !stat_info->table.empty()) {
+        std::string str;
+        if (stat_info->sign == 0) {
+            stmt->set_print_sample(true);
+            stat_info->sample_sql << "family_table_tag_optype_plat=[" << stat_info->family << "\t"
+                << stat_info->table << "\t" << stat_info->resource_tag << "\t" << op_type << "\t"
+                << FLAGS_log_plat_name << "] sql=[" << stmt << "]";
+            uint64_t out[2];
+            str = stat_info->sample_sql.str();
+            butil::MurmurHash3_x64_128(str.c_str(), str.size(), 0x1234, out);
+            stat_info->sign = out[0];
+        }
         if (!ctx->sign_blacklist.empty()) {
             if (ctx->sign_blacklist.count(stat_info->sign) > 0) {
                 DB_WARNING("sql sign[%lu] in blacklist, sample_sql[%s]", stat_info->sign, 
-                    stat_info->sample_sql.str().c_str());
+                    str.c_str());
                 ctx->stat_info.error_code = ER_SQL_REFUSE;
                 ctx->stat_info.error_msg << "sql sign: " << stat_info->sign << " in blacklist";
                 return -1;
@@ -496,7 +520,7 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
             if (ctx->sign_forcelearner.count(stat_info->sign) > 0) {
                 ctx->need_learner_backup = true;
                 DB_WARNING("sql sign[%lu] in forcelearner, sample_sql[%s]", stat_info->sign, 
-                    stat_info->sample_sql.str().c_str());
+                    str.c_str());
             }
         }
         if (!ctx->sign_forceindex.empty()) {
@@ -544,7 +568,7 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
                         auto ret = _factory->get_index_id(table_id, index_name, index_id);
                         if (ret != 0) {
                             DB_WARNING("index_name: %s in table:%s not exist", index_name.c_str(),
-                                    _factory->get_table_info_ptr(table_id)->name.c_str());
+                                        _factory->get_table_info_ptr(table_id)->name.c_str());
                             continue;
                         }
                         scan->add_force_indexes(index_id);
@@ -831,6 +855,10 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
     _ctx->current_table_tuple_ids.emplace(tuple_info->tuple_id);
     //_table_alias_mapping.emplace(use_table_name, org_table_full_name);
     //_table_alias_mapping.emplace(use_table_full_name, org_table_full_name);
+
+    // non-prepare plan cache
+    _ctx->table_version_map[tableid] = _plan_table_ctx->table_info[try_to_lower(alias_full_name)]->version;
+
     return 0;
 }
 
@@ -1770,11 +1798,11 @@ void LogicalPlanner::construct_literal_expr(const ExprValue& value, pb::ExprNode
         case pb::TIMESTAMP_LITERAL:
         case pb::TIME_LITERAL:
         case pb::DATE_LITERAL:
-                node->mutable_derive_node()->set_int_val(value.get_numberic<int32_t>());
-                break;
+            node->mutable_derive_node()->set_int_val(value.get_numberic<int32_t>());
+            break;
         case pb::DATETIME_LITERAL:
-                node->mutable_derive_node()->set_int_val(value.get_numberic<int64_t>());
-                break;
+            node->mutable_derive_node()->set_int_val(value.get_numberic<int64_t>());
+            break;
         default:
             DB_WARNING("expr:%s", value.get_string().c_str());
             break;
@@ -2147,7 +2175,7 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, c
     }
     const parser::ExprNode* expr_item = (const parser::ExprNode*)item;
     if (expr_item->expr_type == parser::ET_LITETAL) {
-        if (0 != create_term_literal_node((parser::LiteralExpr*)expr_item, expr)) {
+        if (0 != create_term_literal_node((parser::LiteralExpr*)expr_item, expr, CreateExprOptions())) {
             if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                 _ctx->stat_info.error_code = ER_BAD_FIELD_ERROR;
                 _ctx->stat_info.error_msg << "Invalid literal '" << expr_item->to_string() << "'";
@@ -2518,10 +2546,21 @@ int LogicalPlanner::create_term_slot_ref_node(
 }
 
 //TODO: primitive len for STRING, BOOL and NULL
-int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal, pb::Expr& expr) {
-    pb::ExprNode* node = expr.add_nodes();
-    node->set_num_children(0);
-
+int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal, pb::Expr& expr, const CreateExprOptions& options) {
+    pb::ExprNode* node = nullptr;
+    if (options.is_plan_cache) {
+        if (expr.nodes_size() == 0) {
+            DB_WARNING("expr has no node");
+            return -1;
+        }
+        node = expr.mutable_nodes(0);
+    } else {
+        node = expr.add_nodes();
+        node->set_num_children(0);
+    }
+    if (enable_plan_cache() && literal->placeholder_literal_type == parser::LT_PLACE_HOLDER) {
+        node->mutable_derive_node()->set_placeholder_id(literal->placeholder_id);
+    }
     switch (literal->literal_type) {
         case parser::LT_INT:
             node->set_node_type(pb::INT_LITERAL);
@@ -2555,7 +2594,11 @@ int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal,
         case parser::LT_PLACE_HOLDER:
             node->set_node_type(pb::PLACE_HOLDER_LITERAL);
             node->set_col_type(pb::PLACE_HOLDER);
-            node->mutable_derive_node()->set_int_val(literal->_u.int64_val);
+            node->mutable_derive_node()->set_placeholder_id(literal->placeholder_id);
+            break;
+        case parser::LT_MAXVALUE:
+            node->set_node_type(pb::MAXVALUE_LITERAL);
+            node->set_col_type(pb::MAXVALUE_TYPE);
             break;
         default:
             DB_WARNING("create_term_literal_node failed: %d", literal->literal_type);
@@ -2790,6 +2833,7 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTm
         scan_node->set_node_type(pb::DUAL_SCAN_NODE);
         scan_node->set_limit(-1);
         scan_node->set_is_explain(_ctx->is_explain);
+        scan_node->set_is_get_keypoint(_ctx->is_get_keypoint);
         scan_node->set_num_children(0);
         pb::DerivePlanNode* derive = scan_node->mutable_derive_node();
         pb::ScanNode* scan = derive->mutable_scan_node();
@@ -2803,6 +2847,7 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTm
         scan_node->set_node_type(pb::SCAN_NODE);
         scan_node->set_limit(-1);
         scan_node->set_is_explain(_ctx->is_explain);
+        scan_node->set_is_get_keypoint(_ctx->is_get_keypoint);
         scan_node->set_num_children(0);
         pb::DerivePlanNode* derive = scan_node->mutable_derive_node();
         pb::ScanNode* scan = derive->mutable_scan_node();
@@ -2850,6 +2895,7 @@ int LogicalPlanner::create_scan_nodes() {
         scan_node->set_node_type(pb::SCAN_NODE);
         scan_node->set_limit(-1);
         scan_node->set_is_explain(_ctx->is_explain);
+        scan_node->set_is_get_keypoint(_ctx->is_get_keypoint);
         scan_node->set_num_children(0); //TODO 
         pb::DerivePlanNode* derive = scan_node->mutable_derive_node();
         pb::ScanNode* scan = derive->mutable_scan_node();
@@ -2871,12 +2917,12 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
             _ctx->enable_2pc, _factory->has_global_index(table_id), _factory->has_open_binlog(table_id));
         if (_ctx->enable_2pc
             || _factory->need_begin_txn(table_id)
-            || _factory->has_open_binlog(table_id)) {
+            || (!_ctx->no_binlog && _factory->has_open_binlog(table_id))) {
             client->on_begin();
             DB_DEBUG("get txn %ld", client->txn_id);
             client->seq_id = 0;
             //is_gloabl_ddl 打开时，该连接处理全局二级索引增量数据，不需要处理binlog。
-            if (_factory->has_open_binlog(table_id) && !client->is_index_ddl) {
+            if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
                 client->open_binlog = true;
                 _ctx->open_binlog = true;
             }
@@ -2887,9 +2933,9 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
-        if (_factory->has_open_binlog(table_id) && !client->is_index_ddl) {
-                client->open_binlog = true;
-                _ctx->open_binlog = true;
+        if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
+            client->open_binlog = true;
+            _ctx->open_binlog = true;
         }
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(false);
@@ -2966,4 +3012,84 @@ void LogicalPlanner::plan_rollback_and_begin_txn() {
     
     txn_node->set_txn_cmd(pb::TXN_ROLLBACK_BEGIN);
 }
+
+int LogicalPlanner::fill_placeholders(
+        std::unordered_multimap<int, ExprNode*>& placeholders,
+        const std::vector<const parser::Node*>& parser_placeholders) {
+    pb::Expr expr;
+    pb::ExprNode* p_node = expr.add_nodes();
+    if (p_node == nullptr) {
+        DB_WARNING("p_node is nullptr");
+        return -1;
+    }
+    p_node->set_num_children(0);
+
+    int max_placeholder_id = -1;
+    for (auto& kv : placeholders) {
+        const int placeholder_id = kv.first;
+        Literal* p_placeholder = static_cast<Literal*>(kv.second);
+        if (BAIDU_UNLIKELY(placeholder_id == -1)) {
+            DB_WARNING("Invalid placeholder_id");
+            return -1;
+        }
+        if (BAIDU_UNLIKELY(p_placeholder == nullptr)) {
+            DB_WARNING("p_placeholder is nullptr");
+            return -1;
+        }
+        if (BAIDU_UNLIKELY(parser_placeholders.size() <= placeholder_id)) {
+            DB_WARNING("parser_placeholders.size: %d is smaller than placeholder_id: %d",
+                        (int)parser_placeholders.size(), placeholder_id);
+            return -1;
+        }
+        const parser::LiteralExpr* p_parser_placeholder = 
+            static_cast<const parser::LiteralExpr*>(parser_placeholders[placeholder_id]);
+        if (BAIDU_UNLIKELY(p_parser_placeholder == nullptr)) {
+            DB_WARNING("p_parser_placeholder is nullptr");
+            return -1;
+        }
+        CreateExprOptions options;
+        options.is_plan_cache = true;
+        if (BAIDU_UNLIKELY(create_term_literal_node(p_parser_placeholder, expr, options) != 0)) {
+            DB_WARNING("Fail to create_term_literal_node");
+            return -1;
+        }
+        p_placeholder->init(*p_node);
+        if (placeholder_id > max_placeholder_id) {
+            max_placeholder_id = placeholder_id;
+        }
+    }
+    if (max_placeholder_id + 1 != parser_placeholders.size()) {
+        DB_WARNING("placeholder_id num: %d is not equal to parser_placeholders.size: %d",
+                    (max_placeholder_id + 1), (int)parser_placeholders.size());
+        return -1;
+    }
+    return 0;
+}
+
+int LogicalPlanner::set_dml_local_index_binlog(const int64_t table_id) {
+    if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
+        // plan的第二个节点为dml节点
+        if (_ctx->plan.nodes_size() < 2) {
+            DB_WARNING("Invalid nodes size: %d", (int)_ctx->plan.nodes_size());
+            return -1;
+        }
+        pb::PlanNode* dml_node = _ctx->plan.mutable_nodes(1);
+        if (dml_node == nullptr) {
+            DB_WARNING("dml_node is nullptr");
+            return -1;
+        }
+        switch (_ctx->stmt_type) {
+        case parser::NT_INSERT: 
+        case parser::NT_UPDATE:
+        case parser::NT_DELETE:
+            dml_node->set_local_index_binlog(true);
+            break;
+        default:
+            DB_WARNING("un-supported command type: %d", _ctx->stmt_type);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 } //namespace

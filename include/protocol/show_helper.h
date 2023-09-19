@@ -33,6 +33,7 @@ const std::string SQL_SHOW_TABLES                = "tables";                // s
 const std::string SQL_SHOW_FUNCTION_STATUS       = "function";              // show function status;
 const std::string SQL_SHOW_PROCEDURE_STATUS      = "procedure";             // show procedure status;
 const std::string SQL_SHOW_TRIGGERS              = "triggers";              // show triggers;
+const std::string SQL_SHOW_EVENTS                 = "events";               // show events;
 const std::string SQL_SHOW_SOCKET                = "socket";                // show socket;
 const std::string SQL_SHOW_WARNINGS              = "warnings";              // show warnings;
 const std::string SQL_SHOW_PROCESSLIST           = "processlist";           // show processlist;
@@ -67,6 +68,8 @@ const std::string SQL_SHOW_KEYS                  = "keys";                  // s
 const std::string SQL_SHOW_PARTITION_TABLE       = "partition_tables";      // show partition table info
 const std::string SQL_SHOW_ABNORMAL_SWITCH       = "abnormal_switch";       // show abnormal_switch
 const std::string SQL_SHOW_META_BINLOG           = "meta_binlog";           // show meta_binlog db.table
+const std::string SQL_SHOW_ACTIVE_RANGE          = "active_range";          // show active_range db.table
+const std::string SQL_SHOW_OFFLINE_BINLOG        = "offline_binlog";        // show offline_binlog tableID regionID
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -119,6 +122,8 @@ private:
     bool _show_procedure_status(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show triggers;
     bool _show_triggers(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show events;
+    bool _show_events(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show full columns from tableName;
     bool _show_full_columns(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show schema_conf database_table;
@@ -163,6 +168,9 @@ private:
     bool _show_abnormal_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
     bool _show_meta_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_active_range(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
+    bool _show_offline_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 
@@ -179,6 +187,9 @@ private:
     bool _process_binlogs_info(const SmartSocket& client, std::unordered_map<int64_t, 
         std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info);
 
+    void _query_offline_binlog_info(int64_t table_id, int64_t region_id, 
+                                    const pb::RegionInfo& info, bool query_one_region,
+                                    std::vector< std::vector<std::string> >& rows);
     inline ResultField make_result_field(const std::string& name, const uint8_t& type, const uint32_t& length) const {
         ResultField field;
         field.name = name;

@@ -43,7 +43,6 @@ public:
     }
     virtual int init(const pb::PlanNode& node) override;
     virtual int open(RuntimeState* state) override;
-    virtual void reset(RuntimeState* state);
     virtual void close(RuntimeState* state) override {
         ExecNode::close(state);
         if (_sub_query_node != nullptr) {
@@ -55,6 +54,7 @@ public:
         for (auto expr : _select_projections) {
             expr->close();
         }
+        _execute_child_idx = 0;
         _origin_records.clear();
         _store_records.clear();
         _on_dup_key_update_records.clear();
@@ -75,6 +75,9 @@ public:
     }
     bool is_replace() {
         return _is_replace;
+    }
+    bool is_merge() {
+        return _is_merge;
     }
     bool on_dup_key_update() {
         return _on_dup_key_update; 
@@ -145,6 +148,7 @@ private:
     int32_t     _tuple_id = -1;
     int32_t     _values_tuple_id = -1;
     bool        _is_replace = false;
+    bool        _is_merge = false;
     bool        _need_ignore = false;
     bool        _on_dup_key_update = false;
     pb::TupleDescriptor* _tuple_desc = nullptr;

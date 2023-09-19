@@ -172,7 +172,8 @@ public:
         ExprValue value = record->get_value(field_desc);
         int64_t partition_id = 0;
         if (binlog_table_info->partition_ptr != nullptr) {
-            partition_id = binlog_table_info->partition_ptr->calc_partition(value);
+            std::shared_ptr<UserInfo> user_info = nullptr; // OLAPTODO - binlog不支持主备分区表
+            partition_id = binlog_table_info->partition_ptr->calc_partition(user_info, value);
         } else {
             DB_WARNING("partition info error, value:%s", value.get_string().c_str());
             return -1;

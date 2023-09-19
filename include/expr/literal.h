@@ -115,11 +115,20 @@ public:
             case pb::PLACE_HOLDER_LITERAL: {
                 _value.type = pb::NULL_TYPE;
                 _is_place_holder = true;
-                _place_holder_id = node.derive_node().int_val(); // place_holder id
+                _place_holder_id = node.derive_node().placeholder_id();
+                break;
+            }
+            case pb::MAXVALUE_LITERAL: {
+                _value.type = pb::MAXVALUE_TYPE;
                 break;
             }
             default:
                 return -1;
+        }
+        // non-prepare plan cache
+        if (!_is_place_holder && node.derive_node().has_placeholder_id()) {
+            _is_place_holder = true;
+            _place_holder_id = node.derive_node().placeholder_id();
         }
         return 0;
     }
@@ -132,9 +141,10 @@ public:
         return _is_place_holder;
     }
 
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         if (_is_place_holder) {
             placeholders.insert({_place_holder_id, this});
+            return;
         }
     }
 
@@ -165,7 +175,7 @@ public:
                 pb_node->mutable_derive_node()->set_int_val(_value.get_numberic<int64_t>());
                 break;
             case pb::PLACE_HOLDER_LITERAL:
-                pb_node->mutable_derive_node()->set_int_val(_place_holder_id); 
+                pb_node->mutable_derive_node()->set_placeholder_id(_place_holder_id);
                 DB_FATAL("place holder need not transfer pb, %d", _place_holder_id);
                 break;
             default:
@@ -229,6 +239,8 @@ private:
             _node_type = pb::HLL_LITERAL;
         } else if (_value.is_bitmap()) {
             _node_type = pb::BITMAP_LITERAL;
+        } else if (_value.is_maxvalue()) {
+            _node_type = pb::MAXVALUE_LITERAL;
         } else {
             _node_type = pb::NULL_LITERAL;
         }

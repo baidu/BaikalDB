@@ -77,5 +77,18 @@ extern bool tz_to_second(const char *time_zone, int32_t& result);
 
 //此函数处理mysql和strftime不一致的格式，进行格式转换后，继续使用strftime函数.
 extern size_t date_format_internal(char* s, size_t maxsize, const char* format, const struct tm* tp);
+
+// Dynamic Partition
+enum class TimeUnit {
+    DAY = 0,
+    MONTH
+};
+
+extern int get_current_timestamp(time_t& current_ts);
+extern int get_specified_timestamp(const time_t& ts, const int64_t offset, TimeUnit time_unit, time_t& specified_ts);
+extern int get_current_day_timestamp(time_t& current_day_ts);
+extern int get_current_month_timestamp(const int start_day_of_month, time_t& current_month_ts);
+extern int timestamp_to_format_str(const time_t ts, const char* format, std::string& str);
+
 } // namespace baikaldb
 

@@ -19,6 +19,11 @@
 #include <boost/algorithm/string.hpp>
 #include "common.h"
 
+#include "datetime.h"
+#include "expr_node.h"
+#include "expr_value.h"
+#include "proto/meta.interface.pb.h"
+
 namespace baikaldb {
 struct IdcInfo {
     std::string resource_tag;
@@ -58,6 +63,98 @@ struct IdcInfo {
         return true;
     }
 };
+
+namespace partition_utils {
+
+constexpr char* MIN_DATE = "0000-01-01";
+constexpr char* MAX_DATE = "9999-12-31";
+constexpr char* MIN_DATETIME = "0000-01-01 00:00:00";
+constexpr char* MAX_DATETIME = "9999-12-31 23:59:59";
+constexpr char* DATE_FORMAT = "%Y-%m-%d";
+constexpr char* DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S";
+constexpr char* DAY_FORMAT = "%Y%m%d";
+constexpr char* MONTH_FORMAT = "%Y%m";
+constexpr char* PREFIX = "p";
+constexpr int32_t START_DAY_OF_MONTH = 1;
+constexpr int32_t MIN_START_DAY_OF_MONTH = 1;
+constexpr int32_t MAX_START_DAY_OF_MONTH = 28;
+
+int64_t compare(const pb::Expr& left, const pb::Expr& right);
+pb::Expr min(const pb::Expr& left, const pb::Expr& right);
+pb::Expr max(const pb::Expr& left, const pb::Expr& right);
+bool is_equal(const pb::RangePartitionInfo& left, const pb::RangePartitionInfo& right);
+
+int create_partition_expr(const pb::PrimitiveType col_type, const std::string& str_val, pb::Expr& expr);
+int check_partition_expr(const pb::Expr& expr, bool lower_or_upper_bound);
+int get_partition_value(const pb::Expr& expr, ExprValue& value);
+int get_min_partition_value(const pb::PrimitiveType col_type, std::string& str_val);
+int get_max_partition_value(const pb::PrimitiveType col_type, std::string& str_val);
+int create_dynamic_range_partition_info(
+    const std::string& partition_prefix, const pb::PrimitiveType partition_col_type, 
+    const time_t current_ts, const int32_t offset, const TimeUnit time_unit, 
+    pb::RangePartitionInfo& range_partition_info);
+bool check_range_partition_info(const pb::RangePartitionInfo& range_partition_info);
+bool check_dynamic_partition_attr(const pb::DynamicPartitionAttr& dynamic_partition_attr);
+bool check_partition_overlapped(
+    const std::vector<pb::RangePartitionInfo>& partitions_vec, 
+    const pb::RangePartitionInfo& partition);
+bool check_partition_overlapped(
+    const ::google::protobuf::RepeatedPtrField<pb::RangePartitionInfo>& partitions_vec, 
+    const pb::RangePartitionInfo& partition);
+int get_specifed_partitions(
+    const pb::Expr& specified_expr,
+    const ::google::protobuf::RepeatedPtrField<pb::RangePartitionInfo>& partitions_vec,
+    ::google::protobuf::RepeatedPtrField<pb::RangePartitionInfo>& specified_partitions_vec,
+    bool is_cold = false);
+int convert_to_partition_range(
+    const pb::PrimitiveType partition_col_type, 
+    pb::RangePartitionInfo& range_partition_info);
+int set_partition_col_type(
+    const pb::PrimitiveType partition_col_type,
+    pb::RangePartitionInfo& range_partition_info);
+int get_partition_range(
+    const pb::RangePartitionInfo& range_partition_info,
+    std::pair<std::string, std::string>& range);
+
+inline bool is_specified_partition(
+        const pb::RangePartitionInfo& partition_info, const pb::RangePartitionInfo& new_partition_info) {
+    // 获取指定类型的热分区
+    if (!partition_info.is_cold() && !new_partition_info.is_cold() && partition_info.type() != new_partition_info.type()) {
+        return false;
+    }
+    return true;
+}
+
+// true表示left <= right
+struct RangeComparator {
+    bool operator() (const pb::RangePartitionInfo& left, const pb::RangePartitionInfo& right) {
+        if (!left.has_range() || !right.has_range()) {
+            return false;
+        }
+        const pb::Expr& pre_right_value = left.range().right_value();
+        const pb::Expr& next_right_value = right.range().right_value();
+        return compare(pre_right_value, next_right_value) <= 0;
+    }
+};
+
+// true表示left <= right
+struct PointerRangeComparator {
+    bool operator() (const pb::RangePartitionInfo* left, const pb::RangePartitionInfo* right) {
+        if (left == nullptr || !left->has_range() || right == nullptr || !right->has_range()) {
+            return false;
+        }
+        const pb::Expr& pre_right_value = left->range().right_value();
+        const pb::Expr& next_right_value = right->range().right_value();
+        int64_t res = compare(pre_right_value, next_right_value);
+        if (res == 0) {
+            return left->type() <= right->type();
+        } else {
+            return res < 0;
+        }
+    }
+};
+
+} // namespace partition_utils
 
 #define ERROR_SET_RESPONSE(response, errcode, err_message, op_type, log_id) \
     do {\

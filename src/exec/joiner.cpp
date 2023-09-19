@@ -193,7 +193,7 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
     }
 }
 
-void Joiner::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+void Joiner::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
     ExecNode::find_place_holder(placeholders);
     for (auto& expr : _conditions) {
         expr->find_place_holder(placeholders);

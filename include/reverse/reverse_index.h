@@ -49,8 +49,8 @@ public:
     //单索引检索接口，fast为true，性能会提高，但会出现ms级别的不一致性
     virtual int search(
                        myrocksdb::Transaction* txn,
-                       const IndexInfo& index_info,
-                       const TableInfo& table_info,
+                       SmartIndex& index_info,
+                       SmartTable& table_info,
                        const std::string& search_data,
                        pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
@@ -71,8 +71,8 @@ public:
     //返回exe，用来给多个倒排索引字段join
     virtual int create_executor(
                     myrocksdb::Transaction* txn,
-                    const IndexInfo& index_info,
-                    const TableInfo& table_info,
+                    SmartIndex& index_info,
+                    SmartTable& table_info,
                     const std::string& search_data,
                     pb::MatchMode mode,
                     std::vector<ExprNode*> conjuncts, 
@@ -149,10 +149,10 @@ public:
     void print_statistic_log() {
         _statistic.print_log();
     }
-    void set_index_info(const IndexInfo& index_info) {
+    void set_index_info(SmartIndex& index_info) {
         _index_info = index_info;
     }
-    void set_table_info(const TableInfo& table_info) {
+    void set_table_info(SmartTable& table_info) {
         _table_info = table_info;
     }
     virtual int create_executor(const std::string& search_data, 
@@ -167,8 +167,8 @@ protected:
     myrocksdb::Transaction *_txn;//读取时用的transaction，由调用者释放
     KeyRange _key_range;
     bool _is_fast = false;
-    IndexInfo _index_info;
-    TableInfo _table_info;
+    SmartIndex _index_info;
+    SmartTable _table_info;
     ReverseSearchStatistic _statistic;
     std::vector<ExprNode*> _conjuncts;
 };
@@ -223,8 +223,8 @@ public:
                         SmartRecord record);
     virtual int search(
                        myrocksdb::Transaction* txn,
-                       const IndexInfo& index_info,
-                       const TableInfo& table_info,
+                       SmartIndex& index_info,
+                       SmartTable& table_info,
                        const std::string& search_data,
                        pb::MatchMode mode,
                        std::vector<ExprNode*> conjuncts, 
@@ -266,8 +266,8 @@ public:
                        bool is_fast = false);
     virtual int create_executor(
                     myrocksdb::Transaction* txn,
-                    const IndexInfo& index_info,
-                    const TableInfo& table_info,
+                    SmartIndex& index_info,
+                    SmartTable& table_info,
                     const std::string& search_data,
                     pb::MatchMode mode,
                     std::vector<ExprNode*> conjuncts, 
@@ -437,8 +437,8 @@ public:
     }
     int search(
             myrocksdb::Transaction* txn,
-            const IndexInfo& index_info,
-            const TableInfo& table_info,
+            SmartIndex& index_info,
+            SmartTable& table_info,
             const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
             const std::vector<std::string>& search_datas,
             const std::vector<pb::MatchMode>& modes,
@@ -446,8 +446,8 @@ public:
 
     int search(
             myrocksdb::Transaction* txn,
-            const IndexInfo& index_info,
-            const TableInfo& table_info,
+            SmartIndex& index_info,
+            SmartTable& table_info,
             std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
             bool is_fast, const pb::FulltextIndex& fulltext_index_info);
 
@@ -491,7 +491,7 @@ public:
         if (!_cur_node) {
             return -1;
         }
-        int ret = record->decode_key(_index_info, _cur_node->key());
+        int ret = record->decode_key(*_index_info, _cur_node->key());
         if (ret < 0) {
             return -1;
         }
@@ -517,8 +517,8 @@ public:
 private:
     OperatorBooleanExecutor<Schema>* _exe = nullptr;
     const ReverseNode* _cur_node = NULL;
-    IndexInfo _index_info;
-    TableInfo _table_info;
+    SmartIndex _index_info;
+    SmartTable _table_info;
     std::vector<BooleanExecutorBase<typename Schema::PostingNodeT>*> _son_exe_vec;
     std::vector<ReverseIndex<Schema>*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;

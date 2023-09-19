@@ -21,6 +21,8 @@
 #include "slot_ref.h"
 #include "scalar_fn_call.h"
 #include "common.h"
+#include "packet_node.h"
+
 namespace baikaldb {
 
 int SelectPlanner::plan() {
@@ -413,6 +415,7 @@ void SelectPlanner::create_dual_scan_node() {
     scan_node->set_node_type(pb::DUAL_SCAN_NODE);
     scan_node->set_limit(1);
     scan_node->set_is_explain(_ctx->is_explain);
+    scan_node->set_is_get_keypoint(_ctx->is_get_keypoint);
     scan_node->set_num_children(0); 
 }
 
@@ -661,22 +664,14 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
         return -1;
     }
     std::string select_name;
+    if (parse_select_name(field, select_name) == -1) {
+        DB_WARNING("Fail to parse_select_name");
+        return -1;
+    }
+    _select_names.emplace_back(select_name);
+    std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
     if (!field->as_name.empty()) {
-        select_name = field->as_name.value;
-        _select_names.emplace_back(select_name);
-        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
         _select_alias_mapping.insert({select_name, (_select_names.size() - 1)});
-    } else {
-        if (field->expr->expr_type == parser::ET_COLUMN) {
-            parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
-            select_name = column->name.c_str();
-        } else if (!field->org_name.empty()) {
-            select_name = field->org_name.c_str();
-        } else {
-            select_name = field->expr->to_string();
-        }
-        _select_names.emplace_back(select_name);
-        std::transform(select_name.begin(), select_name.end(), select_name.begin(), ::tolower);
     }
 
     if (_ctx->is_base_subscribe) {
@@ -688,6 +683,30 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
 
     _select_exprs.emplace_back(select_expr);
     _ctx->field_column_id_mapping[select_name] = _column_id++;
+    return 0;
+}
+
+int SelectPlanner::parse_select_name(parser::SelectField* field, std::string& select_name) {
+    if (field == nullptr) {
+        DB_WARNING("field is nullptr");
+        return -1;
+    }
+    if (field->expr == nullptr) {
+        DB_WARNING("field->expr is nullptr");
+        return -1;
+    }
+    if (!field->as_name.empty()) {
+        select_name = field->as_name.value;
+    } else {
+        if (field->expr->expr_type == parser::ET_COLUMN) {
+            parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
+            select_name = column->name.c_str();
+        } else if (!field->org_name.empty()) {
+            select_name = field->org_name.c_str();
+        } else {
+            select_name = field->expr->to_string();
+        }
+    }
     return 0;
 }
 
@@ -837,6 +856,190 @@ int SelectPlanner::get_base_subscribe_scan_ref_slot() {
             get_scan_ref_slot(_ctx->base_subscribe_table_name, field_info.table_id, field_info.id, field_info.type);
             break;
         }
+    }
+    return 0;
+}
+
+int SelectPlanner::plan_cache_get() {
+    if (!enable_plan_cache()) {
+        return 0;
+    }
+    _ctx->stat_info.hit_cache = false;
+    const auto& client = _ctx->client_conn;
+    if (client == nullptr) {
+        DB_WARNING("client is nullptr");
+        return -1;
+    }
+    if (client->user_info == nullptr) {
+        DB_WARNING("client->user_info is nullptr");
+        return -1;
+    }
+
+    // SQL参数化
+    std::ostringstream os;
+    parser::PlanCacheParam cache_param;
+    cache_param.parser_placeholders.reserve(5000);
+    _ctx->stmt->set_cache_param(&cache_param);
+    _ctx->stmt->to_stream(os);
+    _ctx->stmt->set_cache_param(nullptr);
+
+    _ctx->cache_key.namespace_name = client->user_info->namespace_;
+    _ctx->cache_key.db_name = _ctx->cur_db;
+    _ctx->cache_key.parameterized_sql = std::move(os.str());
+
+    std::shared_ptr<QueryContext> cache_ctx;
+    if (client->non_prepared_plans.find(_ctx->cache_key, &cache_ctx) == 0) {
+        if (cache_ctx == nullptr) {
+            DB_WARNING("cache_ctx is nullptr");
+            return -1;
+        }
+        if (cache_ctx->use_backup) {
+            if (!MetaServerInteract::get_backup_instance()->is_inited()) {
+                // 认为缓存失效
+                DB_WARNING("MetaServerInteract is not inited");
+                return 0;
+            }
+            SchemaFactory::use_backup.set_bthread_local(true);
+        } else {
+            SchemaFactory::use_backup.set_bthread_local(false);
+        }
+        _factory = SchemaFactory::get_instance();
+        bool is_cache_invalid = false;
+        for (const auto& kv : cache_ctx->table_version_map) {
+            const int64_t table_id = kv.first;
+            const int64_t table_version = kv.second;
+            SmartTable tbl_ptr = _factory->get_table_info_ptr(table_id);
+            if (tbl_ptr == nullptr) {
+                DB_WARNING("tbl_ptr is nullptr, table_id: %ld", table_id);
+                return -1;
+            }
+            const int64_t cur_table_version = tbl_ptr->version;
+            if (table_version != cur_table_version) {
+                is_cache_invalid = true;
+                break;
+            }
+        }
+        if (!is_cache_invalid) {
+            _ctx->stat_info.hit_cache = true;
+            if (!cache_ctx->has_find_placeholder) {
+                cache_ctx->has_find_placeholder = true;
+                if (cache_ctx->root == nullptr) {
+                    DB_WARNING("cache_ctx->root is nullptr");
+                    return -1;
+                }
+                cache_ctx->root->find_place_holder(cache_ctx->placeholders);
+            }
+            if (fill_placeholders(cache_ctx->placeholders, cache_param.parser_placeholders) != 0) {
+                DB_WARNING("Fail to fill_placeholders, %s", _ctx->sql.c_str());
+                return -1;
+            } 
+            if (_ctx->copy_query_context(cache_ctx.get()) != 0) {
+                DB_WARNING("Fail to copy_query_context_for_plan_cache, %s", _ctx->sql.c_str());
+                return -1;
+            } 
+            // 输出的字段名重新生成
+            if (replace_select_names() != 0) {
+                DB_WARNING("Fail to replace_select_names, %s", _ctx->sql.c_str());
+                return -1;
+            }
+            if (generate_sql_sign(_ctx, _ctx->stmt) < 0) {
+                DB_WARNING("Fail to generate_sql_sign, %s", _ctx->sql.c_str());
+                return -1;
+            }
+            return 0;
+        }
+    }
+
+    return 0;
+}
+
+int SelectPlanner::plan_cache_add() {
+    if (!enable_plan_cache()) {
+        return 0;
+    }
+    const auto& client = _ctx->client_conn;
+    if (client == nullptr) {
+        DB_WARNING("client is nullptr");
+        return -1;
+    }
+    if (_ctx->create_plan_tree() < 0) {
+        DB_FATAL_CLIENT(client, "Failed to pb_plan to execnode: %s", _ctx->sql.c_str());
+        return -1;
+    }
+    _ctx->is_plan_cache = true;
+    client->non_prepared_plans.add(_ctx->cache_key, client->query_ctx);
+    return 0;
+}
+
+int SelectPlanner::replace_select_names() {
+    _select = (parser::SelectStmt*)_ctx->stmt;
+    if (_select == nullptr) {
+        DB_WARNING("SelectStmt is nullptr");
+        return -1;
+    }
+    PacketNode* packet_node = static_cast<PacketNode*>(_ctx->root->get_node(pb::PACKET_NODE));
+    if (packet_node == nullptr) {
+        DB_WARNING("packet_node is nullptr");
+        return -1;
+    }
+
+    // 获取包含placeholder的projection
+    std::vector<ExprNode*>& projections = packet_node->mutable_projections();
+    std::vector<int> projections_idx_vec;
+    for (int i = 0; i < projections.size(); ++i) {
+        if (projections[i] == nullptr) {
+            DB_WARNING("packet_node is nullptr");
+            return -1;
+        }
+        std::unordered_multimap<int, ExprNode*> placeholders;
+        projections[i]->find_place_holder(placeholders);
+        if (placeholders.empty()) {
+            continue;
+        }
+        projections_idx_vec.emplace_back(i);
+    }
+
+    // 获取包含placeholder的SelectField
+    const parser::Vector<parser::SelectField*>& parser_fields = _select->fields;
+    std::vector<int> parser_idx_vec;
+    for (int i = 0; i < parser_fields.size(); ++i) {
+        if (parser_fields[i] == nullptr) {
+            DB_WARNING("parser_fields[%d] is nullptr", i);
+            return -1;
+        }
+        if (parser_fields[i]->wild_card != nullptr) {
+            continue;
+        }
+        std::unordered_set<int> parser_placeholders;
+        parser_fields[i]->find_placeholder(parser_placeholders);
+        if (parser_placeholders.empty()) {
+            continue;
+        }
+        parser_idx_vec.emplace_back(i);
+    }
+
+    if (projections_idx_vec.size() != parser_idx_vec.size()) {
+        DB_WARNING("projections_idx_vec.size: %d != parser_idx_vec.size: %d", 
+                    (int)projections_idx_vec.size(), (int)parser_idx_vec.size());
+        return -1;
+    }
+
+    // 替换PacketNode中的Field
+    std::vector<ResultField>& fields = packet_node->mutable_fields();
+    for (int i = 0; i < parser_idx_vec.size(); ++i) {
+        std::string select_name;
+        const int parser_field_idx = parser_idx_vec[i];
+        if (parse_select_name(parser_fields[parser_field_idx], select_name) != 0) {
+            DB_WARNING("Fail to parse_select_name");
+            return -1;
+        }
+        const int field_idx = projections_idx_vec[i];
+        if (field_idx >= fields.size()) {
+            DB_WARNING("fields_idx: %d is bigger than fields.size: %d", field_idx, (int)fields.size());
+            return -1;
+        }
+        fields[field_idx].name = select_name;
+        fields[field_idx].org_name = select_name;
     }
     return 0;
 }

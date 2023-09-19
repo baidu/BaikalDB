@@ -137,5 +137,26 @@ int RpcSender::get_leader_read_index(const std::string& leader, int64_t region_i
     StoreInteract store_interact(leader, req_options);
     return store_interact.send_request("get_applied_index", request, response);
 }
+
+int RpcSender::get_peer_binlog_oldest_ts(const std::string& instance, const pb::StoreReq& request, int64_t& oldest_ts) {
+    pb::StoreRes response;
+    StoreReqOptions req_options;
+    req_options.request_timeout = 10000; // 10s
+    req_options.connect_timeout = 10000; // 10s
+    StoreInteract store_interact(instance, req_options);
+    auto ret = store_interact.send_request("query_binlog", request, response);
+    if (ret == 0) {
+        oldest_ts = response.binlog_info().oldest_ts();
+    }
+    return ret;
+}
+
+int RpcSender::get_peer_offline_binlog_info(const std::string& instance, const pb::StoreReq& req, pb::StoreRes& res) {
+    StoreReqOptions req_options;
+    req_options.request_timeout = 10000; // 10s
+    req_options.connect_timeout = 10000; // 10s
+    StoreInteract store_interact(instance, req_options);
+    return store_interact.send_request("query_binlog", req, res);
+}
 }//namespace
 

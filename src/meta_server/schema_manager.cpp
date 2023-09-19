@@ -22,6 +22,7 @@
 #include "ddl_manager.h"
 #include "meta_util.h"
 #include "rocks_wrapper.h"
+#include "query_table_manager.h"
 
 namespace baikaldb {
 
@@ -124,8 +125,13 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_SET_INDEX_HINT_STATUS:
     case pb::OP_UPDATE_MAIN_LOGICAL_ROOM:
     case pb::OP_UPDATE_TABLE_COMMENT:
+    case pb::OP_ADD_PARTITION:
+    case pb::OP_DROP_PARTITION:
     case pb::OP_MODIFY_PARTITION:
-    case pb::OP_UPDATE_CHARSET: {
+    case pb::OP_CONVERT_PARTITION:
+    case pb::OP_UPDATE_DYNAMIC_PARTITION_ATTR:
+    case pb::OP_UPDATE_CHARSET:
+    case pb::OP_SPECIFY_SPLIT_KEYS: {
         if (!request->has_table_info()) { 
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR, 
                     "no schema_info", request->op_type(), log_id);
@@ -168,6 +174,15 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 return;
             }
         }
+        if (is_table_info_op_type(request->op_type())) {
+            std::string input_database = request->table_info().database();
+            boost::trim(input_database);
+            std::string input_namespace_name = request->table_info().namespace_name();
+            boost::trim(input_namespace_name);
+            std::string key = input_namespace_name + "." + input_database;
+            QueryTableManager::get_instance()->erase_cache(key);
+            DB_WARNING("erase table info cache key:%s", key.c_str());
+        }
         if (request->op_type() == pb::OP_UPDATE_DISTS) {
             auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
             std::string main_logical_room;
@@ -197,8 +212,9 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                     "ttl_duration must > 0", request->op_type(), log_id);
             return;
         }
-        if (request->op_type() == pb::OP_MODIFY_PARTITION 
-                && !request->table_info().has_partition_info()) {
+        if ((request->op_type() == pb::OP_ADD_PARTITION || request->op_type() == pb::OP_DROP_PARTITION ||
+             request->op_type() == pb::OP_MODIFY_PARTITION || request->op_type() == pb::OP_UPDATE_DYNAMIC_PARTITION_ATTR) && 
+             !request->table_info().has_partition_info()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no partition_info", request->op_type(), log_id);
             return;
@@ -276,6 +292,10 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
         _meta_state_machine->process(controller, request, response, done_guard.release());
         return;
     }
+    case pb::OP_DROP_PARTITION_TS: {
+        _meta_state_machine->process(controller, request, response, done_guard.release());
+        return;
+    }
     default:
         ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                 "invalid op_type", request->op_type(), log_id);
@@ -316,13 +336,17 @@ void SchemaManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatReq
     }
     TimeCost step_time_cost;
     TableManager::get_instance()->check_table_exist_for_peer(request, response);
-    int64_t table_exist_time =step_time_cost.get_time();
+    int64_t table_exist_time = step_time_cost.get_time();
+    step_time_cost.reset();
+    TableManager::get_instance()->check_partition_exist_for_peer(request, response);
+    int64_t partition_exist_time = step_time_cost.get_time();
     step_time_cost.reset();
     RegionManager::get_instance()->check_whether_illegal_peer(request, response);
     int64_t illegal_peer_time = step_time_cost.get_time();
     step_time_cost.get_time();
-    DB_NOTICE("process peer hearbeat, table_exist_time: %ld, ilegal_peer_time: %ld, log_id: %lu",
-                table_exist_time, illegal_peer_time, log_id);
+    DB_NOTICE("process peer hearbeat, table_exist_time: %ld, partition_exist_time: %ld, "
+              "ilegal_peer_time: %ld, log_id: %lu",
+              table_exist_time, partition_exist_time, illegal_peer_time, log_id);
 }
 
 void SchemaManager::process_leader_heartbeat_for_store(const pb::StoreHeartBeatRequest* request,
@@ -601,6 +625,7 @@ int SchemaManager::load_snapshot() {
     TableManager::get_instance()->check_startkey_regionid_map();
     return 0;
 }
+
 int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* request,
             pb::MetaManagerResponse* response,
             uint64_t log_id) {
@@ -615,10 +640,14 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
             }
         }
     }
-    int partition_num = 1;
-    if (request->table_info().has_partition_num()) {
-        partition_num = request->table_info().partition_num(); 
+
+    // Partition
+    if (pre_process_for_partition(request, response, log_id) != 0) {
+        ERROR_SET_RESPONSE(response, pb::INTERNAL_ERROR,
+                           "Fail to pre_process_for_partition", request->op_type(), log_id);
+        return -1;
     }
+
     std::set<std::string> indexs_name;
     std::string primary_index_name;
     //校验只有普通索引和uniq 索引可以设置全局属性
@@ -652,9 +681,8 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
             }
         }
     }
-    //校验split_key是否有序
-    int32_t total_region_count = 0;
-    std::set<std::string> split_index_names;
+
+    // 校验split_key是否有序
     for (auto& split_key : request->table_info().split_keys()) {
         if (indexs_name.find(split_key.index_name()) == indexs_name.end()) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
@@ -666,16 +694,6 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
                 ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                         "split key not sorted", request->op_type(), log_id);
                 return -1; 
-            }
-        }
-        total_region_count += split_key.split_keys_size() + 1;
-        split_index_names.insert(split_key.index_name());
-    }
-    //全局二级索引或者主键索引没有指定split_key
-    for (auto& index_info : request->table_info().indexs()) {
-        if (index_info.index_type() == pb::I_PRIMARY || index_info.is_global()) {
-            if (split_index_names.find(index_info.index_name()) == split_index_names.end()) {
-                ++total_region_count;
             }
         }
     }
@@ -690,15 +708,12 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     }
     auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
     std::string main_logical_room;
-    //用户指定了跨机房部署
+    // 用户指定了跨机房部署
     auto ret = whether_dists_legal(mutable_request, response, main_logical_room, log_id);
     if (ret != 0) {
         return ret;
     }
-    if (request->table_info().has_main_logical_room()) {
-        main_logical_room = request->table_info().main_logical_room();
-    }
-    total_region_count = partition_num * total_region_count;
+
     std::string resource_tag = request->table_info().resource_tag();
     boost::trim(resource_tag);
 
@@ -743,20 +758,7 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     }
     // 目前建表新建region不考虑dist分布
     table_info_ptr->set_resource_tag(resource_tag);
-    DB_WARNING("create table should select instance count: %d", total_region_count);
-    for (auto i = 0; i < total_region_count; ++i) { 
-        std::string instance;
-        int ret = ClusterManager::get_instance()->select_instance_rolling(
-                    {resource_tag, main_logical_room, ""},
-                    {},
-                    instance);
-        if (ret < 0) {
-            ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
-                        "select instance fail", request->op_type(), log_id);
-            return -1;
-        }
-        mutable_request->mutable_table_info()->add_init_store(instance);
-    }
+
     return 0;
 }
 
@@ -907,17 +909,33 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
                                 "replica num not exist", request->op_type(), log_id);
         return -1;
     }
-    // 5副本，分裂的时候选3个peer，剩下两个peer在分裂完之后补齐
-    if (instance_num > 3) {
-        instance_num = 3;
-    }
     // 副本分布 {resource_tag:logical_room:physical_room} : replica_count
-    std::unordered_map<std::string, int64_t> replica_dists_map;
-    ret = TableManager::get_instance()->get_replica_dist_idcs(table_id, replica_dists_map);
+    // 主resource tag优先
+    std::vector<std::string> table_idcs;
+    std::vector<int> idc_peer_cnts;
+    ret = TableManager::get_instance()->get_replica_dist_idcs(table_id, table_idcs, idc_peer_cnts);
     if (ret < 0) {
         ERROR_SET_RESPONSE_WARN(response, pb::INPUT_PARAM_ERROR,
                                 "replica idcs not exist", request->op_type(), log_id);
         return -1;
+    }
+
+    if (parent_region != nullptr) {
+        const int64_t partition_id = parent_region->partition_id();
+        int64_t partition_replica_num = -1;
+        std::string partition_resource_tag;
+        TableManager::get_instance()->get_partition_info(
+                table_id, partition_id, partition_replica_num, partition_resource_tag);
+        if (partition_replica_num != -1 && partition_resource_tag.size() != 0) {
+            instance_num = partition_replica_num;
+            table_idcs = {partition_resource_tag};
+            idc_peer_cnts = {partition_replica_num};
+        }
+    }
+
+    // 5副本，分裂的时候选3个peer，剩下两个peer在分裂完之后补齐
+    if (instance_num > 3) {
+        instance_num = 3;
     }
 
     //从cluster中选择store, 尾分裂选择replica个store, 中间分裂选择replica-1个store
@@ -927,22 +945,14 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
         response->mutable_split_response()->set_new_instance(source_instance);
         --instance_num;
         exclude_stores.insert(source_instance);
-        // 找到中间分裂的store address所属的副本分布, replica count--
-        IdcInfo idc;
-        ClusterManager::get_instance()->get_instance_idc(source_instance, idc);
-        if (replica_dists_map.find(idc.resource_tag_level()) != replica_dists_map.end()) {
-            replica_dists_map[idc.resource_tag_level()]--;
-        } else if (replica_dists_map.find(idc.logical_room_level()) != replica_dists_map.end()) {
-            replica_dists_map[idc.logical_room_level()]--;
-        } else if (replica_dists_map.find(idc.to_string()) != replica_dists_map.end()) {
-            replica_dists_map[idc.to_string()]--;
-        }
     }
     if (region_num == 1) {
         int selected_instance = 0;
-        for (auto& replica_dist_pair : replica_dists_map) {
-            IdcInfo replica_idc(replica_dist_pair.first);
-            for (auto i = 0; i < replica_dist_pair.second; ++i) {
+        for (int idc_idx = 0; idc_idx < table_idcs.size(); ++idc_idx) {    
+            const std::string& candidate_resouce_tag = table_idcs[idc_idx];
+            int need_peer_count = idc_peer_cnts[idc_idx];
+            IdcInfo replica_idc(candidate_resouce_tag);
+            for (auto i = 0; i < need_peer_count; ++i) {
                 std::string instance;
                 // 尽量和父region的三个peer不在一个store上，同时也得保证只有三个store也能分裂
                 // 选store，如果选到了父region peer所在的store，最多重试3次
@@ -977,9 +987,11 @@ int SchemaManager::pre_process_for_split_region(const pb::MetaManagerRequest* re
             int selected_instance = 0;
             auto new_region_info = response->mutable_split_response()->add_multi_new_regions();
             exclude_stores.clear();
-            for (auto& replica_dist_pair : replica_dists_map) {
-                IdcInfo replica_idc(replica_dist_pair.first);
-                for (auto i = 0; i < replica_dist_pair.second; ++i) {
+            for (int idc_idx = 0; idc_idx < table_idcs.size(); ++idc_idx) {    
+                const std::string& candidate_resouce_tag = table_idcs[idc_idx];
+                int need_peer_count = idc_peer_cnts[idc_idx];
+                IdcInfo replica_idc(candidate_resouce_tag);
+                for (auto i = 0; i < need_peer_count; ++i) {
                     std::string instance;
                     // 直接rolling选
                     ret = ClusterManager::get_instance()->select_instance_rolling(replica_idc,
@@ -1124,6 +1136,302 @@ int SchemaManager::whether_main_logical_room_legal(pb::MetaManagerRequest* reque
     }
     return 0;
 }
+
+int SchemaManager::pre_process_for_partition(const pb::MetaManagerRequest* request,
+                                             pb::MetaManagerResponse* response,
+                                             uint64_t log_id) {
+    if (request == nullptr ||
+            !request->has_table_info() || 
+            !request->table_info().has_partition_info() ||
+            request->table_info().partition_info().type() != pb::PT_RANGE) {
+        return 0;
+    }
+
+    pb::SchemaInfo& table_info = const_cast<pb::SchemaInfo&>(request->table_info());
+    pb::PartitionInfo* p_partition_info = table_info.mutable_partition_info();
+    if (p_partition_info == nullptr) {
+        DB_WARNING("p_partition_info is nullptr, log_id: %lu", log_id);
+        return -1;
+    }
+
+    // 获取分区列的类型
+    pb::PrimitiveType partition_col_type = pb::INVALID_TYPE;
+    if (p_partition_info->has_field_info()) {
+        const std::string& partition_field_name = p_partition_info->field_info().field_name();
+        for (auto& field : table_info.fields()) {
+            if (field.field_name() == partition_field_name) {
+                partition_col_type = field.mysql_type();
+                break;
+            }
+        }
+    }
+    if (partition_col_type != pb::DATE && partition_col_type != pb::DATETIME && !is_int(partition_col_type)) {
+        DB_WARNING("Invalid partition col_type %d, log_id: %lu", partition_col_type, log_id);
+        return -1;
+    }
+    if (p_partition_info->mutable_field_info() == nullptr) {
+        DB_WARNING("p_partition_info mutable_field_info is nullptr, log_id: %lu", log_id);
+        return -1;
+    }
+    p_partition_info->mutable_field_info()->set_mysql_type(partition_col_type);
+
+    // Partition参数合法性检查
+    std::set<std::string> partition_names;
+    for (size_t i = 0; i < p_partition_info->range_partition_infos_size(); ++i) {
+        pb::RangePartitionInfo* p_range_partition_info = p_partition_info->mutable_range_partition_infos(i);
+        if (p_range_partition_info == nullptr) {
+            DB_WARNING("p_range_partition_info is nullptr, log_id: %lu", log_id);
+            return -1;
+        }
+        if (!p_range_partition_info->has_partition_name() || p_range_partition_info->partition_name().empty()) {
+            DB_WARNING("p_range_partition_info has no partition_name, log_id: %lu", log_id);
+            return -1;
+        }
+        const std::string& partition_name = p_range_partition_info->partition_name();
+        if (partition_names.find(partition_name) != partition_names.end()) {
+            DB_WARNING("repeated partition_name: %s, lod_id: %lu", partition_name.c_str(), log_id);
+            return -1;
+        }
+        partition_names.insert(partition_name);
+        // 将分区左右端点的col_type设置为分区列类型
+        if (partition_utils::set_partition_col_type(partition_col_type, *p_range_partition_info) != 0) {
+            DB_WARNING("Fail to set_partition_col_type, log_id: %lu", log_id);
+            return -1;
+        }
+        if (!partition_utils::check_range_partition_info(*p_range_partition_info)) {
+            DB_WARNING("Invalid range_partition_info, log_id: %lu", log_id);
+            return -1;
+        }
+    }
+
+    // 不同类型的Range分区各自处理
+    std::unordered_map<pb::RangePartitionType, std::vector<pb::RangePartitionInfo>> range_partition_info_map;
+
+    // 将less_value转变为range
+    // 将less_value放到range的right_value中
+    for (size_t i = 0; i < p_partition_info->range_partition_infos_size(); ++i) {
+        pb::RangePartitionInfo* p_range_partition_info = p_partition_info->mutable_range_partition_infos(i);
+        if (p_range_partition_info == nullptr) {
+            DB_WARNING("p_range_partition_info is nullptr, log_id: %lu", log_id);
+            return -1;
+        }
+        if (p_range_partition_info->has_less_value()) {
+            pb::RangePartitionInfo range_partition_info;
+            range_partition_info.Swap(p_range_partition_info);
+            pb::PartitionRange* p_range = range_partition_info.mutable_range();
+            if (p_range == nullptr) {
+                DB_WARNING("p_range is nullptr, log_id: %lu", log_id);
+                return -1;
+            }
+            pb::Expr* p_right_value = p_range->mutable_right_value();
+            if (p_right_value == nullptr) {
+                DB_WARNING("p_right_value is nullptr, log_id: %lu", log_id);
+                return -1;
+            }
+            p_right_value->Swap(range_partition_info.mutable_less_value());
+            range_partition_info.clear_less_value();
+            range_partition_info_map[range_partition_info.type()].emplace_back(std::move(range_partition_info));
+        }
+    }
+
+    for (auto& kv : range_partition_info_map) {
+        std::vector<pb::RangePartitionInfo>& range_partition_info_vec = kv.second;
+
+        // 按照range的right_value进行排序
+        std::sort(range_partition_info_vec.begin(), range_partition_info_vec.end(), partition_utils::RangeComparator());
+
+        // 将前一个range的right_value作为后一个range的left_value
+        for (size_t i = 0; i < range_partition_info_vec.size(); ++i) {
+            pb::PartitionRange* p_range = range_partition_info_vec[i].mutable_range();
+            if (p_range == nullptr) {
+                DB_WARNING("p_range is nullptr, log_id: %lu", log_id);
+                return -1;
+            }
+            pb::Expr* p_left_value = p_range->mutable_left_value();
+            if (p_left_value == nullptr) {
+                DB_WARNING("p_left_value is nullptr, log_id: %lu", log_id);
+                return -1;
+            }
+            if (i == 0) {
+                // 处理第一个range的left_value
+                std::string partition_str_val;
+                if (partition_utils::get_min_partition_value(partition_col_type, partition_str_val) != 0) {
+                    DB_WARNING("Fail to get_min_partition_value, log_id: %lu", log_id);
+                    return -1;
+                }
+                if (partition_utils::create_partition_expr(partition_col_type, partition_str_val, *p_left_value) != 0) {
+                    DB_WARNING("Fail to create_partition_expr, log_id: %lu", log_id);
+                    return -1;
+                }
+            } else {
+                p_left_value->CopyFrom(range_partition_info_vec[i-1].range().right_value());
+            }
+        }
+    }
+
+    // 处理区间方式的range
+    for (size_t i = 0; i < p_partition_info->range_partition_infos_size(); ++i) {
+        pb::RangePartitionInfo* p_range_partition_info = p_partition_info->mutable_range_partition_infos(i);
+        if (p_range_partition_info == nullptr) {
+            DB_WARNING("p_range_partition_info is nullptr, log_id: %lu", log_id);
+            return -1;
+        }
+        if (p_range_partition_info->has_range()) {
+            pb::RangePartitionInfo range_partition_info;
+            range_partition_info.Swap(p_range_partition_info);
+            range_partition_info_map[range_partition_info.type()].emplace_back(std::move(range_partition_info));
+        }
+    }
+
+    p_partition_info->clear_range_partition_infos();
+    for (auto& kv : range_partition_info_map) {
+        std::vector<pb::RangePartitionInfo>& range_partition_info_vec = kv.second;
+        for (auto& range_partition_info : range_partition_info_vec) {
+            if (partition_utils::check_partition_overlapped(p_partition_info->range_partition_infos(), range_partition_info)) {
+                DB_WARNING("Partition overlapped, range_partition_info: %s", range_partition_info.ShortDebugString().c_str());
+                return -1;
+            }
+            pb::RangePartitionInfo* p_range_partition_info = p_partition_info->add_range_partition_infos();
+            if (p_range_partition_info == nullptr) {
+                DB_WARNING("p_range_partition_info is nullptr, log_id: %lu", log_id);
+                return -1;
+            }
+            p_range_partition_info->Swap(&range_partition_info);
+        }
+    }
+
+    // 动态分区处理
+    if (pre_process_for_dynamic_partition(request, response, log_id, partition_col_type) != 0) {
+        DB_WARNING("Fail to pre_process_for_dynamic_partition");
+        return -1;
+    }
+
+    // 整体排序
+    std::sort(p_partition_info->mutable_range_partition_infos()->pointer_begin(),
+              p_partition_info->mutable_range_partition_infos()->pointer_end(),
+              partition_utils::PointerRangeComparator());
+
+    int64_t partition_id = -1;
+    for (size_t i = 0; i < p_partition_info->range_partition_infos_size(); ++i) {
+        partition_id = i;
+        p_partition_info->mutable_range_partition_infos(i)->set_partition_id(partition_id);
+    }
+    p_partition_info->set_max_range_partition_id(partition_id);
+    table_info.set_partition_num(p_partition_info->range_partition_infos_size());
+
+    if (table_info.partition_num() == 0) {
+        DB_WARNING("mem_schema_pb partition_num is 0");
+        return -1;
+    }
+
+    return 0;
+}
+
+int SchemaManager::pre_process_for_dynamic_partition(const pb::MetaManagerRequest* request,
+                                                     pb::MetaManagerResponse* response,
+                                                     uint64_t log_id,
+                                                     const pb::PrimitiveType partition_col_type) {
+    if (request == nullptr ||
+            !request->has_table_info() ||
+            !request->table_info().has_partition_info() ||
+            !request->table_info().partition_info().has_dynamic_partition_attr() ||
+            !request->table_info().partition_info().dynamic_partition_attr().enable() ||
+            request->table_info().partition_info().type() != pb::PT_RANGE) {
+        return 0;
+    }
+
+    if (partition_col_type != pb::DATE && partition_col_type != pb::DATETIME) {
+        DB_WARNING("Invalid dynamic partition col type, request: %s, log_id: %lu", 
+                    request->ShortDebugString().c_str(), log_id);
+        return -1;
+    }
+
+    // 动态分区属性检查
+    pb::DynamicPartitionAttr& dynamic_partition_attr = 
+            const_cast<pb::DynamicPartitionAttr&>(request->table_info().partition_info().dynamic_partition_attr());
+    if (!partition_utils::check_dynamic_partition_attr(dynamic_partition_attr)) {
+        DB_WARNING("Invalid dynamic_partition_attr, log_id: %lu", log_id);
+        return -1;
+    }
+
+    // 填充动态分区属性默认值
+    if (!dynamic_partition_attr.has_start_day_of_month()) {
+        dynamic_partition_attr.set_start_day_of_month(partition_utils::START_DAY_OF_MONTH);
+    }
+    if (!dynamic_partition_attr.has_prefix()) {
+        dynamic_partition_attr.set_prefix(partition_utils::PREFIX);
+    }
+
+    // 预创建分区
+    pb::SchemaInfo& table_info = const_cast<pb::SchemaInfo&>(request->table_info());
+    pb::PartitionInfo* p_partition_info = table_info.mutable_partition_info();
+    if (p_partition_info == nullptr) {
+        DB_WARNING("p_partition_info is nullptr, log_id: %lu", log_id);
+        return -1;
+    }
+
+    std::set<std::string> partition_names;
+    for (const auto& range_partition_info : p_partition_info->range_partition_infos()) {
+        partition_names.insert(range_partition_info.partition_name());
+    }
+
+    time_t normalized_current_ts;
+    TimeUnit unit;
+    if (boost::algorithm::iequals(dynamic_partition_attr.time_unit(), "DAY")) {
+        unit = TimeUnit::DAY;
+        get_current_day_timestamp(normalized_current_ts);
+    } else {
+        unit = TimeUnit::MONTH;
+        get_current_month_timestamp(dynamic_partition_attr.start_day_of_month(), normalized_current_ts);
+    }
+
+    for (size_t i = 0; i <= dynamic_partition_attr.end(); ++i) {
+        pb::RangePartitionInfo range_partition_info;
+        partition_utils::create_dynamic_range_partition_info(dynamic_partition_attr.prefix(), partition_col_type,
+                                                             normalized_current_ts, i, unit, range_partition_info);
+
+        std::unordered_set<pb::RangePartitionType> range_partition_type_set;
+        for (const auto& type : table_info.partition_info().gen_range_partition_types()) {
+            range_partition_type_set.insert(static_cast<pb::RangePartitionType>(type));
+        }
+        if (range_partition_type_set.empty()) {
+            // 兼容旧逻辑
+            range_partition_type_set.insert(pb::RPT_DEFAULT);
+        }
+        for (const pb::RangePartitionType& type : range_partition_type_set) {
+            pb::RangePartitionInfo add_range_partition_info;
+            add_range_partition_info.CopyFrom(range_partition_info);
+            if (type != pb::RPT_DEFAULT) {
+                // 兼容旧逻辑
+                add_range_partition_info.set_type(type);
+                add_range_partition_info.set_partition_name(
+                    range_partition_info.partition_name() + "_" + pb::RangePartitionType_Name(type));
+            }
+            if (partition_utils::check_partition_overlapped(p_partition_info->range_partition_infos(), 
+                                                            add_range_partition_info)) {
+                // 自动创建如果分区重叠，则不创建该分区
+                DB_WARNING("partition overlapping, log_id: %lu", log_id);
+                continue;
+            }
+            const std::string& partition_name = add_range_partition_info.partition_name();
+            if (partition_names.find(partition_name) != partition_names.end()) {
+                // 自动创建如果名字冲突，则不创建该分区
+                DB_WARNING("repeated partition_name: %s, log_id: %lu", partition_name.c_str(), log_id);
+                continue;
+            }
+            partition_names.insert(partition_name);
+            pb::RangePartitionInfo* p_range_partition_info = p_partition_info->add_range_partition_infos();
+            if (p_range_partition_info == nullptr) {
+                DB_WARNING("p_range_partition_info is nullptr, log_id: %lu", log_id);
+                return -1;
+            }
+            p_range_partition_info->Swap(&add_range_partition_info);
+        }
+    }
+
+    return 0;
+}
+
 }//namespace 
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

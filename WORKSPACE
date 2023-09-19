@@ -36,6 +36,30 @@ bind(
     actual = "@com_github_apache_arrow//:arrow",
 )
 
+new_http_archive(
+    name = "com_github_xianyi_OpenBLAS",
+    build_file = "third-party/com_github_xianyi_OpenBLAS/BUILD",
+    strip_prefix = "OpenBLAS-0.3.24",
+    url = "https://github.com/xianyi/OpenBLAS/archive/refs/tags/v0.3.24.tar.gz",
+)
+
+bind(
+    name = "openblas",
+    actual = "@com_github_xianyi_OpenBLAS//:openblas",
+)
+
+new_http_archive(
+    name = "com_github_facebookresearch_faiss",
+    build_file = "third-party/com_github_facebookresearch_faiss/BUILD",
+    strip_prefix = "faiss-1.7.4",
+    url = "https://github.com/facebookresearch/faiss/archive/refs/tags/v1.7.4.tar.gz",
+)
+
+bind(
+    name = "faiss",
+    actual = "@com_github_facebookresearch_faiss//:faiss",
+)
+
 http_archive(
   name = "com_github_gflags_gflags",
   strip_prefix = "gflags-46f73f88b18aee341538c0dfc22b1710a6abedef",
@@ -111,9 +135,8 @@ bind(
 
 new_http_archive(
     name = "com_github_facebook_rocksdb",
-    url = "https://github.com/facebook/rocksdb/archive/v6.26.0.tar.gz",
-    strip_prefix = "rocksdb-6.26.0",
-    sha256 = "b793066463da71d31a46f31946e4fca435a7c3e73435e2bb1d062d95e0a20116",
+    url = "https://github.com/facebook/rocksdb/archive/refs/tags/v6.29.5.tar.gz",
+    strip_prefix = "rocksdb-6.29.5",
     build_file = "third-party/com_github_facebook_rocksdb/BUILD",
 )
 

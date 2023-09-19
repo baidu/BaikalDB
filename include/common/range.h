@@ -27,6 +27,7 @@ enum RangeType {
     LIKE_PREFIX,
     MATCH_LANGUAGE,
     MATCH_BOOLEAN,
+    MATCH_VECTOR,
     OR_LIKE,
     IN,
     INDEX_HAS_NULL

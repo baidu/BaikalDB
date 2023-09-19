@@ -36,7 +36,6 @@ public:
     virtual int plan() override;
 
 private:
-
     // methods to create plan nodes
     void create_dual_scan_node();
 
@@ -48,6 +47,7 @@ private:
 
     int parse_select_star(parser::SelectField* field);
     int parse_select_field(parser::SelectField* field);
+    int parse_select_name(parser::SelectField* field, std::string& select_name);
     // method to parse SQL elements
     int parse_select_fields();
 
@@ -80,6 +80,14 @@ private:
 
     // for base subscribe
     int get_base_subscribe_scan_ref_slot();
+
+    // non-prepare plan cache
+    virtual int plan_cache_get() override;
+    virtual int plan_cache_add() override;
+    virtual bool enable_plan_cache() override {
+        return _ctx != nullptr && !_ctx->is_base_subscribe && !_ctx->is_complex && !_ctx->is_full_export;
+    }
+    int replace_select_names();
     
 private:
     parser::SelectStmt*                 _select;

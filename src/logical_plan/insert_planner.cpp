@@ -35,6 +35,7 @@ int InsertPlanner::plan() {
     pb::InsertNode* insert = derive->mutable_insert_node();
     insert->set_need_ignore(_insert_stmt->is_ignore);
     insert->set_is_replace(_insert_stmt->is_replace);
+    insert->set_is_merge(_insert_stmt->is_merge);
     if (_ctx->row_ttl_duration > 0) {
         insert->set_row_ttl_duration(_ctx->row_ttl_duration);
         DB_DEBUG("row_ttl_duration: %ld", _ctx->row_ttl_duration);
@@ -214,6 +215,12 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
     if (_insert_stmt->columns.size() == 0) {
         _fields = tbl.fields;
         for (auto& field : _fields) {
+            if (field.is_unique_indicator) {
+                _olap_uniq_field_ids.insert(field.id);
+            }
+            if (field.lower_short_name == "__sign__") {
+                _olap_sign_field_id = field.id;
+            }
             node->add_field_ids(field.id);
         }
         return 0;
@@ -242,8 +249,42 @@ int InsertPlanner::parse_field_list(pb::InsertNode* node) {
         if (field_ids.count(field.id) == 0) {
             _default_fields.emplace_back(field);
         }
+        if (field.is_unique_indicator) {
+            _olap_uniq_field_ids.insert(field.id);
+        }
+        if (field.lower_short_name == "__sign__") {
+            _olap_sign_field_id = field.id;
+        }
     }
     //DB_WARNING("insert_node:%s", node->DebugString().c_str());
+    return 0;
+}
+
+int InsertPlanner::parse_olap_sign_field_value(SmartRecord record) {
+    if (_olap_sign_field_id < 0 || record == nullptr) {
+        DB_WARNING("table get sign field fail or record is nullptr");
+        return -1;
+    }
+    ExprValue hash_value(pb::UINT64);
+    if (_olap_uniq_field_ids.empty()) {
+        // 没有指标唯一列, sign直接设置0
+        hash_value._u.uint64_val = 0;
+    } else {
+        const std::string identify(1, 0x1);
+        MutTableKey key;
+        for (const auto& uniq_field_id : _olap_uniq_field_ids) {
+            ExprValue value = record->get_value(record->get_field_by_tag(uniq_field_id));
+            key.append_value(value);
+            key.append_char(identify.c_str(), 1);
+        }
+        uint64_t out[2];
+        butil::MurmurHash3_x64_128(key.data().c_str(), key.size(), 0x1234, out);
+        hash_value._u.uint64_val = out[0];
+    }
+    if (0 != record->set_value(record->get_field_by_tag(_olap_sign_field_id), hash_value)) {
+        DB_WARNING("fill olap table sign field failed");
+        return -1;
+    }
     return 0;
 }
 
@@ -276,7 +317,11 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
                 _ctx->stat_info.error_msg << "table not exist";
                 return -1;
             }
+            bool olap_sign_in_value = false;
             for (size_t idx = 0; idx < (size_t)row_expr->children.size(); ++idx) {
+                if (_fields[idx].id == _olap_sign_field_id) {
+                    olap_sign_in_value = true;
+                }
                 if (0 != fill_record_field((parser::ExprNode*)row_expr->children[idx], row, _fields[idx])) {
                     DB_WARNING("fill_record_field fail, field_id:%d", _fields[idx].id);
                     return -1;
@@ -284,6 +329,11 @@ int InsertPlanner::parse_values_list(pb::InsertNode* node) {
             }
             for (auto& field : _default_fields) {
                 if (0 != _factory->fill_default_value(row, field)) {
+                    return -1;
+                }
+            }
+            if (!_olap_uniq_field_ids.empty() && !olap_sign_in_value) {
+                if (0 != parse_olap_sign_field_value(row)) {
                     return -1;
                 }
             }
@@ -339,6 +389,7 @@ int InsertPlanner::fill_record_field(const parser::ExprNode* parser_expr, SmartR
             return -1;
         }
     }
+    value.float_precision_len = field.float_precision_len;
     if (0 != record->set_value(record->get_field_by_tag(field.id), value)) {
         DB_WARNING("fill insert value failed");
         return -1;

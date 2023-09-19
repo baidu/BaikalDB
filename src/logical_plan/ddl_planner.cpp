@@ -19,8 +19,6 @@
 #include "expr_node.h"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string.hpp>
-#include <rapidjson/reader.h>
-#include <rapidjson/document.h>
 
 namespace baikaldb {
 DEFINE_bool(unique_index_default_global, true, "unique_index_default_global");
@@ -104,7 +102,7 @@ int DDLPlanner::plan() {
     return 0;
 }
 
-int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column) {
+int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column, bool is_unique_indicator) {
     pb::FieldInfo* field = table.add_fields();
     if (column->name == nullptr || column->name->name.empty()) {
         DB_WARNING("column_name is empty");
@@ -115,10 +113,19 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
         DB_WARNING("data_type is empty for column: %s", column->name->name.value);
         return -1;
     }
+
     pb::PrimitiveType data_type = to_baikal_type(column->type);
     if (data_type == pb::INVALID_TYPE) {
         DB_WARNING("data_type is unsupported: %s", column->name->name.value);
         return -1;
+    }
+    if (data_type == pb::FLOAT || data_type == pb::DOUBLE) {
+        if (column->type->total_len != -1) {
+            field->set_float_total_len((int8_t)column->type->total_len);
+        }
+        if (column->type->float_len != -1) {
+            field->set_float_precision_len((int8_t)column->type->float_len);
+        }
     }
     field->set_mysql_type(data_type);
     int option_len = column->options.size();
@@ -206,9 +213,44 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column)
         field->set_can_null(true);
     }
     field->set_flag(column->type->flag);
+    if (is_unique_indicator) {
+        field->set_is_unique_indicator(true);
+    }
     return 0;
 }
 
+int DDLPlanner::fill_index_fields(const std::set<std::string>& index_field_names,
+                                  const std::vector<const pb::FieldInfo*>& index_fields,
+                                  const std::vector<const pb::FieldInfo*>& pk_index_fields,
+                                  const pb::IndexInfo* index,
+                                  MutTableKey& key) {
+    for(size_t i = 1; i < index_fields.size(); ++i) {
+        if (index_fields[i] == nullptr) {
+            DB_FATAL("%d index_fields is null", (int)i);
+            return -1;
+        }
+        ExprValue value(index_fields[i]->mysql_type(), "");
+        key.append_value(value);
+    }
+    if (index->index_type() == pb::I_KEY) {
+        // 不是unique的全局索引，需要补齐其他主键字段
+        for(auto field : pk_index_fields) {
+            if (field == nullptr) {
+                DB_FATAL("pk_index_fields is null");
+                return -1;
+            }
+            if (index_field_names.find(field->field_name()) == index_field_names.end()) {
+                ExprValue value(field->mysql_type(), "");
+                key.append_value(value);
+            }
+        }
+    }
+    if (index->is_global()) {
+        uint8_t null_flag = 0;
+        key.append_u8(null_flag);
+    }
+    return 0;
+}
 
 int DDLPlanner::pre_split_index(const std::string& start_key,
                                 const std::string& end_key,
@@ -221,43 +263,14 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
     if (pk_index == nullptr || index == nullptr || index_fields.size() == 0 || pk_index_fields.size() == 0) {
         return 0;
     }
-    std::set<std::string> index_filed_names;
+    std::set<std::string> index_field_names;
     for (auto filed : index_fields) {
         if (filed == nullptr) {
             DB_FATAL("filed nullptr");
             return -1;
         }
-        index_filed_names.insert(filed->field_name());
+        index_field_names.insert(filed->field_name());
     }
-
-    auto fill_other_fileds = [index_fields, index, index_filed_names, pk_index_fields](MutTableKey& key) -> int {
-        for(auto i = 1; i < index_fields.size(); ++i) {
-            if (index_fields[i] == nullptr) {
-                DB_FATAL("%d index_fields is null", i);
-                return -1;
-            }
-            ExprValue value(index_fields[i]->mysql_type(), "");
-            key.append_value(value);
-        }
-        if (index->index_type() == pb::I_KEY) {
-            // 不是unique的全局索引，需要补齐其他主键字段
-            for(auto field : pk_index_fields) {
-                if (field == nullptr) {
-                    DB_FATAL("pk_index_fields is null");
-                    return -1;
-                }
-                if (index_filed_names.find(field->field_name()) == index_filed_names.end()) {
-                    ExprValue value(field->mysql_type(), "");
-                    key.append_value(value);
-                }
-            }
-        }
-        if (index->is_global()) {
-            uint8_t null_flag = 0;
-            key.append_u8(null_flag);
-        }
-        return 0;
-    };
     auto split_keys = table.add_split_keys();
     split_keys->set_index_name(index->index_name());
     switch (index_fields[0]->mysql_type()) {
@@ -285,7 +298,7 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                     }
                     ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
                     key.append_value(first_filed_value);
-                    if (fill_other_fileds(key) < 0) {
+                    if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, key) < 0) {
                         return -1;
                     }
                     split_keys->add_split_keys(key.data());
@@ -316,7 +329,7 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                     }
                     ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
                     key.append_value(first_filed_value);
-                    if (fill_other_fileds(key) < 0) {
+                    if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, key) < 0) {
                         return -1;
                     }
                     split_keys->add_split_keys(key.data());
@@ -345,7 +358,7 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                     }
                     ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
                     key.append_value(first_filed_value);
-                    if (fill_other_fileds(key) < 0) {
+                    if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, key) < 0) {
                         return -1;
                     }
                     split_keys->add_split_keys(key.data());
@@ -392,7 +405,7 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                     }
                     ExprValue first_filed_value(index_fields[0]->mysql_type(), common_prefix + key);
                     split_key.append_value(first_filed_value);
-                    if (fill_other_fileds(split_key) < 0) {
+                    if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, split_key) < 0) {
                         return -1;
                     }
                     split_keys->add_split_keys(split_key.data());
@@ -463,6 +476,141 @@ int DDLPlanner::parse_pre_split_keys(std::string start_key,
     return 0;
 }
 
+int DDLPlanner::parse_partition_pre_split_keys(const std::string& partition_split_keys, pb::SchemaInfo& table) {
+    table.clear_split_keys();
+
+    std::vector<std::string> partition_split_key_vec;
+    boost::split(partition_split_key_vec, partition_split_keys, boost::is_any_of(","));
+    for (auto& partition_split_key : partition_split_key_vec) {
+        boost::trim(partition_split_key);
+    }
+
+    if (partition_split_key_vec.empty()) {
+        return 0;
+    }
+
+    std::unordered_map<std::string, const pb::FieldInfo*> fields;
+    for (const auto& field : table.fields()) {
+        fields[field.field_name()] = &field;
+    }
+    std::set<std::string> pk_field_names;
+    std::vector<const pb::FieldInfo*> pk_fields;
+    for (const auto& index_info : table.indexs()) {
+        if (index_info.index_type() == pb::I_PRIMARY) {
+            for (const auto& field_name : index_info.field_names()) {
+                if (fields.find(field_name) == fields.end()) {
+                    DB_WARNING("no matching filed: %s, table: %s", field_name.c_str(), table.ShortDebugString().c_str());
+                    return -1;
+                }
+                pk_field_names.emplace(field_name);
+                pk_fields.emplace_back(fields[field_name]);
+            }
+            break;
+        }
+    }
+    for (const auto& index_info : table.indexs()) {
+        std::set<std::string> index_field_names;
+        std::vector<const pb::FieldInfo*> index_fields;
+        if (index_info.index_type() == pb::I_PRIMARY) {
+            index_field_names = pk_field_names;
+            index_fields = pk_fields;
+        } else if (index_info.is_global()) {
+            for (const auto& field_name : index_info.field_names()) {
+                if (fields.find(field_name) == fields.end()) {
+                    DB_WARNING("no matching filed: %s, table: %s", field_name.c_str(), table.ShortDebugString().c_str());
+                    return -1;
+                }
+                index_field_names.emplace(field_name);
+                index_fields.emplace_back(fields[field_name]);
+            }
+        }
+        if (index_fields.empty()) {
+            continue;
+        }
+        if (index_fields[0] == nullptr) {
+            DB_WARNING("index_fields[0] is nullptr");
+            return -1;
+        }
+        // 只支持索引第一列为userid的场景
+        if (!boost::algorithm::iequals(index_fields[0]->field_name(), PARITITON_PRE_SPLIT_FIELD)) {
+            continue;
+        }
+        if (index_field_names.empty()) {
+            continue;
+        }
+        auto* split_keys = table.add_split_keys();
+        if (split_keys == nullptr) {
+            DB_WARNING("Fail to add_split_keys");
+            return -1;
+        }
+        split_keys->set_index_name(index_info.index_name());
+        for (const auto& partition_split_key : partition_split_key_vec) {
+            ExprValue first_field_value;
+            switch (index_fields[0]->mysql_type()) {
+            case pb::INT8:
+            case pb::INT16:
+            case pb::INT32:
+            case pb::INT64: {
+                int64_t split_key = strtoll(partition_split_key.c_str(), NULL, 10);
+                first_field_value = ExprValue(index_fields[0]->mysql_type(), std::to_string(split_key));
+                break;
+            }
+            case pb::UINT8:
+            case pb::UINT16:
+            case pb::UINT32:
+            case pb::UINT64: {
+                uint64_t split_key = strtoull(partition_split_key.c_str(), NULL, 10);
+                first_field_value = ExprValue(index_fields[0]->mysql_type(), std::to_string(split_key));
+                break;
+            }
+            case pb::FLOAT:
+            case pb::DOUBLE: {
+                double split_key = strtod(partition_split_key.c_str(), NULL);
+                first_field_value = ExprValue(index_fields[0]->mysql_type(), std::to_string(split_key));
+                break;
+            }
+            case pb::STRING: {
+                first_field_value = ExprValue(index_fields[0]->mysql_type(), partition_split_key);
+                break;
+            }
+            default:
+                DB_FATAL("not support type: %d for pre split", index_fields[0]->mysql_type());
+                return -1;
+            }
+            MutTableKey key;
+            if (index_info.is_global()) {
+                uint8_t null_flag = 0;
+                key.append_u8(null_flag);
+            }
+            key.append_value(first_field_value);
+            if (fill_index_fields(index_field_names, index_fields, pk_fields, &index_info, key) < 0) {
+                DB_WARNING("Fail to fill_index_fields");
+                return -1;
+            }
+            split_keys->add_split_keys(key.data());
+        }
+        if (split_keys->split_keys_size() > 0) {
+            // 对split_key进行排序
+            std::sort(
+                split_keys->mutable_split_keys()->pointer_begin(), split_keys->mutable_split_keys()->pointer_end(),
+                [] (const std::string* left, const std::string* right) { 
+                    if (left == nullptr || right == nullptr) {
+                        return false;
+                    }
+                    return *left < *right; 
+                });
+            // 对split_key进行去重
+            int remove_num = std::distance(std::unique(split_keys->mutable_split_keys()->begin(), split_keys->mutable_split_keys()->end()),
+                                           split_keys->mutable_split_keys()->end());
+            for (int i = 0; i < remove_num; ++i) {
+                split_keys->mutable_split_keys()->RemoveLast();
+            }
+        }
+    }
+
+    return 0;
+}
+
 int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
     parser::CreateTableStmt* stmt = (parser::CreateTableStmt*)(_ctx->stmt);
     if (stmt->table_name == nullptr) {
@@ -489,7 +637,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             DB_WARNING("column is nullptr");
             return -1;
         }
-        if (0 != add_column_def(table, column)) {
+        if (0 != add_column_def(table, column, false)) {
             DB_WARNING("add column to table failed.");
             return -1;
         }
@@ -503,7 +651,11 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
     std::string split_end_key;
     std::string global_split_start_key;
     std::string global_split_end_key;
+    std::string partition_split_keys;
     int32_t split_region_num = 0;
+    bool has_primary_range_partition_type = false;
+    pb::RangePartitionType primary_range_partition_type = pb::RPT_DEFAULT;
+    std::unordered_set<pb::RangePartitionType> gen_range_partition_types;
     for (int idx = 0; idx < constraint_len; ++idx) {
         parser::Constraint* constraint = stmt->constraints[idx];
         pb::IndexInfo* index = table.add_indexs();
@@ -521,6 +673,9 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             }
         } else if (constraint->type == parser::CONSTRAINT_FULLTEXT) {
             index->set_index_type(pb::I_FULLTEXT);
+            can_support_ttl = false;
+        } else if (constraint->type == parser::CONSTRAINT_VECTOR) {
+            index->set_index_type(pb::I_VECTOR);
             can_support_ttl = false;
         } else {
             DB_WARNING("unsupported constraint_type: %d", constraint->type);
@@ -549,17 +704,17 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         code, value);
                     return -1;
                 }
-                auto json_iter = root.FindMember("segment_type");
-                if (json_iter != root.MemberEnd()) {
-                    std::string segment_type = json_iter->value.GetString();
+                auto iter = root.FindMember("segment_type");
+                if (iter != root.MemberEnd()) {
+                    std::string segment_type = iter->value.GetString();
                     pb::SegmentType pb_segment_type = pb::S_DEFAULT;
                     SegmentType_Parse(segment_type, &pb_segment_type);
                     index->set_segment_type(pb_segment_type);
                 }
-                auto storage_type_iter = root.FindMember("storage_type");
+                iter = root.FindMember("storage_type");
                 pb::StorageType pb_storage_type = pb::ST_ARROW;
-                if (storage_type_iter != root.MemberEnd()) {
-                    std::string storage_type = storage_type_iter->value.GetString();
+                if (iter != root.MemberEnd()) {
+                    std::string storage_type = iter->value.GetString();
                     StorageType_Parse(storage_type, &pb_storage_type);
                 }
                 if (!is_fulltext_type_constraint(pb_storage_type, has_arrow_fulltext, has_pb_fulltext)) {
@@ -567,6 +722,25 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     return -1;
                 }
                 index->set_storage_type(pb_storage_type);
+                iter = root.FindMember("vector_description");
+                if (iter != root.MemberEnd()) {
+                    index->set_vector_description(iter->value.GetString());
+                }
+                iter = root.FindMember("dimension");
+                if (iter != root.MemberEnd()) {
+                    index->set_dimension(iter->value.GetInt());
+                }
+                iter = root.FindMember("nprobe");
+                if (iter != root.MemberEnd()) {
+                    index->set_nprobe(iter->value.GetInt());
+                }
+                iter = root.FindMember("metric_type");
+                pb::MetricType metric_type = pb::METRIC_L2;
+                if (iter != root.MemberEnd()) {
+                    std::string metric_type_str = iter->value.GetString();
+                    MetricType_Parse(metric_type_str, &metric_type);
+                    index->set_metric_type(metric_type);
+                }
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", value);
                 return -1;
@@ -764,6 +938,37 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 if (json_iter != root.MemberEnd() && root["split_region_num"].IsNumber()) {
                     split_region_num = json_iter->value.GetInt64();
                 }
+                // Range分区表预分裂相关参数
+                json_iter = root.FindMember("partition_split_keys");
+                if (json_iter != root.MemberEnd() && root["partition_split_keys"].IsString()) {
+                    partition_split_keys = json_iter->value.GetString();
+                }
+                // Range分区类型相关参数
+                json_iter = root.FindMember("primary_range_partition_type");
+                if (json_iter != root.MemberEnd() && root["primary_range_partition_type"].IsString()) {
+                    const std::string& range_partition_type_str = json_iter->value.GetString();
+                    if (!pb::RangePartitionType_Parse(range_partition_type_str, &primary_range_partition_type)) {
+                        DB_WARNING("Invalid primary_range_partition_type: %s", range_partition_type_str.c_str());
+                        return -1;
+                    }
+                    has_primary_range_partition_type = true;
+                }
+                json_iter = root.FindMember("gen_range_partition_types");
+                if (json_iter != root.MemberEnd() && root["gen_range_partition_types"].IsArray()) {
+                    for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                        if (json_iter->value[i].IsString()) {
+                            const std::string& range_partition_type_str = json_iter->value[i].GetString();
+                            pb::RangePartitionType range_partition_type = pb::RPT_DEFAULT;
+                            if (!pb::RangePartitionType_Parse(range_partition_type_str, &range_partition_type)) {
+                                DB_WARNING("Invalid gen_range_partition_types: %s", range_partition_type_str.c_str());
+                                return -1;
+                            }
+                            gen_range_partition_types.insert(range_partition_type);
+                        }
+                    }
+                }
+                // 动态分区相关参数
+                parse_dynamic_partition_attr(table, root);
             } catch (...) {
                 // 兼容mysql语法
                 table.set_comment(option->str_value.value);
@@ -772,7 +977,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             }
         } else if (option->type == parser::TABLE_OPT_PARTITION) {
             // 分区信息配置
-            parser::PartitionOption* p_option = static_cast<parser::PartitionOption*>(option);
+            parser::TablePartitionOption* p_option = static_cast<parser::TablePartitionOption*>(option);
             auto partition_ptr = table.mutable_partition_info();
 
             if (p_option->expr == nullptr || p_option->expr->to_string().empty()) {
@@ -806,14 +1011,13 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     }
                     get_expr_field_name(expr);
                 }
-                for (int32_t index = 0; index < p_option->range.size(); ++index) {
-                    auto range_ptr = partition_ptr->add_range_partition_values();
-                    if (0 != create_expr_tree(p_option->range[index]->less_expr, *range_ptr, expr_options)) {
-                        DB_WARNING("error pasing common expression");
+                for (size_t i = 0; i < p_option->ranges.size(); ++i) {
+                    const parser::PartitionRange* p_partition_range = p_option->ranges[i];
+                    if (parse_partition_range(table, p_partition_range) != 0) {
+                        DB_WARNING("Fail to parse_partition_range");
                         return -1;
                     }
                 }
-                table.set_partition_num(p_option->range.size() + 1);
             } else if (p_option->type == parser::PARTITION_HASH) {
                 partition_ptr->set_type(pb::PT_HASH);
                 if (p_option->expr->node_type == parser::NT_COLUMN_DEF) {
@@ -863,6 +1067,37 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 global_split_start_key, global_split_end_key, split_region_num, table);
         if (ret < 0) {
             return -1;
+        }
+    }
+    if (!partition_split_keys.empty()) {
+        if (parse_partition_pre_split_keys(partition_split_keys, table) != 0) {
+            DB_WARNING("Fail to parse_partition_pre_split_keys");
+            return -1;
+        }
+    }
+    if (table.has_partition_info() && table.partition_info().type() == pb::PT_RANGE) {
+        pb::PartitionInfo* p_partition_info = table.mutable_partition_info();
+        if (p_partition_info == nullptr) {
+            DB_WARNING("p_partition_info is nullptr");
+            return -1;
+        }
+        if (!has_primary_range_partition_type && !gen_range_partition_types.empty()) {
+            DB_WARNING("Has no primary_range_partition_type");
+            return -1;
+        }
+        if (has_primary_range_partition_type && gen_range_partition_types.empty()) {
+            DB_WARNING("Has no gen_range_partition_types");
+            return -1;
+        }
+        if (has_primary_range_partition_type && !gen_range_partition_types.empty()) {
+            if (gen_range_partition_types.find(primary_range_partition_type) == gen_range_partition_types.end()) {
+                DB_WARNING("primary_range_partition_type is not in gen_range_partition_types");
+                return -1;
+            }
+            p_partition_info->set_primary_range_partition_type(primary_range_partition_type);
+            for (const auto& range_partition_type : gen_range_partition_types) {
+                p_partition_info->add_gen_range_partition_types(range_partition_type);
+            }
         }
     }
     table.set_if_exist(!stmt->if_not_exist);
@@ -983,6 +1218,12 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         return -1;
     }
     pb::SchemaInfo* table = alter_request.mutable_table_info();
+    if (table == nullptr) {
+        DB_WARNING("table is nullptr");
+        _ctx->stat_info.error_code = ER_BAD_NULL_ERROR;
+        _ctx->stat_info.error_msg << "table is nullptr";
+        return -1;
+    }
     if (stmt->table_name->db.empty()) {
         if (_ctx->cur_db.empty()) {
             _ctx->stat_info.error_code = ER_NO_DB_ERROR;
@@ -1008,7 +1249,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     }
     if (spec->spec_type == parser::ALTER_SPEC_TABLE_OPTION) {
         if (spec->table_options.size() > 1) {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "Alter with multiple table_options is not supported in this version";
             return -1;
         }
@@ -1057,8 +1298,26 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 table->set_comment(table_option->str_value.value);
                 DB_WARNING("parse alter table json comments error [%s]", table_option->str_value.value);
             }
+        } else if (table_option->type == parser::TABLE_OPT_DYNAMIC_PARTITION_ATTR) {
+            alter_request.set_op_type(pb::OP_UPDATE_DYNAMIC_PARTITION_ATTR);
+            rapidjson::Document root;
+            try {
+                root.Parse<0>(table_option->str_value.value);
+                if (root.HasParseError()) {
+                    rapidjson::ParseErrorCode code = root.GetParseError();
+                    DB_WARNING("parse alter table json comments error [code:%d][%s]",
+                                code, table_option->str_value.value);
+                    return -1;
+                }
+                // 动态分区相关参数
+                parse_dynamic_partition_attr(*table, root);
+            } catch (...) {
+                alter_request.set_op_type(pb::OP_UPDATE_DYNAMIC_PARTITION_ATTR);
+                DB_WARNING("parse alter table json comments error [%s]", table_option->str_value.value);
+                return -1;
+            }
         } else {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "Alter table option type unsupported: " << table_option->type;
             return -1;
         }
@@ -1071,13 +1330,13 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 DB_WARNING("column is nullptr");
                 return -1;
             }
-            if (0 != add_column_def(*table, column)) {
+            if (0 != add_column_def(*table, column, spec->is_unique_indicator)) {
                 DB_WARNING("add column to table failed.");
                 return -1;
             }
         }
         if (table->indexs_size() != 0) {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "add table column with index is not supported in this version";
             return -1;
         }
@@ -1085,7 +1344,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         alter_request.set_op_type(pb::OP_DROP_FIELD);
         pb::FieldInfo* field = table->add_fields();
         if (spec->column_name.empty()) {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "field_name is empty";
             return -1;
         } 
@@ -1094,7 +1353,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         alter_request.set_op_type(pb::OP_MODIFY_FIELD);
         int column_len = spec->new_columns.size();
         if (column_len != 1) {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "unsupported multi schema change";
             return -1;
         }
@@ -1104,7 +1363,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 DB_WARNING("column is nullptr");
                 return -1;
             }
-            if (0 != add_column_def(*table, column)) {
+            if (0 != add_column_def(*table, column, spec->is_unique_indicator)) {
                 DB_WARNING("add column to table failed.");
                 return -1;
             }
@@ -1118,7 +1377,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         alter_request.set_op_type(pb::OP_RENAME_FIELD);
         pb::FieldInfo* field = table->add_fields();
         if (spec->column_name.empty()) {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "old field_name is empty";
             return -1;
         }
@@ -1139,7 +1398,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             new_db_name = spec->new_table_name->db.c_str();
         }
         if (new_db_name != table->database()) {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "cannot rename table to another database";
             return -1;
         }
@@ -1244,7 +1503,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         index->set_index_name(spec->index_name.value);
         index->set_hint_status(pb::IHS_NORMAL);
         DB_NOTICE("restore index schema_info[%s]", table->ShortDebugString().c_str());
-    }  else if (spec->spec_type == parser::ALTER_SPEC_ADD_LEARNER) {
+    } else if (spec->spec_type == parser::ALTER_SPEC_ADD_LEARNER) {
         alter_request.set_op_type(pb::OP_ADD_LEARNER);
         alter_request.add_resource_tags(spec->resource_tag.value);
         DB_NOTICE("add learner schema_info[%s]", table->ShortDebugString().c_str());
@@ -1255,8 +1514,17 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     } else if (spec->spec_type == parser::ALTER_SPEC_MODIFY_COLUMN) {
         alter_request.set_op_type(pb::OP_MODIFY_FIELD);
         return parse_modify_column(alter_request, stmt->table_name, spec);
+    } else if (spec->spec_type == parser::ALTER_SPEC_ADD_PARTITION) {
+        alter_request.set_op_type(pb::OP_ADD_PARTITION);
+        return parse_alter_partition(alter_request, spec);
+    } else if (spec->spec_type == parser::ALTER_SPEC_DROP_PARTITION) {
+        alter_request.set_op_type(pb::OP_DROP_PARTITION);
+        return parse_alter_partition(alter_request, spec);
+    } else if (spec->spec_type == parser::ALTER_SPEC_MODIFY_PARTITION) {
+        alter_request.set_op_type(pb::OP_MODIFY_PARTITION);
+        return parse_alter_partition(alter_request, spec);
     } else {
-        _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+        _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
         _ctx->stat_info.error_msg << "alter_specification type (" 
                                 << spec->spec_type << ") not supported in this version";
         return -1;
@@ -1479,6 +1747,13 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
                 return -1;
             }
             break;
+        case parser::CONSTRAINT_VECTOR:
+            index_type = pb::I_VECTOR;
+            if (constraint->columns.size() > 1) {
+                DB_WARNING("vector index only support one field.");
+                return -1;
+            }
+            break;
         default:
             DB_WARNING("only support uniqe、key index type");
             return -1;
@@ -1494,7 +1769,7 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
     index->set_index_type(index_type);
     index->set_hint_status(pb::IHS_DISABLE);
     index->set_index_name(constraint->name.value);
-//虚拟索引标志位
+    // 虚拟索引标志位
     if (spec->is_virtual_index) {
         if (table.mutable_indexs(0) != nullptr) {
             table.mutable_indexs(0)->set_hint_status(pb::IHS_VIRTUAL);
@@ -1514,6 +1789,7 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
     if (constraint->index_option != nullptr) {
         rapidjson::Document root;
         const char* value = constraint->index_option->comment.c_str();
+        DB_WARNING("json value :%s", value);
         try {
             root.Parse<0>(value);
             if (root.HasParseError()) {
@@ -1563,6 +1839,264 @@ bool DDLPlanner::is_fulltext_type_constraint(pb::StorageType pb_storage_type, bo
     }
     DB_WARNING("unknown storage_type");
     return false;
+}
+
+int DDLPlanner::parse_partition_range(
+        pb::SchemaInfo& table, const parser::PartitionRange* p_partition_range) {
+    pb::PartitionInfo* p_partition_info = table.mutable_partition_info();
+    if (p_partition_info == nullptr) {
+        DB_WARNING("p_partition_info is nullptr");
+        return -1;
+    }
+    pb::RangePartitionInfo* p_range_partition_info = p_partition_info->add_range_partition_infos();
+    if (p_range_partition_info == nullptr) {
+        DB_WARNING("p_range_partition_info is nullptr");
+        return -1;
+    }
+    if (p_partition_range == nullptr) {
+        DB_WARNING("p_partition_range is nullptr");
+        return -1;
+    }
+    if (p_partition_range->name.empty()) {
+        DB_WARNING("No specify partition name");
+        return -1;
+    }
+    p_range_partition_info->set_partition_name(p_partition_range->name.c_str());
+
+    CreateExprOptions expr_options;
+    parser::ExprNode* p_less_expr = p_partition_range->less_expr;
+    parser::ExprNode* p_range_left_expr = p_partition_range->range.first;
+    parser::ExprNode* p_range_right_expr = p_partition_range->range.second;
+    if (p_less_expr != nullptr) {        
+        pb::Expr less_expr;
+        ExprNode* p_less_expr_node = nullptr;
+        ON_SCOPE_EXIT(([&p_less_expr_node]() {
+            if (p_less_expr_node != nullptr) {
+                p_less_expr_node->close();
+            }
+            ExprNode::destroy_tree(p_less_expr_node);
+        }));
+        if (create_expr_tree(p_less_expr, less_expr, expr_options) != 0) {
+            DB_WARNING("Fail to create_expr_tree");
+            return -1;
+        }
+        if (0 != ExprNode::create_tree(less_expr, &p_less_expr_node)) {
+            DB_WARNING("Fail to create_tree, %s", less_expr.ShortDebugString().c_str());
+            return -1;
+        }
+        if (p_less_expr_node == nullptr) {
+            DB_WARNING("p_less_expr_node is nullptr");
+            return -1;
+        }
+        p_less_expr_node->expr_optimize();
+        p_less_expr_node->open();
+        ExprValue less_expr_value = p_less_expr_node->get_value(nullptr);
+        pb::Expr* p_less_value = p_range_partition_info->mutable_less_value();
+        if (p_less_value == nullptr) {
+            DB_WARNING("p_less_value is nullptr");
+            return -1;
+        }
+        construct_literal_expr(less_expr_value, p_less_value->add_nodes());
+    } 
+    if (p_range_left_expr != nullptr && p_range_right_expr != nullptr) {
+        pb::Expr left_expr;
+        pb::Expr right_expr;
+        ExprNode* p_left_expr_node = nullptr;
+        ExprNode* p_right_expr_node = nullptr;
+        ON_SCOPE_EXIT(([&p_left_expr_node, &p_right_expr_node]() {
+            if (p_left_expr_node != nullptr) {
+                p_left_expr_node->close();
+            }
+            if (p_right_expr_node != nullptr) {
+                p_right_expr_node->close();
+            }
+            ExprNode::destroy_tree(p_left_expr_node);
+            ExprNode::destroy_tree(p_right_expr_node);
+        }));
+
+        if (create_expr_tree(p_range_left_expr, left_expr, expr_options) != 0) {
+            DB_WARNING("Fail to create_expr_tree");
+            return -1;
+        }
+        if (0 != ExprNode::create_tree(left_expr, &p_left_expr_node)) {
+            DB_WARNING("Fail to create_tree, %s", left_expr.ShortDebugString().c_str());
+            return -1;
+        }
+        if (p_left_expr_node == nullptr) {
+            DB_WARNING("p_left_expr_node is nullptr");
+            return -1;
+        }
+        p_left_expr_node->expr_optimize();
+        p_left_expr_node->open();
+        ExprValue left_expr_value = p_left_expr_node->get_value(nullptr);
+
+        if (create_expr_tree(p_range_right_expr, right_expr, expr_options) != 0) {
+            DB_WARNING("Fail to create_expr_tree");
+            return -1;
+        }
+        if (0 != ExprNode::create_tree(right_expr, &p_right_expr_node)) {
+            DB_WARNING("Fail to create_tree, %s", right_expr.ShortDebugString().c_str());
+            return -1;
+        }
+        if (p_right_expr_node == nullptr) {
+            DB_WARNING("p_right_expr_node is nullptr");
+            return -1;
+        }
+        p_right_expr_node->expr_optimize();
+        p_right_expr_node->open();
+        ExprValue right_expr_value = p_right_expr_node->get_value(nullptr);
+
+        auto* p_range = p_range_partition_info->mutable_range();
+        if (p_range == nullptr) {
+            DB_WARNING("p_range is nullptr");
+            return -1;
+        }
+        pb::Expr* p_left_value = p_range->mutable_left_value();
+        if (p_left_value == nullptr) {
+            DB_WARNING("p_left_value is nullptr");
+            return -1;
+        }
+        pb::Expr* p_right_value = p_range->mutable_right_value();
+        if (p_right_value == nullptr) {
+            DB_WARNING("p_right_value is nullptr");
+            return -1;
+        }
+        construct_literal_expr(left_expr_value, p_left_value->add_nodes());
+        construct_literal_expr(right_expr_value, p_right_value->add_nodes());
+    }
+
+    const auto& partition_options = p_partition_range->options;
+    for (size_t i = 0; i < partition_options.size(); ++i) {
+        parser::PartitionOption* p_partition_option = partition_options[i];
+        if (p_partition_option == nullptr) {
+            DB_WARNING("p_partition_option is nullptr");
+            return -1;
+        }
+        if (p_partition_option->type == parser::PARTITION_OPT_COMMENT) {
+            rapidjson::Document root;
+            try {
+                std::string partition_resource_tag;
+                root.Parse<0>(p_partition_option->str_value.value);
+                if (root.HasParseError()) {
+                    rapidjson::ParseErrorCode code = root.GetParseError();
+                    DB_WARNING("parse partition json comments error [code:%d][%s]", 
+                                code, p_partition_option->str_value.value);
+                    return -1;
+                }
+                // resource_tag
+                auto json_iter = root.FindMember("resource_tag");
+                if (json_iter != root.MemberEnd()) {
+                    partition_resource_tag = json_iter->value.GetString();
+                }
+                if (!partition_resource_tag.empty()) {
+                    p_range_partition_info->set_resource_tag(partition_resource_tag);
+                }
+                // is_cold
+                bool is_cold = false;
+                json_iter = root.FindMember("is_cold");
+                if (json_iter != root.MemberEnd() && root["is_cold"].IsBool()) {
+                    p_range_partition_info->set_is_cold(json_iter->value.GetBool());
+                }
+                // range_partition_type
+                json_iter = root.FindMember("type");
+                if (json_iter != root.MemberEnd() && root["type"].IsString()) {
+                    const std::string& range_partition_type_str = root["type"].GetString();
+                    pb::RangePartitionType range_partition_type = pb::RPT_DEFAULT;
+                    if (!pb::RangePartitionType_Parse(range_partition_type_str, &range_partition_type)) {
+                        DB_WARNING("Invalid range_partition_type: %s", range_partition_type_str.c_str());
+                        return -1;
+                    }
+                    p_range_partition_info->set_type(range_partition_type);
+                }
+            } catch (...) {
+                DB_WARNING("parse partition json comments error [%s]", p_partition_option->str_value.value);
+                return -1;
+            }
+        } else {
+            DB_WARNING("Unsupported partition option type: %d", p_partition_option->type);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int DDLPlanner::parse_dynamic_partition_attr(
+        pb::SchemaInfo& table, const rapidjson::Document& json) {
+    auto json_iter = json.FindMember("dynamic_partition");
+    if (json_iter == json.MemberEnd()) {
+        return 0;
+    }
+    pb::PartitionInfo* p_partition_info = table.mutable_partition_info();
+    if (p_partition_info == nullptr) {
+        DB_WARNING("p_partition_info is nullptr");
+        return -1;
+    }
+    p_partition_info->set_type(pb::PT_RANGE);
+    pb::DynamicPartitionAttr* p_dynamic_partition_attr = p_partition_info->mutable_dynamic_partition_attr();
+    if (p_dynamic_partition_attr == nullptr) {
+        DB_WARNING("p_dynamic_partition_attr is nullptr");
+        return -1;
+    }
+    const auto& dynamic_partition_value = json_iter->value;
+    auto json_inner_iter = dynamic_partition_value.FindMember("enable");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["enable"].IsBool()) {
+        p_dynamic_partition_attr->set_enable(json_inner_iter->value.GetBool());
+    }
+    json_inner_iter = dynamic_partition_value.FindMember("time_unit");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["time_unit"].IsString()) {
+        p_dynamic_partition_attr->set_time_unit(json_inner_iter->value.GetString());
+    }
+    json_inner_iter = dynamic_partition_value.FindMember("start");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["start"].IsInt()) {
+        p_dynamic_partition_attr->set_start(json_inner_iter->value.GetInt());
+    }
+    json_inner_iter = dynamic_partition_value.FindMember("cold");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["cold"].IsInt()) {
+        p_dynamic_partition_attr->set_cold(json_inner_iter->value.GetInt());
+    }
+    json_inner_iter = dynamic_partition_value.FindMember("end");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["end"].IsInt()) {
+        p_dynamic_partition_attr->set_end(json_inner_iter->value.GetInt());
+    }
+    json_inner_iter = dynamic_partition_value.FindMember("prefix");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["prefix"].IsString()) {
+        p_dynamic_partition_attr->set_prefix(json_inner_iter->value.GetString());
+    }
+    json_inner_iter = dynamic_partition_value.FindMember("start_day_of_month");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["start_day_of_month"].IsInt()) {
+        p_dynamic_partition_attr->set_start_day_of_month(json_inner_iter->value.GetInt());
+    }
+    return 0;
+}
+
+int DDLPlanner::parse_alter_partition(
+        pb::MetaManagerRequest& alter_request, const parser::AlterTableSpec* p_alter_spec) {
+    pb::SchemaInfo* p_table_info = alter_request.mutable_table_info();
+    if (p_table_info == nullptr) {
+        DB_WARNING("p_table_info is nullptr");
+        return -1;
+    }
+    pb::PartitionInfo* p_partition_info = p_table_info->mutable_partition_info();
+    if (p_partition_info == nullptr) {
+        DB_WARNING("p_partition_info is nullptr");
+        return -1;
+    }
+    p_partition_info->set_type(pb::PT_RANGE);
+    const parser::PartitionRange* p_partition_range = p_alter_spec->partition_range;
+    if (parse_partition_range(*p_table_info, p_partition_range) != 0) {
+        DB_WARNING("Fail to parser_partition_range");
+        return -1;
+    }
+    DB_NOTICE("alter partition schema_info[%s]", p_table_info->ShortDebugString().c_str());
+    return 0;
 }
 
 } // end of namespace baikaldb

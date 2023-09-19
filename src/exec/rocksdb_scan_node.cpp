@@ -54,6 +54,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         DB_WARNING_STATE(state, "no index_info found for index id: %ld", _index_id);
         return -1;
     }
+    bool use_vector = _index_info->type == pb::I_VECTOR;
     if (_index_info->type == pb::I_FULLTEXT) {
         use_fulltext = true;
     }
@@ -109,6 +110,31 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     if (pos_index.is_covering_index() && !_is_covering_index) {
         DB_WARNING("covering_index conflict, index_id = [%ld]", _index_id);
         _is_covering_index = true;
+    }
+    if (use_vector) {
+        for (auto expr : _scan_conjuncts) {
+            ret = expr->open();
+            if (ret < 0) {
+                DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
+                return ret;
+            }
+        }
+        for (auto& raw_index : scan_pb.indexes()) {
+            pb::PossibleIndex pos_index;
+            pos_index.ParseFromString(raw_index);
+            auto index_id = pos_index.index_id();
+            auto index_info = _factory->get_index_info_ptr(index_id);
+            if (index_info == nullptr|| index_info->id == -1) {
+                DB_WARNING_STATE(state, "no index_info found for index id: %ld", index_id);
+                return -1;
+            }
+            for (auto& range : pos_index.ranges()) {
+                _vector_word = range.left_key();
+                _topk = std::max(range.topk(), _topk);
+            }
+        }
+        _vector_index = state->vector_index_map()[_index_id];
+        return 0;
     }
 
     if (use_fulltext) {
@@ -458,6 +484,8 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 _field_ids[slot.field_id()] = field;
             } else {
                 _has_s_wordrank = true;
+                // 倒排__weight也能index过滤
+                _index_slot_field_map[slot.slot_id()] = field->id;
             }
         }
     }
@@ -481,7 +509,14 @@ int RocksdbScanNode::open(RuntimeState* state) {
     auto txn = state->txn();
     auto reverse_index_map = state->reverse_index_map();
     //DB_WARNING_STATE(state, "_is_covering_index:%d", _is_covering_index);
-    if (_reverse_infos.size() > 1) {
+    if (_vector_index != nullptr) {
+        int ret = _vector_index->search(txn->get_txn(), _pri_info, _table_info, _vector_word, _topk, _left_records);
+        if (ret < 0) {
+            DB_FATAL("vector_index search fail, index:%ld, table:%ld", _index_info->id, _table_info->id);
+            return -1;
+        }
+        DB_WARNING("vector_index search, index:%ld, table:%ld, size:%lu", _index_info->id, _table_info->id, _left_records.size());
+    } else if (_reverse_infos.size() > 1) {
         //TODO 为不影响原流程暂时保留，后续删除。
         for (auto& info : _reverse_infos) {
             if (reverse_index_map.count(info.id) == 1) {
@@ -499,11 +534,11 @@ int RocksdbScanNode::open(RuntimeState* state) {
             }
 
             if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
-                _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                _m_index.search(txn->get_txn(), _pri_info, _table_info, 
                     reverse_index_map, !FLAGS_reverse_seek_first_level, 
                     _pb_node.derive_node().scan_node().fulltext_index());
             } else if (_storage_type == pb::ST_ARROW) {
-                _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                _m_arrow_index.search(txn->get_txn(), _pri_info, _table_info, 
                     reverse_index_map, !FLAGS_reverse_seek_first_level, 
                     _pb_node.derive_node().scan_node().fulltext_index());
             } else {
@@ -524,7 +559,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 for (auto index_ptr : _reverse_indexes) {
                     common_reverse_indexes.emplace_back(static_cast<ReverseIndex<CommonSchema>*>(index_ptr));
                 }
-                _m_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                _m_index.search(txn->get_txn(), _pri_info, _table_info, 
                     common_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
             } else if (_storage_type == pb::ST_ARROW) {
                 std::vector<ReverseIndex<ArrowSchema>*> arrow_reverse_indexes;
@@ -532,7 +567,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 for (auto index_ptr : _reverse_indexes) {
                     arrow_reverse_indexes.emplace_back(static_cast<ReverseIndex<ArrowSchema>*>(index_ptr));
                 }
-                _m_arrow_index.search(txn->get_txn(), *_pri_info, *_table_info, 
+                _m_arrow_index.search(txn->get_txn(), _pri_info, _table_info, 
                     arrow_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
             } else {
                 DB_FATAL("fulltext storage type error");
@@ -549,7 +584,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
         _reverse_index = reverse_index_map[_index_id];
         //DB_NOTICE("word:%s", str_to_hex(word).c_str());
         // seek性能太差了，倒排索引都不做seek
-        ret = _reverse_index->search(txn->get_txn(), *_pri_info, *_table_info, 
+        ret = _reverse_index->search(txn->get_txn(), _pri_info, _table_info, 
                 _query_words[0], _match_modes[0], _scan_conjuncts, !FLAGS_reverse_seek_first_level);
         if (ret < 0) {
             return ret;
@@ -593,6 +628,9 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     if (StoreQos::get_instance()->need_reject()) {
         return -1;
     }
+    if (_is_get_keypoint) {
+        return get_key_points(state, batch, eos);
+    }
     
     int ret = 0;
     if (_index_id == _table_id) {
@@ -626,10 +664,21 @@ void RocksdbScanNode::close(RuntimeState* state) {
         expr->close();
     }
     _idx = 0;
+    _left_records.clear();
+    _right_records.clear();
+    _left_field_cnts.clear();
+    _right_field_cnts.clear();
+    _left_opens.clear();
+    _right_opens.clear();
+    _like_prefixs.clear();
+    _topk = 10;
     _reverse_infos.clear();
     _query_words.clear();
     _match_modes.clear();
     _reverse_indexes.clear();
+    _vector_index = nullptr;
+    _vector_word.clear();
+
 }
 
 int64_t RocksdbScanNode::copy_multiget_rows(RowBatch* output_batch, std::vector<ExprNode*>* conjuncts) {
@@ -1242,7 +1291,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
     // 只普通索引扫描并且不会反查主表的省略record
     bool use_record = false;
     if ((!_is_covering_index && !_is_global_index) ||
-            !_reverse_indexes.empty() || _reverse_index != nullptr) {
+            !_reverse_indexes.empty() || _reverse_index != nullptr || _vector_index != nullptr) {
         use_record = true;
     }
     int ret = 0;
@@ -1281,7 +1330,12 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 return 0;
             }
         }
-        if (_reverse_indexes.size() > 0) {
+        if (_vector_index != nullptr) {
+            if (_idx >= _left_records.size()) {
+                multiget_last_records = true;
+                continue;
+            }
+        } else if (_reverse_indexes.size() > 0) {
             if (!multi_valid(_storage_type)) {
                 multiget_last_records = true;
                 continue;
@@ -1292,7 +1346,6 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
         } else {
-
             if (_index_iter == nullptr || !_index_iter->valid() || range_reach_limit()) {
                 if (_idx >= _left_records.size() && _scan_range_keys.is_traverse_over()) {
                     multiget_last_records = true;
@@ -1341,7 +1394,9 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             record->clear();
         }
         std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-        if (_reverse_indexes.size() > 0) {
+        if (_vector_index != nullptr) {
+            record = _left_records[_idx++];
+        } else if (_reverse_indexes.size() > 0) {
             ret = multi_get_next(_storage_type, record);
             if (ret < 0) {
                 DB_WARNING_STATE(state, "get index fail, maybe reach end");
@@ -1464,6 +1519,113 @@ void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
 
 }
 
+int RocksdbScanNode::decode_key_points(RuntimeState* state, RowBatch* batch, const rocksdb::Slice& key) {
+    SmartRecord record = _factory->new_record(_table_id);
+    if (state->is_cancelled() || _pri_info == nullptr || record == nullptr) {
+        return 0;
+    }
+    int ret = record->decode_key(*_pri_info, key);
+    if (ret != 0) {
+        DB_WARNING("decode primary index failed");
+        return -1;
+    }
+    std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+    for (auto slot : _tuple_desc->slots()) {
+        auto field = record->get_field_by_tag(slot.field_id());
+        row->set_value(slot.tuple_id(), slot.slot_id(), record->get_value(field));
+    }
+    batch->move_row(std::move(row));
+    return 0;
+}
+
+int RocksdbScanNode::get_key_points(RuntimeState* state, RowBatch* batch, bool* eos) {
+    auto db = RocksWrapper::get_instance();
+    if (db == nullptr) {
+        return -1;
+    }
+    if (_index_id != _pri_info->id) {
+        DB_FATAL("get_key_points only support usding primary index");
+        return -1;
+    }
+    std::string region_start_key = _region_info->start_key();
+    std::string region_end_key = _region_info->end_key();
+    MutTableKey rocksdb_start_key;
+    MutTableKey rocksdb_end_key;
+    rocksdb_start_key.append_i64(_region_id);
+    rocksdb_start_key.append_i64(_table_id);
+    rocksdb_start_key.append_string(region_start_key);
+    rocksdb_end_key.append_i64(_region_id);
+    rocksdb_end_key.append_i64(_table_id);
+    if (region_end_key.empty()) {
+        rocksdb_end_key.append_u64(UINT64_MAX);
+    } else {
+        rocksdb_end_key.append_string(region_end_key);
+    }
+    
+    ON_SCOPE_EXIT(([this, state]() {
+        state->set_num_scan_rows(_scan_rows);
+    }));
+
+    rocksdb::TablePropertiesCollection props;
+    if (state->txn()->use_cold_db()) {
+        db->get_cold_key_points(rocksdb_start_key.data(), rocksdb_end_key.data(), props);
+    } else {
+        db->get_key_points(rocksdb_start_key.data(), rocksdb_end_key.data(), props);
+    }
+    uint32_t num = 0;
+    uint32_t sst_num = 0;
+    for (const auto& item : props) {
+        if (item.second == nullptr) {
+            continue;
+        }
+        auto& user_collected = item.second->user_collected_properties;
+        if (user_collected.find("key_point_lens") == user_collected.end() 
+            || user_collected.find("key_points") == user_collected.end()) {
+            continue;
+        }
+        rocksdb::Slice key_lens(user_collected.at("key_point_lens"));
+        rocksdb::Slice keys(user_collected.at("key_points"));
+        uint64_t len_pos = 0;
+        uint64_t key_pos = 0;
+        uint64_t key_len = 0;
+        rocksdb::Slice key;
+        while (len_pos + sizeof(key_len) - 1 < key_lens.size() && key_pos < keys.size()) {
+            _scan_rows++;
+            char* c = const_cast<char*>(key_lens.data_ + len_pos);
+            key_len = KeyEncoder::to_endian_u64(*reinterpret_cast<uint64_t*>(c));
+            if (key_pos + key_len - 1 >= keys.size()) {
+                break;
+            } 
+
+            key = rocksdb::Slice(keys.data_ + key_pos, key_len);
+            len_pos += sizeof(key_len);
+            key_pos += key_len;
+
+            if (!key.starts_with(rocksdb_start_key.data().substr(0, 16))) {
+                continue;
+            }
+            key.remove_prefix(2 * sizeof(int64_t));
+
+            // 检查keypoint是否在region范围内
+            if (!region_start_key.empty() && key.compare(region_start_key) < 0) {
+                continue;
+            }
+            if (!region_end_key.empty() && key.compare(region_end_key) >= 0) {
+                continue;
+            }
+            // 解析keypoint
+            if (decode_key_points(state, batch, key) != 0) {
+                continue;
+            }
+            ++num;
+        }
+        sst_num++;
+        DB_DEBUG("GetPropertiesOfTablesInRange return sst_num: %d, num: %d, size_len: %ld, value_len: %ld", 
+            sst_num, num, key_lens.size(), keys.size());
+    }
+    *eos = true;
+    return num;
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -90,6 +90,7 @@ message PossibleIndex {
         optional bool  left_full = 13;
         optional bool  right_full = 14;
         optional int32 partition_id = 15;
+        optional int32 topk         = 16;
     };
 
     message SortIndex {
@@ -233,6 +234,7 @@ message InsertNode {
     optional int64 row_ttl_duration = 11; //row ttl support, compatible whit prepared stmt
     optional bool  ddl_need_write = 12; // ddl索引数据写入以db状态为准
     optional int64 ddl_index_id = 13;
+    optional bool is_merge = 14;
 };
 message LockPrimaryNode {
     required int64        table_id       = 1;
@@ -355,6 +357,7 @@ message PlanNode {
     optional bool is_explain = 7;
     optional bool local_index_binlog = 8;
     repeated int64 partitions = 9;
+    optional bool is_get_keypoint  = 10;
 };
 
 message Plan {

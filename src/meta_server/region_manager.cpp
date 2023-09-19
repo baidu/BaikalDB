@@ -277,7 +277,7 @@ void RegionManager::drop_region(const pb::MetaManagerRequest& request,
         region_info.set_start_key(result_start_keys[i]);
         region_info.set_end_key(result_end_keys[i]);
         region_info.set_table_name("deleted");
-        region_info.set_partition_id(0);
+        region_info.set_partition_id(result_partition_ids[i]);
         region_info.set_replica_num(0);
         region_info.set_version(0);
         region_info.set_conf_version(0);
@@ -837,9 +837,6 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
         if (leader_region.status() != pb::IDLE) {
             continue;
         }
-        if (leader_region.region().peers_size() != replica_num) {
-            continue;
-        }
         IdcInfo& main_idc = table_main_idc[table_id];
         // 未设置main_logical_room的直接跳过
         if (main_idc.logical_room.empty()) {
@@ -985,6 +982,11 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
         }
         int64_t region_id = leader_region.region().region_id();
         if (trans_region_pk_prefix_map[table_id].count(region_id) == 0) {
+            continue;
+        }
+        auto master_region_info = get_region_info(region_id);
+        if (master_region_info == nullptr) {
+            DB_WARNING("master region info is nullptr when load balance %ld.", region_id);
             continue;
         }
         int64_t replica_num = table_replica[table_id];
@@ -1211,6 +1213,11 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
     for (auto& leader_region : request->leader_regions()) {
         int64_t table_id = leader_region.region().table_id();
         int64_t region_id = leader_region.region().region_id();
+        auto master_region_info = get_region_info(region_id);
+        if (master_region_info == nullptr) {
+            DB_WARNING("master region info is nullptr when load balance %ld.", region_id);
+            continue;
+        }
         if (trans_leader_region_ids.count(region_id) > 0) {
             continue;
         }
@@ -2264,7 +2271,7 @@ void RegionManager::check_peer_count(int64_t region_id,
     // add_peer
     bool need_add_peer = false;
     // {resource_tag:logical_room:physical_room} -> count
-    const auto& table_replica_dist = table_replica_dists_maps[table_id];
+    auto table_replica_dist = table_replica_dists_maps[table_id];
     // peer address -> ReplicaDistInfo
     std::unordered_map<std::string, IdcInfo> peers_local_idc;
     // {resource_tag:logical_room:physical_room} -> peer list
@@ -2278,6 +2285,18 @@ void RegionManager::check_peer_count(int64_t region_id,
         DB_WARNING("get peers idc fail, region: %ld", region_id);
         return;
     }
+
+    const int64_t partition_id = leader_region_info.partition_id();
+    int64_t partition_replica_num = -1;
+    std::string partition_resource_tag;
+    TableManager::get_instance()->get_partition_info(
+            table_id, partition_id, partition_replica_num, partition_resource_tag);
+    if (partition_replica_num != -1 && partition_resource_tag.size() != 0) {
+        replica_num = partition_replica_num;
+        table_replica_dist.clear();
+        table_replica_dist[partition_resource_tag] = partition_replica_num;
+    }
+
     for (const auto& peer : peers_local_idc) {
         if (table_replica_dist.find(peer.second.resource_tag_level()) != table_replica_dist.end()) {
             table_replica_idc_2_peers[peer.second.resource_tag_level()].insert(peer.first);

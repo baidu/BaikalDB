@@ -138,15 +138,21 @@ enum CompareType {
 struct SubqueryExpr : public ExprNode {
     DmlNode* query_stmt = nullptr;
     SubqueryExpr() {
-        expr_type = ET_SUB_QUERY_EXPR;
         is_complex = true;
+        expr_type = ET_SUB_QUERY_EXPR;
     }
     virtual void print() const override {
         std::cout << this << std::endl;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         query_stmt->set_print_sample(print_sample_);
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (query_stmt != nullptr) {
+            query_stmt->set_cache_param(p_cache_param_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override;
 };
@@ -163,10 +169,19 @@ struct CompareSubqueryExpr: public ExprNode {
     virtual void print() const override {
         std::cout << this << std::endl;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
         left_expr->set_print_sample(print_sample_);
         right_expr->set_print_sample(print_sample_);
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (left_expr != nullptr) {
+            left_expr->set_cache_param(p_cache_param_);
+        }
+        if (right_expr != nullptr) {
+            right_expr->set_cache_param(p_cache_param_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override;
     const char* get_func_name() const;
@@ -182,9 +197,17 @@ struct ExistsSubqueryExpr: public ExprNode {
     virtual void print() const override {
         std::cout << this << std::endl;
     }
-    virtual void set_print_sample(bool print_sample_) {
+    virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
-        query_expr->set_print_sample(print_sample_);
+        if (query_expr != nullptr) {
+            query_expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (query_expr != nullptr) {
+            query_expr->set_cache_param(p_cache_param_);
+        }
     }
     virtual void to_stream(std::ostream& os) const override;
 };
@@ -212,7 +235,8 @@ enum LiteralType {
     LT_BOOL,
     LT_NULL,
     LT_PLACE_HOLDER,
-    LT_HEX
+    LT_HEX,
+    LT_MAXVALUE
 };
 
 struct LiteralExpr : public ExprNode {
@@ -224,6 +248,10 @@ struct LiteralExpr : public ExprNode {
         String str_val;
     } _u;
     String row_str;
+
+    mutable LiteralType placeholder_literal_type = LT_INT;
+    mutable int placeholder_id = -1; // PreparePlanner和PlanCache复用该字段
+
     LiteralExpr() {
         expr_type = ET_LITETAL;
     }
@@ -250,11 +278,14 @@ struct LiteralExpr : public ExprNode {
                 break;
             case LT_PLACE_HOLDER:
                 std::cout << "?(" << _u.int64_val << ")";
+            case LT_MAXVALUE:
+                std::cout << "MAXVALUE";
         }
         std::cout << std::endl;
     }
     virtual void to_stream(std::ostream& os) const override;
     virtual std::string to_string() const override;
+    virtual void find_placeholder(std::unordered_set<int>& placeholders) override;
 
     static LiteralExpr* make_int(const char* str, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
@@ -269,7 +300,6 @@ struct LiteralExpr : public ExprNode {
         lit->_u.double_val = strtod(str, NULL);
         return lit;
     }
-
 
     static LiteralExpr* make_bit(const char* str, size_t len, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
@@ -339,6 +369,7 @@ struct LiteralExpr : public ExprNode {
         lit->_u.bool_val = false;
         return lit;
     }
+
     static LiteralExpr* make_null(butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_NULL;
@@ -348,7 +379,13 @@ struct LiteralExpr : public ExprNode {
     static LiteralExpr* make_place_holder(int place_holder_id, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_PLACE_HOLDER;
-        lit->_u.int64_val = place_holder_id;
+        lit->placeholder_id = place_holder_id;
+        return lit;
+    }
+
+    static LiteralExpr* make_maxvalue(butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        lit->literal_type = LT_MAXVALUE;
         return lit;
     }
 };

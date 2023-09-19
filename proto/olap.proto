@@ -1,0 +1,157 @@
+syntax="proto2";
+package baikaldb.pb;
+option cc_generic_services = true;
+
+message OLAPRawDeltaHeaderMessage {
+    required string signature = 1;
+    required int32 schema_hash = 2;
+};
+
+enum OlapPrimitiveType {
+    olap_uint8_t = 1;
+    olap_int8_t = 2;
+    olap_uint16_t = 3;
+    olap_int16_t = 4;   
+    olap_uint32_t = 5;  
+    olap_int32_t = 6;   
+    olap_uint64_t = 7;  
+    olap_int64_t = 8;   
+    olap_float_t = 9;   
+    olap_double_t = 10;  
+    olap_discrete_double_t = 11;
+    olap_bool_t = 12;    
+    olap_enum_t = 13;    
+    olap_date_t = 14;
+    olap_str36_t = 15;    
+};
+
+message OLAPHeaderMessage {
+    required string signature = 1;
+    // db.table.index determines a real table.
+    required string db_name = 2;
+    required string table_name = 3;
+    optional string abbreviated_name = 4;
+    required string index_name = 5;
+    required uint32 num_rows_per_data_block = 6;
+    required uint32 schema_hash = 7;
+    optional uint32 schema_version = 8;
+    repeated FileVersionMessage file_version = 9;
+    required bool is_healthy = 10 [default = false];
+    required BaseExpansionPolicyMessage base_expansion_policy = 12;
+    optional CumulativePolicyMessage cumulative_policy = 13;
+    required uint32 num_short_key_fields = 14;
+    repeated ColumnMessage column = 15;
+    required int64 creation_time = 16;
+    repeated int32 selectivity = 17;
+    required uint64 num_rows = 18 [default = 1];
+    optional SchemaChangeStatusMessage schema_change_status = 19;
+    optional DeleteDataPolicyMessage delete_data_policy = 20;
+    // current partition policy
+    optional PartitionPolicyMessage cur_partition_policy = 21;
+    // tier storage policy
+    optional TierStoragePolicyMessage tier_storage_policy = 22;
+}
+
+message FileVersionMessage {
+    required uint32 num_segments = 1 [default = 0];
+    required int32 start_version = 2;
+    required int32 end_version = 3;
+    required int64 version_hash = 4 [default = 0];
+    required int64 max_timestamp = 5 [default = 0];
+    required int64 index_size = 6 [default = 0];
+    required int64 data_size = 7 [default = 0];
+    required int64 creation_time = 8 [default = 0];
+    repeated int32 selectivity = 9;
+    optional uint64 num_rows = 10 [default = 0];
+    optional uint32 start_partkey = 11 [default = 0];
+    optional uint32 end_partkey = 12 [default = 16777215];
+    optional bool is_partition = 13 [ default = false];
+    optional string data_file_prefix = 14;
+    optional bool head_reverse = 15 [default = false]; 
+    optional bool version_empty = 16 [default = false];
+}
+
+message PartitionPolicyMessage {
+    required uint32 part_granularity = 1 [default = 0];
+    optional uint32 first_partkey = 2 [default = 0];
+}
+
+// @brief define OLAP base expansion trigger policy message.
+message BaseExpansionPolicyMessage {
+    required int32 min_version = 1;
+    required int32 min_age = 2;
+    required int32 max_version = 3;
+    required int32 max_age = 4;
+    optional int32 flush_be_count = 5;
+    optional PartitionPolicyMessage partition_policy = 6;
+}
+
+message CumulativePolicyMessage {
+    optional uint32 trigger_to_create_cum = 1 [default = 3];
+    optional uint32 version_gap_of_sparse_cum = 2 [default = 5];
+    optional int32 max_cumulative_version_distance = 3 [default = -1];
+}
+
+message ColumnMessage {
+    required string name = 1;
+    required string type = 2;
+    required string aggregation = 3;
+    required uint32 length = 4;
+    required bool is_key = 5;                                                               
+    optional string default_value = 6;
+    optional string referenced_column = 7;
+}
+
+message SchemaChangeStatusMessage {
+    required string related_table_name = 1;
+    required string related_index_name = 2;
+    required int32 related_schema_hash = 3;
+    repeated FileVersionMessage versions_to_be_changed = 4;
+    required int32 schema_change_type = 5;
+}
+
+// @brief define delete data policy
+message DeleteDataPolicyMessage {
+    optional int32 open_flag = 1 [default = 0]; //0:close 1:open
+    optional DelteCondMessage expire_cond = 2;
+    repeated DelteCondMessage delete_conds = 3;
+    repeated DelteCondMessage range_conds = 4;
+    optional int32 expire_cond_open_flag = 5 [default = 0]; //0:close 1:open
+    optional int32 delete_cond_open_flag = 6 [default = 0]; //0:close 1:open
+    optional int32 range_cond_open_flag = 7 [default = 0]; //0:close 1:open
+    // 标记当前be的版本 值自增，latest_edition != be_edition，全量be
+    optional int32 latest_edition = 8 [default = 0];
+    optional int32 be_edition = 9 [default = 0];
+}
+
+message DelteCondMessage {
+    required string field_name = 1;
+    required string  range = 2;
+    required string  value = 3;
+}
+
+message TierStoragePolicyMessage {
+    optional bool allow_delta_ssd = 1 [default = false];
+    // 名字待定，描述的是[某个时间点，现在], 如果base文件"包含此区间"，则放在ssd中
+    optional int32 ssd_days = 2 [default = 0];
+    // 名字待定，描述的是[负无穷，某个时间点], 如果base文件"在这个区间内"，测放入afs中
+    optional int32 afs_days = 3 [default = 0];
+}
+
+message OLAPDataHeaderMessage {
+    required string signature = 1;
+    required uint32 segment = 2;
+}
+
+message OLAPIndexHeaderMessage {
+    required string signature = 1;
+    required string table_name = 2;
+    required string index_name = 3;
+    required int32 schema_hash = 4;
+    required int32 start_version = 5;
+    required int32 end_version = 6;
+    required int64 cumulative_version_hash = 7;
+    required uint32 segment = 8;
+    required uint32 num_rows_per_block = 9; 
+    optional uint32 data_file_size = 10;
+}

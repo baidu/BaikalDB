@@ -88,8 +88,8 @@ int DMLNode::init_schema_info(RuntimeState* state) {
                 DB_WARNING("get index info failed index_id: %ld", index_id);
                 return -1;
             }
-            if (index_info->type == pb::I_FULLTEXT) {
-                _reverse_indes.push_back(index_info);
+            if (index_info->type == pb::I_FULLTEXT || index_info->type == pb::I_VECTOR) {
+                _reverse_or_vector_indexes.push_back(index_info);
             }
             if (!index_info->is_global && index_info->index_hint_status != pb::IHS_VIRTUAL) {
                 _all_indexes.push_back(index_info);
@@ -146,6 +146,11 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         std::set<int32_t> affect_field_ids;
         for (auto& slot : _update_slots) {
             affect_field_ids.insert(slot.field_id());
+        }
+        for (auto& field_info : _table_info->fields) {
+            if (affect_field_ids.count(field_info.id) == 1) {
+                _update_fields[field_info.id] = &field_info;
+            }
         }
         _update_affect_primary = false;
 
@@ -215,6 +220,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             (is_update || _node_type == pb::LOCK_PRIMARY_NODE);
     bool need_increase = true;
     auto& reverse_index_map = state->reverse_index_map();
+    auto& vector_index_map = state->vector_index_map();
     if (_on_dup_key_update) {
         _dup_update_row->clear();
         if (_values_tuple_desc != nullptr) {
@@ -243,6 +249,12 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             old_record = record->clone(true);
         }
         if (FLAGS_replace_no_get && _is_replace && _all_indexes.size() == 1) {
+            if (!_txn->fits_region_range_for_primary(*_pri_info, pk_key)) {
+                // DB_DEBUG("replace_no_get fail to fit: %s", rocksdb::Slice(pk_key.data()).ToString(true).c_str());
+                return 0;
+            }
+            ret = -2;
+        } else if (_is_merge && _all_indexes.size() == 1) {
             if (!_txn->fits_region_range_for_primary(*_pri_info, pk_key)) {
                 // DB_DEBUG("replace_no_get fail to fit: %s", rocksdb::Slice(pk_key.data()).ToString(true).c_str());
                 return 0;
@@ -278,7 +290,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                     }
                     return ret;
                 } else if (_is_replace) {
-                    for (auto& info_ptr : _reverse_indes) {
+                    for (auto& info_ptr : _reverse_or_vector_indexes) {
                         int64_t index_id = info_ptr->id;
                         std::string old_word;
                         old_record->get_reverse_word(*info_ptr, old_word);
@@ -412,6 +424,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             DB_WARNING_STATE(state, "table_id:%ld full index info not found index:%ld", _table_id, info.id);
             return -1;
         }
+        if (_ddl_need_write && info.type == pb::I_VECTOR && vector_index_map.count(info.id) == 0) {
+            DB_WARNING_STATE(state, "table_id:%ld vector index info not found index:%ld", _table_id, info.id);
+            return -1;
+        }
         if (reverse_index_map.count(info.id) == 1) {
             // inverted index only support single field
             if (info.id == -1 || info.fields.size() != 1) {
@@ -435,6 +451,28 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 return ret;
             }
             continue;
+        } else if (vector_index_map.count(info.id) == 1) {
+            // inverted index only support single field
+            if (info.id == -1 || info.fields.size() != 1) {
+                return -1;
+            }
+            auto field = record->get_field_by_idx(info.fields[0].pb_idx);
+            if (record->is_null(field)) {
+                continue;
+            }
+            std::string word;
+            ret = record->get_reverse_word(info, word);
+            if (ret < 0) {
+                DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", 
+                                 info.id);
+                return ret;
+            }
+            //DB_NOTICE("word:%s", str_to_hex(word).c_str());
+            ret = vector_index_map[info.id]->insert_vector(_txn, word, pk_str, record);
+            if (ret < 0) {
+                return ret;
+            }
+            continue;
         }
         ret = _txn->put_secondary(_region_id, info, record);
         if (ret < 0) {
@@ -449,7 +487,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     // 列存为节省空间, 插入默认值或空值时不会put
     // cstore_update_fields_partly为true时更新前旧值尚未被删除
     ret = _txn->put_primary(_region_id, *_pri_info, record,
-                            cstore_update_fields_partly ? &_update_field_ids : nullptr);
+                            cstore_update_fields_partly ? &_update_field_ids : nullptr, _is_merge);
     if (ret < 0) {
         DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
         return -1;
@@ -503,6 +541,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
         }
     }
     auto& reverse_index_map = state->reverse_index_map();
+    auto& vector_index_map = state->vector_index_map();
     for (auto& info_ptr : *_indexes_ptr) {
         IndexInfo& info = *info_ptr;
         int64_t index_id = info.id;
@@ -542,6 +581,28 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
                 return ret;
             }
             ret = reverse_index_map[info.id]->delete_reverse(_txn,
+                                                           word, pk_str, record);
+            if (ret < 0) {
+                return ret;
+            }
+            continue;
+        } else if (vector_index_map.count(info.id) == 1) {
+            // inverted index only support single field
+            if (info.id == -1 || info.fields.size() != 1) {
+                DB_WARNING_STATE(state, "indexinfo get fail, index_id:%ld", info.id);
+                return -1;
+            }
+            auto field = record->get_field_by_idx(info.fields[0].pb_idx);
+            if (record->is_null(field)) {
+                continue;
+            }
+            std::string word;
+            ret = record->get_reverse_word(info, word);
+            if (ret < 0) {
+                DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", info.id);
+                return ret;
+            }
+            ret = vector_index_map[info.id]->delete_vector(_txn,
                                                            word, pk_str, record);
             if (ret < 0) {
                 return ret;
@@ -648,8 +709,15 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     for (size_t i = 0; i < _update_exprs.size(); i++) {
         auto& slot = _update_slots[i];
         auto expr = _update_exprs[i];
-        record->set_value(record->get_field_by_tag(slot.field_id()),
+        auto field = _update_fields[slot.field_id()];
+        if (field->type == pb::FLOAT || field->type == pb::DOUBLE) {
+            auto& expr_value = expr->get_value(row).cast_to(slot.slot_type());
+            expr_value.float_precision_len = field->float_precision_len;
+            record->set_value(record->get_field_by_tag(slot.field_id()), expr_value);
+        } else {
+            record->set_value(record->get_field_by_tag(slot.field_id()),
                 expr->get_value(row).cast_to(slot.slot_type()));
+        }
         auto last_insert_id_expr = expr->get_last_insert_id();
         if (last_insert_id_expr != nullptr) {
             state->last_insert_id = last_insert_id_expr->get_value(row).get_numberic<int64_t>();
@@ -663,7 +731,7 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     return 1;
 }
 
-void DMLNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+void DMLNode::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
     ExecNode::find_place_holder(placeholders);
     for (auto& expr : _update_exprs) {
         expr->find_place_holder(placeholders);

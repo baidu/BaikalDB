@@ -229,9 +229,15 @@ void FuncExpr::to_stream(std::ostream& os) const {
             break;
         case FT_LIKE:
             os << children[0] << not_str[is_not] << " LIKE " << children[1]; 
+            if (p_cache_param != nullptr && children.size() > 2) {
+                os << children[2];
+            }
             break;
         case FT_EXACT_LIKE:
             os << children[0] << not_str[is_not] << " EXACT_LIKE " << children[1]; 
+            if (p_cache_param != nullptr && children.size() > 2) {
+                os << children[2];
+            }
             break;
         case FT_REGEXP:
             os << children[0] << not_str[is_not] << " REGEXP " << children[1]; 
@@ -302,6 +308,15 @@ void ColumnName::to_stream(std::ostream& os) const {
 }
 
 void LiteralExpr::to_stream(std::ostream& os) const {
+    // SQL参数化之后将p_cache_param设置为空，不影响原有逻辑
+    if (p_cache_param != nullptr) {
+        os << "@" << p_cache_param->placeholder_id;
+        placeholder_literal_type = LT_PLACE_HOLDER;
+        placeholder_id = p_cache_param->placeholder_id;
+        p_cache_param->parser_placeholders.emplace_back(this);
+        p_cache_param->placeholder_id++;
+        return;
+    }
     if (print_sample) {
         os << "?";
         return;
@@ -329,10 +344,14 @@ void LiteralExpr::to_stream(std::ostream& os) const {
         case LT_PLACE_HOLDER:
             os << "?";
             break;
+        case LT_MAXVALUE:
+            os << "MAXVALUE";
+            break;
         default:
             break;
     }
 }
+
 // select字段时获取表达式名字
 std::string LiteralExpr::to_string() const {
     std::ostringstream os;        
@@ -363,12 +382,20 @@ std::string LiteralExpr::to_string() const {
         case LT_PLACE_HOLDER:
             os << "?";
             break;
+        case LT_MAXVALUE:
+            os << "MAXVALUE";
+            break;
         default:
             break;
     }
     return os.str();
 }
 
+void LiteralExpr::find_placeholder(std::unordered_set<int>& placeholders) {
+    if (placeholder_literal_type == LT_PLACE_HOLDER) {
+        placeholders.insert(placeholder_id);
+    }
 }
 
+}
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -27,6 +27,7 @@
 #include "transaction.h"
 #include "reverse_index.h"
 #include "reverse_interface.h"
+#include "vector_index.h"
 #include "row_batch.h"
 #include "mysql_err_code.h"
 #include "trace_state.h"
@@ -66,6 +67,11 @@ private:
     ThreadSafeMap<uint64_t, int> _txn_limit_mapping;
 };
 
+struct StateOption {
+    bool store_compute_separate = false;
+    bool is_binlog_region = false;
+};
+
 class QueryContext;
 class NetworkSocket;
 
@@ -87,8 +93,7 @@ public:
     int init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
-        TransactionPool* pool,
-        bool store_compute_separate, bool is_binlog_region = false);
+        TransactionPool* pool, StateOption option);
 
     // baikaldb init
     int init(QueryContext* ctx, DataBuffer* send_buf);
@@ -99,8 +104,14 @@ public:
     void set_reverse_index_map(const std::map<int64_t, ReverseIndexBase*>& reverse_index_map) {
         _reverse_index_map = reverse_index_map;
     }
+    void set_vector_index_map(const std::map<int64_t, VectorIndex*>& vector_index_map) {
+        _vector_index_map = vector_index_map;
+    }
     std::map<int64_t, ReverseIndexBase*>& reverse_index_map() {
         return _reverse_index_map;
+    }
+    std::map<int64_t, VectorIndex*>& vector_index_map() {
+        return _vector_index_map;
     }
     void conn_id_cancel(uint64_t db_conn_id);
     void cancel() {
@@ -415,6 +426,10 @@ public:
 
     uint64_t          sign = 0;
     bool              need_use_read_index = false;
+    // for re
+    int                 keypoint_range = 100 * 10000;
+    int                 partition_threshold = 10000;
+    int                 range_count_limit = 0;
 private:
     bool _is_inited    = false;
     bool _is_cancelled = false;
@@ -430,6 +445,7 @@ private:
     int64_t          _region_version = 0;
     // index_id => ReverseIndex
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
+    std::map<int64_t, VectorIndex*> _vector_index_map;
     DataBuffer*     _send_buf= nullptr;
 
     bool _need_check_region = true;

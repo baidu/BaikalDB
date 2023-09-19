@@ -488,8 +488,8 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
         std::cout << "valid search word : " << search_line << '\n';
         for (auto i = 0; i < 1; ++i) {
             TimeCost tc_all;
-            TableInfo ti;
-            IndexInfo ii;
+            SmartTable ti(new TableInfo);
+            SmartIndex ii(new IndexInfo);
             std::vector<ExprNode*> _con;
             auto smart_transaction = std::make_shared<TransactionPool>();
             SmartTransaction txn(new Transaction(0, smart_transaction.get())); 

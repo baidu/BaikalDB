@@ -20,7 +20,13 @@
 
 namespace baikaldb {
 const rocksdb::WriteOptions MetaWriter::write_options;
+
+// LEVEL 1
 const std::string MetaWriter::META_IDENTIFY(1, 0x01);
+//key: ROCKS_HANG_CHECK_IDENTIFY + -1, 反复写这个key，判断store是否卡住
+const std::string MetaWriter::ROCKS_HANG_CHECK_IDENTIFY(1, 0x02);
+
+// LEVEL 2
 //key: META_IDENTIFY + region_id + identify: value
 const std::string MetaWriter::APPLIED_INDEX_INDENTIFY(1, 0x01);
 const std::string MetaWriter::NUM_TABLE_LINE_INDENTIFY(1, 0x02);
@@ -46,9 +52,10 @@ const std::string MetaWriter::BINLOG_OLDEST_IDENTIFY(1, 0x0B);
 const std::string MetaWriter::LEARNER_IDENTIFY(1, 0x0C);
 
 const std::string MetaWriter::LOCAL_STORAGE_IDENTIFY(1, 0x0D);
-
-//key: ROCKS_HANG_CHECK_IDENTIFY + -1, 反复写这个key，判断store是否卡住
-const std::string MetaWriter::ROCKS_HANG_CHECK_IDENTIFY(1, 0x02);
+//key: META_IDENIFY + region_id + identify
+const std::string MetaWriter::OLAP_REGION_IDENTIFY(1, 0x0E);
+//key: META_IDENIFY + region_id + identify
+const std::string MetaWriter::REGION_OFFLINE_BINLOG_IDENTIFY(1, 0x0F);
 
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
@@ -840,6 +847,63 @@ std::string MetaWriter::learner_key(int64_t region_id) const {
     return key.data();
 }
 
+std::string MetaWriter::olap_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::OLAP_REGION_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+
+std::string MetaWriter::offline_binlog_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::REGION_OFFLINE_BINLOG_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+
+int MetaWriter::write_olap_info(int64_t region_id, const pb::OlapRegionInfo& olap_info) {
+    std::string string_olap_info;
+    if (!olap_info.SerializeToString(&string_olap_info)) {
+        DB_FATAL("olap_info: %s serialize to string fail, region_id: %ld", 
+                olap_info.ShortDebugString().c_str(), region_id); 
+        string_olap_info.clear();
+        return -1;
+    }
+
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(olap_key(region_id)),
+                rocksdb::Slice(string_olap_info));
+    if (!status.ok()) {
+        DB_FATAL("write olap info fail, err_msg: %s, region_id: %ld, info: %s",
+                    status.ToString().c_str(), region_id, olap_info.ShortDebugString().c_str());
+        return -1;
+    }
+    return 0;
+}
+
+int MetaWriter::read_olap_info(int64_t region_id, pb::OlapRegionInfo& olap_info) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(olap_key(region_id)), &value);
+    if (status.ok()) {
+        if (!olap_info.ParseFromString(value)) {
+            DB_FATAL("parse from pb fail when read olap info, region_id: %ld, value:%s",
+                region_id, value.c_str());
+            return -1;
+        }
+        return 0;
+    } else if (status.IsNotFound()) {
+        olap_info.set_state(pb::OLAP_ACTIVE);
+        return 0;
+    } else {
+        DB_FATAL("Error while read olap info, Error %s, region_id: %ld",
+            status.ToString().c_str(), region_id);
+        return -1;
+    }
+}
+
 int MetaWriter::write_binlog_oldest_ts(int64_t region_id, int64_t ts) {
     MutTableKey value;
     value.append_i64(ts);
@@ -864,6 +928,47 @@ int64_t MetaWriter::read_binlog_oldest_ts(int64_t region_id) {
         return -1;
     }
     return TableKey(rocksdb::Slice(value)).extract_i64(0);
+}
+
+
+int MetaWriter::write_region_offline_binlog_info(int64_t region_id, const pb::RegionOfflineBinlogInfo& offline_binlog_info) {
+    std::string string_offline_binlog_info;
+    if (!offline_binlog_info.SerializeToString(&string_offline_binlog_info)) {
+        DB_FATAL("offline_binlog_info: %s serialize to string fail, region_id: %ld", 
+                offline_binlog_info.ShortDebugString().c_str(), region_id); 
+        string_offline_binlog_info.clear();
+        return -1;
+    }
+
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(offline_binlog_key(region_id)),
+                rocksdb::Slice(string_offline_binlog_info));
+    if (!status.ok()) {
+        DB_FATAL("write offline_binlog_info fail, err_msg: %s, region_id: %ld, info: %s",
+                    status.ToString().c_str(), region_id, offline_binlog_info.ShortDebugString().c_str());
+        return -1;
+    }
+    return 0;
+}
+
+int MetaWriter::read_region_offline_binlog_info(int64_t region_id, pb::RegionOfflineBinlogInfo& offline_binlog_info) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(offline_binlog_key(region_id)), &value);
+    if (status.ok()) {
+        if (!offline_binlog_info.ParseFromString(value)) {
+            DB_FATAL("parse from pb fail when read offline_binlog_info, region_id: %ld, value:%s",
+                region_id, value.c_str());
+            return -1;
+        }
+        return 0;
+    } else if (status.IsNotFound()) {
+        return 0;
+    } else {
+        DB_FATAL("Error while read offline_binlog_info, Error %s, region_id: %ld",
+            status.ToString().c_str(), region_id);
+        return -1;
+    }
 }
 
 int MetaWriter::rocks_hang_check() {

@@ -45,6 +45,7 @@
 #include "password.h"
 #include "schema_factory.h"
 #include "transaction.h"
+#include "rocksdb_filesystem.h"
 
 int main(int argc, char* argv[])
 {
@@ -608,6 +609,103 @@ TEST(ttl_test, ttl) {
     DB_WARNING("encode: %lu, 0x%8x%8x%8x%8x%8x%8x%8x%8x", encode, 
         data[0] & 0xFF, data[1]& 0xFF, data[2]& 0xFF, data[3]& 0xFF, data[4]& 0xFF, data[5]& 0xFF, data[6]& 0xFF, data[7]& 0xFF);
 }
+extern int get_size_by_external_file_name(uint64_t* size, const std::string& external_file);
+TEST(sst_ext_linker_test, sst_ext) {
+    // butil::FilePath path("sst_ext_map");
+    // butil::DeleteFile(path, false);
+    std::string name = "afs://yinglong.afs.baidu.com:9902";
+    auto pos = name.find_first_of(".");
+    std::string name2 = name.substr(6, pos - 6);
+    DB_WARNING("%s, %s", name.c_str(), name2.c_str());
+    std::map<std::string, SstExtLinker::ExtFileInfo> map;
+    auto linker = SstExtLinker::get_instance();
+    int ret = linker->init(nullptr, "./");
+    ASSERT_EQ(ret, 0);
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_1_456.extsst", "001.sst");
+    ASSERT_EQ(ret, 0);
+    {
+        SstExtLinker::ExtFileInfo info;
+        info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_1_456.extsst";
+        get_size_by_external_file_name(&info.size, info.full_name);
+        map["001.sst"] = info; 
+    }
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_2_456.extsst", "002.sst");
+    ASSERT_EQ(ret, 0);
+    {
+        SstExtLinker::ExtFileInfo info;
+        info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_2_456.extsst";
+    get_size_by_external_file_name(&info.size, info.full_name);
+        map["002.sst"] = info; 
+    }
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_3_456.extsst", "003.sst");
+    ASSERT_EQ(ret, 0);
+    {
+        SstExtLinker::ExtFileInfo info;
+        info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_3_456.extsst";
+        get_size_by_external_file_name(&info.size, info.full_name);
+        map["003.sst"] = info; 
+    }
+    ret = linker->sst_rename("002.sst", "004.sst");
+    map["004.sst"] = map["002.sst"];
+    map.erase("002.sst");
+    ASSERT_EQ(ret, 0);
+    ret = linker->sst_delete("003.sst");
+    map.erase("003.sst");
+    ASSERT_EQ(ret, 0);
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_4_456.extsst", "005.sst");
+    ASSERT_EQ(ret, 0);
+    {
+        SstExtLinker::ExtFileInfo info;
+        info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_4_456.extsst";
+        get_size_by_external_file_name(&info.size, info.full_name);
+        map["005.sst"] = info; 
+    }
+    linker->TESTclear();
+    ret = linker->load_file();
+    ASSERT_EQ(ret, 0);
+    std::map<std::string, SstExtLinker::ExtFileInfo> sst_ext_map;
+    linker->sst_ext_map(sst_ext_map);
+    for (auto& it : sst_ext_map) {
+        auto it2 = map.find(it.first);
+        ASSERT_EQ(true, it2 != map.end());
+        ASSERT_EQ(it.first, it2->first);
+        ASSERT_EQ(it.second.full_name, it2->second.full_name);
+        ASSERT_EQ(it.second.size, it2->second.size);
+    }
+    ret = linker->do_rewrite_file();
+    ASSERT_EQ(ret, 0);
 
+    union Data {
+        uint32_t   olap_uint32_t_val;
+        int32_t    olap_int32_t_val;
+        uint64_t   olap_uint64_t_val;
+        int64_t    olap_int64_t_val;
+        float    olap_float_t_val;
+        double   olap_double_t_val;
+        char            str255[255];
+    };
+    ASSERT_EQ(sizeof(Data), 256);
+    DB_WARNING("data size: %ld", sizeof(Data));
+    union Data2 {
+        uint8_t    olap_uint8_t_val;
+        int16_t    olap_int16_t_val;
+        uint32_t   olap_uint32_t_val;
+        double   olap_double_t_val;
+        char            str36[36];
+    };
+    ASSERT_EQ(sizeof(Data2), 40);
+    union Data3 {
+        uint8_t    olap_uint8_t_val;
+        int8_t     olap_int8_t_val;
+        uint64_t   olap_uint64_t_val;
+        int64_t    olap_int64_t_val;
+        float    olap_float_t_val;
+        double   olap_double_t_val;
+        char            str36[36];
+        char            str125[125];
+    };
+    ASSERT_EQ(sizeof(Data3), 128);
+    DB_WARNING("data size: %ld", sizeof(Data3));
+}
 
 }  // namespace baikal

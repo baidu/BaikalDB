@@ -13,12 +13,15 @@
 // limitations under the License.
 
 #pragma once
+
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <sstream>
-#include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #ifdef BAIDU_INTERNAL
 #include <base/arena.h>
@@ -64,6 +67,7 @@ enum NodeType {
     NT_CONSTRAINT,
     NT_INDEX_OPT,
     NT_TABLE_OPT,
+    NT_PARTITION_OPT,
     NT_CREATE_TABLE, // CreateTableStmt in ddl.h
     NT_FLOAT_OPT,    
     NT_TYPE_OPT,     // TypeOption (unsigned, zerofill) 
@@ -91,15 +95,30 @@ enum NodeType {
     NT_KILL
 };
 
+struct Node;
+struct PlanCacheParam {
+    int placeholder_id = 0;
+    std::vector<const Node*> parser_placeholders;
+};
+
 struct Node {
     virtual ~Node() {}
     NodeType node_type = NT_BASE;
     bool print_sample = false;
-    bool is_complex = false; // join和子查询认为是复杂查询
+    bool is_complex = false;                 // join和子查询认为是复杂查询
+    PlanCacheParam* p_cache_param = nullptr; // 参数化所需参数
     virtual void set_print_sample(bool print_sample_) {
         print_sample = print_sample_;
         for (int i = 0; i < children.size(); i++) {
             children[i]->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) {
+        p_cache_param = p_cache_param_;
+        for (int i = 0; i < children.size(); i++) {
+            if (children[i] != nullptr) {
+                children[i]->set_cache_param(p_cache_param_);
+            }
         }
     }
     virtual bool is_complex_node() {
@@ -129,6 +148,14 @@ struct Node {
         std::ostringstream os;
         to_stream(os);
         return os.str();
+    }
+    
+    virtual void find_placeholder(std::unordered_set<int>& placeholders) {
+        for (int i = 0; i < children.size(); i++) {
+            if (children[i] != nullptr) {
+                children[i]->find_placeholder(placeholders);
+            }
+        }
     }
 };
 inline std::ostream& operator<<(std::ostream& os, const Node* node) {

@@ -43,6 +43,11 @@ public:
         _table_info_cache_time.clear();
         _table_infos_cache.clear();
     }
+    void erase_cache(std::string& key) {
+        BAIDU_SCOPED_LOCK(_mutex);
+        _table_info_cache_time.erase(key);
+        _table_infos_cache.erase(key);
+    }
 private:
     QueryTableManager() {}
     void check_table_and_update(

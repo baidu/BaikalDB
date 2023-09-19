@@ -31,11 +31,17 @@ struct LruNode : public butil::LinkNode<LruNode<ItemKey, ItemType>> {
     ItemKey key;
 };
 
-template <typename ItemKey, typename ItemType>
+template <typename ItemKey, typename ItemType, typename HashType = std::hash<ItemKey>>
 class Cache {
 public:
     Cache() : _total_count(0), _hit_count(0), 
         _len_threshold(10000){}
+    ~Cache() {
+        for (auto& kv : _lru_map) {
+            delete kv.second;
+        }
+    }
+
     int init(int64_t len_threshold);
     std::string get_info();
     int check(const ItemKey& key);
@@ -45,7 +51,7 @@ public:
 private:
     //双链表，从尾部插入数据，超过阈值数据从头部删除
     butil::LinkedList<LruNode<ItemKey, ItemType>> _lru_list;
-    std::unordered_map<ItemKey, LruNode<ItemKey, ItemType>*> _lru_map;
+    std::unordered_map<ItemKey, LruNode<ItemKey, ItemType>*, HashType> _lru_map;
     std::mutex _mutex;
     int64_t _total_count;
     int64_t _hit_count;

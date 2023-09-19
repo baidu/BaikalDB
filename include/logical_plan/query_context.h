@@ -16,6 +16,7 @@
 #include "user_info.h"
 #include "proto/common.pb.h"
 #include "mem_row_descriptor.h"
+#include "network_socket.h"
 #include "table_record.h"
 #include "runtime_state.h"
 #include "base.h"
@@ -217,6 +218,9 @@ public:
         return user_info->need_use_read_index();
     }
 
+    // 用于PreparePlanner和PlanCache复制QueryContext
+    int copy_query_context(QueryContext* p_query_context);
+
 public:
     std::string         sql;
     std::vector<std::string> comments;
@@ -228,6 +232,7 @@ public:
     parser::StmtNode*   stmt;
     parser::NodeType    stmt_type;
     bool                is_explain = false;
+    bool                is_get_keypoint = false;
     bool                is_full_export = false;
     bool                is_straight_join = false;
     ExplainType         explain_type = EXPLAIN_NULL;
@@ -241,7 +246,9 @@ public:
 
     pb::Plan            plan;
     ExecNode*           root = nullptr;
-    std::map<int, ExprNode*> placeholders;
+    
+    // 如果输出包含AGG表达式，则在PacketNode和AggNode节点中的常量节点都需要获取并赋值
+    std::unordered_multimap<int, ExprNode*> placeholders;
     std::string         prepare_stmt_name;
     std::vector<pb::ExprNode> param_values;
 
@@ -277,6 +284,7 @@ public:
     // 当前sql涉及的表的tuple
     std::set<int64_t>   current_table_tuple_ids;
     bool                open_binlog = false;
+    bool                no_binlog = false; // 用于控制DM导入是否写binlog
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 
@@ -310,6 +318,12 @@ public:
     std::string         base_subscribe_table_name = "";
     std::string         base_subscribe_filter_field = "";
     std::unordered_map<std::string, std::string> base_subscribe_select_name_alias_map {};
+
+    // non-prepare plan cache
+    bool is_plan_cache = false;
+    bool has_find_placeholder = false;
+    PlanCacheKey cache_key;
+    std::unordered_map<int64_t, int64_t> table_version_map;
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

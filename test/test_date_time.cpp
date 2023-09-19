@@ -238,6 +238,14 @@ TEST(test_datetime_time, case_all) {
     EXPECT_EQ(datetime_to_str(time_to_datetime(str_to_time("01:28:44"))), ExprValue::Now().cast_to(pb::DATE).get_string() + " 01:28:44");
     EXPECT_EQ(time_to_str(seconds_to_time(3601)), "01:00:01");
     EXPECT_EQ(time_to_str(seconds_to_time(-3601)), "-01:00:01");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2023-07-26 19:28:44")), "2023-07-26 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("223-07-26 19:28:44")), "0223-07-26 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("23-07-26 19:28:44")), "2023-07-26 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("3-07-26 19:28:44")), "0003-07-26 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("03-07-26 19:28:44")), "2003-07-26 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("0003-07-26 19:28:44")), "0003-07-26 19:28:44");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("00010101")), "0001-01-01 00:00:00");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("010101")), "2001-01-01 00:00:00");
 }
 
 TEST(test_datetime_timestamp, case_all) {

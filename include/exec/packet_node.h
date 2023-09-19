@@ -15,6 +15,7 @@
 #pragma once
 
 #include <vector>
+#include "meta_server_interact.hpp"
 #include "mysql_wrapper.h"
 #include "exec_node.h"
 #include "data_buffer.h"
@@ -42,7 +43,7 @@ public:
         return _op_type;
     }
 
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders);
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders);
 
     size_t field_count() {
         return _fields.size();
@@ -68,6 +69,9 @@ private:
     int handle_trace(RuntimeState* state);
     int handle_trace2(RuntimeState* state);
     int handle_show_cost(RuntimeState* state);
+    int handle_keypoint(RuntimeState* state);
+    int pack_keypoints(RuntimeState* state, std::map<std::string, std::vector<std::string>>& partition_key_pks,
+                               int partition_field_id, int partition_slot_id);
     void pack_trace2(std::vector<std::map<std::string, std::string>>& info, const pb::TraceNode& trace_node,
         int64_t& total_scan_rows, int64_t& total_index_filter, int64_t& total_get_primary, int64_t& total_where_filter);
     int handle_explain(RuntimeState* state);

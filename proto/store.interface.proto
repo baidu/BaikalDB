@@ -86,6 +86,7 @@ message BinlogDesc {
     repeated uint64    signs             = 11; 
     repeated int64     txn_ids           = 12; // capture请求binlog时使用
     optional bool      flash_back_read   = 13; // capture请求binlog时使用
+    optional bool      read_offline_binlog = 14; // capture请求binlog时使用
 };
 
 message BatchStoreReq {
@@ -111,15 +112,21 @@ message RegionIndexs {
     optional string    status       = 4;
     optional string    resource_tag = 5;
     optional int64     table_id     = 6;
+    optional OlapRegionStat olap_state = 7;
+    repeated string    external_full_path = 8;
+    optional bool      path_diff = 9;
 };
 
 message ExtraReq {
     optional bool use_read_idx = 1;
     optional int64 sign_latency = 2;
+    optional OlapRegionInfo olap_info = 3;
+    optional RegionOfflineBinlogInfo offline_binlog_info = 4;
 };
 
 message ExtraRes {
     repeated RegionIndexs infos = 1; 
+    optional RegionOfflineBinlogInfo offline_binlog_info = 2;
 };
 
 message StoreReq {
@@ -257,6 +264,7 @@ message RegionIds {
     optional bool   clear_all_txns  = 5;
     optional int64  txn_timeout     = 6;
     optional bool   query_apply_index = 7;
+    repeated int64  userids         = 8;
 };
 
 message BackUpReq {};
@@ -291,6 +299,27 @@ message BackupResponse {
 };
 
 message HealthCheck {
+};
+
+enum OlapRegionStat {
+    OLAP_ACTIVE       = 0;
+    OLAP_IMMUTABLE    = 1; // region不可写
+    OLAP_FLUSHED      = 2;   // sst写入外部存储系统成功
+    OLAP_TRUNCATED    = 3; // hot ROCKSDB 已经truncate 
+};
+
+message OlapRegionInfo {
+    required OlapRegionStat state = 1 [default=OLAP_ACTIVE];
+    optional uint64   state_time = 2;
+    repeated string external_full_path = 3; // state为OLAP_FLUSHED时，记录外部关联路径
+};
+
+message RegionOfflineBinlogInfo {
+    required int64 oldest_ts = 1;
+    required int64 newest_ts = 2;
+    optional int64 task_start_ts = 3;
+    optional int64 task_end_ts = 4;
+    repeated string external_full_path = 5;
 };
 
 service StoreService {
@@ -345,4 +374,6 @@ service StoreService {
     rpc backup(BackupRequest) returns (BackupResponse);
 
     rpc get_rocks_statistic(RocksStatisticReq) returns (RocksStatisticRes);
+
+    rpc manual_link_external_sst(RegionIds) returns(StoreRes);
 };

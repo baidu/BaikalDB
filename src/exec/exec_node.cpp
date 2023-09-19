@@ -47,6 +47,7 @@ int ExecNode::init(const pb::PlanNode& node) {
     _num_rows_returned = 0;
     _node_type = node.node_type();
     _is_explain = node.is_explain();
+    _is_get_keypoint = node.is_get_keypoint();
     return 0;
 }
 
@@ -370,7 +371,7 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
     }
     return -1;
 }
-//>0代表放到cache里，==0代表不需要放到cache里
+//>0代表放到cache里，==0代表不需要放到cache里, 单语句事务node与prepare一起发送
 int ExecNode::push_cmd_to_cache(RuntimeState* state,
                                 pb::OpType op_type,
                                 ExecNode* store_request,
@@ -395,13 +396,6 @@ int ExecNode::push_cmd_to_cache(RuntimeState* state,
     store_request->set_parent(nullptr);
     plan_item.tuple_descs = state->tuple_descs();
     return 1;
-}
-
-int ExecNode::push_cmd_to_cache(RuntimeState* state,
-                                pb::OpType op_type,
-                                ExecNode* store_request) {
-    return push_cmd_to_cache(state, op_type, store_request,
-                     state->client_conn()->seq_id);
 }
 
 }

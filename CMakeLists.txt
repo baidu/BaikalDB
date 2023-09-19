@@ -55,7 +55,8 @@ SET(EXTERNAL_PROJECT_LOG_ARGS
         LOG_INSTALL 0)
 
 include(ProcessorCount)
-ProcessorCount(NUM_OF_PROCESSOR)
+#ProcessorCount(NUM_OF_PROCESSOR)
+SET(NUM_OF_PROCESSOR 4)
 message(NUM_OF_PROCESSOR: ${NUM_OF_PROCESSOR})
 
 #thread
@@ -117,6 +118,30 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(arrow SHARED IMPORTED GLOBAL)
 else ()
     include(arrow)
+endif ()
+
+#openblas
+if (WITH_SYSTEM_LIBS)
+    find_path(OPENBLAS_INCLUDE_DIR NAMES openblas/api.h)
+    find_library(OPENBLAS_LIBRARIES NAMES openblas)
+    if ((NOT OPENBLAS_INCLUDE_DIR) OR (NOT OPENBLAS_LIBRARIES))
+        message(FATAL_ERROR "Fail to find openblas")
+    endif ()
+    ADD_LIBRARY(openblas SHARED IMPORTED GLOBAL)
+else ()
+    include(openblas)
+endif ()
+
+#faiss
+if (WITH_SYSTEM_LIBS)
+    find_path(FAISS_INCLUDE_DIR NAMES faiss/api.h)
+    find_library(FAISS_LIBRARIES NAMES faiss)
+    if ((NOT FAISS_INCLUDE_DIR) OR (NOT FAISS_LIBRARIES))
+        message(FATAL_ERROR "Fail to find faiss")
+    endif ()
+    ADD_LIBRARY(faiss SHARED IMPORTED GLOBAL)
+else ()
+    include(faiss)
 endif ()
 
 #croaring
@@ -299,6 +324,8 @@ SET(DEP_INC
 
         ${Boost_INCLUDE_DIR}
         ${ARROW_INCLUDE_DIR}
+        ${OPENBLAS_INCLUDE_DIR}
+        ${FAISS_INCLUDE_DIR}
         ${CROARING_INCLUDE_DIR}
         ${RAPIDJSON_INCLUDE_DIR}
 
@@ -339,6 +366,8 @@ SET(DEP_LIB
         ${RE2_LIBRARIES}
 
         ${ARROW_LIBRARIES}
+        ${FAISS_LIBRARIES}
+        ${OPENBLAS_LIBRARIES}
         ${CROARING_LIBRARIES}
         ${Boost_LIBRARIES}
         #        ${BZ2_LIBRARIES}
@@ -357,6 +386,7 @@ SET(DEP_LIB
         rt
         m
         ${CMAKE_THREAD_LIBS_INIT}
+        gfortran
         )
 
 message("DEP INCLUDES: ${DEP_INC}")
@@ -371,8 +401,8 @@ if (NOT DEBUG)
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNDEBUG")
 endif ()
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer ")
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer ")
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
 
 add_definitions(
         -D_GNU_SOURCE
@@ -392,7 +422,7 @@ file(GLOB PROTOCOL src/protocol/*.cpp)
 list(REMOVE_ITEM PROTOCOL src/protocol/main.cpp)
 file(GLOB RAFT src/raft/*.cpp)
 file(GLOB RAFT_META src/raft_meta/*.cpp)
-file(GLOB REVERSE src/reverse/*.cpp)
+file(GLOB REVERSE src/reverse/*.cpp src/vector_index/*.cpp)
 file(GLOB RUNTIME src/runtime/*.cpp)
 file(GLOB SESSION src/session/*.cpp)
 file(GLOB SQLPARSER include/sqlparser/*.cc ${CMAKE_CURRENT_BINARY_DIR}/sqlparser/*.cc)
@@ -414,6 +444,7 @@ set(COMMON_INC
         include/protocol
         include/raft
         include/reverse
+        include/vector_index
         include/reverse/boolean_engine
         include/runtime
         include/session
@@ -443,7 +474,7 @@ file(GLOB COMMON
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 
-set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow croaring glog gflags protobuf re2 snappy rocksdb brpc braft)
+set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow openblas faiss croaring glog gflags protobuf re2 snappy rocksdb brpc braft)
 if (WITH_GPERF)
     set(COMMON_DEPS ${COMMON_DEPS} gperf)
 endif ()

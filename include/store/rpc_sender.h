@@ -48,6 +48,7 @@ public:
     static int send_init_region_method(const std::string& instance_address, 
                 const pb::InitRegion& init_region_request, 
                 pb::StoreRes& response);
-
+    static int get_peer_binlog_oldest_ts(const std::string& instance, const pb::StoreReq& request, int64_t& oldest_ts);
+    static int get_peer_offline_binlog_info(const std::string& instance, const pb::StoreReq& req, pb::StoreRes& res);
 };
 } // end of namespace

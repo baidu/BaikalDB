@@ -90,6 +90,14 @@ const std::string SQL_HANDLE_STORE_RM_TXN               = "store_rm_txn";
 // handle region_adjustkey tableID regionID start_key_region_id end_key_region_id 
 const std::string SQL_HANDLE_REGION_ADJUSTKEY           = "region_adjustkey";
 const std::string SQL_HANDLE_MODIFY_PARTITION           = "modify_partition";
+// HANDLE specify_split_keys dbName tableName [split_key1 split_key2]
+const std::string SQL_HANDLE_SPECIFY_SPLIT_KEYS         = "specify_split_keys";
+// handle convert_partition dbName tableName primary_range_partition_type [gen_range_partition_types]
+const std::string SQL_HADNLE_CONVERT_PARTITION          = "convert_partition";
+// handle offline_binlog tableid regionid oldest_ts newest_ts
+const std::string SQL_HANDLE_OFFLINE_BINLOG             = "offline_binlog";
+// handle link_external_sst dbName tableName partitionName
+const std::string SQL_HADNLE_LINK_EXTERNAL_SST          = "link_external_sst";
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -171,6 +179,15 @@ private:
     bool _handle_region_adjustkey(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle create_namespace NamespaceName
     bool _handle_create_namespace(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle specify_split_keys dbName tableName [split_key1 split_key2]
+    bool _handle_specify_split_keys(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle convert_partition dbName tableName primary_range_partition_type [gen_range_partition_types]
+    bool _handle_convert_partition(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle offline_binlog table_id region_id oldest_ts newest_ts
+    bool _handle_offline_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle link_external_sst dbName tableName partitionName
+    bool _handle_link_external_sst(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
     bool _send_store_raft_control_request(const SmartSocket& client, pb::RaftControlRequest& req, pb::RegionInfo& info);
     bool _make_response_packet(const SmartSocket& client, const std::string& response);
     void _make_handle_region_result_rows(const pb::MetaManagerRequest& request, 

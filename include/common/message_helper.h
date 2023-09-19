@@ -252,6 +252,41 @@ static ExprValue get_value(const FieldDescriptor* field, Message* message) {
     return ExprValue::Null();
 }
 
+// 仅对int型进行add
+static void add_value(const FieldDescriptor* field, Message* message, const ExprValue& value) {
+    const Reflection* reflection = message->GetReflection();
+    if (!reflection->HasField(*message, field)) {
+        return;
+    }
+    auto type = field->cpp_type();
+    switch (type) {
+        case FieldDescriptor::CPPTYPE_INT32: {
+            int32_t val = reflection->GetInt32(*message, field);
+            val += value._u.int32_val;
+            reflection->SetInt32(message, field, val);
+        } break;
+        case FieldDescriptor::CPPTYPE_UINT32: {
+            uint32_t val = reflection->GetUInt32(*message, field);
+            val += value._u.uint32_val;
+            reflection->SetUInt32(message, field, val);
+        } break;
+        case FieldDescriptor::CPPTYPE_INT64: {
+            int64_t val = reflection->GetInt64(*message, field);
+            val += value._u.int64_val;
+            reflection->SetInt64(message, field, val);
+        } break;
+        case FieldDescriptor::CPPTYPE_UINT64: {
+            uint64_t val = reflection->GetUInt64(*message, field);
+            val += value._u.uint64_val;
+            reflection->SetUInt64(message, field, val);
+        } break;
+        default: {
+            return;
+        }
+    }
+    return;
+}
+
 static int decode_field(const FieldDescriptor* field, pb::PrimitiveType field_type, 
         Message* message, const rocksdb::Slice& in) {
     const Reflection* reflection = message->GetReflection();

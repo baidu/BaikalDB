@@ -73,7 +73,11 @@ public:
             rollback();
         }
         if (_db != nullptr && _snapshot != nullptr) {
-            _db->relase_snapshot(_snapshot);
+            if (_use_cold_db) {
+                _db->relase_cold_snapshot(_snapshot);
+            } else {
+                _db->relase_snapshot(_snapshot);
+            }
         }
         delete _txn;
         _txn = nullptr;
@@ -85,6 +89,7 @@ public:
         bool dml_1pc = false; 
         bool in_fsm = false; // 是否在状态机内执行
         int64_t lock_timeout = -1;
+        bool use_cold_db = false; // olap是否使用cold rocksdb
     };
 
     // Begin a new transaction
@@ -112,7 +117,7 @@ public:
     // Value is null if engine = rocksdb_cstore;
     // First encode key with @record, and then erase the key fields from @record;
     int put_primary(int64_t region, IndexInfo& pk_index, SmartRecord record,
-                    std::set<int32_t>* update_fields = nullptr);
+                    std::set<int32_t>* update_fields = nullptr, bool is_merge = false);
 
     // Key format: region_id(8 bytes) + table_id(4 bytes) + field_id(4 bytes) + primary_key_fields;
     // Value format: non-primary key fields encode value;
@@ -249,6 +254,7 @@ public:
     int get_for_update(const std::string& key, std::string* value);
     rocksdb::Status put_kv_without_lock(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
     int put_kv(const std::string& key, const std::string& value, int64_t ttl_timestamp_us);
+    int merge_kv(const std::string& key, const std::string& value);
     int delete_kv(const std::string& key);
     
     int remove(int64_t region, IndexInfo& index, const SmartRecord key);
@@ -446,6 +452,7 @@ public:
 
     void set_use_ttl(bool use_ttl) { _use_ttl = use_ttl; }
     bool use_ttl() const { return _use_ttl; }
+    bool use_cold_db() const { return _use_cold_db; }
 
     static int get_full_primary_key(
             rocksdb::Slice  index_bytes, 
@@ -594,6 +601,15 @@ private:
         kv_op->set_is_primary_key(is_primary_key);
         kv_op->set_ttl_timestamp_us(ttl_timestamp_us);
     }
+
+    void add_kvop_merge(std::string& key, std::string& value) {
+        //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,
+        //           str_to_hex(key).c_str(), str_to_hex(value).c_str());
+        pb::KvOp* kv_op = _store_req.add_kv_ops();
+        kv_op->set_op_type(pb::OP_MERGE_KV);
+        kv_op->set_key(key);
+        kv_op->set_value(value);
+    }
     
     void add_kvop_delete(std::string& key, bool is_primary_key) {
         //DB_WARNING("txn:%p, add kvop delete key:%s", this, str_to_hex(key).c_str());
@@ -631,6 +647,7 @@ private:
     
     myrocksdb::Transaction*         _txn = nullptr;
     rocksdb::ColumnFamilyHandle*    _data_cf = nullptr;
+    rocksdb::ColumnFamilyHandle*    _cold_data_cf = nullptr;
     rocksdb::ColumnFamilyHandle*    _meta_cf = nullptr;
     const rocksdb::Snapshot*        _snapshot = nullptr;
     pb::RegionInfo*                 _region_info = nullptr;
@@ -651,6 +668,7 @@ private:
     // 执行累加时间, 主要是auto_commit dml_latency在prepare的时候记录到dml_cost_time
     int64_t                         _txn_time_cost = 0;
     std::set<ReverseIndexBase*>     _reverse_set;
+    bool                            _use_cold_db = false;
 };
 
 typedef std::shared_ptr<Transaction> SmartTransaction;

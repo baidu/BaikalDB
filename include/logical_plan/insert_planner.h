@@ -40,6 +40,8 @@ private:
 
     int gen_select_plan();
 
+    int parse_olap_sign_field_value(SmartRecord record);
+
     int fill_record_field(const parser::ExprNode* item, SmartRecord record, FieldInfo& field);
 
 private:
@@ -47,6 +49,8 @@ private:
     int64_t                 _table_id;
     std::vector<FieldInfo>  _fields;
     std::vector<FieldInfo>  _default_fields;
+    std::set<int>           _olap_uniq_field_ids;
+    int                     _olap_sign_field_id = -1;
 
     std::vector<pb::SlotDescriptor>     _update_slots;
     std::vector<pb::Expr>               _update_values;

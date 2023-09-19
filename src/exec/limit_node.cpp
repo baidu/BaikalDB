@@ -120,7 +120,7 @@ void LimitNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     return;
 }
 
-void LimitNode::find_place_holder(std::map<int, ExprNode*>& placeholders) {
+void LimitNode::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
     ExecNode::find_place_holder(placeholders);
     if (_offset_expr) {
         _offset_expr->find_place_holder(placeholders);

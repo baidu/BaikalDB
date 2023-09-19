@@ -45,6 +45,11 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
     for (auto& slot : _update_slots) {
         affect_field_ids.insert(slot.field_id());
     }
+    for (auto& field_info : _table_info->fields) {
+        if (affect_field_ids.count(field_info.id) == 1) {
+            _update_fields[field_info.id] = &field_info;
+        }
+    }
     _affect_primary = false;
     std::vector<int64_t> local_affected_indices;
     std::vector<int64_t> global_affected_indices;
@@ -240,8 +245,15 @@ void UpdateManagerNode::update_record(RuntimeState* state, SmartRecord record) {
     for (size_t i = 0; i < _update_exprs.size(); i++) {
         auto& slot = _update_slots[i];
         auto expr = _update_exprs[i];
-        record->set_value(record->get_field_by_tag(slot.field_id()),
-            expr->get_value(row).cast_to(slot.slot_type()));
+        auto field = _update_fields[slot.field_id()];
+        if (field->type == pb::FLOAT || field->type == pb::DOUBLE) {
+            auto& expr_value = expr->get_value(row).cast_to(slot.slot_type());
+            expr_value.float_precision_len = field->float_precision_len;
+            record->set_value(record->get_field_by_tag(slot.field_id()), expr_value);
+        } else {
+            record->set_value(record->get_field_by_tag(slot.field_id()),
+                expr->get_value(row).cast_to(slot.slot_type()));
+        }
         auto last_insert_id_expr = expr->get_last_insert_id();
         if (last_insert_id_expr != nullptr) {
             state->last_insert_id = last_insert_id_expr->get_value(row).get_numberic<int64_t>();

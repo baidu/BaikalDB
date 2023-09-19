@@ -72,8 +72,10 @@ private:
 class RocksdbScanNode : public ScanNode {
 public:
     RocksdbScanNode() {
+        _is_rocksdb_scan_node = true;
     }
     RocksdbScanNode(pb::Engine engine): ScanNode(engine) {
+        _is_rocksdb_scan_node = true;
     }
     virtual ~RocksdbScanNode() {
         for (auto expr : _scan_conjuncts) {
@@ -111,7 +113,7 @@ public:
         return _related_manager_node;
     }
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
-    virtual void find_place_holder(std::map<int, ExprNode*>& placeholders) {
+    virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         ScanNode::find_place_holder(placeholders);
         for (auto& expr : _scan_conjuncts) {
             expr->find_place_holder(placeholders);
@@ -134,6 +136,11 @@ public:
     int64_t get_partition_num() {
         return _table_info->partition_num;
     }
+
+    int decode_key_points(RuntimeState* state, RowBatch* batch, const rocksdb::Slice& key);
+
+    int get_key_points(RuntimeState* state, RowBatch* batch, bool* eos);
+
 
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -197,7 +204,7 @@ private:
     int64_t _num_rows_returned_by_range = 0;
     
     //被选择的索引
-    std::vector<SmartRecord> _left_records;
+    std::vector<SmartRecord> _left_records; // vector index复用
     std::vector<SmartRecord> _right_records;
     BatchTableKey _scan_range_keys;
     BatchRecord   _multiget_records;
@@ -219,6 +226,9 @@ private:
     IndexIterator* _index_iter = nullptr;
     TableIterator* _table_iter = nullptr;
     ReverseIndexBase* _reverse_index = nullptr;
+    VectorIndex* _vector_index = nullptr;
+    std::string _vector_word;
+    int _topk = 10;
 
     SmartTable       _table_info;
     SmartIndex       _pri_info;

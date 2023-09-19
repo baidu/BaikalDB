@@ -175,6 +175,13 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     if (user_privilege.has_use_read_index()) {
         tmp_mem_privilege.set_use_read_index(user_privilege.use_read_index());
     }
+    if (user_privilege.has_enable_plan_cache()) {
+        tmp_mem_privilege.set_enable_plan_cache(user_privilege.enable_plan_cache());
+    }
+    if (user_privilege.has_request_range_partition_type()) {
+        tmp_mem_privilege.set_request_range_partition_type(user_privilege.request_range_partition_type());
+    }
+
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
     std::string value;

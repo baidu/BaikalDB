@@ -128,6 +128,10 @@ public:
         }
         return MessageHelper::set_value(field, _message, value);
     }
+
+    void add_value(const FieldDescriptor* field, const ExprValue& value) {
+        MessageHelper::add_value(field, _message, value);
+    }
 /*
     // by_tag default true
     int set_default_value(const FieldInfo& field_info) {

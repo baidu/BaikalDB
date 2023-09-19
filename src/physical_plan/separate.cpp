@@ -134,6 +134,7 @@ int Separate::create_full_export_node(ExecNode* plan) {
     _is_first_full_export = false;
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
+
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     LimitNode* limit_node = static_cast<LimitNode*>(plan->get_node(pb::LIMIT_NODE));
     std::unique_ptr<ExecNode> export_node(new (std::nothrow) FullExportNode);
@@ -344,6 +345,10 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
         std::vector<ExecNode*> dual_scan_nodes;
         join->join_get_scan_nodes(pb::DUAL_SCAN_NODE, dual_scan_nodes);
         for (auto& scan_node_ptr : scan_nodes) {
+            // INFORMATION_SCHEMA
+            if (!static_cast<ScanNode*>(scan_node_ptr)->is_rocksdb_scan_node()) {
+                continue;
+            }
             ExecNode* manager_node_parent = scan_node_ptr->get_parent();
             ExecNode* manager_node_child = scan_node_ptr;
             if (manager_node_parent == nullptr) {

@@ -53,7 +53,7 @@ DEFINE_int32(batch_insert_sign_sql_interval_us, 10 * 60 * 1000 * 1000, "batch_in
 DEFINE_bool(enable_tcp_keep_alive, false, "enable tcp keepalive flag");
 DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(open_to_collect_slow_query_infos, false, "open to collect slow_query_infos, default: false");
-DEFINE_int32(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
+DEFINE_uint64(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
 DEFINE_int32(slow_query_batch_size, 100, "slow query sql batch size, default: 100");
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
@@ -308,7 +308,17 @@ int NetworkServer::insert_agg_sql_by_sign(std::map<uint64_t, std::string>& sign_
     std::set<uint64_t>& sign_to_counts) {
     std::string values;
     int values_size = 0;
+
+    std::set<uint64_t> need_filter_sign;
+    if (get_filter_sign_set(sign_sql_map, need_filter_sign) != 0) {
+        DB_WARNING("get_filter_sign failed");
+        return -1;
+    }
+
     for (const auto& it : sign_sql_map) {
+        if (need_filter_sign.count(it.first) > 0) {
+            continue;
+        }
         values_size++;
         values += it.second + ",";
         if (values_size >= FLAGS_batch_insert_agg_sql_size) {
@@ -374,6 +384,55 @@ int NetworkServer::insert_agg_sql_by_sign(const std::string& values) {
     }
     DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
               result_set.get_affected_rows(), cost.get_time(), sql.size(), sql.c_str());
+    return 0;
+}
+
+int NetworkServer::get_filter_sign_set(const std::map<uint64_t, std::string>& sign_sql_map, std::set<uint64_t>& need_filter_sign) {
+    baikal::client::ResultSet result_set;
+    TimeCost cost;
+
+    std::string sign_strings = "";
+    int sign_cnt = 0;
+    std::vector<std::string> sign_strings_vec;
+    for (auto& item: sign_sql_map) {
+        sign_strings = std::to_string(item.first) + ",";
+        sign_cnt ++;
+        if (sign_cnt > FLAGS_batch_insert_agg_sql_size) {
+            sign_strings.pop_back();
+            if (sign_strings.size() > 0) {
+                sign_strings_vec.push_back(sign_strings);
+            }
+            sign_strings = "";
+            sign_cnt = 0;
+        }
+    }
+    if(!sign_strings.empty()) {
+        sign_strings.pop_back();
+        sign_strings_vec.push_back(sign_strings);
+    }
+    if (sign_strings_vec.size() == 0) {
+        return 0;
+    }
+
+    for (int i = 0; i < sign_strings_vec.size(); i++) {
+    // 构造sql
+        std::string sql = "SELECT sign FROM BaikalStat.sign_family_table_sql WHERE sign in (" + sign_strings_vec[i] + ")";
+
+        int ret = _baikaldb->query(0, sql, &result_set);
+        if (ret != 0) {
+            DB_FATAL("sql_len:%lu query fail : %s", sql.size(), sql.c_str());
+            sql += ";\n";
+            return -1;
+        }
+        while (result_set.next()) {
+            uint64_t sign = 0;;
+            result_set.get_uint64("sign", &sign);
+            need_filter_sign.insert(sign);
+        }
+
+        DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
+                result_set.get_affected_rows(), cost.get_time(), sql.size(), sql.c_str());
+    }
     return 0;
 }
 

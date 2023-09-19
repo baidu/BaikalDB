@@ -148,7 +148,11 @@ public:
                                      const pb::RocksStatisticReq* request,
                                      pb::RocksStatisticRes* response,
                                      google::protobuf::Closure* done);
-
+                                     
+    virtual void manual_link_external_sst(google::protobuf::RpcController* controller,
+                                const pb::RegionIds* request,
+                                pb::StoreRes* response,
+                                google::protobuf::Closure* done);
     //上报心跳
     void heart_beat_thread();
 
@@ -158,12 +162,19 @@ public:
 
     void check_region_peer_delay();
 
+    void vector_compact_thread();
     void reverse_merge_thread();
     void unsafe_reverse_merge_thread();
     void ttl_remove_thread();
     void delay_remove_data_thread();
 
     void flush_memtable_thread();
+    void cold_region_flush_thread();
+    void cold_region_check();
+    void hot_region_check();
+    void olap_region_check_thread();
+
+    void binlog_region_backup_thread();
     void snapshot_thread();
     void txn_clear_thread();
     
@@ -285,6 +296,8 @@ public:
         DB_WARNING("_transfer_leader_queue join");
         _split_check_bth.join();
         DB_WARNING("split check bth join");
+        _vector_compact_bth.join();
+        DB_WARNING("vector bth check bth join");
         _merge_bth.join();
         DB_WARNING("merge bth check bth join");
         _merge_unsafe_bth.join();
@@ -295,6 +308,12 @@ public:
         DB_WARNING("delay_remove_region_bth bth check bth join");
         _flush_bth.join();
         DB_WARNING("flush check bth join");
+        _cold_region_flush_bth.join();
+        DB_WARNING("cold region flush bth join");
+        _cold_region_check_bth.join();
+        DB_WARNING("cold region check bth join");
+        _offline_binlog_backup_bth.join();
+        DB_WARNING("offline binlog backup bth join");
         _snapshot_bth.join();
         DB_WARNING("snapshot bth join");
         _txn_clear_bth.join();
@@ -311,6 +330,7 @@ public:
     MetaServerInteract& get_meta_server_interact() {
         return _meta_server_interact;
     }
+    int64_t get_region_estimate_lines(int64_t region_id, int64_t region_version);
 private:
     Store(): _split_num(0),
              _disk_total("disk_total", 0),
@@ -321,7 +341,6 @@ private:
              peer_delay_latency("peer_delay_latency", 60),
              heart_beat_count("heart_beat_count"),
              follow_read_wait_time("follow_read_wait_time", 60) {
-        bthread_mutex_init(&_param_mutex, NULL);
     }
 
     class TimePeriodChecker {
@@ -402,6 +421,8 @@ private:
     TimeCost  _last_heart_time;
     //判断是否需要分裂的线程
     Bthread _split_check_bth;
+    //向量索引定时compact线程
+    Bthread _vector_compact_bth;
     //全文索引定时merge线程
     Bthread _merge_bth;
     //全文索引(unsafe)定时线程
@@ -413,6 +434,12 @@ private:
 
     //定时flush region meta信息，确保rocksdb的wal正常删除
     Bthread _flush_bth;
+    //将冷region flush到cold rocksdb
+    Bthread _cold_region_flush_bth;
+    //定时检查cold region sst
+    Bthread _cold_region_check_bth;
+    //定时备份binlog
+    Bthread _offline_binlog_backup_bth;
     //外部控制定时触发snapshot
     Bthread _snapshot_bth;
     // thread for transaction monitor and clear
@@ -440,8 +467,14 @@ private:
     bool _has_binlog_region = false;
     BthreadCond _get_tso_cond {-1};
     BthreadCond _multi_thread_cond;
-    bthread_mutex_t _param_mutex;
+    bthread::Mutex _lock;
     std::map<std::string, std::string> _param_map;
+    struct EstimateLines {
+        int64_t region_version = 0;
+        int64_t region_lines   = 0;
+    };
+    std::map<int64_t, EstimateLines> _region_lines;
+
 public:
     bool exist_prepared_log(int64_t region_id, uint64_t txn_id) {
         if (prepared_txns.find(region_id) != prepared_txns.end()

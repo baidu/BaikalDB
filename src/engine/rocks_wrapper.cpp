@@ -23,6 +23,8 @@
 #include "raft_log_compaction_filter.h"
 #include "split_compaction_filter.h"
 #include "transaction_db_bthread_mutex.h"
+#include "rocksdb_merge_operator.h"
+#include "rocksdb_filesystem.h"
 namespace baikaldb {
 
 DEFINE_int32(rocks_transaction_lock_timeout_ms, 20000, "rocksdb transaction_lock_timeout, real lock_time is 'time + rand_less(time)' (ms)");
@@ -67,17 +69,25 @@ DEFINE_int32(target_file_size_base, 128 * 1024 * 1024, "target_file_size_base");
 DEFINE_int32(addpeer_rate_limit_level, 1, "addpeer_rate_limit_level; "
         "0:no limit, 1:limit when stalling, 2:limit when compaction pending. default(1)");
 DEFINE_bool(delete_files_in_range, true, "delete_files_in_range");
-DEFINE_bool(l0_compaction_use_lz4, true, "L0 sst compaction use lz4 or not");
 DEFINE_bool(real_delete_old_binlog_cf, true, "default true");
 DEFINE_bool(rocksdb_fifo_allow_compaction, false, "default false");
 DEFINE_bool(use_direct_io_for_flush_and_compaction, false, "default false");
 DEFINE_bool(use_direct_reads, false, "default false");
 DEFINE_int32(level0_max_sst_num, 500, "max level0 num for fast importer");
+DEFINE_string(cold_rocksdb_afs_infos, "", "afs_infos"); // 为空时不初始化cold rocksdb
+DEFINE_bool(olap_table_only, false, "default false");
+DEFINE_int32(cold_sst_block_size, 64 * 1024, "default 64K");
+DEFINE_bool(cold_sst_use_zstd, false, "default LZ4");
+DEFINE_int32(max_dict_bytes, 16 * 1024, "default 16K");
+DEFINE_int32(zstd_max_train_bytes, 256 * 1024, "default 256K");
+DEFINE_bool(olap_import_mode, false, "is olap import, default: false");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log_new";
 const std::string RocksWrapper::DATA_CF     = "data";
 const std::string RocksWrapper::METAINFO_CF = "meta_info";
+const std::string RocksWrapper::COLD_DATA_CF = "cold_data";
+const std::string RocksWrapper::COLD_BINLOG_CF = "cold_binlog";
 std::atomic<int64_t> RocksWrapper::raft_cf_remove_range_count = {0};
 std::atomic<int64_t> RocksWrapper::data_cf_remove_range_count = {0};
 std::atomic<int64_t> RocksWrapper::mata_cf_remove_range_count = {0};
@@ -86,6 +96,7 @@ RocksWrapper::RocksWrapper() : _is_init(false), _txn_db(nullptr)
     , _raft_cf_remove_range_count("raft_cf_remove_range_count")
     , _data_cf_remove_range_count("data_cf_remove_range_count")
     , _mata_cf_remove_range_count("mata_cf_remove_range_count") {
+    _cold_env = rocksdb::NewCompositeEnv(std::make_shared<RocksdbFileSystemWrapper>(true));
 }
 int32_t RocksWrapper::init(const std::string& path) {
     if (_is_init) {
@@ -128,6 +139,10 @@ int32_t RocksWrapper::init(const std::string& path) {
     } else {
         table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
     }
+    if (FLAGS_olap_table_only) {
+        // olap集群关闭bloomfilter
+        table_options.filter_policy = nullptr;
+    }
     _cache = table_options.block_cache.get();
     rocksdb::Options db_options;
     db_options.IncreaseParallelism(FLAGS_max_background_jobs);
@@ -151,6 +166,13 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_background_flushes = 2;
     db_options.env->SetBackgroundThreads(2, rocksdb::Env::HIGH);
     db_options.listeners.emplace_back(my_listener);
+    if (FLAGS_olap_import_mode) {
+        table_options.filter_policy = nullptr;
+        db_options.max_background_flushes = 4;
+        db_options.env->SetBackgroundThreads(4, rocksdb::Env::HIGH);
+        db_options.allow_concurrent_memtable_write = false;
+        db_options.memtable_factory.reset(new rocksdb::VectorRepFactory(1024*1024));
+    }
     rocksdb::TransactionDBOptions txn_db_options;
     DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
@@ -200,6 +222,7 @@ int32_t RocksWrapper::init(const std::string& path) {
         _binlog_cf_option.ttl = FLAGS_rocks_binlog_ttl_days * 24 * 60 * 60;
     }
     //todo
+    
     // prefix length: regionid(8 Bytes) tableid(8 Bytes)
     _data_cf_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(sizeof(int64_t) * 2));
@@ -208,6 +231,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.OptimizeLevelStyleCompaction();
     _data_cf_option.compaction_pri = static_cast<rocksdb::CompactionPri>(FLAGS_rocks_data_compaction_pri);
     _data_cf_option.compaction_filter = SplitCompactionFilter::get_instance();
+    _data_cf_option.merge_operator.reset(new OLAPMergeOperator());
     if (FLAGS_rocks_use_sst_partitioner_fixed_prefix) {
         // 按region_id拆分
 #if ROCKSDB_MAJOR >= 7 || (ROCKSDB_MAJOR == 6 && ROCKSDB_MINOR > 22)
@@ -232,16 +256,18 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
 
     _data_cf_option.max_bytes_for_level_base = FLAGS_max_bytes_for_level_base;
-    if (FLAGS_l0_compaction_use_lz4) {
-        _data_cf_option.compression_per_level = {rocksdb::CompressionType::kNoCompression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression};
+    // 保证L0层sst往下compaction使用LZ4, 否则快速导入发来的LZ4 sst ingest到L0层, 再往下compaction会解压, 导致磁盘暴涨
+    _data_cf_option.compression_per_level = {rocksdb::CompressionType::kNoCompression,
+                                                rocksdb::CompressionType::kLZ4Compression,
+                                                rocksdb::CompressionType::kLZ4Compression,
+                                                rocksdb::CompressionType::kLZ4Compression,
+                                                rocksdb::CompressionType::kLZ4Compression,
+                                                rocksdb::CompressionType::kLZ4Compression,
+                                                rocksdb::CompressionType::kLZ4Compression};
+    if (FLAGS_key_point_collector_interval > 0) { 
+        _data_cf_option.table_properties_collector_factories.emplace_back(
+                        new KeyPointsTblPropCollectorFactory());
     }
-
     if (FLAGS_enable_bottommost_compression) {
         _data_cf_option.bottommost_compression_opts.enabled = true;
         _data_cf_option.bottommost_compression = rocksdb::kZSTD;
@@ -257,6 +283,60 @@ int32_t RocksWrapper::init(const std::string& path) {
     _meta_info_option.compaction_pri = rocksdb::kOldestSmallestSeqFirst;
     _meta_info_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
     _meta_info_option.max_write_buffer_number_to_maintain = _meta_info_option.max_write_buffer_number;
+    if (FLAGS_olap_import_mode) {
+        _log_cf_option.max_write_buffer_number_to_maintain = 0;
+        _log_cf_option.min_write_buffer_number_to_merge = 1;
+        _binlog_cf_option.max_write_buffer_number_to_maintain = 0;
+        _binlog_cf_option.min_write_buffer_number_to_merge = 1;
+        _data_cf_option.max_write_buffer_number_to_maintain = 0;
+        _data_cf_option.min_write_buffer_number_to_merge = 1;
+        _meta_info_option.max_write_buffer_number_to_maintain = 0;
+        _meta_info_option.min_write_buffer_number_to_merge = 1;
+        _data_cf_option.compression_per_level = {rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression,
+                                                 rocksdb::CompressionType::kLZ4Compression};
+
+        // 参考rocksdb  PrepareForBulkLoad
+        // never slowdown ingest.
+        _data_cf_option.level0_file_num_compaction_trigger = (1<<30);
+        _data_cf_option.level0_slowdown_writes_trigger = (1<<30);
+        _data_cf_option.level0_stop_writes_trigger = (1<<30);
+        _data_cf_option.soft_pending_compaction_bytes_limit = 0;
+        _data_cf_option.hard_pending_compaction_bytes_limit = 0;
+
+        // no auto compactions please. The application should issue a
+        // manual compaction after all data is loaded into L0.
+        _data_cf_option.disable_auto_compactions = true;
+        // A manual compaction run should pick all files in L0 in
+        // a single compaction run.
+        _data_cf_option.max_compaction_bytes = (static_cast<uint64_t>(1) << 60);
+
+        // It is better to have only 2 levels, otherwise a manual
+        // compaction would compact at every possible level, thereby
+        // increasing the total time needed for compactions.
+        //   num_levels = 2;
+
+        // Need to allow more write buffers to allow more parallism
+        // of flushes.
+        _data_cf_option.max_write_buffer_number = 6;
+        _data_cf_option.min_write_buffer_number_to_merge = 1;
+
+        // When compaction is disabled, more parallel flush threads can
+        // help with write throughput.
+        // _data_cf_option.max_background_flushes = 4;
+
+        // Prevent a memtable flush to automatically promote files
+        // to L1. This is helpful so that all files that are
+        // input to the manual compaction are all at L0.
+        // _data_cf_option.max_background_compactions = 2;
+
+        // The compaction would create large files in L1.
+        _data_cf_option.target_file_size_base = 256 * 1024 * 1024;
+    }
 
     _db_path = path;
     // List Column Family
@@ -392,10 +472,126 @@ int32_t RocksWrapper::init(const std::string& path) {
             return -1;
         }
     }
+    int ret = init_cold_rocksdb(path + "_cold");
+    if (ret < 0) {
+        DB_FATAL("init cold rocksdb failed");
+        return -1;
+    }
     _is_init = true;
     update_oldest_ts_in_binlog_cf();
     collect_rocks_options();
     DB_WARNING("rocksdb init success");
+    return 0;
+}
+
+int32_t RocksWrapper::init_cold_rocksdb(const std::string& path) {
+    if (FLAGS_cold_rocksdb_afs_infos.empty()) {
+        DB_WARNING("not init cold rocksdb");
+        _cold_txn_db = nullptr;
+        _cold_column_family = nullptr;
+        return 0;
+    }
+    rocksdb::BlockBasedTableOptions table_options;
+    table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
+    table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 8);
+    table_options.block_size = FLAGS_cold_sst_block_size;
+    rocksdb::Options db_options;
+    db_options.create_if_missing = true;
+    db_options.skip_stats_update_on_db_open = true;
+    db_options.skip_checking_sst_file_sizes_on_db_open = true;
+    db_options.max_open_files = FLAGS_rocks_max_open_files;
+    db_options.env = _cold_env.get();
+
+    // prefix length: regionid(8 Bytes) tableid(8 Bytes)
+    _cold_option.prefix_extractor.reset(
+            rocksdb::NewFixedPrefixTransform(sizeof(int64_t) * 2));
+    _cold_option.merge_operator.reset(new OLAPMergeOperator());
+    _cold_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
+    if (FLAGS_cold_sst_use_zstd) {
+        _cold_option.compression = rocksdb::kZSTD;
+        _cold_option.compression_opts.max_dict_bytes = FLAGS_max_dict_bytes;
+        _cold_option.compression_opts.zstd_max_train_bytes = FLAGS_zstd_max_train_bytes;
+        _cold_option.compression_opts.max_dict_buffer_bytes = 128 * 1024 * 1024ULL;
+    } else {
+        _cold_option.compression = rocksdb::kLZ4Compression;
+    }
+    _cold_option.compaction_style = rocksdb::kCompactionStyleLevel;
+    _cold_option.disable_auto_compactions = true;
+    _cold_option.table_properties_collector_factories.emplace_back(
+                new KeyPointsTblPropCollectorFactory());
+
+    _cold_db_path = path;
+    // List Column Family
+    std::vector<std::string> cf_names;
+    rocksdb::Status s = rocksdb::DB::ListColumnFamilies(db_options, path, &cf_names);
+    //db已存在
+    if (s.ok()) {
+        std::vector<rocksdb::ColumnFamilyDescriptor> cf_desc;
+        std::vector<rocksdb::ColumnFamilyHandle*> handles;
+        cf_desc.reserve(1);
+        for (auto& cf_name : cf_names) {
+            if (cf_name == COLD_DATA_CF) {
+                cf_desc.emplace_back(rocksdb::ColumnFamilyDescriptor(COLD_DATA_CF, _cold_option));
+            } else if (cf_name == COLD_BINLOG_CF) {
+                cf_desc.emplace_back(rocksdb::ColumnFamilyDescriptor(COLD_BINLOG_CF, _cold_option));
+            } else {
+                cf_desc.emplace_back(rocksdb::ColumnFamilyDescriptor(cf_name, rocksdb::ColumnFamilyOptions()));
+            }
+        }
+        s = rocksdb::TransactionDB::Open(db_options, rocksdb::TransactionDBOptions(),
+                path, cf_desc, &handles, &_cold_txn_db);
+        if (s.ok()) {
+            DB_WARNING("reopen db:%s success", path.c_str());
+            for (auto& handle : handles) {
+                if (handle->GetName() == COLD_DATA_CF) {
+                    _cold_column_family = handle;
+                } else if (handle->GetName() == COLD_BINLOG_CF) {
+                    _cold_binlog_cf = handle;
+                }
+                DB_WARNING("open column family:%s", handle->GetName().c_str());
+            }
+        } else {
+            DB_FATAL("reopen db:%s fail, err_message:%s", path.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    } else {
+        // new db
+        s = rocksdb::TransactionDB::Open(db_options, rocksdb::TransactionDBOptions(), path, &_cold_txn_db);
+        if (s.ok()) {
+            DB_WARNING("open db:%s success", path.c_str());
+        } else {
+            DB_FATAL("open db:%s fail, err_message:%s", path.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    }
+
+    if (_cold_column_family == nullptr) {
+        //create data column_family
+        rocksdb::ColumnFamilyHandle* data_handle;
+        s =  _cold_txn_db->CreateColumnFamily(_cold_option, COLD_DATA_CF, &data_handle);
+        if (s.ok()) {
+            DB_WARNING("create column family success, column family:%s", COLD_DATA_CF.c_str());
+            _cold_column_family = data_handle;
+        } else {
+            DB_FATAL("create column family fail, column family:%s, err_message:%s",
+                    COLD_DATA_CF.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    }
+    if (_cold_binlog_cf == nullptr) {
+        //create code binlog column_family
+        rocksdb::ColumnFamilyHandle* binlog_handle;
+        s =  _cold_txn_db->CreateColumnFamily(_cold_option, COLD_BINLOG_CF, &binlog_handle);
+        if (s.ok()) {
+            DB_WARNING("create cold binlog cf success, column family:%s", COLD_BINLOG_CF.c_str());
+            _cold_binlog_cf = binlog_handle;
+        } else {
+            DB_FATAL("create cold binlog cf fail, column family:%s, err_message:%s",
+                    COLD_BINLOG_CF.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    }
+    DB_WARNING("cold rocksdb init success");
     return 0;
 }
 
@@ -446,6 +642,22 @@ rocksdb::Status RocksWrapper::remove_range(const rocksdb::WriteOptions& options,
     rocksdb::WriteBatch batch;
     batch.DeleteRange(column_family, begin, end);
     return _txn_db->Write(options, opt, &batch);
+}
+
+int32_t RocksWrapper::get_offline_binlog_value(int64_t region_id, int64_t ts, std::string& binlog_value) {
+    if (_cold_binlog_cf == nullptr || _cold_txn_db == nullptr) {
+        DB_WARNING("no binlog handle: ts: %ld", ts);
+        return -1;
+    }
+    MutTableKey key;
+    key.append_i64(region_id).append_i64(ts);
+    rocksdb::ReadOptions option;
+    auto status = _cold_txn_db->Get(option, _cold_binlog_cf, rocksdb::Slice(key.data()), &binlog_value);
+    if (!status.ok()) {
+        DB_WARNING("get binlog fail, err_msg: %s, ts: %ld", status.ToString().c_str(), ts);
+        return -1;
+    }
+    return 0;
 }
 
 int32_t RocksWrapper::get_binlog_value(int64_t ts, std::string& binlog_value) {
@@ -729,5 +941,21 @@ void RocksWrapper::adjust_option(std::map<std::string, std::string> new_options)
             }
         }
     });
+}
+
+void RocksWrapper::get_key_points(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props) {
+    std::vector<rocksdb::Range> ranges { rocksdb::Range(start, end) };
+    auto data_cf = get_data_handle();
+    if (data_cf == nullptr) {
+        return;
+    } 
+    _txn_db->GetPropertiesOfTablesInRange(data_cf, ranges.data(), ranges.size(), &props);
+}
+
+void RocksWrapper::get_cold_key_points(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props) {
+    std::vector<rocksdb::Range> ranges { rocksdb::Range(start, end) };
+    if (_cold_txn_db != nullptr) {
+        _cold_txn_db->GetPropertiesOfTablesInRange(_cold_column_family, ranges.data(), ranges.size(), &props);
+    }
 }
 }

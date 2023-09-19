@@ -150,9 +150,10 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     }
     ctx->root->close(&state);
     if (ret < 0) {
-        DB_WARNING("plan open fail: %d, %s", state.error_code, state.error_msg.str().c_str());
+        std::string str = state.error_msg.str();
+        DB_WARNING("plan open fail: %d, %s", state.error_code, str.c_str());
         ctx->stat_info.error_code = state.error_code;
-        ctx->stat_info.error_msg.str(state.error_msg.str());
+        ctx->stat_info.error_msg.str(str);
         ctx->stat_info.region_count = state.region_count;
         ctx->stat_info.num_scan_rows = state.num_scan_rows();
         return ret;
@@ -175,7 +176,8 @@ int PhysicalPlanner::full_export_start(QueryContext* ctx, DataBuffer* send_buf) 
     state.is_full_export = true;
     ret = ctx->root->open(&state);
     if (ret < 0) {
-        DB_WARNING("plan open fail: %d, %s", state.error_code, state.error_msg.str().c_str());
+        std::string str = state.error_msg.str();
+        DB_WARNING("plan open fail: %d, %s", state.error_code, str.c_str());
         ctx->stat_info.error_code = state.error_code;
         ctx->stat_info.error_msg.str(state.error_msg.str());
         ctx->root->close(&state);
@@ -192,7 +194,8 @@ int PhysicalPlanner::full_export_next(QueryContext* ctx, DataBuffer* send_buf, b
     ret = root->get_next(&state);
     if (ret < 0) {
         root->close(&state);
-        DB_WARNING("plan get_next fail: %d, %s", state.error_code, state.error_msg.str().c_str());
+        std::string str = state.error_msg.str();
+        DB_WARNING("plan get_next fail: %d, %s", state.error_code, str.c_str());
         ctx->stat_info.error_code = state.error_code;
         ctx->stat_info.error_msg.str(state.error_msg.str());
         return ret;
