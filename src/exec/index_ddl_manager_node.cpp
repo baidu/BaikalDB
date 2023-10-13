@@ -28,6 +28,7 @@ IndexDDLManagerNode::~IndexDDLManagerNode() {
 }
 
 int IndexDDLManagerNode::open(RuntimeState* state) {
+    state->set_is_ddl_work(true);
     int ret = 0;
     auto client_conn = state->client_conn();
     if (client_conn == nullptr) {

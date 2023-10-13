@@ -635,6 +635,10 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         *eos = true;
         return 0;
     }
+    if (state->is_timeout()) {
+        DB_WARNING_STATE(state, "sql exec reach timeout");
+        return -1;
+    }
     ON_SCOPE_EXIT(([this, state]() {
         state->set_num_scan_rows(_scan_rows);
         state->set_read_disk_size(_read_disk_size);

@@ -1187,7 +1187,10 @@ NetworkServer::NetworkServer():
         _is_init(false),
         _shutdown(false),
         _epoll_info(NULL),
-        _heart_beat_count("heart_beat_count") {
+        _heart_beat_count("heart_beat_count"),
+        _client_conn_count("client_connection_count", 0),
+        _client_sql_running_count("client_sql_running_count", 0),
+        _client_sql_running_max_latency("client_sql_running_max_latency", 0) {
 }
 
 NetworkServer::~NetworkServer() {
@@ -1452,6 +1455,7 @@ int NetworkServer::make_worker_process() {
         _health_check_bth.run([this]() {store_health_check();});
     }
 
+    _conn_bvars_update_bth.run([this](){client_conn_bvars_update();});
 
     // Create listen socket.
     _service = create_listen_socket();
@@ -1664,5 +1668,38 @@ bool NetworkServer::set_fd_flags(int fd) {
     return true;
 }
 
+void NetworkServer::client_conn_bvars_update() {
+    while (!_shutdown) {
+        bthread_usleep(2000000);
+        int32_t running_sql_cnt = 0;
+        int32_t client_cnt = 0;
+        int32_t max_running_time = 0;
+        EpollInfo* epoll_info = NetworkServer::get_instance()->get_epoll_info();
+        for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+            const SmartSocket& sock = epoll_info->get_fd_mapping(idx);
+            if (sock == NULL || sock->is_free || sock->fd == -1 || sock->ip == "") {
+                if (sock != NULL) {
+                    DB_WARNING_CLIENT(sock, "processlist, free:%d", sock->is_free);
+                }
+                continue;
+            }
+            if (!sock->user_info || !sock->query_ctx) {
+                continue;
+            }
+            auto command = sock->query_ctx->mysql_cmd;
+            client_cnt ++;
+            if (command != COM_SLEEP) {
+                running_sql_cnt ++;
+                int32_t cost = time(NULL) - sock->last_active;
+                if (cost > max_running_time) {
+                    max_running_time = cost;
+                }
+            }
+        }
+        _client_conn_count.set_value(client_cnt);
+        _client_sql_running_count.set_value(running_sql_cnt);
+        _client_sql_running_max_latency.set_value(max_running_time);
+    }
+}
 
 } // namespace baikal

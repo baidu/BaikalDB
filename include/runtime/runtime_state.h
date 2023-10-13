@@ -408,6 +408,16 @@ public:
     int64_t get_cost_time() {
         return time_cost.get_time();
     }
+    bool is_timeout() {
+        return _sql_exec_timeout > 0 && time_cost.get_time()  > _sql_exec_timeout * 1000L;
+    }
+
+    bool is_ddl_work() {
+        return _is_ddl_work;
+    }
+    void set_is_ddl_work(bool is_ddl_work) {
+        _is_ddl_work = is_ddl_work;
+    }
 
 public:
     uint64_t          txn_id = 0;
@@ -446,6 +456,8 @@ public:
     int                 keypoint_range = 100 * 10000;
     int                 partition_threshold = 10000;
     int                 range_count_limit = 0;
+    int64_t           _sql_exec_timeout = -1;
+    bool              _is_ddl_work = false;
 private:
     bool _is_inited    = false;
     bool _is_cancelled = false;
