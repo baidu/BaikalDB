@@ -531,8 +531,8 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
 }
 
 bool Separate::need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id) {
-    if (ctx->get_runtime_state()->single_sql_autocommit() && 
-        (ctx->enable_2pc 
+    if (ctx->get_runtime_state()->single_sql_autocommit() &&
+        (ctx->enable_2pc
             || _factory->need_begin_txn(main_table_id)
             || ctx->open_binlog || ctx->execute_global_flow)) {
         auto client = ctx->client_conn;
@@ -749,7 +749,7 @@ int Separate::create_lock_node(
         const std::vector<int64_t>& global_affected_indexs,
         const std::vector<int64_t>& local_affected_indexs,
         ExecNode* manager_node) {
-    
+
     //构造LockAndPutPrimaryNode
     if (mode == Separate::BOTH || mode == Separate::PRIMARY) {
         std::unique_ptr<LockPrimaryNode> primary_node(new (std::nothrow) LockPrimaryNode);
@@ -766,7 +766,7 @@ int Separate::create_lock_node(
         lock_primary_node->set_table_id(table_id);
         lock_primary_node->set_row_ttl_duration_s(_row_ttl_duration);
         primary_node->init(plan_node);
-        primary_node->set_affected_index_ids(local_affected_indexs); 
+        primary_node->set_affected_index_ids(local_affected_indexs);
         manager_node->add_child(primary_node.release());
     }
     //构造LockAndPutSecondaryNode
@@ -798,6 +798,7 @@ int Separate::separate_update(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     UpdateNode* update_node = static_cast<UpdateNode*>(plan->get_node(pb::UPDATE_NODE));
+    LimitNode* limit_node = static_cast<LimitNode*>(update_node->get_node(pb::LIMIT_NODE));
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     pb::PlanNode pb_manager_node;
@@ -816,7 +817,7 @@ int Separate::separate_update(QueryContext* ctx) {
     }
     int64_t main_table_id = update_node->table_id();
     bool should_delete = false;
-    if (!need_separate_plan(ctx, main_table_id)) {
+    if (!need_separate_plan(ctx, main_table_id) && limit_node == nullptr) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_UPDATE);
         manager_node->set_region_infos(region_infos);
@@ -843,6 +844,7 @@ int Separate::separate_delete(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     DeleteNode* delete_node = static_cast<DeleteNode*>(plan->get_node(pb::DELETE_NODE));
+    LimitNode* limit_node = static_cast<LimitNode*>(delete_node->get_node(pb::LIMIT_NODE));
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     int64_t main_table_id = delete_node->table_id();
@@ -860,11 +862,11 @@ int Separate::separate_delete(QueryContext* ctx) {
         return -1;
     }
     bool should_delete = false;
-    if (!need_separate_plan(ctx, main_table_id)) {
+    if (!need_separate_plan(ctx, main_table_id) && limit_node == nullptr) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_DELETE);
         manager_node->set_region_infos(region_infos);
-        manager_node->add_child(packet_node->children(0));       
+        manager_node->add_child(packet_node->children(0));
     } else {
         int ret = separate_global_delete(manager_node.get(), delete_node, scan_nodes[0]);
         if (ret < 0) {
@@ -911,8 +913,23 @@ int Separate::separate_global_update(
         return -1;
     }
     select_manager_node->set_region_infos(scan_node->region_infos());
-    select_manager_node->add_child(update_node->children(0));
-    delete_manager_node->add_child(select_manager_node.release());
+
+    LimitNode* limit_node = static_cast<LimitNode*>(update_node->get_node(pb::LIMIT_NODE));
+    SortNode* sort_node = static_cast<SortNode*>(update_node->get_node(pb::SORT_NODE));
+    if (limit_node != nullptr) {
+        if (sort_node != nullptr) {
+            select_manager_node->init_sort_info(sort_node);
+            sort_node->set_limit(limit_node->other_limit());
+        }
+        select_manager_node->set_limit(limit_node->other_limit());
+        select_manager_node->add_child(limit_node->children(0));
+        limit_node->clear_children();
+        limit_node->add_child(select_manager_node.release());
+        delete_manager_node->add_child(limit_node);
+    } else {
+        select_manager_node->add_child(update_node->children(0));
+        delete_manager_node->add_child(select_manager_node.release());
+    }
     manager_node->set_update_exprs(update_node->update_exprs());
     update_node->clear_children();
     update_node->clear_update_exprs();
@@ -956,9 +973,9 @@ int Separate::separate_global_update(
         return -1;
     }
     insert_manager_node->init(pb_insert_manager_node);
-    create_lock_node(main_table_id, pb::LOCK_DML, Separate::BOTH, 
-            manager_node->global_affected_index_ids(), 
-            manager_node->local_affected_index_ids(), 
+    create_lock_node(main_table_id, pb::LOCK_DML, Separate::BOTH,
+            manager_node->global_affected_index_ids(),
+            manager_node->local_affected_index_ids(),
             insert_manager_node.get());
     pri_node = static_cast<LockPrimaryNode*>(insert_manager_node->children(0));
     pri_node->set_affect_primary(manager_node->affect_primary());
@@ -990,8 +1007,23 @@ int Separate::separate_global_delete(
     std::map<int64_t, pb::RegionInfo> region_infos =
             static_cast<RocksdbScanNode*>(scan_node)->region_infos();
     select_manager_node->set_region_infos(region_infos);
-    select_manager_node->add_child(delete_node->children(0));
-    manager_node->add_child(select_manager_node.release());
+
+    LimitNode* limit_node = static_cast<LimitNode*>(delete_node->get_node(pb::LIMIT_NODE));
+    SortNode* sort_node = static_cast<SortNode*>(delete_node->get_node(pb::SORT_NODE));
+    if (limit_node != nullptr) {
+        if (sort_node != nullptr) {
+            select_manager_node->init_sort_info(sort_node);
+            sort_node->set_limit(limit_node->other_limit());
+        }
+        select_manager_node->set_limit(limit_node->other_limit());
+        select_manager_node->add_child(limit_node->children(0));
+        limit_node->clear_children();
+        limit_node->add_child(select_manager_node.release());
+        manager_node->add_child(limit_node);
+    } else {
+        select_manager_node->add_child(delete_node->children(0));
+        manager_node->add_child(select_manager_node.release());
+    }
     delete_node->clear_children();
 
     create_lock_node(main_table_id, pb::LOCK_GET_DML, Separate::PRIMARY, manager_node);

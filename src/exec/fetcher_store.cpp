@@ -36,7 +36,7 @@ DEFINE_int64(print_time_us, 10000, "print log when time_cost > print_time_us(us)
 DEFINE_int64(baikaldb_alive_time_s, 10 * 60, "obervation time length in baikaldb, default:10 min");
 BRPC_VALIDATE_GFLAG(print_time_us, brpc::NonNegativeInteger);
 DEFINE_int32(fetcher_request_timeout, 100000,
-                    "store as server request timeout, default:10000ms");
+                    "store as server request timeout, default:100000ms");
 DEFINE_int32(fetcher_connect_timeout, 1000,
                     "store as server connect timeout, default:1000ms");
 DEFINE_bool(fetcher_follower_read, true, "where allow follower read for fether");

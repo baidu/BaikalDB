@@ -57,6 +57,9 @@ int UpdatePlanner::plan() {
     if (0 != create_update_node(update_node)) {
         return -1;
     }
+    if (0 != create_limit_node()) {
+        return -1;
+    }
     if (0 != create_sort_node()) {
         return -1;
     }
@@ -80,9 +83,16 @@ int UpdatePlanner::plan() {
 }
 
 int UpdatePlanner::parse_limit() {
-    if (_update->limit != nullptr) {
-        _ctx->stat_info.error_code = ER_SYNTAX_ERROR;
-        _ctx->stat_info.error_msg << "syntax error! update does not support limit";
+    if (_update->limit == nullptr) {
+        return 0;
+    }
+    parser::LimitClause* limit = _update->limit;
+    if (limit->offset != nullptr && 0 != create_expr_tree(limit->offset, _limit_offset, CreateExprOptions())) {
+        DB_WARNING("create limit offset expr failed");
+        return -1;
+    }
+    if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, CreateExprOptions())) {
+        DB_WARNING("create limit offset expr failed");
         return -1;
     }
     return 0;
@@ -105,7 +115,7 @@ int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
     }
 
     update_node->set_node_type(pb::UPDATE_NODE);
-    update_node->set_limit(_limit_count);
+    update_node->set_limit(-1);
     update_node->set_is_explain(_ctx->is_explain);
     update_node->set_num_children(1); //TODO 
     pb::DerivePlanNode* derive = update_node->mutable_derive_node();
@@ -126,6 +136,32 @@ int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
         auto& slot = get_scan_ref_slot(try_to_lower(_current_tables[0]), table_id, field.id, field.type);
         update->add_primary_slots()->CopyFrom(slot);
     }
+    return 0;
+}
+
+int UpdatePlanner::create_limit_node() {
+    if (_update->limit == nullptr) {
+        return 0;
+    }
+    pb::PlanNode* limit_node = _ctx->add_plan_node();
+    limit_node->set_node_type(pb::LIMIT_NODE);
+    limit_node->set_limit(-1);
+    limit_node->set_is_explain(_ctx->is_explain);
+    limit_node->set_num_children(1); //TODO
+
+    pb::DerivePlanNode* derive = limit_node->mutable_derive_node();
+    pb::LimitNode* limit = derive->mutable_limit_node();
+    if (_limit_offset.nodes_size() > 0) {
+        limit->mutable_offset_expr()->CopyFrom(_limit_offset);
+        limit->set_offset(0);
+    } else {
+        limit->set_offset(0);
+    }
+
+    if (_limit_count.nodes_size() > 0) {
+        limit->mutable_count_expr()->CopyFrom(_limit_count);
+    }
+    _ctx->enable_2pc = true;
     return 0;
 }
 
@@ -241,8 +277,7 @@ int UpdatePlanner::parse_where() {
 
 int UpdatePlanner::parse_orderby() {
     if (_update->order != nullptr) {
-        DB_WARNING("update doesnot support orderby");
-        return -1;
+        return create_orderby_exprs(_update->order);
     }
     return 0;
 }

@@ -21,7 +21,8 @@ namespace baikaldb {
 int DeleteManagerNode::open(RuntimeState* state) {
     ExecNode* child_node = _children[0];
     //如果没有全局二级索引，直接走逻辑
-    if (child_node->node_type() != pb::SELECT_MANAGER_NODE) {
+    if ((child_node->node_type() != pb::SELECT_MANAGER_NODE) &&
+        (child_node->node_type() != pb::LIMIT_NODE)) {
         int ret =  DmlManagerNode::open(state);
         if (ret >= 0) {
             if (process_binlog(state, true) < 0) {
@@ -62,8 +63,8 @@ int DeleteManagerNode::init_delete_info(const pb::UpdateNode& update_node) {
 }
 
 int DeleteManagerNode::open_global_delete(RuntimeState* state) {
-    ExecNode* select_manager_node = _children[_execute_child_idx++];
-    auto ret = select_manager_node->open(state);
+    ExecNode* select_manager_or_limit_node = _children[_execute_child_idx++];
+    auto ret = select_manager_or_limit_node->open(state);
     if (ret < 0) {
         DB_WARNING("select manager node fail");
         return ret;
@@ -74,7 +75,7 @@ int DeleteManagerNode::open_global_delete(RuntimeState* state) {
     std::vector<SmartRecord>        scan_records;
     do {
         RowBatch batch;
-        ret = select_manager_node->get_next(state, &batch, &eos);
+        ret = select_manager_or_limit_node->get_next(state, &batch, &eos);
         if (ret < 0) {
             DB_WARNING("children:get_next fail:%d", ret);
             return ret;

@@ -24,8 +24,7 @@ namespace baikaldb {
 class UpdatePlanner : public LogicalPlanner {
 public:
     UpdatePlanner(QueryContext* ctx) : 
-        LogicalPlanner(ctx), 
-        _limit_count(-1) {}
+        LogicalPlanner(ctx) {}
 
     virtual ~UpdatePlanner() {}
     virtual int plan();
@@ -33,6 +32,7 @@ public:
 private:
 
     int create_update_node(pb::PlanNode* update_node);
+    int create_limit_node();
 
     // method to parse SQL parts
     int parse_kv_list();
@@ -43,9 +43,10 @@ private:
 private:
     parser::UpdateStmt*                 _update;
     std::vector<pb::Expr>               _where_filters;
-    int32_t                             _limit_count;
     std::vector<pb::SlotDescriptor>     _update_slots;
     std::vector<pb::Expr>               _update_values;
+    pb::Expr                            _limit_offset;
+    pb::Expr                            _limit_count;
 };
 } //namespace baikal
 
