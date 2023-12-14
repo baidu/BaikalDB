@@ -363,13 +363,15 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             }
         }
         // TODO 除了not in外，其他计算null的地方在index_selector判断了，应该统一处理
-        if (expr->node_type() == pb::NOT_PREDICATE) {
-            if (static_cast<NotPredicate*>(expr)->always_null_or_false()) {
-                DB_WARNING("expr not is always null or false");
-                ctx->return_empty = true;
-                return 0;
-            }
-        }
+        //
+        // not in (结果为空的子查询)这里应该为true, 删掉
+        // if (expr->node_type() == pb::NOT_PREDICATE) {
+        //     if (static_cast<NotPredicate*>(expr)->always_null_or_false()) {
+        //         DB_WARNING("expr not is always null or false");
+        //         ctx->return_empty = true;
+        //         return 0;
+        //     }
+        // }
         if (expr->children_size() < 2) {
             continue;
         }
