@@ -210,6 +210,7 @@ void FunctionManager::register_operators() {
     register_object_ret("ifnull", ifnull, pb::STRING);
     register_object_ret("nullif", nullif, pb::STRING);
     register_object_ret("isnull", isnull, pb::BOOL);
+    register_object_ret("find_in_set", find_in_set, pb::INT64);
     // MurmurHash sign
     register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
     register_object_ret("md5", md5, pb::STRING);

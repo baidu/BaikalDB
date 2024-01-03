@@ -19,6 +19,7 @@
 #include "hll_common.h"
 #include "datetime.h"
 #include <boost/date_time/gregorian/gregorian.hpp>
+#include <boost/algorithm/string.hpp>
 #include <cctype>
 #include <cmath>
 #include <algorithm>
@@ -2294,6 +2295,24 @@ ExprValue cast_to_double(const std::vector<ExprValue>& input) {
     }
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::DOUBLE);
+}
+
+ExprValue find_in_set(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    std::string target = ExprValue(input[0]).cast_to(pb::STRING).str_val;
+    std::string set_str = ExprValue(input[1]).cast_to(pb::STRING).str_val;
+    std::vector<std::string>set;
+    boost::split(set, set_str, boost::is_any_of(","));
+    ExprValue res(pb::INT64);
+    for (int i = 0; i < set.size(); i ++) {
+        if (set[i] == target) {
+            res._u.int64_val = i + 1;
+            break;
+        }
+    }
+    return res;
 }
 
 }
