@@ -35,11 +35,14 @@ public:
     virtual std::vector<ExprNode*>* mutable_conjuncts() {
         return &_conjuncts;
     }
+    std::vector<ExprNode*>& conjuncts() {
+        return _conjuncts;
+    }
 
     void add_conjunct(ExprNode* conjunct) {
         _conjuncts.push_back(conjunct);
     }
-    const std::vector<ExprNode*>& pruned_conjuncts() {
+    std::vector<ExprNode*>& pruned_conjuncts() {
         return _pruned_conjuncts;
     }
 
@@ -73,6 +76,9 @@ public:
         for (auto& expr : _conjuncts) {
             expr->replace_slot_ref_to_literal(sign_set, literal_maps);
         }
+    }
+    void modify_conjuncts(std::vector<ExprNode*>& conjuncts) {
+        _conjuncts.swap(conjuncts);
     }
     void modifiy_pruned_conjuncts_by_index(std::vector<ExprNode*>& filter_condition) {
         _pruned_conjuncts.clear();

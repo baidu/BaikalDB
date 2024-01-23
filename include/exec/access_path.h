@@ -194,6 +194,7 @@ public:
     bool _in_pred = false;
     bool _is_eq_or_in = true;
     bool _need_filter = false;
+    uint32_t prefix_ratio_index_score = UINT32_MAX;
 };
 typedef std::shared_ptr<AccessPath> SmartPath;
 }
