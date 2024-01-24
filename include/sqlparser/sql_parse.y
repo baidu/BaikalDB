@@ -511,6 +511,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RowExprList
     RowExpr
     ColumnName
+    IndexColumnField
     ExprList
     Expr
     ElseOpt
@@ -544,6 +545,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %type <item> 
     ColumnNameListOpt 
     ColumnNameList 
+    IndexColumnList
     TableName
     AssignmentList 
     ByList 
@@ -589,6 +591,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IndexOption
     IndexType
     TablePartitionOpt
+    IndexTypeOpt
     PartitionRange
     PartitionRangeList
     PartitionRangeListOpt
@@ -1091,6 +1094,31 @@ ColumnName:
         name->table = $3;
         name->name = $5;
         $$ = name;
+    }
+    ;
+
+IndexColumnField:
+    ColumnName {
+        $$ = $1;
+    }
+    | ColumnName '(' INTEGER_LIT ')' {
+        $$ = $1;
+    }
+    | IndexColumnField Order {
+        $$ = $1;
+    }
+    ;
+
+IndexColumnList:
+    IndexColumnField {
+        Node* list = new_node(Node);
+        list->children.reserve(10, parser->arena);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | IndexColumnList ',' IndexColumnField {
+        $1->children.push_back($3, parser->arena);
+        $$ = $1;
     }
     ;
 
@@ -3525,17 +3553,17 @@ ConstraintKeywordOpt:
     ;
 
 ConstraintElem:
-    PRIMARY KEY '(' ColumnNameList ')' IndexOptionList
+    PRIMARY KEY IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_PRIMARY;
-        for (int idx = 0; idx < $4->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$6;
+        item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | FULLTEXT KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
+    | FULLTEXT KeyOrIndexOpt IndexName '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_FULLTEXT;
@@ -3557,50 +3585,50 @@ ConstraintElem:
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | KeyOrIndex IndexName '(' ColumnNameList ')' IndexOptionList
+    | KeyOrIndex IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
         item->name = $2;
-        for (int idx = 0; idx < $4->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
-        }
-        item->index_option = (IndexOption*)$6;
-        $$ = item;
-    }
-    | UNIQUE KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
-    {
-        Constraint* item = new_node(Constraint);
-        item->type = CONSTRAINT_UNIQ;
-        item->name = $3;
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | KeyOrIndex GlobalOrLocal IndexName '(' ColumnNameList ')' IndexOptionList
+    | UNIQUE KeyOrIndexOpt IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_UNIQ;
+        item->name = $3;
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$8;
+        $$ = item;
+    }
+    | KeyOrIndex GlobalOrLocal IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
         item->index_dist = static_cast<IndexDistibuteType>($2);
         item->name = $3;
-        for (int idx = 0; idx < $5->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$7;
+        item->index_option = (IndexOption*)$8;
         $$ = item;
     }
-    | UNIQUE KeyOrIndexOpt GlobalOrLocal IndexName '(' ColumnNameList ')' IndexOptionList
+    | UNIQUE KeyOrIndexOpt GlobalOrLocal IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_UNIQ;
         item->index_dist = static_cast<IndexDistibuteType>($3);
         item->name = $4;
-        for (int idx = 0; idx < $6->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
+        for (int idx = 0; idx < $7->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($7->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$8;
+        item->index_option = (IndexOption*)$9;
         $$ = item;
     }
     ;
@@ -3668,6 +3696,14 @@ IndexType:
         $$ = nullptr;
     }
     ;
+
+IndexTypeOpt:
+    {
+        $$ = nullptr;
+    }
+    | IndexType {
+        $$ = nullptr;
+    };
 
 /*************************************Type Begin***************************************/
 Type:
@@ -4948,7 +4984,7 @@ AlterTableStmt:
         }
         $$ = stmt;
     }
-    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
+    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName ON TableName '(' IndexColumnList ')' IndexOptionList
     {
         AlterTableStmt* stmt = new_node(AlterTableStmt);
         stmt->table_name = (TableName*)$6;
@@ -4966,7 +5002,7 @@ AlterTableStmt:
         stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
         $$ = stmt;
     }
-    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
+    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName ON TableName '(' IndexColumnList ')' IndexOptionList
     {
         AlterTableStmt* stmt = new_node(AlterTableStmt);
         stmt->table_name = (TableName*)$7;
