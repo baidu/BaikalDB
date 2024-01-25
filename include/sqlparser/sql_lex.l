@@ -163,7 +163,6 @@ REAL { return REAL; }
 REFERENCES { return REFERENCES; }
 REGEXP { return REGEXP; }
 RENAME { return RENAME; }
-REPEAT { return REPEAT; }
 REPLACE { return REPLACE; }
 MERGE { return MERGE; }
 RESTRICT { return RESTRICT; }
@@ -337,7 +336,6 @@ REDUNDANT { un_reserved_keyword(yylval, yyscanner, parser); return REDUNDANT; }
 RELOAD { un_reserved_keyword(yylval, yyscanner, parser); return RELOAD; }
 REPEATABLE { un_reserved_keyword(yylval, yyscanner, parser); return REPEATABLE; }
 REPLICATION { un_reserved_keyword(yylval, yyscanner, parser); return REPLICATION; }
-REVERSE { un_reserved_keyword(yylval, yyscanner, parser); return REVERSE; }
 ROLLBACK { un_reserved_keyword(yylval, yyscanner, parser); return ROLLBACK; }
 ROUTINE { un_reserved_keyword(yylval, yyscanner, parser); return ROUTINE; }
 ROW { un_reserved_keyword(yylval, yyscanner, parser); return ROW; }

@@ -583,12 +583,9 @@ ExprValue ascii(const std::vector<ExprValue>& input) {
     }
 
     ExprValue tmp(pb::INT32);
-
-    if (input[0].str_val.empty()) {
-        tmp._u.int32_val = 0;
-    } else {
-        tmp._u.int32_val = static_cast<int32_t>(input[0].str_val[0]);
-    }
+    ExprValue in = input[0];
+    in.cast_to(pb::STRING);
+    tmp._u.int32_val = static_cast<uint8_t>(in.str_val[0]);
 
     return tmp;
 }
@@ -624,19 +621,22 @@ ExprValue insert(const std::vector<ExprValue>& input) {
     }
 
     int pos = input[1].get_numberic<int>();
-    if (pos < 0) {
+    if (pos < 1) {
         return input[0];
     }
+    pos -= 1;
 
     int len = input[2].get_numberic<int>();
     if (len <= 0) {
         return input[0];
     }
-
     ExprValue tmp(pb::STRING);
     tmp.str_val = input[0].str_val;
-    tmp.str_val.replace(pos, len, input[2].str_val);
-    
+    if (pos >= input[0].str_val.size()) {
+        return tmp;
+    }
+    tmp.str_val.replace(pos, len, input[3].str_val);
+
     return tmp;
 }
 
@@ -1745,6 +1745,54 @@ ExprValue date_sub(const std::vector<ExprValue>& input) {
     return ret;
 }
 
+ExprValue addtime(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue arg2 = input[1];
+    if (arg2.cast_to(pb::TIME)._u.int32_val == 0) {
+        return input[0];
+    }
+    ExprValue arg1 = input[0];
+    int seconds = time_to_seconds(arg2._u.int32_val);
+    if (arg1.cast_to(pb::DATETIME)._u.int64_val != 0) {
+        arg1.cast_to(pb::TIMESTAMP);
+        arg1._u.int32_val += seconds;
+        return arg1.cast_to(pb::STRING);
+    } else {
+        arg1 = input[0];
+        if (arg1.cast_to(pb::TIME)._u.int32_val != 0) {
+            arg1._u.int32_val = seconds_to_time(time_to_seconds(arg1._u.int32_val) + seconds);
+            return arg1.cast_to(pb::STRING);
+        }
+    }
+    return ExprValue::Null();
+}
+
+ExprValue subtime(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue arg2 = input[1];
+    if (arg2.cast_to(pb::TIME)._u.int32_val == 0) {
+        return input[0];
+    }
+    ExprValue arg1 = input[0];
+    int seconds = time_to_seconds(arg2._u.int32_val);
+    if (arg1.cast_to(pb::DATETIME)._u.int64_val != 0) {
+        arg1.cast_to(pb::TIMESTAMP);
+        arg1._u.int32_val -= seconds;
+        return arg1.cast_to(pb::STRING);
+    } else {
+        arg1 = input[0];
+        if (arg1.cast_to(pb::TIME)._u.int32_val != 0) {
+            arg1._u.int32_val = seconds_to_time(time_to_seconds(arg1._u.int32_val) - seconds);
+            return arg1.cast_to(pb::STRING);
+        }
+    }
+    return ExprValue::Null();
+}
+
 ExprValue extract(const std::vector<ExprValue>& input) {
     if (input.size() != 2 || input[0].is_null() || input[1].is_null()) {
         return ExprValue::Null();
@@ -2481,6 +2529,415 @@ ExprValue find_in_set(const std::vector<ExprValue>& input) {
             break;
         }
     }
+    return res;
+}
+
+ExprValue export_set(const std::vector<ExprValue>& input) {
+    if (input.size() != 4 && input.size() != 5) {
+        return ExprValue::Null();
+    }
+    ExprValue num = input[0];
+    num.cast_to(pb::INT64);
+    ExprValue on = input[1];
+    on.cast_to(pb::STRING);
+    ExprValue off = input[2];
+    off.cast_to(pb::STRING);
+    ExprValue sep = input[3];
+    sep.cast_to(pb::STRING);
+    ExprValue len(pb::INT64);
+    len._u.int64_val = 64;
+    if (input.size() == 5) {
+        len = input[4];
+        len.cast_to(pb::INT64);
+    }
+    if (len._u.int64_val > 64 || len._u.int64_val < 1) {
+        len._u.int64_val = 64;
+    }
+    ExprValue res(pb::STRING);
+    for (int i = 0; i < len._u.int64_val; i ++) {
+        if (i != 0) {
+            res.str_val += sep.str_val;
+        }
+        if (num._u.int64_val & 1) {
+            res.str_val += on.str_val;
+        } else {
+            res.str_val += off.str_val;
+        }
+        num._u.int64_val >>= 1;
+    }
+    return res;
+}
+
+ExprValue to_base64(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::STRING);
+    ExprValue res(pb::STRING);
+    butil::StringPiece sp(tmp.str_val);
+    butil::Base64Encode(sp, &res.str_val);
+    return res;
+}
+
+ExprValue from_base64(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::STRING);
+    ExprValue res(pb::STRING);
+    butil::StringPiece sp(tmp.str_val);
+    butil::Base64Decode(sp, &res.str_val);
+    return res;
+}
+
+ExprValue make_set(const std::vector<ExprValue>& input) {
+    if (input.size() < 2) {
+        return ExprValue::Null();
+    }
+    ExprValue num = input[0];
+    num.cast_to(pb::INT64);
+    ExprValue res(pb::STRING);
+    bool flag = false;
+    ExprValue t;
+    for (size_t i = 0; i < input.size() - 1; ++ i) {
+        if (num._u.int64_val & 1) {
+            if (flag) {
+                res.str_val += ",";
+            }
+            t = input[i+1];
+            t.cast_to(pb::STRING);
+            res.str_val += t.str_val;
+            flag = true;
+        }
+        num._u.int64_val >>= 1;
+        if (num._u.int64_val == 0) {
+            break;
+        }
+    }
+    return res;
+}
+
+ExprValue oct(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue num = input[0];
+    num.cast_to(pb::INT64);
+    ExprValue res(pb::STRING);
+    std::stringstream ss;
+    ss << std::oct << num._u.int64_val;
+    res.str_val = ss.str();
+    return res;
+}
+
+ExprValue hex(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue num = input[0];
+    ExprValue res(pb::STRING);
+    if (num.is_numberic() ){
+        num.cast_to(pb::INT64);
+        std::stringstream ss;
+        ss << std::hex << num._u.int64_val;
+        res.str_val = ss.str();
+    } else {
+        num.cast_to(pb::STRING);
+        char * c = (char *)malloc(2 * num.str_val.size() + 1);
+        int idx = 0;
+        for (char ch : num.str_val) {
+            sprintf(c + idx, "%02X", static_cast<uint8_t>(ch));
+            idx += 2;
+        }
+        c[2 * num.str_val.size()] = 0;
+        res.str_val = c;
+        delete c;
+    }
+    std::transform(res.str_val.begin(), res.str_val.end(), res.str_val.begin(), ::toupper);
+    return res;
+}
+
+ExprValue bin(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue num = input[0];
+    num.cast_to(pb::INT64);
+    ExprValue res(pb::STRING);
+    uint64_t u = static_cast<unsigned long long>(num._u.int64_val);
+    if (u == 0) {
+        res.str_val = "0";
+        return res;
+    }
+    while (u) {
+        res.str_val += (u & 1) + '0';
+        u >>= 1;
+    }
+    std::reverse(res.str_val.begin(), res.str_val.end());
+    return res;
+}
+
+ExprValue space(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue arg1 = input[0];
+    arg1.cast_to(pb::INT32);
+    int num = arg1._u.int32_val;
+    if (num < 1 || num > 1000000) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::STRING);
+    for (int i = 0; i < num; i ++ ){
+        res.str_val += " ";
+    }
+    return res;
+}
+
+ExprValue unhex(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue argv = input[0];
+    argv.cast_to(pb::STRING);
+    ExprValue result(pb::STRING);
+    int num = 0;
+    bool flag = argv.str_val.size() % 2 == 0;
+    for (char ch : argv.str_val) {
+        flag = !flag;
+        if (ch >= '0' && ch <= '9') {
+            num = (num << 4) + (ch - '0');
+        } else if (ch >= 'A' && ch <= 'F') {
+            num = (num << 4) + (ch - 'A' + 10);
+        } else if (ch >= 'a' && ch <= 'f') {
+            num = (num << 4) + (ch - 'a' + 10);
+        } else {
+            return ExprValue::Null();
+        }
+        if (flag) {
+            result.str_val += static_cast<char>(num);
+            num = 0;
+        }
+    }
+    if (num != 0) {
+        result.str_val += static_cast<char>(num);
+    }
+    return result;
+}
+
+ExprValue elt(const std::vector<ExprValue>& input) {
+    if (input.size() <= 1) {
+        return ExprValue::Null();
+    }
+    ExprValue idx = input[0];
+    idx.cast_to(pb::INT64);
+    int64_t index = idx._u.int64_val;
+    if (index < 1 || index > input.size() -1) {
+        return ExprValue::Null();
+    }
+    ExprValue res = input[index];
+    return res.cast_to(pb::STRING);
+}
+
+ExprValue char_length(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue argv = input[0];
+    argv.cast_to(pb::STRING);
+    int length = 0;
+    int bytes = 0;
+    for (char ch : argv.str_val) {
+        if ((ch & 0b10000000) == 0b00000000) {  // 1 byte
+            ++length;
+            bytes = 0;
+        } else if ((ch & 0b11100000) == 0b11000000) {  // 2 bytes
+            ++length;
+            bytes = 1;
+        } else if ((ch & 0b11110000) == 0b11100000) {  // 3 bytes
+            bytes = 2;
+        } else if ((ch & 0b11111000) == 0b11110000) {  // 4 bytes
+            bytes = 3;
+        } else if ((ch & 0b11111100) == 0b11111000) {  // 5 bytes
+            bytes = 4;
+        } else if ((ch & 0b11111110) == 0b11111100) {  // 6 bytes
+            bytes = 5;
+        }
+        if (bytes == 0) {
+            bytes = 1;
+        } else {
+            --bytes;
+        }
+    }
+    ExprValue res(pb::INT32);
+    res._u.int32_val = length;
+    return res;
+}
+
+ExprValue format(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue num = input[0];
+    num.cast_to(pb::DOUBLE);
+    ExprValue pre = input[1];
+    pre.cast_to(pb::INT32);
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(pre._u.int32_val) << num._u.double_val;
+    std::string str = stream.str();
+    int len = str.size();
+    int pos = str.find('.');
+    if (pos == std::string::npos) {
+        pos = len;
+    }
+    for (int i = pos - 3; i > 0; i -= 3) {
+        str.insert(i, ",");
+    }
+    ExprValue res(pb::STRING);
+    res.str_val = str;
+    return res;
+}
+
+ExprValue field(const std::vector<ExprValue>& input) {
+    if (input.size() < 2) {
+        return ExprValue::Null();
+    }
+    ExprValue target = input[0];
+    target.cast_to(pb::STRING);
+    ExprValue res(pb::INT32);
+    for (size_t i = 1; i < input.size(); i ++) {
+        ExprValue tmp = input[i];
+        if (tmp.cast_to(pb::STRING).str_val == target.str_val) {
+            res._u.int32_val = i;
+            break;
+        }
+    }
+    return res;
+}
+
+ExprValue quote(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue in = input[0];
+    in.cast_to(pb::STRING);
+    std::string result = "'";
+    for (char c : in.str_val) {
+        if (c == '\'') {
+            result += "\\'";
+        } else if (c == '\\') {
+            result += "\\\\";
+        } else {
+            result += c;
+        }
+    }
+    result += "'";
+    ExprValue res(pb::STRING);
+    res.str_val = result;
+    return res;
+}
+
+ExprValue func_char(const std::vector<ExprValue>& input) {
+    if (input.size() < 1) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::STRING);
+    for (size_t i = 0; i < input.size(); ++ i) {
+        ExprValue tmp = input[i];
+        if (tmp.is_null()) {
+            continue;
+        }
+        tmp.cast_to(pb::UINT32);
+        std::string cur;
+        while (tmp._u.uint32_val) {
+            cur += static_cast<char>(tmp._u.uint32_val & 255);
+            tmp._u.uint32_val >>= 8;
+        }
+        std::reverse(cur.begin(), cur.end());
+        res.str_val += cur;
+    }
+    return res;
+}
+
+ExprValue soundex(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue argv = input[0];
+    argv.cast_to(pb::STRING);
+    std::string result;
+    for (char ch : argv.str_val) {
+        result += std::tolower(ch);
+    }
+
+    int len = argv.str_val.length();
+    int i = 0;
+    int size = 0;
+    char last_char = 0;
+    std::string code;
+    while (i < len && size < 3) {
+        unsigned char c = argv.str_val[i];
+        int bytes = 1;
+        if (c >= 0xc0 && c <= 0xdf) {
+            bytes = 2;
+        } else if (c >= 0xe0 && c <= 0xef) {
+            bytes = 3;
+        } else if (c >= 0xf0 && c <= 0xf7) {
+            bytes = 4;
+        } else if (c >= 0xf8 && c <= 0xfb) {
+            bytes = 5;
+        } else if (c >= 0xfc && c <= 0xfd) {
+            bytes = 6;
+        }
+        if (code.empty()) {
+            if (bytes == 1 && std::tolower(c) >= 'a' and std::tolower(c) <= 'z') {
+                code = std::toupper(c);
+            } else if (bytes > 1) {
+                if (i + bytes < len) {
+                    code = argv.str_val.substr(i, bytes);
+                }
+            }
+        } else if (bytes == 1) {
+            char low = std::tolower(c);
+            char cur_c = '0';
+            switch (low) {
+                case 'b': case 'f': case 'p': case 'v':
+                    cur_c = '1';
+                    break;
+                case 'c': case 'g': case 'j': case 'k': case 'q': case 's': case 'x': case 'z':
+                    cur_c= '2';
+                    break;
+                case 'd': case 't':
+                    cur_c = '3';
+                    break;
+                case 'l':
+                    cur_c = '4';
+                    break;
+                case 'm': case 'n':
+                    cur_c = '5';
+                    break;
+                case 'r':
+                    cur_c = '6';
+                    break;
+            }
+            if (cur_c != '0' && cur_c != last_char) {
+                size += 1;
+                code += cur_c;
+                last_char = cur_c;
+            }
+        }
+        i += bytes;
+    }
+    if (!code.empty()) {
+        while (size < 3) {
+            code += '0';
+            size ++;
+        }
+    }
+    ExprValue res(pb::STRING);
+    res.str_val = code;
     return res;
 }
 

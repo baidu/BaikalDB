@@ -356,6 +356,23 @@ std::string time_to_str(int32_t time) {
     snprintf(buf, sizeof(buf), "%s%02d:%02d:%02d", OP_STR[minus], hour, min, sec);
     return std::string(buf);
 }
+
+int32_t time_to_seconds(int32_t time) {
+    bool minus = false;
+    if (time < 0) {
+        minus = true;
+        time = -time;
+    }
+    int hour = (time >> 12) & 0x3FF;
+    int min = (time >> 6) & 0x3F;
+    int sec = time & 0x3F;
+    int32_t res = sec + min * 60 + hour * 3600;
+    if (minus) {
+        res = res * -1;
+    }
+    return res;
+}
+
 int32_t str_to_time(const char* str_time) {
     while (*str_time == ' ') {
         str_time++;

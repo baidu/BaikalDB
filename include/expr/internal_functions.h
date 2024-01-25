@@ -66,6 +66,23 @@ ExprValue lpad(const std::vector<ExprValue>& input);
 ExprValue rpad(const std::vector<ExprValue>& input);
 ExprValue instr(const std::vector<ExprValue>& input);
 ExprValue json_extract(const std::vector<ExprValue>& input);
+ExprValue export_set(const std::vector<ExprValue>& input);
+ExprValue to_base64(const std::vector<ExprValue>& input);
+ExprValue from_base64(const std::vector<ExprValue>& input);
+ExprValue make_set(const std::vector<ExprValue>& input);
+ExprValue oct(const std::vector<ExprValue>& input);
+ExprValue hex(const std::vector<ExprValue>& input);
+ExprValue unhex(const std::vector<ExprValue>& input);
+ExprValue bin(const std::vector<ExprValue>& input);
+ExprValue space(const std::vector<ExprValue>& input);
+ExprValue elt(const std::vector<ExprValue>& input);
+ExprValue char_length(const std::vector<ExprValue>& input);
+ExprValue format(const std::vector<ExprValue>& input);
+ExprValue field(const std::vector<ExprValue>& input);
+ExprValue quote(const std::vector<ExprValue>& input);
+ExprValue func_char(const std::vector<ExprValue>& input);
+ExprValue soundex(const std::vector<ExprValue>& input);
+
 
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);
@@ -118,6 +135,9 @@ ExprValue tso_to_timestamp(const std::vector<ExprValue>& input);
 ExprValue timestamp_to_tso(const std::vector<ExprValue>& input);
 ExprValue to_days(const std::vector<ExprValue>& input);
 ExprValue to_seconds(const std::vector<ExprValue>& input);
+ExprValue addtime(const std::vector<ExprValue>& input);
+ExprValue subtime(const std::vector<ExprValue>& input);
+
 // hll functions
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);

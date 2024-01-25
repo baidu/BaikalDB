@@ -191,7 +191,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     REFERENCES
     REGEXP
     RENAME
-    REPEAT
     REPLACE
     MERGE
     RESTRICT
@@ -385,7 +384,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RELOAD
     REPEATABLE
     REPLICATION
-    REVERSE
     ROLLBACK
     ROUTINE
     ROW
@@ -2023,7 +2021,7 @@ FunctionNameDateArith:
      DATE_ADD | DATE_SUB
      ;
 FunctionNameSubstring:
-    SUBSTR | SUBSTRING
+    SUBSTR | SUBSTRING | MID
     ;
 
 TimestampUnit:
@@ -2502,6 +2500,34 @@ FunctionCallNonKeyword:
         fun->children.push_back($5, parser->arena);
         $$ = fun;
     }
+    | FORMAT '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "format";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;
+    }
+    | INSERT '(' Expr ',' Expr ',' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "insert";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        fun->children.push_back($7, parser->arena);
+        fun->children.push_back($9, parser->arena);
+        $$ = fun;
+    }
+    | ASCII '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "ascii";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CHAR '(' ExprList ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "char";
+        fun->children = $3->children;
+        $$ = fun;
+    }
     ;
 FunctionCallKeyword:
     VALUES '(' ColumnName ')' {
@@ -2889,7 +2915,6 @@ AllIdent:
     | RELOAD
     | REPEATABLE
     | REPLICATION
-    | REVERSE
     | ROLLBACK
     | ROUTINE
     | ROW

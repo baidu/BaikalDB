@@ -41,6 +41,7 @@ extern int32_t datetime_to_time(uint64_t datetime);
 extern uint64_t time_to_datetime(int32_t time);
 extern std::string time_to_str(int32_t time);
 extern int32_t str_to_time(const char* str_time);
+extern int32_t time_to_seconds(int32_t time);
 extern int32_t seconds_to_time(int32_t seconds);
 struct DateTime;
 extern uint64_t bin_date_to_datetime(DateTime time_struct);
