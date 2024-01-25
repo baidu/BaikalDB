@@ -160,7 +160,17 @@ void FunctionManager::register_operators() {
     register_object_ret("now", now, pb::DATETIME);
     register_object_ret("sysdate", now, pb::DATETIME);
     register_object_ret("utc_timestamp", utc_timestamp, pb::DATETIME);
+    register_object_ret("utc_date", utc_date, pb::DATE);
+    register_object_ret("utc_time", utc_time, pb::TIME);
     register_object_ret("date_format", date_format, pb::STRING);
+    register_object_ret("period_diff", period_diff, pb::INT32);
+    register_object_ret("period_add", period_add, pb::STRING);
+    register_object_ret("minute", minute, pb::INT32);
+    register_object_ret("second", second, pb::INT32);
+    register_object_ret("time", func_time, pb::TIME);
+    register_object_ret("quarter", func_quarter, pb::INT32);
+    register_object_ret("microsecond", microsecond, pb::INT32);
+    register_object_ret("timestampadd", timestampadd, pb::TIMESTAMP);
     /*
         str_to_date实现较为复杂，需要满足任意格式的string转换为标准形式的DATETIME，现在为了方便确保str_to_date可以使用，
         默认string是标准形式的date，故其实现内容和date_format函数一致
@@ -198,6 +208,8 @@ void FunctionManager::register_operators() {
     register_object_ret("extract", extract, pb::UINT32);
     register_object_ret("tso_to_timestamp", tso_to_timestamp, pb::DATETIME);
     register_object_ret("timestamp_to_tso", timestamp_to_tso, pb::INT64);
+    register_object_ret("to_days", to_days, pb::INT64);
+    register_object_ret("to_seconds", to_seconds, pb::INT64);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);

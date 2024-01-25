@@ -926,6 +926,152 @@ ExprValue utc_timestamp(const std::vector<ExprValue>& input) {
     return ExprValue::UTC_TIMESTAMP(0);
 }
 
+ExprValue utc_date(const std::vector<ExprValue>& input) {
+    return ExprValue::UTC_TIMESTAMP(0).cast_to(pb::DATE);
+}
+
+ExprValue utc_time(const std::vector<ExprValue>& input) {
+    return ExprValue::UTC_TIMESTAMP(0).cast_to(pb::TIME);
+}
+
+ExprValue period_add(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::INT64);
+    int year = tmp._u.int64_val / 100;
+    int month = tmp._u.int64_val % 100;
+    ExprValue num = input[1];
+    num.cast_to(pb::INT32);
+    month += num._u.int32_val + year * 12 - 1;
+    year = month / 12;
+    month = month % 12 + 1;
+    char buf[30] = {0};
+    snprintf(buf, sizeof(buf), "%d%02d", year, month);
+    ExprValue res(pb::STRING);
+    res.str_val = buf;
+    return res;
+}
+
+ExprValue period_diff(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue dt1 = input[0];
+    dt1.cast_to(pb::INT64);
+
+    ExprValue dt2 = input[0];
+    dt2.cast_to(pb::INT64);
+
+    int month1 = dt1._u.int64_val / 100 * 12 + dt1._u.int64_val % 100;
+    int month2 = dt2._u.int64_val / 100 * 12 + dt2._u.int64_val % 100;
+    int diff = month1 - month2;
+    ExprValue res(pb::INT32);
+    res._u.int32_val = diff;
+    return res;
+}
+
+ExprValue minute(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::TIME);
+    ExprValue res(pb::INT32);
+    res._u.int32_val = (tmp._u.int32_val >> 6 ) & 0x3F;
+    return res;
+}
+
+ExprValue func_time(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue res = input[0];
+    res.cast_to(pb::TIME);
+    return res;
+}
+
+ExprValue func_quarter(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::DATE);
+    int year_month = ((tmp._u.int32_val >> 5) & 0x1FFFF);
+    int month = year_month % 13;
+    int quarter = (month - 1) / 3;
+    ExprValue res(pb::INT32);
+    res._u.int32_val = quarter + 1;
+    return res;
+}
+
+ExprValue microsecond(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::STRING);
+    int idx = 0;
+    while (idx < tmp.str_val.length()) {
+        if (tmp.str_val[idx] == '.') {
+            break;
+        }
+        idx ++;
+    }
+    idx ++;
+    int micro = 0;
+    int cnt = 0;
+    while (idx < tmp.str_val.length()) {
+        if (tmp.str_val[idx] >= '0' && tmp.str_val[idx] <= '9') {
+            micro = micro * 10 + tmp.str_val[idx] - '0';
+            cnt ++;
+            idx ++;
+            continue;
+        }
+        break;
+    }
+    if (cnt == 0 || cnt > 6) {
+        micro = 0;
+    }
+    ExprValue res(pb::INT32) ;
+    res._u.int32_val = micro;
+    return res;
+}
+
+ExprValue second(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::TIME);
+    ExprValue res(pb::INT32);
+    res._u.int32_val = tmp._u.int32_val & 0x3F;
+    return res;
+}
+
+ExprValue timestampadd(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    ExprValue ret = input[2];
+    ret.cast_to(pb::TIMESTAMP);
+    ExprValue num = input[1];
+    num.cast_to(pb::INT32);
+    if (input[0].str_val == "second") {
+        ret._u.uint32_val += num._u.int32_val;
+    } else if (input[0].str_val == "minute") {
+        ret._u.uint32_val += num._u.int32_val * 60;
+    } else if (input[0].str_val == "hour") {
+        ret._u.uint32_val += num._u.int32_val * 3600;
+    } else if (input[0].str_val == "day") {
+        ret._u.uint32_val += num._u.int32_val * 24 * 3600;
+    } else {
+        return ExprValue::Null();
+    }
+    return ret;
+}
+
 ExprValue timestamp(const std::vector<ExprValue>& input) {
     if (input.size() == 0 || input.size() > 2) {
         return ExprValue::Null();
@@ -992,6 +1138,29 @@ ExprValue time_format(const std::vector<ExprValue>& input) {
     format_result.str_val = s;
     return format_result;
 }
+
+ExprValue to_days(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::TIMESTAMP);
+    tmp.cast_to(pb::INT64);
+    tmp._u.int64_val = (tmp._u.int64_val + 62167248000) / 86400;
+    return tmp;
+}
+
+ExprValue to_seconds(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::TIMESTAMP);
+    tmp.cast_to(pb::INT64);
+    tmp._u.int64_val += 62167248000;
+    return tmp;
+}
+
 
 ExprValue convert_tz(const std::vector<ExprValue>& input) {
     if (input.size() != 3){

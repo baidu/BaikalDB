@@ -199,8 +199,6 @@ UPDATE { return UPDATE; }
 USAGE { return USAGE; }
 USE { return USE; }
 USING { return USING; }
-UTC_DATE { return UTC_DATE; }
-UTC_TIME { return UTC_TIME; }
 VALUES { return VALUES; }
 LONG { return LONG; }
 VARCHAR { return VARCHAR; }
