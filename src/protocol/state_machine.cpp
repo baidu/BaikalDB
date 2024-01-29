@@ -28,6 +28,8 @@ DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second")
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
 DEFINE_int64(baikal_max_allowed_packet, 268435456LL, "The largest possible packet : 256M");
 DEFINE_int32(query_cache_timeout_s, 10, "query cache timeout(s)");
+DEFINE_string(default_charset_name, "utf8", "default charset name: utf8");
+DEFINE_int32(default_charset_number, 33, "default charset number: 33");
 DECLARE_int64(print_time_us);
 DECLARE_string(meta_server_bns);
 DECLARE_int32(baikal_port);
@@ -575,10 +577,10 @@ int StateMachine::_auth_read(SmartSocket sock) {
         sock->charset_name = "utf8";
         sock->charset_num = 33;
     } else {
-        DB_TRACE_CLIENT(sock, "unknown charset num: %u, charset will be set as gbk.",
-            charset_num);
-        sock->charset_name = "gbk";
-        sock->charset_num = 28;
+        DB_TRACE_CLIENT(sock, "unknown charset num: %u, charset will be set as %s.",
+            FLAGS_default_charset_number, FLAGS_default_charset_name.c_str());
+        sock->charset_name = FLAGS_default_charset_name;
+        sock->charset_num = FLAGS_default_charset_number;
     }
     off += 23;
 
