@@ -270,6 +270,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ANY
     ASCII
     AUTO_INCREMENT
+    AUTOEXTEND_SIZE
     AVG_ROW_LENGTH
     AVG
     BEGINX
@@ -308,9 +309,11 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DUPLICATE
     DYNAMIC
     ENABLE
+    ENCRYPTION
     END
     ENGINE
     ENGINES
+    ENGINE_ATTRIBUTE
     ENUM
     EVENT
     EVENTS
@@ -319,6 +322,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     EXECUTE
     FIELDS
     FIRST
+    LAST
     FIXED
     FILE_T
     FLUSH
@@ -331,6 +335,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IDENTIFIED
     ISOLATION
     INDEXES
+    INSERT_METHOD
     INVOKER
     JSON
     KEY_BLOCK_SIZE
@@ -384,6 +389,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ROW_COUNT
     ROW_FORMAT
     SECOND
+    SECONDARY_ENGINE_ATTRIBUTE
     SECURITY
     SEPARATOR
     SERIALIZABLE
@@ -398,6 +404,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SHUTDOWN
     START
     STATS_PERSISTENT
+    STATS_AUTO_RECALC
+    STATS_SAMPLE_PAGES
     STATUS
     SUPER
     SOME
@@ -590,6 +598,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IndexType
     TablePartitionOpt
     IndexTypeOpt
+    RowFormatOpt
+    InsertMethodOpt
     PartitionRange
     PartitionRangeList
     PartitionRangeListOpt
@@ -2756,6 +2766,7 @@ AllIdent:
     | ANY
     | ASCII
     | AUTO_INCREMENT
+    | AUTOEXTEND_SIZE
     | AVG_ROW_LENGTH
     | AVG
     | BEGINX
@@ -2794,9 +2805,11 @@ AllIdent:
     | DUPLICATE
     | DYNAMIC
     | ENABLE
+    | ENCRYPTION
     | END
     | ENGINE
     | ENGINES
+    | ENGINE_ATTRIBUTE
     | ENUM
     | EVENT
     | EVENTS
@@ -2805,6 +2818,7 @@ AllIdent:
     | EXECUTE
     | FIELDS
     | FIRST
+    | LAST
     | FIXED
     | FILE_T
     | FLUSH
@@ -2817,6 +2831,7 @@ AllIdent:
     | IDENTIFIED
     | ISOLATION
     | INDEXES
+    | INSERT_METHOD
     | INVOKER
     | JSON
     | KEY_BLOCK_SIZE
@@ -2870,6 +2885,7 @@ AllIdent:
     | ROW_COUNT
     | ROW_FORMAT
     | SECOND
+    | SECONDARY_ENGINE_ATTRIBUTE
     | SECURITY
     | SEPARATOR
     | SERIALIZABLE
@@ -2884,6 +2900,8 @@ AllIdent:
     | SHUTDOWN
     | START
     | STATS_PERSISTENT
+    | STATS_AUTO_RECALC
+    | STATS_SAMPLE_PAGES
     | STATUS
     | SUPER
     | SOME
@@ -3539,8 +3557,10 @@ DefaultValue:
 
 FunctionCallCurTimestamp:
     NOW '(' ')'
+    | NOW '(' NumLiteral ')'
     | FunctionNameCurTimestamp
     | FunctionNameCurTimestamp '(' ')'
+    | FunctionNameCurTimestamp '(' NumLiteral ')'
     ;
 FunctionNameCurTimestamp:
     CURRENT_TIMESTAMP 
@@ -4331,12 +4351,16 @@ TableOptionList:
     }
     | TableOptionList TableOption
     {
-        $1->children.push_back($2, parser->arena);
+        if ($2 != nullptr) {
+            $1->children.push_back($2, parser->arena);
+        }
         $$ = $1;
     }
     | TableOptionList ','  TableOption
     {
-        $1->children.push_back($3, parser->arena);
+        if ($3 != nullptr) {
+            $1->children.push_back($3, parser->arena);
+        }
         $$ = $1;
     }
     ;
@@ -4402,6 +4426,10 @@ TableOption:
         TableOption* option = (TableOption*)$3;
         option->type = TABLE_OPT_PARTITION;
         $$ = option;
+    }
+    | IgnoreTableOption
+    {
+        $$ = nullptr;
     }
     ;
 
@@ -4505,6 +4533,35 @@ PartitionRangeListOpt:
     {
         $$ = $1;
     }
+    ;
+InsertMethodOpt:
+    NO | FIRST | LAST
+    ;
+
+RowFormatOpt:
+    DEFAULT | DYNAMIC | FIXED | COMPRESSED | REDUNDANT | COMPACT
+    ;
+
+IgnoreTableOption:
+    ROW_FORMAT EqOpt RowFormatOpt
+    | STATS_PERSISTENT EqOpt NumLiteral
+    | STATS_PERSISTENT EqOpt DEFAULT
+    | STATS_AUTO_RECALC EqOpt NumLiteral
+    | STATS_AUTO_RECALC EqOpt DEFAULT
+    | STATS_SAMPLE_PAGES EqOpt NumLiteral
+    | CHECKSUM EqOpt NumLiteral
+    | MAX_ROWS EqOpt NumLiteral
+    | MIN_ROWS EqOpt NumLiteral
+    | PACK_KEYS EqOpt NumLiteral
+    | PACK_KEYS EqOpt DEFAULT
+    | ENCRYPTION EqOpt STRING_LIT
+    | ENGINE_ATTRIBUTE EqOpt STRING_LIT
+    | SECONDARY_ENGINE_ATTRIBUTE EqOpt STRING_LIT
+    | INSERT_METHOD EqOpt InsertMethodOpt
+    | DELAY_KEY_WRITE EqOpt NumLiteral
+    | CONNECTION EqOpt STRING_LIT
+    | COMPRESSION EqOpt STRING_LIT
+    | AUTOEXTEND_SIZE EqOpt NumLiteral
     ;
 
 TablePartitionOpt:
@@ -5014,36 +5071,36 @@ AlterTableStmt:
         }
         $$ = stmt;
     }
-    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName ON TableName '(' IndexColumnList ')' IndexOptionList
+    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName IndexTypeOpt ON TableName '(' IndexColumnList ')' IndexOptionList
     {
         AlterTableStmt* stmt = new_node(AlterTableStmt);
-        stmt->table_name = (TableName*)$6;
+        stmt->table_name = (TableName*)$7;
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
         item->index_dist = static_cast<IndexDistibuteType>($3);
         item->name = $4;
-        for (int idx = 0; idx < $8->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($8->children[idx]), parser->arena);
+        for (int idx = 0; idx < $9->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($9->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$10;
+        item->index_option = (IndexOption*)$11;
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_ADD_INDEX;
         spec->new_constraints.push_back((Constraint*)item, parser->arena);
         stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
         $$ = stmt;
     }
-    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName ON TableName '(' IndexColumnList ')' IndexOptionList
+    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName IndexTypeOpt ON TableName '(' IndexColumnList ')' IndexOptionList
     {
         AlterTableStmt* stmt = new_node(AlterTableStmt);
-        stmt->table_name = (TableName*)$7;
+        stmt->table_name = (TableName*)$8;
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_UNIQ;
         item->index_dist = static_cast<IndexDistibuteType>($4);
         item->name = $5;
-        for (int idx = 0; idx < $9->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($9->children[idx]), parser->arena);
+        for (int idx = 0; idx < $10->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($10->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$11;
+        item->index_option = (IndexOption*)$12;
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_ADD_INDEX;
         spec->new_constraints.push_back((Constraint*)item, parser->arena);

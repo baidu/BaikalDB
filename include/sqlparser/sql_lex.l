@@ -274,6 +274,7 @@ EXECUTE { un_reserved_keyword(yylval, yyscanner, parser); return EXECUTE; }
 FIELDS { un_reserved_keyword(yylval, yyscanner, parser); return FIELDS; }
 FILE { un_reserved_keyword(yylval, yyscanner, parser); return FILE_T; }
 FIRST { un_reserved_keyword(yylval, yyscanner, parser); return FIRST; }
+LAST { un_reserved_keyword(yylval, yyscanner, parser); return LAST; }
 FIXED { un_reserved_keyword(yylval, yyscanner, parser); return FIXED; }
 FLUSH { un_reserved_keyword(yylval, yyscanner, parser); return FLUSH; }
 FORMAT { un_reserved_keyword(yylval, yyscanner, parser); return FORMAT; }
@@ -305,6 +306,12 @@ MAX_UPDATES_PER_HOUR { un_reserved_keyword(yylval, yyscanner, parser); return MA
 MAX_USER_CONNECTIONS { un_reserved_keyword(yylval, yyscanner, parser); return MAX_USER_CONNECTIONS; }
 MERGE { un_reserved_keyword(yylval, yyscanner, parser); return MERGE; }
 MIN_ROWS { un_reserved_keyword(yylval, yyscanner, parser); return MIN_ROWS; }
+ENCRYPTION { un_reserved_keyword(yylval, yyscanner, parser); return ENCRYPTION; }
+ENGINE_ATTRIBUTE { un_reserved_keyword(yylval, yyscanner, parser); return ENGINE_ATTRIBUTE; }
+SECONDARY_ENGINE_ATTRIBUTE {un_reserved_keyword(yylval, yyscanner, parser); 
+return SECONDARY_ENGINE_ATTRIBUTE; }
+INSERT_METHOD { un_reserved_keyword(yylval, yyscanner, parser); return INSERT_METHOD; }
+AUTOEXTEND_SIZE { un_reserved_keyword(yylval, yyscanner, parser); return AUTOEXTEND_SIZE; }
 NAMES { un_reserved_keyword(yylval, yyscanner, parser); return NAMES; }
 NATIONAL { un_reserved_keyword(yylval, yyscanner, parser); return NATIONAL; }
 NO { un_reserved_keyword(yylval, yyscanner, parser); return NO; }
@@ -336,6 +343,7 @@ ROUTINE { un_reserved_keyword(yylval, yyscanner, parser); return ROUTINE; }
 ROW { un_reserved_keyword(yylval, yyscanner, parser); return ROW; }
 ROW_COUNT { un_reserved_keyword(yylval, yyscanner, parser); return ROW_COUNT; }
 ROW_FORMAT { un_reserved_keyword(yylval, yyscanner, parser); return ROW_FORMAT; }
+STATS_AUTO_RECALC { un_reserved_keyword(yylval, yyscanner, parser); return STATS_AUTO_RECALC; }
 SECOND { un_reserved_keyword(yylval, yyscanner, parser); return SECOND; }
 SECURITY { un_reserved_keyword(yylval, yyscanner, parser); return SECURITY; }
 SEPARATOR { un_reserved_keyword(yylval, yyscanner, parser); return SEPARATOR; }
@@ -351,6 +359,7 @@ SQL_CACHE { un_reserved_keyword(yylval, yyscanner, parser); return SQL_CACHE; }
 SQL_NO_CACHE { un_reserved_keyword(yylval, yyscanner, parser); return SQL_NO_CACHE; }
 START { un_reserved_keyword(yylval, yyscanner, parser); return START; }
 STATS_PERSISTENT { un_reserved_keyword(yylval, yyscanner, parser); return STATS_PERSISTENT; }
+STATS_SAMPLE_PAGES { un_reserved_keyword(yylval, yyscanner, parser); return STATS_SAMPLE_PAGES; }
 STATUS { un_reserved_keyword(yylval, yyscanner, parser); return STATUS; }
 SUPER { un_reserved_keyword(yylval, yyscanner, parser); return SUPER; }
 SOME { un_reserved_keyword(yylval, yyscanner, parser); return SOME; }
