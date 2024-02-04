@@ -22,6 +22,7 @@
 
 namespace baikaldb {
 DEFINE_bool(global_index_read_consistent, true, "double check for global and primary region consistency");
+DEFINE_int32(max_select_region_count, -1, "max select sql region count limit, default:-1 means no limit");
 int SelectManagerNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([state](TraceLocalNode& local_node) {
         local_node.set_scan_rows(state->num_scan_rows());
@@ -220,6 +221,15 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
     if (main_scan_index == nullptr) {
         return -1;
     }
+    auto ctx = state->client_conn()->query_ctx;
+    if (ctx->is_select && !scan_node->has_index() && FLAGS_max_select_region_count > 0
+            && main_scan_index->region_infos.size() > FLAGS_max_select_region_count
+            && scan_node->get_limit() == -1) {
+        ctx->stat_info.error_code = ER_SQL_REFUSE;
+        ctx->stat_info.error_msg << "sql is forbid, reason is not use index and region count="
+                << main_scan_index->region_infos.size();
+        return -1;
+    };
 
     if (backup_scan_index != nullptr && dynamic_timeout_ms > 0 && state->txn_id == 0) {
         // 非事务情况下才进行全局二级索引降级，txn_id != 0 情况下state中会有修改，无法多个请求并发使用state
