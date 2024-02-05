@@ -219,13 +219,18 @@ int DDLPlanner::plan() {
     return 0;
 }
 
-int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column, bool is_unique_indicator) {
+int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
+                               bool is_unique_indicator, const std::string& old_field_name) {
     pb::FieldInfo* field = table.add_fields();
     if (column->name == nullptr || column->name->name.empty()) {
         DB_WARNING("column_name is empty");
         return -1;
     }
     field->set_field_name(column->name->name.value);
+    if (old_field_name != "") {
+        field->set_field_name(old_field_name);
+        field->set_new_field_name(column->name->name.value);
+    }
     if (column->type == nullptr) {
         DB_WARNING("data_type is empty for column: %s", column->name->name.value);
         return -1;
@@ -1495,6 +1500,31 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         if (table->indexs_size() != 0) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
             _ctx->stat_info.error_msg << "modify table column with index is not supported";
+            return -1;
+        }
+    } else if (spec->spec_type == parser::ALTER_SPEC_CHANGE_COLUMN && spec->new_columns.size() > 0) {
+        alter_request.set_op_type(pb::OP_MODIFY_FIELD);
+        int column_len = spec->new_columns.size();
+        if (column_len != 1) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "unsupported multi schema change";
+            return -1;
+        }
+        std::string old_field_name = spec->column_name.value;
+        for (int idx = 0; idx < column_len; ++idx) {
+            parser::ColumnDef* column = spec->new_columns[idx];
+            if (column == nullptr) {
+                DB_WARNING("column is nullptr");
+                return -1;
+            }
+            if (0 != add_column_def(*table, column, spec->is_unique_indicator, old_field_name)) {
+                DB_WARNING("add column to table failed.");
+                return -1;
+            }
+        }
+        if (table->indexs_size() != 0) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "change table column with index is not supported";
             return -1;
         }
     } else if (spec->spec_type == parser::ALTER_SPEC_RENAME_COLUMN) {
