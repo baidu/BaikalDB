@@ -1365,7 +1365,19 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     }
     table->set_table_name(stmt->table_name->table.value);
     table->set_namespace_name(_ctx->user_info->namespace_);
-    if (stmt->alter_specs.size() > 1 || stmt->alter_specs.size() == 0) {
+
+    // 支持Alter Table Add Column Field1, Add Column Field2;用法
+    bool has_same_spec_type = true;
+    if (stmt->alter_specs.size() > 1) {
+        for (int i = 0; i < stmt->alter_specs.size(); ++i) {
+            parser::AlterTableSpec* s =  stmt->alter_specs[i];
+            if (s == nullptr || s->spec_type != parser::ALTER_SPEC_ADD_COLUMN) {
+                has_same_spec_type = false;
+                break;
+            }
+        }
+    }
+    if ((stmt->alter_specs.size() > 1 && !has_same_spec_type) || stmt->alter_specs.size() == 0) {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
         _ctx->stat_info.error_msg << "Alter with multiple alter_specifications is not supported in this version";
         return -1;
@@ -1462,6 +1474,23 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             if (0 != add_column_def(*table, column, spec->is_unique_indicator)) {
                 DB_WARNING("add column to table failed.");
                 return -1;
+            }
+        }
+        if (has_same_spec_type) {
+            for (int i = 1; i < stmt->alter_specs.size(); ++i) {
+                parser::AlterTableSpec* s =  stmt->alter_specs[i];
+                int column_len = s->new_columns.size();
+                for (int idx = 0; idx < column_len; ++idx) {
+                    parser::ColumnDef* column = s->new_columns[idx];
+                    if (column == nullptr) {
+                        DB_WARNING("column is nullptr");
+                        return -1;
+                    }
+                    if (0 != add_column_def(*table, column, s->is_unique_indicator)) {
+                        DB_WARNING("add column to table failed.");
+                        return -1;
+                    }
+                }
             }
         }
         if (table->indexs_size() != 0) {
