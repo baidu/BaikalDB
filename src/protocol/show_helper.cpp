@@ -1298,16 +1298,18 @@ bool ShowHelper::_show_processlist(const SmartSocket& client, const std::vector<
             DB_FATAL("param invalid");
             return false;
         }
-        if (only_show_doing_sql && sock->query_ctx->sql.size() == 0) {
+        auto query_ctx = sock->get_query_ctx();
+        if (only_show_doing_sql && query_ctx->sql.size() == 0) {
             continue;
         }
         DB_WARNING_CLIENT(sock, "processlist, free:%d", sock->is_free);
         std::vector<std::string> row;
+        row.reserve(fields.size());
         row.emplace_back(std::to_string(sock->conn_id));
         row.emplace_back(sock->user_info->username);
         row.emplace_back(sock->ip);
         row.emplace_back(sock->current_db);
-        auto command = sock->query_ctx->mysql_cmd;
+        auto command = query_ctx->mysql_cmd;
         if (command == COM_SLEEP) {
             row.emplace_back("Sleep");
         } else {
@@ -1322,7 +1324,7 @@ bool ShowHelper::_show_processlist(const SmartSocket& client, const std::vector<
         if (command == COM_SLEEP) {
             row.emplace_back("");
         } else {
-            row.emplace_back(sock->query_ctx->sql);
+            row.emplace_back(query_ctx->sql);
         }
         rows.emplace_back(row);
     }

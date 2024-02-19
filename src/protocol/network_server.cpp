@@ -1686,7 +1686,8 @@ void NetworkServer::client_conn_bvars_update() {
             if (!sock->user_info || !sock->query_ctx) {
                 continue;
             }
-            auto command = sock->query_ctx->mysql_cmd;
+            auto query_ctx = sock->get_query_ctx();
+            auto command = query_ctx->mysql_cmd;
             client_cnt ++;
             if (command != COM_SLEEP) {
                 running_sql_cnt ++;
