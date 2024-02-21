@@ -196,7 +196,7 @@ void TransactionPool::txn_query_primary_region(uint64_t txn_id, Region* region,
                     request.ShortDebugString().c_str(),
                     response.ShortDebugString().c_str());
                 bthread_usleep(retry_times * FLAGS_retry_interval_us);
-            break;
+                break;
             }
             case pb::VERSION_OLD: {
                 for (auto r : response.regions()) {
@@ -222,6 +222,12 @@ void TransactionPool::txn_query_primary_region(uint64_t txn_id, Region* region,
                     response.ShortDebugString().c_str());
                 success = true;
                 break;
+            }
+            case pb::EXEC_FAIL: {
+                DB_WARNING("send txn query failed , request:%s response: %s",
+                    request.ShortDebugString().c_str(),
+                    response.ShortDebugString().c_str());
+                return;
             }
             default: {
                 DB_WARNING("send txn query failed , request:%s response: %s",
@@ -389,6 +395,11 @@ void TransactionPool::txn_commit_through_raft(uint64_t txn_id,
                 bthread_usleep(retry_times * FLAGS_retry_interval_us);
                 break;
             }
+            case pb::EXEC_FAIL:
+                DB_WARNING("send txn commit failed , request:%s response: %s",
+                    request.ShortDebugString().c_str(),
+                    response.ShortDebugString().c_str());
+                return;
             default: {
                 DB_WARNING("send txn commit failed , request:%s response: %s",
                     request.ShortDebugString().c_str(),
@@ -397,9 +408,7 @@ void TransactionPool::txn_commit_through_raft(uint64_t txn_id,
                 break;
             }
         }
-        if (retry_times < 5) {
-            retry_times++;
-        }
+        retry_times++;
    } while (!success && retry_times < 5);
 }
 
@@ -475,6 +484,13 @@ void TransactionPool::update_primary_timestamp(const pb::TransactionInfo& txn_in
                             response.ShortDebugString().c_str());
                         break;
                     }
+                    case pb::EXEC_FAIL: {
+                        DB_WARNING("send update primary timestamp failed , request:%s response: %s",
+                            request.ShortDebugString().c_str(),
+                            response.ShortDebugString().c_str());
+                        return;
+
+                    }
                     default: {
                         DB_WARNING("send update primary timestamp failed , request:%s response: %s",
                             request.ShortDebugString().c_str(),
@@ -485,7 +501,6 @@ void TransactionPool::update_primary_timestamp(const pb::TransactionInfo& txn_in
                 }
                 retry_times++;
             } while (!success && retry_times < 3);
-
         };
     Bthread bth;
     bth.run(update_fun);
