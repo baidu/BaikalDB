@@ -767,7 +767,8 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     std::transform(lower_index_name.begin(), lower_index_name.end(), 
                     lower_index_name.begin(), ::tolower);
     idx_info.name = table_info.name + "." + lower_index_name;
-    idx_info.short_name = lower_index_name;
+    // idx_info.short_name = lower_index_name;
+    idx_info.short_name = index.index_name();
     idx_info.type = index.index_type();
     idx_info.state = index.state();
     idx_info.max_field_id = table_info.max_field_id;
