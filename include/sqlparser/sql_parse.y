@@ -297,6 +297,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     COMPRESSION
     CONNECTION
     CONSISTENT
+    COPY
     DAY
     DATA
     DATE
@@ -335,7 +336,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IDENTIFIED
     ISOLATION
     INDEXES
+    INPLACE
     INSERT_METHOD
+    INSTANT
     INVOKER
     JSON
     KEY_BLOCK_SIZE
@@ -595,10 +598,15 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ColumnDefList
     IndexOptionList
     IndexOption
+    DropIndexOpt
     IndexType
     TablePartitionOpt
     IndexTypeOpt
     RowFormatOpt
+    AlgorithmVal
+    AlgorighmOpt
+    IndexLockVal
+    IndexLockOpt
     InsertMethodOpt
     PartitionRange
     PartitionRangeList
@@ -2793,6 +2801,7 @@ AllIdent:
     | COMPRESSION
     | CONNECTION
     | CONSISTENT
+    | COPY
     | DAY
     | DATA
     | DATE
@@ -2831,8 +2840,10 @@ AllIdent:
     | IDENTIFIED
     | ISOLATION
     | INDEXES
+    | INPLACE
     | INSERT_METHOD
     | INVOKER
+    | INSTANT
     | JSON
     | KEY_BLOCK_SIZE
     | DYNAMIC_PARTITION_ATTR
@@ -3724,6 +3735,31 @@ IndexOptionList:
     }
     ;
 
+AlgorighmOpt:
+    ALGORITHM EqOpt AlgorithmVal {
+
+        $$ = nullptr;
+    }
+    ;
+
+IndexLockOpt:
+    LOCK EqOpt IndexLockVal {
+        $$ = nullptr;
+    }
+    ;
+
+DropIndexOpt:
+    {
+        $$ = nullptr;
+    }
+    | AlgorighmOpt {
+        $$ = nullptr;
+    }
+    | IndexLockOpt {
+
+    }
+    ;
+
 IndexOption:
     KEY_BLOCK_SIZE EqOpt INTEGER_LIT {
         $$ = nullptr;
@@ -3735,6 +3771,13 @@ IndexOption:
         IndexOption* op = new_node(IndexOption);
         op->comment = ((LiteralExpr*)$2)->_u.str_val;
         $$ = op;
+    }
+    | AlgorighmOpt {
+
+        $$ = nullptr;
+    }
+    | IndexLockOpt {
+        $$ = nullptr;
     }
     ;
 
@@ -4542,6 +4585,14 @@ RowFormatOpt:
     DEFAULT | DYNAMIC | FIXED | COMPRESSED | REDUNDANT | COMPACT
     ;
 
+AlgorithmVal:
+    DEFAULT | INSTANT | INPLACE | COPY
+    ;
+
+IndexLockVal:
+    DEFAULT | NONE | SHARED | EXCLUSIVE
+    ;
+
 IgnoreTableOption:
     ROW_FORMAT EqOpt RowFormatOpt
     | STATS_PERSISTENT EqOpt NumLiteral
@@ -5104,6 +5155,17 @@ AlterTableStmt:
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_ADD_INDEX;
         spec->new_constraints.push_back((Constraint*)item, parser->arena);
+        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
+        $$ = stmt;
+    }
+    | DROP INDEX IndexName ON TableName ForceOrNot DropIndexOpt
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->table_name = (TableName*)$5;
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_INDEX;
+        spec->index_name = $3;
+        spec->force = $6;
         stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
         $$ = stmt;
     }

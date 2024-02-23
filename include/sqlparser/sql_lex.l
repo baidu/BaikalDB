@@ -351,6 +351,9 @@ SERIALIZABLE { un_reserved_keyword(yylval, yyscanner, parser); return SERIALIZAB
 SESSION { un_reserved_keyword(yylval, yyscanner, parser); return SESSION; }
 SHARE { un_reserved_keyword(yylval, yyscanner, parser); return SHARE; }
 SHARED { un_reserved_keyword(yylval, yyscanner, parser); return SHARED; }
+INPLACE { un_reserved_keyword(yylval, yyscanner, parser); return INPLACE; }
+INSTANT { un_reserved_keyword(yylval, yyscanner, parser); return INSTANT; }
+COPY { un_reserved_keyword(yylval, yyscanner, parser); return COPY; }
 SHUTDOWN { un_reserved_keyword(yylval, yyscanner, parser); return SHUTDOWN; }
 SIGNED { un_reserved_keyword(yylval, yyscanner, parser); return SIGNED; }
 SLAVE { un_reserved_keyword(yylval, yyscanner, parser); return SLAVE; }
