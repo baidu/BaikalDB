@@ -109,6 +109,11 @@ message PossibleIndex {
     optional bool use_for_learner = 7;
     optional bool range_key_sorted = 8;
     optional bool is_eq = 9;
+    optional int32 left_field_cnt = 10;
+    optional int32 right_field_cnt = 11;
+    optional bool left_open = 12;
+    optional bool right_open = 13;
+    optional bool like_prefix = 14;
 };
 
 enum FulltextNodeType {

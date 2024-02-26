@@ -57,27 +57,6 @@ struct IndexRange {
 
     IndexRange() {}
 
-    IndexRange(TableRecord* _left, 
-        TableRecord* _right,
-        IndexInfo*  _index_info,
-        IndexInfo*  _pri_info,
-        pb::RegionInfo* _region_info,
-        int left_cnt,
-        int right_cnt,
-        bool _l_open,
-        bool _r_open,
-        bool _like_prefix) :
-        left(_left),
-        right(_right),
-        index_info(_index_info),
-        pri_info(_pri_info),
-        region_info(_region_info),
-        left_field_cnt(left_cnt),
-        right_field_cnt(right_cnt),
-        left_open(_l_open),
-        right_open(_r_open),
-        like_prefix(_like_prefix) {}
-    
     IndexRange(const MutTableKey& _left,
         const MutTableKey& _right,
         IndexInfo*  _index_info,

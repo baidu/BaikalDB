@@ -269,16 +269,23 @@ public:
         index.use_for = use_for;
         _scan_indexs.emplace_back(std::move(index));
         bool has_index = false;
+        if (pos_index.has_sort_index()) {
+            _has_index = true;
+            return;
+        }
+        if (pos_index.left_field_cnt() > 0) {
+            _has_index = true;
+            return;
+        }
+        if (pos_index.right_field_cnt() > 0) {
+            return;
+        }
         for (auto& range : pos_index.ranges()) {
             if (range.left_field_cnt() > 0) {
                 has_index = true;
                 break;
             }
             if (range.right_field_cnt() > 0) {
-                has_index = true;
-                break;
-            }
-            if (pos_index.has_sort_index()) {
                 has_index = true;
                 break;
             }
@@ -343,10 +350,10 @@ public:
     }
 
     void set_index_useage_and_lock(bool use_global_backup) {
+        _current_index_mutex.lock();
         // 只有在存在global backup的时候才加锁
         for (auto& scan_index_info : _scan_indexs) {
             if (scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER) {
-                _current_index_mutex.lock();
                 _current_global_backup = use_global_backup;
                 break;
             }
@@ -354,12 +361,12 @@ public:
     }
 
     void current_index_unlock() {
-        for (auto& scan_index_info : _scan_indexs) {
-            if (scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER) {
-                _current_index_mutex.unlock();
-                break;
-            }
-        }
+        _current_index_mutex.unlock();
+        // for (auto& scan_index_info : _scan_indexs) {
+        //     if (scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER) {
+        //         break;
+        //     }
+        // }
     }
 
     bool current_use_global_backup() const {

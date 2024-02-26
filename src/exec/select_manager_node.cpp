@@ -15,14 +15,14 @@
 #include "select_manager_node.h"
 #include "filter_node.h"
 #include "network_socket.h"
-#include "rocksdb_scan_node.h"
-#include "limit_node.h"
 #include "agg_node.h"
 #include "query_context.h"
 
 namespace baikaldb {
 DEFINE_bool(global_index_read_consistent, true, "double check for global and primary region consistency");
 DEFINE_int32(max_select_region_count, -1, "max select sql region count limit, default:-1 means no limit");
+DEFINE_int32(fetcher_primary_once_count, 16384, "fetcher primary once count");
+DEFINE_bool(fetcher_primary_pipeline, false, "fetcher primary pipeline");
 int SelectManagerNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([state](TraceLocalNode& local_node) {
         local_node.set_scan_rows(state->num_scan_rows());
@@ -286,13 +286,25 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
     } 
 
     for (auto& pair : fetcher_store->start_key_sort) {
-        auto iter = fetcher_store->region_batch.find(pair.second);
-        if (iter != fetcher_store->region_batch.end()) {
-            auto& batch = iter->second;
-            if (batch != nullptr && batch->size() != 0) {
-                _sorter->add_batch(batch);
+        if (!fetcher_store->is_pipeline()) {
+            auto iter = fetcher_store->region_batch.find(pair.second);
+            if (iter != fetcher_store->region_batch.end()) {
+                auto& batch = iter->second;
+                if (batch != nullptr && batch->size() != 0) {
+                    _sorter->add_batch(batch);
+                }
+                fetcher_store->region_batch.erase(iter);
             }
-            fetcher_store->region_batch.erase(iter);
+        } else {
+            auto iter = fetcher_store->region_batch_list.find(pair.second);
+            if (iter != fetcher_store->region_batch_list.end()) {
+                for (auto &batch : iter->second) {
+                    if (batch != nullptr && batch->size() != 0) {
+                        _sorter->add_batch(batch);
+                    }
+                }
+                fetcher_store->region_batch_list.erase(iter);
+            }
         }
     }
     // 无sort节点时不会排序，按顺序输出
@@ -330,6 +342,10 @@ int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* sta
         std::unordered_set<int32_t> index_field_ids;
         SmartIndex index_info = _factory->get_index_info_ptr(global_index_id);
         for (auto& field : index_info->fields) {
+            index_field_ids.insert(field.id);
+        }
+        SmartIndex pri_info = _factory->get_index_info_ptr(main_table_id);
+        for (auto& field : pri_info->fields) {
             index_field_ids.insert(field.id);
         }
         std::unordered_set<int32_t> expr_field_ids;
@@ -370,26 +386,170 @@ int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* sta
         }
         parent = parent->get_parent();
     }
+
     LimitNode* limit = static_cast<LimitNode*>(parent);
-    if (need_pushdown && limit != nullptr) {
-        ret = construct_primary_possible_index(fetcher->fetcher_store, fetcher->scan_index, state, scan_node, main_table_id, limit);
-    } else {
-        ret = construct_primary_possible_index(fetcher->fetcher_store, fetcher->scan_index, state, scan_node, main_table_id);
+    if (!need_pushdown) {
+        limit = nullptr;
     }
+
+    auto pri_info = _factory->get_index_info_ptr(main_table_id);
+    if (pri_info == nullptr) {
+        DB_WARNING("pri index info not found table_id:%ld", main_table_id);
+        return -1;
+    }
+
+    if (!FLAGS_fetcher_primary_pipeline) {
+        return fetcher_primary(fetcher, state, scan_node, pri_info, limit, main_table_id);
+    } else {
+        return fetcher_primary_pipeline(fetcher, state, scan_node, pri_info, limit, main_table_id);
+    }
+    return  0;
+}
+
+
+int SelectManagerNode::fetcher_primary_pipeline(
+                      FetcherInfo* fetcher, 
+                      RuntimeState* state, 
+                      ExecNode* exec_node,
+                      SmartIndex pri_info,
+                      LimitNode* limit,
+                      int64_t main_table_id) {
+
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
+    auto client_conn = state->client_conn();
+    std::map<int64_t, FetcherPrimaryInfo> region_primary_map;
+    std::map<int64_t, pb::RegionInfo> region_infos;
+
+    FetcherStore global_index_fetcher;
+    global_index_fetcher.start_key_sort = fetcher->fetcher_store.start_key_sort;
+    global_index_fetcher.region_batch = fetcher->fetcher_store.region_batch;
+    fetcher->fetcher_store.clear_result(state);
+
+    auto fetcher_primary_func = [&](FetcherPrimaryInfo& fetcher_primary_info) {
+        std::string *region_primary = new std::string("");
+        fetcher_primary_info.pos_index.set_index_id(main_table_id);
+        fetcher_primary_info.pos_index.set_left_field_cnt(pri_info->fields.size());
+        fetcher_primary_info.pos_index.set_left_open(false);
+        fetcher_primary_info.pos_index.set_is_eq(true);
+        fetcher_primary_info.pos_index.SerializeToString(region_primary);
+        fetcher_primary_info.pos_index.clear_ranges();
+        fetcher_primary_info.region_primary_list.push_back(region_primary);
+        fetcher->fetcher_store.fetcher_select_with_region_primary(state, &fetcher_primary_info.region_info, fetcher_primary_info.region_primary_list[fetcher_primary_info.cur_idx], _children[0], client_conn->seq_id, client_conn->seq_id);
+        fetcher_primary_info.cur_idx++;
+    };
+
+
+    std::map<std::string, pb::RegionInfo> finded_region_map;
+
+    int fetcher_primary_count = std::max(FLAGS_fetcher_primary_once_count, 1024);
+
+    auto add_one_record = [&](MutTableKey &key) -> int {
+        pb::RegionInfo region_info;
+        auto find_iter = finded_region_map.upper_bound(key.data());
+        if (find_iter != finded_region_map.begin()) {
+            --find_iter;
+        }
+        if (find_iter != finded_region_map.end()) {
+             if (find_iter->second.end_key() == "" || key.data() < find_iter->second.end_key()) {
+                 region_info = find_iter->second;
+             }
+        }
+        if (!region_info.has_region_id()){
+            int ret = _factory->get_region_by_primary_key(main_table_id, *pri_info, key, 0, region_info);
+            if (ret) {
+                DB_WARNING("get region error!");
+                return ret;
+            }
+            finded_region_map[region_info.start_key()] = region_info;
+        }
+        auto iter = region_primary_map.find(region_info.region_id());
+        if (iter == region_primary_map.end()) {
+            region_primary_map[region_info.region_id()].region_info = region_info;
+        }
+        auto &fetcher_primary_info = region_primary_map[region_info.region_id()];
+        auto range = fetcher_primary_info.pos_index.add_ranges();
+        range->set_left_key(key.data());
+        range->set_left_full(true); 
+        if (fetcher_primary_info.pos_index.ranges_size() >= fetcher_primary_count) {
+            fetcher_primary_func(fetcher_primary_info);
+        }
+        return 0;
+    };
+
+    int ret = construct_primary_possible_index(global_index_fetcher, fetcher->scan_index, state, scan_node, main_table_id, add_one_record, pri_info, limit);
+
     if (ret < 0) {
         DB_WARNING("construct primary possible index failed");
         return ret;
     }
 
-    ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, _children[0], 
-            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
-    if (ret < 0) {
-        DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
-                state->txn_id, state->log_id());
-        return ret; 
+    for (auto &kv : region_primary_map) {
+        if (kv.second.pos_index.ranges_size() != 0) {
+            fetcher_primary_func(kv.second);
+        }
+    }
+    fetcher->fetcher_store.wait_finish();
+    if (fetcher->fetcher_store.error != E_OK) {
+        return -1;
+    }
+    if (_children[0]->get_trace() != nullptr) {
+        for (auto trace : fetcher->fetcher_store.get_traces()) {
+            (*_children[0]->get_trace()->add_child_nodes()) = *trace;
+        }
     }
     return ret;
 }
+
+int SelectManagerNode::fetcher_primary(
+                      FetcherInfo* fetcher,
+                      RuntimeState* state,
+                      ExecNode* exec_node,
+                      SmartIndex pri_info,
+                      LimitNode* limit,
+                      int64_t main_table_id) {
+
+
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node); 
+    auto client_conn = state->client_conn();
+    pb::PossibleIndex pos_index;
+    pos_index.set_index_id(main_table_id);
+    pos_index.set_left_field_cnt(pri_info->fields.size());
+    pos_index.set_left_open(false);
+    pos_index.set_is_eq(true);
+
+    auto add_one_record = [&](MutTableKey &key) -> int {
+        auto range = pos_index.add_ranges();
+        range->set_left_key(key.data());
+        range->set_left_full(key.get_full());
+        return 0;
+    };
+
+    auto ret = construct_primary_possible_index(fetcher->fetcher_store, fetcher->scan_index, state, exec_node, main_table_id, add_one_record, pri_info, limit);
+
+    if (ret < 0) {
+        DB_WARNING("construct primary possible index failed");
+        return ret;
+    }
+    
+    pos_index.SerializeToString(&fetcher->scan_index->raw_index);
+   
+    ret = _factory->get_region_by_key(main_table_id, *pri_info, &pos_index, fetcher->scan_index->region_infos,
+                &fetcher->scan_index->region_primary, scan_node->get_partition());
+    if (ret < 0) {
+        DB_WARNING("get region info failed!");
+        return ret;
+    }
+
+    ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, _children[0],
+            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
+    if (ret < 0) {
+        DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu",
+                state->txn_id, state->log_id());
+        return ret;
+    }
+    return ret;
+}
+                      
 
 int SelectManagerNode::construct_primary_possible_index(
                       FetcherStore& fetcher_store,
@@ -397,36 +557,27 @@ int SelectManagerNode::construct_primary_possible_index(
                       RuntimeState* state,
                       ExecNode* exec_node,
                       int64_t main_table_id,
+                      std::function<int(MutTableKey&)> add_one_record,
+                      const SmartIndex& pri_info,
                       LimitNode* limit) {
+
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
     int32_t tuple_id = scan_node->tuple_id();
-    auto pri_info = _factory->get_index_info_ptr(main_table_id);
-    if (pri_info == nullptr) {
-        DB_WARNING("pri index info not found table_id:%ld", main_table_id);
-        return -1;
-    }
-    auto table_info = _factory->get_table_info_ptr(main_table_id);
-    if (table_info == nullptr) {
-        DB_WARNING("pri index info not found table_id:%ld", main_table_id);
-        return -1;
-    }
-    // 不能直接清理所有索引，可能有backup请求使用scan_node
-    // scan_node->clear_possible_indexes();
-    // pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
-    // auto pos_index = pb_scan_node->add_indexes();
-    // pos_index->set_index_id(main_table_id);
-    // scan_node->set_router_index_id(main_table_id);
-
     scan_index_info->router_index = nullptr;
     scan_index_info->raw_index.clear();
     scan_index_info->region_infos.clear();
     scan_index_info->region_primary.clear();
     scan_index_info->router_index_id = main_table_id;
     scan_index_info->index_id = main_table_id;
-    pb::PossibleIndex pos_index;
-    pos_index.set_index_id(main_table_id);
     SmartRecord record_template = _factory->new_record(main_table_id);
-    auto tsorter = std::make_shared<Sorter>(_mem_row_compare.get());
+    std::shared_ptr<MemRowCompare> tmp_mem_row_compare;
+    std::vector<baikaldb::ExprNode*> null_slot_order_exprs;
+    if (limit != nullptr) {
+        tmp_mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
+    } else {
+        tmp_mem_row_compare = std::make_shared<MemRowCompare>(null_slot_order_exprs, _is_asc, _is_null_first);
+    }
+    auto tsorter = std::make_shared<Sorter>(tmp_mem_row_compare.get());
     for (auto& pair : fetcher_store.start_key_sort) {
         auto& batch = fetcher_store.region_batch[pair.second];
         if (batch == nullptr) {
@@ -441,10 +592,7 @@ int SelectManagerNode::construct_primary_possible_index(
     }
     tsorter->merge_sort();
     bool eos = false;
-    int64_t limit_cnt = 0x7fffffff;
-    if (limit != nullptr) {
-        limit_cnt = limit->get_limit();
-    }
+    int cnt = 0;
     while (!eos) {
         std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
         auto ret = tsorter->get_next(batch.get(), &eos);
@@ -470,31 +618,23 @@ int SelectManagerNode::construct_primary_possible_index(
                 }
                 record->set_value(record->get_field_by_tag(field_id), mem_row->get_value(tuple_id, slot_id));
             }
-            auto range = pos_index.add_ranges();
             MutTableKey  key;
             if (record->encode_key(*pri_info.get(), key, pri_info->fields.size(), false, false) != 0) {
                 DB_FATAL("Fail to encode_key left, table:%ld", pri_info->id);
                 return -1;
             }
-            range->set_left_key(key.data());
-            range->set_left_full(key.get_full());
-            range->set_right_key(key.data());
-            range->set_right_full(key.get_full());
-            range->set_left_field_cnt(pri_info->fields.size());
-            range->set_right_field_cnt(pri_info->fields.size());
-            range->set_left_open(false);
-            range->set_right_open(false);
-            limit_cnt --;
-            if(!limit_cnt) {
+            int ret = add_one_record(key);
+            if (ret) {
+                return ret;
+            }
+            cnt ++;
+            if (limit != nullptr && cnt >= limit->get_limit()) {
                 eos = true;
                 break;
             }
         }
     }
-    //重新做路由选择
-    pos_index.SerializeToString(&scan_index_info->raw_index);
-    return _factory->get_region_by_key(main_table_id, *pri_info, &pos_index, scan_index_info->region_infos,
-                &scan_index_info->region_primary, scan_node->get_partition());
+    return 0;
 }
 
 }

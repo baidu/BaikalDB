@@ -19,10 +19,12 @@
 #include "scan_node.h"
 #include "limit_node.h"
 #include "table_record.h"
+#include "table_key.h"
 #include "proto/store.interface.pb.h"
 #include "sorter.h"
 #include "mem_row_compare.h"
 #include "fetcher_store.h"
+#include "rocksdb_scan_node.h"
 
 namespace baikaldb {
 struct FetcherInfo {
@@ -36,6 +38,18 @@ struct FetcherInfo {
     ScanIndexInfo* scan_index = nullptr;
     std::atomic<Status> status = { S_INIT };
     FetcherStore fetcher_store;
+};
+
+struct FetcherPrimaryInfo {
+    pb::PossibleIndex pos_index;
+    pb::RegionInfo region_info;
+    int cur_idx = 0;
+    std::vector<std::string*> region_primary_list;
+    ~FetcherPrimaryInfo() {
+        for(auto &rp : region_primary_list) {
+            SAFE_DELETE(rp);
+        }
+    }
 };
 
 class SelectManagerNode : public ExecNode {
@@ -86,7 +100,22 @@ public:
                           RuntimeState* state,
                           ExecNode* exec_node,
                           int64_t main_table_id,
+                          std::function<int(MutTableKey&)>add_one_record,
+                          const SmartIndex& pri_info,
                           LimitNode* limit = nullptr);
+
+    int fetcher_primary(FetcherInfo* fetcher,
+                      RuntimeState* state,
+                      ExecNode* exec_node,
+                      SmartIndex pri_info,
+                      LimitNode* limit,
+                      int64_t main_table_id);
+    int fetcher_primary_pipeline(FetcherInfo* fetcher,
+                      RuntimeState* state,
+                      ExecNode* exec_node,
+                      SmartIndex pri_info,
+                      LimitNode* limit,
+                      int64_t main_table_id);
 
     void set_sub_query_runtime_state(RuntimeState* state) {
         _sub_query_runtime_state = state;

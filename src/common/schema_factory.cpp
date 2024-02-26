@@ -2410,6 +2410,46 @@ int SchemaFactory::check_region_ranges_consecutive(int64_t table_id) {
     return 0;
 }
 
+int SchemaFactory::get_region_by_primary_key(int64_t main_table_id,
+        IndexInfo& index,
+        MutTableKey &primary_key,
+        int partition_id,
+        pb::RegionInfo &region_info) {
+
+    DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+    if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+        DB_WARNING("DoubleBufferedTableRegion read scoped ptr error.");
+        return -1;
+    }
+
+    auto it = table_region_mapping_ptr->find(index.id);
+    if (it == table_region_mapping_ptr->end()) {
+        DB_WARNING("index id[%ld] not in table_region_mapping", index.id);
+        return -1;
+    }
+    auto frontground = it->second;
+    auto &key_region_mapping = frontground->key_region_mapping;
+    auto record_template = TableRecord::new_record(main_table_id);
+    auto key_region_iter = key_region_mapping.find(partition_id);
+    if (key_region_iter == key_region_mapping.end()) {
+        DB_WARNING("partition %ld schema not update.", partition_id);
+        return -1;
+    }
+    StrInt64Map &map = key_region_iter->second;
+    auto region_iter = map.upper_bound(primary_key.data());
+    if (region_iter != map.begin()) {
+        --region_iter;
+    }
+    int64_t region_id = region_iter->second;
+    frontground->get_region_info(region_id, region_info);
+    region_info.set_start_key(region_iter->first);
+    region_iter ++;
+    if (region_iter != map.end()) {
+        region_info.set_end_key(region_iter->first);
+    }
+    return 0;
+}
+
 int SchemaFactory::get_region_by_key(IndexInfo& index, 
         const pb::PossibleIndex* primary,
         std::map<int64_t, pb::RegionInfo>& region_infos,
@@ -2469,43 +2509,31 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
         template_primary.mutable_sort_index()->CopyFrom(primary->sort_index());
     }
     template_primary.mutable_index_conjuncts()->CopyFrom(primary->index_conjuncts());
+    if (primary->has_is_eq()) {
+        template_primary.set_is_eq(primary->is_eq());
+        template_primary.set_left_field_cnt(primary->left_field_cnt());
+        template_primary.set_right_field_cnt(primary->right_field_cnt());
+        template_primary.set_left_open(primary->left_open());
+        template_primary.set_right_open(primary->right_open());
+        template_primary.set_like_prefix(primary->like_prefix());
+    }
 
     std::map<int64_t, std::vector<int>> region_idx_map;
     auto record_template = TableRecord::new_record(main_table_id);
     int range_size = primary->ranges_size();
     for (int i = 0; i < range_size; ++i) {
         const auto& range = primary->ranges(i);
-        bool like_prefix = range.like_prefix();
-        bool left_open = range.left_open();
-        bool right_open = range.right_open();
+        bool like_prefix = template_primary.has_like_prefix() ? template_primary.like_prefix() : range.like_prefix();
+        bool left_open = template_primary.has_left_open() ? template_primary.left_open() : range.left_open();
+        bool right_open = template_primary.has_right_open() ? template_primary.right_open() : range.right_open();
         MutTableKey  start;
         MutTableKey  end;
-        if (!range.left_pb_record().empty()) {
-            auto left = record_template->clone(false);
-            if (left->decode(range.left_pb_record()) != 0) {
-                DB_FATAL("Fail to encode pb left, table:%ld", index.id);
-                return -1;
-            }
-            if (left->encode_key(index, start, range.left_field_cnt(), false, like_prefix) != 0) {
-                DB_FATAL("Fail to encode_key left, table:%ld", index.id);
-                return -1;
-            }
-        } else if (!range.left_key().empty()) {
+        if (!range.left_key().empty()) {
             start = MutTableKey(range.left_key(), range.left_full());
         } else {
             left_open = false;
         }
-        if (!range.right_pb_record().empty()) {
-            auto right = record_template->clone(false);
-            if (right->decode(range.right_pb_record()) != 0) {
-                DB_FATAL("Fail to encode pb right, table:%ld", index.id);
-                return -1;
-            }
-            if (right->encode_key(index, end, range.right_field_cnt(), false, like_prefix) != 0) {
-                DB_FATAL("Fail to encode_key right, table:%ld", index.id);
-                return -1;
-            }
-        } else if (!range.right_key().empty()) {
+        if (!range.right_key().empty()) {
             end = MutTableKey(range.right_key(), range.right_full());
         } else {
             right_open = false;

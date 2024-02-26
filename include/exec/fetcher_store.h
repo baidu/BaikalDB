@@ -61,7 +61,11 @@ public:
     void retry_times_inc() {
         _retry_times++;
     }
-    
+
+    void set_primary_indexes(std::string *primary_indexes) {
+        _primary_indexes = primary_indexes;
+    }
+
     void set_rpc_ctrl(RPCCtrl* ctrl) {
         _rpc_ctrl = ctrl;
     }
@@ -139,6 +143,7 @@ private:
     static bvar::LatencyRecorder total_send_request;
     static bvar::LatencyRecorder add_backup_send_request;
     static bvar::LatencyRecorder has_backup_send_request;
+    std::string *_primary_indexes = nullptr;
 };
 
 // RPCCtrl只控制rpc的异步发送和并发控制，具体rpc的成功与否结果收集由fetcher_store处理
@@ -153,12 +158,11 @@ public:
         std::unique_lock<bthread::Mutex> lck(_mutex);
         while(true) {
             // 完成
-            if (_todo_cnt == 0 && _doing_cnt == 0) {
-                return 1;
-            }
+            // if (_todo_cnt == 0 && _doing_cnt == 0) {
+            //     return 1;
+            // }
 
             // 获取任务 
-            tasks.clear();
             if (_todo_cnt > 0) {
                 for (auto& iter : _ip_task_group_map) {
                     auto task_group = iter.second;
@@ -178,7 +182,11 @@ public:
 
             if (tasks.empty()) {
                 // 没有获取到任务，等待唤醒
-                _cv.wait(lck);
+                if ((!_is_pipeline || _add_task_finish) && _todo_cnt == 0 && _doing_cnt == 0) {
+                    return 1;
+                } else {
+                    _cv.wait(lck);
+                }
             } else {
                 // 获取成功
                 return 0;
@@ -200,6 +208,7 @@ public:
         }
         task->set_rpc_ctrl(this);
         _todo_cnt++;
+        _cv.notify_one();
     } 
 
     void task_finish(OnRPCDone* task) {
@@ -227,7 +236,6 @@ public:
         _cv.notify_one();
     }
     
-
     void execute() {
         while (true) {
             std::vector<OnRPCDone*> tasks;
@@ -235,11 +243,32 @@ public:
             if (ret == 1) {
                 return;
             }
-
             for (OnRPCDone* task : tasks) {
                 task->send_request();
             }
         }
+    }
+
+    void set_pipeline() {
+        _is_pipeline = true;
+        if (!_bthread_started) {
+            _bthread_started = true;
+            _bth.run([this](){execute();});
+        }
+    }
+
+    void wait_finish() {
+        {
+           std::unique_lock<bthread::Mutex> lck(_mutex);
+           _add_task_finish = true;
+           _cv.notify_one();
+        }
+        _bth.join();
+        _bthread_started = false;
+    }
+
+    void set_task_concurrency_per_group(int concurrency) {
+        _task_concurrency_per_group = concurrency;
     }
 
 private:
@@ -274,9 +303,13 @@ private:
     int _todo_cnt  = 0;
     int _done_cnt  = 0;
     int _doing_cnt = 0;
+    bool _add_task_finish = false;
+    bool _is_pipeline = false;
     std::map<std::string, std::shared_ptr<TaskGroup>> _ip_task_group_map;
     bthread::ConditionVariable _cv;
     bthread::Mutex _mutex;
+    Bthread _bth;
+    bool _bthread_started = false;
 };
 
 // 全局二级索引降级使用，将主备请求分别发往不同集群
@@ -327,10 +360,20 @@ public:
     FetcherStore() {
     }
     virtual ~FetcherStore() {
+        SAFE_DELETE(_rpc_control);
     }
-    
+
+    void init_rpc_control(RuntimeState * state, pb::OpType opType) {
+        if (_rpc_control == nullptr) {
+            _rpc_control = new RPCCtrl(state->calc_single_store_concurrency(opType));
+        } else {
+            _rpc_control->set_task_concurrency_per_group(state->calc_single_store_concurrency(opType));
+        }
+    }
+
     void clear() {
         region_batch.clear();
+        region_batch_list.clear();
         index_records.clear();
         start_key_sort.clear();
         error = E_OK;
@@ -399,12 +442,73 @@ public:
     }
 
     int run_not_set_state(RuntimeState* state, 
-            std::map<int64_t, pb::RegionInfo>& region_infos,
+            std::map<int64_t, pb::RegionInfo>& region_info,
             ExecNode* store_request,
             int start_seq_id,
             int current_seq_id,
             pb::OpType op_type, 
             GlobalBackupType backup_type);
+
+    int fetcher_select_with_region_primary(RuntimeState* state,
+            pb::RegionInfo *region_info,
+            std::string *region_primary,
+            ExecNode* store_request,
+            int start_seq_id,
+            int current_seq_id){ 
+
+        uint64_t log_id = state->log_id();
+        pb::OpType op_type = pb::OP_SELECT;
+        if (!_is_pipeline) {
+            set_pipeline_mode(state, op_type);
+        }
+        auto task = new OnRPCDone(this, state, store_request, region_info,
+                region_info->region_id(), region_info->region_id(), start_seq_id, current_seq_id, op_type);
+        task->set_primary_indexes(region_primary);
+        _rpc_control->add_new_task(task);
+        _traces.insert(task->get_trace());
+        return 0;
+    }
+
+    void clear_result(RuntimeState *state) {
+        region_batch.clear();
+        region_batch_list.clear();
+        index_records.clear();
+        start_key_sort.clear();
+        no_copy_cache_plan_set.clear();
+        error = E_OK;
+        skip_region_set.clear();
+        callids.clear();
+        primary_timestamp_updated = false;
+        affected_rows = 0;
+        scan_rows = 0;
+        filter_rows = 0;
+        row_cnt = 0;
+        client_conn = state->client_conn();
+        _traces.clear();
+    }
+
+    void set_pipeline_mode(RuntimeState *state, pb::OpType op_type ) {
+        _is_pipeline = true;
+        if(_rpc_control == nullptr) {
+            init_rpc_control(state, op_type);
+            _rpc_control->set_pipeline();
+        }
+    }
+
+    bool is_pipeline() {
+        return _is_pipeline;
+    }
+
+    void wait_finish() {
+        if (_rpc_control != nullptr) {
+            _rpc_control->wait_finish();
+        }
+    }
+
+    
+    std::set<std::shared_ptr<pb::TraceNode>> & get_traces() {
+        return _traces;
+    }
 
     int run(RuntimeState* state,
                     std::map<int64_t, pb::RegionInfo>& region_infos,
@@ -563,6 +667,7 @@ public:
     std::map<int64_t, std::vector<std::string>>  return_str_records;
     std::map<int64_t, std::vector<std::string>>  return_str_old_records;
     std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
+    std::map<int64_t, std::vector<std::shared_ptr<RowBatch>>> region_batch_list;
     //std::map<int64_t, std::shared_ptr<RowBatch>> split_region_batch;
     std::map<int64_t, std::vector<int64_t>> region_id_ttl_timestamp_batch;
 
@@ -592,6 +697,9 @@ public:
     bool need_send_rollback = true;
     WriteBinlogParam write_binlog_param;
     GlobalBackupType global_backup_type = GBT_INIT;
+    RPCCtrl *_rpc_control = nullptr;
+    bool _is_pipeline = false;
+    std::set<std::shared_ptr<pb::TraceNode>> _traces;
 };
 
 template<typename Repeated>

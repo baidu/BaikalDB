@@ -209,14 +209,14 @@ private:
     BatchTableKey _scan_range_keys;
     BatchRecord   _multiget_records;
     RowBatch      _multiget_row_batch;
-    std::vector<int> _left_field_cnts;
-    std::vector<int> _right_field_cnts;
-    std::vector<bool> _left_opens;
-    std::vector<bool> _right_opens;
-    std::vector<bool> _like_prefixs;
+    int _left_field_cnt = 0;
+    int _right_field_cnt = 0;
+    bool _left_open = false;
+    bool _right_open = false;
+    bool _like_prefix = false;
+    bool _is_eq = false;
     std::vector<pb::SlotDescriptor> _update_slots;
     std::vector<ExprNode*> _update_exprs;
-    bool _use_encoded_key = false;
     bool _range_key_sorted = false;
     // trace使用
     int _scan_rows = 0;
