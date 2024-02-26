@@ -236,7 +236,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
         DB_WARNING("data_type is unsupported: %s", column->name->name.value);
         return -1;
     }
-    if (data_type == pb::FLOAT || data_type == pb::DOUBLE) {
+    if (data_type == pb::FLOAT || data_type == pb::DOUBLE || pb::DATETIME) {
         if (column->type->total_len != -1) {
             field->set_float_total_len((int8_t)column->type->total_len);
         }
@@ -269,7 +269,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
         } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL && col_option->expr != nullptr) {
             if (col_option->expr->to_string() == "(current_timestamp())") {
                 if (is_current_timestamp_specic(data_type)) {
-                    field->set_default_literal(ExprValue::Now().get_string());
+                    field->set_default_literal(ExprValue::Now(field->float_precision_len()).get_string());
                     field->set_default_value("(current_timestamp())");
                     continue;
                 } else {

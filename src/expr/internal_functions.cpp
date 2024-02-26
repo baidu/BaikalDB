@@ -912,11 +912,17 @@ ExprValue now(const std::vector<ExprValue>& input) {
 }
 
 ExprValue current_timestamp(const std::vector<ExprValue>& input) {
+    if (input.size() > 0) {
+        return ExprValue::Now(input[0].get_numberic<int>());
+    }
     return ExprValue::Now(0);
 }
 
 ExprValue utc_timestamp(const std::vector<ExprValue>& input) {
-    return ExprValue::UTC_TIMESTAMP();
+    if (input.size() > 0) {
+        return ExprValue::UTC_TIMESTAMP(input[0].get_numberic<int>());
+    }
+    return ExprValue::UTC_TIMESTAMP(0);
 }
 
 ExprValue timestamp(const std::vector<ExprValue>& input) {
@@ -1494,8 +1500,10 @@ ExprValue datediff(const std::vector<ExprValue>& input) {
     if (right.type == pb::INT64) {
         right.cast_to(pb::STRING);
     }
-    time_t t1 = left.cast_to(pb::TIMESTAMP)._u.uint32_val;
-    time_t t2 = right.cast_to(pb::TIMESTAMP)._u.uint32_val;
+    left.cast_to(pb::DATE);
+    right.cast_to(pb::DATE);
+    int64_t t1 = left.cast_to(pb::TIMESTAMP)._u.uint32_val;
+    int64_t t2 = right.cast_to(pb::TIMESTAMP)._u.uint32_val;
     ExprValue tmp(pb::INT32);
     tmp._u.int32_val = (t1 - t2) / (3600 * 24);
     return tmp;
@@ -2243,7 +2251,9 @@ ExprValue cast_to_datetime(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     ExprValue tmp = input[0];
-    return tmp.cast_to(pb::DATETIME);
+    tmp.cast_to(pb::DATETIME);
+    tmp.set_precision_len(0);
+    return tmp;
 }
 
 ExprValue cast_to_time(const std::vector<ExprValue>& input) {

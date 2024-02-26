@@ -313,7 +313,7 @@ int LoadNode::fill_field_value(SmartRecord record, FieldInfo& field, ExprValue& 
     }
     ExprValue default_value = field.default_expr_value;
     if (field.default_value == "(current_timestamp())") {
-        default_value = ExprValue::Now();
+        default_value = ExprValue::Now(field.float_precision_len);
         default_value.cast_to(field.type);
     }
     if (0 != record->set_value(record->get_field_by_tag(field.id), default_value)) {

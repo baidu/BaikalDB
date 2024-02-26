@@ -2166,6 +2166,12 @@ FunctionCallNonKeyword:
         fun->fn_name = $1;
         $$ = fun;
     }
+    | UTC_TIMESTAMP '(' INTEGER_LIT ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
     | TIMESTAMP '(' ExprList ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
@@ -4067,6 +4073,11 @@ DateAndTimeType:
         // TODO: fractional seconds precision
         FieldType* field_type = new_node(FieldType);
         field_type->type = MYSQL_TYPE_DATETIME;
+        if ($2 >= 1 && $2 <= 6) {
+            field_type->float_len = $2;
+        } else {
+            field_type->float_len = 0;
+        }
         $$ = field_type;
     }
     | TIMESTAMP OptFieldLen

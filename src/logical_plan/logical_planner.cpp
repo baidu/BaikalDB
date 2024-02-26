@@ -2410,7 +2410,7 @@ ScanTupleInfo* LogicalPlanner::get_scan_tuple(const std::string& table_name, int
 }
 
 pb::SlotDescriptor& LogicalPlanner::get_scan_ref_slot(
-        const std::string& alias_name, int64_t table, 
+        const std::string& alias_name, int64_t table,
         int32_t field, pb::PrimitiveType type) {
     ScanTupleInfo* tuple_info = get_scan_tuple(alias_name, table);
     _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
@@ -2433,7 +2433,7 @@ pb::SlotDescriptor& LogicalPlanner::get_scan_ref_slot(
     return *slot_desc;
 }
 
-pb::SlotDescriptor& LogicalPlanner::get_values_ref_slot(int64_t table, 
+pb::SlotDescriptor& LogicalPlanner::get_values_ref_slot(int64_t table,
         int32_t field, pb::PrimitiveType type) {
     auto& tuple_info = _values_tuple_info;
     if (tuple_info.tuple_id == -1) {

@@ -174,7 +174,7 @@ void FunctionManager::register_operators() {
     register_object_ret("current_date", current_date, pb::DATE);
     register_object_ret("curtime", curtime, pb::TIME);
     register_object_ret("current_time", current_time, pb::TIME);
-    register_object_ret("current_timestamp", current_timestamp, pb::TIMESTAMP);
+    register_object_ret("current_timestamp", current_timestamp, pb::DATETIME);
     register_object_ret("timestamp", timestamp, pb::TIMESTAMP);
     register_object_ret("date", date, pb::DATE);
     register_object_ret("hour", hour, pb::UINT32);
@@ -192,7 +192,7 @@ void FunctionManager::register_operators() {
     register_object_ret("time_to_sec", time_to_sec, pb::UINT32);
     register_object_ret("sec_to_time", sec_to_time, pb::TIME);
     register_object_ret("weekday", weekday, pb::UINT32);
-    register_object_ret("datediff", datediff, pb::UINT32);
+    register_object_ret("datediff", datediff, pb::INT32);
     register_object_ret("date_add", date_add, pb::DATETIME);
     register_object_ret("date_sub", date_sub, pb::DATETIME);
     register_object_ret("extract", extract, pb::UINT32);

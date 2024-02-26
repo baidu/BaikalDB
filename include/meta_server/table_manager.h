@@ -980,8 +980,15 @@ public:
         return false;
     }
 
-    bool check_field_is_compatible_type(pb::PrimitiveType src_type, pb::PrimitiveType target_type) {
+    bool check_field_is_compatible_type(const pb::FieldInfo& src_field, const pb::FieldInfo& target_field) {
+        auto src_type = src_field.mysql_type();
+        auto target_type = target_field.mysql_type();
         if (src_type == target_type) {
+            if (src_type == pb::DATETIME || src_type == pb::FLOAT || src_type == pb::DOUBLE) {
+                if (src_field.float_precision_len() > target_field.float_precision_len()) {
+                    return false;
+                }
+            }
             return true;
         }
         switch (src_type) {

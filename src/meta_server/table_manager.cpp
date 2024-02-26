@@ -2071,7 +2071,7 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
             if (mem_field.field_name() == field_name) {
                 if (field.has_mysql_type()) {
-                    if (!check_field_is_compatible_type(mem_field.mysql_type(), field.mysql_type())) {
+                    if (!check_field_is_compatible_type(mem_field, field)) {
                         // TODO 数据类型变更仅支持meta-only, 有损变更待支持
                         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
                                              "modify field data type unsupported lossy changes");
@@ -2115,7 +2115,13 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
                         //修改default value需谨慎，会导致存储null数据的值变成新默认值
                         mem_field.set_default_value(field.default_value());
                     }
-                } 
+                }
+                if (field.has_float_total_len()) {
+                    mem_field.set_float_total_len(field.float_total_len());
+                }
+                if (field.has_float_precision_len()) {
+                    mem_field.set_float_precision_len(field.float_precision_len());
+                }
             }
         }
     }
