@@ -462,6 +462,7 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL},
         { pb::BITMAP,       FieldDescriptorProto::TYPE_BYTES},
         { pb::TDIGEST,      FieldDescriptorProto::TYPE_BYTES},
+        { pb::JSON,         FieldDescriptorProto::TYPE_BYTES},
         { pb::NULL_TYPE,    FieldDescriptorProto::TYPE_BOOL}
     };
     if (_mysql_pb_type_mapping.count(type) == 0) {

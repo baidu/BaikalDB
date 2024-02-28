@@ -155,6 +155,11 @@ void FunctionManager::register_operators() {
     register_object_ret("rpad", rpad, pb::STRING);
     register_object_ret("instr", instr, pb::INT32);
     register_object_ret("json_extract", json_extract, pb::STRING);
+    register_object_ret("json_extract1", json_extract1, pb::STRING);
+    register_object_ret("json_type", json_type, pb::STRING);
+    register_object_ret("json_array", json_array, pb::STRING);
+    register_object_ret("json_object", json_object, pb::STRING);
+    register_object_ret("json_valid", json_valid, pb::BOOL);
     register_object_ret("export_set", export_set, pb::STRING);
     register_object_ret("to_base64", to_base64, pb::STRING);
     register_object_ret("from_base64", from_base64, pb::STRING);
