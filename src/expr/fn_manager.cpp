@@ -232,6 +232,8 @@ void FunctionManager::register_operators() {
     register_object_ret("timestamp_to_tso", timestamp_to_tso, pb::INT64);
     register_object_ret("to_days", to_days, pb::INT64);
     register_object_ret("to_seconds", to_seconds, pb::INT64);
+    register_object_ret("timeseq", timeseq, pb::INT64);
+    register_object_ret("timeseq_to_str", timeseq_to_str, pb::STRING);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);

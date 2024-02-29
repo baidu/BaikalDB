@@ -862,15 +862,16 @@ struct ExprValue {
     // 默认不带us
     static ExprValue Now(int32_t precision = 0) {
         ExprValue tmp(pb::TIMESTAMP);
-        tmp._u.uint32_val = time(NULL);
-        tmp.cast_to(pb::DATETIME);
-
         if (precision > 0 and precision <= 6) {
             timeval tv;
             gettimeofday(&tv, NULL);
+            tmp._u.uint32_val = tv.tv_sec;
+            tmp.cast_to(pb::DATETIME);
             tmp._u.uint64_val |= tv.tv_usec;
             tmp.set_precision_len(precision);
         } else {
+            tmp._u.uint32_val = time(NULL);
+            tmp.cast_to(pb::DATETIME);
             tmp.set_precision_len(0);
         }
         return tmp;
@@ -895,14 +896,16 @@ struct ExprValue {
         long offset = timeinfo.tm_gmtoff;
 
         ExprValue tmp(pb::TIMESTAMP);
-        tmp._u.uint32_val = time(NULL) - offset;
-        tmp.cast_to(pb::DATETIME);
-        timeval tv;
-        gettimeofday(&tv, NULL);
-        tmp._u.uint64_val |= tv.tv_usec;
         if (precision >=0 && precision <= 6) {
+            timeval tv;
+            gettimeofday(&tv, NULL);
+            tmp._u.uint32_val = tv.tv_sec - offset;
+            tmp.cast_to(pb::DATETIME);
+            tmp._u.uint64_val |= tv.tv_usec;
             tmp.set_precision_len(precision);
         } else {
+            tmp._u.uint32_val = time(NULL) - offset;
+            tmp.cast_to(pb::DATETIME);
             tmp.set_precision_len(0);
         }
         return tmp;

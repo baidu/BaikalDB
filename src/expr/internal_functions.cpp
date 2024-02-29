@@ -1850,6 +1850,42 @@ ExprValue timestamp_to_tso(const std::vector<ExprValue>& input) {
     tmp._u.int64_val = timestamp_to_ts(arg_timestamp._u.uint32_val);
     return tmp;
 }
+static const uint64_t MAX_TIME_SERIES_US = 4573968371548160000; // 等于 str_to_date("5000","") + 0
+ExprValue timeseq(const std::vector<ExprValue>& input) {
+    if (input.size() > 1) {
+        return ExprValue::Null();
+    }
+    bool is_reverse = false;
+    if (input.size() == 1 && !(input[0].is_null())) {
+        ExprValue arg1 = input[0];
+        is_reverse = arg1.cast_to(pb::INT32)._u.int32_val < 0;
+    }
+    ExprValue tmp(pb::UINT64);
+    if (is_reverse) {
+        tmp._u.uint64_val = MAX_TIME_SERIES_US - ExprValue::Now(6)._u.uint64_val;
+    } else {
+        tmp._u.uint64_val = MAX_TIME_SERIES_US + ExprValue::Now(6)._u.uint64_val;
+    }
+    return tmp;
+}
+
+ExprValue timeseq_to_str(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::STRING);
+    ExprValue arg1 = input[0];
+    arg1.cast_to(pb::UINT64);
+    int64_t val = arg1._u.uint64_val - MAX_TIME_SERIES_US;
+    if (val < 0) {
+        tmp.str_val += "-";
+        val = -val;
+    }
+    arg1._u.uint64_val = val;
+    arg1.cast_to(pb::DATETIME);
+    tmp.str_val += arg1.get_string();
+    return tmp;
+}
 
 ExprValue hll_add(const std::vector<ExprValue>& input) {
     if (input.size() == 0) {

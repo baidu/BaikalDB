@@ -138,7 +138,8 @@ ExprValue to_days(const std::vector<ExprValue>& input);
 ExprValue to_seconds(const std::vector<ExprValue>& input);
 ExprValue addtime(const std::vector<ExprValue>& input);
 ExprValue subtime(const std::vector<ExprValue>& input);
-
+ExprValue timeseq(const std::vector<ExprValue>& input);
+ExprValue timeseq_to_str(const std::vector<ExprValue>& input);
 // hll functions
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);
