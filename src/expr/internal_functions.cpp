@@ -900,6 +900,32 @@ ExprValue substring_index(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue setrange(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp(pb::STRING);
+    std::string str = input[0].get_string();
+    int64_t offset = input[1].get_numberic<int64_t>();
+    std::string value = input[2].get_string();
+    if (offset < 0 || offset > UINT16_MAX) {
+        return ExprValue::Null();
+    }
+    if (offset > str.length()) {
+        tmp.str_val = str;
+        tmp.str_val += std::string(offset - str.length(), '\x00');
+        tmp.str_val += value;
+        return tmp;
+    }
+    tmp.str_val.append(str.begin(), str.begin() + offset);
+    tmp.str_val += value;
+    if (offset + value.length() >= str.length()) {
+        return tmp;
+    }
+    tmp.str_val.append(str.begin() + offset + value.length(), str.end());
+    return tmp;
+}
+
 ExprValue unix_timestamp(const std::vector<ExprValue>& input) {
     ExprValue tmp(pb::UINT32);
     if (input.size() == 0) {

@@ -83,7 +83,7 @@ ExprValue field(const std::vector<ExprValue>& input);
 ExprValue quote(const std::vector<ExprValue>& input);
 ExprValue func_char(const std::vector<ExprValue>& input);
 ExprValue soundex(const std::vector<ExprValue>& input);
-
+ExprValue setrange(const std::vector<ExprValue>& input);
 
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);

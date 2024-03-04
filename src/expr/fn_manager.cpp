@@ -171,7 +171,7 @@ void FunctionManager::register_operators() {
     register_object_ret("quote", quote, pb::STRING);
     register_object_ret("char", func_char, pb::STRING);
     register_object_ret("soundex", soundex, pb::STRING);
-
+    register_object_ret("setrange", setrange, pb::STRING);
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);
