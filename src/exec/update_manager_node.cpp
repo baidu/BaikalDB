@@ -181,6 +181,9 @@ int UpdateManagerNode::open(RuntimeState* state) {
         update_record(state, new_record);
         _insert_scan_records.emplace_back(new_record);
     }
+    if (state->error_code == ER_ILLEGAL_VALUE_FOR_TYPE) {
+        return -1;
+    }
 
     InsertManagerNode* insert_manager = static_cast<InsertManagerNode*>(_children[1]);
     insert_manager->init_insert_info(this);
@@ -258,6 +261,26 @@ void UpdateManagerNode::update_record(RuntimeState* state, SmartRecord record) {
         if (last_insert_id_expr != nullptr) {
             state->last_insert_id = last_insert_id_expr->get_value(row).get_numberic<int64_t>();
             state->client_conn()->last_insert_id = state->last_insert_id;
+        }
+        auto last_value_expr = expr->get_last_value();
+        if (last_value_expr != nullptr) {
+            // 类型检查
+            if (last_value_expr->children_size() == 2 && last_value_expr->children(1)->is_literal()) {
+                std::string frt = last_value_expr->children(1)->get_value(nullptr).get_string();
+                bool is_valid = true;
+                if (frt == "%d") {
+                    is_valid = last_value_expr->is_valid_int_cast(row);
+                } else if (frt == "%f") {
+                    is_valid = last_value_expr->is_valid_double_cast(row);
+                }
+                if (!is_valid) {
+                    state->error_code = ER_ILLEGAL_VALUE_FOR_TYPE;
+                    state->error_msg << "ERR value is not an integer or out of range";
+                    DB_WARNING_STATE(state, "ERR value is not an integer or out of range");
+                    return;
+                }
+            }
+            state->client_conn()->last_value += redis_encode(last_value_expr->get_value(row).get_string());
         }
     }
 }

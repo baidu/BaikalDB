@@ -81,6 +81,7 @@ public:
         return _table_info;
     }
 
+
 protected:
     int init_schema_info(RuntimeState* state);
     void add_delete_conditon_fields();
@@ -128,6 +129,7 @@ protected:
     int64_t _ttl_timestamp_us = 0; //ttl写入时间，0表示无ttl
     bool  _ddl_need_write = false;
     int64_t  _ddl_index_id = -1;
+    ExprNode* _last_value_expr = nullptr; // not own it
 };
 }
 

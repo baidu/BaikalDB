@@ -674,6 +674,7 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             }
         }
         std::unique_ptr<MemRow>& row = _child_row_batch.get_row();
+
         if (_is_explain || need_copy(row.get())) {
             batch->move_row(std::move(row));
             ++_num_rows_returned;

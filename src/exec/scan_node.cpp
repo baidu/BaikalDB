@@ -635,15 +635,15 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
             std::vector<ExprNode*> learner_condition;
             learner_condition.insert(learner_condition.end(), learner_path->other_condition.begin(),
                     learner_path->other_condition.end());
-            if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
-                get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
+            if (get_parent() != nullptr && (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+                get_parent()->node_type() == pb::WHERE_FILTER_NODE)) {
                 static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index_learner(learner_condition);
             }
         }
     }
     // modify filter conjuncts
-    if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
-        get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
+    if (get_parent() != nullptr && (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+        get_parent()->node_type() == pb::WHERE_FILTER_NODE)) {
         static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index(filter_condition);
     }
     _select_idx = select_idx;

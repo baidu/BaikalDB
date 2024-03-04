@@ -533,9 +533,11 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
     std::set<int32_t> dup_record_ids;
     for (auto pair : _index_info_map) {
         int64_t index_id = pair.first;
+        RuntimeState* tmp_state = index_id == _pri_info->id ? state : nullptr;
         auto key_ids_map = _index_keys_record_map[index_id];
         auto info = pair.second;
         auto return_records = _store_records[index_id];
+
         for (auto& record : return_records) {
             MutTableKey mt_key;
             ret = record->encode_key(*info, mt_key, -1, false);
@@ -548,7 +550,7 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
             // 移除冲突行
             for (auto id : ids_set) {
                 if (_record_ids.erase(id)) {
-                    update_record(_on_dup_key_update_records[index_id][key], _origin_records[id]);
+                    update_record(_on_dup_key_update_records[index_id][key], _origin_records[id], tmp_state);
                 }
             }
         }
@@ -632,7 +634,7 @@ int InsertManagerNode::insert_on_dup_key_update(RuntimeState* state) {
     return _affected_rows;
 }
 
-void InsertManagerNode::update_record(const SmartRecord& record, const SmartRecord& origin_record) {
+void InsertManagerNode::update_record(const SmartRecord& record, const SmartRecord& origin_record, RuntimeState* state) {
     // 处理values函数
     _dup_update_row->clear();
     if (_values_tuple_desc != nullptr) {
@@ -662,6 +664,12 @@ void InsertManagerNode::update_record(const SmartRecord& record, const SmartReco
         } else {
             record->set_value(record->get_field_by_tag(slot.field_id()),
                 expr->get_value(row).cast_to(slot.slot_type()));
+        }
+        if (state != nullptr) {
+            auto last_value_expr = expr->get_last_value();
+            if (last_value_expr != nullptr) {
+                state->client_conn()->last_value += redis_encode(last_value_expr->get_value(row).get_string());
+            };
         }
     }
 }

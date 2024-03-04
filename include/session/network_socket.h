@@ -193,7 +193,8 @@ struct NetworkSocket {
     int             is_auth_result_send_partly;     // Auth result is sended partly,
                                                     // need to go on sending.
     int64_t         last_insert_id;
-    // Socket status.
+    std::string     last_value = "";
+    // string status.
     std::string     current_db;                     // Current use database.
     int             charset_num;                    // Client charset number.
     std::string     charset_name;                   // Client charset name.

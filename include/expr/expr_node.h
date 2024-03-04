@@ -100,12 +100,72 @@ public:
     }
     virtual ExprNode* get_last_insert_id() {
         for (auto c : _children) {
-            if (c->get_last_insert_id() != nullptr) {
+            auto expr = c->get_last_insert_id();
+            if (expr != nullptr) {
                 return c;
             }
         }
         return nullptr;
     }
+    virtual ExprNode* get_last_value() {
+        for (auto c : _children) {
+            auto expr = c->get_last_value();
+            if (expr != nullptr) {
+                return expr;
+            }
+        }
+        return nullptr;
+    }
+    virtual bool is_valid_int_cast(MemRow* row) {
+        if (_node_type == pb::SLOT_REF ||
+            _node_type == pb::STRING_LITERAL) {
+            auto v = get_value(row);
+            if (v.type == pb::STRING) {
+                char* end = nullptr;
+                strtoll(v.str_val.c_str(), &end, 10);
+                if (strlen(end) > 0) {
+                    return false;
+                }
+                if (errno == ERANGE) {
+                    errno = 0;
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (auto c : _children) {
+            if (!c->is_valid_int_cast(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    virtual bool is_valid_double_cast(MemRow* row) {
+        if (_node_type == pb::SLOT_REF ||
+            _node_type == pb::STRING_LITERAL) {
+            auto v = get_value(row);
+            if (v.type == pb::STRING) {
+                char* end = nullptr;
+                strtod(v.str_val.c_str(), &end);
+                if (strlen(end) > 0) {
+                    return false;
+                }
+                if (errno == ERANGE) {
+                    errno = 0;
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (auto c : _children) {
+            if (!c->is_valid_double_cast(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool is_row_expr() {
         return _node_type == pb::ROW_EXPR;
     }

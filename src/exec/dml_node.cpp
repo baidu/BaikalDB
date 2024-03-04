@@ -14,6 +14,7 @@
 
 #include "runtime_state.h"
 #include "dml_node.h"
+#include "filter_node.h"
 
 namespace baikaldb {
 
@@ -207,6 +208,14 @@ int DMLNode::init_schema_info(RuntimeState* state) {
     } else {
         _affected_indexes = _all_indexes;
     }
+    FilterNode* where_filter_node = static_cast<FilterNode*>(get_node(pb::WHERE_FILTER_NODE));
+    if (where_filter_node != nullptr) {
+        _last_value_expr = where_filter_node->get_last_value();
+    }
+    FilterNode* table_filter_node = static_cast<FilterNode*>(get_node(pb::TABLE_FILTER_NODE));
+    if (table_filter_node != nullptr) {
+        _last_value_expr = table_filter_node->get_last_value();
+    }
     return 0;
 }
 
@@ -378,7 +387,8 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 }
                 return ret;
             } else if (_is_replace) {
-                ret = delete_row(state, old_record, nullptr);
+                std::unique_ptr<MemRow> row = state->mem_row_desc()->fetch_mem_row();
+                ret = delete_row(state, old_record, row.get());
                 if (ret < 0) {
                     DB_WARNING_STATE(state, "remove fail, index:%ld ,ret:%d", info.id, ret);
                     return -1;
@@ -648,6 +658,10 @@ int DMLNode::delete_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         DB_WARNING_STATE(state, "lock table:%ld failed", _table_id);
         return -1;
     }
+    if (_last_value_expr != nullptr) {
+        state->last_value += redis_encode(_last_value_expr->get_value(row).get_string());
+    }
+
     if (!satisfy_condition_again(state, row)) {
         DB_WARNING_STATE(state, "condition changed when delete record:%s", record->debug_string().c_str());
         // UndoGetForUpdate(pk_str)?
@@ -729,6 +743,26 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         auto last_insert_id_expr = expr->get_last_insert_id();
         if (last_insert_id_expr != nullptr) {
             state->last_insert_id = last_insert_id_expr->get_value(row).get_numberic<int64_t>();
+        }
+        auto last_value_expr = expr->get_last_value();
+        if (last_value_expr != nullptr) {
+            // 类型检查
+            if (last_value_expr->children_size() == 2 && last_value_expr->children(1)->is_literal()) {
+                std::string frt = last_value_expr->children(1)->get_value(nullptr).get_string();
+                bool is_valid = true;
+                if (frt == "%d") {
+                    is_valid = last_value_expr->children(0)->is_valid_int_cast(row);
+                } else if (frt == "%f") {
+                    is_valid = last_value_expr->children(0)->is_valid_double_cast(row);
+                }
+                if (!is_valid) {
+                    state->error_code = ER_ILLEGAL_VALUE_FOR_TYPE;
+                    state->error_msg << "ERR value is not an integer or out of range";
+                    DB_WARNING_STATE(state, "ERR value is not an integer or out of range");
+                    return -1;
+                }
+            }
+            state->last_value += redis_encode(last_value_expr->get_value(row).get_string());
         }
     }
     ret = insert_row(state, record, true);

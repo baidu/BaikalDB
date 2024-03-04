@@ -1387,6 +1387,16 @@ inline bool float_equal(double value, double compare, double epsilon = 1e-9) {
     return std::fabs(value - compare) < epsilon;
 }
 
+inline std::string redis_encode(std::string str) {
+    //\n<length>\n<data>
+    std::string tmp;
+    tmp += "\n";
+    tmp += std::to_string(str.length());
+    tmp += "\n";
+    tmp += str;
+    return tmp;
+}
+
 //set double buffer
 template<typename T>
 using DoubleBufferSet = butil::DoublyBufferedData<std::unordered_set<T>>;

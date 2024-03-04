@@ -127,6 +127,7 @@ message ExtraReq {
 message ExtraRes {
     repeated RegionIndexs infos = 1; 
     optional RegionOfflineBinlogInfo offline_binlog_info = 2;
+    optional string last_value  = 3;
 };
 
 message StoreReq {

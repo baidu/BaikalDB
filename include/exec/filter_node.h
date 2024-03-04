@@ -112,6 +112,15 @@ public:
             e->reset(state);
         }
     }
+    ExprNode* get_last_value() {
+        for (auto conjunct : _conjuncts) {
+            auto last_value_expr = conjunct->get_last_value();
+            if (last_value_expr != nullptr) {
+                return last_value_expr;
+            }
+        }
+        return nullptr;
+    }
 
 private:
     bool need_copy(MemRow* row);

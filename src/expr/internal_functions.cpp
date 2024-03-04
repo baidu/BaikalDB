@@ -2508,6 +2508,13 @@ ExprValue last_insert_id(const std::vector<ExprValue>& input) {
     ExprValue tmp = input[0];
     return tmp.cast_to(pb::INT64);
 }
+ExprValue last_value(const std::vector<ExprValue>& input) {
+    if (input.size() == 0) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    return tmp.cast_to(pb::STRING);
+}
 
 ExprValue point_distance(const std::vector<ExprValue>& input) {
     if (input.size() < 4) {

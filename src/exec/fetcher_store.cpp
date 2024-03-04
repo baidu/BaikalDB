@@ -867,6 +867,11 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_response.has_last_insert_id()) {
         _client_conn->last_insert_id = _response.last_insert_id();
     }
+    if (_response.has_extra_res()) {
+        if (_response.extra_res().has_last_value()) {
+            _client_conn->last_value = _response.extra_res().last_value();
+        }
+    }
     if (_op_type != pb::OP_SELECT && _op_type != pb::OP_SELECT_FOR_UPDATE && _op_type != pb::OP_ROLLBACK && _op_type != pb::OP_COMMIT) {
         _fetcher_store->affected_rows += _response.affected_rows();
         _client_conn->txn_affected_rows += _response.affected_rows();

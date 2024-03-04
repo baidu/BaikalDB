@@ -290,6 +290,7 @@ void FunctionManager::register_operators() {
 
     register_object_ret("version", version, pb::STRING);
     register_object_ret("last_insert_id", last_insert_id, pb::INT64);
+    register_object_ret("last_value", last_value, pb::STRING);
     //
     register_object_ret("point_distance", point_distance, pb::INT64);
     register_object_ret("cast_to_date", cast_to_date, pb::DATE);

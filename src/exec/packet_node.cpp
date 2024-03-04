@@ -816,6 +816,11 @@ int PacketNode::pack_ok(int num_affected_rows, NetworkSocket* client) {
     bytes[1] = (0 >> 8) & 0xff;
     tmp_buf.byte_array_append_len(bytes, 2);
 
+    if (!client->last_value.empty()) {
+        tmp_buf.pack_length_coded_string(client->last_value, false);
+        client->last_value.clear();
+    }
+
     return _send_buf->network_queue_send_append(tmp_buf._data, tmp_buf._size, ++client->packet_id, 0);
 }
 

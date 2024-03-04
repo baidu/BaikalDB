@@ -195,6 +195,7 @@ ExprValue tdigest_location(const std::vector<ExprValue>& input);
 // other
 ExprValue version(const std::vector<ExprValue>& input);
 ExprValue last_insert_id(const std::vector<ExprValue>& input);
+ExprValue last_value(const std::vector<ExprValue>& input);
 ExprValue find_in_set(const std::vector<ExprValue>& input);
 //transfer (latitude A, longitude A), (latitude B, longitude B) to distance of A to B (m)
 ExprValue point_distance(const std::vector<ExprValue>& input);
