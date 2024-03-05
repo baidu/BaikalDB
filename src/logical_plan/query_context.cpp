@@ -80,6 +80,11 @@ int QueryContext::copy_query_context(QueryContext* p_query_ctx) {
     stat_info.sample_sql << p_query_ctx->stat_info.sample_sql.str();
     need_learner_backup = p_query_ctx->need_learner_backup;
     use_backup = p_query_ctx->use_backup;
+    has_derived_table = p_query_ctx->has_derived_table;
+    derived_table_ctx_mapping.insert(p_query_ctx->derived_table_ctx_mapping.begin(),
+                                     p_query_ctx->derived_table_ctx_mapping.end());
+    slot_column_mapping.insert(p_query_ctx->slot_column_mapping.begin(),
+                               p_query_ctx->slot_column_mapping.end());
 
     // runtime state
     if (p_query_ctx->is_select) {
