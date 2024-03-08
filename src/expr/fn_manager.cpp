@@ -124,6 +124,7 @@ void FunctionManager::register_operators() {
     register_object_ret("least", least, pb::DOUBLE);
     register_object_ret("ceil", ceil, pb::INT64);
     register_object_ret("ceiling", ceil, pb::INT64);
+    register_object_ret("bit_count", bit_count, pb::INT64);
 
     // str funcs
     register_object_ret("length", length, pb::INT64);

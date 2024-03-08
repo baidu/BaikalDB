@@ -328,6 +328,21 @@ ExprValue bit_length(const std::vector<ExprValue>& input) {
     tmp._u.uint32_val = input[0].get_string().size() * 8;
     return tmp;
 }
+ExprValue bit_count(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::UINT64);
+    ExprValue res(pb::INT64);
+    while (tmp._u.uint64_val) {
+        if (tmp._u.uint64_val & 1) {
+            res._u.int64_val += 1;
+        }
+        tmp._u.uint64_val >>= 1;
+    }
+    return res;
+}
 
 ExprValue lower(const std::vector<ExprValue>& input) {
     if (input.size() == 0 || input[0].is_null()) {

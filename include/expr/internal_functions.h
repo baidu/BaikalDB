@@ -40,6 +40,7 @@ ExprValue pi(const std::vector<ExprValue>& input);
 ExprValue greatest(const std::vector<ExprValue>& input);
 ExprValue least(const std::vector<ExprValue>& input);
 ExprValue pow(const std::vector<ExprValue>& input);
+ExprValue bit_count(const std::vector<ExprValue>& input);
 //string functions
 ExprValue length(const std::vector<ExprValue>& input);
 ExprValue bit_length(const std::vector<ExprValue>& input);
