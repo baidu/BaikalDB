@@ -3035,7 +3035,214 @@ ExprValue soundex(const std::vector<ExprValue>& input) {
     res.str_val = code;
     return res;
 }
+#define NBBY            8
+#define SETBIT(a,i)     ((a)[(i)/NBBY] |= 1<<(NBBY-1-(i)%NBBY))
+#define CLRBIT(a,i)     ((a)[(i)/NBBY] &= ~(1<<(NBBY-1-(i)%NBBY)))
+#define ISSET(a,i)      ((a)[(i)/NBBY] & (1<<(NBBY-1-(i)%NBBY)))
+#define ISCLR(a,i)      (((a)[(i)/NBBY] & (1<<(NBBY-1-(i)%NBBY))) == 0)
 
+ExprValue bset(const std::vector<ExprValue>& input) {
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    ExprValue value = input[0];
+    if (value.is_null()) {
+        value.str_val.clear();
+        value.type = pb::STRING;
+    }
+    value.cast_to(pb::STRING);
+    ExprValue offset = input[1];
+    offset.cast_to(pb::UINT64);
+    ExprValue bit = input[2];
+    bit.cast_to(pb::BOOL);
+    int n = offset._u.uint64_val/NBBY + 1 - value.str_val.length();
+    if (n > 0) {
+        value.str_val.append(n ,'\0');
+    }
+    if (bit._u.bool_val) {
+        SETBIT(value.str_val, offset._u.uint64_val);
+    } else {
+        CLRBIT(value.str_val, offset._u.uint64_val);
+    }
+    return value;
+}
+ExprValue bget(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue ret(pb::UINT64);
+    ExprValue value = input[0];
+    if (value.is_null()) {
+        value.str_val.clear();
+        value.type = pb::STRING;
+    }
+    value.cast_to(pb::STRING);
+    ExprValue offset = input[1];
+    offset.cast_to(pb::UINT64);
+    int n = offset._u.uint64_val/NBBY + 1 - value.str_val.length();
+    if (n > 0) {
+        ret._u.uint64_val = 0;
+    }
+    ret._u.uint64_val = ISSET(value.str_val, offset._u.uint64_val) ? 1 : 0;
+    return ret;
+}
+ExprValue band(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue ret(pb::STRING);
+    ExprValue v1 = input[0];
+    v1.cast_to(pb::STRING);
+    ExprValue v2 = input[1];
+    v2.cast_to(pb::STRING);
+
+    std::string& s1 = v1.str_val;
+    std::string& s2 = v2.str_val;
+    if (s1.size() < s2.size()) {
+        s1.append(s1.size() - s2.size(),'\0');
+    } else {
+        s2.append(s2.size() - s1.size(),'\0');
+    }
+    for (size_t i = 0; i < s1.size(); i++) {
+        ret.str_val.push_back(s1[i] & s2[i]);
+    }
+    return ret;
+}
+ExprValue bor(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue ret(pb::STRING);
+    ExprValue v1 = input[0];
+    v1.cast_to(pb::STRING);
+    ExprValue v2 = input[1];
+    v2.cast_to(pb::STRING);
+
+    std::string& s1 = v1.str_val;
+    std::string& s2 = v2.str_val;
+    if (s1.size() < s2.size()) {
+        s1.append(s1.size() - s2.size(),'\0');
+    } else {
+        s2.append(s2.size() - s1.size(),'\0');
+    }
+    for (size_t i = 0; i < s1.size(); i++) {
+        ret.str_val.push_back(s1[i] | s2[i]);
+    }
+    return ret;
+}
+ExprValue bxor(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue ret(pb::STRING);
+    ExprValue v1 = input[0];
+    v1.cast_to(pb::STRING);
+    ExprValue v2 = input[1];
+    v2.cast_to(pb::STRING);
+
+    std::string& s1 = v1.str_val;
+    std::string& s2 = v2.str_val;
+    if (s1.size() < s2.size()) {
+        s1.append(s1.size() - s2.size(),'\0');
+    } else {
+        s2.append(s2.size() - s1.size(),'\0');
+    }
+    for (size_t i = 0; i < s1.size(); i++) {
+        ret.str_val.push_back(s1[i] ^ s2[i]);
+    }
+    return ret;
+}
+ExprValue bnot(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue ret(pb::STRING);
+    ExprValue v = input[0];
+    v.cast_to(pb::STRING);
+    std::string& s = v.str_val;
+    for (size_t i = 0; i < s.size(); i++) {
+        ret.str_val.push_back(~s[i]);
+    }
+    return ret;
+}
+ExprValue bpos(const std::vector<ExprValue>& input) {
+    if (input.size() != 2 && input.size() != 4 && input.size() != 5) {
+        return ExprValue::Null();
+    }
+    ExprValue ret(pb::INT64);
+    ExprValue value = input[0];
+    if (value.is_null()) {
+        value.str_val.clear();
+        value.type = pb::STRING;
+    }
+    value.cast_to(pb::STRING);
+    ExprValue bit = input[1];
+    bit.cast_to(pb::BOOL);
+    std::string& d = value.str_val;
+
+    int64_t off = 0;
+    int64_t end = d.size() * NBBY;
+    int STEP = NBBY;
+    if (input.size() == 5 && to_lower(input[4].get_string()) == "bit") {
+        STEP = 1;
+    }
+    if (input.size() >= 4) {
+        ExprValue s = input[2];
+        off = s.cast_to(pb::INT64)._u.int64_val * STEP;
+        ExprValue e = input[3];
+        end = std::min(end, (e.cast_to(pb::INT64)._u.int64_val + 1) * STEP);
+    }
+    if (bit._u.bool_val) {
+        for (; off < end; off++) {
+            if (ISSET(d, off)) {
+                ret._u.int64_val = off;
+                return ret;
+            }
+        }
+        ret._u.int64_val = -1;
+    } else {
+        for (; off < end; off++) {
+            if (ISCLR(d, off)) {
+                ret._u.int64_val = off;
+                return ret;
+            }
+        }
+        ret._u.int64_val = (input.size() == 4) ? -1 : end;
+    }
+    return ret;
+}
+ExprValue bcount(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 && input.size() != 3 && input.size() != 4) {
+        return ExprValue::Null();
+    }
+    ExprValue ret(pb::INT64);
+
+    ExprValue value = input[0];
+    if (value.is_null()) {
+        value.str_val.clear();
+        value.type = pb::STRING;
+    }
+    value.cast_to(pb::STRING);
+    std::string& d = value.str_val;
+
+    int64_t off = 0;
+    int64_t end = d.size() * NBBY;int STEP = NBBY;
+    if (input.size() == 4 && to_lower(input[3].get_string()) == "bit") {
+        STEP = 1;
+    }
+    if (input.size() >= 3) {
+        ExprValue s = input[1];
+        off = s.cast_to(pb::INT64)._u.int64_val * STEP;
+        ExprValue e = input[2];
+        end = std::min(end, (e.cast_to(pb::INT64)._u.int64_val + 1) * STEP);
+    }
+    for (; off < end; off++) {
+        if (ISSET(d, off)) {
+            ret._u.int64_val++;
+        }
+    }
+    return ret;
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

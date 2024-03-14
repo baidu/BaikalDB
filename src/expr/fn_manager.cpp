@@ -300,6 +300,16 @@ void FunctionManager::register_operators() {
     register_object_ret("cast_to_signed", cast_to_signed, pb::INT64);
     register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::INT64);
     register_object_ret("cast_to_double", cast_to_double, pb::DOUBLE);
+
+    // redis bitmap funcs
+    register_object_ret("bset", bset, pb::STRING);
+    register_object_ret("band", band, pb::STRING);
+    register_object_ret("bor",  bor, pb::STRING);
+    register_object_ret("bxor", bxor, pb::STRING);
+    register_object_ret("bnot", bnot, pb::STRING);
+    register_object_ret("bget", bget, pb::INT64);
+    register_object_ret("bpos", bpos, pb::INT64);
+    register_object_ret("bcount", bcount, pb::INT64);
 }
 
 int FunctionManager::init() {

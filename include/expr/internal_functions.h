@@ -206,6 +206,16 @@ ExprValue cast_to_signed(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_unsigned(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_string(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_double(const std::vector<ExprValue>& inpt);
+// bit functions
+ExprValue bset(const std::vector<ExprValue>& input);
+ExprValue band(const std::vector<ExprValue>& input);
+ExprValue bor(const std::vector<ExprValue>& input);
+ExprValue bxor(const std::vector<ExprValue>& input);
+ExprValue bnot(const std::vector<ExprValue>& input);
+ExprValue bget(const std::vector<ExprValue>& input);
+ExprValue bpos(const std::vector<ExprValue>& input);
+ExprValue bcount(const std::vector<ExprValue>& input);
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */
