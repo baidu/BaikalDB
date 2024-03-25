@@ -342,8 +342,8 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
     }
-    // sign => pred
-    std::map<int64_t, SlotPredicate> pred_map;
+    
+    std::vector<ExprNode*> like2range;
     for (auto& expr : _conjuncts) {
         //类型推导
         ret = expr->expr_optimize();
@@ -352,7 +352,15 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             return ret;
         }
         ExprNode::or_node_optimize(&expr);
-
+        ExprNode::like_node_optimize(&expr, like2range);
+    }
+    for (auto expr : like2range) {
+        _conjuncts.push_back(expr);
+    }
+    
+    // sign => pred
+    std::map<int64_t, SlotPredicate> pred_map;
+    for (auto& expr : _conjuncts) {
         //非bool型表达式判断
         if (expr->col_type() != pb::BOOL) {
             ExprNode::_s_non_boolean_sql_cnts << 1;
