@@ -2814,6 +2814,7 @@ int LogicalPlanner::create_sort_node() {
         sort->add_is_null_first(_order_ascs[idx]);
     }
     sort->set_tuple_id(_order_tuple_id);
+
     return 0;
 }
 int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTmp* apply_root) {
