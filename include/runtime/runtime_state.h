@@ -459,6 +459,7 @@ public:
     int                 range_count_limit = 0;
     int64_t           _sql_exec_timeout = -1;
     bool              _is_ddl_work = false;
+    bool              must_have_one = false;
 private:
     bool _is_inited    = false;
     bool _is_cancelled = false;
