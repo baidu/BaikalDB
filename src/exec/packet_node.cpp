@@ -668,7 +668,9 @@ int PacketNode::open_analyze(RuntimeState* state) {
             return ret;
         }
         state->inc_num_returned_rows(batch->size());
-        batch_vector.push_back(batch);
+        if (batch->size() > 0) {
+            batch_vector.push_back(batch);
+        }
     } while (!eos);
 
     std::vector<ExprNode*> slot_order_exprs;
