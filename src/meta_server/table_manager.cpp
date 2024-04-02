@@ -1996,7 +1996,7 @@ void TableManager::rename_field(const pb::MetaManagerRequest& request,
         }
         int32_t field_id = 0;
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
-            if (mem_field.field_name() == field.field_name()) {
+            if (!mem_field.deleted() && mem_field.field_name() == field.field_name()) {
                 mem_field.set_field_name(field.new_field_name());
                 field_id = mem_field.field_id();
             }
@@ -2071,7 +2071,7 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
             return;
         }
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
-            if (mem_field.field_name() == field_name) {
+            if (!mem_field.deleted() && mem_field.field_name() == field_name) {
                 if (field.has_mysql_type()) {
                     if (!check_field_is_compatible_type(mem_field, field)) {
                         // TODO 数据类型变更仅支持meta-only, 有损变更待支持
@@ -4364,7 +4364,7 @@ void TableManager::link_binlog(const pb::MetaManagerRequest& request, const int6
         }
         if (request.table_info().has_link_field()) {
             for (const auto& field_info : mem_schema_pb.fields()) {
-                if (field_info.field_name() == request.table_info().link_field().field_name()) {
+                if (!field_info.deleted() && field_info.field_name() == request.table_info().link_field().field_name()) {
                     link_field = field_info;
                     get_field_info = true;
                     break;
