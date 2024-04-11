@@ -284,7 +284,7 @@ int32_t RocksWrapper::init(const std::string& path) {
         _data_cf_option.enable_blob_files = true;
         _data_cf_option.min_blob_size = FLAGS_min_blob_size;
         _data_cf_option.blob_file_size = 1ULL << 28;
-        _data_cf_option.blob_compression_type = rocksdb::CompressionType::kLZ4HCCompression;
+        _data_cf_option.blob_compression_type = rocksdb::CompressionType::kLZ4Compression;
         _data_cf_option.enable_blob_garbage_collection  = true;
         _data_cf_option.blob_garbage_collection_age_cutoff  = 0.25;
         _data_cf_option.blob_garbage_collection_force_threshold  = 0.8;
