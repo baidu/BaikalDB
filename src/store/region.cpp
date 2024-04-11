@@ -1837,7 +1837,7 @@ void Region::dml_2pc(const pb::StoreReq& request,
     // 只有leader有事务情况才能在raft外执行
     if (applied_index == 0 && term == 0 && !is_leader()) {
         // 非leader才返回
-        const std::string& leader = butil::endpoint2str(get_leader());
+        const auto& leader = butil::endpoint2str(get_leader());
         response.set_leader(leader.c_str());
         response.set_errcode(pb::NOT_LEADER);
         response.set_errmsg("not leader");
