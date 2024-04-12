@@ -140,6 +140,7 @@ MEDIUMTEXT { return MEDIUMTEXT; }
 MINUTE_MICROSECOND { un_reserved_keyword(yylval, yyscanner, parser); return MINUTE_MICROSECOND; }
 MINUTE_SECOND { un_reserved_keyword(yylval, yyscanner, parser); return MINUTE_SECOND; }
 MOD { un_reserved_keyword(yylval, yyscanner, parser); return MOD; }
+NAMESPACE_ { return NAMESPACE; }
 NOT { return NOT; }
 NO_WRITE_TO_BINLOG { return NO_WRITE_TO_BINLOG; }
 NULL { return NULLX; }
@@ -273,6 +274,7 @@ ESCAPE { un_reserved_keyword(yylval, yyscanner, parser); return ESCAPE; }
 EXCLUSIVE { un_reserved_keyword(yylval, yyscanner, parser); return EXCLUSIVE; }
 EXECUTE { un_reserved_keyword(yylval, yyscanner, parser); return EXECUTE; }
 FIELDS { un_reserved_keyword(yylval, yyscanner, parser); return FIELDS; }
+FILE { un_reserved_keyword(yylval, yyscanner, parser); return FILE_T; }
 FIRST { un_reserved_keyword(yylval, yyscanner, parser); return FIRST; }
 FIXED { un_reserved_keyword(yylval, yyscanner, parser); return FIXED; }
 FLUSH { un_reserved_keyword(yylval, yyscanner, parser); return FLUSH; }
@@ -319,6 +321,7 @@ PRIVILEGES { un_reserved_keyword(yylval, yyscanner, parser); return PRIVILEGES; 
 PROCESS { un_reserved_keyword(yylval, yyscanner, parser); return PROCESS; }
 PROCESSLIST { un_reserved_keyword(yylval, yyscanner, parser); return PROCESSLIST; }
 PROFILES { un_reserved_keyword(yylval, yyscanner, parser); return PROFILES; }
+PROXY { un_reserved_keyword(yylval, yyscanner, parser); return PROXY; }
 QUARTER { un_reserved_keyword(yylval, yyscanner, parser); return QUARTER; }
 QUERY { un_reserved_keyword(yylval, yyscanner, parser); return QUERY; }
 QUERIES { un_reserved_keyword(yylval, yyscanner, parser); return QUERIES; }
@@ -342,6 +345,7 @@ SERIALIZABLE { un_reserved_keyword(yylval, yyscanner, parser); return SERIALIZAB
 SESSION { un_reserved_keyword(yylval, yyscanner, parser); return SESSION; }
 SHARE { un_reserved_keyword(yylval, yyscanner, parser); return SHARE; }
 SHARED { un_reserved_keyword(yylval, yyscanner, parser); return SHARED; }
+SHUTDOWN { un_reserved_keyword(yylval, yyscanner, parser); return SHUTDOWN; }
 SIGNED { un_reserved_keyword(yylval, yyscanner, parser); return SIGNED; }
 SLAVE { un_reserved_keyword(yylval, yyscanner, parser); return SLAVE; }
 SNAPSHOT { un_reserved_keyword(yylval, yyscanner, parser); return SNAPSHOT; }
@@ -355,6 +359,7 @@ SOME { un_reserved_keyword(yylval, yyscanner, parser); return SOME; }
 SWAP { un_reserved_keyword(yylval, yyscanner, parser); return SWAP; }
 GLOBAL { un_reserved_keyword(yylval, yyscanner, parser); return GLOBAL; }
 TABLES { un_reserved_keyword(yylval, yyscanner, parser); return TABLES; }
+TABLESPACE { un_reserved_keyword(yylval, yyscanner, parser); return TABLESPACE; }
 TEMPORARY { un_reserved_keyword(yylval, yyscanner, parser); return TEMPORARY; }
 TEMPTABLE { un_reserved_keyword(yylval, yyscanner, parser); return TEMPTABLE; }
 TEXT { un_reserved_keyword(yylval, yyscanner, parser); return TEXT; }
@@ -514,7 +519,7 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 [ \t\r\n] { }
 [\0] { return 0; }
 
-[-,\.*+(){}|&/^~;] { return yytext[0]; }
+[-,\.*+(){}|&/^~;@] { return yytext[0]; }
 [][] { return yytext[0]; }
 
 "/*"([*]*(([^*/])+([/])*)*)*"*/" {/* comment; do nothing */}

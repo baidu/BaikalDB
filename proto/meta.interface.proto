@@ -21,6 +21,7 @@ message NameSpaceInfo {
     optional int64 byte_size_per_record    = 9;
     optional int64 replica_num             = 10;
     optional int64 region_split_lines      = 11; //region分裂行数阈值
+    optional bool  if_exist                = 13;
 };
 
 message DataBaseInfo {
@@ -330,6 +331,7 @@ message PrivilegeDatabase {
     optional int64 database_id = 2;
     optional RW database_rw    = 3;
     optional bool force        = 4;
+    optional uint32 acl         = 5; //权限控制列表,bitmap
 };
 
 message PrivilegeTable {
@@ -339,6 +341,7 @@ message PrivilegeTable {
     optional int64 table_id    = 4;
     optional RW table_rw       = 5;
     optional bool force        = 6;
+    optional uint32 acl         = 7; //权限控制列表,bitmap
 };
 
 message UserPrivilege {
@@ -359,6 +362,8 @@ message UserPrivilege {
     optional bool use_read_index                             = 15; // 读是否走folloewr read use read idx
     optional bool enable_plan_cache                          = 16; // 是否缓存执行计划
     optional RangePartitionType request_range_partition_type = 17; // 访问的Range分区类型
+    optional uint32 acl                                      = 18; //权限控制列表,bitmap
+    optional bool  if_exist                                  = 19;
 };
 
 //集群信息

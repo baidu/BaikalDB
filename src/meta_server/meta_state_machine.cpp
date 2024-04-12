@@ -307,6 +307,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
              PrivilegeManager::get_instance()->drop_user(request, done);
             break;
         }
+        case pb::OP_MODIFY_USER: {
+            PrivilegeManager::get_instance()->modify_user(request, done);
+            break;
+        }
         case pb::OP_ADD_PRIVILEGE: {
              PrivilegeManager::get_instance()->add_privilege(request, done);
             break;

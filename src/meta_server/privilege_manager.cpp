@@ -47,7 +47,8 @@ void PrivilegeManager::process_user_privilege(google::protobuf::RpcController* c
         return;
     }
     switch (request->op_type()) {
-    case pb::OP_CREATE_USER: {
+    case pb::OP_CREATE_USER:
+    case pb::OP_MODIFY_USER: {
         if (!request->user_privilege().has_password()) {
             ERROR_SET_RESPONSE(response, 
                                 pb::INPUT_PARAM_ERROR, 
@@ -82,7 +83,11 @@ void PrivilegeManager::create_user(const pb::MetaManagerRequest& request, braft:
     if (_user_privilege.find(username) != _user_privilege.end()) {
         DB_WARNING("request username has been created, username:%s", 
                 user_privilege.username().c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username has been repeated");
+        if (user_privilege.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username has been repeated");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
         return;
     }
     int ret = SchemaManager::get_instance()->check_and_get_for_privilege(user_privilege);
@@ -114,10 +119,15 @@ void PrivilegeManager::create_user(const pb::MetaManagerRequest& request, braft:
 }
 
 void PrivilegeManager::drop_user(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    auto& user_privilege = const_cast<pb::UserPrivilege&>(request.user_privilege());
     std::string username =  request.user_privilege().username();
     if (_user_privilege.find(username) == _user_privilege.end()) {                        
         DB_WARNING("request username not exist, username:%s", username.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username not exist");
+        if (!user_privilege.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username not exist");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
         return;
     }
     auto ret = MetaRocksdb::get_instance()->delete_meta_info(
@@ -131,6 +141,52 @@ void PrivilegeManager::drop_user(const pb::MetaManagerRequest& request, braft::C
     _user_privilege.erase(username);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop user success, request:%s", request.ShortDebugString().c_str());
+}
+
+void PrivilegeManager::modify_user(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    auto& user_privilege = const_cast<pb::UserPrivilege&>(request.user_privilege());
+    std::string username = user_privilege.username();
+    if (_user_privilege.find(username) == _user_privilege.end()) {
+        DB_WARNING("request username not exist, username:%s", username.c_str());
+        if (!user_privilege.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "username not exist");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
+        return;
+    }
+    int ret = SchemaManager::get_instance()->check_and_get_for_privilege(user_privilege);
+    if (ret < 0) {
+        DB_WARNING("request not illegal, request:%s", request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "request invalid");
+        return;
+    }
+    // 目前仅支持修改密码与namespace
+    pb::UserPrivilege tmp_info = _user_privilege[username];
+    tmp_info.set_namespace_id(user_privilege.namespace_id());
+    tmp_info.set_namespace_name(user_privilege.namespace_name());
+    tmp_info.set_password(user_privilege.password());
+    tmp_info.set_version(tmp_info.version() + 1);
+
+    // 构造key 和 value
+    std::string value;
+    if (!tmp_info.SerializeToString(&value)) {
+        DB_WARNING("request serializeToArray fail, request:%s",request.ShortDebugString().c_str());
+        IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+        return;
+    }
+    // write date to rocksdb
+    ret = MetaRocksdb::get_instance()->put_meta_info(construct_privilege_key(username), value);
+    if (ret < 0) {
+        DB_WARNING("add username:%s privilege to rocksdb fail", username.c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+        return;
+    }
+    //更新内存
+    BAIDU_SCOPED_LOCK(_user_mutex);
+    _user_privilege[username] = tmp_info;
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("alter user success, request:%s", request.ShortDebugString().c_str());
 }
 
 void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braft::Closure* done) {
@@ -181,7 +237,9 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     if (user_privilege.has_request_range_partition_type()) {
         tmp_mem_privilege.set_request_range_partition_type(user_privilege.request_range_partition_type());
     }
-
+    if (user_privilege.has_acl()) { // grank
+        tmp_mem_privilege.set_acl(tmp_mem_privilege.acl() | user_privilege.acl());
+    }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
     std::string value;
@@ -236,6 +294,9 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
     if (user_privilege.has_resource_tag() && tmp_mem_privilege.has_resource_tag() && 
         user_privilege.resource_tag() == tmp_mem_privilege.resource_tag()) {
         tmp_mem_privilege.clear_resource_tag();
+    }
+    if (user_privilege.has_acl()) { // revoke
+        tmp_mem_privilege.set_acl(tmp_mem_privilege.acl() & ~user_privilege.acl());
     }
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
@@ -295,9 +356,15 @@ int PrivilegeManager::load_snapshot() {
 void PrivilegeManager::insert_database_privilege(const pb::PrivilegeDatabase& privilege_database,
                                                   pb::UserPrivilege& mem_privilege) {
     bool whether_exist = false;
+    pb::PrivilegeDatabase* mem_database_ptr = nullptr;
     for (auto& mem_database : *mem_privilege.mutable_privilege_database()) {
         if (mem_database.database_id() == privilege_database.database_id()) {
             whether_exist = true;
+            mem_database_ptr = &mem_database;
+
+            if (!privilege_database.has_database_rw()) { // for grant only
+                break;
+            }
 
             if (privilege_database.force()) {
                 mem_database.set_database_rw(privilege_database.database_rw());
@@ -312,6 +379,8 @@ void PrivilegeManager::insert_database_privilege(const pb::PrivilegeDatabase& pr
     if (!whether_exist) {
         pb::PrivilegeDatabase* ptr_database = mem_privilege.add_privilege_database();
         *ptr_database = privilege_database;
+    } else if (privilege_database.has_acl()){ // for grank
+        mem_database_ptr->set_acl(mem_database_ptr->acl() | privilege_database.acl());
     }
 }
 
@@ -320,10 +389,16 @@ void PrivilegeManager::insert_table_privilege(const pb::PrivilegeTable& privileg
     bool whether_exist = false;
     int64_t database_id = privilege_table.database_id();
     int64_t table_id = privilege_table.table_id();
+    pb::PrivilegeTable* mem_privilege_table_ptr = nullptr;
     for (auto& mem_privilege_table : *mem_privilege.mutable_privilege_table()) {
         if (mem_privilege_table.database_id() == database_id
                 && mem_privilege_table.table_id() == table_id) {
             whether_exist = true;
+            mem_privilege_table_ptr = &mem_privilege_table;
+
+            if (!privilege_table.has_table_rw()) { // for grant only
+                break;
+            }
 
             if (privilege_table.force()) {
                 mem_privilege_table.set_table_rw(privilege_table.table_rw());
@@ -339,6 +414,8 @@ void PrivilegeManager::insert_table_privilege(const pb::PrivilegeTable& privileg
     if (!whether_exist) {
          pb::PrivilegeTable* ptr_table = mem_privilege.add_privilege_table();
          *ptr_table = privilege_table;
+    } else if (privilege_table.has_acl()){ // for grank
+        mem_privilege_table_ptr->set_acl(mem_privilege_table_ptr->acl() | privilege_table.acl());
     }
 }
 
@@ -379,13 +456,18 @@ void PrivilegeManager::delete_database_privilege(const pb::PrivilegeDatabase& pr
                     privilege_database.database_rw() < copy_database.database_rw()) {
                 auto add_database = mem_privilege.add_privilege_database();
                 *add_database = privilege_database;
-            } 
+            }
+            // 收回revoke的权限
+            if (privilege_database.has_acl()) {
+                auto add_database = mem_privilege.add_privilege_database();
+                *add_database = copy_database;
+                add_database->set_acl(add_database->acl() & ~privilege_database.acl());
+            }
         } else {
             auto add_database = mem_privilege.add_privilege_database();
             *add_database = copy_database;
-
         }
-    } 
+    }
 }
 
 void PrivilegeManager::delete_table_privilege(const pb::PrivilegeTable& privilege_table,
@@ -401,6 +483,12 @@ void PrivilegeManager::delete_table_privilege(const pb::PrivilegeTable& privileg
                     privilege_table.table_rw() < copy_table.table_rw()) {
                  auto add_table = mem_privilege.add_privilege_table();
                  *add_table = privilege_table;
+            }
+            // 收回revoke的权限
+            if (privilege_table.has_acl()) {
+                auto add_table = mem_privilege.add_privilege_table();
+                *add_table = copy_table;
+                add_table->set_acl(add_table->acl() & ~privilege_table.acl());
             }
         } else {
             auto add_table = mem_privilege.add_privilege_table();

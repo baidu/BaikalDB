@@ -70,6 +70,8 @@ const std::string SQL_SHOW_ABNORMAL_SWITCH       = "abnormal_switch";       // s
 const std::string SQL_SHOW_META_BINLOG           = "meta_binlog";           // show meta_binlog db.table
 const std::string SQL_SHOW_ACTIVE_RANGE          = "active_range";          // show active_range db.table
 const std::string SQL_SHOW_OFFLINE_BINLOG        = "offline_binlog";        // show offline_binlog tableID regionID
+const std::string SQL_SHOW_NAMESPACES            = "namespaces";            // show namespaces;
+const std::string SQL_SHOW_GRANTS                = "grants";                // show grants for username;
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -166,11 +168,14 @@ private:
     // sql: show abnormal_switch
     // 异常的switch，如快速导入超一天，表split_lines超1kw行，peer_loadbalance，migrate关闭等
     bool _show_abnormal_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
-
     bool _show_meta_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_active_range(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
     bool _show_offline_binlog(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show namespaces;
+    bool _show_namespaces(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show grants for username;
+    bool _show_grants(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 

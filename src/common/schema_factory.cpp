@@ -1235,6 +1235,8 @@ void SchemaFactory::update_leader(const pb::RegionInfo& region) {
 }
 
 void SchemaFactory::update_user(const pb::UserPrivilege& user) {
+    // 每次都新建一个UserInfo，所以内部无需加锁
+    std::shared_ptr<UserInfo> user_info(new (std::nothrow)UserInfo);
     const std::string& username = user.username();
     const std::string& password = user.password();
     std::unordered_set<std::string> last_auth_ip_set;
@@ -1255,6 +1257,7 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
                 if (user.has_ddl_permission()) {
                     iter->second->ddl_permission = user.ddl_permission();
                 }
+//                user_info = iter->second; // 更新原UserInfo，使connection中的user_info可以不重启，更新生效
             } else {
                 last_auth_ip_set = iter->second->auth_ip_set;
             }
@@ -1269,8 +1272,6 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
             }
         }
     }
-    // 每次都新建一个UserInfo，所以内部无需加锁
-    std::shared_ptr<UserInfo> user_info(new (std::nothrow)UserInfo);
     user_info->username = username;
     user_info->password = password;
     user_info->resource_tag = user.resource_tag();
@@ -1299,6 +1300,12 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     if (user.has_txn_lock_timeout()) {
         user_info->txn_lock_timeout = user.txn_lock_timeout();
     }
+    if (user.has_acl()) {
+        user_info->acl_user = user.acl();
+        for (auto& iter : _show_db_info) {
+            user_info->all_database.insert(iter.first);
+        }
+    }
     uint32_t db_cnt  = user.privilege_database_size();
     uint32_t tbl_cnt = user.privilege_table_size();
 
@@ -1306,12 +1313,18 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
         const pb::PrivilegeDatabase& db = user.privilege_database(idx);
         user_info->database[db.database_id()] = db.database_rw();
         user_info->all_database.insert(db.database_id());
+        if (db.has_acl()) {
+            user_info->acl_database[db.database_id()] = db.acl();
+        }
     }
     for (uint32_t idx = 0; idx < tbl_cnt; ++idx) {
         const pb::PrivilegeTable& tbl = user.privilege_table(idx);
         user_info->table[tbl.table_id()] = tbl.table_rw();
         user_info->table_name[tbl.table_name()] = tbl.table_rw();
         user_info->all_database.insert(tbl.database_id());
+        if (tbl.has_acl()) {
+            user_info->acl_table[tbl.table_id()] = tbl.acl();
+        }
     }
     user_info->all_database.insert(InformationSchema::get_instance()->db_id());
     user_info->database[InformationSchema::get_instance()->db_id()] = pb::READ;
@@ -1354,12 +1367,18 @@ void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
     BAIDU_SCOPED_LOCK(_update_show_db_mutex);
     _show_db_info.clear();
     for (auto db_info : db_infos) {
+        DB_WARNING("update_show_db: %s.%s", db_info.namespace_name().c_str(), db_info.database().c_str())
+        if (db_info.namespace_name() == "INTERNAL" && db_info.database() == "baikaldb") {
+            //忽略INTERNAL.baikaldb
+            continue;
+        }
         DatabaseInfo info;
         info.id = db_info.database_id();
         info.version = db_info.version();
         info.name = db_info.database();
         info.namespace_ = db_info.namespace_name();
         _show_db_info[info.id] = info;
+        _show_db_name_id_mapping[try_to_lower(info.namespace_ + "." + info.name)] = info.id;
     }
     //特殊处理information_schema
     DatabaseInfo info;
@@ -1368,6 +1387,7 @@ void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
     info.name = "information_schema";
     info.namespace_ = "INTERNAL";
     _show_db_info[info.id] = info;
+    _show_db_name_id_mapping[try_to_lower(info.namespace_ + "." + info.name)] = info.id;
 }
 
 void SchemaFactory::update_statistics(const StatisticsVec& statistics) {
@@ -1739,7 +1759,12 @@ std::vector<std::string> SchemaFactory::get_table_list(
                 user->table.count(table_info.id) == 1 ||
                 user->table_name.count(table_info.short_name) == 1) {
                 vec.push_back(table_info.short_name);
+            } else if (user->acl_user != 0 ||
+                user->acl_database.count(db_id) == 1 ||
+                user->acl_table.count(table_info.id) == 1) {
+                vec.push_back(table_info.short_name);
             }
+
         }
     }
     std::sort(vec.begin(), vec.end());
@@ -1762,6 +1787,10 @@ std::vector<SmartTable> SchemaFactory::get_table_list(std::string namespace_, Us
         }
         if(user->database.count(table_info->db_id) == 1 ||
                 user->table.count(table_info->id) == 1) {
+            vec.emplace_back(table_info);
+        } else if (user->acl_user != 0 ||
+            user->acl_database.count(table_info->db_id) == 1 ||
+            user->acl_table.count(table_info->id) == 1) {
             vec.emplace_back(table_info);
         }
     }
@@ -2226,6 +2255,17 @@ int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
     db_id = db_name_id_mapping.at(try_to_lower(db_name));
     return 0;
 }
+
+int SchemaFactory::get_show_database_id(const std::string& db_name, int64_t& db_id) {
+    BAIDU_SCOPED_LOCK(_update_show_db_mutex);
+    auto& db_name_id_mapping = _show_db_name_id_mapping;
+    if (db_name_id_mapping.count(try_to_lower(db_name)) == 0) {
+        return -1;
+    }
+    db_id = db_name_id_mapping.at(try_to_lower(db_name));
+    return 0;
+}
+
 bool SchemaFactory::exist_tableid(int64_t table_id) {
     DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {

@@ -144,4 +144,5 @@ enum OpType {
     OP_DROP_PARTITION_TS                    = 198;
     OP_SPECIFY_SPLIT_KEYS                   = 199; // 指定RangePartition分区的预分裂Key
     OP_CONVERT_PARTITION                    = 200;
+    OP_MODIFY_USER                          = 201; //改user
 };

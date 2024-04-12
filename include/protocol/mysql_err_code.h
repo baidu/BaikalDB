@@ -899,6 +899,8 @@ enum MysqlErrCode : int32_t {
     ER_OLD_TEMPORALS_UPGRADED                                    = 1880,
     ER_INNODB_FORCED_RECOVERY                                    = 1881,
 
+    ER_NO_NAMESPACE_ERROR                                        = 2001,
+
     // baikaldb and baikalStore specific errors
     ER_ERROR_COMMON                                              = 10001,
     ER_MAKE_RESULT_PACKET                                        = 10002,

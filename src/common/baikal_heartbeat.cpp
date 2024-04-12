@@ -101,10 +101,10 @@ void BaikalHeartBeat::process_heart_beat_response(const pb::BaikalHeartBeatRespo
     if (response.has_idc_info()) {
         factory->update_idc(response.idc_info());
     }
+    factory->update_show_db(response.db_info());
     for (auto& info : response.privilege_change_info()) {
         factory->update_user(info);
     }
-    factory->update_show_db(response.db_info());
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }
@@ -131,10 +131,10 @@ void BaikalHeartBeat::process_heart_beat_response_sync(const pb::BaikalHeartBeat
     if (response.has_idc_info()) {
         factory->update_idc(response.idc_info());
     }
+    factory->update_show_db(response.db_info());
     for (auto& info : response.privilege_change_info()) {
         factory->update_user(info);
     }
-    factory->update_show_db(response.db_info());
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }
@@ -341,10 +341,10 @@ void BinlogNetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatR
     if (response.has_idc_info()) {
         factory->update_idc(response.idc_info());
     }
+    factory->update_show_db(response.db_info());
     for (auto& info : response.privilege_change_info()) {
         factory->update_user(info);
     }
-    factory->update_show_db(response.db_info());
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }
@@ -505,6 +505,7 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
     if (response.has_idc_info()) {
         factory->update_idc(response.idc_info());
     }
+    factory->update_show_db(response.db_info());
     for (auto& info : response.privilege_change_info()) {
         factory->update_user(info);
     }
@@ -518,7 +519,6 @@ bool BinlogNetworkServer::process_heart_beat_response_sync(const pb::BaikalHeart
         *rv.Add() = region_info;
     }
     factory->update_regions_double_buffer_sync(rv);
-    factory->update_show_db(response.db_info());
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }

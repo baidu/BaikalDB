@@ -169,6 +169,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     MEDIUMINT
     MEDIUMTEXT
     MOD
+    NAMESPACE
     NOT
     NO_WRITE_TO_BINLOG
     NULLX
@@ -240,6 +241,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     XOR
     ZEROFILL
     NATURAL
+    
 %token<string>
     /* The following tokens belong to ReservedKeyword. */
     BOTH
@@ -320,6 +322,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     FIELDS
     FIRST
     FIXED
+    FILE_T
     FLUSH
     FORMAT
     FULL
@@ -365,6 +368,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     PROCESS
     PROCESSLIST
     PROFILES
+    PROXY
     QUARTER
     QUERY
     QUERIES
@@ -393,6 +397,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SNAPSHOT
     SQL_CACHE
     SQL_NO_CACHE
+    SHUTDOWN
     START
     STATS_PERSISTENT
     STATUS
@@ -401,6 +406,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SWAP
     GLOBAL
     TABLES
+    TABLESPACE
     TEMPORARY
     TEMPTABLE
     TEXT
@@ -497,6 +503,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     LinesTerminated
     Starting
     ResourceTag
+    AuthString
+    NSName
+    NamespaceOpt
 
 %type <expr> 
     RowExprList
@@ -591,6 +600,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     FieldItem
     ColumnNameOrUserVarListOptWithBrackets
     LoadDataSetSpecOpt
+    NamespaceOption
+    NamespaceOptionListOpt
+    NamespaceOptionList
 
 %type <item> OnDuplicateKeyUpdate 
 %type <item> 
@@ -599,6 +611,16 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     TableRefs 
     TableFactor
     JoinTable
+
+%type <item>
+    AuthOption
+    OptionalBraces
+    UserSpec
+    UserSpecList
+    Username
+    PrivType
+    PrivTypeList
+    PrivLevel
 
 %type <stmt> 
     MultiStmt
@@ -640,6 +662,14 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DeallocPrepareStmt
     TransactionChars
     LoadDataStmt
+    CreateNamespaceStmt
+    DropNamespaceStmt
+    AlterNamespaceStmt
+    CreateUserStmt
+    DropUserStmt
+    AlterUserStmt
+    GrantStmt
+    RevokeStmt
 
 %type <assign> Assignment
 %type <integer>
@@ -685,6 +715,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ForceOrNot
     GlobalOrLocal
     GlobalOrLocalOpt
+    WithGrantOptionOpt
+    MysqlACL
 
 %type <string_list> IndexNameList VarList PartitionNameListOpt PartitionNameList
 %type <index_hint> IndexHint
@@ -763,6 +795,14 @@ Statement:
     | ExplainStmt
     | KillStmt
     | LoadDataStmt
+    | CreateNamespaceStmt
+    | DropNamespaceStmt
+    | AlterNamespaceStmt
+    | CreateUserStmt
+    | DropUserStmt
+    | AlterUserStmt
+    | GrantStmt
+    | RevokeStmt
     ;
 
 InsertStmt:
@@ -2702,6 +2742,7 @@ AllIdent:
     | FIELDS
     | FIRST
     | FIXED
+    | FILE_T
     | FLUSH
     | FORMAT
     | FULL
@@ -2747,6 +2788,7 @@ AllIdent:
     | PROCESS
     | PROCESSLIST
     | PROFILES
+    | PROXY
     | QUARTER
     | QUERY
     | QUERIES
@@ -2775,6 +2817,7 @@ AllIdent:
     | SNAPSHOT
     | SQL_CACHE
     | SQL_NO_CACHE
+    | SHUTDOWN
     | START
     | STATS_PERSISTENT
     | STATUS
@@ -2782,6 +2825,7 @@ AllIdent:
     | SOME
     | GLOBAL
     | TABLES
+    | TABLESPACE
     | TEMPORARY
     | TEMPTABLE
     | TEXT
@@ -5481,6 +5525,430 @@ ExplainableStmt:
     | ReplaceStmt
     | LoadDataStmt
     ;
+
+/************************************************************************************
+ *  Account Management Statements
+ *  https://dev.mysql.com/doc/refman/5.7/en/account-management-statements.html
+ ************************************************************************************/
+CreateNamespaceStmt:
+    CREATE NAMESPACE IfNotExists NSName NamespaceOptionListOpt
+    {
+        CreateNamespaceStmt* stmt = new_node(CreateNamespaceStmt);
+        stmt->if_not_exists = $3;
+        stmt->ns_name = $4;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            stmt->options.push_back((NamespaceOption*)$5->children[idx], parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+  
+DropNamespaceStmt:
+    DROP NAMESPACE IfExists NSName
+    {
+        DropNamespaceStmt* stmt = new_node(DropNamespaceStmt);
+        stmt->if_exists = $3;
+        stmt->ns_name = $4;
+        $$ = stmt;
+    }
+    ;
+    
+AlterNamespaceStmt:
+    ALTER NAMESPACE IfExists NSName NamespaceOptionListOpt
+    {
+        AlterNamespaceStmt* stmt = new_node(AlterNamespaceStmt);
+        stmt->if_exists = $3;
+        stmt->ns_name = $4;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            stmt->options.push_back((NamespaceOption*)$5->children[idx], parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+
+NSName:
+    AllIdent {
+        $$ = $1;
+    }
+    ;
+
+NamespaceOption:
+    AllIdent EqOpt Expr
+    {
+        NamespaceOption* option = new_node(NamespaceOption);
+        if ($1.to_lower() == "quota") {
+            option->type = NAMESPACE_OPT_QUOTA;
+            option->uint_value = ((LiteralExpr*)$3)->_u.int64_val;
+        } else if ($1.to_lower() == "resource_tag") {
+            option->type = NAMESPACE_OPT_RESOURCE_TAG;
+            option->str_value = ((LiteralExpr*)$3)->_u.str_val;
+        }
+        $$ = option;
+    }
+    ;
+
+NamespaceOptionListOpt:
+    {
+        $$ = new_node(Node);
+    }
+    | NamespaceOptionList
+    {
+        $$ = $1;
+    }
+    ;
+
+NamespaceOptionList:
+    NamespaceOption
+    {
+        Node* list = new_node(Node);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | NamespaceOptionList NamespaceOption
+    {
+        Node* list = $1;
+        list->children.push_back($2, parser->arena);
+        $$ = list;
+    }
+    | NamespaceOptionList ',' NamespaceOption
+    {
+        Node* list = $1;
+        list->children.push_back($3, parser->arena);
+        $$ = list;
+    }
+    ;
+
+CreateUserStmt:
+    CREATE USER IfNotExists UserSpecList NamespaceOpt
+    {
+        // See https://dev.mysql.com/doc/refman/5.7/en/create-user.html
+        CreateUserStmt* stmt = new_node(CreateUserStmt);
+        stmt->if_not_exists = $3;
+        for (int idx = 0; idx < $4->children.size(); ++idx) {
+            stmt->specs.push_back((UserSpec*)($4->children[idx]), parser->arena);
+        }
+        stmt->namespace_name = $5;
+        $$ = stmt;
+    }
+    ;
+    
+DropUserStmt:
+    DROP USER IfExists UserSpecList
+    {
+        DropUserStmt* stmt = new_node(DropUserStmt);
+        stmt->if_exists = $3;
+        for (int idx = 0; idx < $4->children.size(); ++idx) {
+            stmt->specs.push_back((UserSpec*)($4->children[idx]), parser->arena);
+        }
+        $$ = stmt;
+    }
+    ;
+    
+AlterUserStmt:
+    ALTER USER IfExists UserSpecList NamespaceOpt
+    {
+        AlterUserStmt* stmt = new_node(AlterUserStmt);
+        stmt->if_exists = $3;
+        for (int idx = 0; idx < $4->children.size(); ++idx) {
+            stmt->specs.push_back((UserSpec*)($4->children[idx]), parser->arena);
+        }
+        stmt->namespace_name = $5;
+        $$ = stmt;
+    }
+    ;
+
+UserSpecList:
+    UserSpec
+    {
+        Node* list = new_node(Node);
+        if ($1 != nullptr) {
+            list->children.push_back($1, parser->arena);
+        }
+        $$ = list;
+    }
+    |   UserSpecList ',' UserSpec
+    {
+        if ($3 != nullptr) {
+            $1->children.push_back($3, parser->arena);
+        }
+        $$ = $1;
+    }
+    ;
+
+UserSpec:
+    Username AuthOption
+    {
+        UserSpec* user_spec = new_node(UserSpec);
+        user_spec->user = (UserIdentity*)$1;
+        if ($2 != nullptr) {
+            user_spec->auth_opt = (AuthOption*)$2;
+        }
+        $$ = user_spec;
+    }
+    ;
+
+Username:
+    StringName
+    {
+        UserIdentity* user = new_node(UserIdentity);
+        user->username = $1;
+        user->hostname = "%";
+        $$ = user;
+    }
+    |   StringName '@' StringName
+    {
+        UserIdentity* user = new_node(UserIdentity);
+        user->username = $1;
+        user->hostname = $3;
+        $$ = user;
+    }
+    |   CURRENT_USER OptionalBraces
+    {
+        UserIdentity* user = new_node(UserIdentity);
+        user->current_user = true;
+        $$ = user;
+    }
+    ;
+
+OptionalBraces:
+    {}
+    |   '(' ')'
+    {}
+
+AuthOption:
+    {
+        $$ = nullptr;
+    }
+    |   IDENTIFIED BY AuthString
+    {
+        AuthOption* auth_option = new_node(AuthOption);
+        auth_option->auth_string = $3;
+        $$ = auth_option;
+    }
+    ;
+
+AuthString:
+    STRING_LIT
+    {
+        $$ = ((LiteralExpr*)$1)->_u.str_val;
+    }
+    ;
+
+NamespaceOpt:
+    {
+        $$ = nullptr;
+    }
+    |   NAMESPACE NSName
+    {
+        $$ = $2;
+    }
+    ;
+    
+GrantStmt:
+    GRANT PrivTypeList ON PrivLevel TO UserSpecList WithGrantOptionOpt NamespaceOpt
+    {
+        GrantStmt* stmt = new_node(GrantStmt);
+        for (int idx = 0; idx < $2->children.size(); ++idx) {
+            stmt->privs.push_back((PrivType*)($2->children[idx]), parser->arena);
+        }
+        stmt->priv_level = (PrivLevel*)$4;
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            stmt->specs.push_back((UserSpec*)($6->children[idx]), parser->arena);
+        }
+        stmt->with_grant = $7;
+        stmt->namespace_name = $8;
+        $$ = stmt;
+    }
+    ;
+
+RevokeStmt:
+    REVOKE PrivTypeList ON PrivLevel FROM UserSpecList NamespaceOpt
+    {
+        RevokeStmt* stmt = new_node(RevokeStmt);
+        for (int idx = 0; idx < $2->children.size(); ++idx) {
+            stmt->privs.push_back((PrivType*)($2->children[idx]), parser->arena);
+        }
+        stmt->priv_level = (PrivLevel*)$4;
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            stmt->specs.push_back((UserSpec*)($6->children[idx]), parser->arena);
+        }
+        stmt->namespace_name = $7;
+        $$ = stmt;
+    }
+    ;
+
+
+PrivTypeList:
+    PrivType
+    {
+        Node* list = new_node(Node);
+        if ($1 != nullptr) {
+            list->children.push_back($1, parser->arena);
+        }
+        $$ = list;
+    }
+    |   PrivTypeList ',' PrivType
+    {
+        if ($3 != nullptr) {
+            $1->children.push_back($3, parser->arena);
+        }
+        $$ = $1;
+    }
+    ;
+
+PrivType:
+    MysqlACL {
+        PrivType* priv = new_node(PrivType);
+        priv->type = (MysqlACL)$1;
+        $$ = priv;
+    }
+    ;
+
+MysqlACL:
+	ALL {
+		$$ = ALL_ACL;
+	}
+	|	ALL PRIVILEGES {
+		$$ = ALL_ACL;
+	}
+	|	ALTER {
+		$$ = ALTER_ACL;
+	}
+	|	ALTER ROUTINE {
+		$$ = ALTER_PROC_ACL;
+	}
+	|	CREATE
+	{
+		$$ = CREATE_ACL;
+	}
+	|	CREATE ROUTINE {
+		$$ = CREATE_PROC_ACL;
+	}
+	|	CREATE TABLESPACE {
+		$$ = CREATE_TABLESPACE_ACL;
+	}
+	|	CREATE TEMPORARY TABLES {
+		$$ = CREATE_TMP_ACL;
+	}
+	|	CREATE USER	{
+		$$ = CREATE_USER_ACL;
+	}
+	|	CREATE VIEW {
+		$$ = CREATE_VIEW_ACL;
+	}
+	|	DELETE {
+		$$ = DELETE_ACL;
+	}
+	|	DROP {
+		$$ = DROP_ACL;
+	}
+	|	EVENT {
+		$$ = EVENT_ACL;
+	}
+	|	EXECUTE {
+		$$ = EXECUTE_ACL;
+	}
+	|	FILE_T {
+		$$ = FILE_ACL;
+	}
+	|	GRANT OPTION {
+		$$ = GRANT_ACL;
+	}
+	|	INDEX {
+		$$ = INDEX_ACL;
+	}
+	|	INSERT {
+		$$ = INSERT_ACL;
+	}
+	|	LOCK TABLES {
+		$$ = LOCK_TABLES_ACL;
+	}
+	|	PROCESS {
+		$$ = PROCESS_ACL;
+	}
+	|	PROXY {
+		$$ = PROXY_ACL;
+	}
+	|	REFERENCES {
+		$$ = REFERENCES_ACL;
+	}
+	|	RELOAD {
+		$$ = RELOAD_ACL;
+	}
+	|	REPLICATION CLIENT {
+		$$ = REPL_CLIENT_ACL;
+	}
+	|	REPLICATION SLAVE {
+		$$ = REPL_SLAVE_ACL;
+	}
+	|	SELECT {
+		$$ = SELECT_ACL;
+	}
+	|	SHOW DATABASES {
+		$$ = SHOW_DB_ACL;
+	}
+	|	SHOW VIEW {
+		$$ = SHOW_VIEW_ACL;
+	}
+	|	SHUTDOWN {
+		$$ = SHUTDOWN_ACL;
+	}
+	|	SUPER {
+		$$ = SUPER_ACL;
+	}
+	|	TRIGGER	{
+		$$ = TRIGGER_ACL;
+	}
+	|	UPDATE {
+		$$ = UPDATE_ACL;
+	}
+	|	USAGE {
+		$$ = NO_ACCESS_ACL;
+	}
+	;
+
+PrivLevel:
+    '*' {
+        PrivLevel* priv_level = new_node(PrivLevel);
+        priv_level->level = GRANT_LEVEL_DB;
+        $$ = priv_level;
+    }
+    | '*' '.' '*' {
+        PrivLevel* priv_level = new_node(PrivLevel);
+        priv_level->level = GRANT_LEVEL_GLOBAL;
+        $$ = priv_level;
+    }
+    | AllIdent '.' '*' {
+        PrivLevel* priv_level = new_node(PrivLevel);
+        priv_level->level = GRANT_LEVEL_DB;
+        priv_level->db_name = $1;
+        $$ = priv_level;
+    }
+    | AllIdent '.' AllIdent {
+        PrivLevel* priv_level = new_node(PrivLevel);
+        priv_level->level = GRANT_LEVEL_TABLE;
+        priv_level->db_name = $1;
+        priv_level->table_name = $3;
+        $$ = priv_level;
+    }
+    | AllIdent {
+        PrivLevel* priv_level = new_node(PrivLevel);
+        priv_level->level = GRANT_LEVEL_TABLE;
+        priv_level->table_name = $1;
+        $$ = priv_level;
+    }
+    ;
+
+WithGrantOptionOpt:
+    {
+        $$ = false;
+    }
+    | WITH GRANT OPTION {
+        $$ = true;
+    }
+    ;
+
+
 
 //CreateUserStmt:
 //    CREATE USER IfNotExists UserSpecList {

@@ -115,6 +115,10 @@ void ShowHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_OFFLINE_BINLOG] = std::bind(&ShowHelper::_show_offline_binlog,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_NAMESPACES] = std::bind(&ShowHelper::_show_namespaces,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_GRANTS] = std::bind(&ShowHelper::_show_grants,
+            this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
 
@@ -4030,12 +4034,10 @@ bool ShowHelper::_show_meta_binlog(const SmartSocket& client, const std::vector<
             }
         }
     }
-
     std::vector<std::string> names = { "region_id" };
     for (size_t i = 1; max_size > 1 && i <= max_size - 1; i++) {
         names.emplace_back("peer" + std::to_string(i));
     }
-
     std::vector<ResultField> fields;
     fields.reserve(4);
     for (auto& name : names) {
@@ -4303,6 +4305,223 @@ bool ShowHelper::_show_active_range(const SmartSocket& client, const std::vector
     return true;
 }
 
+
+bool ShowHelper::_show_namespaces(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    // Make fields.
+    std::vector<ResultField> fields;
+    fields.reserve(5);
+    fields.emplace_back(make_result_field("namespace_id", MYSQL_TYPE_LONG, 10));
+    fields.emplace_back(make_result_field("namespace_name", MYSQL_TYPE_LONG, 10));
+    fields.emplace_back(make_result_field("version", MYSQL_TYPE_LONG, 10));
+    fields.emplace_back(make_result_field("quota", MYSQL_TYPE_LONG, 1024));
+    fields.emplace_back(make_result_field("resource_tag", MYSQL_TYPE_VARCHAR, 1024));
+
+    pb::QueryRequest request;
+    pb::QueryResponse response;
+    request.set_op_type(pb::QUERY_NAMESPACE);
+    MetaServerInteract::get_instance()->send_request("query", request, response);
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    for(auto& namespace_info : response.namespace_infos()) {
+        if (namespace_info.deleted()) {
+            continue;
+        }
+        std::vector<std::string> row;
+        row.reserve(5);
+        row.emplace_back(std::to_string(namespace_info.namespace_id()));
+        row.emplace_back(namespace_info.namespace_name());
+        row.emplace_back(std::to_string(namespace_info.version()));
+        row.emplace_back(std::to_string(namespace_info.quota()));
+        row.emplace_back(namespace_info.resource_tag());
+        rows.emplace_back(row);
+    }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    // SHOW GRANTS [FOR user]
+    // SHOW GRANTS FOR CURRENT_USER;
+    // SHOW GRANTS FOR CURRENT_USER();
+
+    std::map<parser::MysqlACL, std::string> privs = {
+            {parser::SELECT_ACL, "SELECT"},
+            {parser::INSERT_ACL, "INSERT"},
+            {parser::UPDATE_ACL, "UPDATE"},
+            {parser::DELETE_ACL, "DELETE"},
+            {parser::CREATE_ACL, "CREATE"},
+            {parser::DROP_ACL, "DROP"},
+            {parser::RELOAD_ACL, "RELOAD"},
+            {parser::SHUTDOWN_ACL, "SHUTDOWN"},
+            {parser::PROCESS_ACL, "PROCESS"},
+            {parser::FILE_ACL, "FILE"},
+//            {parser::GRANT_ACL, "GRANT"},
+            {parser::REFERENCES_ACL, "REFERENCES"},
+            {parser::INDEX_ACL, "INDEX"},
+            {parser::ALTER_ACL, "ALTER"},
+            {parser::SHOW_DB_ACL, "SHOW DATABASES"},
+            {parser::SUPER_ACL, "SUPER"},
+            {parser::CREATE_TMP_ACL, "CREATE TABLESPACE"},
+            {parser::LOCK_TABLES_ACL, "LOCK TABLES"},
+            {parser::EXECUTE_ACL, "EXECUTE"},
+            {parser::REPL_SLAVE_ACL, "REPLICATION SLAVE"},
+            {parser::REPL_CLIENT_ACL, "REPLICATION CLIENT"},
+            {parser::CREATE_VIEW_ACL, "CREATE VIEW"},
+            {parser::SHOW_VIEW_ACL, "SHOW VIEW"},
+            {parser::CREATE_PROC_ACL, "CREATE ROUTINE"},
+            {parser::ALTER_PROC_ACL, "ALTER ROUTINE"},
+            {parser::CREATE_USER_ACL, "CREATE USER"},
+            {parser::EVENT_ACL, "EVENT"},
+            {parser::TRIGGER_ACL, "TRIGGER"},
+            {parser::CREATE_TABLESPACE_ACL, "CREATE TABLESPACE"},
+            {parser::PROXY_ACL, "PROXY"},
+            {parser::NO_ACCESS_ACL, "USAGE"},
+    };
+
+
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr || client == nullptr) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    std::string username;
+    if (split_vec.size() == 2) {
+        username = client->user_info->username;
+    } else if (split_vec.size() == 4) {
+        if (try_to_lower(split_vec[3]) == "current_user" ||
+            try_to_lower(split_vec[3]) == "current_user()") {
+            username = client->user_info->username;
+        } else {
+            username = split_vec[3];
+            // 'name'@'ip' => 'name'
+            size_t pos = username.find("@");
+            if (pos != std::string::npos) {
+                username = username.substr(0, pos);
+            }
+            // trim ' " `
+            auto trim = [] (std::string str) -> std::string {
+                size_t first = str.find_first_not_of(" `\'\"");
+                if (first == std::string::npos)
+                    return "";
+                size_t last = str.find_last_not_of(" `\'\"");
+                return str.substr(first, (last-first+1));
+            };
+            username = trim(username);
+        }
+    } else {
+        DB_FATAL("param invalid");
+        return false;
+    }
+
+    auto info = factory->get_user_info(username);
+    if (info == nullptr) {
+        DB_WARNING("user name not exist [%s]", username.c_str());
+        _wrapper->make_err_packet(client, ER_NO_SUCH_USER, "No Such User");
+        client->state = STATE_READ_QUERY_RESULT;
+        return false;
+    }
+
+
+
+    auto get_priv_str = [&privs] (uint32_t acl, uint32_t all_acl, std::string& with_grant) -> std::string {
+        std::string priv_str = "";
+        if ((acl & parser::GLOBAL_ACLS) == parser::GLOBAL_ACLS) {
+            priv_str += "ALL ";
+        } else {
+            bool is_first = true;
+            for (auto& p : privs) {
+                 if (p.first & acl) {
+                     if (is_first) {
+                         priv_str += p.second;
+                         is_first = false;
+                     } else {
+                         priv_str += ", " + p.second;
+                     }
+
+                 }
+             }
+        }
+        if (acl & parser::GRANT_ACL) {
+            with_grant = " WITH GRANT OPTION";
+        }
+        return priv_str;
+    };
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    ResultField field;
+    field.name = "Grants for " + username;
+    field.type = MYSQL_TYPE_VARCHAR;
+    field.length = 1024;
+    fields.emplace_back(field);
+
+
+    pb::QueryRequest request;
+    pb::QueryResponse response;
+    request.set_op_type(pb::QUERY_USERPRIVILEG);
+    request.set_user_name(username);
+    MetaServerInteract::get_instance()->send_request("query", request, response);
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    for(auto user_privilege : response.user_privilege()) {
+        if (user_privilege.has_acl()) { // GRANT_LEVEL_GLOBAL
+            std::vector<std::string> row;
+            std::string priv_level = "*.*";
+            std::string with_grant = "";
+            std::string priv_str = get_priv_str(user_privilege.acl(), parser::GLOBAL_ACLS, with_grant);
+            char msg[1024];
+            snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
+                     priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
+            row.emplace_back(msg);
+            rows.emplace_back(row);
+        }
+        for (auto db : user_privilege.privilege_database()) {
+            if (db.has_acl()) { // GRANT_LEVEL_DB
+                std::vector<std::string> row;
+                std::string priv_level = db.database() + ".*";
+                std::string with_grant = "";
+                std::string priv_str = get_priv_str(db.acl(), parser::DB_ACLS, with_grant);
+                char msg[1024];
+                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
+                         priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
+                row.emplace_back(msg);
+                rows.emplace_back(row);
+            }
+        }
+        for (auto table : user_privilege.privilege_table()) {
+            if (table.has_acl()) { // GRANT_LEVEL_TABLE
+                std::vector<std::string> row;
+                std::string priv_level = table.database() + "." + table.table_name();
+                std::string with_grant = "";
+                std::string priv_str = get_priv_str(table.acl(), parser::TABLE_ACLS, with_grant);
+                char msg[1024];
+                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
+                         priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
+                row.emplace_back(msg);
+                rows.emplace_back(row);
+            }
+        }
+    }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
 
 bool ShowHelper::_handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (boost::iequals(split_vec[1], "meta")) {

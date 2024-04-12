@@ -24,7 +24,11 @@ void NamespaceManager::create_namespace(
     std::string namespace_name = namespace_info.namespace_name();
     if (_namespace_id_map.find(namespace_name) != _namespace_id_map.end()) {
         DB_WARNING("request namespace:%s has been existed", namespace_name.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace already existed");
+        if (namespace_info.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace already exist");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
         return;
     }
     std::vector<std::string> rocksdb_keys;
@@ -67,7 +71,11 @@ void NamespaceManager::drop_namespace(const pb::MetaManagerRequest& request, bra
     std::string namespace_name = namespace_info.namespace_name();
     if (_namespace_id_map.find(namespace_name) == _namespace_id_map.end()) {
         DB_WARNING("request namespace:%s not exist", namespace_name.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace not exist");
+        if (!namespace_info.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace not exist");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
         return;
     }
 
@@ -99,10 +107,14 @@ void NamespaceManager::modify_namespace(const pb::MetaManagerRequest& request, b
     std::string namespace_name = namespace_info.namespace_name();
     if (_namespace_id_map.find(namespace_name) == _namespace_id_map.end()) {
         DB_WARNING("request namespace:%s not exist", namespace_name.c_str());
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace not exist");
+        if (!namespace_info.if_exist()) {
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "namespace not exist");
+        } else {
+            IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+        }
         return;
     }
-    //目前支持改quota
+    //目前支持改quota, resource_tag
     int64_t namespace_id = _namespace_id_map[namespace_name];
     pb::NameSpaceInfo tmp_info = _namespace_info_map[namespace_id];
     if (namespace_info.has_quota()) {
