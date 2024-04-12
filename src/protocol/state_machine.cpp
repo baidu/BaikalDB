@@ -588,6 +588,7 @@ int StateMachine::_auth_read(SmartSocket sock) {
     //需要修改成权限类
     SchemaFactory* factory = SchemaFactory::get_instance();
     sock->user_info = factory->get_user_info(username);
+    sock->last_update_user.reset();
 
     if (sock->user_info == nullptr) {
         sock->user_info.reset(new UserInfo);
@@ -1001,6 +1002,14 @@ int StateMachine::_query_read_stmt_execute(SmartSocket sock) {
 }
 
 bool StateMachine::_query_process(SmartSocket client) {
+    if (client->last_update_user.get_time() > 10 * 1000 * 1000LL) {
+        SchemaFactory* factory = SchemaFactory::get_instance();
+        auto user_info = factory->get_user_info(client->username);
+        if (user_info != nullptr && user_info->version > client->user_info->version) {
+            client->user_info = user_info;
+        }
+        client->last_update_user.reset();
+    }
     TimeCost cost;
     //gettimeofday(&(client->query_ctx->stat_info.start_stamp), NULL);
 

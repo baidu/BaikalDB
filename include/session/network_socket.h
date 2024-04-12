@@ -199,6 +199,7 @@ struct NetworkSocket {
     std::string     charset_name;                   // Client charset name.
 
     std::string     username;
+    TimeCost        last_update_user;               // update userinfo every 10s
     std::shared_ptr<UserInfo>       user_info;      // userinfo for current connection
     std::shared_ptr<QueryContext>   query_ctx;      // Current query.
     SmartBinlogContext              binlog_ctx;     // for binlog
