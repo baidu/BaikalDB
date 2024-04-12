@@ -2314,7 +2314,7 @@ int DDLPlanner::parse_priv(pb::UserPrivilege& user_privilege) {
     int64_t db_id = -1;
     int64_t table_id = -1;
 
-    if (stmt->priv_level->level == GRANT_LEVEL_GLOBAL) {
+    if (stmt->priv_level->level == parser::GRANT_LEVEL_GLOBAL) {
         user_privilege.set_acl(acl);
     } else {
         std::string db;
@@ -2336,11 +2336,11 @@ int DDLPlanner::parse_priv(pb::UserPrivilege& user_privilege) {
                 return -1;
             }
         }
-        if (stmt->priv_level->level == GRANT_LEVEL_DB) {
+        if (stmt->priv_level->level == parser::GRANT_LEVEL_DB) {
             auto add_db = user_privilege.add_privilege_database();
             add_db->set_database(db);
             add_db->set_acl(acl);
-        } else if (stmt->priv_level->level == GRANT_LEVEL_TABLE) {
+        } else if (stmt->priv_level->level == parser::GRANT_LEVEL_TABLE) {
             auto add_table = user_privilege.add_privilege_table();
             add_table->set_database(db);
             add_table->set_acl(acl);
@@ -2364,7 +2364,7 @@ int DDLPlanner::parse_priv(pb::UserPrivilege& user_privilege) {
         }
     }
     if (need_check) {
-        if (!_ctx->user_info->contain_privs(acl | GRANT_ACL, db_id, table_id)) {
+        if (!_ctx->user_info->contain_privs(acl | parser::GRANT_ACL, db_id, table_id)) {
             _ctx->stat_info.error_code = ER_NO_PERMISSION_TO_CREATE_USER;
             _ctx->stat_info.error_msg << "user must have the privileges "
                     "that you are granting and with GRANT OPTION";
@@ -2378,7 +2378,7 @@ int DDLPlanner::parse_priv(pb::UserPrivilege& user_privilege) {
     return 0;
 }
 
-int DDLPlanner::add_user_specs(pb::UserPrivilege& user_privilege, Vector<UserSpec*>& specs) {
+int DDLPlanner::add_user_specs(pb::UserPrivilege& user_privilege, parser::Vector<parser::UserSpec*>& specs) {
     if (specs.size() > 1 || specs.size() == 0) {
         _ctx->stat_info.error_code = ER_CANNOT_USER;;
         _ctx->stat_info.error_msg << "multiple user_specifications is not supported";

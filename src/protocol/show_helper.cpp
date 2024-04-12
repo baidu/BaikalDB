@@ -4433,7 +4433,7 @@ bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::
 
     auto get_priv_str = [&privs] (uint32_t acl, uint32_t all_acl, std::string& with_grant) -> std::string {
         std::string priv_str = "";
-        if ((acl & GLOBAL_ACLS) == GLOBAL_ACLS) {
+        if ((acl & parser::GLOBAL_ACLS) == parser::GLOBAL_ACLS) {
             priv_str += "ALL ";
         } else {
             bool is_first = true;
@@ -4477,7 +4477,7 @@ bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::
             std::vector<std::string> row;
             std::string priv_level = "*.*";
             std::string with_grant = "";
-            std::string priv_str = get_priv_str(user_privilege.acl(), GLOBAL_ACLS, with_grant);
+            std::string priv_str = get_priv_str(user_privilege.acl(), parser::GLOBAL_ACLS, with_grant);
             char msg[1024];
             snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
                      priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
@@ -4489,7 +4489,7 @@ bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::
                 std::vector<std::string> row;
                 std::string priv_level = db.database() + ".*";
                 std::string with_grant = "";
-                std::string priv_str = get_priv_str(db.acl(), DB_ACLS, with_grant);
+                std::string priv_str = get_priv_str(db.acl(), parser::DB_ACLS, with_grant);
                 char msg[1024];
                 snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
                          priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
@@ -4502,7 +4502,7 @@ bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::
                 std::vector<std::string> row;
                 std::string priv_level = table.database() + "." + table.table_name();
                 std::string with_grant = "";
-                std::string priv_str = get_priv_str(table.acl(), TABLE_ACLS, with_grant);
+                std::string priv_str = get_priv_str(table.acl(), parser::TABLE_ACLS, with_grant);
                 char msg[1024];
                 snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
                          priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
