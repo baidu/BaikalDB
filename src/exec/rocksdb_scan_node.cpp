@@ -284,6 +284,10 @@ int RocksdbScanNode::init(const pb::PlanNode& node) {
         DB_WARNING("pri info not found _table_id:%ld", _table_id);
         return -1;
     }
+    if (node.derive_node().scan_node().has_lock() &&
+            node.derive_node().scan_node().lock() == pb::LOCK_GET_ONLY_PRIMARY) {
+        _get_mode = GET_LOCK;
+    }
     _is_ddl_work = node.derive_node().scan_node().is_ddl_work();
     _ddl_work_type = node.derive_node().scan_node().ddl_work_type();
     _ddl_index_id = node.derive_node().scan_node().ddl_index_id();
@@ -469,7 +473,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
     for (auto& slot : _tuple_desc->slots()) {
         if (slot.field_id() > _field_slot.size() - 1) {
             DB_WARNING("vector out of range, region_id: %ld, field_id: %d", _region_id, slot.field_id());
-            return -1;
+            continue;
         }
         _field_slot[slot.field_id()] = slot.slot_id();
         if (pri_field_ids.count(slot.field_id()) == 0) {
@@ -736,19 +740,19 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
             *eos = true;
             return 0;
         }
-        if (!FLAGS_scan_use_multi_get) {
+        if (!FLAGS_scan_use_multi_get || _get_mode != GET_ONLY) {
             ++_scan_rows;
             if (_use_encoded_key) {
                 _idx++;
                 auto key_pair = _scan_range_keys.get_next();
                 int ret = txn->get_update_primary(_region_id, *_pri_info, key_pair->left_key(), record,
-                            _field_ids, GET_ONLY, state->need_check_region());
+                            _field_ids, _get_mode, state->need_check_region());
                 if (ret < 0) {
                     continue;
                 }
             } else {
                 record = _left_records[_idx++];
-                int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY,
+                int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, _get_mode,
                         state->need_check_region());
                 if (ret < 0) {
                     continue;
@@ -813,7 +817,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
             *eos = true;
             return 0;
         }
-        if (!FLAGS_scan_use_multi_get) {
+        if (!FLAGS_scan_use_multi_get || _get_mode != GET_ONLY) {
             ++_scan_rows;
             if (_use_encoded_key) {
                 auto key_pair = _scan_range_keys.get_next();
@@ -834,7 +838,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
             }
             if (!_is_covering_index && !_is_global_index) {
                 ++get_primary_cnt;
-                int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
+                int ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, _get_mode, false);
                 if (ret < 0) {
                     DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s", 
                             _table_id, ret, record->to_string().c_str());
@@ -1161,6 +1165,12 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
             if (_lock != pb::LOCK_GET) {
+                if (_lock == pb::LOCK_GET_ONLY_PRIMARY) {
+                    // select ... for update
+                    if (lock_primary(state, row.get()) != 0) {
+                        return -1;
+                    }
+                }
                 if (!need_copy(row.get(), _scan_conjuncts)) {
                     state->inc_num_filter_rows();
                     ++index_filter_cnt;
@@ -1436,11 +1446,11 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         }
         //DB_NOTICE("get index: %ld", cost.get_time());
         //cost.reset();
-        if (!FLAGS_scan_use_multi_get || _has_s_wordrank) {
+        if (!FLAGS_scan_use_multi_get || _has_s_wordrank || _get_mode != GET_ONLY) {
             if (!_is_covering_index && !_is_global_index) {
                 ++get_primary_cnt;
                 // todo: 反查直接用encode_key
-                ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_ONLY, false);
+                ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, _get_mode, false);
                 if (ret < 0) {
                     if (_reverse_indexes.size() == 0 && _reverse_index == nullptr) {
                         DB_FATAL("get primary:%ld fail, ret:%d, index primary may be not consistency: %s",

@@ -82,6 +82,10 @@ DEFINE_int32(max_dict_bytes, 16 * 1024, "default 16K");
 DEFINE_int32(zstd_max_train_bytes, 256 * 1024, "default 256K");
 DEFINE_bool(olap_import_mode, false, "is olap import, default: false");
 
+DEFINE_bool(enable_blob_files, false, "set it to true to enable key-value separation");
+DEFINE_int32(min_blob_size, 1 * 1024,
+             "values at or above this threshold will be written to blob files during flush or compaction");
+
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log_new";
 const std::string RocksWrapper::DATA_CF     = "data";
@@ -273,6 +277,17 @@ int32_t RocksWrapper::init(const std::string& path) {
         _data_cf_option.bottommost_compression = rocksdb::kZSTD;
         _data_cf_option.bottommost_compression_opts.max_dict_bytes = 1 << 14; // 16KB
         _data_cf_option.bottommost_compression_opts.zstd_max_train_bytes = 1 << 18; // 256KB
+    }
+
+    // key-value separation
+    if (FLAGS_enable_blob_files) {
+        _data_cf_option.enable_blob_files = true;
+        _data_cf_option.min_blob_size = FLAGS_min_blob_size;
+        _data_cf_option.blob_file_size = 1ULL << 28;
+        _data_cf_option.blob_compression_type = rocksdb::CompressionType::kLZ4Compression;
+        _data_cf_option.enable_blob_garbage_collection  = true;
+        _data_cf_option.blob_garbage_collection_age_cutoff  = 0.25;
+        _data_cf_option.blob_garbage_collection_force_threshold  = 0.8;
     }
 
     //todo

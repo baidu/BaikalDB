@@ -79,6 +79,9 @@ DEFINE_int64(split_send_first_log_entry_threshold, 3600 * 1000 * 1000LL, "split 
 DEFINE_int64(split_send_log_batch_size, 20, "split send log batch size");
 DEFINE_int64(no_write_log_entry_threshold, 1000, "max left logEntry to be exec before no write");
 DEFINE_int64(check_peer_notice_delay_s, 1, "check peer delay notice second");
+DEFINE_int64(min_split_slowdown_cost, 50000, "min slowdown time when split");
+DEFINE_int64(max_split_slowdown_cost, 5000000, "max slowdown time when split");
+DEFINE_bool(split_slow_down_before_send_entry, false, "if slow down only send entry");
 DECLARE_int64(transfer_leader_catchup_time_threshold);
 DEFINE_bool(force_clear_txn_for_fast_recovery, false, "clear all txn info for fast recovery");
 DEFINE_bool(split_add_peer_asyc, false, "asyc split add peer");
@@ -1834,11 +1837,12 @@ void Region::dml_2pc(const pb::StoreReq& request,
     // 只有leader有事务情况才能在raft外执行
     if (applied_index == 0 && term == 0 && !is_leader()) {
         // 非leader才返回
-        response.set_leader(butil::endpoint2str(get_leader()).c_str());
+        const auto& leader = butil::endpoint2str(get_leader());
+        response.set_leader(leader.c_str());
         response.set_errcode(pb::NOT_LEADER);
         response.set_errmsg("not leader");
         DB_WARNING("not in raft, not leader, leader:%s, region_id: %ld, log_id:%lu",
-                butil::endpoint2str(get_leader()).c_str(), _region_id, request.log_id());
+                   leader.c_str(), _region_id, request.log_id());
         return;
     }
 
@@ -5605,8 +5609,9 @@ void Region::start_process_split(const pb::RegionSplitResponse& split_response,
     if (average_cost == 0) {
         average_cost = 50000;
     }
+
     _split_param.split_slow_down_cost = std::min(
-            std::max(average_cost, (int64_t)50000), (int64_t)5000000);
+            std::max(average_cost, (int64_t)FLAGS_min_split_slowdown_cost), (int64_t)FLAGS_max_split_slowdown_cost);
 
     if (!is_leader()) {
         if (_split_param.multi_new_regions.empty()) {
@@ -5866,7 +5871,9 @@ void Region::write_local_rocksdb_for_split() {
     _split_param.op_start_split_cost = _split_param.op_start_split.get_time();
     ScopeProcStatus split_status(this);
 
-    _split_param.split_slow_down = true;
+    if (!FLAGS_split_slow_down_before_send_entry) {
+        _split_param.split_slow_down = true;
+    }
     TimeCost write_sst_time_cost;
     //uint64_t imageid = TableKey(_split_param.split_key).extract_u64(0);
 
@@ -6436,6 +6443,9 @@ void Region::send_log_entry_to_new_region_for_split() {
     requests.reserve(10);
     attachment_datas.reserve(10);
     int64_t average_cost = _dml_time_cost.latency();
+    if (FLAGS_split_slow_down_before_send_entry) {
+        _split_param.split_slow_down = true;
+    }
     int while_count = 0;
     int64_t new_region_braft_index = 0;
     int64_t new_region_apply_index = 0;

@@ -59,6 +59,10 @@ int SelectPlanner::plan() {
         _ctx->is_straight_join = _select->select_opt->straight_join;
     }
 
+    if (_select->lock == parser::SL_FOR_UPDATE && client->txn_id != 0) {
+        _ctx->select_for_update = true;
+    }
+
     // parse from
     if (0 != parse_db_tables(_select->table_refs, &_join_root)) {
         return -1;

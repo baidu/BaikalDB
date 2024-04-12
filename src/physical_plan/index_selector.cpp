@@ -133,12 +133,22 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
         if (!expr->children(i)->is_row_expr()) {
             return;
         }
+        bool has_null = false;
         for (auto& pair : slots) {
             size_t idx = pair.first;
-            values[idx].push_back(static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx));
+            ExprValue val = static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx);
+            if (val.is_null()) {
+                has_null = true;
+            }
+        }
+        if (!has_null) {
+            for (auto& pair : slots) {
+                size_t idx = pair.first;
+                values[idx].push_back(static_cast<RowExpr*>(expr->children(i))->get_value(nullptr, idx));
+            }
         }
     }
-    if (values.begin()->second.size() == 0) {
+    if (values.empty() || values.begin()->second.size() == 0) {
         *index_predicate_is_null = is_index_predicate(expr);
         return;
     }
@@ -169,6 +179,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                         return;
                     }
                     int32_t field_id = slots[0]->field_id();
+                    if (field_range_map[field_id].left.size() > 0) {
+                        return;
+                    }
                     for (auto pair : values) {
                         field_range_map[field_id].left.push_back(pair.second[0]);
                     }
@@ -185,6 +198,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                         return;
                     }
                     int32_t field_id = slots[0]->field_id();
+                    if (field_range_map[field_id].right.size() > 0) {
+                        return;
+                    }
                     for (auto pair : values) {
                         field_range_map[field_id].right.push_back(pair.second[0]);
                     }
@@ -420,6 +436,11 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     return;
                 case parser::FT_GE:
                 case parser::FT_GT:
+                    if (field_range_map[field_id].left.size() > 0){
+                        field_range_map[field_id].left.clear();
+                        field_range_map[field_id].left_row_field_ids.clear();
+                        field_range_map[field_id].is_row_expr = false;
+                    }
                     field_range_map[field_id].left.push_back(values[0]);
                     field_range_map[field_id].left_open = fn_op == parser::FT_GT;
                     field_range_map[field_id].left_expr = expr;
@@ -427,6 +448,11 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     return;
                 case parser::FT_LE:
                 case parser::FT_LT:
+                    if(field_range_map[field_id].right.size() > 0){
+                        field_range_map[field_id].right.clear();
+                        field_range_map[field_id].right_row_field_ids.clear();
+                        field_range_map[field_id].is_row_expr = false;
+                    }
                     field_range_map[field_id].right.push_back(values[0]);
                     field_range_map[field_id].right_open = fn_op == parser::FT_LT;
                     field_range_map[field_id].right_expr = expr;

@@ -235,6 +235,7 @@ public:
     bool                is_get_keypoint = false;
     bool                is_full_export = false;
     bool                is_straight_join = false;
+    bool                select_for_update = false;
     ExplainType         explain_type = EXPLAIN_NULL;
     int                 single_store_concurrency = -1;
 

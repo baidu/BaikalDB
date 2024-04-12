@@ -231,6 +231,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     VARCHAR
     VARBINARY
     _BINARY
+    _UTF8MB4
     VIRTUAL
     WHEN
     WHERE
@@ -1819,6 +1820,9 @@ SubSelect:
         sub_query->query_stmt = (UnionStmt*)$2;
         $$ = sub_query;
     }
+    | '(' SubSelect ')' {
+        $$ = $2;
+    }
     ;
 
 // See https://dev.mysql.com/doc/refman/5.7/en/union.html
@@ -2858,6 +2862,9 @@ Literal:
     | STRING_LIT {
     }
     | _BINARY STRING_LIT {
+        $$ = $2;
+    }
+    | _UTF8MB4 STRING_LIT {
         $$ = $2;
     }
     ;

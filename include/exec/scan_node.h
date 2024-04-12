@@ -402,6 +402,7 @@ protected:
     std::vector<ScanIndexInfo> _scan_indexs;
     bthread::Mutex _current_index_mutex;
     bool _current_global_backup = false;
+    GetMode _get_mode = GET_ONLY; // set to GET_LOCK, when "select ... for update"
 };
 }
 

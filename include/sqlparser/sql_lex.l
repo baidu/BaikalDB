@@ -205,6 +205,7 @@ LONG { return LONG; }
 VARCHAR { return VARCHAR; }
 VARBINARY { return VARBINARY; }
 _BINARY { return _BINARY; }
+_UTF8MB4 { return _UTF8MB4; }
 VIRTUAL { return VIRTUAL; }
 WHEN { return WHEN; }
 WHERE { return WHERE; }
@@ -472,12 +473,12 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
     return STRING_LIT;
 }
 
-\"([^\\\"]|\\.)*\" |
-\'([^\\\']|\\.)*\' {
+\"([^\\\"]|\\.|\"\")*\" |
+\'([^\\\']|\\.|\'\')*\' {
     //string
     LiteralExpr* lit;
     lit = LiteralExpr::make_string(yytext, parser->arena);
-    lit->_u.str_val.stripslashes(); // move from logical_plan
+    lit->_u.str_val.stripslashes(yytext[0]); // move from logical_plan
     if (parser->is_gbk && parser->has_5c) {
         lit->_u.str_val.restore_5c();
     }

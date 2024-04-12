@@ -2864,6 +2864,10 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTm
         for (auto index_id : join_root->ignore_indexes) {
             scan->add_ignore_indexes(index_id);
         }
+        if (_ctx->select_for_update) {
+            // 仅加主表行锁
+            scan->set_lock(pb::LOCK_GET_ONLY_PRIMARY);
+        }
         return 0;
     }
     //如果不是根节点必须是左右孩子都有
