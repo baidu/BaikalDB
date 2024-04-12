@@ -25,7 +25,6 @@
 #include "common.h"
 #include "parser.h"
 
-using namespace parser;
 namespace baikaldb {
 DECLARE_bool(need_verify_ddl_permission);
 DECLARE_bool(use_read_index);
@@ -33,24 +32,24 @@ inline uint32_t get_op_require_acl(pb::OpType op_type) {
     switch (op_type) {
         case pb::OP_SELECT:
         case pb::OP_UNION:
-            return SELECT_ACL;
+            return parser::SELECT_ACL;
         case pb::OP_INSERT:
-            return INSERT_ACL;
+            return parser::INSERT_ACL;
         case pb::OP_DELETE:
         case pb::OP_TRUNCATE_TABLE:
-            return DELETE_ACL;
+            return parser::DELETE_ACL;
         case pb::OP_UPDATE:
-            return UPDATE_ACL;
+            return parser::UPDATE_ACL;
         case pb::OP_LOAD:
-            return FILE_ACL;
+            return parser::FILE_ACL;
         case pb::OP_CREATE_NAMESPACE:
         case pb::OP_CREATE_DATABASE:
         case pb::OP_CREATE_TABLE:
-            return CREATE_ACL;
+            return parser::CREATE_ACL;
         case pb::OP_DROP_NAMESPACE:
         case pb::OP_DROP_DATABASE:
         case pb::OP_DROP_TABLE:
-            return DROP_ACL;
+            return parser::DROP_ACL;
         case pb::OP_MODIFY_NAMESPACE:
         case pb::OP_MODIFY_DATABASE:
         case pb::OP_RENAME_TABLE:
@@ -58,18 +57,18 @@ inline uint32_t get_op_require_acl(pb::OpType op_type) {
         case pb::OP_DROP_FIELD:
         case pb::OP_RENAME_FIELD:
         case pb::OP_MODIFY_FIELD:
-            return ALTER_ACL;
+            return parser::ALTER_ACL;
         case pb::OP_ADD_INDEX:
         case pb::OP_DROP_INDEX:
         case pb::OP_RENAME_INDEX:
-            return INDEX_ACL;
+            return parser::INDEX_ACL;
         case pb::OP_CREATE_USER:
         case pb::OP_DROP_USER:
         case pb::OP_MODIFY_USER:
-            return CREATE_USER_ACL;
+            return parser::CREATE_USER_ACL;
         case pb::OP_ADD_PRIVILEGE :
         case pb::OP_DROP_PRIVILEGE:
-            return GRANT_ACL;
+            return parser::GRANT_ACL;
         default:
             return 0U;
     }

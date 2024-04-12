@@ -2257,6 +2257,7 @@ int SchemaFactory::get_database_id(const std::string& db_name, int64_t& db_id) {
 }
 
 int SchemaFactory::get_show_database_id(const std::string& db_name, int64_t& db_id) {
+    BAIDU_SCOPED_LOCK(_update_show_db_mutex);
     auto& db_name_id_mapping = _show_db_name_id_mapping;
     if (db_name_id_mapping.count(try_to_lower(db_name)) == 0) {
         return -1;
