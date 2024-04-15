@@ -464,7 +464,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
             DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
                     "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] "
                     "row=[%ld] scan_row=[%ld] read_size=[%ld] bufsize=[%zu] "
-                    "key=[%d] changeid=[%lu] logid=[%lu] traceid=[%s] family_ip=[%s] cache=[%d] stmt_name=[%s] "
+                    "key=[%d] changeid=[%lu] logid=[%lu] traceid=[%s] family_ip=[%s] cache=[%d,%d] stmt_name=[%s] "
                     "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%lu] region_count=[%d] sqllen=[%lu] "
                     "sql=[%s] id=[%ld] bkup=[%d] server_addr=[%s:%d]",
                     stat_info->family.c_str(),
@@ -495,6 +495,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->trace_id.c_str(),
                     stat_info->server_ip.c_str(),
                     stat_info->hit_cache,
+                    stat_info->hit_query_cache,
                     ctx->prepare_stmt_name.c_str(),
                     client->username.c_str(),
                     client->charset_name.c_str(),
@@ -1881,7 +1882,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
 bool StateMachine::_handle_client_query_with_cache(SmartSocket client) {
     TimeCost cost;
     // Step1. 查缓存
-    auto& key = client->query_ctx->sql;
+    const auto& key = client->query_ctx->sql;
     SmartQueryBuffer tmp_ptr(new QueryBuffer());
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -1892,7 +1893,7 @@ bool StateMachine::_handle_client_query_with_cache(SmartSocket client) {
     if (!tmp_ptr->is_expired(client->query_ctx->query_cache * 1000L)) {
         // read from cache
         tmp_ptr->get_buffer(client->send_buf);
-        client->query_ctx->stat_info.hit_cache = true;
+        client->query_ctx->stat_info.hit_query_cache = true;
         client->query_ctx->stat_info.send_buf_size += client->send_buf->_size;
         DB_DEBUG_CLIENT(client, "read cache, buf_time=%ld, buf_size=%ld, cost=%ld",
                  butil::gettimeofday_us() - tmp_ptr->buf_time, tmp_ptr->buf->_size, cost.get_time());
@@ -1916,7 +1917,7 @@ bool StateMachine::_handle_client_query_with_cache(SmartSocket client) {
     if (!tmp_ptr->is_expired(client->query_ctx->query_cache * 1000L)) {
         // read from cache
         tmp_ptr->get_buffer(client->send_buf);
-        client->query_ctx->stat_info.hit_cache = true;
+        client->query_ctx->stat_info.hit_query_cache = true;
         client->query_ctx->stat_info.send_buf_size += client->send_buf->_size;
         DB_DEBUG_CLIENT(client, "read cache after wait, buf_time=%ld, buf_size=%ld, cost=%ld",
                  butil::gettimeofday_us() - tmp_ptr->buf_time, tmp_ptr->buf->_size, cost.get_time());

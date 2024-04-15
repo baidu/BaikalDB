@@ -49,6 +49,7 @@ struct QueryStat {
     int32_t     sql_length;
     int32_t     region_count;
     bool        hit_cache;
+    bool        hit_query_cache;
     timeval     start_stamp;
     timeval     send_stamp;
     timeval     end_stamp;
@@ -98,6 +99,7 @@ struct QueryStat {
         sql_length          = 0;
         txn_alive_time      = 0;
         hit_cache           = false;
+        hit_query_cache     = false;
         gettimeofday(&(start_stamp), NULL);
         gettimeofday(&(send_stamp), NULL);
         gettimeofday(&(end_stamp), NULL);
