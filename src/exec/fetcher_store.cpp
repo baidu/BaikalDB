@@ -369,6 +369,23 @@ void OnRPCDone::select_addr() {
             FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, nullptr);
         }
         _request.set_select_without_leader(true);
+    } else if (_op_type == pb::OP_SELECT && _state->txn_id == 0 && _client_conn->query_ctx->peer_index != -1) {
+        int64_t peer_index = _client_conn->query_ctx->peer_index;
+        std::vector<std::string> sorted_peers; // leader first
+        sorted_peers.emplace_back(_info.leader());
+        SchemaFactory* schema_factory = SchemaFactory::get_instance();
+        for (auto& peer: _info.peers()) {
+            if (_info.leader() != peer) {
+                sorted_peers.emplace_back(peer);
+            }
+        }
+        if (_retry_times == 0) {
+            if (peer_index < sorted_peers.size()) {
+                _addr = sorted_peers[peer_index];
+                DB_WARNING("choose peer %s, index: %ld", _addr.c_str(), peer_index);
+            }
+        }
+        _request.set_select_without_leader(true);
     } else if (_op_type == pb::OP_SELECT && _state->txn_id == 0 && FLAGS_fetcher_follower_read) {
         // 多机房优化
         if (_info.learners_size() > 0) {
@@ -389,23 +406,8 @@ void OnRPCDone::select_addr() {
             }
         } else {
             if (_retry_times == 0) {
-                if (_client_conn != nullptr && _client_conn->query_ctx->peer_index != -1) {
-                    int64_t peer_index = _client_conn->query_ctx->peer_index;
-                    std::vector<std::string> sorted_peers; // leader first
-                    sorted_peers.emplace_back(_info.leader());
-                    for (auto& peer: _info.peers()) {
-                        if (_info.leader() != peer) {
-                            sorted_peers.emplace_back(peer);
-                        }
-                    }
-                    if (peer_index < sorted_peers.size()) {
-                        _addr = sorted_peers[peer_index];
-                        DB_WARNING("choose peer %s, index: %ld", _addr.c_str(), peer_index);
-                    }
-                } else {
-                    pb::Status addr_status = pb::NORMAL;
-                    FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, &_backup);
-                }
+                pb::Status addr_status = pb::NORMAL;
+                FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, &_backup);
             }
         }
         _request.set_select_without_leader(true);
@@ -835,6 +837,9 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     }
     if (_response.has_scan_rows()) {
         _fetcher_store->scan_rows += _response.scan_rows();
+    }
+    if (_response.has_read_disk_size()) {
+        _fetcher_store->read_disk_size += _response.read_disk_size();
     }
     if (_response.has_filter_rows()) {
         _fetcher_store->filter_rows += _response.filter_rows();

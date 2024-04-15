@@ -337,6 +337,7 @@ public:
         skip_region_set.clear();
         affected_rows = 0;
         scan_rows = 0;
+        read_disk_size = 0;
         filter_rows = 0;
         row_cnt = 0;
         primary_timestamp_updated = false;
@@ -427,6 +428,7 @@ public:
     void update_state_info(RuntimeState* state) {
         state->region_count += region_count;
         state->set_num_scan_rows(state->num_scan_rows() + scan_rows.load());
+        state->set_read_disk_size(state->read_disk_size() + read_disk_size.load());
         state->set_num_filter_rows(state->num_filter_rows() + filter_rows.load());
     }
 
@@ -573,6 +575,7 @@ public:
     std::atomic<int64_t> row_cnt = {0};
     std::atomic<int64_t> affected_rows = {0};
     std::atomic<int64_t> scan_rows = {0};
+    std::atomic<int64_t> read_disk_size = {0};
     std::atomic<int64_t> filter_rows = {0};
     bool is_cancelled = false;
     BthreadCond binlog_cond;

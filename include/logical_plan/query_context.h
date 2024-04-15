@@ -49,6 +49,7 @@ struct QueryStat {
     int32_t     sql_length;
     int32_t     region_count;
     bool        hit_cache;
+    bool        hit_query_cache;
     timeval     start_stamp;
     timeval     send_stamp;
     timeval     end_stamp;
@@ -68,6 +69,7 @@ struct QueryStat {
     int64_t     num_affected_rows = 0;
     int64_t     num_returned_rows = 0;
     int64_t     num_scan_rows     = 0;
+    int64_t     read_disk_size = 0;
     int64_t     num_filter_rows   = 0;
     int64_t     txn_alive_time    = 0;
     uint64_t    log_id = 0;
@@ -97,6 +99,7 @@ struct QueryStat {
         sql_length          = 0;
         txn_alive_time      = 0;
         hit_cache           = false;
+        hit_query_cache     = false;
         gettimeofday(&(start_stamp), NULL);
         gettimeofday(&(send_stamp), NULL);
         gettimeofday(&(end_stamp), NULL);
@@ -114,6 +117,7 @@ struct QueryStat {
         num_affected_rows   = 0;
         num_returned_rows   = 0;
         num_scan_rows       = 0;
+        read_disk_size      = 0;
         num_filter_rows     = 0;
         log_id              = butil::fast_rand();
         old_txn_id          = 0;
@@ -294,6 +298,10 @@ public:
     // user can scan data in specific peer by comments
     // /*{"peer_index":$peer_index}*/ preceding a Select statement
     int64_t             peer_index = -1;
+
+    // user can get query data from cache in specific query_cache(ms) by comments
+    // /*{"query_cache":$query_cache}*/ preceding a Select statement
+    int64_t             query_cache = 0;
 
     // in autocommit mode, two phase commit is disabled by default (for better formance)
     // user can enable 2pc by comments /*{"enable_2pc":1}*/ preceding a DML statement

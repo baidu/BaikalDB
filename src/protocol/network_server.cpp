@@ -585,14 +585,14 @@ void NetworkServer::print_agg_sql() {
                             out_sign, sql_info->qps, sql_info->avg_scan_rows, sql_info->scan_rows_9999, sql_info->latency_us,
                             sql_info->latency_us_9999, sql_info->times_avg_and_9999, dynamic_timeout_ms);
                 }
-                SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_rgcnt_err="
-                        "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] dynamic_timeout_ms:%ld sql_agg: %s "
+                SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_rgcnt_err_size="
+                        "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] dynamic_timeout_ms:%ld sql_agg: %s "
                         "op_version_desc=[%ld\t%s\t%s\t%s] server_addr=[%s:%d]",
                     1900 + tm.tm_year, 1 + tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min,
                     pair2.second.sum, pair2.second.count,
                     pair2.second.count == 0 ? 0 : pair2.second.sum / pair2.second.count,
                     pair2.second.affected_rows, pair2.second.scan_rows, pair2.second.filter_rows,
-                    pair2.second.region_count, pair2.second.err_count,
+                    pair2.second.region_count, pair2.second.err_count, pair2.second.read_disk_size, 
                     out_sign, hostname.c_str(), factory->get_index_name(pair2.first).c_str(), dynamic_timeout_ms, 
                     pair.first.c_str(), version, op_description.c_str(), recommend_index.c_str(), field_desc.c_str(),
                     butil::my_ip_cstr(), FLAGS_baikal_port);

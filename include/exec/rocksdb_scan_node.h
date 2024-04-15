@@ -220,6 +220,7 @@ private:
     bool _range_key_sorted = false;
     // trace使用
     int _scan_rows = 0;
+    int64_t _read_disk_size = 0;
     size_t _idx = 0;
     //后续做下推用
     std::vector<ExprNode*> _scan_conjuncts;

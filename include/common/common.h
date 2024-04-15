@@ -985,11 +985,13 @@ struct BvarMap {
     struct SumCount {
         SumCount() {}
         SumCount(int64_t table_id, int64_t sum, int64_t err_sum, int64_t count, int64_t err_count,
-                int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, int64_t region_count,
+                int64_t affected_rows, int64_t scan_rows, int64_t read_disk_size,
+                int64_t filter_rows, int64_t region_count,
                 const std::map<int32_t, int>& field_range_type_,
                 const uint64_t sign_, const std::set<uint64_t>& subquery_signs_) 
             : table_id(table_id), sum(sum), err_sum(err_sum), count(count), err_count(err_count),
-            affected_rows(affected_rows), scan_rows(scan_rows), filter_rows(filter_rows),
+            affected_rows(affected_rows), scan_rows(scan_rows), 
+            read_disk_size(read_disk_size), filter_rows(filter_rows),
             region_count(region_count) {
                 field_range_type = field_range_type_;
                 parent_sign = sign_;
@@ -1020,6 +1022,7 @@ struct BvarMap {
             err_count += other.err_count;
             affected_rows += other.affected_rows;
             scan_rows += other.scan_rows;
+            read_disk_size += other.read_disk_size;
             filter_rows += other.filter_rows;
             region_count += other.region_count;
             return *this;
@@ -1031,6 +1034,7 @@ struct BvarMap {
             err_count -= other.err_count;
             affected_rows -= other.affected_rows;
             scan_rows -= other.scan_rows;
+            read_disk_size -= other.read_disk_size;
             filter_rows -= other.filter_rows;
             region_count -= other.region_count;
             return *this;
@@ -1042,6 +1046,7 @@ struct BvarMap {
         int64_t err_count = 0;
         int64_t affected_rows = 0;
         int64_t scan_rows = 0;
+        int64_t read_disk_size = 0;
         int64_t filter_rows = 0;
         int64_t region_count = 0;
         // 用于索引推荐
@@ -1052,11 +1057,12 @@ struct BvarMap {
 public:
     BvarMap() {}
     BvarMap(const std::string& key, int64_t index_id, int64_t table_id, int64_t cost, int64_t err_cost,
-        int64_t affected_rows, int64_t scan_rows, int64_t filter_rows, int64_t region_count,
-        const std::map<int32_t, int>& field_range_type_, int64_t err_count, uint64_t parent_sign, std::set<uint64_t>& subquery_signs) {
+        int64_t affected_rows, int64_t scan_rows, int64_t read_disk_size, 
+        int64_t filter_rows, int64_t region_count,
+        const std::map<int32_t, int>& field_range_type_, int64_t err_count, 
+        uint64_t parent_sign, std::set<uint64_t>& subquery_signs) {
         internal_map[key][index_id] = SumCount(table_id, cost, err_cost, 1, err_count, affected_rows,
-            scan_rows, filter_rows, region_count, field_range_type_,
-            parent_sign, subquery_signs);
+            scan_rows, read_disk_size, filter_rows, region_count, field_range_type_, parent_sign, subquery_signs);
     }
 
     BvarMap& operator+=(const BvarMap& other) {
@@ -1363,6 +1369,12 @@ inline std::string try_to_lower(const std::string& str) {
         return tmp;
     }
     return str;
+}
+
+inline std::string to_lower(const std::string& str) {
+    std::string tmp = str;
+    std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::tolower);
+    return tmp;
 }
 
 inline uint64_t make_sign(const std::string& key) {

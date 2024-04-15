@@ -698,7 +698,9 @@ int Transaction::get_update_primary(
         return -1;
     }
 
+    lock_cost += cost.get_time();
     if (res.ok()) {
+        read_disk_size = _key.size() + pin_slice.size();
         DB_DEBUG("lock ok and key exist");
         if (mode == GET_ONLY || mode == GET_LOCK) {
             rocksdb::Slice value_slice(pin_slice);
@@ -770,6 +772,7 @@ int Transaction::multiget_primary(
     int64_t num_keys = rocksdb_keys.size();
     std::vector<rocksdb::PinnableSlice> values(num_keys);
     std::vector<rocksdb::Status> statuses(num_keys);
+    read_disk_size = 0;
     TimeCost cost;
     rocksdb::ReadOptions read_opt;
     read_opt.fill_cache = true;
@@ -778,6 +781,7 @@ int Transaction::multiget_primary(
     for (int i = 0; i < num_keys; i++) {
         if (statuses[i].ok()) {
             rocksdb::Slice value_slice(values[i]);
+            read_disk_size += rocksdb_keys[i].size() + values[i].size();
             if (_use_ttl && _read_ttl_timestamp_us > 0) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &pk_index, _online_ttl_base_expire_time_us);
                 if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
@@ -1024,6 +1028,8 @@ int Transaction::multiget_secondary(
         ++num_keys;
     }
 
+    read_disk_size = 0;
+
     std::vector<rocksdb::PinnableSlice> values(num_keys);
     std::vector<rocksdb::Status> statuses(num_keys);
     TimeCost cost;
@@ -1034,6 +1040,7 @@ int Transaction::multiget_secondary(
     for (int i = 0; i < num_keys; i++) {
         if (statuses[i].ok()) {
             rocksdb::Slice value_slice(values[i]);
+            read_disk_size += rocksdb_keys[i].size() + values[i].size();
             if (_use_ttl && _read_ttl_timestamp_us > 0) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &index, _online_ttl_base_expire_time_us);
                 if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
@@ -1148,6 +1155,7 @@ int Transaction::get_update_secondary(
     }
 
     rocksdb::Slice value(pin_slice);
+    read_disk_size = _key.size() + value.size();
     if (_use_ttl && _read_ttl_timestamp_us > 0) {
         int64_t row_ttl_timestamp_us = ttl_decode(value, &index, _online_ttl_base_expire_time_us);
         if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
@@ -1479,6 +1487,7 @@ int Transaction::get_update_primary_columns(
         rocksdb::Status res = _txn->Get(read_opt, _data_cf, key.data(), &value);
         if (res.ok()){
             int ret = 0;
+            read_disk_size += value.size();
             if (val != nullptr) {
                 ret = val->decode_field(field_info, value);
             } else {
@@ -1488,6 +1497,7 @@ int Transaction::get_update_primary_columns(
                 DB_WARNING("decode value tuple_id: %d failed: %d", tuple_id, field_id);
                 return -1;
             }
+            read_disk_size += value.size();
         } else if (res.IsNotFound()) {
             if (val != nullptr) {
                 const FieldDescriptor* field = val->get_field_by_tag(field_id);

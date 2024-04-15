@@ -536,6 +536,7 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             }
         }
     }
+    last_read_disk_size = iter_key.size() + _iter->value().size();
     if (_forward) {
         _iter->Next();
     } else {
@@ -549,6 +550,7 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
 
 int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const FiltBitSet* filter, RowBatch* batch) {
 
+    last_read_disk_size = 0;
     int32_t field_id = field.id;
     int32_t slot_id = _field_slot[field_id];
     if (slot_id == 0) {
@@ -585,6 +587,7 @@ int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const Fi
                 break;
             }
             rocksdb::Slice column_key = iter->key();
+            last_read_disk_size += iter->key().size() + iter->value().size();
             if (!column_key.starts_with(prefix_key.data())){
                 mem_row->set_value(tuple_id, slot_id, field.default_expr_value);
                 DB_DEBUG("not match prefix, field_id=%d, key=%s, default_value=%s",
@@ -713,6 +716,7 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
                 }
             }
         }
+        last_read_disk_size = iter_key.size() + iter_value.size();
         if (_forward) {
             _iter->Next();
         } else {

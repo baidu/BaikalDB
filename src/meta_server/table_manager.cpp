@@ -4216,7 +4216,9 @@ int TableManager::check_index(const pb::IndexInfo& index_info_to_check,
     };
 
     for (const auto& index_info : schema_info.indexs()) {
-        if (try_to_lower(index_info.index_name()) == try_to_lower(index_info_to_check.index_name())) {
+        // Partition, subpartition, column, index, stored routine, event, and resource group names
+        // are not case-sensitive on any platform, nor are column aliases.
+        if (to_lower(index_info.index_name()) == to_lower(index_info_to_check.index_name())) {
             //索引状态为NONE、IS_DELETE_ONLY并且索引的field一致，可以重建。
             if (index_info.state() == pb::IS_NONE || index_info.state() == pb::IS_DELETE_ONLY) {
                 if (same_index(index_info, index_info_to_check)) {

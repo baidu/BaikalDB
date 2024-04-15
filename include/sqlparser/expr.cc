@@ -15,8 +15,10 @@
 #include "expr.h"
 #include "dml.h"
 #include <unordered_map>
+#include <gflags/gflags.h>
 
 namespace parser {
+DEFINE_bool(normalize_case_when_to_stream, false, "whether reduce case_when/case_expr_when func's children to 2 when to_stream");
 static std::unordered_map<int, std::string> FUNC_STR_MAP = {
     {FT_COMMON, ""},
     {FT_AGG, ""},
@@ -175,7 +177,9 @@ void FuncExpr::to_stream(std::ostream& os) const {
             int children_size = children.size();
             // hll/rolling bitmap/tdigest相关的函数归一化时避免过长
             if (print_sample && children.size() > 2 && 
-                (fn_name.starts_with("hll_") || fn_name.starts_with("rb_") || fn_name.starts_with("tdigest_"))) {
+                (fn_name.starts_with("hll_") || fn_name.starts_with("rb_") || fn_name.starts_with("tdigest_") 
+                || (FLAGS_normalize_case_when_to_stream &&
+                        (fn_name.to_string() == "case_expr_when" || fn_name.to_string() == "case_when")))) {
                 children_size = 2;
             }
             for (int i = 0; i < children_size; i++) {

@@ -356,8 +356,8 @@ int PlanRouter::truncate_node_analyze(TruncateNode* trunc_node, QueryContext* ct
 int PlanRouter::kill_node_analyze(KillNode* kill_node, QueryContext* ctx) {
     // 获取上一个query的region_info
     if (ctx->kill_ctx == nullptr) {
-        DB_FATAL("ctx->kill_ctx is null");
-        return -1;
+        DB_WARNING("ctx->kill_ctx is null");
+        return 0;
     }
     ExecNode* plan = ctx->kill_ctx->root;
     if (plan == nullptr) {

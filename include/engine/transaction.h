@@ -568,6 +568,8 @@ public:
     int64_t     batch_num_increase_rows = 0;//用于batch txn
     pb::ErrCode err_code = pb::SUCCESS;
     std::string remote_side = ""; // 便于定位超时事务来源
+    int64_t     lock_cost = 0;
+    int64_t     read_disk_size = 0;
 
 private:
     int get_update_primary(

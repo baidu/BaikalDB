@@ -157,6 +157,9 @@ public:
         _primary_keys.reserve(ROW_BATCH_CAPACITY);
     }
 
+public:
+    int64_t  last_read_disk_size = 0;
+
 protected:
     MutTableKey             _start;
     MutTableKey             _end;
