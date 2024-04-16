@@ -173,7 +173,6 @@ int DeletePlanner::create_limit_node() {
     if (_limit_count.nodes_size() > 0) {
         limit->mutable_count_expr()->CopyFrom(_limit_count);
     }
-    _ctx->enable_2pc = true;
     return 0;
 }
 
@@ -296,6 +295,7 @@ int DeletePlanner::parse_limit() {
         DB_WARNING("create limit offset expr failed");
         return -1;
     }
+    _ctx->execute_global_flow = true;
     return 0;
 }
 

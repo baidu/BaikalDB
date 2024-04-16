@@ -798,7 +798,6 @@ int Separate::separate_update(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     UpdateNode* update_node = static_cast<UpdateNode*>(plan->get_node(pb::UPDATE_NODE));
-    LimitNode* limit_node = static_cast<LimitNode*>(update_node->get_node(pb::LIMIT_NODE));
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     pb::PlanNode pb_manager_node;
@@ -817,7 +816,7 @@ int Separate::separate_update(QueryContext* ctx) {
     }
     int64_t main_table_id = update_node->table_id();
     bool should_delete = false;
-    if (!need_separate_plan(ctx, main_table_id) && limit_node == nullptr) {
+    if (!need_separate_plan(ctx, main_table_id)) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_UPDATE);
         manager_node->set_region_infos(region_infos);
@@ -844,7 +843,6 @@ int Separate::separate_delete(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     DeleteNode* delete_node = static_cast<DeleteNode*>(plan->get_node(pb::DELETE_NODE));
-    LimitNode* limit_node = static_cast<LimitNode*>(delete_node->get_node(pb::LIMIT_NODE));
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     int64_t main_table_id = delete_node->table_id();
@@ -862,7 +860,7 @@ int Separate::separate_delete(QueryContext* ctx) {
         return -1;
     }
     bool should_delete = false;
-    if (!need_separate_plan(ctx, main_table_id) && limit_node == nullptr) {
+    if (!need_separate_plan(ctx, main_table_id)) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
         manager_node->set_op_type(pb::OP_DELETE);
         manager_node->set_region_infos(region_infos);

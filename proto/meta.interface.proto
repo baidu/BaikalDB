@@ -757,7 +757,6 @@ message BaikalHeartBeatResponse {
     repeated Statistics   statistics              = 10;
     repeated RegionDdlWork region_ddl_works       = 11;
     repeated DdlWorkInfo  ddl_works               = 12;
-    repeated string meta_peer                     = 13;
 };
 
 enum QueryOpType {

@@ -48,8 +48,8 @@ DEFINE_bool(use_dynamic_timeout, false, "whether use dynamic_timeout");
 BRPC_VALIDATE_GFLAG(use_dynamic_timeout, brpc::PassValidate);
 DEFINE_bool(use_read_index, false, "whether use follower read");
 DEFINE_bool(read_random_select_peer, false, "read random select peers");
-DEFINE_int32(sql_exec_timeout, 100000, "sql exec timeout default 100s");
-BRPC_VALIDATE_GFLAG(sql_exec_timeout, brpc::NonNegativeInteger);
+DEFINE_int32(sql_exec_timeout, -1, "sql exec timeout. -1 means no limit");
+BRPC_VALIDATE_GFLAG(sql_exec_timeout, brpc::PassValidate);
 bvar::Adder<int64_t> OnRPCDone::async_rpc_region_count {"async_rpc_region_count"};
 bvar::LatencyRecorder OnRPCDone::total_send_request {"total_send_request"};
 bvar::LatencyRecorder OnRPCDone::add_backup_send_request {"add_backup_send_request"};
@@ -439,14 +439,20 @@ ErrorType OnRPCDone::send_async() {
     if (_fetcher_store->dynamic_timeout_ms > 0 && !_backup.empty() && _backup != _addr) {
         option.backup_request_ms = _fetcher_store->dynamic_timeout_ms;
     }
+
     if (!_state->is_ddl_work() && _request.op_type() == 4 && _state->explain_type == EXPLAIN_NULL) {
-        int64_t min_timeout = std::min(FLAGS_sql_exec_timeout - _state->get_cost_time() / 1000, FLAGS_fetcher_request_timeout * 1L);
-        if (min_timeout <= 0) {
-            DB_WARNING("logid: %lu, sql exec timeout, op_type: %d, total_cost: %ld", _state->log_id(), _request.op_type(), _state->get_cost_time());
-            return E_FATAL;
+        int32_t sql_exec_time_left = FLAGS_fetcher_request_timeout;
+        if (FLAGS_sql_exec_timeout > 0) {
+            int64_t sql_exec_time_left = std::min(FLAGS_sql_exec_timeout - _state->get_cost_time() / 1000,
+                                                  FLAGS_fetcher_request_timeout * 1L);
+            if (sql_exec_time_left <= 0) {
+                DB_WARNING("logid: %lu, sql exec timeout, op_type: %d, total_cost: %ld", _state->log_id(),
+                           _request.op_type(), _state->get_cost_time());
+                return E_FATAL;
+            }
         }
-        _request.set_sql_exec_timeout(min_timeout);
-        option.timeout_ms = min_timeout;
+        _request.set_sql_exec_timeout(sql_exec_time_left);
+        option.timeout_ms = sql_exec_time_left;
     }
     // SelectiveChannel在init时会出core,开源版先注释掉
 #ifdef BAIDU_INTERNAL
