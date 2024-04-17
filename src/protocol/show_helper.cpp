@@ -1299,6 +1299,9 @@ bool ShowHelper::_show_processlist(const SmartSocket& client, const std::vector<
             return false;
         }
         auto query_ctx = sock->get_query_ctx();
+        if (query_ctx == nullptr) {
+            continue;
+        }
         if (only_show_doing_sql && query_ctx->sql.size() == 0) {
             continue;
         }
