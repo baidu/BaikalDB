@@ -175,7 +175,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
         // 如果更新主键或ttl表，那么影响了全部索引
         if (!_update_affect_primary && !ttl) {
             // cstore下只更新涉及列
-            if (_table_info->engine == pb::ROCKSDB_CSTORE && !_local_index_binlog) {
+            if (_table_info->engine == pb::ROCKSDB_CSTORE) {
                 for (size_t i = 0; i < _update_slots.size(); i++) {
                     auto field_id = _update_slots[i].field_id();
                     if (_pri_field_ids.count(field_id) == 0 &&
@@ -195,6 +195,14 @@ int DMLNode::init_schema_info(RuntimeState* state) {
             }
         } else {
             _affected_indexes = _all_indexes;
+            if (ttl || _local_index_binlog) {
+                // cstore_update_fields_partly=true时，需要用到_update_field_ids，修复ttl列存表更新默认字段不生效的bug
+                if (_table_info->engine == pb::ROCKSDB_CSTORE) {
+                    for (auto iter : _field_ids) {
+                        _update_field_ids.insert(iter.first);
+                    }
+                }
+            }
         }
     } else {
         _affected_indexes = _all_indexes;
@@ -214,9 +222,8 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         _indexes_ptr = &_all_indexes;
     }
     // LOCK_PRIMARY_NODE目前无法区分update与insert，暂用update兼容
-    // 由于cstore的字段是分开存储的,不涉及主键与ttl时,可以优化为更新部分涉及字段.
+    // 由于cstore的字段是分开存储的,不涉及主键时,可以优化为更新部分涉及字段.
     bool cstore_update_fields_partly = !_update_affect_primary &&
-            (_ttl_timestamp_us == 0) &&
             (is_update || _node_type == pb::LOCK_PRIMARY_NODE);
     bool need_increase = true;
     auto& reverse_index_map = state->reverse_index_map();

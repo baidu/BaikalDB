@@ -61,6 +61,9 @@ int PacketNode::expr_optimize(QueryContext* ctx) {
         //db table_name先不填，后续有影响再填
         _fields[i].type = to_mysql_type(expr->col_type());
         _fields[i].flags = 1;
+        if (_fields[i].type == MYSQL_TYPE_STRING) {
+            _fields[i].length = 255;
+        }
         if (is_uint(expr->col_type())) {
             _fields[i].flags |= 32;
         }

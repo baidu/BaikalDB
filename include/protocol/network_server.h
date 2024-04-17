@@ -103,6 +103,8 @@ private:
     SmartSocket create_listen_socket();
     void construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request);
     void process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response);
+    void update_meta_list();
+    void client_conn_bvars_update();
 
     std::string state2str(SmartSocket client);
 
@@ -149,10 +151,14 @@ private:
     Bthread         _other_heartbeat_bth;
     Bthread         _agg_sql_bth;
     Bthread         _health_check_bth;
+    Bthread         _conn_bvars_update_bth;
     uint32_t        _driver_thread_num;
     uint64_t        _instance_id = 0;
     std::string     _physical_room;
     bvar::Adder<int64_t> _heart_beat_count;
+    bvar::Status<int32_t> _client_conn_count;
+    bvar::Status<int32_t> _client_sql_running_count;
+    bvar::Status<int32_t> _client_sql_running_max_latency;
     // for print_agg_sql
     baikal::client::Manager _manager;
     baikal::client::Service* _baikaldb;

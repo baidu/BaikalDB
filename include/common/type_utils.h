@@ -417,21 +417,23 @@ inline std::string to_mysql_type_full_string(pb::PrimitiveType type) {
         case pb::DOUBLE:
             return "double";
         case pb::STRING:
-            return "text";
+            return "varchar(1024)";
         case pb::DATETIME:
-            return "datetime(6)";
+            return "datetime";
         case pb::DATE:
             return "date";
         case pb::TIME:
             return "time";
         case pb::TIMESTAMP:
-            return "timestamp(0)";
+            return "timestamp";
         case pb::HLL:
+            return "HLL";
         case pb::BITMAP:
+            return "BITMAP";
         case pb::TDIGEST:
-            return "binary";
+            return "TDIGEST";
         default:
-            return "text";
+            return "";
     }
 }
 

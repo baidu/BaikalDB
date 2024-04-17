@@ -156,6 +156,8 @@ public:
     //上报心跳
     void heart_beat_thread();
 
+    void update_meta_list();
+
     void send_heart_beat();
 
     void start_db_statistics();

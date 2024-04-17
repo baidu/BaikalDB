@@ -55,6 +55,7 @@ DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(open_to_collect_slow_query_infos, false, "open to collect slow_query_infos, default: false");
 DEFINE_uint64(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
 DEFINE_int32(slow_query_batch_size, 100, "slow query sql batch size, default: 100");
+DECLARE_bool(auto_update_meta_list);
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 
@@ -97,8 +98,42 @@ void NetworkServer::report_heart_beat() {
             }
         }
 
+        if (FLAGS_auto_update_meta_list) {
+            update_meta_list();
+        }
+
         _heart_beat_count << -1;
         bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
+    }
+}
+
+void NetworkServer::update_meta_list() {
+    pb::RaftControlRequest req;
+    req.set_op_type(pb::GetPeerList);
+    pb::RaftControlResponse res;
+    if (!MetaServerInteract::get_instance()->is_inited()) {
+        return;
+    }
+    if (MetaServerInteract::get_instance()->send_request("raft_control", req, res) == 0) {
+        std::string meta_list = "";
+        for (auto i = 0; i < res.peers_size(); i ++) {
+            if (i != 0) {
+                meta_list += ",";
+            }
+            meta_list += res.peers(i);
+        }
+        if (meta_list != "" && meta_list != FLAGS_meta_server_bns) {
+            DB_WARNING("meta list %s change to:%s", FLAGS_meta_server_bns.c_str(), meta_list.c_str());
+            if (MetaServerInteract::get_instance()->reset_bns_channel(meta_list) == 0) {
+                FLAGS_meta_server_bns = meta_list;
+            }
+            if (MetaServerInteract::get_auto_incr_instance()->is_inited()) {
+                MetaServerInteract::get_auto_incr_instance()->reset_bns_channel(meta_list);
+            }
+            if (MetaServerInteract::get_tso_instance()->is_inited()) {
+                MetaServerInteract::get_tso_instance()->reset_bns_channel(meta_list);
+            }
+        }
     }
 }
 
@@ -974,12 +1009,30 @@ void NetworkServer::connection_timeout_check() {
 
                 int query_time_diff = time_now - ctx->stat_info.start_stamp.tv_sec;
                 if (query_time_diff > FLAGS_slow_query_timeout_s) {
-                    DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][sql=%s]",
+                    std::string sql = ctx->sql;
+                    size_t slow_idx = 0;
+                    bool is_blank = false;
+                    for (size_t i = 0; i < sql.size(); i++) {
+                        if (sql[i] == ' ' || sql[i] == '\t' || sql[i] == '\n') {
+                            if (!is_blank) {
+                                sql[slow_idx++] = ' ';
+                                is_blank = true;
+                            }
+                        } else {
+                            is_blank = false;
+                            sql[slow_idx++] = sql[i];
+                        }
+                    }
+                    sql.resize(slow_idx);
+                    DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][conn_id=%ld][sign=%lu][server_addr=%s:%d][sql=%s]",
                             query_time_diff, sock->fd, sock->ip.c_str(), sock->port,
                             time_now, sock->last_active,
                             sock->user_info->username.c_str(),
                             ctx->stat_info.log_id,
-                            ctx->sql.c_str());
+                            sock->conn_id,
+                            ctx->stat_info.sign,
+                            butil::my_ip_cstr(), FLAGS_baikal_port,
+                            sql.c_str());
                     if (FLAGS_open_to_collect_slow_query_infos) {
                         SlowQueryInfo slow_query_info(ctx->stat_info.log_id, 
                             ctx->stat_info.sign,
@@ -1134,7 +1187,10 @@ NetworkServer::NetworkServer():
         _is_init(false),
         _shutdown(false),
         _epoll_info(NULL),
-        _heart_beat_count("heart_beat_count") {
+        _heart_beat_count("heart_beat_count"),
+        _client_conn_count("client_connection_count", 0),
+        _client_sql_running_count("client_sql_running_count", 0),
+        _client_sql_running_max_latency("client_sql_running_max_latency", 0) {
 }
 
 NetworkServer::~NetworkServer() {
@@ -1399,6 +1455,7 @@ int NetworkServer::make_worker_process() {
         _health_check_bth.run([this]() {store_health_check();});
     }
 
+    _conn_bvars_update_bth.run([this](){client_conn_bvars_update();});
 
     // Create listen socket.
     _service = create_listen_socket();
@@ -1611,5 +1668,42 @@ bool NetworkServer::set_fd_flags(int fd) {
     return true;
 }
 
+void NetworkServer::client_conn_bvars_update() {
+    while (!_shutdown) {
+        bthread_usleep(2000000);
+        int32_t running_sql_cnt = 0;
+        int32_t client_cnt = 0;
+        int32_t max_running_time = 0;
+        EpollInfo* epoll_info = NetworkServer::get_instance()->get_epoll_info();
+        for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+            const SmartSocket& sock = epoll_info->get_fd_mapping(idx);
+            if (sock == NULL || sock->is_free || sock->fd == -1 || sock->ip == "") {
+                if (sock != NULL) {
+                    DB_WARNING_CLIENT(sock, "processlist, free:%d", sock->is_free);
+                }
+                continue;
+            }
+            if (!sock->user_info || !sock->query_ctx) {
+                continue;
+            }
+            auto query_ctx = sock->get_query_ctx();
+            if (query_ctx == nullptr) {
+                continue;
+            }
+            auto command = query_ctx->mysql_cmd;
+            client_cnt ++;
+            if (command != COM_SLEEP) {
+                running_sql_cnt ++;
+                int32_t cost = time(NULL) - sock->last_active;
+                if (cost > max_running_time) {
+                    max_running_time = cost;
+                }
+            }
+        }
+        _client_conn_count.set_value(client_cnt);
+        _client_sql_running_count.set_value(running_sql_cnt);
+        _client_sql_running_max_latency.set_value(max_running_time);
+    }
+}
 
 } // namespace baikal

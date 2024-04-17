@@ -32,6 +32,7 @@ public:
 private:
     // method to create plan node
     int create_delete_node(pb::PlanNode* delete_node);
+    int create_limit_node();
 
     // method to create plan node
     int create_truncate_node();

@@ -11,6 +11,7 @@ enum RaftControlOp {
     ShutDown = 5; //leader and follower both can do, 只关闭，但并没有从raft group里去掉
     Vote = 6; //调用node的vote接口
     ResetVoteTime = 7; //调用node的reset_election_timeout_ms接口
+    GetPeerList = 8; //获取当前peer list, 只能发leader
 };
 
 // operation request/response
@@ -31,4 +32,5 @@ message RaftControlResponse {
     required ErrCode errcode = 2;
     optional string leader = 3;
     optional string errmsg = 4;
+    repeated string peers = 5;
 };

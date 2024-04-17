@@ -160,6 +160,7 @@ message StoreReq {
     optional uint64      sql_sign       = 28; // sql 签名
     repeated RegionInfo multi_new_region_infos = 29;
     optional ExtraReq   extra_req       = 30; // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
+    optional int64    sql_exec_timeout  = 31;
 };
 
 message RowValue {

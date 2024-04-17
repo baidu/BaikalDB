@@ -75,9 +75,9 @@ int SetKVPlanner::plan() {
                 //_ctx->succ_after_logical_plan = true;
                 return set_autocommit(var_assign->value);
             } else if (key == "sql_mode") { 
-                // ignore sql_mode: may be support in the future
-                _ctx->succ_after_logical_plan = true;
-                return 0;                
+                // SET sql_mode = "compatible" 时， show create table将兼容mysql模式，
+                // 去掉resource_tag等特殊格式，方便建表语句的导入导出。
+                return set_sql_mode(var_assign->value);
             } else {
                 DB_WARNING("unrecoginized command: %s", _ctx->sql.c_str());
                 _ctx->succ_after_logical_plan = true;
@@ -143,6 +143,29 @@ int SetKVPlanner::set_autocommit_1() {
     }
     plan_commit_txn();
     _ctx->get_runtime_state()->set_single_sql_autocommit(false); // autocommit status before set autocommit=1
+    return 0;
+}
+
+int SetKVPlanner::set_sql_mode(parser::ExprNode* expr) {
+    if (expr->expr_type != parser::ET_LITETAL) {
+        DB_WARNING("invalid expr type: %d", expr->expr_type);
+        return -1;
+    }
+    parser::LiteralExpr* literal = (parser::LiteralExpr*)expr;
+    if (literal->literal_type != parser::LT_STRING) {
+        DB_WARNING("invalid literal expr type: %d", literal->literal_type);
+        return -1;
+    }
+    auto client = _ctx->client_conn;
+    pb::ExprNode str_node;
+    str_node.set_node_type(pb::STRING_LITERAL);
+    str_node.set_col_type(pb::STRING);
+    str_node.set_num_children(0);
+    if (!literal->_u.str_val.empty()) {
+        str_node.mutable_derive_node()->set_string_val(literal->_u.str_val.to_string());
+    }
+    client->session_vars["sql_mode"] = str_node;
+    _ctx->succ_after_logical_plan = true;
     return 0;
 }
 
