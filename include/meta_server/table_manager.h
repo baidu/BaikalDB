@@ -984,11 +984,11 @@ public:
         auto src_type = src_field.mysql_type();
         auto target_type = target_field.mysql_type();
         if (src_type == target_type) {
-            if (src_type == pb::DATETIME || src_type == pb::FLOAT || src_type == pb::DOUBLE) {
-                if (src_field.float_precision_len() > target_field.float_precision_len()) {
-                    return false;
-                }
-            }
+//            if (src_type == pb::DATETIME || src_type == pb::FLOAT || src_type == pb::DOUBLE) {
+//                if (src_field.float_precision_len() > target_field.float_precision_len()) {
+//                    return false;
+//                }
+//            }
             return true;
         }
         switch (src_type) {
